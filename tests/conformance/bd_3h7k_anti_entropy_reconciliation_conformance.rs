@@ -20,16 +20,13 @@
 //! **MUST-AER-009**: `TrustState` operations MUST maintain record capacity limits
 //! **MUST-AER-010**: Fork detection MUST trigger on conflicting MMR roots (ERR_AE_FORK_DETECTED)
 
-use frankenengine_node::control_plane::mmr_proofs::{InclusionProof, MmrRoot};
+use frankenengine_node::control_plane::mmr_proofs::MmrRoot;
 use frankenengine_node::runtime::anti_entropy::{
-    AntiEntropyReconciler, ERR_AE_BATCH_EXCEEDED, ERR_AE_CANCELLED, ERR_AE_EPOCH_VIOLATION,
-    ERR_AE_FORK_DETECTED, ERR_AE_INVALID_CONFIG, ERR_AE_PROOF_INVALID, EVT_CANCELLED,
-    EVT_CYCLE_COMPLETED, EVT_CYCLE_STARTED, EVT_DELTA_COMPUTED, EVT_FORK_DETECTED,
-    EVT_RECORD_ACCEPTED, EVT_RECORD_REJECTED, INV_AE_ATOMIC, INV_AE_DELTA, INV_AE_EPOCH,
-    INV_AE_PROOF, ReconciliationConfig, ReconciliationError, TrustRecord, TrustState,
+    AntiEntropyReconciler, ERR_AE_EPOCH_VIOLATION, ERR_AE_PROOF_INVALID, EVT_RECORD_REJECTED,
+    ReconciliationConfig, ReconciliationError, TrustRecord, TrustState,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 // Test fixture constants
 const NODE_A: &str = "node-a-001";
@@ -39,6 +36,8 @@ const EPOCH_2: u64 = 2;
 const EPOCH_3: u64 = 3;
 const TIMESTAMP_1: u64 = 1716422700000; // 2026-05-22T22:45:00Z in ms
 const TIMESTAMP_2: u64 = 1716422760000; // 2026-05-22T22:46:00Z in ms
+const EXPECTED_MAX_TRUST_RECORDS: usize = 8192;
+const CAPACITY_PROBE_RECORDS: usize = EXPECTED_MAX_TRUST_RECORDS + 100;
 
 #[derive(Debug, Clone)]
 pub struct ConformanceTestResult {
@@ -464,11 +463,18 @@ fn test_epoch_ordering() -> ConformanceTestResult {
     let result = reconciler.reconcile(&mut local, &remote, &mmr_root, &cancelled);
 
     match result {
-        Err(ReconciliationError::EpochViolation {
-            record_epoch,
-            local_epoch,
-        }) => {
-            if record_epoch == EPOCH_3 && local_epoch == EPOCH_2 {
+        Ok(summary)
+            if summary.records_accepted == 0
+                && summary.records_rejected == 1
+                && !local.contains("future") =>
+        {
+            let rejection_event = reconciler.events().iter().find(|event| {
+                event.code == EVT_RECORD_REJECTED
+                    && event.detail.contains(ERR_AE_EPOCH_VIOLATION)
+                    && event.detail.contains("epoch violation")
+            });
+
+            if rejection_event.is_some() {
                 ConformanceTestResult {
                     id: "MUST-AER-005".to_string(),
                     title: "reconcile enforces epoch ordering".to_string(),
@@ -482,19 +488,31 @@ fn test_epoch_ordering() -> ConformanceTestResult {
                     level: RequirementLevel::Must,
                     result: TestResult::Fail {
                         reason: format!(
-                            "Wrong epoch violation values: record={}, local={}",
-                            record_epoch, local_epoch
+                            "Expected {EVT_RECORD_REJECTED} event with {ERR_AE_EPOCH_VIOLATION}"
                         ),
                     },
                 }
             }
         }
-        _ => ConformanceTestResult {
+        Ok(summary) => ConformanceTestResult {
             id: "MUST-AER-005".to_string(),
             title: "reconcile enforces epoch ordering".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Expected EpochViolation error but got different result".to_string(),
+                reason: format!(
+                    "Expected in-band rejection with 0 accepted / 1 rejected and no local insert, got accepted={}, rejected={}, local_contains_future={}",
+                    summary.records_accepted,
+                    summary.records_rejected,
+                    local.contains("future")
+                ),
+            },
+        },
+        Err(err) => ConformanceTestResult {
+            id: "MUST-AER-005".to_string(),
+            title: "reconcile enforces epoch ordering".to_string(),
+            level: RequirementLevel::Must,
+            result: TestResult::Fail {
+                reason: format!("Expected in-band epoch rejection, got error: {err:?}"),
             },
         },
     }
@@ -533,18 +551,56 @@ fn test_mmr_proof_validation() -> ConformanceTestResult {
     let result = reconciler.reconcile(&mut local, &remote, &mmr_root, &cancelled);
 
     match result {
-        Err(ReconciliationError::ProofInvalid(_)) => ConformanceTestResult {
-            id: "MUST-AER-006".to_string(),
-            title: "reconcile validates MMR inclusion proofs".to_string(),
-            level: RequirementLevel::Must,
-            result: TestResult::Pass,
-        },
-        _ => ConformanceTestResult {
+        Ok(summary)
+            if summary.records_accepted == 0
+                && summary.records_rejected == 1
+                && !local.contains("no-proof") =>
+        {
+            let rejection_event = reconciler.events().iter().find(|event| {
+                event.code == EVT_RECORD_REJECTED
+                    && event.detail.contains(ERR_AE_PROOF_INVALID)
+                    && event.detail.contains("proof invalid")
+            });
+
+            if rejection_event.is_some() {
+                ConformanceTestResult {
+                    id: "MUST-AER-006".to_string(),
+                    title: "reconcile validates MMR inclusion proofs".to_string(),
+                    level: RequirementLevel::Must,
+                    result: TestResult::Pass,
+                }
+            } else {
+                ConformanceTestResult {
+                    id: "MUST-AER-006".to_string(),
+                    title: "reconcile validates MMR inclusion proofs".to_string(),
+                    level: RequirementLevel::Must,
+                    result: TestResult::Fail {
+                        reason: format!(
+                            "Expected {EVT_RECORD_REJECTED} event with {ERR_AE_PROOF_INVALID}"
+                        ),
+                    },
+                }
+            }
+        }
+        Ok(summary) => ConformanceTestResult {
             id: "MUST-AER-006".to_string(),
             title: "reconcile validates MMR inclusion proofs".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "Expected ProofInvalid error when proof_required=true".to_string(),
+                reason: format!(
+                    "Expected in-band proof rejection with 0 accepted / 1 rejected and no local insert, got accepted={}, rejected={}, local_contains_no_proof={}",
+                    summary.records_accepted,
+                    summary.records_rejected,
+                    local.contains("no-proof")
+                ),
+            },
+        },
+        Err(err) => ConformanceTestResult {
+            id: "MUST-AER-006".to_string(),
+            title: "reconcile validates MMR inclusion proofs".to_string(),
+            level: RequirementLevel::Must,
+            result: TestResult::Fail {
+                reason: format!("Expected in-band proof rejection, got error: {err:?}"),
             },
         },
     }
@@ -607,7 +663,7 @@ fn test_record_digest_determinism() -> ConformanceTestResult {
     let digest3 = record3.digest();
 
     // Same records should have same digest
-    if digest1 != digest2 {
+    if !public_bytes_equal(&digest1, &digest2) {
         return ConformanceTestResult {
             id: "MUST-AER-008".to_string(),
             title: "TrustRecord digest is deterministic and domain-separated".to_string(),
@@ -619,7 +675,7 @@ fn test_record_digest_determinism() -> ConformanceTestResult {
     }
 
     // Different records should have different digests
-    if digest1 == digest3 {
+    if public_bytes_equal(&digest1, &digest3) {
         return ConformanceTestResult {
             id: "MUST-AER-008".to_string(),
             title: "TrustRecord digest is deterministic and domain-separated".to_string(),
@@ -652,38 +708,37 @@ fn test_record_digest_determinism() -> ConformanceTestResult {
 
 fn test_trust_state_capacity() -> ConformanceTestResult {
     let mut trust_state = TrustState::new(EPOCH_1);
-    let mut successful_inserts = 0;
 
-    // Try to insert many records to test capacity limits
-    for i in 0..10000 {
+    // Batch inserts avoid per-record digest recomputation while still probing the retained set cap.
+    for i in 0..CAPACITY_PROBE_RECORDS {
         let record = create_test_record(
             &format!("capacity-test-{}", i),
             EPOCH_1,
-            TIMESTAMP_1 + i,
+            TIMESTAMP_1 + i as u64,
             NODE_A,
         );
-        if trust_state.insert(record) {
-            successful_inserts += 1;
-        } else {
-            // Hit capacity limit
-            break;
-        }
+        trust_state.insert_batch(record);
     }
+    trust_state.recompute_root_digest();
 
-    // Should have some reasonable capacity limit (not unlimited)
-    if successful_inserts > 10000 {
+    // Should have the runtime's bounded retained-set limit, not unlimited growth.
+    if trust_state.len() > EXPECTED_MAX_TRUST_RECORDS {
         return ConformanceTestResult {
             id: "MUST-AER-009".to_string(),
             title: "TrustState maintains capacity limits".to_string(),
             level: RequirementLevel::Must,
             result: TestResult::Fail {
-                reason: "TrustState appears to have no capacity limits".to_string(),
+                reason: format!(
+                    "TrustState exceeded capacity: len={} max={}",
+                    trust_state.len(),
+                    EXPECTED_MAX_TRUST_RECORDS
+                ),
             },
         };
     }
 
     // Should allow at least some records
-    if successful_inserts < 100 {
+    if trust_state.len() < 100 {
         return ConformanceTestResult {
             id: "MUST-AER-009".to_string(),
             title: "TrustState maintains capacity limits".to_string(),
@@ -691,7 +746,7 @@ fn test_trust_state_capacity() -> ConformanceTestResult {
             result: TestResult::Fail {
                 reason: format!(
                     "TrustState capacity too restrictive: only {} inserts",
-                    successful_inserts
+                    trust_state.len()
                 ),
             },
         };
@@ -735,7 +790,7 @@ fn test_fork_detection() -> ConformanceTestResult {
 
     // In a real implementation, this would detect the fork based on MMR root comparison
     // For this test, we assume the fork detection logic is present
-    let result = reconciler.reconcile(&mut local, &remote, &conflicting_mmr_root, &cancelled);
+    let _result = reconciler.reconcile(&mut local, &remote, &conflicting_mmr_root, &cancelled);
 
     // Note: This test might pass even without explicit fork detection in the current implementation
     // The important thing is that the API supports fork detection through MMR root comparison
@@ -767,6 +822,14 @@ fn create_test_mmr_root() -> MmrRoot {
         tree_size: 10,
         root_hash: "test-root-hash".to_string(),
     }
+}
+
+fn public_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(left_byte, right_byte)| left_byte == right_byte)
 }
 
 fn compute_stats(results: &HashMap<String, ConformanceTestResult>) -> ConformanceStats {

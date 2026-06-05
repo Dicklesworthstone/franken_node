@@ -803,6 +803,17 @@ impl AntiEntropyReconciler {
             epoch: local.current_epoch(),
         });
 
+        if self.config.cancellation_enabled && cancelled.load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.push_event(ReconciliationEvent {
+                code: EVT_CANCELLED.to_string(),
+                detail: "cancelled before delta computation".to_string(),
+                trace_id: trace_id.clone(),
+                epoch: local.current_epoch(),
+            });
+            return Err(ReconciliationError::Cancelled);
+        }
+
         // Check for fork.
         if let Some(forked_id) = self.detect_fork(local, remote) {
             self.push_event(ReconciliationEvent {
@@ -891,10 +902,11 @@ impl AntiEntropyReconciler {
                 self.push_event(ReconciliationEvent {
                     code: EVT_RECORD_REJECTED.to_string(),
                     detail: format!(
-                        "epoch violation: record {} epoch={} > local={}",
+                        "{ERR_AE_EPOCH_VIOLATION}: epoch violation: record {} epoch={} > local={} + tolerance={}",
                         record.id,
                         record.epoch,
-                        local.current_epoch()
+                        local.current_epoch(),
+                        self.config.epoch_tolerance
                     ),
                     trace_id: trace_id.clone(),
                     epoch: local.current_epoch(),
@@ -909,7 +921,7 @@ impl AntiEntropyReconciler {
             {
                 self.push_event(ReconciliationEvent {
                     code: EVT_RECORD_REJECTED.to_string(),
-                    detail: format!("proof invalid: {e}"),
+                    detail: format!("{ERR_AE_PROOF_INVALID}: proof invalid: {e}"),
                     trace_id: trace_id.clone(),
                     epoch: local.current_epoch(),
                 });
@@ -2243,6 +2255,13 @@ mod tests {
         assert_eq!(result.records_rejected, 1);
         assert_eq!(result.records_accepted, 0);
         assert!(local.is_empty());
+        let rejection = reconciler
+            .events()
+            .iter()
+            .find(|event| event.code == EVT_RECORD_REJECTED)
+            .expect("future epoch should emit a rejection event");
+        assert!(rejection.detail.contains(ERR_AE_EPOCH_VIOLATION));
+        assert!(rejection.detail.contains("epoch violation"));
     }
 
     #[test]
@@ -2260,6 +2279,14 @@ mod tests {
             .expect("should succeed");
         assert_eq!(result.records_rejected, 1);
         assert_eq!(result.records_accepted, 0);
+        assert!(local.is_empty());
+        let rejection = reconciler
+            .events()
+            .iter()
+            .find(|event| event.code == EVT_RECORD_REJECTED)
+            .expect("missing proof should emit a rejection event");
+        assert!(rejection.detail.contains(ERR_AE_PROOF_INVALID));
+        assert!(rejection.detail.contains("missing inclusion proof"));
     }
 
     #[test]
