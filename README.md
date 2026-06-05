@@ -12,7 +12,7 @@
 ![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success)
 ![Compatibility](https://img.shields.io/badge/compatibility-node%20%2B%20bun-5b3cc4)
 ![Tests](https://img.shields.io/badge/tests-23k%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![License](https://img.shields.io/badge/license-MIT%20%2B%20OpenAI%2FAnthropic%20Rider-lightgrey)
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
 
 </div>
@@ -3062,4 +3062,8 @@ are the two most-used entry points.
 
 ## License
 
-MIT. See `LICENSE`.
+**MIT License with OpenAI/Anthropic Rider.** This is *not* permissive MIT: the
+rider grants no rights to OpenAI, Anthropic, their affiliates, or anyone acting
+for them, and prohibits incorporating the software (or any derivative work) into
+any dataset, training corpus, evaluation harness, or ML pipeline. See the full
+terms in [`LICENSE`](LICENSE).

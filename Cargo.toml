@@ -14,7 +14,12 @@ resolver = "2"
 edition = "2024"
 version = "0.1.0"
 authors = ["Franken Node Contributors"]
-license = "MIT"
+# The project ships the "MIT License (with OpenAI/Anthropic Rider)" (see ./LICENSE),
+# NOT permissive MIT — the rider grants no rights to OpenAI/Anthropic (or anyone acting
+# for them) and forbids incorporating the software into any ML training corpus or
+# evaluation harness. Declaring bare `license = "MIT"` here would misrepresent those
+# terms, so we use the SPDX LicenseRef form that points at the bundled LICENSE text.
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 
 [workspace.dependencies]
 anyhow = "1.0"

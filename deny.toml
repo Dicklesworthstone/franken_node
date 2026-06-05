@@ -34,6 +34,10 @@ allow = [
   "MPL-2.0",
   "CC0-1.0",
   "CDLA-Permissive-2.0",
+  # First-party FrankenSuite license: "MIT License (with OpenAI/Anthropic Rider)"
+  # (see ./LICENSE). Expressed as an SPDX LicenseRef because it is NOT permissive MIT —
+  # the rider restricts rights for OpenAI/Anthropic and ML training/eval use.
+  "LicenseRef-MIT-OpenAI-Anthropic-Rider",
 ]
 confidence-threshold = 0.9
 # First-party FrankenSuite siblings (asupersync, fastapi-*, fsqlite-*, frankenengine-*)
