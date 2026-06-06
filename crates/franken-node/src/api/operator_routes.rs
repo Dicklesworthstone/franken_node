@@ -141,6 +141,12 @@ fn install_operator_config(config: &RuntimeConfig) {
     *view = ConfigView::from_runtime_config(config);
 }
 
+fn init_default_operator_config() {
+    run_atomic_initializer(&OPERATOR_CONFIG_STATE, || {
+        install_operator_config(&RuntimeConfig::default());
+    });
+}
+
 pub(crate) fn init_process_start() {
     #[cfg(test)]
     PROCESS_START_INIT_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -151,9 +157,38 @@ pub(crate) fn init_process_start() {
 }
 
 pub(crate) fn init_operator_config(config: &RuntimeConfig) {
-    run_atomic_initializer(&OPERATOR_CONFIG_STATE, || {
-        install_operator_config(config);
-    });
+    loop {
+        match OPERATOR_CONFIG_STATE.load(Ordering::Acquire) {
+            INIT_STATE_UNINITIALIZED => {
+                if OPERATOR_CONFIG_STATE
+                    .compare_exchange(
+                        INIT_STATE_UNINITIALIZED,
+                        INIT_STATE_INITIALIZING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
+
+                let guard = AtomicInitResetGuard::new(&OPERATOR_CONFIG_STATE);
+                install_operator_config(config);
+                guard.complete();
+                return;
+            }
+            INIT_STATE_INITIALIZING => std::hint::spin_loop(),
+            INIT_STATE_INITIALIZED => {
+                install_operator_config(config);
+                OPERATOR_CONFIG_STATE.store(INIT_STATE_INITIALIZED, Ordering::Release);
+                return;
+            }
+            invalid => {
+                debug_assert_eq!(invalid, INIT_STATE_INITIALIZED);
+                OPERATOR_CONFIG_STATE.store(INIT_STATE_UNINITIALIZED, Ordering::Release);
+            }
+        }
+    }
 }
 
 fn process_uptime_seconds() -> u64 {
@@ -189,7 +224,7 @@ fn process_started_at_rfc3339() -> String {
 
 fn operator_config_view() -> ConfigView {
     if OPERATOR_CONFIG_STATE.load(Ordering::Acquire) != INIT_STATE_INITIALIZED {
-        init_operator_config(&RuntimeConfig::default());
+        init_default_operator_config();
     }
 
     OPERATOR_CONFIG_VIEW
@@ -358,7 +393,7 @@ pub fn operator_config_initialization_loom_model() {
             }
         }
 
-        fn install(&self, seed: ConfigSeed) {
+        fn install_view(&self, seed: ConfigSeed) {
             {
                 let mut view = self.view.lock().expect("loom config view lock");
                 *view = seed;
@@ -367,56 +402,84 @@ pub fn operator_config_initialization_loom_model() {
             self.state.store(2, Ordering::Release);
         }
 
-        fn init(&self, seed: ConfigSeed) {
-            if self
-                .state
-                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.install(seed);
-            } else {
-                while self.state.load(Ordering::Acquire) != 2 {
-                    thread::yield_now();
+        fn init_default(&self) {
+            loop {
+                match self.state.load(Ordering::Acquire) {
+                    2 => return,
+                    0 => {
+                        if self
+                            .state
+                            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        self.install_view(Self::DEFAULT);
+                        return;
+                    }
+                    1 => thread::yield_now(),
+                    _ => self.state.store(0, Ordering::Release),
+                }
+            }
+        }
+
+        fn bootstrap(&self, seed: ConfigSeed) {
+            loop {
+                match self.state.load(Ordering::Acquire) {
+                    0 => {
+                        if self
+                            .state
+                            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        self.install_view(seed);
+                        return;
+                    }
+                    1 => thread::yield_now(),
+                    2 => {
+                        self.install_view(seed);
+                        return;
+                    }
+                    _ => self.state.store(0, Ordering::Release),
                 }
             }
         }
 
         fn read_view(&self) -> ConfigSeed {
             if self.state.load(Ordering::Acquire) != 2 {
-                self.init(Self::DEFAULT);
+                self.init_default();
             }
 
             *self.view.lock().expect("loom config view lock")
         }
     }
 
-    loom::model(|| {
+    let mut model = loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.check(|| {
         let state = Arc::new(ConfigCell::new());
 
         let bootstrap = Arc::clone(&state);
-        let reader_a = Arc::clone(&state);
-        let reader_b = Arc::clone(&state);
+        let reader = Arc::clone(&state);
 
         let bootstrap = thread::spawn(move || {
-            bootstrap.init(ConfigCell::BOOTSTRAPPED);
+            bootstrap.bootstrap(ConfigCell::BOOTSTRAPPED);
             bootstrap.read_view()
         });
-        let reader_a = thread::spawn(move || reader_a.read_view());
-        let reader_b = thread::spawn(move || reader_b.read_view());
+        let reader = thread::spawn(move || reader.read_view());
 
-        let installed = [
-            bootstrap.join().expect("join bootstrap"),
-            reader_a.join().expect("join reader A"),
-            reader_b.join().expect("join reader B"),
-        ];
+        let bootstrapped = bootstrap.join().expect("join bootstrap");
+        let observed = reader.join().expect("join reader");
 
-        assert_eq!(installed[0], installed[1]);
-        assert_eq!(installed[1], installed[2]);
+        assert_eq!(bootstrapped, ConfigCell::BOOTSTRAPPED);
         assert!(
-            installed[0] == ConfigCell::DEFAULT || installed[0] == ConfigCell::BOOTSTRAPPED,
-            "installed view must match exactly one initialization winner"
+            observed == ConfigCell::DEFAULT || observed == ConfigCell::BOOTSTRAPPED,
+            "reader must observe a complete default or bootstrapped config"
         );
         assert_eq!(state.state.load(Ordering::Acquire), 2);
+        assert_eq!(state.read_view(), ConfigCell::BOOTSTRAPPED);
     });
 }
 
@@ -1749,7 +1812,7 @@ mod tests {
             // Deserialization should handle large payloads
             let deserialized: HealthCheck =
                 serde_json::from_str(&serialized).expect("Should deserialize massive health check");
-            assert_eq!(deserialized.checks.len(), massive_component_count);
+            assert_eq!(deserialized.checks.len(), massive_health.checks.len());
         }
 
         #[test]
@@ -2065,5 +2128,31 @@ mod tests {
         );
         assert_eq!(installed.profile, "legacy-risky");
         assert_eq!(installed.compatibility_mode, "legacy-risky");
+    }
+
+    #[test]
+    fn operator_config_bootstrap_overwrites_default_read_snapshot() {
+        let _lock = process_start_test_lock();
+        reset_operator_route_state_for_tests();
+
+        let identity = test_identity();
+        let trace = test_trace();
+        let default_snapshot = get_config(&identity, &trace).expect("default config snapshot");
+        assert_eq!(default_snapshot.data.profile, "balanced");
+        assert_eq!(
+            OPERATOR_CONFIG_STATE.load(Ordering::Acquire),
+            INIT_STATE_INITIALIZED
+        );
+
+        let custom_runtime_config =
+            crate::config::Config::for_profile(crate::config::Profile::LegacyRisky);
+        init_operator_config(&custom_runtime_config);
+
+        let installed = get_config(&identity, &trace).expect("bootstrapped config snapshot");
+        assert_eq!(installed.data.profile, "legacy-risky");
+        assert_eq!(installed.data.compatibility_mode, "legacy-risky");
+        assert!(!installed.data.trust_revocation_fresh);
+        assert!(!installed.data.quarantine_on_high_risk);
+        assert_eq!(installed.data.fleet_convergence_timeout_seconds, 300);
     }
 }

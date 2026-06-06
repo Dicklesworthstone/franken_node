@@ -1,7 +1,7 @@
 #![cfg(loom)]
 
 //! Run with:
-//! `RUSTFLAGS="--cfg loom" rch exec -- cargo test --release --features control-plane --test operator_process_start_initialization_loom`
+//! `rch exec -- env RUSTFLAGS="--cfg loom" cargo test --release --features control-plane,loom-models --test operator_process_start_initialization_loom`
 
 #[test]
 fn process_start_initialization_has_one_winner_under_all_interleavings() {
@@ -9,6 +9,6 @@ fn process_start_initialization_has_one_winner_under_all_interleavings() {
 }
 
 #[test]
-fn operator_config_initialization_has_one_winner_under_all_interleavings() {
+fn operator_config_bootstrap_overwrites_default_under_all_interleavings() {
     frankenengine_node::api::operator_routes::operator_config_initialization_loom_model();
 }
