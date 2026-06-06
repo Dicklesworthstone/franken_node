@@ -3795,7 +3795,10 @@ mod tests {
         );
 
         // Test capsule tampering detection - modify each field and verify signature fails
-        let test_mutations: [(&str, fn(&mut ReplayCapsule)); 7] = [
+        type CapsuleMutation = fn(&mut ReplayCapsule);
+        type NamedCapsuleMutation = (&'static str, CapsuleMutation);
+
+        let test_mutations: [NamedCapsuleMutation; 7] = [
             ("capsule_id", |c: &mut ReplayCapsule| {
                 c.manifest.capsule_id = "TAMPERED".to_string()
             }),

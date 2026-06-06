@@ -1322,7 +1322,9 @@ impl VerifierSdk {
             });
         }
 
-        let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes.try_into().unwrap());
+        let mut signature_array = [0_u8; 64];
+        signature_array.copy_from_slice(&signature_bytes);
+        let signature = ed25519_dalek::Signature::from_bytes(&signature_array);
 
         // Verify the Ed25519 signature
         self.verifying_key
@@ -5127,8 +5129,14 @@ mod tests {
             }
         }
 
-        fn validate_capsule_schema_stability(_capsule: &TestCapsule) -> Result<(), &'static str> {
-            Ok(()) // Simplified validation
+        fn validate_capsule_schema_stability(capsule: &TestCapsule) -> Result<(), &'static str> {
+            if capsule.id.is_empty() {
+                return Err("Capsule id missing");
+            }
+            if !is_valid_version_format(&capsule.version) {
+                return Err("Capsule version invalid");
+            }
+            Ok(())
         }
 
         fn validate_versioned_api_coverage() -> Result<(), &'static str> {
