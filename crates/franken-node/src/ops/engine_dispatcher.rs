@@ -856,6 +856,27 @@ fn captured_output_from(output: Output) -> CapturedProcessOutput {
     }
 }
 
+#[cfg(unix)]
+fn synthetic_success_status() -> std::process::ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+
+    std::process::ExitStatus::from_raw(0)
+}
+
+#[cfg(windows)]
+fn synthetic_success_status() -> std::process::ExitStatus {
+    use std::os::windows::process::ExitStatusExt;
+
+    std::process::ExitStatus::from_raw(0)
+}
+
+#[cfg(unix)]
+fn kill_command_path() -> Option<&'static str> {
+    ["/bin/kill", "/usr/bin/kill"]
+        .into_iter()
+        .find(|candidate| Path::new(candidate).is_file())
+}
+
 fn run_command_capture_output(cmd: &mut Command) -> io::Result<Output> {
     use std::sync::mpsc;
     use std::time::Duration;
@@ -957,7 +978,11 @@ fn run_command_capture_output(cmd: &mut Command) -> io::Result<Output> {
             return;
         }
 
-        let _ = Command::new("kill")
+        let Some(kill_path) = kill_command_path() else {
+            return;
+        };
+
+        let _ = Command::new(kill_path)
             .arg("-KILL")
             .arg("--")
             .arg(pid_arg)
@@ -2097,17 +2122,8 @@ impl EngineDispatcher {
         // Convert native execution result to Output format for compatibility
         let stdout = format!("Native execution completed: {:?}", execution_result);
 
-        // Create a synthetic success status - we'll use a helper command for this
-        let synthetic_output =
-            std::process::Command::new("true")
-                .output()
-                .map_err(|e| EngineProcessError::Spawn {
-                    message: format!("Failed to create synthetic exit status: {}", e),
-                    telemetry_report: None,
-                })?;
-
         let output = Output {
-            status: synthetic_output.status,
+            status: synthetic_success_status(),
             stdout: stdout.into_bytes(),
             stderr: Vec::new(),
         };
@@ -2378,6 +2394,23 @@ mod tests {
             status: std::process::ExitStatus::from_raw(status_raw),
             stdout: stdout.to_vec(),
             stderr: stderr.to_vec(),
+        }
+    }
+
+    #[test]
+    fn synthetic_success_status_does_not_spawn_a_helper_process() {
+        let status = synthetic_success_status();
+        assert!(status.success());
+        assert_eq!(status.code(), Some(0));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kill_command_path_uses_absolute_system_binary_when_available() {
+        if let Some(path) = kill_command_path() {
+            let path = Path::new(path);
+            assert!(path.is_absolute());
+            assert!(path.is_file());
         }
     }
 
