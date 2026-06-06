@@ -7,21 +7,6 @@ use frankenengine_node::security::threshold_sig::{
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-fn extend_len_prefixed_field(msg: &mut Vec<u8>, value: &str) {
-    let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
-    msg.extend_from_slice(&value_len.to_le_bytes());
-    msg.extend_from_slice(value.as_bytes());
-}
-
-fn build_signing_message(artifact_id: &str, connector_id: &str, content_hash: &str) -> Vec<u8> {
-    let mut msg = Vec::new();
-    msg.extend_from_slice(b"threshold_sig_verify_v2:");
-    extend_len_prefixed_field(&mut msg, artifact_id);
-    extend_len_prefixed_field(&mut msg, connector_id);
-    extend_len_prefixed_field(&mut msg, content_hash);
-    msg
-}
-
 fn test_signing_key(i: u32) -> SigningKey {
     let mut hasher = Sha256::new();
     hasher.update(b"threshold_sig_bench_seed_v1:");
