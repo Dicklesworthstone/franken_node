@@ -1936,6 +1936,16 @@ fn path_is_protected_workspace_state(path: &str) -> bool {
     })
 }
 
+fn paths_overlap_by_component(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+
+    let left = Path::new(left);
+    let right = Path::new(right);
+    left.starts_with(right) || right.starts_with(left)
+}
+
 fn decode_proc_cmdline(raw: &[u8]) -> String {
     raw.split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
@@ -2028,6 +2038,7 @@ impl CleanupRequest {
             }
         })?;
         for candidate in &self.candidates {
+            validate_cleanup_candidate_path_fields(candidate)?;
             if candidate.safety_class.is_protected() {
                 return Err(CleanupError::ProtectedSafetyClass {
                     path: candidate.path.clone(),
@@ -2067,6 +2078,39 @@ impl CleanupRequest {
 
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
+}
+
+fn validate_cleanup_candidate_path_fields(
+    candidate: &ResourceArtifactInventoryEntry,
+) -> Result<(), CleanupError> {
+    reject_unsafe_path("candidate.path", &candidate.path).map_err(|err| {
+        CleanupError::InvalidField {
+            field: "candidate.path",
+            reason: err.to_string(),
+        }
+    })?;
+    reject_unsafe_path("candidate.repo_key", &candidate.repo_key).map_err(|err| {
+        CleanupError::InvalidField {
+            field: "candidate.repo_key",
+            reason: err.to_string(),
+        }
+    })?;
+    validate_artifact_string("candidate.path", &candidate.path, MAX_ARTIFACT_PATH_BYTES).map_err(
+        |err| CleanupError::InvalidField {
+            field: "candidate.path",
+            reason: err.to_string(),
+        },
+    )?;
+    validate_artifact_string(
+        "candidate.repo_key",
+        &candidate.repo_key,
+        MAX_ARTIFACT_PATH_BYTES,
+    )
+    .map_err(|err| CleanupError::InvalidField {
+        field: "candidate.repo_key",
+        reason: err.to_string(),
+    })?;
+    Ok(())
 }
 
 fn update_cleanup_digest_field(hasher: &mut Sha256, value: &str) {
@@ -2251,7 +2295,7 @@ fn check_cleanup_eligibility(
     }
     if active_reservations
         .iter()
-        .any(|res| entry.path.starts_with(res) || res.starts_with(&entry.path))
+        .any(|reservation| paths_overlap_by_component(&entry.path, reservation))
     {
         return Err(CleanupError::ActiveReservation {
             path: entry.path.clone(),
@@ -3276,6 +3320,21 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_request_rejects_candidate_parent_traversal() {
+        let candidates = vec![cleanup_candidate(
+            "/tmp/target/debug/build/../source/main.rs",
+            1024,
+        )];
+        let result = cleanup_request(candidates, CleanupMode::Execute).validated();
+
+        assert!(matches!(
+            result.unwrap_err(),
+            CleanupError::InvalidField { field: "candidate.path", reason }
+                if reason.contains("RG_ARTIFACT_PATH_TRAVERSAL")
+        ));
+    }
+
+    #[test]
     fn cleanup_skips_pinned_artifacts() {
         let adapter = MockCleanupAdapter::new();
         let pinned = cleanup_candidate("/tmp/target/debug/build/pinned", 1024).with_pin(
@@ -3337,6 +3396,41 @@ mod tests {
                 .contains("reservation")
         );
         assert!(adapter.removed.borrow().is_empty());
+    }
+
+    #[test]
+    fn cleanup_reservations_use_path_component_boundaries() {
+        let adapter = MockCleanupAdapter::new();
+        let candidates = vec![cleanup_candidate(
+            "/tmp/target/debug/build/reserved-sibling",
+            1024,
+        )];
+        let mut request = cleanup_request(candidates, CleanupMode::Execute);
+        request.active_reservations = vec!["/tmp/target/debug/build/reserved".to_string()];
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.removed_count, 1);
+        assert_eq!(receipt.skipped_count, 0);
+        assert_eq!(receipt.outcomes[0].outcome, CleanupOutcome::Removed);
+        assert_eq!(adapter.removed.borrow().len(), 1);
+    }
+
+    #[test]
+    fn cleanup_ignores_empty_active_reservation_entries() {
+        let adapter = MockCleanupAdapter::new();
+        let candidates = vec![cleanup_candidate("/tmp/target/debug/build/reclaim", 1024)];
+        let mut request = cleanup_request(candidates, CleanupMode::Execute);
+        request.active_reservations = vec![String::new()];
+
+        let receipt =
+            execute_cleanup(request, &adapter, sample_ts(600)).expect("cleanup should succeed");
+
+        assert_eq!(receipt.removed_count, 1);
+        assert_eq!(receipt.skipped_count, 0);
+        assert_eq!(receipt.outcomes[0].outcome, CleanupOutcome::Removed);
+        assert_eq!(adapter.removed.borrow().len(), 1);
     }
 
     #[test]

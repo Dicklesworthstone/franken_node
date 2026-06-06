@@ -432,6 +432,18 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
         let timestamp = Utc::now();
         let path = &candidate.path;
 
+        if path_has_parent_traversal(path) {
+            return CleanupOperation {
+                path: path.clone(),
+                size_bytes: 0,
+                age_seconds: 0,
+                outcome: CleanupOutcome::SkippedProtected,
+                reason: "Path contains parent traversal".to_string(),
+                error: None,
+                timestamp,
+            };
+        }
+
         // Check if path exists
         if !self.deletion_adapter.exists(path) {
             return CleanupOperation {
@@ -589,7 +601,7 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
         if self
             .active_reservations
             .iter()
-            .any(|reservation| path.starts_with(reservation) || reservation.starts_with(path))
+            .any(|reservation| paths_overlap_by_component(path, reservation))
         {
             return Some((
                 CleanupOutcome::SkippedReserved,
@@ -617,8 +629,10 @@ impl<T: FileDeletionAdapter> CleanupExecutor<T> {
         if pattern.contains("**") {
             let prefix = pattern.split("**").next().unwrap_or("");
             path.starts_with(prefix)
-        } else if pattern.starts_with("*.") {
-            let extension = &pattern[1..];
+        } else if let Some(extension) = pattern
+            .strip_prefix('*')
+            .filter(|suffix| suffix.starts_with('.'))
+        {
             path.ends_with(extension)
         } else {
             path.contains(pattern) || path == pattern
@@ -664,6 +678,19 @@ fn path_has_component(path: &Path, protected_dir: &Path) -> bool {
         Component::Normal(name) => name == protected_name,
         _ => false,
     })
+}
+
+fn paths_overlap_by_component(path: &Path, reservation: &Path) -> bool {
+    if path.as_os_str().is_empty() || reservation.as_os_str().is_empty() {
+        return false;
+    }
+
+    path.starts_with(reservation) || reservation.starts_with(path)
+}
+
+fn path_has_parent_traversal(path: &Path) -> bool {
+    path.components()
+        .any(|component| component == Component::ParentDir)
 }
 
 fn update_digest_field(hasher: &mut Sha256, value: &str) {
@@ -877,6 +904,121 @@ mod tests {
             receipt.operations[0].outcome,
             CleanupOutcome::SkippedReserved
         );
+    }
+
+    #[test]
+    fn test_active_reservations_use_path_component_boundaries() {
+        let mock_adapter = MockDeletionAdapter::default();
+        let mut executor =
+            CleanupExecutor::with_protection_rules(test_cleanup_rules(), mock_adapter);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let reserved_path = temp_dir.path().join("reserved");
+        let sibling_path = temp_dir.path().join("reserved-sibling.tmp");
+        std::fs::write(&sibling_path, "reclaimable").expect("write sibling file");
+
+        let mut reservations = BTreeSet::new();
+        reservations.insert(reserved_path);
+        executor.update_reservations(reservations);
+
+        let candidates = vec![CleanupCandidate {
+            path: sibling_path,
+            size_bytes: 1024,
+            reason: "Sibling prefix should not be reserved".to_string(),
+            requires_approval: false,
+            mtime: None,
+        }];
+
+        let receipt = executor.execute_cleanup(
+            &candidates,
+            CleanupMode::Execute,
+            "test_actor".to_string(),
+            "Test reservation component boundaries".to_string(),
+            None,
+        );
+
+        assert_eq!(receipt.operations.len(), 1);
+        assert_eq!(receipt.operations[0].outcome, CleanupOutcome::Removed);
+    }
+
+    #[test]
+    fn test_empty_active_reservation_entries_do_not_block_cleanup() {
+        let mock_adapter = MockDeletionAdapter::default();
+        let mut executor =
+            CleanupExecutor::with_protection_rules(test_cleanup_rules(), mock_adapter);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let reclaimable_path = temp_dir.path().join("reclaimable.tmp");
+        std::fs::write(&reclaimable_path, "reclaimable").expect("write reclaimable file");
+
+        let mut reservations = BTreeSet::new();
+        reservations.insert(PathBuf::new());
+        executor.update_reservations(reservations);
+
+        let candidates = vec![CleanupCandidate {
+            path: reclaimable_path,
+            size_bytes: 1024,
+            reason: "Empty reservation should not block".to_string(),
+            requires_approval: false,
+            mtime: None,
+        }];
+
+        let receipt = executor.execute_cleanup(
+            &candidates,
+            CleanupMode::Execute,
+            "test_actor".to_string(),
+            "Test empty reservation".to_string(),
+            None,
+        );
+
+        assert_eq!(receipt.operations.len(), 1);
+        assert_eq!(receipt.operations[0].outcome, CleanupOutcome::Removed);
+    }
+
+    #[test]
+    fn test_parent_traversal_candidates_are_skipped_before_deletion() {
+        let mock_adapter = MockDeletionAdapter::default();
+        let deletion_requests = mock_adapter.deletion_requests.clone();
+        let executor = CleanupExecutor::with_protection_rules(test_cleanup_rules(), mock_adapter);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let subdir = temp_dir.path().join("subdir");
+        let target_path = temp_dir.path().join("victim.tmp");
+        let traversal_path = subdir.join("..").join("victim.tmp");
+        std::fs::create_dir_all(&subdir).expect("create subdir");
+        std::fs::write(&target_path, "must not be touched").expect("write target");
+
+        let candidates = vec![CleanupCandidate {
+            path: traversal_path,
+            size_bytes: 1024,
+            reason: "Traversal candidate should be refused".to_string(),
+            requires_approval: false,
+            mtime: None,
+        }];
+
+        let receipt = executor.execute_cleanup(
+            &candidates,
+            CleanupMode::Execute,
+            "test_actor".to_string(),
+            "Test traversal candidate".to_string(),
+            None,
+        );
+
+        assert_eq!(receipt.operations.len(), 1);
+        assert_eq!(
+            receipt.operations[0].outcome,
+            CleanupOutcome::SkippedProtected
+        );
+        assert!(receipt.operations[0].reason.contains("parent traversal"));
+        assert!(target_path.exists());
+        assert!(deletion_requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_star_patterns_without_extension_are_not_global_wildcards() {
+        let mock_adapter = MockDeletionAdapter::default();
+        let executor = CleanupExecutor::with_protection_rules(test_cleanup_rules(), mock_adapter);
+
+        assert!(executor.matches_pattern("/tmp/build/reclaimable.tmp", "*.tmp"));
+        assert!(!executor.matches_pattern("/tmp/build/reclaimable.tmp", "*"));
+        assert!(!executor.matches_pattern("/tmp/build/reclaimable.tmp", "*tmp"));
     }
 
     #[test]
