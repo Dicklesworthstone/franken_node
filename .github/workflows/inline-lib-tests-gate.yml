@@ -94,9 +94,37 @@ jobs:
             | tee inline-lib-tests.list
           python3 scripts/check_inline_lib_tests.py inline-lib-tests.list --min-tests 1 --json
 
-      - name: Run inline library tests
+      - name: Emit inline library test shard plan
         run: |
-          "$HOME/.local/bin/rch" exec -- env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo test \
-            -p frankenengine-node \
-            --lib \
-            --features extended-surfaces,test-support
+          python3 scripts/check_inline_lib_tests.py inline-lib-tests.list \
+            --emit-shard-plan \
+            --max-tests-per-shard 500 \
+            --shard-timeout-seconds 1800 \
+            --rch-bin "$HOME/.local/bin/rch" \
+            --plan-jsonl-out inline-lib-tests.plan.jsonl \
+            --json \
+            > inline-lib-tests.plan.json
+
+      - name: Run inline library tests in resumable shards
+        run: |
+          python3 scripts/check_inline_lib_tests.py inline-lib-tests.list \
+            --run-shards \
+            --resume \
+            --fail-fast \
+            --max-tests-per-shard 500 \
+            --shard-timeout-seconds 1800 \
+            --rch-bin "$HOME/.local/bin/rch" \
+            --receipt-jsonl inline-lib-tests.receipts.jsonl \
+            --output-dir inline-lib-test-shards
+
+      - name: Upload inline library shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inline-lib-test-shard-evidence
+          path: |
+            franken_node/inline-lib-tests.list
+            franken_node/inline-lib-tests.plan.json
+            franken_node/inline-lib-tests.plan.jsonl
+            franken_node/inline-lib-tests.receipts.jsonl
+            franken_node/inline-lib-test-shards/
