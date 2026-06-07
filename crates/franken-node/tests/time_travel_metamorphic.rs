@@ -12,7 +12,7 @@ use frankenengine_node::replay::time_travel_engine::{
     AuditEntry, DivergenceKind, EnvironmentSnapshot, ReplayEngine, ReplayVerdict, SideEffect,
     TraceBuilder, TraceStep, WorkflowTrace, event_codes,
 };
-use frankenengine_node::storage::cas::ContentAddressedStore;
+use frankenengine_node::storage::cas::{ContentAddressedStore, content_hash};
 
 /// Create a demo environment for testing.
 fn demo_env() -> EnvironmentSnapshot {
@@ -156,6 +156,140 @@ fn assert_event_count(codes: &[&str], event_code: &str, expected: usize) {
         expected,
         "expected {expected} {event_code} events in {codes:?}"
     );
+}
+
+struct CasReplayFixture {
+    _tempdir: tempfile::TempDir,
+    cas: ContentAddressedStore,
+    trace: WorkflowTrace,
+}
+
+fn cas_backed_real_io_trace(trace_id: &str) -> CasReplayFixture {
+    let tempdir = tempfile::tempdir().expect("tempdir should be available");
+    let cas =
+        ContentAddressedStore::with_directory(tempdir.path()).expect("CAS should open in tempdir");
+    let empty = cas.put(b"").expect("empty pre-state should store");
+    let first_result = cas.put(b"first recorded bytes").expect("first result");
+    let second_result = cas.put(b"second recorded bytes").expect("second result");
+
+    let mut builder = TraceBuilder::new(trace_id, "verify-cas", demo_env());
+    builder.record_step(
+        b"fs.readFile".to_vec(),
+        b"first-output".to_vec(),
+        vec![SideEffect::recorded(
+            "fs_read",
+            "cap:fs:/tmp/a",
+            empty.clone(),
+            first_result.clone(),
+            first_result,
+            b"first recorded bytes".to_vec(),
+        )],
+        1_000_010,
+    );
+    builder.record_step(
+        b"http.request".to_vec(),
+        b"second-output".to_vec(),
+        vec![SideEffect::recorded(
+            "http_request",
+            "cap:http:example.test",
+            empty,
+            second_result.clone(),
+            second_result,
+            b"second recorded bytes".to_vec(),
+        )],
+        1_000_020,
+    );
+    let (trace, _) = builder.build().expect("trace should build");
+
+    CasReplayFixture {
+        _tempdir: tempdir,
+        cas,
+        trace,
+    }
+}
+
+fn assert_audit_json_contract(entries: &[AuditEntry], trace_id: &str) -> serde_json::Value {
+    let audit_json = serde_json::to_value(entries).expect("audit telemetry should serialize");
+    let audit_entries = audit_json
+        .as_array()
+        .expect("audit telemetry should be a JSON array");
+    assert_eq!(audit_entries.len(), entries.len());
+
+    for entry in audit_entries {
+        assert_eq!(entry["trace_id"], trace_id);
+        assert!(
+            entry["event_code"]
+                .as_str()
+                .expect("event_code should be a string")
+                .starts_with("TTR-")
+        );
+        assert!(entry["detail"].is_string());
+        assert!(entry["timestamp_ns"].as_u64().is_some());
+    }
+
+    audit_json
+}
+
+fn assert_audit_event_detail(entries: &[AuditEntry], event_code: &str, expected_detail: &str) {
+    assert!(
+        entries.iter().any(|entry| {
+            entry.event_code.as_str() == event_code && entry.detail.contains(expected_detail)
+        }),
+        "expected {event_code} audit detail containing {expected_detail:?} in {entries:?}"
+    );
+}
+
+fn one_step_replay_trace(trace_id: &str, side_effects: Vec<SideEffect>) -> WorkflowTrace {
+    let mut builder = TraceBuilder::new(trace_id, "divergence-kind-classification", demo_env());
+    builder.record_step(
+        b"input".to_vec(),
+        b"output".to_vec(),
+        side_effects,
+        1_000_010,
+    );
+    let (trace, _) = builder.build().expect("trace should build");
+    trace
+}
+
+fn output_mismatch_replay(
+    step: &TraceStep,
+    _env: &EnvironmentSnapshot,
+) -> (Vec<u8>, Vec<SideEffect>) {
+    let mut replayed_output = step.output.clone();
+    replayed_output.extend_from_slice(b"-changed");
+    (replayed_output, step.side_effects.clone())
+}
+
+fn side_effect_mismatch_replay(
+    step: &TraceStep,
+    _env: &EnvironmentSnapshot,
+) -> (Vec<u8>, Vec<SideEffect>) {
+    (
+        step.output.clone(),
+        vec![SideEffect::new("fs_read", b"different-bytes".to_vec())],
+    )
+}
+
+fn full_mismatch_replay(
+    _step: &TraceStep,
+    _env: &EnvironmentSnapshot,
+) -> (Vec<u8>, Vec<SideEffect>) {
+    (
+        b"different-output".to_vec(),
+        vec![SideEffect::new("http_request", b"different-body".to_vec())],
+    )
+}
+
+fn clock_drift_replay(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
+    let mut replayed_effects = step.side_effects.clone();
+    for effect in &mut replayed_effects {
+        if effect.effect_kind.as_str() == "clock_read" {
+            effect.payload = 2_000_000_000_u64.to_le_bytes().to_vec();
+            effect.result_hash = content_hash(&effect.payload);
+            effect.post_state_hash = content_hash(&effect.payload);
+        }
+    }
+    (step.output.clone(), replayed_effects)
 }
 
 #[test]
@@ -430,41 +564,11 @@ fn replay_round_trip_identity_emits_capture_and_replay_telemetry() {
 
 #[test]
 fn verify_replay_from_cas_serves_recorded_bytes_as_identical() {
-    let tempdir = tempfile::tempdir().expect("tempdir should be available");
-    let cas =
-        ContentAddressedStore::with_directory(tempdir.path()).expect("CAS should open in tempdir");
-    let empty = cas.put(b"").expect("empty pre-state should store");
-    let first_result = cas.put(b"first recorded bytes").expect("first result");
-    let second_result = cas.put(b"second recorded bytes").expect("second result");
-
-    let mut builder = TraceBuilder::new("verify-cas-identical", "verify-cas", demo_env());
-    builder.record_step(
-        b"fs.readFile".to_vec(),
-        b"first-output".to_vec(),
-        vec![SideEffect::recorded(
-            "fs_read",
-            "cap:fs:/tmp/a",
-            empty.clone(),
-            first_result.clone(),
-            first_result,
-            b"first recorded bytes".to_vec(),
-        )],
-        1_000_010,
-    );
-    builder.record_step(
-        b"http.request".to_vec(),
-        b"second-output".to_vec(),
-        vec![SideEffect::recorded(
-            "http_request",
-            "cap:http:example.test",
-            empty,
-            second_result.clone(),
-            second_result,
-            b"second recorded bytes".to_vec(),
-        )],
-        1_000_020,
-    );
-    let (trace, _) = builder.build().expect("trace should build");
+    let CasReplayFixture {
+        _tempdir,
+        cas,
+        trace,
+    } = cas_backed_real_io_trace("verify-cas-identical");
 
     let mut engine = ReplayEngine::new();
     engine.register_trace(trace).expect("trace should register");
@@ -475,45 +579,33 @@ fn verify_replay_from_cas_serves_recorded_bytes_as_identical() {
     assert_eq!(result.verdict, ReplayVerdict::Identical);
     assert_eq!(result.steps_replayed, 2);
     assert!(result.divergences.is_empty());
+
+    let replay_codes = audit_event_codes(engine.audit_log());
+    assert!(replay_codes.contains(&event_codes::TTR_004));
+    assert_event_count(&replay_codes, event_codes::TTR_005, 2);
+    assert_eq!(replay_codes.last().copied(), Some(event_codes::TTR_007));
+    assert_event_count(&replay_codes, event_codes::TTR_006, 0);
+    assert_audit_event_detail(engine.audit_log(), event_codes::TTR_005, "Step 0 identical");
+    assert_audit_event_detail(engine.audit_log(), event_codes::TTR_005, "Step 1 identical");
+
+    let audit_json = assert_audit_json_contract(engine.audit_log(), "verify-cas-identical");
+    assert_eq!(
+        audit_json
+            .as_array()
+            .expect("audit telemetry should be an array")
+            .last()
+            .expect("audit telemetry should include replay completion")["detail"],
+        "Replay completed: verdict=identical"
+    );
 }
 
 #[test]
 fn verify_replay_from_cas_mutated_recorded_byte_diverges_at_step() {
-    let tempdir = tempfile::tempdir().expect("tempdir should be available");
-    let cas =
-        ContentAddressedStore::with_directory(tempdir.path()).expect("CAS should open in tempdir");
-    let empty = cas.put(b"").expect("empty pre-state should store");
-    let first_result = cas.put(b"first recorded bytes").expect("first result");
-    let second_result = cas.put(b"second recorded bytes").expect("second result");
-
-    let mut builder = TraceBuilder::new("verify-cas-mutated", "verify-cas", demo_env());
-    builder.record_step(
-        b"fs.readFile".to_vec(),
-        b"first-output".to_vec(),
-        vec![SideEffect::recorded(
-            "fs_read",
-            "cap:fs:/tmp/a",
-            empty.clone(),
-            first_result.clone(),
-            first_result,
-            b"first recorded bytes".to_vec(),
-        )],
-        1_000_010,
-    );
-    builder.record_step(
-        b"http.request".to_vec(),
-        b"second-output".to_vec(),
-        vec![SideEffect::recorded(
-            "http_request",
-            "cap:http:example.test",
-            empty,
-            second_result.clone(),
-            second_result,
-            b"second recorded bytes".to_vec(),
-        )],
-        1_000_020,
-    );
-    let (mut trace, _) = builder.build().expect("trace should build");
+    let CasReplayFixture {
+        _tempdir,
+        cas,
+        mut trace,
+    } = cas_backed_real_io_trace("verify-cas-mutated");
     let byte = trace
         .steps
         .get_mut(1)
@@ -521,7 +613,7 @@ fn verify_replay_from_cas_mutated_recorded_byte_diverges_at_step() {
         .and_then(|effect| effect.payload.first_mut())
         .expect("fixture should contain a second-step side-effect payload byte");
     *byte ^= 0x01;
-    trace = trace.with_canonical_digest();
+    let trace = trace.with_canonical_digest();
 
     let mut engine = ReplayEngine::new();
     engine
@@ -537,6 +629,180 @@ fn verify_replay_from_cas_mutated_recorded_byte_diverges_at_step() {
     assert_eq!(
         result.divergences[0].kind,
         DivergenceKind::SideEffectMismatch
+    );
+    assert!(
+        result.divergences[0]
+            .explanation
+            .contains("side_effect_mismatch")
+    );
+
+    let replay_codes = audit_event_codes(engine.audit_log());
+    assert!(replay_codes.contains(&event_codes::TTR_004));
+    assert_event_count(&replay_codes, event_codes::TTR_005, 1);
+    assert_event_count(&replay_codes, event_codes::TTR_006, 1);
+    assert_eq!(replay_codes.last().copied(), Some(event_codes::TTR_007));
+    assert_audit_event_detail(engine.audit_log(), event_codes::TTR_005, "Step 0 identical");
+    assert_audit_event_detail(engine.audit_log(), event_codes::TTR_006, "Step 1 diverged");
+
+    let audit_json = assert_audit_json_contract(engine.audit_log(), "verify-cas-mutated");
+    assert!(
+        audit_json
+            .as_array()
+            .expect("audit telemetry should be an array")
+            .iter()
+            .any(|entry| entry["detail"]
+                .as_str()
+                .expect("detail should be a string")
+                .contains("effects_match=false"))
+    );
+}
+
+#[test]
+fn typed_side_effect_json_round_trip_preserves_capability_and_hashes() {
+    let effect = SideEffect::recorded(
+        "fs_write",
+        "cap:fs:workspace-report",
+        content_hash(b"report-before"),
+        content_hash(b"write-ok"),
+        content_hash(b"report-after"),
+        b"write-ok".to_vec(),
+    );
+
+    let encoded = serde_json::to_string(&effect).expect("side effect should serialize");
+    let decoded: SideEffect =
+        serde_json::from_str(&encoded).expect("side effect JSON should decode");
+
+    assert_eq!(decoded, effect);
+    assert_eq!(decoded.effect_kind, "fs_write");
+    assert_eq!(decoded.capability_ref, "cap:fs:workspace-report");
+    assert_eq!(decoded.pre_state_hash, content_hash(b"report-before"));
+    assert_eq!(decoded.result_hash, content_hash(b"write-ok"));
+    assert_eq!(decoded.post_state_hash, content_hash(b"report-after"));
+    assert_eq!(decoded.payload, b"write-ok".to_vec());
+}
+
+#[test]
+fn replay_divergence_kind_classifications_cover_output_effect_full_and_clock() {
+    let cases: [(
+        &str,
+        fn(&TraceStep, &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>),
+        DivergenceKind,
+        &str,
+    ); 3] = [
+        (
+            "classification-output-mismatch",
+            output_mismatch_replay,
+            DivergenceKind::OutputMismatch,
+            "output_mismatch",
+        ),
+        (
+            "classification-side-effect-mismatch",
+            side_effect_mismatch_replay,
+            DivergenceKind::SideEffectMismatch,
+            "side_effect_mismatch",
+        ),
+        (
+            "classification-full-mismatch",
+            full_mismatch_replay,
+            DivergenceKind::FullMismatch,
+            "full_mismatch",
+        ),
+    ];
+
+    for (trace_id, replay_fn, expected_kind, expected_kind_label) in cases {
+        let trace = one_step_replay_trace(
+            trace_id,
+            vec![SideEffect::new("fs_read", b"recorded-bytes".to_vec())],
+        );
+        let mut engine = ReplayEngine::new();
+        engine.register_trace(trace).expect("trace should register");
+        let result = engine
+            .replay(trace_id, replay_fn)
+            .expect("replay should classify divergence");
+
+        assert_eq!(result.verdict, ReplayVerdict::Diverged(1));
+        assert_eq!(result.divergences.len(), 1);
+        assert_eq!(result.divergences[0].step_seq, 0);
+        assert_eq!(result.divergences[0].kind, expected_kind);
+        assert!(
+            result.divergences[0]
+                .explanation
+                .contains(expected_kind_label)
+        );
+    }
+
+    let original_clock_ns = 1_000_000_u64;
+    let clock_payload = original_clock_ns.to_le_bytes().to_vec();
+    let trace = one_step_replay_trace(
+        "classification-clock-drift",
+        vec![SideEffect::recorded(
+            "clock_read",
+            "cap:clock:monotonic",
+            content_hash(b""),
+            content_hash(&clock_payload),
+            content_hash(&clock_payload),
+            clock_payload,
+        )],
+    );
+    let mut engine = ReplayEngine::new();
+    engine.register_trace(trace).expect("trace should register");
+    let result = engine
+        .replay("classification-clock-drift", clock_drift_replay)
+        .expect("clock replay should classify drift");
+
+    assert_eq!(result.verdict, ReplayVerdict::Diverged(1));
+    let clock_drift = result
+        .divergences
+        .iter()
+        .find(|divergence| {
+            matches!(
+                &divergence.kind,
+                DivergenceKind::ClockDrift {
+                    expected_ns,
+                    actual_ns,
+                    ..
+                } if *expected_ns == original_clock_ns && *actual_ns == 2_000_000_000
+            )
+        })
+        .expect("clock drift divergence should be recorded");
+    assert_eq!(clock_drift.step_seq, 0);
+    assert_audit_event_detail(
+        engine.audit_log(),
+        event_codes::TTR_006,
+        "Clock drift detected",
+    );
+}
+
+#[test]
+fn workflow_trace_rejects_reordered_and_gapped_step_sequences() {
+    let mut builder = TraceBuilder::new("sequence-negative", "sequence-negative", demo_env());
+    builder.record_step(b"input-0".to_vec(), b"output-0".to_vec(), vec![], 1_000_000);
+    builder.record_step(b"input-1".to_vec(), b"output-1".to_vec(), vec![], 1_000_001);
+    builder.record_step(b"input-2".to_vec(), b"output-2".to_vec(), vec![], 1_000_002);
+    let (trace, _) = builder.build().expect("trace should build");
+
+    let mut reordered = trace.clone();
+    reordered.steps.swap(0, 1);
+    reordered = reordered.with_canonical_digest();
+    let reordered_error = reordered
+        .validate()
+        .expect_err("reordered sequence must be rejected")
+        .to_string();
+    assert!(
+        reordered_error.contains("ERR_TTR_SEQ_GAP"),
+        "unexpected reordered trace error: {reordered_error}"
+    );
+
+    let mut gapped = trace;
+    gapped.steps.remove(1);
+    gapped = gapped.with_canonical_digest();
+    let gapped_error = gapped
+        .validate()
+        .expect_err("gapped sequence must be rejected")
+        .to_string();
+    assert!(
+        gapped_error.contains("ERR_TTR_SEQ_GAP"),
+        "unexpected gapped trace error: {gapped_error}"
     );
 }
 

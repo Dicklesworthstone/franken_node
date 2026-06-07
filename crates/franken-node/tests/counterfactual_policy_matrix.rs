@@ -142,6 +142,24 @@ fn replay_profile(
     Ok(engine.replay_with_baseline(bundle, baseline, policy)?)
 }
 
+fn json_array<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a Vec<serde_json::Value>> {
+    value
+        .get(field)
+        .and_then(|field_value| field_value.as_array())
+}
+
+fn json_str<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)
+        .and_then(|field_value| field_value.as_str())
+}
+
+fn json_u64(value: &serde_json::Value, field: &str) -> Option<u64> {
+    value
+        .get(field)
+        .and_then(|field_value| field_value.as_u64())
+}
+
 #[test]
 fn counterfactual_profile_matrix_bounds_and_monotone_severity_delta() -> TestResult {
     let bundle = fixture_bundle()?;
@@ -316,6 +334,100 @@ fn counterfactual_replay_reports_recorded_host_effect_policy_diff() -> TestResul
     assert_eq!(
         effect_diff.result_hash.as_deref(),
         original_effect.result_hash.as_deref()
+    );
+
+    let result_json = to_canonical_json(&result)?;
+    let result_value: serde_json::Value = serde_json::from_str(&result_json)?;
+    let summary_json = result_value.get("summary_statistics").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "missing summary statistics")
+    })?;
+    assert_eq!(json_u64(summary_json, "total_decisions"), Some(1));
+    assert_eq!(json_u64(summary_json, "changed_decisions"), Some(1));
+
+    let original_effect_json = json_array(&result_value, "original_outcomes")
+        .and_then(|outcomes| outcomes.first())
+        .and_then(|outcome| json_array(outcome, "recorded_effects"))
+        .and_then(|effects| effects.first())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "missing serialized recorded effect",
+            )
+        })?;
+    assert_eq!(json_u64(original_effect_json, "sequence_number"), Some(7));
+    assert_eq!(
+        json_str(original_effect_json, "effect_kind"),
+        Some("http_request")
+    );
+    assert_eq!(
+        json_str(original_effect_json, "capability_ref"),
+        Some("cap:http.audit")
+    );
+    assert_eq!(
+        json_str(original_effect_json, "recorded_policy_decision"),
+        Some("allow")
+    );
+    assert_eq!(
+        json_str(original_effect_json, "args_hash"),
+        Some(args_hash.as_str())
+    );
+    assert_eq!(
+        json_str(original_effect_json, "result_hash"),
+        Some(result_hash.as_str())
+    );
+
+    let divergence_json = json_array(&result_value, "divergence_points")
+        .and_then(|divergences| divergences.first())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "missing serialized divergence")
+        })?;
+    assert_eq!(json_u64(divergence_json, "sequence_number"), Some(1));
+    assert_eq!(
+        json_str(divergence_json, "original_decision"),
+        Some("observe")
+    );
+    assert_eq!(
+        json_str(divergence_json, "counterfactual_decision"),
+        Some("quarantine")
+    );
+
+    let effect_diff_json = json_array(divergence_json, "effect_diffs")
+        .and_then(|diffs| diffs.first())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "missing serialized effect diff")
+        })?;
+    assert_eq!(json_u64(effect_diff_json, "sequence_number"), Some(7));
+    assert_eq!(
+        json_str(effect_diff_json, "effect_kind"),
+        Some("http_request")
+    );
+    assert_eq!(
+        json_str(effect_diff_json, "capability_ref"),
+        Some("cap:http.audit")
+    );
+    assert_eq!(
+        json_str(effect_diff_json, "original_effect_decision"),
+        Some("allow")
+    );
+    assert_eq!(
+        json_str(effect_diff_json, "counterfactual_effect_decision"),
+        Some("deny")
+    );
+    assert_eq!(
+        json_str(effect_diff_json, "pre_state_hash"),
+        Some(pre_state_hash.as_str())
+    );
+    assert_eq!(
+        json_str(effect_diff_json, "args_hash"),
+        Some(args_hash.as_str())
+    );
+    assert_eq!(
+        json_str(effect_diff_json, "result_hash"),
+        Some(result_hash.as_str())
+    );
+    assert_eq!(
+        json_str(effect_diff_json, "post_state_hash"),
+        Some(post_state_hash.as_str())
     );
 
     Ok(())
