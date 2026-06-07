@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex, Once};
@@ -13,6 +13,7 @@ use frankenengine_node::config::{Config, Profile};
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction, FleetTargetKind, FleetTransport, NodeHealth, NodeStatus,
 };
+use frankenengine_node::security::remote_cap::{CapabilityProvider, RemoteOperation, RemoteScope};
 use frankenengine_node::supply_chain::trust_card::{
     SnapshotSourceContext, TrustCardListFilter, TrustCardMutation, TrustCardRegistry,
     fixture_registry,
@@ -35,6 +36,7 @@ struct StructuredLogEvent {
 
 const FIXTURE_RECEIPT_KEY_ID: &str = "72416df9f1dcd9b3";
 const FIXTURE_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
+const FIXTURE_REMOTECAP_KEY: &str = "trust-cli-e2e-remotecap-key";
 
 static TEST_TRACING_INIT: Once = Once::new();
 
@@ -95,6 +97,11 @@ fn run_cli_in_workspace_with_env(workspace: &Path, args: &[&str], env: &[(&str, 
     );
     let mut command = Command::new(&binary_path);
     command.current_dir(workspace).args(args);
+    command
+        .env_remove("FRANKEN_NODE_OSV_QUERY_URL")
+        .env_remove("FRANKEN_NODE_REMOTECAP_KEY")
+        .env_remove("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN")
+        .env_remove("FRANKEN_NODE_TRUST_SCAN_HTTP_TIMEOUT_MS");
     for (key, value) in env {
         command.env(key, value);
     }
@@ -136,15 +143,128 @@ fn read_http_request(stream: &mut impl Read) -> String {
     String::from_utf8_lossy(&buffer).to_string()
 }
 
-fn spawn_osv_fixture_server() -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind OSV fixture server");
+fn accept_osv_fixture_connection(listener: &TcpListener, label: &str) -> TcpStream {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "{label} timed out waiting for OSV fixture request"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => panic!("{label} accept failed: {err}"),
+        }
+    }
+}
+
+fn write_osv_response(
+    stream: &mut TcpStream,
+    status_code: u16,
+    status_text: &str,
+    response_body: &str,
+) {
+    let response = format!(
+        "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        response_body.len(),
+        response_body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("write OSV fixture response");
+}
+
+fn spawn_osv_static_response_server(
+    expected_requests: usize,
+    status_code: u16,
+    status_text: &'static str,
+    response_body: &'static str,
+) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind static OSV fixture server");
+    listener
+        .set_nonblocking(true)
+        .expect("set static fixture listener nonblocking");
     let address = format!("http://{}", listener.local_addr().expect("local addr"));
     let requests = Arc::new(Mutex::new(Vec::new()));
     let captured_requests = Arc::clone(&requests);
 
     let handle = thread::spawn(move || {
-        for stream in listener.incoming().take(2) {
-            let mut stream = stream.expect("accept fixture connection");
+        for _ in 0..expected_requests {
+            let mut stream = accept_osv_fixture_connection(&listener, "static OSV fixture");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("set static fixture read timeout");
+            let request = read_http_request(&mut stream);
+            captured_requests
+                .lock()
+                .expect("lock static fixture requests")
+                .push(
+                    request
+                        .split("\r\n\r\n")
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            write_osv_response(&mut stream, status_code, status_text, response_body);
+        }
+    });
+
+    (format!("{address}/query"), requests, handle)
+}
+
+fn spawn_osv_stalling_server(
+    expected_requests: usize,
+    stall_for: Duration,
+) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalling OSV fixture server");
+    listener
+        .set_nonblocking(true)
+        .expect("set stalling fixture listener nonblocking");
+    let address = format!("http://{}", listener.local_addr().expect("local addr"));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
+
+    let handle = thread::spawn(move || {
+        for _ in 0..expected_requests {
+            let mut stream = accept_osv_fixture_connection(&listener, "stalling OSV fixture");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("set stalling fixture read timeout");
+            let request = read_http_request(&mut stream);
+            captured_requests
+                .lock()
+                .expect("lock stalling fixture requests")
+                .push(
+                    request
+                        .split("\r\n\r\n")
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            thread::sleep(stall_for);
+        }
+    });
+
+    (format!("{address}/query"), requests, handle)
+}
+
+fn spawn_osv_fixture_server() -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind OSV fixture server");
+    listener
+        .set_nonblocking(true)
+        .expect("set OSV fixture listener nonblocking");
+    let address = format!("http://{}", listener.local_addr().expect("local addr"));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
+
+    let handle = thread::spawn(move || {
+        for _ in 0..2 {
+            let mut stream = accept_osv_fixture_connection(&listener, "OSV fixture");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("set OSV fixture read timeout");
             let request = read_http_request(&mut stream);
             let body = request
                 .split("\r\n\r\n")
@@ -177,14 +297,7 @@ fn spawn_osv_fixture_server() -> (String, Arc<Mutex<Vec<String>>>, thread::JoinH
                 )
             };
 
-            let response = format!(
-                "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write fixture response");
+            write_osv_response(&mut stream, status_code, status_text, &response_body);
         }
     });
 
@@ -201,21 +314,13 @@ fn spawn_osv_observer_server() -> (String, Arc<Mutex<usize>>, thread::JoinHandle
     let captured_count = Arc::clone(&request_count);
 
     let handle = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_millis(500);
         while Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let _ = read_http_request(&mut stream);
                     *captured_count.lock().expect("lock observer count") += 1;
-                    let response_body = r#"{"vulns":[]}"#;
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        response_body.len(),
-                        response_body
-                    );
-                    stream
-                        .write_all(response.as_bytes())
-                        .expect("write observer response");
+                    write_osv_response(&mut stream, 200, "OK", r#"{"vulns":[]}"#);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
@@ -226,6 +331,36 @@ fn spawn_osv_observer_server() -> (String, Arc<Mutex<usize>>, thread::JoinHandle
     });
 
     (format!("{address}/query"), request_count, handle)
+}
+
+fn issue_osv_fixture_remotecap(workspace: &Path, osv_url: &str) -> PathBuf {
+    let issued_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_secs();
+    let provider = CapabilityProvider::new(FIXTURE_REMOTECAP_KEY).expect("fixture provider");
+    let (cap, _) = provider
+        .issue(
+            "trust-cli-e2e",
+            RemoteScope::new(
+                vec![RemoteOperation::NetworkEgress],
+                vec![osv_url.to_string()],
+            ),
+            issued_at,
+            3_600,
+            true,
+            false,
+            "trace-trust-cli-e2e-osv",
+        )
+        .expect("issue OSV fixture RemoteCap");
+    let token_path = workspace.join(".franken-node/remotecap/osv-fixture-token.json");
+    fs::create_dir_all(token_path.parent().expect("token parent")).expect("create token parent");
+    fs::write(
+        &token_path,
+        serde_json::to_vec_pretty(&serde_json::json!({ "token": cap })).expect("token JSON"),
+    )
+    .expect("write OSV fixture RemoteCap token");
+    token_path
 }
 
 fn seeded_fixture_trust_workspace_with_timestamp(now_secs: u64) -> tempfile::TempDir {
@@ -264,24 +399,25 @@ fn seeded_fixture_trust_workspace() -> tempfile::TempDir {
 
 fn rewrite_fixture_last_verified_timestamps(workspace: &Path, now_secs: u64) {
     let registry_path = workspace.join(".franken-node/state/trust-card-registry.v1.json");
-    let mut registry = TrustCardRegistry::load_authoritative_state(
-        &registry_path,
-        60,
-        now_secs,
-        SnapshotSourceContext::TrustedFile,
-    )
-    .expect("load authoritative trust registry");
-    let cards = registry
-        .list(
-            &TrustCardListFilter::empty(),
-            "trace-cli-test-refresh-list",
-            now_secs,
-        )
-        .expect("list authoritative trust registry");
     let timestamp = chrono::DateTime::from_timestamp(now_secs as i64, 0)
         .expect("valid test timestamp")
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-
+    let mut config = Config::for_profile(Profile::Balanced);
+    config.trust.registry_signing_key = Some(BASE64_STANDARD.encode(FIXTURE_REGISTRY_KEY));
+    let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
+        &registry_path,
+        &config.trust,
+        now_secs,
+        SnapshotSourceContext::TrustedFile,
+    )
+    .expect("load trust registry for timestamp rewrite");
+    let cards = registry
+        .list(
+            &TrustCardListFilter::empty(),
+            "trace-trust-cli-e2e-refresh-timestamps",
+            now_secs,
+        )
+        .expect("list trust cards for timestamp rewrite");
     for card in cards {
         registry
             .update(
@@ -297,11 +433,10 @@ fn rewrite_fixture_last_verified_timestamps(workspace: &Path, now_secs: u64) {
                     evidence_refs: None,
                 },
                 now_secs,
-                "trace-cli-test-refresh-update",
+                "trace-trust-cli-e2e-refresh-timestamps",
             )
-            .expect("refresh trust card timestamp");
+            .expect("rewrite trust-card timestamp");
     }
-
     registry
         .persist_authoritative_state(&registry_path)
         .expect("persist refreshed trust registry");
@@ -1489,10 +1624,16 @@ fn trust_quarantine_receipt_export_uses_config_signing_key() {
 fn trust_sync_reports_summary_counts() {
     let workspace = seeded_fixture_trust_workspace();
     let (osv_url, requests, server) = spawn_osv_fixture_server();
+    let token_path = issue_osv_fixture_remotecap(workspace.path(), &osv_url);
+    let token_path = token_path.to_str().expect("fixture token path is utf8");
     let output = run_cli_in_workspace_with_env(
         workspace.path(),
         &["trust", "sync", "--force"],
-        &[("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str())],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            ("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN", token_path),
+        ],
     );
     assert!(
         output.status.success(),
@@ -1535,13 +1676,162 @@ fn trust_sync_reports_summary_counts() {
 }
 
 #[test]
+fn trust_sync_offline_clean_refresh_reports_zero_vulnerabilities() {
+    let workspace = seeded_fixture_trust_workspace();
+    let (osv_url, requests, server) =
+        spawn_osv_static_response_server(2, 200, "OK", r#"{"vulns":[]}"#);
+    let token_path = issue_osv_fixture_remotecap(workspace.path(), &osv_url);
+    let token_path = token_path.to_str().expect("fixture token path is utf8");
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["trust", "sync", "--force"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            ("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN", token_path),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "trust sync clean fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("trust sync completed: force=true"));
+    assert!(stdout.contains("refreshed=2"));
+    assert!(stdout.contains("vulnerabilities=0"));
+    assert!(stdout.contains("network_errors=0"));
+
+    server.join().expect("join clean OSV fixture server");
+    assert_eq!(requests.lock().expect("lock requests").len(), 2);
+}
+
+#[test]
+fn trust_sync_malformed_osv_response_is_reported_without_live_network() {
+    let workspace = seeded_fixture_trust_workspace();
+    let (osv_url, requests, server) = spawn_osv_static_response_server(2, 200, "OK", "not-json");
+    let token_path = issue_osv_fixture_remotecap(workspace.path(), &osv_url);
+    let token_path = token_path.to_str().expect("fixture token path is utf8");
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["trust", "sync", "--force"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            ("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN", token_path),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "trust sync malformed fixture should preserve stale data and report warnings: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("refreshed=0"));
+    assert!(stdout.contains("vulnerabilities=0"));
+    assert!(stdout.contains("network_errors=2"));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid OSV JSON"));
+    assert!(stderr.contains("warning: @acme/auth-guard"));
+
+    server.join().expect("join malformed OSV fixture server");
+    assert_eq!(requests.lock().expect("lock requests").len(), 2);
+}
+
+#[test]
+fn trust_sync_stalled_osv_response_obeys_fixed_timeout() {
+    let workspace = seeded_fixture_trust_workspace();
+    let (osv_url, requests, server) = spawn_osv_stalling_server(2, Duration::from_millis(250));
+    let token_path = issue_osv_fixture_remotecap(workspace.path(), &osv_url);
+    let token_path = token_path.to_str().expect("fixture token path is utf8");
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["trust", "sync", "--force"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            ("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN", token_path),
+            ("FRANKEN_NODE_TRUST_SCAN_HTTP_TIMEOUT_MS", "50"),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "trust sync stalled fixture should preserve stale data and report warnings: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("refreshed=0"));
+    assert!(stdout.contains("network_errors=2"));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_ascii_lowercase();
+    assert!(stderr.contains("OSV query failed"));
+    assert!(
+        stderr_lower.contains("timeout")
+            || stderr_lower.contains("timed out")
+            || stderr_lower.contains("deadline"),
+        "stalled fixture should surface a timeout-like error, got:\n{stderr}"
+    );
+
+    server.join().expect("join stalling OSV fixture server");
+    assert_eq!(requests.lock().expect("lock requests").len(), 2);
+}
+
+#[test]
+fn trust_sync_remotecap_denial_does_not_reach_osv_fixture() {
+    let workspace = seeded_fixture_trust_workspace();
+    let (osv_url, request_count, server) = spawn_osv_observer_server();
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["trust", "sync", "--force"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str()),
+            (
+                "FRANKEN_NODE_REMOTECAP_KEY",
+                "trust-sync-denied-fixture-key",
+            ),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "trust sync RemoteCap denial should be reported as stale-data warnings: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("refreshed=0"));
+    assert!(stdout.contains("network_errors=2"));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("REMOTECAP_MISSING"));
+
+    server.join().expect("join RemoteCap observer server");
+    assert_eq!(*request_count.lock().expect("lock observer count"), 0);
+}
+
+#[test]
 fn trust_sync_rejects_unauthenticated_clean_refresh_that_lowers_risk() {
     let workspace = seeded_fixture_trust_workspace();
     let (vulnerable_osv_url, _, vulnerable_server) = spawn_osv_fixture_server();
+    let vulnerable_token_path = issue_osv_fixture_remotecap(workspace.path(), &vulnerable_osv_url);
+    let vulnerable_token_path = vulnerable_token_path
+        .to_str()
+        .expect("fixture token path is utf8");
     let vulnerable = run_cli_in_workspace_with_env(
         workspace.path(),
         &["trust", "sync", "--force"],
-        &[("FRANKEN_NODE_OSV_QUERY_URL", vulnerable_osv_url.as_str())],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", vulnerable_osv_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            (
+                "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN",
+                vulnerable_token_path,
+            ),
+        ],
     );
     assert!(
         vulnerable.status.success(),
@@ -1553,10 +1843,18 @@ fn trust_sync_rejects_unauthenticated_clean_refresh_that_lowers_risk() {
         .expect("join vulnerable OSV fixture server");
 
     let (clean_osv_url, request_count, clean_server) = spawn_osv_observer_server();
+    let clean_token_path = issue_osv_fixture_remotecap(workspace.path(), &clean_osv_url);
+    let clean_token_path = clean_token_path
+        .to_str()
+        .expect("fixture token path is utf8");
     let clean = run_cli_in_workspace_with_env(
         workspace.path(),
         &["trust", "sync", "--force"],
-        &[("FRANKEN_NODE_OSV_QUERY_URL", clean_osv_url.as_str())],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", clean_osv_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            ("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN", clean_token_path),
+        ],
     );
     assert!(
         clean.status.success(),

@@ -297,6 +297,8 @@ const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
 const TRUST_SCAN_OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const TRUST_SCAN_DEPS_DEV_BASE_URL: &str = "https://api.deps.dev/v3alpha";
 const TRUST_SCAN_REMOTECAP_TOKEN_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN";
+const TRUST_SCAN_HTTP_TIMEOUT_MS_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_HTTP_TIMEOUT_MS";
+const TRUST_SCAN_HTTP_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const OPS_HEALTH_LEDGER_FILE_CANDIDATES: &[&str] = &[
     "evidence_spill.jsonl",
     "durable_evidence_spill.jsonl",
@@ -15579,8 +15581,28 @@ fn trust_scan_osv_query_config() -> TrustScanOsvQueryConfig {
 }
 
 #[cfg(feature = "http-client")]
+fn trust_scan_http_timeout() -> Duration {
+    std::env::var(TRUST_SCAN_HTTP_TIMEOUT_MS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(TRUST_SCAN_HTTP_DEFAULT_TIMEOUT)
+}
+
+#[cfg(feature = "http-client")]
+fn trust_scan_http_agent() -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(trust_scan_http_timeout()))
+        .build();
+    ureq::Agent::new_with_config(config)
+}
+
+#[cfg(feature = "http-client")]
 fn trust_scan_http_get_body(url: &str, request_error: &str, read_error: &str) -> Result<String> {
-    let mut response = ureq::get(url)
+    let agent = trust_scan_http_agent();
+    let mut response = agent
+        .get(url)
         .header("User-Agent", &trust_scan_user_agent())
         .call()
         .map_err(|err| anyhow::anyhow!("{request_error}: {err}"))?;
@@ -15602,7 +15624,9 @@ fn trust_scan_http_post_json_body(
     request_error: &str,
     read_error: &str,
 ) -> Result<String> {
-    let mut response = ureq::post(url)
+    let agent = trust_scan_http_agent();
+    let mut response = agent
+        .post(url)
         .header("User-Agent", &trust_scan_user_agent())
         .header("Content-Type", "application/json")
         .send(body)

@@ -1418,11 +1418,21 @@ impl TrustCardRegistry {
     /// Returns `TrustCardError` if snapshot materialization, lock acquisition,
     /// canonical encoding, fsync, or atomic persistence fails.
     pub fn persist_authoritative_state(&self, path: &Path) -> Result<(), TrustCardError> {
-        let snapshot = self.snapshot()?;
+        let mut snapshot = self.snapshot()?;
         let high_water_path = authoritative_snapshot_high_water_path(path);
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         with_authoritative_snapshot_persist_lock(path, || {
             let high_water = read_snapshot_high_water(path, &self.registry_key)?;
+            if let Some(current) = high_water.as_ref()
+                && snapshot.snapshot_epoch > current.snapshot_epoch
+                && !snapshot
+                    .previous_snapshot_hash
+                    .as_deref()
+                    .is_some_and(|previous| constant_time::ct_eq(previous, &current.snapshot_hash))
+            {
+                snapshot.previous_snapshot_hash = Some(current.snapshot_hash.clone());
+                sign_snapshot_in_place(&mut snapshot, &self.registry_key)?;
+            }
             validate_snapshot_high_water(path, &snapshot, high_water.as_ref())?;
             let encoded = to_canonical_json(&snapshot)?;
             let next_high_water = signed_snapshot_high_water(&snapshot, &self.registry_key)?;
