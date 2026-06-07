@@ -480,7 +480,11 @@ mod tests {
     fn content_hash_serde_round_trips_and_validates() {
         let h = content_hash(b"serde me");
         let json = serde_json::to_string(&h).expect("serialize");
-        assert_eq!(json, format!("\"{}\"", h.as_str()), "serializes as plain string");
+        assert_eq!(
+            json,
+            format!("\"{}\"", h.as_str()),
+            "serializes as plain string"
+        );
         let back: ContentHash = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, h);
         // A malformed hash must be rejected at deserialization, not silently accepted.

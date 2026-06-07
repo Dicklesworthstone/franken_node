@@ -15,12 +15,39 @@
 use frankenengine_node::runtime::effect_receipt::{
     EffectKind, EffectReceipt, EffectReceiptChain, EffectReceiptError, PolicyOutcome,
 };
-use frankenengine_node::storage::cas::{CasError, ContentAddressedStore, ContentHash, content_hash};
+use frankenengine_node::storage::cas::{
+    CasError, ContentAddressedStore, ContentHash, content_hash,
+};
 
 fn store() -> (tempfile::TempDir, ContentAddressedStore) {
     let dir = tempfile::tempdir().expect("tempdir");
     let cas = ContentAddressedStore::with_directory(dir.path()).expect("open cas");
     (dir, cas)
+}
+
+fn allowed_receipt(seq: u64, trace_id: &str, hash: &ContentHash) -> EffectReceipt {
+    EffectReceipt::allowed(
+        seq,
+        trace_id,
+        EffectKind::FsRead,
+        "cap",
+        hash.clone(),
+        hash.clone(),
+        hash.clone(),
+        hash.clone(),
+        seq,
+    )
+}
+
+fn allowed_chain(hash: &ContentHash, len: u64) -> EffectReceiptChain {
+    let mut chain = EffectReceiptChain::new();
+    for seq in 0..len {
+        chain
+            .append(allowed_receipt(seq, "trace-chain", hash))
+            .expect("append");
+    }
+    chain.verify_integrity().expect("baseline verifies");
+    chain
 }
 
 #[test]
@@ -29,14 +56,23 @@ fn keystone_flow_store_receipt_chain_and_verify() {
 
     // 1. Real effect bytes land in the CAS, addressed by content hash.
     let pre = cas.put(b"// module.exports = {}").expect("put pre");
-    let args = cas.put(br#"{"path":"/app/index.js","flags":"r"}"#).expect("put args");
+    let args = cas
+        .put(br#"{"path":"/app/index.js","flags":"r"}"#)
+        .expect("put args");
     let result = cas.put(b"export const answer = 42;").expect("put result");
     let post = cas.put(b"// module.exports = {}").expect("put post");
 
     // CAS round-trips and dedups (pre == post bytes -> one blob).
-    assert_eq!(cas.get(&result).expect("get result"), b"export const answer = 42;");
+    assert_eq!(
+        cas.get(&result).expect("get result"),
+        b"export const answer = 42;"
+    );
     assert_eq!(pre, post, "identical bytes share a content hash (dedup)");
-    assert_eq!(cas.len().expect("len"), 3, "four puts, three distinct blobs");
+    assert_eq!(
+        cas.len().expect("len"),
+        3,
+        "four puts, three distinct blobs"
+    );
 
     // 2. An allowed effect receipt references the CAS hashes.
     let mut chain = EffectReceiptChain::new();
@@ -97,34 +133,46 @@ fn tampering_with_cas_bytes_fails_closed_on_read() {
 fn tampering_with_a_chained_receipt_breaks_integrity() {
     let (_dir, cas) = store();
     let h = cas.put(b"x").expect("put");
-    let mut chain = EffectReceiptChain::new();
-    for seq in 0..4 {
-        chain
-            .append(EffectReceipt::allowed(
-                seq,
-                "t",
-                EffectKind::FsRead,
-                "cap",
-                h.clone(),
-                h.clone(),
-                h.clone(),
-                h.clone(),
-                seq,
-            ))
-            .expect("append");
-    }
-    chain.verify_integrity().expect("baseline verifies");
+    let chain = allowed_chain(&h, 4);
 
-    // A forged receipt whose hashes weren't recomputed must fail closed. We
-    // rebuild an equivalent chain and corrupt the serialized form to confirm
-    // verify_integrity catches receipt/hash divergence via the public API by
-    // re-deriving every receipt hash.
-    let entries = chain.entries();
-    let recomputed = entries[2].receipt.receipt_hash();
-    assert_eq!(
-        recomputed, entries[2].receipt_hash,
-        "an untampered receipt re-derives its recorded hash"
+    // A forged persisted receipt whose hashes were not recomputed must fail
+    // closed when the verifier re-derives every receipt hash.
+    let mut entries = chain.entries().to_vec();
+    entries[2].receipt.trace_id = "forged-trace".to_string();
+    let err = EffectReceiptChain::verify_entries_integrity(&entries)
+        .expect_err("tampered entry must fail");
+    assert!(
+        matches!(err, EffectReceiptError::ChainIntegrity { index: 2, .. }),
+        "tampered receipt must fail at its recorded index, got {err:?}"
     );
+}
+
+#[test]
+fn tampering_with_chain_linkage_fields_breaks_integrity() {
+    let (_dir, cas) = store();
+    let h = cas.put(b"x").expect("put");
+    let chain = allowed_chain(&h, 4);
+
+    let mut entries = chain.entries().to_vec();
+    entries[1].prev_chain_hash = entries[0].prev_chain_hash.clone();
+    assert!(matches!(
+        EffectReceiptChain::verify_entries_integrity(&entries),
+        Err(EffectReceiptError::ChainIntegrity { index: 1, .. })
+    ));
+
+    let mut entries = chain.entries().to_vec();
+    entries[2].chain_hash = entries[1].chain_hash.clone();
+    assert!(matches!(
+        EffectReceiptChain::verify_entries_integrity(&entries),
+        Err(EffectReceiptError::ChainIntegrity { index: 2, .. })
+    ));
+
+    let mut entries = chain.entries().to_vec();
+    entries[2].index = 99;
+    assert!(matches!(
+        EffectReceiptChain::verify_entries_integrity(&entries),
+        Err(EffectReceiptError::ChainIntegrity { index: 2, .. })
+    ));
 }
 
 #[test]
@@ -157,5 +205,44 @@ fn allowed_receipt_missing_result_is_rejected_on_append() {
     assert!(matches!(
         chain.append(bogus),
         Err(EffectReceiptError::AllowedMissingHash { .. })
+    ));
+}
+
+#[test]
+fn denied_receipt_with_result_is_rejected_on_append() {
+    let (_dir, cas) = store();
+    let h = cas.put(b"denied bytes must not exist").expect("put");
+    let mut bogus = EffectReceipt::denied(
+        0,
+        "t",
+        EffectKind::HttpRequest,
+        "ssrf_policy: denied",
+        h.clone(),
+        h.clone(),
+        0,
+    );
+    bogus.result_hash = Some(h);
+    let mut chain = EffectReceiptChain::new();
+    assert!(matches!(
+        chain.append(bogus),
+        Err(EffectReceiptError::DeniedHasHash {
+            field: "result_hash"
+        })
+    ));
+}
+
+#[test]
+fn cas_capacity_allows_dedup_but_rejects_new_blob() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cas = ContentAddressedStore::with_limits(dir.path(), 1024, 1).expect("open cas");
+
+    let first = cas.put(b"same").expect("first put");
+    let second = cas.put(b"same").expect("dedup put");
+    assert_eq!(first, second, "dedup must not consume capacity");
+    assert_eq!(cas.len().expect("len"), 1);
+
+    assert!(matches!(
+        cas.put(b"different"),
+        Err(CasError::CapacityExceeded { max: 1 })
     ));
 }

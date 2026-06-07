@@ -46,7 +46,8 @@ const RECEIPT_HASH_DOMAIN: &[u8] = b"runtime_effect_receipt_canonical_v1:";
 /// Domain separator for the chain-hash preimage.
 const CHAIN_HASH_DOMAIN: &[u8] = b"runtime_effect_receipt_chain_v1:";
 /// Genesis `prev_chain_hash` for the first entry in a chain.
-const CHAIN_GENESIS: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+const CHAIN_GENESIS: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 /// Hard cap on entries in one in-memory chain (bounded growth).
 pub const DEFAULT_MAX_CHAIN_ENTRIES: usize = 1_000_000;
 
@@ -378,8 +379,18 @@ impl EffectReceiptChain {
     /// compare (constant time) against the recorded values. Any tampering with
     /// a receipt, a hash, or the ordering fails closed.
     pub fn verify_integrity(&self) -> Result<(), EffectReceiptError> {
+        Self::verify_entries_integrity(&self.entries)
+    }
+
+    /// Verify a persisted or deserialized chain entry slice without requiring
+    /// callers to rebuild an [`EffectReceiptChain`] value. This is the
+    /// verifier-facing form used by replay/incident tooling after entries have
+    /// crossed a storage or bundle boundary.
+    pub fn verify_entries_integrity(
+        entries: &[EffectReceiptChainEntry],
+    ) -> Result<(), EffectReceiptError> {
         let mut expected_prev = CHAIN_GENESIS.to_string();
-        for (idx, entry) in self.entries.iter().enumerate() {
+        for (idx, entry) in entries.iter().enumerate() {
             let index = u64::try_from(idx).unwrap_or(u64::MAX);
             if entry.index != index {
                 return Err(EffectReceiptError::ChainIntegrity {
