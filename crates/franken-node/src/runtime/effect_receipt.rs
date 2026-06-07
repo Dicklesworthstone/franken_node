@@ -115,6 +115,13 @@ impl PolicyOutcome {
 /// Errors surfaced by the effect-receipt chain. Every variant fails closed.
 #[derive(Debug, thiserror::Error)]
 pub enum EffectReceiptError {
+    #[error("effect receipt schema mismatch: expected {expected}, got {actual:?}")]
+    SchemaVersionMismatch {
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("effect receipt audit field {field} must not be empty")]
+    EmptyField { field: &'static str },
     #[error("allowed effect receipt is missing its {field}")]
     AllowedMissingHash { field: &'static str },
     #[error("denied effect receipt must not carry a {field}")]
@@ -208,11 +215,31 @@ impl EffectReceipt {
         }
     }
 
-    /// Validate the allowed/denied invariant: an `Allowed` receipt must carry a
-    /// result and post-state; a `Denied` receipt must carry neither.
+    /// Validate the receipt: known schema version (refuse-on-unknown, so a
+    /// deserialized/cross-boundary receipt with an unexpected schema fails
+    /// closed) plus the allowed/denied invariant — an `Allowed` receipt must
+    /// carry a result and post-state; a `Denied` receipt must carry neither.
     pub fn validate(&self) -> Result<(), EffectReceiptError> {
-        match self.policy_outcome {
-            PolicyOutcome::Allowed { .. } => {
+        if self.schema_version != EFFECT_RECEIPT_SCHEMA {
+            return Err(EffectReceiptError::SchemaVersionMismatch {
+                expected: EFFECT_RECEIPT_SCHEMA,
+                actual: self.schema_version.clone(),
+            });
+        }
+        // Audit identifiers must be non-empty — a receipt with an empty
+        // trace_id / capability_ref / reason is an unauditable degenerate
+        // record and fails closed (matches the corpus-record validate_non_empty
+        // discipline).
+        if self.trace_id.trim().is_empty() {
+            return Err(EffectReceiptError::EmptyField { field: "trace_id" });
+        }
+        match &self.policy_outcome {
+            PolicyOutcome::Allowed { capability_ref } => {
+                if capability_ref.trim().is_empty() {
+                    return Err(EffectReceiptError::EmptyField {
+                        field: "capability_ref",
+                    });
+                }
                 if self.result_hash.is_none() {
                     return Err(EffectReceiptError::AllowedMissingHash {
                         field: "result_hash",
@@ -224,7 +251,10 @@ impl EffectReceipt {
                     });
                 }
             }
-            PolicyOutcome::Denied { .. } => {
+            PolicyOutcome::Denied { reason } => {
+                if reason.trim().is_empty() {
+                    return Err(EffectReceiptError::EmptyField { field: "reason" });
+                }
                 if self.result_hash.is_some() {
                     return Err(EffectReceiptError::DeniedHasHash {
                         field: "result_hash",
@@ -454,6 +484,57 @@ mod tests {
         assert!(r.validate().is_ok());
         assert!(r.result_hash.is_some());
         assert!(r.post_state_hash.is_some());
+    }
+
+    #[test]
+    fn empty_audit_identifiers_fail_closed() {
+        // Empty trace_id.
+        let mut r = allowed(0);
+        r.trace_id = "  ".to_string();
+        assert!(matches!(
+            r.validate(),
+            Err(EffectReceiptError::EmptyField { field: "trace_id" })
+        ));
+        // Empty capability_ref on an allowed receipt.
+        let r = EffectReceipt::allowed(
+            0,
+            "trace",
+            EffectKind::FsRead,
+            "",
+            h("pre"),
+            h("args"),
+            h("result"),
+            h("post"),
+            0,
+        );
+        assert!(matches!(
+            r.validate(),
+            Err(EffectReceiptError::EmptyField {
+                field: "capability_ref"
+            })
+        ));
+        // Empty reason on a denied receipt.
+        let r = EffectReceipt::denied(0, "trace", EffectKind::Spawn, "", h("pre"), h("args"), 0);
+        assert!(matches!(
+            r.validate(),
+            Err(EffectReceiptError::EmptyField { field: "reason" })
+        ));
+    }
+
+    #[test]
+    fn unknown_schema_version_fails_closed() {
+        let mut r = allowed(0);
+        r.schema_version = "effect-receipt-v999".to_string();
+        assert!(
+            matches!(r.validate(), Err(EffectReceiptError::SchemaVersionMismatch { .. })),
+            "a receipt with an unknown schema version must be refused"
+        );
+        // And it must not be appendable to a chain.
+        let mut chain = EffectReceiptChain::new();
+        assert!(matches!(
+            chain.append(r),
+            Err(EffectReceiptError::SchemaVersionMismatch { .. })
+        ));
     }
 
     #[test]

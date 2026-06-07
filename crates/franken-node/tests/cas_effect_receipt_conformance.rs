@@ -249,6 +249,22 @@ fn denied_receipt_with_result_is_rejected_on_append() {
 }
 
 #[test]
+fn unknown_schema_version_is_rejected_on_append() {
+    let (_dir, cas) = store();
+    let h = cas.put(b"z").expect("put");
+    let mut receipt = allowed_receipt(0, "trace", &h);
+    receipt.schema_version = "effect-receipt-v999".to_string();
+    let mut chain = EffectReceiptChain::new();
+    assert!(
+        matches!(
+            chain.append(receipt),
+            Err(EffectReceiptError::SchemaVersionMismatch { .. })
+        ),
+        "a receipt with an unknown schema version must fail closed (refuse-on-unknown)"
+    );
+}
+
+#[test]
 fn cas_capacity_allows_dedup_but_rejects_new_blob() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cas = ContentAddressedStore::with_limits(dir.path(), 1024, 1).expect("open cas");
