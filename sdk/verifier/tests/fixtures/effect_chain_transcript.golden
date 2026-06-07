@@ -1,0 +1,4 @@
+FN-VSDK-EFFECT-CHAIN-START bundle_id=effect-chain-bundle-001 effect_count=2
+FN-VSDK-EFFECT-VERIFIED index=0 seq=0 kind=fs_read outcome=allowed capability_ref=cap-fs-read-01 result_hash=sha256:c082bb9237a57be2c405295f5f3e984e6e28f3a4ca84d2becabe1c331a31fba1 cas_bindings=4
+FN-VSDK-EFFECT-VERIFIED index=1 seq=1 kind=http_request outcome=denied capability_ref=none result_hash=none cas_bindings=2
+FN-VSDK-EFFECT-CHAIN-PASS bundle_id=effect-chain-bundle-001 head_chain_hash=sha256:eaf3468d44b99ea630a50da4b7996a9d6e691c9ce7bd241deaada9344ad8187d

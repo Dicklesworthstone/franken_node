@@ -4,7 +4,7 @@ use ed25519_dalek::SigningKey;
 use frankenengine_node::supply_chain::artifact_signing::{self, KeyId, KeyRing};
 use frankenengine_node::supply_chain::extension_registry::{
     AdmissionKernel, ExtensionSignature, RegistrationRequest, RegistryConfig, SignedExtension,
-    SignedExtensionRegistry, VersionEntry,
+    SignedExtensionRegistry, VersionEntry, canonical_registration_manifest_bytes,
 };
 use frankenengine_node::supply_chain::provenance::{
     self, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, ProvenanceAttestation,
@@ -110,7 +110,20 @@ fn registration_request(
     signing_key: &SigningKey,
     now_epoch: u64,
 ) -> TestResult<RegistrationRequest> {
-    let manifest_bytes = b"manifest:chain-verify-registry:sha256:registry-entry-fixture".to_vec();
+    let initial_version = VersionEntry {
+        version: "1.0.0".to_string(),
+        parent_version: None,
+        content_hash: "c".repeat(64),
+        registered_at: "2023-11-14T22:13:20Z".to_string(),
+        compatible_with: vec!["franken-node".to_string()],
+    };
+    let tags = vec!["sdk-verifier".to_string(), "registry".to_string()];
+    let manifest_bytes = canonical_registration_manifest_bytes(
+        "chain-verify-registry",
+        "pub-001",
+        &initial_version,
+        &tags,
+    )?;
     let signature_bytes = artifact_signing::sign_bytes(signing_key, &manifest_bytes);
     let key_id = KeyId::from_verifying_key(&signing_key.verifying_key());
 
@@ -125,14 +138,8 @@ fn registration_request(
             signed_at: "2023-11-14T22:13:20Z".to_string(),
         },
         provenance: provenance_attestation(signing_key, now_epoch)?,
-        initial_version: VersionEntry {
-            version: "1.0.0".to_string(),
-            parent_version: None,
-            content_hash: "c".repeat(64),
-            registered_at: "2023-11-14T22:13:20Z".to_string(),
-            compatible_with: vec!["franken-node".to_string()],
-        },
-        tags: vec!["sdk-verifier".to_string(), "registry".to_string()],
+        initial_version,
+        tags,
         manifest_bytes,
         transparency_proof: None,
     })

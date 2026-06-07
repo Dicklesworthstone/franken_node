@@ -123,7 +123,7 @@ fn canonical_replay_bundle() -> ReplayBundle {
         incident_id: "inc-2026-04-20-negative".to_string(),
         created_at: "2026-04-20T14:10:00.000000Z".to_string(),
         policy_version: "strict@2026-04-20".to_string(),
-        verifier_identity: "sdk-verifier-negative-contract".to_string(),
+        verifier_identity: "verifier://sdk-negative-contract".to_string(),
         timeline: vec![
             TimelineEvent {
                 sequence_number: 1,

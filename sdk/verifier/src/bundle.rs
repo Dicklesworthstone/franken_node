@@ -21,11 +21,27 @@ pub const REPLAY_BUNDLE_SCHEMA_VERSION: &str = "vsdk-replay-bundle-v1.0";
 
 /// Hash algorithm tag accepted by the verifier SDK bundle surface.
 pub const REPLAY_BUNDLE_HASH_ALGORITHM: &str = "sha256";
+/// Timeline event type that carries one proof-carrying host-effect receipt.
+pub const EFFECT_RECEIPT_EVENT_TYPE: &str = "effect_receipt";
+/// Stable schema marker for effect receipts embedded in verifier SDK bundles.
+pub const EFFECT_RECEIPT_SCHEMA_VERSION: &str = "effect-receipt-v1.0";
+/// Event code emitted when offline effect-chain verification starts.
+pub const FN_VSDK_EFFECT_CHAIN_START: &str = "FN-VSDK-EFFECT-CHAIN-START";
+/// Event code emitted for each verified effect receipt.
+pub const FN_VSDK_EFFECT_VERIFIED: &str = "FN-VSDK-EFFECT-VERIFIED";
+/// Event code emitted when offline effect-chain verification succeeds.
+pub const FN_VSDK_EFFECT_CHAIN_PASS: &str = "FN-VSDK-EFFECT-CHAIN-PASS";
 
 const HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:canonical-hash:v1:";
 const SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:structural-signature:v1:";
 const ED25519_BUNDLE_SIGNATURE_DOMAIN: &[u8] =
     b"frankenengine-verifier-sdk:ed25519-bundle-signature:v1:";
+const CAS_HASH_DOMAIN: &[u8] = b"storage_cas_content_hash_v1:";
+const EFFECT_RECEIPT_HASH_DOMAIN: &[u8] = b"runtime_effect_receipt_canonical_v1:";
+const EFFECT_RECEIPT_CHAIN_HASH_DOMAIN: &[u8] = b"runtime_effect_receipt_chain_v1:";
+const CONTENT_HASH_PREFIX: &str = "sha256:";
+const EFFECT_RECEIPT_CHAIN_GENESIS: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A deterministic replay bundle that external verifiers can serialize, hash,
 /// and verify without depending on privileged product internals.
@@ -98,6 +114,133 @@ pub struct BundleArtifact {
 pub struct BundleSignature {
     pub algorithm: String,
     pub signature_hex: String,
+}
+
+/// Class of host effect described by an embedded proof-carrying receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectKind {
+    FsRead,
+    FsWrite,
+    NetConnect,
+    HttpRequest,
+    Spawn,
+    ModuleResolve,
+}
+
+impl EffectKind {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::FsRead => 1,
+            Self::FsWrite => 2,
+            Self::NetConnect => 3,
+            Self::HttpRequest => 4,
+            Self::Spawn => 5,
+            Self::ModuleResolve => 6,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::FsRead => "fs_read",
+            Self::FsWrite => "fs_write",
+            Self::NetConnect => "net_connect",
+            Self::HttpRequest => "http_request",
+            Self::Spawn => "spawn",
+            Self::ModuleResolve => "module_resolve",
+        }
+    }
+}
+
+/// Pre-execution policy decision bound into an effect receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum EffectPolicyOutcome {
+    Allowed { capability_ref: String },
+    Denied { reason: String },
+}
+
+impl EffectPolicyOutcome {
+    const fn tag(&self) -> u8 {
+        match self {
+            Self::Allowed { .. } => 1,
+            Self::Denied { .. } => 2,
+        }
+    }
+
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Allowed { .. } => "allowed",
+            Self::Denied { .. } => "denied",
+        }
+    }
+
+    fn capability_ref(&self) -> Option<&str> {
+        match self {
+            Self::Allowed { capability_ref } => Some(capability_ref),
+            Self::Denied { .. } => None,
+        }
+    }
+}
+
+/// Effect receipt wire shape accepted by offline SDK verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectReceipt {
+    pub schema_version: String,
+    pub seq: u64,
+    pub trace_id: String,
+    pub effect_kind: EffectKind,
+    pub policy_outcome: EffectPolicyOutcome,
+    pub pre_state_hash: String,
+    pub args_hash: String,
+    pub result_hash: Option<String>,
+    pub post_state_hash: Option<String>,
+    pub recorded_at_millis: u64,
+}
+
+/// One append-only effect receipt chain entry embedded in a replay bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectReceiptChainEntry {
+    pub index: u64,
+    pub prev_chain_hash: String,
+    pub receipt_hash: String,
+    pub chain_hash: String,
+    pub receipt: EffectReceipt,
+}
+
+/// One receipt field proven against a CAS byte artifact in the bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedCasBinding {
+    pub field: String,
+    pub hash: String,
+    pub artifact_path: String,
+    pub byte_length: u64,
+}
+
+/// Effect receipt summary after offline chain and CAS-byte verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedEffect {
+    pub index: u64,
+    pub seq: u64,
+    pub trace_id: String,
+    pub effect_kind: String,
+    pub outcome: String,
+    pub capability_ref: Option<String>,
+    pub result_hash: Option<String>,
+    pub cas_bindings: Vec<VerifiedCasBinding>,
+}
+
+/// Offline verification report for an effect-chain-bearing replay bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectChainVerification {
+    pub bundle_id: String,
+    pub verifier_identity: String,
+    pub effect_count: usize,
+    pub head_chain_hash: String,
+    pub verified_effects: Vec<VerifiedEffect>,
+    pub event_codes: Vec<String>,
 }
 
 /// Errors returned by replay bundle serialization and verification.
@@ -196,6 +339,38 @@ pub enum BundleError {
         length: usize,
     },
     Ed25519SignatureInvalid,
+    EmptyEffectChain,
+    InvalidEffectReceiptPayload {
+        event_id: String,
+        source: String,
+    },
+    UnsupportedEffectReceiptSchema {
+        index: u64,
+        expected: String,
+        actual: String,
+    },
+    MalformedEffectContentHash {
+        index: u64,
+        field: &'static str,
+        value: String,
+    },
+    EffectReceiptAllowedMissingHash {
+        index: u64,
+        field: &'static str,
+    },
+    EffectReceiptDeniedHasHash {
+        index: u64,
+        field: &'static str,
+    },
+    EffectReceiptMissingCasBytes {
+        index: u64,
+        field: &'static str,
+        hash: String,
+    },
+    EffectChainIntegrity {
+        index: u64,
+        detail: String,
+    },
 }
 
 impl fmt::Display for BundleError {
@@ -331,6 +506,49 @@ impl fmt::Display for BundleError {
                     "replay bundle Ed25519 signature verification failed"
                 )
             }
+            Self::EmptyEffectChain => {
+                write!(formatter, "replay bundle carries no effect_receipt events")
+            }
+            Self::InvalidEffectReceiptPayload { event_id, source } => write!(
+                formatter,
+                "replay bundle effect receipt payload for {event_id} is invalid: {source}"
+            ),
+            Self::UnsupportedEffectReceiptSchema {
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "effect receipt {index} schema mismatch: expected {expected}, got {actual}"
+            ),
+            Self::MalformedEffectContentHash {
+                index,
+                field,
+                value: _,
+            } => write!(
+                formatter,
+                "effect receipt {index} field {field} is not a canonical sha256:<hex> content hash"
+            ),
+            Self::EffectReceiptAllowedMissingHash { index, field } => write!(
+                formatter,
+                "allowed effect receipt {index} is missing {field}"
+            ),
+            Self::EffectReceiptDeniedHasHash { index, field } => write!(
+                formatter,
+                "denied effect receipt {index} must not carry {field}"
+            ),
+            Self::EffectReceiptMissingCasBytes {
+                index,
+                field,
+                hash: _,
+            } => write!(
+                formatter,
+                "effect receipt {index} field {field} references CAS bytes not bundled"
+            ),
+            Self::EffectChainIntegrity { index, detail } => write!(
+                formatter,
+                "effect receipt chain integrity violation at index {index}: {detail}"
+            ),
         }
     }
 }
@@ -560,6 +778,347 @@ pub fn verify(bytes: &[u8]) -> BundleResult<ReplayBundle> {
     }
     validate_signature(&bundle)?;
     Ok(bundle)
+}
+
+/// Verify a replay bundle and then independently verify its embedded
+/// proof-carrying effect receipt chain against bundled CAS bytes.
+///
+/// The SDK recomputes each receipt hash, chain hash, and referenced CAS content
+/// hash without consulting privileged runtime internals. Structural bundle
+/// verification runs first, so unsupported bundle schema/sdk versions and
+/// non-canonical bytes fail closed before effect-chain parsing.
+pub fn verify_effect_chain(bytes: &[u8]) -> BundleResult<EffectChainVerification> {
+    let bundle = verify(bytes)?;
+    verify_effect_chain_in_bundle(&bundle)
+}
+
+/// Verify effect receipt chain events in an already structurally verified
+/// replay bundle.
+pub fn verify_effect_chain_in_bundle(
+    bundle: &ReplayBundle,
+) -> BundleResult<EffectChainVerification> {
+    let cas_lookup = cas_artifact_lookup(bundle)?;
+    let entries = effect_chain_entries(bundle)?;
+    if entries.is_empty() {
+        return Err(BundleError::EmptyEffectChain);
+    }
+
+    let mut expected_prev = EFFECT_RECEIPT_CHAIN_GENESIS.to_string();
+    let mut verified_effects = Vec::with_capacity(entries.len());
+    for (position, entry) in entries.iter().enumerate() {
+        let expected_index = u64::try_from(position).unwrap_or(u64::MAX);
+        if entry.index != expected_index {
+            return Err(BundleError::EffectChainIntegrity {
+                index: expected_index,
+                detail: format!(
+                    "index field {} does not match effect event position {expected_index}",
+                    entry.index
+                ),
+            });
+        }
+        if !constant_time_eq(&entry.prev_chain_hash, &expected_prev) {
+            return Err(BundleError::EffectChainIntegrity {
+                index: expected_index,
+                detail: "prev_chain_hash does not match prior effect entry".to_string(),
+            });
+        }
+
+        validate_effect_receipt(expected_index, &entry.receipt)?;
+        let recomputed_receipt = effect_receipt_hash(&entry.receipt);
+        if !constant_time_eq(&recomputed_receipt, &entry.receipt_hash) {
+            return Err(BundleError::EffectChainIntegrity {
+                index: expected_index,
+                detail: "receipt_hash does not match receipt contents".to_string(),
+            });
+        }
+        let recomputed_chain =
+            effect_chain_hash(entry.index, &entry.prev_chain_hash, &entry.receipt_hash);
+        if !constant_time_eq(&recomputed_chain, &entry.chain_hash) {
+            return Err(BundleError::EffectChainIntegrity {
+                index: expected_index,
+                detail: "chain_hash does not match index, prev_chain_hash, and receipt_hash"
+                    .to_string(),
+            });
+        }
+
+        let cas_bindings =
+            verify_receipt_cas_bindings(expected_index, &entry.receipt, &cas_lookup)?;
+        verified_effects.push(VerifiedEffect {
+            index: entry.index,
+            seq: entry.receipt.seq,
+            trace_id: entry.receipt.trace_id.clone(),
+            effect_kind: entry.receipt.effect_kind.label().to_string(),
+            outcome: entry.receipt.policy_outcome.label().to_string(),
+            capability_ref: entry
+                .receipt
+                .policy_outcome
+                .capability_ref()
+                .map(str::to_string),
+            result_hash: entry.receipt.result_hash.clone(),
+            cas_bindings,
+        });
+
+        expected_prev = entry.chain_hash.clone();
+    }
+
+    Ok(EffectChainVerification {
+        bundle_id: bundle.bundle_id.clone(),
+        verifier_identity: bundle.verifier_identity.clone(),
+        effect_count: verified_effects.len(),
+        head_chain_hash: expected_prev,
+        verified_effects,
+        event_codes: vec![
+            FN_VSDK_EFFECT_CHAIN_START.to_string(),
+            FN_VSDK_EFFECT_VERIFIED.to_string(),
+            FN_VSDK_EFFECT_CHAIN_PASS.to_string(),
+        ],
+    })
+}
+
+/// Render a deterministic operator transcript for a verified effect chain.
+#[must_use]
+pub fn render_effect_chain_transcript(report: &EffectChainVerification) -> String {
+    let mut transcript = String::new();
+    transcript.push_str(&format!(
+        "{FN_VSDK_EFFECT_CHAIN_START} bundle_id={} effect_count={}\n",
+        report.bundle_id, report.effect_count
+    ));
+    for effect in &report.verified_effects {
+        let capability = effect.capability_ref.as_deref().unwrap_or("none");
+        let result_hash = effect.result_hash.as_deref().unwrap_or("none");
+        transcript.push_str(&format!(
+            "{FN_VSDK_EFFECT_VERIFIED} index={} seq={} kind={} outcome={} capability_ref={} result_hash={} cas_bindings={}\n",
+            effect.index,
+            effect.seq,
+            effect.effect_kind,
+            effect.outcome,
+            capability,
+            result_hash,
+            effect.cas_bindings.len()
+        ));
+    }
+    transcript.push_str(&format!(
+        "{FN_VSDK_EFFECT_CHAIN_PASS} bundle_id={} head_chain_hash={}\n",
+        report.bundle_id, report.head_chain_hash
+    ));
+    transcript
+}
+
+#[derive(Debug, Clone)]
+struct CasArtifactBinding {
+    artifact_path: String,
+    byte_length: u64,
+}
+
+fn cas_artifact_lookup(
+    bundle: &ReplayBundle,
+) -> BundleResult<BTreeMap<String, CasArtifactBinding>> {
+    let mut lookup = BTreeMap::new();
+    for (path, artifact) in &bundle.artifacts {
+        let bytes = decode_canonical_artifact_hex(path, &artifact.bytes_hex)?;
+        let content_hash = cas_content_hash(&bytes);
+        lookup.entry(content_hash).or_insert_with(|| {
+            let byte_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            CasArtifactBinding {
+                artifact_path: path.clone(),
+                byte_length,
+            }
+        });
+    }
+    Ok(lookup)
+}
+
+fn effect_chain_entries(bundle: &ReplayBundle) -> BundleResult<Vec<EffectReceiptChainEntry>> {
+    bundle
+        .timeline
+        .iter()
+        .filter(|event| event.event_type == EFFECT_RECEIPT_EVENT_TYPE)
+        .map(|event| {
+            serde_json::from_value(event.payload.clone()).map_err(|source| {
+                BundleError::InvalidEffectReceiptPayload {
+                    event_id: event.event_id.clone(),
+                    source: source.to_string(),
+                }
+            })
+        })
+        .collect()
+}
+
+fn validate_effect_receipt(index: u64, receipt: &EffectReceipt) -> BundleResult<()> {
+    if receipt.schema_version != EFFECT_RECEIPT_SCHEMA_VERSION {
+        return Err(BundleError::UnsupportedEffectReceiptSchema {
+            index,
+            expected: EFFECT_RECEIPT_SCHEMA_VERSION.to_string(),
+            actual: receipt.schema_version.clone(),
+        });
+    }
+    validate_effect_content_hash(index, "pre_state_hash", &receipt.pre_state_hash)?;
+    validate_effect_content_hash(index, "args_hash", &receipt.args_hash)?;
+    match receipt.policy_outcome {
+        EffectPolicyOutcome::Allowed { .. } => {
+            if receipt.result_hash.is_none() {
+                return Err(BundleError::EffectReceiptAllowedMissingHash {
+                    index,
+                    field: "result_hash",
+                });
+            }
+            if receipt.post_state_hash.is_none() {
+                return Err(BundleError::EffectReceiptAllowedMissingHash {
+                    index,
+                    field: "post_state_hash",
+                });
+            }
+        }
+        EffectPolicyOutcome::Denied { .. } => {
+            if receipt.result_hash.is_some() {
+                return Err(BundleError::EffectReceiptDeniedHasHash {
+                    index,
+                    field: "result_hash",
+                });
+            }
+            if receipt.post_state_hash.is_some() {
+                return Err(BundleError::EffectReceiptDeniedHasHash {
+                    index,
+                    field: "post_state_hash",
+                });
+            }
+        }
+    }
+    if let Some(hash) = &receipt.result_hash {
+        validate_effect_content_hash(index, "result_hash", hash)?;
+    }
+    if let Some(hash) = &receipt.post_state_hash {
+        validate_effect_content_hash(index, "post_state_hash", hash)?;
+    }
+    Ok(())
+}
+
+fn validate_effect_content_hash(index: u64, field: &'static str, value: &str) -> BundleResult<()> {
+    let Some(hex) = value.strip_prefix(CONTENT_HASH_PREFIX) else {
+        return Err(BundleError::MalformedEffectContentHash {
+            index,
+            field,
+            value: value.to_string(),
+        });
+    };
+    if hex.len() != 64 || !is_canonical_lower_hex(hex) {
+        return Err(BundleError::MalformedEffectContentHash {
+            index,
+            field,
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn verify_receipt_cas_bindings(
+    index: u64,
+    receipt: &EffectReceipt,
+    cas_lookup: &BTreeMap<String, CasArtifactBinding>,
+) -> BundleResult<Vec<VerifiedCasBinding>> {
+    let mut bindings = Vec::new();
+    push_verified_cas_binding(
+        &mut bindings,
+        index,
+        "pre_state_hash",
+        &receipt.pre_state_hash,
+        cas_lookup,
+    )?;
+    push_verified_cas_binding(
+        &mut bindings,
+        index,
+        "args_hash",
+        &receipt.args_hash,
+        cas_lookup,
+    )?;
+    if let Some(hash) = &receipt.result_hash {
+        push_verified_cas_binding(&mut bindings, index, "result_hash", hash, cas_lookup)?;
+    }
+    if let Some(hash) = &receipt.post_state_hash {
+        push_verified_cas_binding(&mut bindings, index, "post_state_hash", hash, cas_lookup)?;
+    }
+    Ok(bindings)
+}
+
+fn push_verified_cas_binding(
+    bindings: &mut Vec<VerifiedCasBinding>,
+    index: u64,
+    field: &'static str,
+    hash: &str,
+    cas_lookup: &BTreeMap<String, CasArtifactBinding>,
+) -> BundleResult<()> {
+    let artifact =
+        cas_lookup
+            .get(hash)
+            .ok_or_else(|| BundleError::EffectReceiptMissingCasBytes {
+                index,
+                field,
+                hash: hash.to_string(),
+            })?;
+    bindings.push(VerifiedCasBinding {
+        field: field.to_string(),
+        hash: hash.to_string(),
+        artifact_path: artifact.artifact_path.clone(),
+        byte_length: artifact.byte_length,
+    });
+    Ok(())
+}
+
+fn cas_content_hash(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(CAS_HASH_DOMAIN);
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+    format!("{CONTENT_HASH_PREFIX}{}", hex::encode(hasher.finalize()))
+}
+
+fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(EFFECT_RECEIPT_HASH_DOMAIN);
+    update_hash_str(&mut hasher, &receipt.schema_version);
+    hasher.update(receipt.seq.to_le_bytes());
+    update_hash_str(&mut hasher, &receipt.trace_id);
+    hasher.update([receipt.effect_kind.tag()]);
+    hasher.update([receipt.policy_outcome.tag()]);
+    match &receipt.policy_outcome {
+        EffectPolicyOutcome::Allowed { capability_ref } => {
+            update_hash_str(&mut hasher, capability_ref);
+        }
+        EffectPolicyOutcome::Denied { reason } => {
+            update_hash_str(&mut hasher, reason);
+        }
+    }
+    update_hash_str(&mut hasher, &receipt.pre_state_hash);
+    update_hash_str(&mut hasher, &receipt.args_hash);
+    update_optional_hash_str(&mut hasher, receipt.result_hash.as_deref());
+    update_optional_hash_str(&mut hasher, receipt.post_state_hash.as_deref());
+    hasher.update(receipt.recorded_at_millis.to_le_bytes());
+    format!("{CONTENT_HASH_PREFIX}{}", hex::encode(hasher.finalize()))
+}
+
+fn update_hash_str(hasher: &mut Sha256, value: &str) {
+    let bytes = value.as_bytes();
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn update_optional_hash_str(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(hash) => {
+            hasher.update([1_u8]);
+            update_hash_str(hasher, hash);
+        }
+        None => hasher.update([0_u8]),
+    }
+}
+
+fn effect_chain_hash(index: u64, prev_chain_hash: &str, receipt_hash: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(EFFECT_RECEIPT_CHAIN_HASH_DOMAIN);
+    hasher.update(index.to_le_bytes());
+    update_hash_str(&mut hasher, prev_chain_hash);
+    update_hash_str(&mut hasher, receipt_hash);
+    format!("{CONTENT_HASH_PREFIX}{}", hex::encode(hasher.finalize()))
 }
 
 fn validate_structure(bundle: &ReplayBundle) -> Result<(), BundleError> {

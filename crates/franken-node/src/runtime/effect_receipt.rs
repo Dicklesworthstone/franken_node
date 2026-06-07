@@ -526,7 +526,10 @@ mod tests {
         let mut r = allowed(0);
         r.schema_version = "effect-receipt-v999".to_string();
         assert!(
-            matches!(r.validate(), Err(EffectReceiptError::SchemaVersionMismatch { .. })),
+            matches!(
+                r.validate(),
+                Err(EffectReceiptError::SchemaVersionMismatch { .. })
+            ),
             "a receipt with an unknown schema version must be refused"
         );
         // And it must not be appendable to a chain.

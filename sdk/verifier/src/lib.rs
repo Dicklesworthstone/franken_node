@@ -999,6 +999,35 @@ impl VerifierSdk {
         Ok(())
     }
 
+    /// Verify an effect-chain-bearing replay bundle offline.
+    ///
+    /// This validates canonical bundle structure, SDK/schema versions,
+    /// verifier identity, each embedded effect receipt's hash-chain linkage,
+    /// and every receipt hash reference against CAS bytes carried in the
+    /// bundle artifacts.
+    pub fn verify_effect_chain_bundle(
+        &self,
+        bundle_bytes: &[u8],
+    ) -> VerifierSdkResult<bundle::EffectChainVerification> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let max_bytes = self.resolved_max_bundle_size_bytes();
+        if bundle_bytes.len() > max_bytes {
+            return Err(VerifierSdkError::BundleTooLarge {
+                actual_bytes: bundle_bytes.len(),
+                max_bytes,
+            });
+        }
+        let report = bundle::verify_effect_chain(bundle_bytes)?;
+        if !constant_time_eq(&report.verifier_identity, &self.verifier_identity) {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: self.verifier_identity.clone(),
+                actual: report.verifier_identity,
+            });
+        }
+        Ok(report)
+    }
+
     /// Resolve the active bundle size cap for this SDK instance.
     ///
     /// Reads [`VERIFIER_SDK_MAX_BUNDLE_SIZE_BYTES_CONFIG_KEY`] from
