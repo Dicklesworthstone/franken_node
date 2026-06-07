@@ -35,7 +35,7 @@ use std::fmt;
 
 use crate::push_bounded;
 use crate::security::constant_time;
-use crate::storage::cas::{ContentHash, content_hash};
+use crate::storage::cas::{ContentAddressedStore, ContentHash, content_hash};
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -1108,6 +1108,81 @@ pub fn fixture_identity_replay(
     (step.output.clone(), step.side_effects.clone())
 }
 
+fn cas_read_for_replay(
+    trace_id: &str,
+    step: &TraceStep,
+    effect: &SideEffect,
+    field: &str,
+    hash: &ContentHash,
+    cas: &ContentAddressedStore,
+) -> Result<Vec<u8>, TimeTravelError> {
+    cas.get(hash)
+        .map_err(|source| TimeTravelError::ReplayFailed {
+            trace_id: trace_id.to_string(),
+            reason: format!(
+                "step {} effect {} {field} {} unavailable from CAS: {source}",
+                step.seq,
+                sanitize_log_identifier(&effect.effect_kind),
+                hash.as_str()
+            ),
+        })
+}
+
+fn replay_side_effect_from_cas(
+    trace_id: &str,
+    step: &TraceStep,
+    effect: &SideEffect,
+    cas: &ContentAddressedStore,
+) -> Result<SideEffect, TimeTravelError> {
+    let pre_state = cas_read_for_replay(
+        trace_id,
+        step,
+        effect,
+        "pre_state_hash",
+        &effect.pre_state_hash,
+        cas,
+    )?;
+    let result = cas_read_for_replay(
+        trace_id,
+        step,
+        effect,
+        "result_hash",
+        &effect.result_hash,
+        cas,
+    )?;
+    let post_state = cas_read_for_replay(
+        trace_id,
+        step,
+        effect,
+        "post_state_hash",
+        &effect.post_state_hash,
+        cas,
+    )?;
+
+    let result_hash = content_hash(&result);
+    if !constant_time::ct_eq(result_hash.as_str(), effect.result_hash.as_str()) {
+        return Err(TimeTravelError::ReplayFailed {
+            trace_id: trace_id.to_string(),
+            reason: format!(
+                "step {} effect {} re-derived result_hash {} did not match recorded {}",
+                step.seq,
+                sanitize_log_identifier(&effect.effect_kind),
+                result_hash.as_str(),
+                effect.result_hash.as_str()
+            ),
+        });
+    }
+
+    Ok(SideEffect::recorded(
+        &effect.effect_kind,
+        &effect.capability_ref,
+        content_hash(&pre_state),
+        result_hash,
+        content_hash(&post_state),
+        result,
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // ReplayEngine
 // ---------------------------------------------------------------------------
@@ -1179,6 +1254,20 @@ impl ReplayEngine {
         trace_id: &str,
         replay_fn: ReplayFn,
     ) -> Result<ReplayResult, TimeTravelError> {
+        self.replay_with_adapter(trace_id, |step, env| Ok(replay_fn(step, env)))
+    }
+
+    fn replay_with_adapter<F>(
+        &mut self,
+        trace_id: &str,
+        mut replay_fn: F,
+    ) -> Result<ReplayResult, TimeTravelError>
+    where
+        F: FnMut(
+            &TraceStep,
+            &EnvironmentSnapshot,
+        ) -> Result<(Vec<u8>, Vec<SideEffect>), TimeTravelError>,
+    {
         let trace = self
             .traces
             .get(trace_id)
@@ -1203,7 +1292,7 @@ impl ReplayEngine {
         let mut replay_duration_ns: u64 = 0;
 
         for step in &trace.steps {
-            let (replayed_output, replayed_effects) = replay_fn(step, &trace.environment);
+            let (replayed_output, replayed_effects) = replay_fn(step, &trace.environment)?;
 
             let original_output_digest = step.output_digest();
             let original_effects_digest = step.side_effects_digest();
@@ -1407,6 +1496,27 @@ impl ReplayEngine {
         trace_id: &str,
     ) -> Result<ReplayResult, TimeTravelError> {
         self.replay(trace_id, fixture_identity_replay)
+    }
+
+    /// Verify-replay a captured trace with recorded side-effect bytes served
+    /// from the content-addressed store by typed effect hashes.
+    ///
+    /// This is the production-facing replay mode for recorded host effects:
+    /// the adapter retrieves pre-state/result/post-state blobs from CAS,
+    /// re-derives the result hash from the served bytes, and then lets the
+    /// standard replay comparator classify any mismatch at the exact step.
+    pub fn verify_replay_from_cas(
+        &mut self,
+        trace_id: &str,
+        cas: &ContentAddressedStore,
+    ) -> Result<ReplayResult, TimeTravelError> {
+        self.replay_with_adapter(trace_id, |step, _env| {
+            let mut replayed_effects = Vec::with_capacity(step.side_effects.len());
+            for effect in &step.side_effects {
+                replayed_effects.push(replay_side_effect_from_cas(trace_id, step, effect, cas)?);
+            }
+            Ok((step.output.clone(), replayed_effects))
+        })
     }
 
     /// Access the engine's accumulated audit log.

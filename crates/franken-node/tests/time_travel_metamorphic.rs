@@ -9,9 +9,10 @@ use std::collections::BTreeMap;
 
 use frankenengine_node::capacity_defaults::aliases::MAX_TRACE_STEPS;
 use frankenengine_node::replay::time_travel_engine::{
-    AuditEntry, EnvironmentSnapshot, ReplayEngine, ReplayVerdict, SideEffect, TraceBuilder,
-    TraceStep, WorkflowTrace, event_codes,
+    AuditEntry, DivergenceKind, EnvironmentSnapshot, ReplayEngine, ReplayVerdict, SideEffect,
+    TraceBuilder, TraceStep, WorkflowTrace, event_codes,
 };
+use frankenengine_node::storage::cas::ContentAddressedStore;
 
 /// Create a demo environment for testing.
 fn demo_env() -> EnvironmentSnapshot {
@@ -424,6 +425,118 @@ fn replay_round_trip_identity_emits_capture_and_replay_telemetry() {
             .expect("audit telemetry should be an array")
             .len(),
         engine.audit_log().len()
+    );
+}
+
+#[test]
+fn verify_replay_from_cas_serves_recorded_bytes_as_identical() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be available");
+    let cas =
+        ContentAddressedStore::with_directory(tempdir.path()).expect("CAS should open in tempdir");
+    let empty = cas.put(b"").expect("empty pre-state should store");
+    let first_result = cas.put(b"first recorded bytes").expect("first result");
+    let second_result = cas.put(b"second recorded bytes").expect("second result");
+
+    let mut builder = TraceBuilder::new("verify-cas-identical", "verify-cas", demo_env());
+    builder.record_step(
+        b"fs.readFile".to_vec(),
+        b"first-output".to_vec(),
+        vec![SideEffect::recorded(
+            "fs_read",
+            "cap:fs:/tmp/a",
+            empty.clone(),
+            first_result.clone(),
+            first_result,
+            b"first recorded bytes".to_vec(),
+        )],
+        1_000_010,
+    );
+    builder.record_step(
+        b"http.request".to_vec(),
+        b"second-output".to_vec(),
+        vec![SideEffect::recorded(
+            "http_request",
+            "cap:http:example.test",
+            empty,
+            second_result.clone(),
+            second_result,
+            b"second recorded bytes".to_vec(),
+        )],
+        1_000_020,
+    );
+    let (trace, _) = builder.build().expect("trace should build");
+
+    let mut engine = ReplayEngine::new();
+    engine.register_trace(trace).expect("trace should register");
+    let result = engine
+        .verify_replay_from_cas("verify-cas-identical", &cas)
+        .expect("CAS-backed verify replay should succeed");
+
+    assert_eq!(result.verdict, ReplayVerdict::Identical);
+    assert_eq!(result.steps_replayed, 2);
+    assert!(result.divergences.is_empty());
+}
+
+#[test]
+fn verify_replay_from_cas_mutated_recorded_byte_diverges_at_step() {
+    let tempdir = tempfile::tempdir().expect("tempdir should be available");
+    let cas =
+        ContentAddressedStore::with_directory(tempdir.path()).expect("CAS should open in tempdir");
+    let empty = cas.put(b"").expect("empty pre-state should store");
+    let first_result = cas.put(b"first recorded bytes").expect("first result");
+    let second_result = cas.put(b"second recorded bytes").expect("second result");
+
+    let mut builder = TraceBuilder::new("verify-cas-mutated", "verify-cas", demo_env());
+    builder.record_step(
+        b"fs.readFile".to_vec(),
+        b"first-output".to_vec(),
+        vec![SideEffect::recorded(
+            "fs_read",
+            "cap:fs:/tmp/a",
+            empty.clone(),
+            first_result.clone(),
+            first_result,
+            b"first recorded bytes".to_vec(),
+        )],
+        1_000_010,
+    );
+    builder.record_step(
+        b"http.request".to_vec(),
+        b"second-output".to_vec(),
+        vec![SideEffect::recorded(
+            "http_request",
+            "cap:http:example.test",
+            empty,
+            second_result.clone(),
+            second_result,
+            b"second recorded bytes".to_vec(),
+        )],
+        1_000_020,
+    );
+    let (mut trace, _) = builder.build().expect("trace should build");
+    let byte = trace
+        .steps
+        .get_mut(1)
+        .and_then(|step| step.side_effects.first_mut())
+        .and_then(|effect| effect.payload.first_mut())
+        .expect("fixture should contain a second-step side-effect payload byte");
+    *byte ^= 0x01;
+    trace = trace.with_canonical_digest();
+
+    let mut engine = ReplayEngine::new();
+    engine
+        .register_trace(trace)
+        .expect("mutated trace should still register");
+    let result = engine
+        .verify_replay_from_cas("verify-cas-mutated", &cas)
+        .expect("CAS-backed verify replay should classify the mismatch");
+
+    assert_eq!(result.verdict, ReplayVerdict::Diverged(1));
+    assert_eq!(result.divergences.len(), 1);
+    assert_eq!(result.divergences[0].step_seq, 1);
+    assert_eq!(
+        result.divergences[0].kind,
+        DivergenceKind::SideEffectMismatch
     );
 }
 
