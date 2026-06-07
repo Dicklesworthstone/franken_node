@@ -211,6 +211,10 @@ name = "incident_cli_e2e"
 path = "tests/incident_cli_e2e.rs"
 
 [[test]]
+name = "counterfactual_policy_matrix"
+path = "tests/counterfactual_policy_matrix.rs"
+
+[[test]]
 name = "rch_adapter_classification"
 path = "tests/rch_adapter_classification.rs"
 

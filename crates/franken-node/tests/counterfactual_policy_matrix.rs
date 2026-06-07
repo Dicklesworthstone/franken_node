@@ -1,10 +1,11 @@
+use frankenengine_node::storage::cas::content_hash;
 use frankenengine_node::tools::counterfactual_replay::{
     CounterfactualReplayEngine, CounterfactualResult, PolicyConfig, to_canonical_json,
 };
 use frankenengine_node::tools::replay_bundle::{
-    EventType, RawEvent, ReplayBundle, generate_replay_bundle,
-    write_bundle_to_path_with_trusted_key, read_bundle_from_path_with_trusted_key,
-    sign_replay_bundle, ReplayBundleSigningMaterial,
+    EventType, RawEvent, ReplayBundle, ReplayBundleSigningMaterial, generate_replay_bundle,
+    read_bundle_from_path_with_trusted_key, sign_replay_bundle,
+    write_bundle_to_path_with_trusted_key,
 };
 use tempfile::TempDir;
 
@@ -91,15 +92,18 @@ fn fixture_bundle() -> TestResult<ReplayBundle> {
     let bundle_path = workspace.path().join("counterfactual_matrix_bundle.json");
 
     // Derive trusted key ID for file operations
-    let trusted_key_id = frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
-        &signing_key.verifying_key()
-    ).to_string();
+    let trusted_key_id =
+        frankenengine_node::supply_chain::artifact_signing::KeyId::from_verifying_key(
+            &signing_key.verifying_key(),
+        )
+        .to_string();
 
     // Write bundle to real file system
     write_bundle_to_path_with_trusted_key(&bundle, &bundle_path, &trusted_key_id)?;
 
     // Read bundle back from file system - this exercises the full serialization roundtrip
-    let file_loaded_bundle = read_bundle_from_path_with_trusted_key(&bundle_path, Some(&trusted_key_id))?;
+    let file_loaded_bundle =
+        read_bundle_from_path_with_trusted_key(&bundle_path, Some(&trusted_key_id))?;
 
     Ok(file_loaded_bundle)
 }
@@ -215,6 +219,104 @@ fn counterfactual_replay_is_byte_identical_for_same_bundle_and_policy() -> TestR
     let second_bytes = to_canonical_json(&second)?.into_bytes();
 
     assert_eq!(first_bytes, second_bytes);
+    let first_json = String::from_utf8(first_bytes)?;
+    assert!(
+        !first_json.contains("recorded_effects"),
+        "no-effect bundles must not grow empty recorded_effects fields"
+    );
+    assert!(
+        !first_json.contains("effect_diffs"),
+        "no-effect bundles must not grow empty effect_diffs fields"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn counterfactual_replay_reports_recorded_host_effect_policy_diff() -> TestResult {
+    let pre_state_hash = content_hash(b"socket-pool-before").as_str().to_string();
+    let args_hash = content_hash(br#"{"url":"https://api.example.test/audit"}"#)
+        .as_str()
+        .to_string();
+    let result_hash = content_hash(b"HTTP/1.1 200 OK\nbody").as_str().to_string();
+    let post_state_hash = content_hash(b"socket-pool-after").as_str().to_string();
+    let events = vec![
+        RawEvent::new(
+            "2026-02-20T13:00:00.000001Z",
+            EventType::PolicyEval,
+            serde_json::json!({
+                "confidence": 60_u64,
+                "decision": "observe",
+                "rule_id": "policy.http.audit",
+                "effect_receipts": [{
+                    "seq": 7_u64,
+                    "effect_kind": "http_request",
+                    "capability_ref": "cap:http.audit",
+                    "pre_state_hash": pre_state_hash,
+                    "args_hash": args_hash,
+                    "result_hash": result_hash,
+                    "post_state_hash": post_state_hash,
+                    "policy_outcome": {
+                        "outcome": "allowed",
+                        "capability_ref": "cap:http.audit"
+                    }
+                }]
+            }),
+        )
+        .with_policy_version("counterfactual-real-io-baseline"),
+    ];
+    let bundle = generate_replay_bundle("INC-CF-REAL-IO-001", &events)?;
+    let engine = CounterfactualReplayEngine::default();
+    let baseline = PolicyConfig::from_bundle(&bundle);
+    let strict = strict_policy();
+
+    let result = replay_profile(&engine, &bundle, &baseline, &strict)?;
+
+    assert_eq!(result.summary_statistics.total_decisions, 1);
+    assert_eq!(result.summary_statistics.changed_decisions, 1);
+    let original_outcome = result.original_outcomes.first().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "missing original outcome")
+    })?;
+    let original_effect = original_outcome
+        .recorded_effects
+        .first()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "missing recorded effect"))?;
+    assert_eq!(original_effect.effect_kind, "http_request");
+    assert_eq!(original_effect.capability_ref, "cap:http.audit");
+    assert_eq!(original_effect.recorded_policy_decision, "allow");
+    let counterfactual_outcome = result.counterfactual_outcomes.first().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "missing counterfactual outcome")
+    })?;
+    assert!(
+        counterfactual_outcome
+            .rationale
+            .contains("recorded_effects=1")
+    );
+
+    let divergence = result
+        .divergence_points
+        .iter()
+        .find(|record| !record.effect_diffs.is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "strict counterfactual should include effect-level diff",
+            )
+        })?;
+    let effect_diff = divergence
+        .effect_diffs
+        .first()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "missing effect diff"))?;
+    assert_eq!(effect_diff.sequence_number, 7);
+    assert_eq!(effect_diff.effect_kind, "http_request");
+    assert_eq!(effect_diff.capability_ref, "cap:http.audit");
+    assert_eq!(effect_diff.original_effect_decision, "allow");
+    assert_eq!(effect_diff.counterfactual_effect_decision, "deny");
+    assert!(original_effect.result_hash.is_some());
+    assert_eq!(
+        effect_diff.result_hash.as_deref(),
+        original_effect.result_hash.as_deref()
+    );
 
     Ok(())
 }

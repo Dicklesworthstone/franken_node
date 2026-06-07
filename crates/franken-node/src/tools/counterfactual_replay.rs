@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::push_bounded;
 
@@ -27,6 +27,8 @@ const MAX_POLICY_OVERRIDE_DIFFS: usize = 32;
 const MAX_REPLAY_OUTCOMES: usize = 1_000_000;
 const MAX_SWEEP_RESULTS: usize = MAX_SWEEP_VALUES;
 const MAX_DIVERGENCE_POINTS: usize = 100_000;
+const MAX_RECORDED_EFFECTS_PER_EVENT: usize = 64;
+const MAX_EFFECT_DIFFS_PER_DIVERGENCE: usize = 64;
 
 pub const COUNTERFACTUAL_REPLAY_STARTED: &str = "COUNTERFACTUAL_REPLAY_STARTED";
 pub const COUNTERFACTUAL_REPLAY_COMPLETED: &str = "COUNTERFACTUAL_REPLAY_COMPLETED";
@@ -218,6 +220,41 @@ pub struct DecisionPoint {
     pub decision: String,
     pub rationale: String,
     pub expected_loss: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recorded_effects: Vec<RecordedHostEffect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedHostEffect {
+    pub sequence_number: u64,
+    pub effect_kind: String,
+    pub capability_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_state_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_state_hash: Option<String>,
+    pub recorded_policy_decision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectDecisionDiff {
+    pub sequence_number: u64,
+    pub effect_kind: String,
+    pub capability_ref: String,
+    pub original_effect_decision: String,
+    pub counterfactual_effect_decision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_state_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_state_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +275,8 @@ pub struct DivergenceRecord {
     pub original_rationale: String,
     pub counterfactual_rationale: String,
     pub impact_estimate: ImpactEstimate,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_diffs: Vec<EffectDecisionDiff>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,7 +409,9 @@ pub struct PureSandboxedExecutor;
 
 impl SandboxedExecutor for PureSandboxedExecutor {
     fn evaluate_event(&self, event: &TimelineEvent, policy: &PolicyConfig) -> DecisionPoint {
+        let recorded_effects = extract_recorded_host_effects(event);
         let mut risk = base_risk_score(event);
+        risk = risk.saturating_add(recorded_effect_risk_bonus(&recorded_effects));
         if event_indicates_degraded_mode(event) {
             risk = risk.saturating_add(policy.degraded_mode_bias);
         }
@@ -385,14 +426,26 @@ impl SandboxedExecutor for PureSandboxedExecutor {
         };
 
         let expected_loss = expected_loss_from_decision(decision, clamped);
-        let rationale = format!(
-            "event={} risk={} policy={} thresholds=({}, {})",
-            event.event_type.as_str(),
-            clamped,
-            policy.policy_name,
-            policy.observe_threshold,
-            policy.quarantine_threshold
-        );
+        let rationale = if recorded_effects.is_empty() {
+            format!(
+                "event={} risk={} policy={} thresholds=({}, {})",
+                event.event_type.as_str(),
+                clamped,
+                policy.policy_name,
+                policy.observe_threshold,
+                policy.quarantine_threshold
+            )
+        } else {
+            format!(
+                "event={} risk={} policy={} thresholds=({}, {}) recorded_effects={}",
+                event.event_type.as_str(),
+                clamped,
+                policy.policy_name,
+                policy.observe_threshold,
+                policy.quarantine_threshold,
+                recorded_effects.len()
+            )
+        };
 
         DecisionPoint {
             sequence_number: event.sequence_number,
@@ -400,6 +453,7 @@ impl SandboxedExecutor for PureSandboxedExecutor {
             decision: decision.to_string(),
             rationale,
             expected_loss,
+            recorded_effects,
         }
     }
 }
@@ -577,7 +631,8 @@ where
             counterfactual_loss_total = counterfactual_loss_total
                 .saturating_add(i64::try_from(counterfactual.expected_loss).unwrap_or(i64::MAX));
 
-            if original.decision != counterfactual.decision {
+            let effect_diffs = build_effect_decision_diffs(original, counterfactual);
+            if original.decision != counterfactual.decision || !effect_diffs.is_empty() {
                 changed_decisions = changed_decisions.saturating_add(1);
                 let delta = i64::try_from(counterfactual.expected_loss)
                     .unwrap_or(i64::MAX)
@@ -591,6 +646,7 @@ where
                         original_rationale: original.rationale.clone(),
                         counterfactual_rationale: counterfactual.rationale.clone(),
                         impact_estimate: classify_impact(delta),
+                        effect_diffs,
                     },
                     MAX_DIVERGENCE_POINTS,
                 );
@@ -760,6 +816,204 @@ fn event_indicates_degraded_mode(event: &TimelineEvent) -> bool {
         || extract_string(&event.payload, "mode").is_some_and(|mode| mode == "degraded")
 }
 
+fn extract_recorded_host_effects(event: &TimelineEvent) -> Vec<RecordedHostEffect> {
+    let mut effects = Vec::new();
+    extract_effect_value(
+        &event.payload,
+        event.sequence_number,
+        &mut effects,
+        MAX_RECORDED_EFFECTS_PER_EVENT,
+    );
+    effects
+}
+
+fn extract_effect_value(
+    value: &Value,
+    fallback_sequence_number: u64,
+    out: &mut Vec<RecordedHostEffect>,
+    cap: usize,
+) {
+    if out.len() >= cap {
+        return;
+    }
+
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                extract_effect_value(item, fallback_sequence_number, out, cap);
+                if out.len() >= cap {
+                    break;
+                }
+            }
+        }
+        Value::Object(map) => {
+            for key in [
+                "effect_receipts",
+                "effectReceipts",
+                "side_effects",
+                "sideEffects",
+            ] {
+                if let Some(nested) = map.get(key) {
+                    extract_effect_value(nested, fallback_sequence_number, out, cap);
+                }
+            }
+            for key in [
+                "effect_receipt",
+                "effectReceipt",
+                "side_effect",
+                "sideEffect",
+            ] {
+                if let Some(nested) = map.get(key) {
+                    extract_effect_value(nested, fallback_sequence_number, out, cap);
+                }
+            }
+            if let Some(effect) = parse_effect_object(map, fallback_sequence_number) {
+                push_bounded(out, effect, cap);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_effect_object(
+    map: &Map<String, Value>,
+    fallback_sequence_number: u64,
+) -> Option<RecordedHostEffect> {
+    let effect_kind = first_string(
+        map,
+        &[
+            "effect_kind",
+            "effectKind",
+            "kind",
+            "effect",
+            "effect_type",
+            "effectType",
+        ],
+    )?;
+    let capability_ref = first_string(
+        map,
+        &[
+            "capability_ref",
+            "capabilityRef",
+            "capability",
+            "capability_id",
+            "capabilityId",
+        ],
+    )
+    .unwrap_or(effect_kind);
+    let sequence_number = first_u64(map, &["seq", "sequence_number", "sequenceNumber"])
+        .unwrap_or(fallback_sequence_number);
+    let recorded_policy_decision = effect_policy_decision(map).unwrap_or_else(|| {
+        first_string(map, &["policy_decision", "policyDecision", "decision"])
+            .unwrap_or("allow")
+            .to_string()
+    });
+
+    Some(RecordedHostEffect {
+        sequence_number,
+        effect_kind: effect_kind.to_string(),
+        capability_ref: capability_ref.to_string(),
+        pre_state_hash: first_owned_string(map, &["pre_state_hash", "preStateHash"]),
+        args_hash: first_owned_string(map, &["args_hash", "argsHash"]),
+        result_hash: first_owned_string(map, &["result_hash", "resultHash"]),
+        post_state_hash: first_owned_string(map, &["post_state_hash", "postStateHash"]),
+        recorded_policy_decision,
+    })
+}
+
+fn first_string<'a>(map: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| map.get(*key)?.as_str())
+}
+
+fn first_owned_string(map: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    first_string(map, keys).map(ToString::to_string)
+}
+
+fn first_u64(map: &Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| map.get(*key)?.as_u64())
+}
+
+fn effect_policy_decision(map: &Map<String, Value>) -> Option<String> {
+    let policy_outcome = map
+        .get("policy_outcome")
+        .or_else(|| map.get("policyOutcome"))?;
+    match policy_outcome {
+        Value::String(value) => Some(normalize_effect_decision(value).to_string()),
+        Value::Object(policy) => first_string(policy, &["outcome", "decision"])
+            .map(normalize_effect_decision)
+            .map(ToString::to_string),
+        _ => None,
+    }
+}
+
+fn recorded_effect_risk_bonus(effects: &[RecordedHostEffect]) -> i64 {
+    effects.iter().fold(0_i64, |acc, effect| {
+        acc.saturating_add(match effect.effect_kind.as_str() {
+            "spawn" | "child_process" | "child_process.spawn" => 18,
+            "http_request" | "net_connect" | "network" => 14,
+            "fs_write" | "file_write" => 10,
+            "module_resolve" | "resolver_snapshot" => 7,
+            "fs_read" | "file_read" => 4,
+            _ => 2,
+        })
+    })
+}
+
+fn build_effect_decision_diffs(
+    original: &DecisionPoint,
+    counterfactual: &DecisionPoint,
+) -> Vec<EffectDecisionDiff> {
+    let mut diffs = Vec::new();
+    for effect in &original.recorded_effects {
+        let original_effect_decision = normalize_effect_decision(
+            non_empty_effect_decision(&effect.recorded_policy_decision)
+                .unwrap_or(original.decision.as_str()),
+        );
+        let counterfactual_effect_decision =
+            effect_decision_from_event_decision(&counterfactual.decision);
+
+        if original_effect_decision != counterfactual_effect_decision {
+            push_bounded(
+                &mut diffs,
+                EffectDecisionDiff {
+                    sequence_number: effect.sequence_number,
+                    effect_kind: effect.effect_kind.clone(),
+                    capability_ref: effect.capability_ref.clone(),
+                    original_effect_decision: original_effect_decision.to_string(),
+                    counterfactual_effect_decision: counterfactual_effect_decision.to_string(),
+                    pre_state_hash: effect.pre_state_hash.clone(),
+                    args_hash: effect.args_hash.clone(),
+                    result_hash: effect.result_hash.clone(),
+                    post_state_hash: effect.post_state_hash.clone(),
+                },
+                MAX_EFFECT_DIFFS_PER_DIVERGENCE,
+            );
+        }
+    }
+    diffs
+}
+
+fn non_empty_effect_decision(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn effect_decision_from_event_decision(decision: &str) -> &'static str {
+    match normalize_effect_decision(decision) {
+        "block" | "deny" | "denied" | "quarantine" => "deny",
+        "observe" => "observe",
+        _ => "allow",
+    }
+}
+
+fn normalize_effect_decision(decision: &str) -> &str {
+    match decision.trim() {
+        "allowed" => "allow",
+        "denied" => "deny",
+        other => other,
+    }
+}
+
 fn extract_integer(payload: &Value, key: &str) -> Option<i64> {
     payload.as_object()?.get(key)?.as_i64()
 }
@@ -824,7 +1078,9 @@ fn canonicalize_json(value: &Value) -> Value {
             keys.sort_unstable();
             let mut out = serde_json::Map::with_capacity(map.len());
             for key in keys {
-                out.insert(key.to_string(), canonicalize_json(&map[key]));
+                if let Some(value) = map.get(key) {
+                    out.insert(key.to_string(), canonicalize_json(value));
+                }
             }
             Value::Object(out)
         }
