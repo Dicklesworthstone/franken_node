@@ -62,7 +62,7 @@ mod tests {
             // by modifying the side effects to include drifted timestamps
             let mut effects = step.side_effects.clone();
             if let Some(effect) = effects.get_mut(0) {
-                if effect.kind.as_str().eq("clock_read") && effect.payload.len() >= 8 {
+                if effect.effect_kind.as_str().eq("clock_read") && effect.payload.len() >= 8 {
                     let original_time =
                         u64::from_le_bytes(effect.payload[0..8].try_into().unwrap_or([0; 8]));
                     let drifted_time = original_time.saturating_add(drift_ns);

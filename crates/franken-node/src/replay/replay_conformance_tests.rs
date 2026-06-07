@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn schema_version_consistency() {
         // Verify schema version is embedded consistently
-        assert_eq!(SCHEMA_VERSION, "ttr-v1.0");
+        assert_eq!(SCHEMA_VERSION, "ttr-v1.1");
 
         let env = minimal_env();
         assert_eq!(env.schema_version, SCHEMA_VERSION);

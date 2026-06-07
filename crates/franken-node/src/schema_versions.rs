@@ -11,8 +11,8 @@
 
 // ── Runtime & Scheduling ───────────────────────────────────────────
 pub const LANE_SCHEDULER: &str = "ls-v1.0";
-pub const TIME_TRAVEL: &str = "ttr-v1.0";
-pub const TIME_TRAVEL_ENGINE: &str = "ttr-v1.0";
+pub const TIME_TRAVEL: &str = "ttr-v1.1";
+pub const TIME_TRAVEL_ENGINE: &str = "ttr-v1.1";
 pub const CANCELLABLE_TASK: &str = "cxt-v1.0";
 pub const ISOLATION_MESH: &str = "isolation-mesh-v1.0";
 pub const OBLIGATION_CHANNEL: &str = "och-v1.0";

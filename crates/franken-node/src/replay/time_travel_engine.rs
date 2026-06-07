@@ -35,19 +35,21 @@ use std::fmt;
 
 use crate::push_bounded;
 use crate::security::constant_time;
+use crate::storage::cas::{ContentHash, content_hash};
 
 // ---------------------------------------------------------------------------
 // Schema version
 // ---------------------------------------------------------------------------
 
 /// Schema version for time-travel replay records.
-pub const SCHEMA_VERSION: &str = "ttr-v1.0";
+pub const SCHEMA_VERSION: &str = "ttr-v1.1";
 
 use crate::capacity_defaults::aliases::{
     MAX_AUDIT_LOG_ENTRIES, MAX_DIVERGENCES, MAX_REGISTERED_TRACES, MAX_TRACE_STEPS,
 };
 
 const MAX_SIDE_EFFECTS_PER_STEP: usize = crate::capacity_defaults::base::TRACE;
+const STEP_EFFECTS_HASH_DOMAIN: &[u8] = b"replay_step_effects_v2:";
 
 /// Maximum allowed clock drift tolerance in nanoseconds (1 second).
 /// Replays with timestamp drifts beyond this threshold trigger ERR_REPLAY_CLOCK_DRIFT.
@@ -93,7 +95,11 @@ fn update_hash_str_len_prefixed(hasher: &mut Sha256, value: &str) {
 fn update_side_effects_hash_len_prefixed(hasher: &mut Sha256, side_effects: &[SideEffect]) {
     hasher.update((u64::try_from(side_effects.len()).unwrap_or(u64::MAX)).to_le_bytes());
     for effect in side_effects {
-        update_hash_str_len_prefixed(hasher, &effect.kind);
+        update_hash_str_len_prefixed(hasher, &effect.effect_kind);
+        update_hash_str_len_prefixed(hasher, &effect.capability_ref);
+        update_hash_str_len_prefixed(hasher, effect.pre_state_hash.as_str());
+        update_hash_str_len_prefixed(hasher, effect.result_hash.as_str());
+        update_hash_str_len_prefixed(hasher, effect.post_state_hash.as_str());
         update_hash_len_prefixed(hasher, &effect.payload);
     }
 }
@@ -405,20 +411,71 @@ impl AuditEntry {
 // ---------------------------------------------------------------------------
 
 /// Describes a single side-effect produced during a trace step.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, arbitrary::Arbitrary)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SideEffect {
-    /// Human-readable kind of side-effect (e.g., "file_write", "network_call").
-    pub kind: String,
-    /// Machine-readable payload describing the effect.
+    /// Stable effect class (e.g. "fs_write", "http_request", "clock_read").
+    pub effect_kind: String,
+    /// Capability or policy reference that authorized this effect.
+    pub capability_ref: String,
+    /// CAS hash of the relevant state before the effect.
+    pub pre_state_hash: ContentHash,
+    /// CAS hash of the bytes/result produced by the effect.
+    pub result_hash: ContentHash,
+    /// CAS hash of the relevant state after the effect.
+    pub post_state_hash: ContentHash,
+    /// Bounded metadata payload for replay diagnostics.
     pub payload: Vec<u8>,
 }
 
 impl SideEffect {
-    pub fn new(kind: &str, payload: Vec<u8>) -> Self {
+    pub fn new(effect_kind: &str, payload: Vec<u8>) -> Self {
+        let empty_hash = content_hash(&[]);
+        let payload_hash = content_hash(&payload);
         Self {
-            kind: kind.to_string(),
+            effect_kind: effect_kind.to_string(),
+            capability_ref: effect_kind.to_string(),
+            pre_state_hash: empty_hash,
+            result_hash: payload_hash.clone(),
+            post_state_hash: payload_hash,
             payload,
         }
+    }
+
+    pub fn recorded(
+        effect_kind: &str,
+        capability_ref: &str,
+        pre_state_hash: ContentHash,
+        result_hash: ContentHash,
+        post_state_hash: ContentHash,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            effect_kind: effect_kind.to_string(),
+            capability_ref: capability_ref.to_string(),
+            pre_state_hash,
+            result_hash,
+            post_state_hash,
+            payload,
+        }
+    }
+}
+
+impl<'a> arbitrary::Arbitrary<'a> for SideEffect {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let effect_kind = String::arbitrary(u)?;
+        let capability_ref = String::arbitrary(u)?;
+        let pre_state = Vec::<u8>::arbitrary(u)?;
+        let result = Vec::<u8>::arbitrary(u)?;
+        let post_state = Vec::<u8>::arbitrary(u)?;
+        let payload = Vec::<u8>::arbitrary(u)?;
+        Ok(Self::recorded(
+            &effect_kind,
+            &capability_ref,
+            content_hash(&pre_state),
+            content_hash(&result),
+            content_hash(&post_state),
+            payload,
+        ))
     }
 }
 
@@ -614,7 +671,7 @@ impl TraceStep {
     /// Compute a SHA-256 digest of the step's side-effects as raw bytes.
     pub fn side_effects_digest_bytes(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(b"replay_step_effects_v1:");
+        hasher.update(STEP_EFFECTS_HASH_DOMAIN);
         update_side_effects_hash_len_prefixed(&mut hasher, &self.side_effects);
         hasher.finalize().into()
     }
@@ -1160,7 +1217,7 @@ impl ReplayEngine {
             };
             let replayed_effects_digest = {
                 let mut hasher = Sha256::new();
-                hasher.update(b"replay_step_effects_v1:");
+                hasher.update(STEP_EFFECTS_HASH_DOMAIN);
                 update_side_effects_hash_len_prefixed(&mut hasher, &replayed_effects);
                 hex::encode(hasher.finalize())
             };
@@ -1178,10 +1235,10 @@ impl ReplayEngine {
             if let Some(original_clock_effect) = step
                 .side_effects
                 .iter()
-                .find(|e| e.kind.as_str().eq("clock_read"))
+                .find(|e| e.effect_kind.as_str().eq("clock_read"))
                 && let Some(replayed_clock_effect) = replayed_effects
                     .iter()
-                    .find(|e| e.kind.as_str().eq("clock_read"))
+                    .find(|e| e.effect_kind.as_str().eq("clock_read"))
             {
                 // Verify exact payload length for timestamp safety
                 if original_clock_effect.payload.len() == 8
@@ -1588,8 +1645,8 @@ mod tests {
     // --- Schema version ---
 
     #[test]
-    fn schema_version_is_ttr_v1() {
-        assert_eq!(SCHEMA_VERSION, "ttr-v1.0");
+    fn schema_version_is_ttr_v1_1() {
+        assert_eq!(SCHEMA_VERSION, "ttr-v1.1");
     }
 
     // --- EnvironmentSnapshot validation ---
@@ -2631,8 +2688,74 @@ mod tests {
     #[test]
     fn side_effect_new() {
         let se = SideEffect::new("file_write", vec![1, 2, 3]);
-        assert_eq!(se.kind, "file_write");
+        assert_eq!(se.effect_kind, "file_write");
+        assert_eq!(se.capability_ref, "file_write");
+        assert_eq!(se.pre_state_hash, content_hash(&[]));
+        assert_eq!(se.result_hash, content_hash(&[1, 2, 3]));
+        assert_eq!(se.post_state_hash, content_hash(&[1, 2, 3]));
         assert_eq!(se.payload, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn side_effect_recorded_binds_capability_and_state_hashes() {
+        let pre = content_hash(b"before");
+        let result = content_hash(b"result");
+        let post = content_hash(b"after");
+        let se = SideEffect::recorded(
+            "fs_write",
+            "cap:file-write:/tmp/report",
+            pre.clone(),
+            result.clone(),
+            post.clone(),
+            b"/tmp/report".to_vec(),
+        );
+
+        assert_eq!(se.effect_kind, "fs_write");
+        assert_eq!(se.capability_ref, "cap:file-write:/tmp/report");
+        assert_eq!(se.pre_state_hash, pre);
+        assert_eq!(se.result_hash, result);
+        assert_eq!(se.post_state_hash, post);
+        assert_eq!(se.payload, b"/tmp/report");
+    }
+
+    #[test]
+    fn side_effect_digest_changes_when_typed_hashes_change() {
+        let pre = content_hash(b"before");
+        let result = content_hash(b"result");
+        let post = content_hash(b"after");
+        let baseline = TraceStep::new(
+            0,
+            Vec::new(),
+            Vec::new(),
+            vec![SideEffect::recorded(
+                "http_request",
+                "cap:http:api",
+                pre.clone(),
+                result,
+                post.clone(),
+                b"metadata".to_vec(),
+            )],
+            0,
+        );
+        let mutated = TraceStep::new(
+            0,
+            Vec::new(),
+            Vec::new(),
+            vec![SideEffect::recorded(
+                "http_request",
+                "cap:http:api",
+                pre,
+                content_hash(b"different-result"),
+                post,
+                b"metadata".to_vec(),
+            )],
+            0,
+        );
+
+        assert_ne!(
+            baseline.side_effects_digest(),
+            mutated.side_effects_digest()
+        );
     }
 
     // --- AuditEntry construction ---
@@ -3012,7 +3135,7 @@ mod tests {
                 // Verify side effect data handling is safe
                 for step in &trace.steps {
                     for side_effect in &step.side_effects {
-                        assert!(!side_effect.effect_type.is_empty());
+                        assert!(!side_effect.effect_kind.is_empty());
                         // Data may be arbitrary bytes, but should not corrupt other fields
                     }
                 }
@@ -3400,7 +3523,11 @@ mod tests {
             for (orig_effect, deser_effect) in
                 orig.side_effects.iter().zip(deser.side_effects.iter())
             {
-                assert_eq!(orig_effect.kind, deser_effect.kind);
+                assert_eq!(orig_effect.effect_kind, deser_effect.effect_kind);
+                assert_eq!(orig_effect.capability_ref, deser_effect.capability_ref);
+                assert_eq!(orig_effect.pre_state_hash, deser_effect.pre_state_hash);
+                assert_eq!(orig_effect.result_hash, deser_effect.result_hash);
+                assert_eq!(orig_effect.post_state_hash, deser_effect.post_state_hash);
                 assert_eq!(
                     orig_effect.payload, deser_effect.payload,
                     "side effect payload should be identical"
@@ -3473,7 +3600,11 @@ mod tests {
             .iter()
             .zip(deserialized.side_effects.iter())
         {
-            assert_eq!(orig.kind, deser.kind);
+            assert_eq!(orig.effect_kind, deser.effect_kind);
+            assert_eq!(orig.capability_ref, deser.capability_ref);
+            assert_eq!(orig.pre_state_hash, deser.pre_state_hash);
+            assert_eq!(orig.result_hash, deser.result_hash);
+            assert_eq!(orig.post_state_hash, deser.post_state_hash);
             assert_eq!(orig.payload, deser.payload);
         }
     }
@@ -4503,7 +4634,7 @@ mod tests {
 
         // Verify domain prefixes are distinct
         assert_ne!(
-            b"replay_step_output_v1:", b"replay_step_effects_v1:",
+            b"replay_step_output_v1:", b"replay_step_effects_v2:",
             "Step domain prefixes must be distinct"
         );
         assert_ne!(
@@ -5081,7 +5212,7 @@ mod tests {
         let wraparound_replay_fn = |step: &TraceStep, _env: &EnvironmentSnapshot| {
             let mut effects = step.side_effects.clone();
             if let Some(effect) = effects.get_mut(0) {
-                if effect.kind.as_str().eq("clock_read") {
+                if effect.effect_kind.as_str().eq("clock_read") {
                     // Simulate timestamp wraparound
                     effect.payload = wrapped_timestamp.to_le_bytes().to_vec();
                 }
@@ -5169,7 +5300,7 @@ mod tests {
 
         let side_effects_digest_old = {
             let mut hasher = Sha256::new();
-            hasher.update(b"replay_step_effects_v1:");
+            hasher.update(STEP_EFFECTS_HASH_DOMAIN);
             update_side_effects_hash_len_prefixed(&mut hasher, &trace_step.side_effects);
             hex::encode(hasher.finalize())
         };
@@ -5288,8 +5419,8 @@ mod tests {
              separator `replay_step_output_v1:` or LE64(0) framing"
         );
         assert_eq!(
-            empty.output_digest_bytes(),
-            hex::decode(empty.output_digest()).unwrap().as_slice(),
+            hex::encode(empty.output_digest_bytes()),
+            empty.output_digest(),
             "output_digest_bytes and hex::encode(output_digest) MUST \
              agree byte-for-byte (output_digest is hex-of-bytes)"
         );

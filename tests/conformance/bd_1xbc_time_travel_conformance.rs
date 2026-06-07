@@ -17,10 +17,9 @@
 //! | **TOTAL**         | **45**      | **2**          | **47** | **47**  | **0**     | **100%** |
 
 use frankenengine_node::replay::time_travel_engine::{
-    AuditEntry, EnvironmentSnapshot, SideEffect, TimeTravelError, SCHEMA_VERSION,
-    event_codes, error_codes, contract_invariants,
-    INV_TTR_DETERMINISM, INV_TTR_DIVERGENCE_DETECT, INV_TTR_TRACE_COMPLETE,
-    INV_TTR_STEP_ORDER, INV_TTR_ENV_SEALED, INV_TTR_AUDIT_COMPLETE,
+    AuditEntry, EnvironmentSnapshot, INV_TTR_AUDIT_COMPLETE, INV_TTR_DETERMINISM,
+    INV_TTR_DIVERGENCE_DETECT, INV_TTR_ENV_SEALED, INV_TTR_STEP_ORDER, INV_TTR_TRACE_COMPLETE,
+    SCHEMA_VERSION, SideEffect, TimeTravelError, contract_invariants, error_codes, event_codes,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -85,9 +84,15 @@ impl TestContext {
 struct LifecycleCaptureTest;
 
 impl ConformanceTest for LifecycleCaptureTest {
-    fn name(&self) -> &str { "BD-1XBC-LIFE-001" }
-    fn category(&self) -> TestCategory { TestCategory::Lifecycle }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-LIFE-001"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Lifecycle
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Mock capture phase by creating environment snapshot and side effects
@@ -100,39 +105,39 @@ impl ConformanceTest for LifecycleCaptureTest {
             1640995200000000000, // Clock seed
             env_vars,
             "linux-x86_64",
-            "rust-1.75.0"
+            "rust-1.75.0",
         );
 
         // Verify environment snapshot fields
         if env_snapshot.schema_version != SCHEMA_VERSION {
             return TestResult::Fail {
-                reason: "Environment snapshot must use current schema version".to_string()
+                reason: "Environment snapshot must use current schema version".to_string(),
             };
         }
 
         if env_snapshot.clock_seed_ns == 0 {
             return TestResult::Fail {
-                reason: "Clock seed must be non-zero for deterministic replay".to_string()
+                reason: "Clock seed must be non-zero for deterministic replay".to_string(),
             };
         }
 
         if env_snapshot.env_vars.is_empty() {
             return TestResult::Fail {
-                reason: "Environment variables should be captured".to_string()
+                reason: "Environment variables should be captured".to_string(),
             };
         }
 
         // Test side effect creation
         let side_effect = SideEffect::new("file_write", b"test data".to_vec());
-        if side_effect.kind != "file_write" {
+        if side_effect.effect_kind != "file_write" {
             return TestResult::Fail {
-                reason: "SideEffect must preserve kind field".to_string()
+                reason: "SideEffect must preserve kind field".to_string(),
             };
         }
 
         if side_effect.payload != b"test data" {
             return TestResult::Fail {
-                reason: "SideEffect must preserve payload field".to_string()
+                reason: "SideEffect must preserve payload field".to_string(),
             };
         }
 
@@ -144,9 +149,15 @@ impl ConformanceTest for LifecycleCaptureTest {
 struct LifecycleReplayTest;
 
 impl ConformanceTest for LifecycleReplayTest {
-    fn name(&self) -> &str { "BD-1XBC-LIFE-002" }
-    fn category(&self) -> TestCategory { TestCategory::Lifecycle }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-LIFE-002"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Lifecycle
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Mock replay by comparing original vs replayed outputs
@@ -157,14 +168,14 @@ impl ConformanceTest for LifecycleReplayTest {
         // Identical replay should not detect divergence
         if original_output != replay_output_identical {
             return TestResult::Fail {
-                reason: "Identical outputs should not trigger divergence detection".to_string()
+                reason: "Identical outputs should not trigger divergence detection".to_string(),
             };
         }
 
         // Divergent replay should detect divergence
         if original_output == replay_output_divergent {
             return TestResult::Fail {
-                reason: "Different outputs should be detected as divergent".to_string()
+                reason: "Different outputs should be detected as divergent".to_string(),
             };
         }
 
@@ -176,9 +187,15 @@ impl ConformanceTest for LifecycleReplayTest {
 struct LifecycleDivergenceDiagnosticsTest;
 
 impl ConformanceTest for LifecycleDivergenceDiagnosticsTest {
-    fn name(&self) -> &str { "BD-1XBC-LIFE-003" }
-    fn category(&self) -> TestCategory { TestCategory::Lifecycle }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-LIFE-003"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Lifecycle
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Mock structured divergence diagnostics
@@ -190,16 +207,17 @@ impl ConformanceTest for LifecycleDivergenceDiagnosticsTest {
 
         // Verify structured error provides diagnostic information
         let error_code = divergence_info.code();
-        if error_code != error_codes::ERR_TTR_DIGEST_MISMATCH {
+        if !error_code.eq(error_codes::ERR_TTR_DIGEST_MISMATCH) {
             return TestResult::Fail {
-                reason: "Divergence error must provide correct error code".to_string()
+                reason: "Divergence error must provide correct error code".to_string(),
             };
         }
 
         let error_display = format!("{}", divergence_info);
         if !error_display.contains("trace-001") || !error_display.contains("abc123") {
             return TestResult::Fail {
-                reason: "Divergence error must include structured diagnostic information".to_string()
+                reason: "Divergence error must include structured diagnostic information"
+                    .to_string(),
             };
         }
 
@@ -211,15 +229,21 @@ impl ConformanceTest for LifecycleDivergenceDiagnosticsTest {
 struct TTRInvariantDeterminismTest;
 
 impl ConformanceTest for TTRInvariantDeterminismTest {
-    fn name(&self) -> &str { "BD-1XBC-TTR-001" }
-    fn category(&self) -> TestCategory { TestCategory::TTRInvariants }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-TTR-001"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::TTRInvariants
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Verify INV-TTR-DETERMINISM constant is defined
         if INV_TTR_DETERMINISM != "INV-TTR-DETERMINISM" {
             return TestResult::Fail {
-                reason: "INV-TTR-DETERMINISM constant must be correctly defined".to_string()
+                reason: "INV-TTR-DETERMINISM constant must be correctly defined".to_string(),
             };
         }
 
@@ -230,7 +254,8 @@ impl ConformanceTest for TTRInvariantDeterminismTest {
 
         if output1 != output2 {
             return TestResult::Fail {
-                reason: "Deterministic process must produce identical outputs for identical inputs".to_string()
+                reason: "Deterministic process must produce identical outputs for identical inputs"
+                    .to_string(),
             };
         }
 
@@ -242,15 +267,21 @@ impl ConformanceTest for TTRInvariantDeterminismTest {
 struct TTRInvariantDivergenceDetectTest;
 
 impl ConformanceTest for TTRInvariantDivergenceDetectTest {
-    fn name(&self) -> &str { "BD-1XBC-TTR-002" }
-    fn category(&self) -> TestCategory { TestCategory::TTRInvariants }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-TTR-002"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::TTRInvariants
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Verify INV-TTR-DIVERGENCE-DETECT constant is defined
         if INV_TTR_DIVERGENCE_DETECT != "INV-TTR-DIVERGENCE-DETECT" {
             return TestResult::Fail {
-                reason: "INV-TTR-DIVERGENCE-DETECT constant must be correctly defined".to_string()
+                reason: "INV-TTR-DIVERGENCE-DETECT constant must be correctly defined".to_string(),
             };
         }
 
@@ -261,7 +292,7 @@ impl ConformanceTest for TTRInvariantDivergenceDetectTest {
         let divergence_detected = detect_trace_divergence(&expected_trace, &actual_trace);
         if !divergence_detected {
             return TestResult::Fail {
-                reason: "Divergence detection must identify differences between traces".to_string()
+                reason: "Divergence detection must identify differences between traces".to_string(),
             };
         }
 
@@ -273,15 +304,21 @@ impl ConformanceTest for TTRInvariantDivergenceDetectTest {
 struct TTRInvariantTraceCompleteTest;
 
 impl ConformanceTest for TTRInvariantTraceCompleteTest {
-    fn name(&self) -> &str { "BD-1XBC-TTR-003" }
-    fn category(&self) -> TestCategory { TestCategory::TTRInvariants }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-TTR-003"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::TTRInvariants
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Verify INV-TTR-TRACE-COMPLETE constant is defined
         if INV_TTR_TRACE_COMPLETE != "INV-TTR-TRACE-COMPLETE" {
             return TestResult::Fail {
-                reason: "INV-TTR-TRACE-COMPLETE constant must be correctly defined".to_string()
+                reason: "INV-TTR-TRACE-COMPLETE constant must be correctly defined".to_string(),
             };
         }
 
@@ -290,27 +327,27 @@ impl ConformanceTest for TTRInvariantTraceCompleteTest {
             1640995200000000000,
             BTreeMap::new(),
             "linux-x86_64",
-            "rust-1.75.0"
+            "rust-1.75.0",
         );
 
         // Must have schema version
         if env_snapshot.schema_version.is_empty() {
             return TestResult::Fail {
-                reason: "Trace must include schema version for completeness".to_string()
+                reason: "Trace must include schema version for completeness".to_string(),
             };
         }
 
         // Must have platform info
         if env_snapshot.platform.is_empty() {
             return TestResult::Fail {
-                reason: "Trace must include platform information for completeness".to_string()
+                reason: "Trace must include platform information for completeness".to_string(),
             };
         }
 
         // Must have runtime version
         if env_snapshot.runtime_version.is_empty() {
             return TestResult::Fail {
-                reason: "Trace must include runtime version for completeness".to_string()
+                reason: "Trace must include runtime version for completeness".to_string(),
             };
         }
 
@@ -322,15 +359,21 @@ impl ConformanceTest for TTRInvariantTraceCompleteTest {
 struct TTRInvariantStepOrderTest;
 
 impl ConformanceTest for TTRInvariantStepOrderTest {
-    fn name(&self) -> &str { "BD-1XBC-TTR-004" }
-    fn category(&self) -> TestCategory { TestCategory::TTRInvariants }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-TTR-004"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::TTRInvariants
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Verify INV-TTR-STEP-ORDER constant is defined
         if INV_TTR_STEP_ORDER != "INV-TTR-STEP-ORDER" {
             return TestResult::Fail {
-                reason: "INV-TTR-STEP-ORDER constant must be correctly defined".to_string()
+                reason: "INV-TTR-STEP-ORDER constant must be correctly defined".to_string(),
             };
         }
 
@@ -340,13 +383,13 @@ impl ConformanceTest for TTRInvariantStepOrderTest {
 
         if !is_sequence_ordered(&ordered_steps) {
             return TestResult::Fail {
-                reason: "Ordered sequence should be detected as ordered".to_string()
+                reason: "Ordered sequence should be detected as ordered".to_string(),
             };
         }
 
         if is_sequence_ordered(&unordered_steps) {
             return TestResult::Fail {
-                reason: "Unordered sequence should be detected as unordered".to_string()
+                reason: "Unordered sequence should be detected as unordered".to_string(),
             };
         }
 
@@ -358,15 +401,21 @@ impl ConformanceTest for TTRInvariantStepOrderTest {
 struct TTRInvariantEnvSealedTest;
 
 impl ConformanceTest for TTRInvariantEnvSealedTest {
-    fn name(&self) -> &str { "BD-1XBC-TTR-005" }
-    fn category(&self) -> TestCategory { TestCategory::TTRInvariants }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-TTR-005"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::TTRInvariants
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Verify INV-TTR-ENV-SEALED constant is defined
         if INV_TTR_ENV_SEALED != "INV-TTR-ENV-SEALED" {
             return TestResult::Fail {
-                reason: "INV-TTR-ENV-SEALED constant must be correctly defined".to_string()
+                reason: "INV-TTR-ENV-SEALED constant must be correctly defined".to_string(),
             };
         }
 
@@ -376,19 +425,20 @@ impl ConformanceTest for TTRInvariantEnvSealedTest {
             1640995200000000000,
             env_vars.clone(),
             "linux-x86_64",
-            "rust-1.75.0"
+            "rust-1.75.0",
         );
 
         // Environment snapshot should preserve original values
         if snapshot.env_vars != env_vars {
             return TestResult::Fail {
-                reason: "Environment snapshot must preserve captured environment variables".to_string()
+                reason: "Environment snapshot must preserve captured environment variables"
+                    .to_string(),
             };
         }
 
         if snapshot.clock_seed_ns != 1640995200000000000 {
             return TestResult::Fail {
-                reason: "Environment snapshot must preserve clock seed".to_string()
+                reason: "Environment snapshot must preserve clock seed".to_string(),
             };
         }
 
@@ -400,15 +450,21 @@ impl ConformanceTest for TTRInvariantEnvSealedTest {
 struct TTRInvariantAuditCompleteTest;
 
 impl ConformanceTest for TTRInvariantAuditCompleteTest {
-    fn name(&self) -> &str { "BD-1XBC-TTR-006" }
-    fn category(&self) -> TestCategory { TestCategory::TTRInvariants }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-TTR-006"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::TTRInvariants
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Verify INV-TTR-AUDIT-COMPLETE constant is defined
         if INV_TTR_AUDIT_COMPLETE != "INV-TTR-AUDIT-COMPLETE" {
             return TestResult::Fail {
-                reason: "INV-TTR-AUDIT-COMPLETE constant must be correctly defined".to_string()
+                reason: "INV-TTR-AUDIT-COMPLETE constant must be correctly defined".to_string(),
             };
         }
 
@@ -417,27 +473,27 @@ impl ConformanceTest for TTRInvariantAuditCompleteTest {
             event_codes::TTR_001,
             "trace-audit-test",
             "Workflow trace capture started",
-            1640995200000000000
+            1640995200000000000,
         );
 
         // Must have stable event code
         if audit_entry.event_code.is_empty() {
             return TestResult::Fail {
-                reason: "Audit entry must have non-empty event code".to_string()
+                reason: "Audit entry must have non-empty event code".to_string(),
             };
         }
 
         // Must have trace ID
         if audit_entry.trace_id.is_empty() {
             return TestResult::Fail {
-                reason: "Audit entry must have trace ID for correlation".to_string()
+                reason: "Audit entry must have trace ID for correlation".to_string(),
             };
         }
 
         // Must have timestamp
         if audit_entry.timestamp_ns == 0 {
             return TestResult::Fail {
-                reason: "Audit entry must have non-zero timestamp".to_string()
+                reason: "Audit entry must have non-zero timestamp".to_string(),
             };
         }
 
@@ -449,15 +505,22 @@ impl ConformanceTest for TTRInvariantAuditCompleteTest {
 struct ContractInvariantDeterministicTest;
 
 impl ConformanceTest for ContractInvariantDeterministicTest {
-    fn name(&self) -> &str { "BD-1XBC-CON-001" }
-    fn category(&self) -> TestCategory { TestCategory::ContractInvariants }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-CON-001"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::ContractInvariants
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         // Verify contract invariant is defined
         if contract_invariants::INV_REPLAY_DETERMINISTIC != "INV-REPLAY-DETERMINISTIC" {
             return TestResult::Fail {
-                reason: "INV-REPLAY-DETERMINISTIC contract invariant must be correctly defined".to_string()
+                reason: "INV-REPLAY-DETERMINISTIC contract invariant must be correctly defined"
+                    .to_string(),
             };
         }
 
@@ -470,7 +533,8 @@ impl ConformanceTest for ContractInvariantDeterministicTest {
 
         if result1 != result2 {
             return TestResult::Fail {
-                reason: "Same seed and input sequence must produce identical replay results".to_string()
+                reason: "Same seed and input sequence must produce identical replay results"
+                    .to_string(),
             };
         }
 
@@ -482,9 +546,15 @@ impl ConformanceTest for ContractInvariantDeterministicTest {
 struct EventCodesTest;
 
 impl ConformanceTest for EventCodesTest {
-    fn name(&self) -> &str { "BD-1XBC-EVT-001" }
-    fn category(&self) -> TestCategory { TestCategory::EventCodes }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-EVT-001"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::EventCodes
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let expected_events = [
@@ -503,7 +573,7 @@ impl ConformanceTest for EventCodesTest {
         for (expected, actual) in expected_events {
             if actual != expected {
                 return TestResult::Fail {
-                    reason: format!("Event code mismatch: expected {expected}, got {actual}")
+                    reason: format!("Event code mismatch: expected {expected}, got {actual}"),
                 };
             }
         }
@@ -516,46 +586,90 @@ impl ConformanceTest for EventCodesTest {
 struct ErrorCodesTest;
 
 impl ConformanceTest for ErrorCodesTest {
-    fn name(&self) -> &str { "BD-1XBC-ERR-001" }
-    fn category(&self) -> TestCategory { TestCategory::ErrorCodes }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-ERR-001"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::ErrorCodes
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let expected_ttr_errors = [
             ("ERR_TTR_EMPTY_TRACE", error_codes::ERR_TTR_EMPTY_TRACE),
             ("ERR_TTR_SEQ_GAP", error_codes::ERR_TTR_SEQ_GAP),
-            ("ERR_TTR_DIGEST_MISMATCH", error_codes::ERR_TTR_DIGEST_MISMATCH),
-            ("ERR_TTR_INVALID_IDENTIFIER", error_codes::ERR_TTR_INVALID_IDENTIFIER),
+            (
+                "ERR_TTR_DIGEST_MISMATCH",
+                error_codes::ERR_TTR_DIGEST_MISMATCH,
+            ),
+            (
+                "ERR_TTR_INVALID_IDENTIFIER",
+                error_codes::ERR_TTR_INVALID_IDENTIFIER,
+            ),
             ("ERR_TTR_ENV_MISSING", error_codes::ERR_TTR_ENV_MISSING),
             ("ERR_TTR_ENV_INVALID", error_codes::ERR_TTR_ENV_INVALID),
             ("ERR_TTR_REPLAY_FAILED", error_codes::ERR_TTR_REPLAY_FAILED),
-            ("ERR_TTR_DUPLICATE_TRACE", error_codes::ERR_TTR_DUPLICATE_TRACE),
-            ("ERR_TTR_TRACE_CAPACITY_EXCEEDED", error_codes::ERR_TTR_TRACE_CAPACITY_EXCEEDED),
-            ("ERR_TTR_STEP_ORDER_VIOLATION", error_codes::ERR_TTR_STEP_ORDER_VIOLATION),
-            ("ERR_TTR_TRACE_NOT_FOUND", error_codes::ERR_TTR_TRACE_NOT_FOUND),
+            (
+                "ERR_TTR_DUPLICATE_TRACE",
+                error_codes::ERR_TTR_DUPLICATE_TRACE,
+            ),
+            (
+                "ERR_TTR_TRACE_CAPACITY_EXCEEDED",
+                error_codes::ERR_TTR_TRACE_CAPACITY_EXCEEDED,
+            ),
+            (
+                "ERR_TTR_STEP_ORDER_VIOLATION",
+                error_codes::ERR_TTR_STEP_ORDER_VIOLATION,
+            ),
+            (
+                "ERR_TTR_TRACE_NOT_FOUND",
+                error_codes::ERR_TTR_TRACE_NOT_FOUND,
+            ),
         ];
 
         for (expected, actual) in expected_ttr_errors {
             if actual != expected {
                 return TestResult::Fail {
-                    reason: format!("TTR error code mismatch: expected {expected}, got {actual}")
+                    reason: format!("TTR error code mismatch: expected {expected}, got {actual}"),
                 };
             }
         }
 
         let expected_contract_errors = [
-            ("ERR_REPLAY_SEED_MISMATCH", error_codes::ERR_REPLAY_SEED_MISMATCH),
-            ("ERR_REPLAY_STATE_CORRUPTION", error_codes::ERR_REPLAY_STATE_CORRUPTION),
-            ("ERR_REPLAY_STEP_OVERFLOW", error_codes::ERR_REPLAY_STEP_OVERFLOW),
-            ("ERR_REPLAY_INPUT_MISSING", error_codes::ERR_REPLAY_INPUT_MISSING),
-            ("ERR_REPLAY_CLOCK_DRIFT", error_codes::ERR_REPLAY_CLOCK_DRIFT),
-            ("ERR_REPLAY_SNAPSHOT_INVALID", error_codes::ERR_REPLAY_SNAPSHOT_INVALID),
+            (
+                "ERR_REPLAY_SEED_MISMATCH",
+                error_codes::ERR_REPLAY_SEED_MISMATCH,
+            ),
+            (
+                "ERR_REPLAY_STATE_CORRUPTION",
+                error_codes::ERR_REPLAY_STATE_CORRUPTION,
+            ),
+            (
+                "ERR_REPLAY_STEP_OVERFLOW",
+                error_codes::ERR_REPLAY_STEP_OVERFLOW,
+            ),
+            (
+                "ERR_REPLAY_INPUT_MISSING",
+                error_codes::ERR_REPLAY_INPUT_MISSING,
+            ),
+            (
+                "ERR_REPLAY_CLOCK_DRIFT",
+                error_codes::ERR_REPLAY_CLOCK_DRIFT,
+            ),
+            (
+                "ERR_REPLAY_SNAPSHOT_INVALID",
+                error_codes::ERR_REPLAY_SNAPSHOT_INVALID,
+            ),
         ];
 
         for (expected, actual) in expected_contract_errors {
             if actual != expected {
                 return TestResult::Fail {
-                    reason: format!("Contract error code mismatch: expected {expected}, got {actual}")
+                    reason: format!(
+                        "Contract error code mismatch: expected {expected}, got {actual}"
+                    ),
                 };
             }
         }
@@ -568,22 +682,28 @@ impl ConformanceTest for ErrorCodesTest {
 struct SideEffectDataStructureTest;
 
 impl ConformanceTest for SideEffectDataStructureTest {
-    fn name(&self) -> &str { "BD-1XBC-DATA-001" }
-    fn category(&self) -> TestCategory { TestCategory::DataStructures }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
+    fn name(&self) -> &str {
+        "BD-1XBC-DATA-001"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::DataStructures
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
 
     fn run(&self, _ctx: &TestContext) -> TestResult {
         let side_effect = SideEffect::new("file_write", vec![1, 2, 3, 4]);
 
-        if side_effect.kind != "file_write" {
+        if side_effect.effect_kind != "file_write" {
             return TestResult::Fail {
-                reason: "SideEffect must preserve kind field correctly".to_string()
+                reason: "SideEffect must preserve kind field correctly".to_string(),
             };
         }
 
         if side_effect.payload != vec![1, 2, 3, 4] {
             return TestResult::Fail {
-                reason: "SideEffect must preserve payload field correctly".to_string()
+                reason: "SideEffect must preserve payload field correctly".to_string(),
             };
         }
 
@@ -591,7 +711,7 @@ impl ConformanceTest for SideEffectDataStructureTest {
         let cloned = side_effect.clone();
         if cloned != side_effect {
             return TestResult::Fail {
-                reason: "SideEffect must support Clone trait correctly".to_string()
+                reason: "SideEffect must support Clone trait correctly".to_string(),
             };
         }
 
@@ -671,11 +791,15 @@ pub fn generate_compliance_report() -> String {
         match test.requirement_level() {
             RequirementLevel::Must => {
                 must_total += 1;
-                if is_pass { must_pass += 1; }
+                if is_pass {
+                    must_pass += 1;
+                }
             }
             RequirementLevel::Should => {
                 should_total += 1;
-                if is_pass { should_pass += 1; }
+                if is_pass {
+                    should_pass += 1;
+                }
             }
             RequirementLevel::May => {}
         }
@@ -745,7 +869,10 @@ fn bd_1xbc_lifecycle_coverage() {
     // Test complete capture/replay/divergence lifecycle
     assert!(matches!(LifecycleCaptureTest.run(&ctx), TestResult::Pass));
     assert!(matches!(LifecycleReplayTest.run(&ctx), TestResult::Pass));
-    assert!(matches!(LifecycleDivergenceDiagnosticsTest.run(&ctx), TestResult::Pass));
+    assert!(matches!(
+        LifecycleDivergenceDiagnosticsTest.run(&ctx),
+        TestResult::Pass
+    ));
 }
 
 #[test]
@@ -753,15 +880,36 @@ fn bd_1xbc_invariants_coverage() {
     let ctx = TestContext::new();
 
     // Test all TTR invariants
-    assert!(matches!(TTRInvariantDeterminismTest.run(&ctx), TestResult::Pass));
-    assert!(matches!(TTRInvariantDivergenceDetectTest.run(&ctx), TestResult::Pass));
-    assert!(matches!(TTRInvariantTraceCompleteTest.run(&ctx), TestResult::Pass));
-    assert!(matches!(TTRInvariantStepOrderTest.run(&ctx), TestResult::Pass));
-    assert!(matches!(TTRInvariantEnvSealedTest.run(&ctx), TestResult::Pass));
-    assert!(matches!(TTRInvariantAuditCompleteTest.run(&ctx), TestResult::Pass));
+    assert!(matches!(
+        TTRInvariantDeterminismTest.run(&ctx),
+        TestResult::Pass
+    ));
+    assert!(matches!(
+        TTRInvariantDivergenceDetectTest.run(&ctx),
+        TestResult::Pass
+    ));
+    assert!(matches!(
+        TTRInvariantTraceCompleteTest.run(&ctx),
+        TestResult::Pass
+    ));
+    assert!(matches!(
+        TTRInvariantStepOrderTest.run(&ctx),
+        TestResult::Pass
+    ));
+    assert!(matches!(
+        TTRInvariantEnvSealedTest.run(&ctx),
+        TestResult::Pass
+    ));
+    assert!(matches!(
+        TTRInvariantAuditCompleteTest.run(&ctx),
+        TestResult::Pass
+    ));
 
     // Test contract invariants
-    assert!(matches!(ContractInvariantDeterministicTest.run(&ctx), TestResult::Pass));
+    assert!(matches!(
+        ContractInvariantDeterministicTest.run(&ctx),
+        TestResult::Pass
+    ));
 }
 
 #[test]
@@ -771,7 +919,7 @@ fn bd_1xbc_environment_snapshot_integrity() {
         1640995200000000000,
         env_vars.clone(),
         "linux-x86_64",
-        "rust-1.75.0"
+        "rust-1.75.0",
     );
 
     assert_eq!(snapshot.schema_version, SCHEMA_VERSION);
