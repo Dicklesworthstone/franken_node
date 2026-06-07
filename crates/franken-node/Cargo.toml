@@ -145,7 +145,7 @@ ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 ciborium = { version = "0.2.2", optional = true }
 flate2 = { version = "1.0.35", optional = true }
 rand = "0.8.5"
-asupersync = { version = "0.3.1", optional = true }
+asupersync = { version = "0.3.4", optional = true }
 # bd-98xo5.12.1: HDR histogram for the `profiling` feature. Optional
 # so default builds pay zero binary cost.
 hdrhistogram = { version = "7.5", default-features = false, optional = true }

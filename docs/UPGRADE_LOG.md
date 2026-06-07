@@ -105,6 +105,13 @@ Everything else in the workspace is at latest within pinned semver range.
 
 ## Phase C — flagged deprecated
 
+### asupersync: 0.3.1 → 0.3.4 ✓ DONE (2026-06-07)
+
+- **Scope:** optional `asupersync-transport` dependency for direct control-lane transport integration.
+- **Breaking:** No local manifest-level migration expected; 0.3.4 supersedes the broken 0.3.3 release and keeps the stable `Cx`/region-facing APIs used by franken_node.
+- **Supply-chain note:** 0.3.4 is the current crates.io/docs.rs release; 0.3.3 was yanked for downstream `tls` feature compile regression.
+- **File:** `crates/franken-node/Cargo.toml`
+
 ### serde_cbor: 0.11.2 → ciborium 0.2.2 ✓ DONE (2026-06-05)
 
 - **Scope:** optional dep behind `cbor-serialization` feature.
