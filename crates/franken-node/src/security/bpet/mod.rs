@@ -6,6 +6,7 @@
 pub mod adversarial_evolution;
 pub mod adversarial_harness;
 pub mod adversarial_scenarios;
+pub mod calibration_benchmark;
 pub mod camouflage_detector;
 pub mod camouflage_fixtures;
 pub mod cohort_baselines;
