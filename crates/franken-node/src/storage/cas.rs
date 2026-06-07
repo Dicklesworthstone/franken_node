@@ -16,8 +16,8 @@
 //!   opaque immutable blobs.
 //! * **Content-addressed + immutable.** A blob's path is derived purely from
 //!   its hash hex, so writes are idempotent (dedup) and there is no mutation
-//!   surface. Writes are idempotent (dedup) and reclaimable temp files left by
-//!   a crash are orphans, never torn blobs (see `prune_orphans`).
+//!   surface. A crash mid-write leaves only an orphan `*.tmp` file (reclaimable
+//!   via `prune_orphans`), never a torn blob.
 //! * **Hardened.** Domain-separated + length-prefixed SHA-256 (collision
 //!   resistance under a stable preimage), bounded reads (parser-bomb defence),
 //!   per-blob + total-capacity caps with saturating arithmetic, read-time
@@ -31,6 +31,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -55,6 +56,17 @@ pub const DEFAULT_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 /// Default maximum number of distinct blobs the store will hold before `put`
 /// fails closed. Prevents unbounded growth from a misbehaving producer.
 pub const DEFAULT_MAX_ENTRIES: usize = 1_000_000;
+
+/// Process-wide monotonic counter making each in-flight temp file name unique,
+/// so two threads writing the *same* blob concurrently never share a temp path.
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Committed blobs are named with their 64-char hex digest (never start with a
+/// dot); in-flight/orphan temp files are dotfiles ending in `.tmp`. This
+/// predicate keeps `len()` counting only real blobs.
+fn is_committed_blob(name: &std::ffi::OsStr) -> bool {
+    !name.to_string_lossy().starts_with('.')
+}
 
 /// A content hash of the form `sha256:<64 hex chars>`. The only way to obtain a
 /// well-formed value is [`content_hash`] or [`ContentHash::parse`], both of
@@ -275,6 +287,7 @@ impl ContentAddressedStore {
                     .file_type()
                     .map_err(|s| io_err(&blob.path(), s))?
                     .is_file()
+                    && is_committed_blob(&blob.file_name())
                 {
                     count = count.saturating_add(1);
                 }
@@ -318,14 +331,15 @@ impl ContentAddressedStore {
     /// any point leaves either no file or the complete blob — never a torn one.
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), CasError> {
         let parent = path.parent().unwrap_or(&self.root);
-        // Temp name is unique per (hash, pid) so concurrent writers of the same
-        // blob never clobber each other's temp file; the final rename is
-        // idempotent because the destination is content-addressed.
+        // Temp name is unique per (hash, pid, monotonic seq) so even two threads
+        // in this process writing the *same* blob get distinct temp files; the
+        // final rename is idempotent because the destination is content-addressed.
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "blob".to_string());
-        let tmp = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+        let seq = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".{file_name}.{}.{seq}.tmp", std::process::id()));
 
         let mut file = fs::File::create(&tmp).map_err(|s| io_err(&tmp, s))?;
         file.write_all(bytes).map_err(|s| io_err(&tmp, s))?;
@@ -504,5 +518,21 @@ mod tests {
         fs::write(shard.join(".orphan.123.tmp"), b"partial").expect("orphan");
         assert_eq!(cas.prune_orphans().expect("prune"), 1);
         assert!(cas.contains(&hash), "committed blob survives prune");
+    }
+
+    #[test]
+    fn len_ignores_orphan_temp_files() {
+        let (_d, cas) = store();
+        let hash = cas.put(b"real blob").expect("put");
+        assert_eq!(cas.len().expect("len"), 1);
+        // An orphan temp file in the shard dir must NOT be counted as a blob —
+        // otherwise the capacity check over-counts and `len()` lies.
+        let shard = cas.root.join(&hash.hex()[..2]);
+        fs::write(shard.join(".real-blob.999.0.tmp"), b"partial").expect("orphan");
+        assert_eq!(
+            cas.len().expect("len"),
+            1,
+            "temp/orphan files must not be counted toward stored-blob count"
+        );
     }
 }

@@ -176,6 +176,23 @@ fn tampering_with_chain_linkage_fields_breaks_integrity() {
 }
 
 #[test]
+fn cas_len_excludes_orphan_temp_files() {
+    let (dir, cas) = store();
+    let hash = cas.put(b"a real committed blob").expect("put");
+    assert_eq!(cas.len().expect("len"), 1);
+    // Drop an orphan temp file (as an interrupted write would) into the shard
+    // dir; len() must still report exactly one stored blob.
+    let hex = hash.as_str().strip_prefix("sha256:").expect("prefix");
+    let shard = dir.path().join(&hex[..2]);
+    std::fs::write(shard.join(".orphan.42.7.tmp"), b"partial").expect("orphan");
+    assert_eq!(
+        cas.len().expect("len"),
+        1,
+        "orphan temp files must not be counted as stored blobs"
+    );
+}
+
+#[test]
 fn malformed_content_hash_is_rejected() {
     assert!(matches!(
         ContentHash::parse("not-a-hash"),
