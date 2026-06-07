@@ -5,9 +5,16 @@
 //! snapshots and validates restart requests without inventing a second proof
 //! worker registry.
 
-use crate::ops::validation_broker::{ProofStatusKind, RchMode, ValidationExitKind};
+use crate::ops::validation_broker::{
+    CommandSpec, ProofStatusKind, RchMode, TimeoutClass, ValidationErrorClass, ValidationExitKind,
+    ValidationReceipt,
+};
+use crate::ops::validation_proof_coalescer::{
+    ValidationSwarmSchedulerDecision, ValidationSwarmSchedulerDecisionKind,
+};
 use crate::ops::validation_readiness::{
-    ProofKindCounts, RchWorkerReadiness, ValidationReadinessInput,
+    ProofKindCounts, RchWorkerReadiness, SwarmSchedulerReadinessSummary, ValidationReadinessInput,
+    summarize_swarm_scheduler_decisions,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,6 +23,8 @@ pub const PROOF_PIPELINE_QUEUE_REPORT_SCHEMA_VERSION: &str =
     "franken-node/proof-pipeline/queue-report/v1";
 pub const PROOF_PIPELINE_RESTART_REPORT_SCHEMA_VERSION: &str =
     "franken-node/proof-pipeline/restart-report/v1";
+pub const PROOF_WORKER_SCHEDULING_BASELINE_SCHEMA_VERSION: &str =
+    "franken-node/proof-pipeline/worker-scheduling-baseline/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +92,88 @@ pub struct ProofPipelineQueueReport {
     pub proof_counts: ProofKindCounts,
     pub workers: Vec<RchWorkerReadiness>,
     pub checks: Vec<ProofPipelineCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofWorkerSchedulingBaselineEnvironment {
+    pub environment_id: String,
+    pub observed_at_utc: DateTime<Utc>,
+    pub rch_status_posture: String,
+    pub rch_workers_healthy: u16,
+    pub rch_workers_total: u16,
+    pub rch_slots_available: u16,
+    pub rch_slots_total: u16,
+    pub rch_queue_active_builds: u16,
+    pub rch_queue_waiting_builds: u16,
+    pub worker_probe_reachable: u16,
+    pub worker_probe_total: u16,
+    #[serde(default)]
+    pub storage_pressure_notes: Vec<String>,
+    #[serde(default)]
+    pub evidence_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProofWorkerSchedulingBaselineMetrics {
+    pub samples: usize,
+    pub service_time_ms_p50: u64,
+    pub service_time_ms_p95: u64,
+    pub service_time_ms_p99: u64,
+    pub service_time_ms_max: u64,
+    pub queue_wait_ms_p95: u64,
+    pub queue_wait_ms_p99: u64,
+    pub queue_wait_ms_max: u64,
+    pub retryable_samples: usize,
+    pub retry_rate: f64,
+    pub worker_exclusion_samples: usize,
+    pub worker_exclusion_rate: f64,
+    pub remote_selected_samples: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofWorkerSchedulingBaselineSample {
+    pub sample_id: String,
+    pub source: String,
+    pub reference_id: String,
+    pub bead_id: String,
+    pub trace_id: String,
+    pub queue_depth: u16,
+    pub selected_worker: Option<String>,
+    pub worker_health_class: String,
+    pub command_class: String,
+    pub queue_wait_ms: u64,
+    pub wall_time_ms: u64,
+    pub outcome_class: String,
+    pub retry_recovery_action: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProofWorkerSchedulingBaselineReport {
+    pub schema_version: String,
+    pub command: String,
+    pub trace_id: String,
+    pub generated_at_utc: DateTime<Utc>,
+    pub status: ProofPipelineStatus,
+    pub measurement_mode: String,
+    pub environment: ProofWorkerSchedulingBaselineEnvironment,
+    pub queue_summary: ProofPipelineQueueSummary,
+    pub scheduler_summary: SwarmSchedulerReadinessSummary,
+    pub metrics: ProofWorkerSchedulingBaselineMetrics,
+    pub samples: Vec<ProofWorkerSchedulingBaselineSample>,
+    pub checks: Vec<ProofPipelineCheck>,
+}
+
+#[derive(Serialize)]
+struct ProofWorkerSchedulingBaselineJsonlRecord<'a> {
+    schema_version: &'static str,
+    command: &'a str,
+    trace_id: &'a str,
+    generated_at_utc: DateTime<Utc>,
+    measurement_mode: &'a str,
+    environment: &'a ProofWorkerSchedulingBaselineEnvironment,
+    metrics: &'a ProofWorkerSchedulingBaselineMetrics,
+    sample: &'a ProofWorkerSchedulingBaselineSample,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +268,65 @@ pub fn build_queue_report(
         workers: input.rch_workers.clone(),
         checks,
     }
+}
+
+#[must_use]
+pub fn build_worker_scheduling_baseline_report(
+    input: &ValidationReadinessInput,
+    trace_id: impl Into<String>,
+    now: DateTime<Utc>,
+    environment: ProofWorkerSchedulingBaselineEnvironment,
+) -> ProofWorkerSchedulingBaselineReport {
+    let trace_id = trace_id.into();
+    let queue_report = build_queue_report(input, trace_id.clone(), now);
+    let scheduler_summary = summarize_swarm_scheduler_decisions(&input.swarm_scheduler_decisions);
+    let samples = worker_scheduling_baseline_samples(input);
+    let metrics = summarize_worker_scheduling_baseline_metrics(&samples);
+    let mut checks = queue_report.checks.clone();
+    checks.extend(worker_scheduling_baseline_checks(
+        &scheduler_summary,
+        &metrics,
+    ));
+    let status = checks
+        .iter()
+        .fold(ProofPipelineStatus::Healthy, |acc, check| {
+            acc.max(check.status)
+        });
+
+    ProofWorkerSchedulingBaselineReport {
+        schema_version: PROOF_WORKER_SCHEDULING_BASELINE_SCHEMA_VERSION.to_string(),
+        command: "proofs workers scheduling-baseline".to_string(),
+        trace_id,
+        generated_at_utc: now,
+        status,
+        measurement_mode: "baseline_only_no_performance_improvement_claimed".to_string(),
+        environment,
+        queue_summary: queue_report.summary,
+        scheduler_summary,
+        metrics,
+        samples,
+        checks,
+    }
+}
+
+pub fn render_worker_scheduling_baseline_jsonl(
+    report: &ProofWorkerSchedulingBaselineReport,
+) -> Result<String, serde_json::Error> {
+    let mut lines = Vec::with_capacity(report.samples.len());
+    for sample in &report.samples {
+        let record = ProofWorkerSchedulingBaselineJsonlRecord {
+            schema_version: PROOF_WORKER_SCHEDULING_BASELINE_SCHEMA_VERSION,
+            command: &report.command,
+            trace_id: &report.trace_id,
+            generated_at_utc: report.generated_at_utc,
+            measurement_mode: &report.measurement_mode,
+            environment: &report.environment,
+            metrics: &report.metrics,
+            sample,
+        };
+        lines.push(serde_json::to_string(&record)?);
+    }
+    Ok(lines.join("\n"))
 }
 
 #[must_use]
@@ -428,6 +578,380 @@ fn queue_checks(
     vec![broker_state, queue, workers]
 }
 
+fn worker_scheduling_baseline_checks(
+    scheduler_summary: &SwarmSchedulerReadinessSummary,
+    metrics: &ProofWorkerSchedulingBaselineMetrics,
+) -> Vec<ProofPipelineCheck> {
+    let samples = if metrics.samples == 0 {
+        check(
+            "PPB-SAMPLES-001",
+            ProofPipelineStatus::Degraded,
+            "No proof-worker scheduling baseline samples were supplied.",
+            "Collect scheduler decisions or validation receipts before using the baseline.",
+        )
+    } else {
+        check(
+            "PPB-SAMPLES-001",
+            ProofPipelineStatus::Healthy,
+            format!(
+                "Proof-worker baseline includes {} sample(s).",
+                metrics.samples
+            ),
+            "No action required.",
+        )
+    };
+    let scheduler = if scheduler_summary.decisions == 0 {
+        check(
+            "PPB-SCHEDULER-002",
+            ProofPipelineStatus::Degraded,
+            "No swarm-scheduler decisions were supplied.",
+            "Add synthetic or live scheduler decisions before comparing worker routing.",
+        )
+    } else {
+        check(
+            "PPB-SCHEDULER-002",
+            ProofPipelineStatus::Healthy,
+            format!(
+                "Scheduler baseline covers {} decision(s); queue_age_p95_ms={}.",
+                scheduler_summary.decisions, scheduler_summary.queue_age_p95_ms
+            ),
+            "No action required.",
+        )
+    };
+    let worker_exclusion = if metrics.worker_exclusion_samples > 0 {
+        check(
+            "PPB-WORKER-003",
+            ProofPipelineStatus::Degraded,
+            format!(
+                "{} sample(s) excluded remote-ready worker execution.",
+                metrics.worker_exclusion_samples
+            ),
+            "Treat exclusion rate as baseline evidence only; collect post-change evidence before claiming improvement.",
+        )
+    } else {
+        check(
+            "PPB-WORKER-003",
+            ProofPipelineStatus::Healthy,
+            "All baseline samples selected remote-ready workers.",
+            "No action required.",
+        )
+    };
+
+    vec![samples, scheduler, worker_exclusion]
+}
+
+fn worker_scheduling_baseline_samples(
+    input: &ValidationReadinessInput,
+) -> Vec<ProofWorkerSchedulingBaselineSample> {
+    let mut samples = input
+        .swarm_scheduler_decisions
+        .iter()
+        .enumerate()
+        .map(|(index, decision)| scheduler_baseline_sample(input, decision, index))
+        .collect::<Vec<_>>();
+    samples.extend(
+        input
+            .receipts
+            .iter()
+            .enumerate()
+            .map(|(index, receipt)| receipt_baseline_sample(receipt, index)),
+    );
+    samples
+}
+
+fn scheduler_baseline_sample(
+    input: &ValidationReadinessInput,
+    decision: &ValidationSwarmSchedulerDecision,
+    index: usize,
+) -> ProofWorkerSchedulingBaselineSample {
+    let selected_worker = selected_worker_for_scheduler_decision(input, decision);
+    let worker_health_class =
+        scheduler_worker_health_class(input, decision, selected_worker.as_deref());
+    ProofWorkerSchedulingBaselineSample {
+        sample_id: format!("scheduler-{index:03}-{}", decision.decision_id),
+        source: "swarm_scheduler_decision".to_string(),
+        reference_id: decision.decision_id.clone(),
+        bead_id: decision.bead_id.clone(),
+        trace_id: decision.trace_id.clone(),
+        queue_depth: decision.diagnostics.queue_depth,
+        selected_worker,
+        worker_health_class,
+        command_class: scheduler_command_class(decision).to_string(),
+        queue_wait_ms: decision.diagnostics.queue_age_ms,
+        wall_time_ms: 0,
+        outcome_class: decision.decision.as_str().to_string(),
+        retry_recovery_action: decision.required_action.as_str().to_string(),
+        retryable: decision.retryable,
+    }
+}
+
+fn receipt_baseline_sample(
+    receipt: &ValidationReceipt,
+    index: usize,
+) -> ProofWorkerSchedulingBaselineSample {
+    ProofWorkerSchedulingBaselineSample {
+        sample_id: format!("receipt-{index:03}-{}", receipt.receipt_id),
+        source: "validation_receipt".to_string(),
+        reference_id: receipt.receipt_id.clone(),
+        bead_id: receipt.bead_id.clone(),
+        trace_id: receipt.request_id.clone(),
+        queue_depth: 0,
+        selected_worker: receipt.rch.worker_id.clone(),
+        worker_health_class: receipt_worker_health_class(receipt).to_string(),
+        command_class: classify_command(&receipt.command).to_string(),
+        queue_wait_ms: if receipt.exit.timeout_class == TimeoutClass::QueueWait {
+            receipt.timing.duration_ms
+        } else {
+            0
+        },
+        wall_time_ms: receipt.timing.duration_ms,
+        outcome_class: receipt_outcome_class(receipt),
+        retry_recovery_action: receipt_recovery_action(receipt).to_string(),
+        retryable: receipt.exit.retryable,
+    }
+}
+
+fn summarize_worker_scheduling_baseline_metrics(
+    samples: &[ProofWorkerSchedulingBaselineSample],
+) -> ProofWorkerSchedulingBaselineMetrics {
+    let service_times = samples
+        .iter()
+        .filter_map(|sample| (sample.wall_time_ms > 0).then_some(sample.wall_time_ms))
+        .collect::<Vec<_>>();
+    let queue_wait_times = samples
+        .iter()
+        .map(|sample| sample.queue_wait_ms)
+        .collect::<Vec<_>>();
+    let retryable_samples = samples.iter().filter(|sample| sample.retryable).count();
+    let worker_exclusion_samples = samples
+        .iter()
+        .filter(|sample| worker_execution_excluded(sample))
+        .count();
+    let remote_selected_samples = samples
+        .iter()
+        .filter(|sample| {
+            matches!(
+                sample.worker_health_class.as_str(),
+                "remote_ready" | "remote_selected"
+            )
+        })
+        .count();
+
+    ProofWorkerSchedulingBaselineMetrics {
+        samples: samples.len(),
+        service_time_ms_p50: percentile(&service_times, 50),
+        service_time_ms_p95: percentile(&service_times, 95),
+        service_time_ms_p99: percentile(&service_times, 99),
+        service_time_ms_max: service_times.iter().copied().max().unwrap_or_default(),
+        queue_wait_ms_p95: percentile(&queue_wait_times, 95),
+        queue_wait_ms_p99: percentile(&queue_wait_times, 99),
+        queue_wait_ms_max: queue_wait_times.iter().copied().max().unwrap_or_default(),
+        retryable_samples,
+        retry_rate: ratio(retryable_samples, samples.len()),
+        worker_exclusion_samples,
+        worker_exclusion_rate: ratio(worker_exclusion_samples, samples.len()),
+        remote_selected_samples,
+    }
+}
+
+fn selected_worker_for_scheduler_decision(
+    input: &ValidationReadinessInput,
+    decision: &ValidationSwarmSchedulerDecision,
+) -> Option<String> {
+    if !matches!(
+        decision.decision,
+        ValidationSwarmSchedulerDecisionKind::RunNow
+            | ValidationSwarmSchedulerDecisionKind::StealStaleWork
+    ) {
+        return None;
+    }
+
+    input
+        .rch_workers
+        .iter()
+        .find(|worker| worker_is_ready(worker))
+        .map(|worker| worker.worker_id.clone())
+}
+
+fn scheduler_worker_health_class(
+    input: &ValidationReadinessInput,
+    decision: &ValidationSwarmSchedulerDecision,
+    selected_worker: Option<&str>,
+) -> String {
+    if let Some(worker) = selected_worker.and_then(|worker_id| {
+        input
+            .rch_workers
+            .iter()
+            .find(|worker| worker.worker_id == worker_id)
+    }) {
+        return readiness_worker_health_class(worker).to_string();
+    }
+
+    match decision.decision {
+        ValidationSwarmSchedulerDecisionKind::RunNow
+        | ValidationSwarmSchedulerDecisionKind::StealStaleWork => "remote_ready_worker_missing",
+        ValidationSwarmSchedulerDecisionKind::JoinExisting => "joined_existing_proof",
+        ValidationSwarmSchedulerDecisionKind::WaitForCapacity => "capacity_wait_no_worker_selected",
+        ValidationSwarmSchedulerDecisionKind::RejectLowPriority => "deferred_low_priority",
+        ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker => "source_only_blocker",
+        ValidationSwarmSchedulerDecisionKind::FailClosedProduct => "product_failure_no_worker",
+        ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact => {
+            "invalid_artifact_no_worker"
+        }
+    }
+    .to_string()
+}
+
+fn readiness_worker_health_class(worker: &RchWorkerReadiness) -> &'static str {
+    if worker_is_ready(worker) {
+        return "remote_ready";
+    }
+    match worker.mode {
+        RchMode::Remote if worker.failure.is_some() => "remote_failed",
+        RchMode::Remote => "remote_unreachable",
+        RchMode::LocalFallback => "local_fallback",
+        RchMode::NotUsed => "not_used",
+        RchMode::Unavailable => "unavailable",
+    }
+}
+
+fn receipt_worker_health_class(receipt: &ValidationReceipt) -> &'static str {
+    match receipt.rch.mode {
+        RchMode::Remote if receipt.rch.worker_id.is_some() => "remote_selected",
+        RchMode::Remote => "remote_missing_worker_id",
+        RchMode::LocalFallback => "local_fallback",
+        RchMode::NotUsed => "not_used",
+        RchMode::Unavailable => "unavailable",
+    }
+}
+
+fn scheduler_command_class(decision: &ValidationSwarmSchedulerDecision) -> &'static str {
+    match decision.decision {
+        ValidationSwarmSchedulerDecisionKind::RunNow
+        | ValidationSwarmSchedulerDecisionKind::WaitForCapacity
+        | ValidationSwarmSchedulerDecisionKind::StealStaleWork => "cargo_validation",
+        ValidationSwarmSchedulerDecisionKind::JoinExisting => "proof_join",
+        ValidationSwarmSchedulerDecisionKind::RejectLowPriority
+        | ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker
+        | ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+        | ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact => "not_scheduled",
+    }
+}
+
+fn classify_command(command: &CommandSpec) -> &'static str {
+    let is_cargo = command.program == "cargo" || command.argv.iter().any(|arg| arg == "cargo");
+    if !is_cargo {
+        return "external_command";
+    }
+    if command.argv.iter().any(|arg| arg == "test") {
+        "cargo_test"
+    } else if command.argv.iter().any(|arg| arg == "check") {
+        "cargo_check"
+    } else if command.argv.iter().any(|arg| arg == "clippy") {
+        "cargo_clippy"
+    } else if command.argv.iter().any(|arg| arg == "fmt") {
+        "cargo_fmt"
+    } else {
+        "cargo_other"
+    }
+}
+
+fn receipt_outcome_class(receipt: &ValidationReceipt) -> String {
+    let exit = validation_exit_kind_as_str(receipt.exit.kind);
+    let error = validation_error_class_as_str(receipt.exit.error_class);
+    if error == "none" {
+        exit.to_string()
+    } else {
+        format!("{exit}_{error}")
+    }
+}
+
+fn receipt_recovery_action(receipt: &ValidationReceipt) -> &'static str {
+    if receipt.exit.kind == ValidationExitKind::Success {
+        return "no_action_required";
+    }
+    if receipt.exit.kind == ValidationExitKind::SourceOnly
+        || receipt.classifications.source_only_fallback
+    {
+        return "record_source_only_blocker";
+    }
+    if receipt.exit.retryable {
+        return "retry_rch_validation";
+    }
+    match receipt.exit.error_class {
+        ValidationErrorClass::WorkerInfra
+        | ValidationErrorClass::TransportTimeout
+        | ValidationErrorClass::EnvironmentContention
+        | ValidationErrorClass::DiskPressure => "recover_worker_infrastructure",
+        ValidationErrorClass::CompileError
+        | ValidationErrorClass::TestFailure
+        | ValidationErrorClass::ClippyWarning
+        | ValidationErrorClass::FormatFailure => "surface_product_failure",
+        ValidationErrorClass::None
+        | ValidationErrorClass::SourceOnly
+        | ValidationErrorClass::Unknown => "manual_review",
+    }
+}
+
+fn worker_execution_excluded(sample: &ProofWorkerSchedulingBaselineSample) -> bool {
+    sample.selected_worker.is_none()
+        || !matches!(
+            sample.worker_health_class.as_str(),
+            "remote_ready" | "remote_selected"
+        )
+}
+
+fn percentile(values: &[u64], percentile: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let index = sorted
+        .len()
+        .saturating_mul(percentile)
+        .saturating_add(99)
+        .checked_div(100)
+        .unwrap_or(1)
+        .saturating_sub(1)
+        .min(sorted.len().saturating_sub(1));
+    sorted[index]
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn validation_exit_kind_as_str(kind: ValidationExitKind) -> &'static str {
+    match kind {
+        ValidationExitKind::Success => "success",
+        ValidationExitKind::Failed => "failed",
+        ValidationExitKind::Timeout => "timeout",
+        ValidationExitKind::SourceOnly => "source_only",
+        ValidationExitKind::Cancelled => "cancelled",
+    }
+}
+
+fn validation_error_class_as_str(error_class: ValidationErrorClass) -> &'static str {
+    match error_class {
+        ValidationErrorClass::None => "none",
+        ValidationErrorClass::CompileError => "compile_error",
+        ValidationErrorClass::TestFailure => "test_failure",
+        ValidationErrorClass::ClippyWarning => "clippy_warning",
+        ValidationErrorClass::FormatFailure => "format_failure",
+        ValidationErrorClass::TransportTimeout => "transport_timeout",
+        ValidationErrorClass::WorkerInfra => "worker_infra",
+        ValidationErrorClass::EnvironmentContention => "environment_contention",
+        ValidationErrorClass::DiskPressure => "disk_pressure",
+        ValidationErrorClass::SourceOnly => "source_only",
+        ValidationErrorClass::Unknown => "unknown",
+    }
+}
+
 fn count_proofs(input: &ValidationReadinessInput) -> ProofKindCounts {
     let mut counts = ProofKindCounts::default();
     for status in &input.proof_statuses {
@@ -536,9 +1060,26 @@ fn check(
 mod tests {
     use super::*;
     use crate::ops::validation_broker::{ProofEvidenceSource, QueueState, ValidationProofStatus};
+    use crate::ops::validation_proof_coalescer::{
+        ValidationSwarmSchedulerCoalescerState, ValidationSwarmSchedulerDiagnostics,
+        ValidationSwarmSchedulerFairnessBucket, ValidationSwarmSchedulerFlightRecorderState,
+        ValidationSwarmSchedulerProofDebtClass, ValidationSwarmSchedulerRequiredAction,
+        ValidationSwarmSchedulerStarvationRisk,
+    };
 
     fn now() -> DateTime<Utc> {
         DateTime::<Utc>::from(std::time::SystemTime::UNIX_EPOCH)
+    }
+
+    fn ready_worker() -> RchWorkerReadiness {
+        RchWorkerReadiness {
+            worker_id: "vmi-proof-ready".to_string(),
+            reachable: true,
+            mode: RchMode::Remote,
+            required_toolchains: vec!["stable".to_string()],
+            observed_toolchains: vec!["stable".to_string()],
+            failure: None,
+        }
     }
 
     fn degraded_worker() -> RchWorkerReadiness {
@@ -580,6 +1121,127 @@ mod tests {
         }
     }
 
+    fn baseline_environment() -> ProofWorkerSchedulingBaselineEnvironment {
+        ProofWorkerSchedulingBaselineEnvironment {
+            environment_id: "test-rch-baseline".to_string(),
+            observed_at_utc: now(),
+            rch_status_posture: "degraded".to_string(),
+            rch_workers_healthy: 1,
+            rch_workers_total: 2,
+            rch_slots_available: 1,
+            rch_slots_total: 8,
+            rch_queue_active_builds: 0,
+            rch_queue_waiting_builds: 0,
+            worker_probe_reachable: 2,
+            worker_probe_total: 2,
+            storage_pressure_notes: vec!["synthetic fixture".to_string()],
+            evidence_notes: vec!["measurement-first baseline".to_string()],
+        }
+    }
+
+    fn scheduler_decision(
+        decision: ValidationSwarmSchedulerDecisionKind,
+        decision_id: &str,
+        queue_age_ms: u64,
+        queue_depth: u16,
+        slots_available: u16,
+        retryable: bool,
+    ) -> ValidationSwarmSchedulerDecision {
+        let (required_action, reason_code, event_code, proof_debt_class) = match decision {
+            ValidationSwarmSchedulerDecisionKind::RunNow => (
+                ValidationSwarmSchedulerRequiredAction::StartRchValidation,
+                "VSS_RUN_READY",
+                "VSS-001",
+                ValidationSwarmSchedulerProofDebtClass::None,
+            ),
+            ValidationSwarmSchedulerDecisionKind::WaitForCapacity => (
+                ValidationSwarmSchedulerRequiredAction::WaitForCapacity,
+                "VSS_WAIT_CAPACITY",
+                "VSS-003",
+                ValidationSwarmSchedulerProofDebtClass::Capacity,
+            ),
+            ValidationSwarmSchedulerDecisionKind::StealStaleWork => (
+                ValidationSwarmSchedulerRequiredAction::StealWithNewFence,
+                "VSS_STEAL_STALE",
+                "VSS-004",
+                ValidationSwarmSchedulerProofDebtClass::StaleProducer,
+            ),
+            ValidationSwarmSchedulerDecisionKind::JoinExisting => (
+                ValidationSwarmSchedulerRequiredAction::JoinExistingProof,
+                "VSS_JOIN_IDENTICAL",
+                "VSS-002",
+                ValidationSwarmSchedulerProofDebtClass::None,
+            ),
+            ValidationSwarmSchedulerDecisionKind::RejectLowPriority => (
+                ValidationSwarmSchedulerRequiredAction::DeferLowPriority,
+                "VSS_REJECT_LOW_PRIORITY",
+                "VSS-005",
+                ValidationSwarmSchedulerProofDebtClass::Capacity,
+            ),
+            ValidationSwarmSchedulerDecisionKind::RecordSourceOnlyBlocker => (
+                ValidationSwarmSchedulerRequiredAction::RecordSourceOnlyBlocker,
+                "VSS_SOURCE_ONLY_BLOCKER",
+                "VSS-006",
+                ValidationSwarmSchedulerProofDebtClass::SourceOnly,
+            ),
+            ValidationSwarmSchedulerDecisionKind::FailClosedProduct => (
+                ValidationSwarmSchedulerRequiredAction::SurfaceProductFailure,
+                "VSS_FAIL_PRODUCT",
+                "VSS-007",
+                ValidationSwarmSchedulerProofDebtClass::ProductFailure,
+            ),
+            ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact => (
+                ValidationSwarmSchedulerRequiredAction::RejectArtifact,
+                "VSS_FAIL_INVALID_ARTIFACT",
+                "VSS-008",
+                ValidationSwarmSchedulerProofDebtClass::InvalidArtifact,
+            ),
+        };
+
+        ValidationSwarmSchedulerDecision {
+            schema_version:
+                crate::ops::validation_proof_coalescer::SWARM_SCHEDULER_DECISION_SCHEMA_VERSION
+                    .to_string(),
+            decision_id: decision_id.to_string(),
+            input_ref: "synthetic-input".to_string(),
+            bead_id: "bd-98xo5.18".to_string(),
+            agent_name: "SilverMaple".to_string(),
+            trace_id: format!("trace-{decision_id}"),
+            decided_at: now(),
+            freshness_expires_at: now(),
+            decision,
+            reason_code: reason_code.to_string(),
+            event_code: event_code.to_string(),
+            required_action,
+            fairness_bucket: ValidationSwarmSchedulerFairnessBucket::Normal,
+            starvation_risk: ValidationSwarmSchedulerStarvationRisk::None,
+            retryable,
+            fail_closed: matches!(
+                decision,
+                ValidationSwarmSchedulerDecisionKind::FailClosedProduct
+                    | ValidationSwarmSchedulerDecisionKind::FailClosedInvalidArtifact
+            ),
+            green_proof_eligible: matches!(decision, ValidationSwarmSchedulerDecisionKind::RunNow),
+            operator_message: "synthetic scheduler fixture".to_string(),
+            diagnostics: ValidationSwarmSchedulerDiagnostics {
+                proof_work_key_hex: "a".repeat(64),
+                command_digest_hex: "b".repeat(64),
+                capacity_snapshot_id: "synthetic-capacity".to_string(),
+                queue_age_ms,
+                slots_total: 8,
+                slots_available,
+                worker_slots: 4,
+                queue_depth,
+                coalescer_state: ValidationSwarmSchedulerCoalescerState::None,
+                flight_recorder_state: ValidationSwarmSchedulerFlightRecorderState::None,
+                proof_debt_class,
+                retry_after_ms: retryable.then_some(30_000),
+                fencing_token_digest: None,
+                recorder_path: Some(format!("artifacts/validation_broker/{decision_id}.json")),
+            },
+        }
+    }
+
     #[test]
     fn queue_report_counts_running_proof_and_degraded_worker() {
         let report = build_queue_report(&input_with_running_proof(), "trace-1", now());
@@ -588,6 +1250,160 @@ mod tests {
         assert_eq!(report.summary.queue_depth, 1);
         assert_eq!(report.summary.degraded_workers, 1);
         assert_eq!(report.proof_counts.running, 1);
+    }
+
+    #[test]
+    fn worker_scheduling_baseline_records_run_and_capacity_wait_decisions() {
+        let mut input = input_with_running_proof();
+        input.rch_workers = vec![ready_worker(), degraded_worker()];
+        input.swarm_scheduler_decisions = vec![
+            scheduler_decision(
+                ValidationSwarmSchedulerDecisionKind::RunNow,
+                "run-now",
+                120,
+                3,
+                4,
+                false,
+            ),
+            scheduler_decision(
+                ValidationSwarmSchedulerDecisionKind::WaitForCapacity,
+                "wait-capacity",
+                900,
+                86,
+                0,
+                true,
+            ),
+        ];
+
+        let report = build_worker_scheduling_baseline_report(
+            &input,
+            "trace-baseline",
+            now(),
+            baseline_environment(),
+        );
+
+        assert_eq!(
+            report.schema_version,
+            PROOF_WORKER_SCHEDULING_BASELINE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            report.measurement_mode,
+            "baseline_only_no_performance_improvement_claimed"
+        );
+        assert_eq!(report.scheduler_summary.decisions, 2);
+        assert_eq!(report.scheduler_summary.capacity_waits, 1);
+        assert_eq!(report.metrics.samples, 2);
+        assert_eq!(report.metrics.queue_wait_ms_p95, 900);
+        assert_eq!(report.metrics.queue_wait_ms_p99, 900);
+        assert_eq!(report.metrics.retryable_samples, 1);
+        assert_eq!(report.metrics.worker_exclusion_samples, 1);
+
+        let run_now = &report.samples[0];
+        assert_eq!(run_now.queue_depth, 3);
+        assert_eq!(run_now.selected_worker.as_deref(), Some("vmi-proof-ready"));
+        assert_eq!(run_now.worker_health_class, "remote_ready");
+        assert_eq!(run_now.command_class, "cargo_validation");
+        assert_eq!(run_now.wall_time_ms, 0);
+        assert_eq!(run_now.outcome_class, "run_now");
+        assert_eq!(run_now.retry_recovery_action, "start_rch_validation");
+
+        let wait = &report.samples[1];
+        assert_eq!(wait.queue_depth, 86);
+        assert_eq!(wait.selected_worker, None);
+        assert_eq!(wait.worker_health_class, "capacity_wait_no_worker_selected");
+        assert_eq!(wait.outcome_class, "wait_for_capacity");
+        assert_eq!(wait.retry_recovery_action, "wait_for_capacity");
+        assert!(wait.retryable);
+    }
+
+    #[test]
+    fn worker_scheduling_baseline_renders_sample_jsonl_records() {
+        let mut input = input_with_running_proof();
+        input.rch_workers = vec![ready_worker()];
+        input.swarm_scheduler_decisions = vec![scheduler_decision(
+            ValidationSwarmSchedulerDecisionKind::RunNow,
+            "run-now",
+            42,
+            1,
+            2,
+            false,
+        )];
+        let report = build_worker_scheduling_baseline_report(
+            &input,
+            "trace-jsonl",
+            now(),
+            baseline_environment(),
+        );
+
+        let jsonl =
+            render_worker_scheduling_baseline_jsonl(&report).expect("baseline JSONL should render");
+        let record: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().expect("one JSONL line"))
+                .expect("baseline JSONL line should parse");
+
+        assert_eq!(
+            record["schema_version"].as_str(),
+            Some(PROOF_WORKER_SCHEDULING_BASELINE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            record["measurement_mode"].as_str(),
+            Some("baseline_only_no_performance_improvement_claimed")
+        );
+        assert_eq!(record["sample"]["queue_depth"].as_u64(), Some(1));
+        assert_eq!(
+            record["sample"]["selected_worker"].as_str(),
+            Some("vmi-proof-ready")
+        );
+        assert_eq!(
+            record["sample"]["worker_health_class"].as_str(),
+            Some("remote_ready")
+        );
+        assert_eq!(
+            record["sample"]["retry_recovery_action"].as_str(),
+            Some("start_rch_validation")
+        );
+    }
+
+    #[test]
+    fn checked_in_baseline_artifact_records_required_jsonl_fields() {
+        let artifact = include_str!(
+            "../../../../artifacts/validation_broker/bd-98xo5.18/rch-proof-worker-baseline.jsonl"
+        );
+        let mut lines = artifact.lines().filter(|line| !line.trim().is_empty());
+        let record: serde_json::Value = serde_json::from_str(
+            lines
+                .next()
+                .expect("checked-in baseline artifact should include a JSONL record"),
+        )
+        .expect("checked-in baseline artifact should parse as JSON");
+
+        assert_eq!(
+            record["schema_version"].as_str(),
+            Some(PROOF_WORKER_SCHEDULING_BASELINE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            record["measurement_mode"].as_str(),
+            Some("baseline_only_no_performance_improvement_claimed")
+        );
+        assert_eq!(record["environment"]["rch_workers_total"].as_u64(), Some(9));
+        assert_eq!(
+            record["environment"]["worker_probe_reachable"].as_u64(),
+            Some(9)
+        );
+        for field in [
+            "queue_depth",
+            "selected_worker",
+            "worker_health_class",
+            "command_class",
+            "wall_time_ms",
+            "outcome_class",
+            "retry_recovery_action",
+        ] {
+            assert!(
+                record["sample"].get(field).is_some(),
+                "missing baseline sample field {field}"
+            );
+        }
     }
 
     #[test]
