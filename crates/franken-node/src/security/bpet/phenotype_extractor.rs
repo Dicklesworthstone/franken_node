@@ -10,12 +10,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_FIELDS};
-use crate::push_bounded;
+use crate::connector::canonical_serializer::canonical_bytes;
+use crate::{bounded_read, push_bounded};
 
 use super::drift_features::PhenotypeSample;
 
 pub const PHENOTYPE_EXTRACTOR_SCHEMA_VERSION: &str = "bpet.phenotype_extractor.v1";
+pub const ADVERSARY_CORPUS_RECORD_SCHEMA_VERSION: &str =
+    crate::schema_versions::ADVERSARY_CORPUS_RECORD;
 pub const DEFAULT_MAX_BATCH_VERSIONS: usize = 4096;
+pub const DEFAULT_MAX_CORPUS_RECORD_BYTES: u64 = 1 << 20;
+pub const MAX_BASIS_POINTS: u16 = 10_000;
 
 pub mod event_codes {
     pub const BPET_EXTRACT_INPUT_ACCEPTED: &str = "BPET-EXTRACT-001";
@@ -239,6 +244,341 @@ impl PhenotypeFeatureVector {
 
     pub fn to_drift_sample(&self, ts: i64) -> PhenotypeSample {
         PhenotypeSample::new(ts, self.known_feature_values())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CorpusRecordError {
+    #[error("corpus record field {field} must not be empty")]
+    EmptyField { field: &'static str },
+    #[error("corpus record schema mismatch: expected {expected}, got {actual}")]
+    SchemaVersionMismatch {
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("{field} basis-points value {value} exceeds {max}")]
+    BasisPointsOutOfRange { field: String, value: u16, max: u16 },
+    #[error("campaign-member label requires campaign_id")]
+    MissingCampaignId,
+    #[error("corpus record requires at least one provenance reference")]
+    MissingProvenance,
+    #[error("ground-truth evidence_refs must not be empty")]
+    MissingGroundTruthEvidence,
+    #[error("canonical corpus record contains floating point value at {path}")]
+    FloatingPointValue { path: String },
+    #[error("corpus record bytes are not canonical JSON")]
+    NonCanonicalEncoding,
+    #[error("failed to serialize corpus record: {source}")]
+    Serialize { source: serde_json::Error },
+    #[error("failed to deserialize corpus record: {source}")]
+    Deserialize { source: serde_json::Error },
+    #[error("failed to load corpus record: {source}")]
+    Io { source: std::io::Error },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorpusFeatureState {
+    Known,
+    Partial,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorpusGroundTruthLabel {
+    Benign,
+    Malicious,
+    CampaignMember,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorpusProvenanceKind {
+    RealAdvisory,
+    SyntheticGenerator,
+    RuntimeTrace,
+    RegistrySnapshot,
+    OperatorAssertion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusFeatureObservation {
+    pub state: CorpusFeatureState,
+    pub value_basis_points: Option<u16>,
+    pub source: EvidenceSource,
+    pub uncertainty_code: Option<UncertaintyCode>,
+    pub provenance_ref: String,
+}
+
+impl CorpusFeatureObservation {
+    pub fn known(
+        value_basis_points: u16,
+        source: EvidenceSource,
+        provenance_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            state: CorpusFeatureState::Known,
+            value_basis_points: Some(value_basis_points),
+            source,
+            uncertainty_code: None,
+            provenance_ref: provenance_ref.into(),
+        }
+    }
+
+    pub fn partial(
+        value_basis_points: u16,
+        source: EvidenceSource,
+        uncertainty_code: UncertaintyCode,
+        provenance_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            state: CorpusFeatureState::Partial,
+            value_basis_points: Some(value_basis_points),
+            source,
+            uncertainty_code: Some(uncertainty_code),
+            provenance_ref: provenance_ref.into(),
+        }
+    }
+
+    pub fn unknown(
+        source: EvidenceSource,
+        uncertainty_code: UncertaintyCode,
+        provenance_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            state: CorpusFeatureState::Unknown,
+            value_basis_points: None,
+            source,
+            uncertainty_code: Some(uncertainty_code),
+            provenance_ref: provenance_ref.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusNetworkSurface {
+    pub destination_classes: BTreeMap<String, u64>,
+    pub unique_destination_count: u64,
+    pub egress_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusFilesystemSurface {
+    pub path_classes: BTreeMap<String, u64>,
+    pub read_ops: u64,
+    pub write_ops: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusDependencyTopologyContext {
+    pub direct_dependency_count: u64,
+    pub transitive_dependency_count: u64,
+    pub max_depth: u64,
+    pub maintainer_overlap_count: u64,
+    pub single_point_of_failure_score_bp: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusTrajectoryPoint {
+    pub observed_at: String,
+    pub package_version: String,
+    pub feature_values_bp: BTreeMap<String, u16>,
+    pub risk_score_bp: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusGroundTruth {
+    pub label: CorpusGroundTruthLabel,
+    pub campaign_id: Option<String>,
+    pub confidence_basis_points: u16,
+    pub evidence_refs: Vec<String>,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusProvenanceRef {
+    pub provenance_id: String,
+    pub kind: CorpusProvenanceKind,
+    pub uri: String,
+    pub captured_at: String,
+    pub labeler: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdversaryCorpusRecord {
+    pub schema_version: String,
+    pub record_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub observation_timestamp: String,
+    pub phenotype_features: BTreeMap<String, CorpusFeatureObservation>,
+    pub capability_invocations: BTreeMap<String, u64>,
+    pub network_surface: CorpusNetworkSurface,
+    pub filesystem_surface: CorpusFilesystemSurface,
+    pub dependency_topology: CorpusDependencyTopologyContext,
+    pub longitudinal_trajectory: Vec<CorpusTrajectoryPoint>,
+    pub ground_truth: CorpusGroundTruth,
+    pub provenance: Vec<CorpusProvenanceRef>,
+}
+
+impl AdversaryCorpusRecord {
+    pub fn validate(&self) -> Result<(), CorpusRecordError> {
+        if self.schema_version != ADVERSARY_CORPUS_RECORD_SCHEMA_VERSION {
+            return Err(CorpusRecordError::SchemaVersionMismatch {
+                expected: ADVERSARY_CORPUS_RECORD_SCHEMA_VERSION,
+                actual: self.schema_version.clone(),
+            });
+        }
+        validate_non_empty("record_id", &self.record_id)?;
+        validate_non_empty("package_name", &self.package_name)?;
+        validate_non_empty("package_version", &self.package_version)?;
+        validate_non_empty("observation_timestamp", &self.observation_timestamp)?;
+        validate_basis_points(
+            "dependency_topology.single_point_of_failure_score_bp",
+            self.dependency_topology.single_point_of_failure_score_bp,
+        )?;
+        validate_basis_points(
+            "ground_truth.confidence_basis_points",
+            self.ground_truth.confidence_basis_points,
+        )?;
+        validate_non_empty("ground_truth.rationale", &self.ground_truth.rationale)?;
+        if self.ground_truth.evidence_refs.is_empty() {
+            return Err(CorpusRecordError::MissingGroundTruthEvidence);
+        }
+        if matches!(
+            self.ground_truth.label,
+            CorpusGroundTruthLabel::CampaignMember
+        ) && self
+            .ground_truth
+            .campaign_id
+            .as_deref()
+            .is_none_or(|campaign_id| campaign_id.trim().is_empty())
+        {
+            return Err(CorpusRecordError::MissingCampaignId);
+        }
+        if self.provenance.is_empty() {
+            return Err(CorpusRecordError::MissingProvenance);
+        }
+        for provenance in &self.provenance {
+            validate_non_empty("provenance.provenance_id", &provenance.provenance_id)?;
+            validate_non_empty("provenance.uri", &provenance.uri)?;
+            validate_non_empty("provenance.captured_at", &provenance.captured_at)?;
+            validate_non_empty("provenance.labeler", &provenance.labeler)?;
+        }
+        for (feature_name, feature) in &self.phenotype_features {
+            validate_non_empty("phenotype_features.key", feature_name)?;
+            validate_non_empty("phenotype_features.provenance_ref", &feature.provenance_ref)?;
+            if let Some(value) = feature.value_basis_points {
+                validate_basis_points(
+                    format!("phenotype_features.{feature_name}.value_basis_points"),
+                    value,
+                )?;
+            }
+            if feature.state == CorpusFeatureState::Known && feature.value_basis_points.is_none() {
+                return Err(CorpusRecordError::EmptyField {
+                    field: "phenotype_features.known.value_basis_points",
+                });
+            }
+        }
+        for point in &self.longitudinal_trajectory {
+            validate_non_empty("longitudinal_trajectory.observed_at", &point.observed_at)?;
+            validate_non_empty(
+                "longitudinal_trajectory.package_version",
+                &point.package_version,
+            )?;
+            validate_basis_points("longitudinal_trajectory.risk_score_bp", point.risk_score_bp)?;
+            for (feature_name, value) in &point.feature_values_bp {
+                validate_non_empty(
+                    "longitudinal_trajectory.feature_values_bp.key",
+                    feature_name,
+                )?;
+                validate_basis_points(
+                    format!("longitudinal_trajectory.{feature_name}.feature_value_bp"),
+                    *value,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CorpusRecordError> {
+        canonical_corpus_record_bytes(self)
+    }
+}
+
+pub fn canonical_corpus_record_bytes(
+    record: &AdversaryCorpusRecord,
+) -> Result<Vec<u8>, CorpusRecordError> {
+    record.validate()?;
+    let value =
+        serde_json::to_value(record).map_err(|source| CorpusRecordError::Serialize { source })?;
+    reject_float_values(&value, "$")?;
+    Ok(canonical_bytes(&value))
+}
+
+pub fn decode_canonical_corpus_record(
+    bytes: &[u8],
+) -> Result<AdversaryCorpusRecord, CorpusRecordError> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes)
+        .map_err(|source| CorpusRecordError::Deserialize { source })?;
+    reject_float_values(&value, "$")?;
+    let canonical = canonical_bytes(&value);
+    if canonical != bytes {
+        return Err(CorpusRecordError::NonCanonicalEncoding);
+    }
+    let record = serde_json::from_value::<AdversaryCorpusRecord>(value)
+        .map_err(|source| CorpusRecordError::Deserialize { source })?;
+    record.validate()?;
+    Ok(record)
+}
+
+pub fn load_corpus_record(
+    path: &std::path::Path,
+    max_bytes: u64,
+) -> Result<AdversaryCorpusRecord, CorpusRecordError> {
+    let bytes = bounded_read(path, max_bytes).map_err(|source| CorpusRecordError::Io { source })?;
+    decode_canonical_corpus_record(&bytes)
+}
+
+fn validate_non_empty(field: &'static str, value: &str) -> Result<(), CorpusRecordError> {
+    if value.trim().is_empty() {
+        return Err(CorpusRecordError::EmptyField { field });
+    }
+    Ok(())
+}
+
+fn validate_basis_points(field: impl Into<String>, value: u16) -> Result<(), CorpusRecordError> {
+    if value > MAX_BASIS_POINTS {
+        return Err(CorpusRecordError::BasisPointsOutOfRange {
+            field: field.into(),
+            value,
+            max: MAX_BASIS_POINTS,
+        });
+    }
+    Ok(())
+}
+
+fn reject_float_values(value: &serde_json::Value, path: &str) -> Result<(), CorpusRecordError> {
+    match value {
+        serde_json::Value::Number(number) if number.is_f64() => {
+            Err(CorpusRecordError::FloatingPointValue {
+                path: path.to_string(),
+            })
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                reject_float_values(item, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                reject_float_values(item, &format!("{path}.{key}"))?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 

@@ -88,6 +88,7 @@ pub const CONFORMANCE_SUITE_VERSION: &str = "1.0.0";
 
 // ── Security ───────────────────────────────────────────────────────
 pub const INTENT_FIREWALL: &str = "fw-v1.0";
+pub const ADVERSARY_CORPUS_RECORD: &str = "bpet-adversary-corpus-record-v1";
 pub const DECISION_RECEIPT_CBOR_EXPORT: &str = "decision-receipt-cbor-v2";
 pub const ZK_ATTESTATION: &str = "zka-v1.0";
 pub const STAKING_GOVERNANCE: &str = "staking-v1.0";
@@ -240,6 +241,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("conformance_suite_version", CONFORMANCE_SUITE_VERSION),
         // Security
         ("intent_firewall", INTENT_FIREWALL),
+        ("adversary_corpus_record", ADVERSARY_CORPUS_RECORD),
         ("decision_receipt_cbor_export", DECISION_RECEIPT_CBOR_EXPORT),
         ("zk_attestation", ZK_ATTESTATION),
         ("staking_governance", STAKING_GOVERNANCE),
@@ -458,6 +460,10 @@ mod tests {
         assert_eq!(lookup("control_lane_policy"), Some(CONTROL_LANE_POLICY));
         assert_eq!(lookup("n_version_oracle"), Some(N_VERSION_ORACLE));
         assert_eq!(lookup("vef_proof_generator"), Some(VEF_PROOF_GENERATOR));
+        assert_eq!(
+            lookup("adversary_corpus_record"),
+            Some(ADVERSARY_CORPUS_RECORD)
+        );
         assert_eq!(lookup("extension_registry"), Some(EXTENSION_REGISTRY));
         assert_eq!(lookup("verify_cli_contract"), Some(VERIFY_CLI_CONTRACT));
     }
@@ -627,6 +633,7 @@ mod tests {
             ("extension_registry", EXTENSION_REGISTRY),
             ("security_trust_metrics", SECURITY_TRUST_METRICS),
             ("vef_execution_receipt", VEF_EXECUTION_RECEIPT),
+            ("adversary_corpus_record", ADVERSARY_CORPUS_RECORD),
             ("counterfactual_replay_engine", COUNTERFACTUAL_REPLAY_ENGINE),
         ] {
             assert!(
