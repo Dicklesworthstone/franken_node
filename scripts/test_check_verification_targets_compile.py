@@ -11,6 +11,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_verification_targets_compile import (  # noqa: E402
+    _CONF_CMD,
+    _FUZZ_CMD,
     parse_broken_targets,
     records_from_output,
     main,
@@ -64,6 +66,10 @@ class TestParser(unittest.TestCase):
         self.assertEqual(layers["fuzz_capability_token_parser"], "fuzz")
         # all census records are compile-failures => not green
         self.assertTrue(all((not r.compiles and not r.is_green()) for r in recs))
+
+    def test_cargo_census_commands_are_locked(self):
+        self.assertIn("--locked", _CONF_CMD)
+        self.assertIn("--locked", _FUZZ_CMD)
 
 
 class TestGateExitCode(unittest.TestCase):

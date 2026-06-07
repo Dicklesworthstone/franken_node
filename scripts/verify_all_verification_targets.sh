@@ -20,14 +20,37 @@ OUT="artifacts/verification"
 JSONL="$OUT/verify_run_$(echo "$TS" | tr -d ':-').jsonl"
 REPORT="$OUT/verify_run_$(echo "$TS" | tr -d ':-').md"
 RCH="${VERIF_GATE_CARGO_PREFIX:-rch exec --}"
+LOCK_GUARD="$SCRIPT_DIR/lockfile_drift_guard.py"
+GATES_RC=0
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+
+run_guarded_gate() {
+  label="$1"
+  report_json="$2"
+  log_path="$3"
+  shift 3
+
+  python3 "$LOCK_GUARD" \
+    --label "$label" \
+    --report-json "$report_json" \
+    -- "$@" > "$log_path" 2>&1
+  rc=$?
+  [ "$rc" -ne 0 ] && GATES_RC=1
+
+  {
+    echo "## $label"
+    tail -20 "$log_path"
+    echo "json: $report_json"
+  } >> "$OUT/gates.txt"
+}
 
 if [ "${1:-}" = "--selftest" ]; then
   log "selftest: running parser unit tests"
   python3 "$SCRIPT_DIR/test_remediation_log.py" || exit 1
   python3 "$SCRIPT_DIR/test_check_verification_targets_compile.py" || exit 1
   python3 "$SCRIPT_DIR/test_parse_cargo_test_results.py" || exit 1
+  python3 "$SCRIPT_DIR/test_lockfile_drift_guard.py" || exit 1
   log "selftest OK"
   exit 0
 fi
@@ -44,7 +67,7 @@ CENSUS_RC=$?
 
 # 1) full conformance suite (compile + RUN)
 log "step 1: full conformance suite"
-$RCH cargo test -p frankenengine-node --features extended-surfaces,test-support > "$OUT/full_test.log" 2>&1
+$RCH cargo test -p frankenengine-node --locked --features extended-surfaces,test-support > "$OUT/full_test.log" 2>&1
 python3 "$SCRIPT_DIR/parse_cargo_test_results.py" "$OUT/full_test.log" "$TS" conformance >> "$JSONL"
 
 # 2) fuzz smokes (bounded; one per target)
@@ -62,13 +85,22 @@ done
 
 # 3) verifier SDK
 log "step 3: verifier SDK tests"
-$RCH cargo test -p frankenengine-verifier-sdk > "$OUT/sdk_test.log" 2>&1
+$RCH cargo test -p frankenengine-verifier-sdk --locked > "$OUT/sdk_test.log" 2>&1
 python3 "$SCRIPT_DIR/parse_cargo_test_results.py" "$OUT/sdk_test.log" "$TS" sdk >> "$JSONL"
 
 # 4) supply-chain + fmt + clippy (recorded in the report tail)
 log "step 4: cargo deny / fmt / clippy"
-{ echo "## gates"; cargo deny check advisories bans sources 2>&1 | tail -3
-  cargo fmt --check -p frankenengine-node >/dev/null 2>&1 && echo "fmt: OK" || echo "fmt: FAIL"; } > "$OUT/gates.txt"
+: > "$OUT/gates.txt"
+run_guarded_gate \
+  "cargo deny check advisories bans sources" \
+  "$OUT/cargo_deny_lockfile_drift.json" \
+  "$OUT/cargo_deny.log" \
+  cargo deny check advisories bans sources
+run_guarded_gate \
+  "cargo fmt --check -p frankenengine-node" \
+  "$OUT/cargo_fmt_lockfile_drift.json" \
+  "$OUT/cargo_fmt.log" \
+  cargo fmt --check -p frankenengine-node
 
 # 5) render summary + exit code
 log "step 5: summary"
@@ -76,6 +108,7 @@ python3 "$SCRIPT_DIR/remediation_log.py" "$JSONL" > "$REPORT"
 RC=$?
 cat "$OUT/gates.txt" >> "$REPORT"
 log "report -> $REPORT (exit $RC)"
-# Overall RED if census broke OR any target not green.
+# Overall RED if census broke, gates failed, or any target was not green.
 [ "$CENSUS_RC" -ne 0 ] && RC=1
+[ "$GATES_RC" -ne 0 ] && RC=1
 exit "$RC"

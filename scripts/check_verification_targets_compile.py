@@ -72,16 +72,16 @@ def records_from_output(cargo_output: str, ts: str) -> List[RemediationRecord]:
 
 _CONF_CMD = [
     "rch", "exec", "--", "cargo", "build", "-p", "frankenengine-node",
-    "--tests", "--keep-going", "--features", "extended-surfaces,test-support",
+    "--tests", "--keep-going", "--locked", "--features", "extended-surfaces,test-support",
 ]
 _FUZZ_CMD = [
     "rch", "exec", "--", "cargo", "+nightly", "build",
-    "--manifest-path", "fuzz/Cargo.toml", "--bins", "--keep-going",
+    "--manifest-path", "fuzz/Cargo.toml", "--bins", "--keep-going", "--locked",
 ]
 
 
 def _run(cmd: List[str]) -> str:
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, check=False)
     return (p.stdout or "") + "\n" + (p.stderr or "")
 
 
