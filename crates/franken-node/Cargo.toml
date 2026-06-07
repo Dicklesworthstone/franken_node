@@ -765,6 +765,10 @@ name = "project_scanner"
 path = "tests/project_scanner.rs"
 
 [[test]]
+name = "module_resolution_graph"
+path = "tests/module_resolution_graph.rs"
+
+[[test]]
 name = "rewrite_suggestion_engine"
 path = "tests/rewrite_suggestion_engine.rs"
 required-features = ["admin-tools"]

@@ -6,6 +6,7 @@ pub mod extension_registry;
 #[cfg(feature = "engine")]
 pub mod manifest;
 pub mod migration_kit;
+pub mod module_resolution_graph;
 pub mod project_scanner;
 pub mod provenance;
 pub mod provenance_gate;
