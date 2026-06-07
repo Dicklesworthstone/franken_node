@@ -38,9 +38,13 @@ use frankenengine_node::security::bpet::adversarial_scenarios::{
     AdversarialScenarioFixture, ExpectedVerdict, ScenarioVerdictMatch, all_synthesizers,
     evaluate_scenario_fixture, load_scenario_fixture,
     synthesize_capability_creep_disguised_as_feature, synthesize_eviction_via_trust_flooding,
-    synthesize_false_recovery_claim, synthesize_indirect_via_dep, synthesize_many_tiny_updates,
+    synthesize_false_recovery_claim, synthesize_indirect_via_dep,
+    synthesize_labeled_corpus_records, synthesize_many_tiny_updates,
     synthesize_multi_persona_coordination, synthesize_signature_rollover,
     synthesize_slow_roll_drift,
+};
+use frankenengine_node::security::bpet::phenotype_extractor::{
+    CorpusGroundTruthLabel, GENOME_DIMENSIONS, decode_canonical_corpus_record,
 };
 
 type TestResult = Result<(), String>;
@@ -525,5 +529,107 @@ fn test_all_eight_adversary_kinds_have_corresponding_scenario() -> TestResult {
         observed_files.len(),
         observed_files,
     );
+    Ok(())
+}
+
+#[test]
+fn test_synthetic_corpus_records_cover_all_attack_families_and_benign_controls() -> TestResult {
+    let records = synthesize_labeled_corpus_records()
+        .map_err(|e| format!("synthesize labeled corpus records: {e:?}"))?;
+
+    let campaign_records: Vec<_> = records
+        .iter()
+        .filter(|record| record.ground_truth.label == CorpusGroundTruthLabel::CampaignMember)
+        .collect();
+    let benign_records: Vec<_> = records
+        .iter()
+        .filter(|record| record.ground_truth.label == CorpusGroundTruthLabel::Benign)
+        .collect();
+
+    assert_eq!(
+        records.len(),
+        16,
+        "expected 8 campaigns + 8 benign controls"
+    );
+    assert_eq!(campaign_records.len(), 8, "campaign-member record count");
+    assert_eq!(benign_records.len(), 8, "benign-control record count");
+
+    let required_kinds: BTreeSet<String> = all_synthesizers()
+        .iter()
+        .map(|fixture| fixture.scenario.kind.as_str().to_string())
+        .collect();
+    let observed_campaign_kinds: BTreeSet<String> = campaign_records
+        .iter()
+        .filter_map(|record| record.ground_truth.campaign_id.as_deref())
+        .filter_map(|campaign_id| campaign_id.strip_prefix("synthetic-bpet-campaign:"))
+        .map(str::to_string)
+        .collect();
+
+    assert_eq!(
+        observed_campaign_kinds, required_kinds,
+        "campaign-member records must cover every adversary kind"
+    );
+
+    for record in &records {
+        record
+            .validate()
+            .map_err(|e| format!("validate corpus record `{}`: {e:?}", record.record_id))?;
+        assert_eq!(
+            record.phenotype_features.len(),
+            GENOME_DIMENSIONS.len(),
+            "record `{}` must carry every BPET genome dimension",
+            record.record_id
+        );
+        for dimension in GENOME_DIMENSIONS {
+            assert!(
+                record.phenotype_features.contains_key(dimension),
+                "record `{}` missing phenotype dimension `{dimension}`",
+                record.record_id
+            );
+        }
+        let bytes = record
+            .canonical_bytes()
+            .map_err(|e| format!("canonicalize `{}`: {e:?}", record.record_id))?;
+        let decoded = decode_canonical_corpus_record(&bytes)
+            .map_err(|e| format!("decode canonical `{}`: {e:?}", record.record_id))?;
+        assert_eq!(
+            decoded, *record,
+            "canonical round-trip changed `{}`",
+            record.record_id
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_synthetic_corpus_records_are_byte_deterministic() -> TestResult {
+    let first = synthesize_labeled_corpus_records()
+        .map_err(|e| format!("first corpus generation: {e:?}"))?;
+    let second = synthesize_labeled_corpus_records()
+        .map_err(|e| format!("second corpus generation: {e:?}"))?;
+
+    let first_bytes: Result<Vec<_>, _> = first
+        .iter()
+        .map(|record| {
+            record
+                .canonical_bytes()
+                .map_err(|e| format!("canonicalize first `{}`: {e:?}", record.record_id))
+        })
+        .collect();
+    let second_bytes: Result<Vec<_>, _> = second
+        .iter()
+        .map(|record| {
+            record
+                .canonical_bytes()
+                .map_err(|e| format!("canonicalize second `{}`: {e:?}", record.record_id))
+        })
+        .collect();
+
+    assert_eq!(
+        first_bytes?, second_bytes?,
+        "same synthetic corpus profile must emit byte-identical canonical records"
+    );
+
     Ok(())
 }

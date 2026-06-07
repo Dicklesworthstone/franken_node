@@ -33,13 +33,20 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::adversarial_evolution::{
-    AdversarialError, AdversaryKind, AdversaryScenario, RampCurve, validate_scenario,
+    AdversarialError, AdversaryKind, AdversaryScenario, RampCurve, canonical_hash,
+    validate_scenario,
 };
 use super::adversarial_harness::{
     AdversarialHarness, AdversarialHarnessError, CAPABILITY_FIELD, DetectorThresholds,
-    RESPONSE_FIELD, ScenarioVerdict, VELOCITY_FIELD, run_scenario,
+    EvolutionResult, RESPONSE_FIELD, ScenarioVerdict, VELOCITY_FIELD, run_scenario,
 };
 use super::drift_features::PhenotypeSample;
+use super::phenotype_extractor::{
+    ADVERSARY_CORPUS_RECORD_SCHEMA_VERSION, AdversaryCorpusRecord, CorpusDependencyTopologyContext,
+    CorpusFeatureObservation, CorpusFilesystemSurface, CorpusGroundTruth, CorpusGroundTruthLabel,
+    CorpusNetworkSurface, CorpusProvenanceKind, CorpusProvenanceRef, CorpusTrajectoryPoint,
+    EvidenceSource, GENOME_DIMENSIONS, MAX_BASIS_POINTS, feature_names,
+};
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -250,6 +257,540 @@ pub fn evaluate_scenario_fixture(
         actual_first_detection_at: result.first_detection_at,
         divergences,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic corpus record generation
+// ---------------------------------------------------------------------------
+
+const SYNTHETIC_CORPUS_CAPTURED_AT: &str = "1970-01-01T00:00:00Z";
+const SYNTHETIC_CORPUS_LABELER: &str = "franken-node-bpet-adversarial-scenarios-v1";
+
+/// Emit deterministic labeled corpus records for every canonical adversary
+/// scenario, plus one benign control per scenario.
+///
+/// The generator is intentionally a pure function over the in-code fixture
+/// catalog. There is no wall-clock, filesystem, RNG, or environment input, so
+/// two calls with the same checked-in catalog produce byte-identical
+/// [`AdversaryCorpusRecord::canonical_bytes`] payloads.
+pub fn synthesize_labeled_corpus_records()
+-> std::result::Result<Vec<AdversaryCorpusRecord>, AdversarialHarnessError> {
+    let mut records = Vec::with_capacity(16);
+    for fixture in all_synthesizers() {
+        let (campaign_member, benign_control) =
+            synthesize_labeled_corpus_records_for_fixture(&fixture)?;
+        records.push(campaign_member);
+        records.push(benign_control);
+    }
+    Ok(records)
+}
+
+/// Emit the labeled campaign-member record and the matched benign control for
+/// a single fixture.
+pub fn synthesize_labeled_corpus_records_for_fixture(
+    fixture: &AdversarialScenarioFixture,
+) -> std::result::Result<(AdversaryCorpusRecord, AdversaryCorpusRecord), AdversarialHarnessError> {
+    fixture
+        .validate()
+        .map_err(AdversarialHarnessError::InvalidScenario)?;
+    let mut harness = AdversarialHarness::new(fixture.thresholds)?;
+    let result = run_scenario(&mut harness, &fixture.scenario, &fixture.baseline)?;
+    Ok((
+        campaign_member_corpus_record(fixture, &result),
+        benign_control_corpus_record(fixture),
+    ))
+}
+
+fn campaign_member_corpus_record(
+    fixture: &AdversarialScenarioFixture,
+    result: &EvolutionResult,
+) -> AdversaryCorpusRecord {
+    let provenance_id = provenance_id(fixture, "campaign");
+    let campaign_id = campaign_id(fixture);
+    AdversaryCorpusRecord {
+        schema_version: ADVERSARY_CORPUS_RECORD_SCHEMA_VERSION.to_string(),
+        record_id: format!("synthetic-bpet-v1:{}:campaign-member", fixture.name),
+        package_name: format!("synthetic-bpet-{}", fixture.name),
+        package_version: "1.0.0".to_string(),
+        observation_timestamp: SYNTHETIC_CORPUS_CAPTURED_AT.to_string(),
+        phenotype_features: corpus_feature_observations(
+            fixture,
+            Some(result),
+            &provenance_id,
+            CorpusGroundTruthLabel::CampaignMember,
+        ),
+        capability_invocations: capability_invocations(fixture, false),
+        network_surface: network_surface(fixture, false),
+        filesystem_surface: filesystem_surface(fixture, false),
+        dependency_topology: dependency_topology(fixture, false),
+        longitudinal_trajectory: adversarial_trajectory(result, fixture),
+        ground_truth: CorpusGroundTruth {
+            label: CorpusGroundTruthLabel::CampaignMember,
+            campaign_id: Some(campaign_id.clone()),
+            confidence_basis_points: MAX_BASIS_POINTS,
+            evidence_refs: vec![provenance_id.clone(), canonical_hash(&fixture.scenario)],
+            rationale: format!(
+                "Synthetic BPET adversary fixture `{}` exercises `{}` as a labeled campaign member.",
+                fixture.name,
+                fixture.scenario.kind.as_str()
+            ),
+        },
+        provenance: vec![provenance_ref(fixture, &provenance_id, "campaign")],
+    }
+}
+
+fn benign_control_corpus_record(fixture: &AdversarialScenarioFixture) -> AdversaryCorpusRecord {
+    let provenance_id = provenance_id(fixture, "benign-control");
+    AdversaryCorpusRecord {
+        schema_version: ADVERSARY_CORPUS_RECORD_SCHEMA_VERSION.to_string(),
+        record_id: format!("synthetic-bpet-v1:{}:benign-control", fixture.name),
+        package_name: format!("synthetic-bpet-{}-control", fixture.name),
+        package_version: "1.0.0".to_string(),
+        observation_timestamp: SYNTHETIC_CORPUS_CAPTURED_AT.to_string(),
+        phenotype_features: corpus_feature_observations(
+            fixture,
+            None,
+            &provenance_id,
+            CorpusGroundTruthLabel::Benign,
+        ),
+        capability_invocations: capability_invocations(fixture, true),
+        network_surface: network_surface(fixture, true),
+        filesystem_surface: filesystem_surface(fixture, true),
+        dependency_topology: dependency_topology(fixture, true),
+        longitudinal_trajectory: benign_trajectory(fixture),
+        ground_truth: CorpusGroundTruth {
+            label: CorpusGroundTruthLabel::Benign,
+            campaign_id: None,
+            confidence_basis_points: MAX_BASIS_POINTS,
+            evidence_refs: vec![provenance_id.clone(), canonical_hash(&fixture.scenario)],
+            rationale: format!(
+                "Matched benign control for synthetic BPET fixture `{}`.",
+                fixture.name
+            ),
+        },
+        provenance: vec![provenance_ref(fixture, &provenance_id, "benign-control")],
+    }
+}
+
+fn corpus_feature_observations(
+    fixture: &AdversarialScenarioFixture,
+    result: Option<&EvolutionResult>,
+    provenance_id: &str,
+    label: CorpusGroundTruthLabel,
+) -> BTreeMap<String, CorpusFeatureObservation> {
+    let feature_values = corpus_feature_values(fixture, result, label);
+    GENOME_DIMENSIONS
+        .into_iter()
+        .map(|feature_name| {
+            let value = feature_values
+                .get(feature_name)
+                .copied()
+                .unwrap_or_default();
+            (
+                feature_name.to_string(),
+                CorpusFeatureObservation::known(
+                    value,
+                    EvidenceSource::Derived,
+                    provenance_id.to_string(),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn corpus_feature_values(
+    fixture: &AdversarialScenarioFixture,
+    result: Option<&EvolutionResult>,
+    label: CorpusGroundTruthLabel,
+) -> BTreeMap<&'static str, u16> {
+    let benign = matches!(label, CorpusGroundTruthLabel::Benign);
+    let (capability, declared, velocity, response, risk) = match result {
+        Some(result) => {
+            let last_step = result.trace.steps.last();
+            let last_outcome = result.outcomes.last();
+            (
+                last_step
+                    .map(|step| field_value(&step.observed_state, CAPABILITY_FIELD))
+                    .unwrap_or_else(|| baseline_field(fixture, CAPABILITY_FIELD)),
+                last_step
+                    .map(|step| field_value(&step.declared_state, CAPABILITY_FIELD))
+                    .unwrap_or_else(|| baseline_field(fixture, CAPABILITY_FIELD)),
+                last_step
+                    .map(|step| field_value(&step.observed_state, VELOCITY_FIELD))
+                    .unwrap_or_else(|| baseline_field(fixture, VELOCITY_FIELD)),
+                last_step
+                    .map(|step| field_value(&step.observed_state, RESPONSE_FIELD))
+                    .unwrap_or_else(|| baseline_field(fixture, RESPONSE_FIELD)),
+                last_outcome
+                    .map(|outcome| outcome.risk_score)
+                    .unwrap_or_default(),
+            )
+        }
+        None => (
+            baseline_field(fixture, CAPABILITY_FIELD),
+            baseline_field(fixture, CAPABILITY_FIELD),
+            baseline_field(fixture, VELOCITY_FIELD),
+            baseline_field(fixture, RESPONSE_FIELD),
+            0.0,
+        ),
+    };
+
+    let mut values = BTreeMap::new();
+    values.insert(
+        feature_names::CAPABILITY_INVOCATION_INTENSITY,
+        basis_points(capability),
+    );
+    values.insert(
+        feature_names::RESOURCE_ENVELOPE_PRESSURE,
+        if benign { 500 } else { basis_points(risk) },
+    );
+    values.insert(
+        feature_names::NETWORK_SURFACE_AREA,
+        surface_bp(fixture.scenario.kind, "network", benign),
+    );
+    values.insert(
+        feature_names::FILESYSTEM_SURFACE_AREA,
+        surface_bp(fixture.scenario.kind, "filesystem", benign),
+    );
+    values.insert(
+        feature_names::DECLARED_PERMISSION_SURFACE,
+        basis_points(declared),
+    );
+    values.insert(
+        feature_names::CODE_COMPLEXITY,
+        basis_points(velocity.max(response)),
+    );
+    values.insert(
+        feature_names::DEPENDENCY_SURFACE,
+        dependency_surface_bp(fixture.scenario.kind, benign),
+    );
+    values
+}
+
+fn adversarial_trajectory(
+    result: &EvolutionResult,
+    fixture: &AdversarialScenarioFixture,
+) -> Vec<CorpusTrajectoryPoint> {
+    result
+        .trace
+        .steps
+        .iter()
+        .zip(&result.outcomes)
+        .map(|(step, outcome)| {
+            let mut feature_values = BTreeMap::new();
+            feature_values.insert(
+                feature_names::CAPABILITY_INVOCATION_INTENSITY.to_string(),
+                basis_points(field_value(&step.observed_state, CAPABILITY_FIELD)),
+            );
+            feature_values.insert(
+                feature_names::RESOURCE_ENVELOPE_PRESSURE.to_string(),
+                basis_points(outcome.risk_score),
+            );
+            feature_values.insert(
+                feature_names::DECLARED_PERMISSION_SURFACE.to_string(),
+                basis_points(field_value(&step.declared_state, CAPABILITY_FIELD)),
+            );
+            feature_values.insert(
+                feature_names::CODE_COMPLEXITY.to_string(),
+                basis_points(
+                    field_value(&step.observed_state, VELOCITY_FIELD)
+                        .max(field_value(&step.observed_state, RESPONSE_FIELD)),
+                ),
+            );
+            feature_values.insert(
+                feature_names::NETWORK_SURFACE_AREA.to_string(),
+                surface_bp(fixture.scenario.kind, "network", false),
+            );
+            feature_values.insert(
+                feature_names::FILESYSTEM_SURFACE_AREA.to_string(),
+                surface_bp(fixture.scenario.kind, "filesystem", false),
+            );
+            feature_values.insert(
+                feature_names::DEPENDENCY_SURFACE.to_string(),
+                dependency_surface_bp(fixture.scenario.kind, false),
+            );
+            CorpusTrajectoryPoint {
+                observed_at: synthetic_step_timestamp(step.step_idx),
+                package_version: synthetic_step_version(step.step_idx),
+                feature_values_bp: feature_values,
+                risk_score_bp: basis_points(outcome.risk_score),
+            }
+        })
+        .collect()
+}
+
+fn benign_trajectory(fixture: &AdversarialScenarioFixture) -> Vec<CorpusTrajectoryPoint> {
+    let mut feature_values = BTreeMap::new();
+    for (feature_name, value) in
+        corpus_feature_values(fixture, None, CorpusGroundTruthLabel::Benign)
+    {
+        feature_values.insert(feature_name.to_string(), value);
+    }
+    vec![CorpusTrajectoryPoint {
+        observed_at: SYNTHETIC_CORPUS_CAPTURED_AT.to_string(),
+        package_version: "1.0.0".to_string(),
+        feature_values_bp: feature_values,
+        risk_score_bp: 0,
+    }]
+}
+
+fn capability_invocations(
+    fixture: &AdversarialScenarioFixture,
+    benign: bool,
+) -> BTreeMap<String, u64> {
+    let mut invocations = BTreeMap::new();
+    let step_count = if benign {
+        1
+    } else {
+        u64::from(fixture.scenario.n_steps)
+    };
+    let multiplier = match fixture.scenario.kind {
+        AdversaryKind::SlowRollDrift | AdversaryKind::ManyTinyUpdates => 1,
+        AdversaryKind::CapabilityCreepDisguisedAsFeature => 4,
+        AdversaryKind::EvictionViaTrustFlooding => 5,
+        AdversaryKind::MultiPersonaCoordination => 6,
+        AdversaryKind::FalseRecoveryClaim => 3,
+        AdversaryKind::IndirectViaDep => 2,
+        AdversaryKind::SignatureRollover => 4,
+    };
+    invocations.insert(
+        fixture.scenario.target_capability.clone(),
+        step_count.saturating_mul(multiplier),
+    );
+    if matches!(
+        fixture.scenario.kind,
+        AdversaryKind::MultiPersonaCoordination
+    ) && !benign
+    {
+        invocations.insert(
+            "maintainer:persona-switch".to_string(),
+            step_count.saturating_div(2).max(1),
+        );
+    }
+    invocations
+}
+
+fn network_surface(fixture: &AdversarialScenarioFixture, benign: bool) -> CorpusNetworkSurface {
+    let mut destination_classes = BTreeMap::new();
+    let steps = if benign {
+        1
+    } else {
+        u64::from(fixture.scenario.n_steps)
+    };
+    match fixture.scenario.kind {
+        AdversaryKind::CapabilityCreepDisguisedAsFeature
+        | AdversaryKind::EvictionViaTrustFlooding
+        | AdversaryKind::MultiPersonaCoordination
+        | AdversaryKind::FalseRecoveryClaim
+        | AdversaryKind::IndirectViaDep
+        | AdversaryKind::SignatureRollover => {
+            destination_classes.insert("registry_api".to_string(), steps);
+        }
+        AdversaryKind::SlowRollDrift | AdversaryKind::ManyTinyUpdates => {
+            destination_classes.insert("telemetry_endpoint".to_string(), steps.saturating_div(4));
+        }
+    }
+    if benign {
+        destination_classes.insert("package_registry".to_string(), 1);
+    }
+    let unique_destination_count = destination_classes
+        .values()
+        .filter(|count| **count > 0)
+        .count() as u64;
+    let egress_bytes = destination_classes
+        .values()
+        .copied()
+        .sum::<u64>()
+        .saturating_mul(if benign { 512 } else { 4096 });
+    CorpusNetworkSurface {
+        destination_classes,
+        unique_destination_count,
+        egress_bytes,
+    }
+}
+
+fn filesystem_surface(
+    fixture: &AdversarialScenarioFixture,
+    benign: bool,
+) -> CorpusFilesystemSurface {
+    let mut path_classes = BTreeMap::new();
+    let steps = if benign {
+        1
+    } else {
+        u64::from(fixture.scenario.n_steps)
+    };
+    if fixture.scenario.target_capability.contains("fs") {
+        path_classes.insert("workspace".to_string(), steps);
+    }
+    if matches!(
+        fixture.scenario.kind,
+        AdversaryKind::FalseRecoveryClaim | AdversaryKind::SignatureRollover
+    ) {
+        path_classes.insert(
+            "release_artifacts".to_string(),
+            steps.saturating_div(2).max(1),
+        );
+    }
+    if path_classes.is_empty() {
+        path_classes.insert("manifest".to_string(), if benign { 1 } else { 2 });
+    }
+    CorpusFilesystemSurface {
+        path_classes,
+        read_ops: if benign { 1 } else { steps.saturating_mul(2) },
+        write_ops: if benign { 0 } else { steps },
+    }
+}
+
+fn dependency_topology(
+    fixture: &AdversarialScenarioFixture,
+    benign: bool,
+) -> CorpusDependencyTopologyContext {
+    if benign {
+        return CorpusDependencyTopologyContext {
+            direct_dependency_count: 2,
+            transitive_dependency_count: 6,
+            max_depth: 2,
+            maintainer_overlap_count: 0,
+            single_point_of_failure_score_bp: 1_000,
+        };
+    }
+    match fixture.scenario.kind {
+        AdversaryKind::IndirectViaDep => CorpusDependencyTopologyContext {
+            direct_dependency_count: 4,
+            transitive_dependency_count: 38,
+            max_depth: 5,
+            maintainer_overlap_count: 2,
+            single_point_of_failure_score_bp: 8_250,
+        },
+        AdversaryKind::MultiPersonaCoordination => CorpusDependencyTopologyContext {
+            direct_dependency_count: 6,
+            transitive_dependency_count: 28,
+            max_depth: 4,
+            maintainer_overlap_count: 5,
+            single_point_of_failure_score_bp: 6_750,
+        },
+        AdversaryKind::EvictionViaTrustFlooding => CorpusDependencyTopologyContext {
+            direct_dependency_count: 5,
+            transitive_dependency_count: 24,
+            max_depth: 4,
+            maintainer_overlap_count: 3,
+            single_point_of_failure_score_bp: 6_000,
+        },
+        AdversaryKind::FalseRecoveryClaim | AdversaryKind::SignatureRollover => {
+            CorpusDependencyTopologyContext {
+                direct_dependency_count: 3,
+                transitive_dependency_count: 16,
+                max_depth: 3,
+                maintainer_overlap_count: 2,
+                single_point_of_failure_score_bp: 5_500,
+            }
+        }
+        AdversaryKind::CapabilityCreepDisguisedAsFeature
+        | AdversaryKind::SlowRollDrift
+        | AdversaryKind::ManyTinyUpdates => CorpusDependencyTopologyContext {
+            direct_dependency_count: 3,
+            transitive_dependency_count: 12,
+            max_depth: 3,
+            maintainer_overlap_count: 1,
+            single_point_of_failure_score_bp: 4_000,
+        },
+    }
+}
+
+fn surface_bp(kind: AdversaryKind, surface: &str, benign: bool) -> u16 {
+    if benign {
+        return 500;
+    }
+    match (kind, surface) {
+        (AdversaryKind::CapabilityCreepDisguisedAsFeature, "network") => 8_500,
+        (AdversaryKind::EvictionViaTrustFlooding, "network") => 7_500,
+        (AdversaryKind::IndirectViaDep, "network") => 6_500,
+        (AdversaryKind::SlowRollDrift, "filesystem") => 7_000,
+        (AdversaryKind::ManyTinyUpdates, "filesystem") => 5_500,
+        (AdversaryKind::FalseRecoveryClaim | AdversaryKind::SignatureRollover, "filesystem") => {
+            5_000
+        }
+        (AdversaryKind::MultiPersonaCoordination, _) => 6_000,
+        (_, _) => 2_500,
+    }
+}
+
+fn dependency_surface_bp(kind: AdversaryKind, benign: bool) -> u16 {
+    if benign {
+        return 1_000;
+    }
+    match kind {
+        AdversaryKind::IndirectViaDep => 8_500,
+        AdversaryKind::MultiPersonaCoordination | AdversaryKind::EvictionViaTrustFlooding => 6_500,
+        AdversaryKind::FalseRecoveryClaim | AdversaryKind::SignatureRollover => 5_500,
+        AdversaryKind::CapabilityCreepDisguisedAsFeature
+        | AdversaryKind::SlowRollDrift
+        | AdversaryKind::ManyTinyUpdates => 3_500,
+    }
+}
+
+fn provenance_ref(
+    fixture: &AdversarialScenarioFixture,
+    provenance_id: &str,
+    role: &str,
+) -> CorpusProvenanceRef {
+    CorpusProvenanceRef {
+        provenance_id: provenance_id.to_string(),
+        kind: CorpusProvenanceKind::SyntheticGenerator,
+        uri: format!(
+            "franken-node://security/bpet/adversarial-scenarios/{}/{}",
+            fixture.name, role
+        ),
+        captured_at: SYNTHETIC_CORPUS_CAPTURED_AT.to_string(),
+        labeler: SYNTHETIC_CORPUS_LABELER.to_string(),
+    }
+}
+
+fn campaign_id(fixture: &AdversarialScenarioFixture) -> String {
+    format!("synthetic-bpet-campaign:{}", fixture.scenario.kind.as_str())
+}
+
+fn provenance_id(fixture: &AdversarialScenarioFixture, role: &str) -> String {
+    format!("synthetic-bpet:{}:{role}", fixture.name)
+}
+
+fn synthetic_step_timestamp(step_idx: u32) -> String {
+    let seconds = step_idx;
+    let hour = seconds / 3_600;
+    let minute = (seconds / 60) % 60;
+    let second = seconds % 60;
+    format!("1970-01-01T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn synthetic_step_version(step_idx: u32) -> String {
+    format!("1.0.{}", step_idx.saturating_add(1))
+}
+
+fn baseline_field(fixture: &AdversarialScenarioFixture, field: &str) -> f64 {
+    field_value(&fixture.baseline.fields, field)
+}
+
+fn field_value(fields: &BTreeMap<String, f64>, field: &str) -> f64 {
+    fields
+        .get(field)
+        .copied()
+        .filter(|value| value.is_finite())
+        .unwrap_or_default()
+        .clamp(0.0, 1.0)
+}
+
+fn basis_points(value: f64) -> u16 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let scaled = (value.clamp(0.0, 1.0) * f64::from(MAX_BASIS_POINTS)).round();
+    if scaled <= 0.0 {
+        0
+    } else if scaled >= f64::from(MAX_BASIS_POINTS) {
+        MAX_BASIS_POINTS
+    } else {
+        scaled as u16
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +1186,37 @@ mod tests {
                 kinds.contains(&kind),
                 "missing synthesizer for {kind:?}; got {kinds:?}"
             );
+        }
+    }
+
+    #[test]
+    fn synthetic_corpus_records_are_valid_labeled_and_deterministic() {
+        let first = synthesize_labeled_corpus_records().expect("first corpus generation");
+        let second = synthesize_labeled_corpus_records().expect("second corpus generation");
+
+        assert_eq!(first.len(), 16);
+        assert_eq!(second.len(), 16);
+
+        let first_bytes: Vec<Vec<u8>> = first
+            .iter()
+            .map(|record| record.canonical_bytes().expect("canonical record"))
+            .collect();
+        let second_bytes: Vec<Vec<u8>> = second
+            .iter()
+            .map(|record| record.canonical_bytes().expect("canonical record"))
+            .collect();
+        assert_eq!(first_bytes, second_bytes);
+
+        for fixture in all_synthesizers() {
+            let campaign_id = campaign_id(&fixture);
+            assert!(first.iter().any(|record| {
+                record.ground_truth.label == CorpusGroundTruthLabel::CampaignMember
+                    && record.ground_truth.campaign_id.as_deref() == Some(campaign_id.as_str())
+            }));
+            assert!(first.iter().any(|record| {
+                record.ground_truth.label == CorpusGroundTruthLabel::Benign
+                    && record.record_id.contains(&fixture.name)
+            }));
         }
     }
 }
