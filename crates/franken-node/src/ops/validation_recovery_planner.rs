@@ -1122,6 +1122,18 @@ impl ValidationRecoveryPlanner {
         &self,
         input: &RecoveryPlannerInput,
     ) -> Result<RecoveryDecision, RecoveryPlannerError> {
+        if is_storage_pressure_outcome(input) {
+            return RecoveryDecision::new(
+                input,
+                RecoveryAction::DrainWorkerThenRetry,
+                reason_codes::DRAIN_WORKER_THEN_RETRY,
+                "Worker storage pressure - drain saturated worker before retry".to_string(),
+                "Drain storage-pressured worker and retry on healthy capacity".to_string(),
+                Some(120_000),
+                None,
+            );
+        }
+
         // Filesystem errors could be worker-specific or systemic
         if input.attempt_count == 0 {
             // First attempt - try different worker
@@ -1244,6 +1256,15 @@ impl ValidationRecoveryPlanner {
             // Multiple broker errors - fail closed
             self.create_fail_closed_decision(input, "Persistent broker internal errors")
         }
+    }
+}
+
+fn is_storage_pressure_outcome(input: &RecoveryPlannerInput) -> bool {
+    input.rch_outcome.reason_code == "RCH-WORKER-STORAGE-PRESSURE" || {
+        let detail = input.rch_outcome.detail.to_ascii_lowercase();
+        detail.contains("no space left on device")
+            || detail.contains("os error 28")
+            || detail.contains("enospc")
     }
 }
 
@@ -1845,6 +1866,24 @@ mod tests {
         let decision = planner.plan_recovery(&input).unwrap();
         assert_eq!(decision.action, RecoveryAction::RetryRemoteDifferentWorker);
         assert_eq!(decision.retry_after_ms, Some(30_000));
+    }
+
+    #[test]
+    fn storage_pressure_drains_worker_without_same_worker_preference() {
+        let planner = ValidationRecoveryPlanner::new(RecoveryPlannerConfig::default());
+        let mut input = default_input();
+        input.rch_outcome.outcome = RchOutcomeClass::WorkerFilesystemError;
+        input.rch_outcome.reason_code = "RCH-WORKER-STORAGE-PRESSURE".to_string();
+        input.rch_outcome.detail = "failed to unpack package `linux-raw-sys v0.12.1`: No space left on device (os error 28)".to_string();
+        input.rch_outcome.worker_id = Some("vmi1227854".to_string());
+
+        let decision = planner.plan_recovery(&input).unwrap();
+
+        assert_eq!(decision.action, RecoveryAction::DrainWorkerThenRetry);
+        assert_eq!(decision.reason_code, reason_codes::DRAIN_WORKER_THEN_RETRY);
+        assert_eq!(decision.retry_after_ms, Some(120_000));
+        assert!(decision.worker_preference.is_none());
+        assert!(decision.operator_message.contains("storage pressure"));
     }
 
     #[test]

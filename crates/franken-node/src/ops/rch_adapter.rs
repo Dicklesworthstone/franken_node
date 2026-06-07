@@ -1273,10 +1273,19 @@ fn classify_worker_failure(normalized: &str) -> Option<ClassifiedOutcome> {
         });
     }
 
+    if is_worker_storage_pressure(normalized) {
+        return Some(ClassifiedOutcome {
+            outcome: RchOutcomeClass::WorkerFilesystemError,
+            timeout_class: RchTimeoutClass::None,
+            retryable: true,
+            reason_code: "RCH-WORKER-STORAGE-PRESSURE".to_string(),
+            detail: "RCH worker storage pressure prevented cargo from unpacking or writing build artifacts before product validation".to_string(),
+        });
+    }
+
     if contains_any(
         normalized,
         &[
-            "no space left on device",
             "read-only file system",
             "permission denied",
             "failed to create directory",
@@ -1297,6 +1306,13 @@ fn classify_worker_failure(normalized: &str) -> Option<ClassifiedOutcome> {
     }
 
     None
+}
+
+fn is_worker_storage_pressure(normalized: &str) -> bool {
+    contains_any(
+        normalized,
+        &["no space left on device", "os error 28", "enospc"],
+    )
 }
 
 fn is_worker_missing_dependency_path(normalized: &str) -> bool {
@@ -1978,6 +1994,7 @@ mod tests {
         let outcome = classify_rch_output(&cmd, &result, &RchProcessSnapshot::quiet(), &policy());
 
         assert_eq!(outcome.outcome, RchOutcomeClass::WorkerFilesystemError);
+        assert_eq!(outcome.reason_code, "RCH-WORKER-STORAGE-PRESSURE");
         assert!(!outcome.product_failure);
         assert!(outcome.retryable);
     }

@@ -3545,14 +3545,20 @@ fn recovery_decision_for_error(exit: &ValidationExit) -> ReadinessRecoveryDecisi
             "queue validation until capacity is available",
             Some(120_000),
         ),
-        ValidationErrorClass::DiskPressure
-        | ValidationErrorClass::SourceOnly
-        | ValidationErrorClass::None => readiness_recovery_decision(
-            RecoveryAction::UseSourceOnlyBlocker,
-            reason_codes::USE_SOURCE_ONLY_BLOCKER,
-            "use source-only validation blocker",
-            None,
+        ValidationErrorClass::DiskPressure => readiness_recovery_decision(
+            RecoveryAction::DrainWorkerThenRetry,
+            reason_codes::DRAIN_WORKER_THEN_RETRY,
+            "drain storage-pressured worker and retry validation",
+            Some(120_000),
         ),
+        ValidationErrorClass::SourceOnly | ValidationErrorClass::None => {
+            readiness_recovery_decision(
+                RecoveryAction::UseSourceOnlyBlocker,
+                reason_codes::USE_SOURCE_ONLY_BLOCKER,
+                "use source-only validation blocker",
+                None,
+            )
+        }
         ValidationErrorClass::Unknown if exit.retryable => readiness_recovery_decision(
             RecoveryAction::RetryRemoteDifferentWorker,
             reason_codes::RETRY_REMOTE_DIFFERENT_WORKER,

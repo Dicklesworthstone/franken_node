@@ -299,6 +299,67 @@ fn worker_missing_dp_path_dependency_is_infrastructure_failure() {
 }
 
 #[test]
+fn worker_storage_pressure_from_crate_unpack_is_infrastructure_failure() {
+    let cmd = invocation(&[
+        "cargo",
+        "check",
+        "-p",
+        "frankenengine-node",
+        "--all-targets",
+    ]);
+    let output = command_output(
+        101,
+        "",
+        "error: failed to download `linux-raw-sys v0.12.1`\n\
+         Caused by:\n\
+           failed to unpack package `linux-raw-sys v0.12.1`\n\
+         Caused by:\n\
+           failed to create directory `/home/ubuntu/.cargo/registry/src/linux-raw-sys-0.12.1/src`\n\
+         Caused by:\n\
+           No space left on device (os error 28)\n\
+         [RCH] remote vmi1227854 (23.7s)\n",
+    );
+
+    let outcome = classify_rch_output(
+        &cmd,
+        &output,
+        &RchProcessSnapshot::quiet(),
+        &RchCommandPolicy::default(),
+    );
+
+    assert_eq!(outcome.outcome, RchOutcomeClass::WorkerFilesystemError);
+    assert_eq!(outcome.reason_code, "RCH-WORKER-STORAGE-PRESSURE");
+    assert_eq!(outcome.worker_id.as_deref(), Some("vmi1227854"));
+    assert_eq!(outcome.action, Some(RchValidationAction::Check));
+    assert!(outcome.stderr_digest.snippet.contains("No space left"));
+    assert!(outcome.retryable);
+    assert!(!outcome.product_failure);
+}
+
+#[test]
+fn worker_storage_pressure_from_os_error_28_without_phrase_is_infrastructure_failure() {
+    let cmd = invocation(&["cargo", "test", "-p", "frankenengine-node"]);
+    let output = command_output(
+        101,
+        "",
+        "error: could not create temp dir for build script output (os error 28)\n\
+         [RCH] remote vmi1227854 (8.1s)\n",
+    );
+
+    let outcome = classify_rch_output(
+        &cmd,
+        &output,
+        &RchProcessSnapshot::quiet(),
+        &RchCommandPolicy::default(),
+    );
+
+    assert_eq!(outcome.outcome, RchOutcomeClass::WorkerFilesystemError);
+    assert_eq!(outcome.reason_code, "RCH-WORKER-STORAGE-PRESSURE");
+    assert!(outcome.retryable);
+    assert!(!outcome.product_failure);
+}
+
+#[test]
 fn worker_rmeta_loss_is_infrastructure_failure() {
     let cmd = invocation(&[
         "cargo",

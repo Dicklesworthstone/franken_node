@@ -1,9 +1,10 @@
 use chrono::{DateTime, TimeZone, Utc};
 use frankenengine_node::ops::validation_broker::{
-    CommandSpec, DigestRef, EnvironmentPolicy, InputDigest, ProofEvidenceSource, ProofStatusKind,
-    RchMode, RchReceipt, ReceiptArtifacts, ReceiptClassifications, ReceiptRequestRef, ReceiptTrust,
-    SourceOnlyReason, TargetDirPolicy, TimeoutClass, ValidationErrorClass, ValidationExit,
-    ValidationExitKind, ValidationProofStatus, ValidationReceipt, ValidationTiming,
+    CommandSpec, DigestRef, EnvironmentPolicy, FlightRecorderAdapterOutcomeClass, InputDigest,
+    ProofEvidenceSource, ProofStatusKind, RchMode, RchReceipt, ReceiptArtifacts,
+    ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy,
+    TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind,
+    ValidationFlightRecorderRef, ValidationProofStatus, ValidationReceipt, ValidationTiming,
 };
 use frankenengine_node::ops::validation_proof_cache::DirtyStatePolicy;
 use frankenengine_node::ops::validation_proof_coalescer::{
@@ -1148,6 +1149,79 @@ fn worker_timeout_is_warn_not_product_failure() {
         .find(|check| check.code == "VR-PROOF-005")
         .expect("proof status check");
     assert!(proof_check.message.contains("worker/resource"));
+}
+
+#[test]
+fn storage_pressure_flight_recorder_reason_is_reported_as_worker_infra() {
+    let flight_ref = ValidationFlightRecorderRef {
+        schema_version: "franken-node/validation-flight-recorder-ref/v1".to_string(),
+        attempt_path: "artifacts/validation_broker/bd-rchstor/attempt.json".to_string(),
+        attempt_digest: DigestRef::sha256(b"rch-storage-pressure"),
+        attempt_id: "bd-rchstor-attempt".to_string(),
+        generated_at: ts(29),
+        freshness_expires_at: ts(60),
+        outcome_class: FlightRecorderAdapterOutcomeClass::WorkerFilesystemError,
+        execution_mode: RchMode::Remote,
+        worker_id: Some("vmi1227854".to_string()),
+        reason_code: "RCH-WORKER-STORAGE-PRESSURE".to_string(),
+    };
+    let input = ValidationReadinessInput {
+        proof_statuses: vec![ValidationProofStatus {
+            schema_version: "franken-node/validation-broker/status/v1".to_string(),
+            bead_id: "bd-rchstor".to_string(),
+            thread_id: "bd-rchstor".to_string(),
+            request_id: Some("bd-rchstor-request".to_string()),
+            queue_id: None,
+            status: ProofStatusKind::Failed,
+            proof_source: ProofEvidenceSource::FreshExecution,
+            queue_state: None,
+            deduplicated: false,
+            queue_depth: 0,
+            artifact_paths: None,
+            command_digest: None,
+            exit: Some(ValidationExit {
+                kind: ValidationExitKind::Failed,
+                code: Some(101),
+                signal: None,
+                timeout_class: TimeoutClass::None,
+                error_class: ValidationErrorClass::DiskPressure,
+                retryable: true,
+            }),
+            reason: Some("worker storage pressure".to_string()),
+            proof_coalescer: None,
+            proof_cache: None,
+            readiness_ref: None,
+            flight_recorder_ref: Some(flight_ref),
+            observed_at: ts(30),
+        }],
+        rch_workers: vec![remote_worker()],
+        resource_governor: Some(allow_resource_snapshot()),
+        ..ValidationReadinessInput::default()
+    };
+
+    let report = build_validation_readiness_report(&input, "vr-rch-storage-pressure", ts(30));
+
+    assert_eq!(report.overall_status, ValidationReadinessStatus::Warn);
+    assert_eq!(report.summary.flight_recorder_refs, 1);
+    let [failed] = report.summary.failed_attempt_details.as_slice() else {
+        assert_eq!(report.summary.failed_attempt_details.len(), 1);
+        return;
+    };
+    assert_eq!(failed.outcome_class, "worker_filesystem_error");
+    assert_eq!(failed.execution_mode, "remote");
+    assert_eq!(failed.worker_id.as_deref(), Some("vmi1227854"));
+    assert_eq!(failed.reason_code, "RCH-WORKER-STORAGE-PRESSURE");
+    assert!(failed.retryable);
+    assert!(!failed.product_failure);
+    let [recovery] = report.summary.pending_recoveries.as_slice() else {
+        assert_eq!(report.summary.pending_recoveries.len(), 1);
+        return;
+    };
+    assert_eq!(recovery.bead_id, "bd-rchstor");
+    assert_eq!(recovery.action, "DrainWorkerThenRetry");
+    assert_eq!(recovery.reason_code, "DRAIN_WORKER_THEN_RETRY");
+    assert_eq!(recovery.retry_after_ms, Some(120_000));
+    assert!(recovery.worker_preference.is_none());
 }
 
 #[test]
