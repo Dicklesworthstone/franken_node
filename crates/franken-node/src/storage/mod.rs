@@ -1,3 +1,4 @@
+pub mod cas;
 pub mod cleanup_receipts;
 pub mod frankensqlite_adapter;
 pub mod models;

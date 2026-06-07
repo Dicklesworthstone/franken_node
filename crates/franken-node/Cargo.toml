@@ -634,6 +634,11 @@ path = "tests/runtime_checkpoint_envelopes_fuzz_harness.rs"
 name = "storage_metamorphic"
 path = "tests/storage_metamorphic.rs"
 
+# bd-f5b04.2.2.1 + .2.2.2 (TNR keystone): proof-carrying host-effects integration
+[[test]]
+name = "cas_effect_receipt_conformance"
+path = "tests/cas_effect_receipt_conformance.rs"
+
 [[test]]
 name = "control_lane_mapping_policy"
 path = "tests/control_lane_mapping_policy.rs"
@@ -1212,6 +1217,11 @@ path = "../../tests/conformance/bpet_feature_extraction.rs"
 [[test]]
 name = "bpet_adversarial_evolution_suite"
 path = "../../tests/security/bpet_adversarial_evolution_suite.rs"
+
+# bd-f5b04.1.4: BPET calibration benchmark artifact
+[[test]]
+name = "bpet_calibration_benchmark"
+path = "../../tests/security/bpet_calibration_benchmark.rs"
 
 # bd-2zo1.1: BPET to ATC temporal interop bridge
 [[test]]
