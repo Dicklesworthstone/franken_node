@@ -57,6 +57,7 @@ use sha2::Digest;
 use subtle::ConstantTimeEq;
 
 pub mod bundle;
+pub mod calibration;
 pub mod capsule;
 pub mod counterfactual;
 pub mod resolution;

@@ -87,6 +87,20 @@ pub struct CalibrationSample {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalibrationSignalSamples {
+    pub signal_id: String,
+    pub signal_schema_version: String,
+    pub metric_notes: Vec<String>,
+    pub samples: Vec<CalibrationSample>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalibrationVerifierInput {
+    pub corpus_record_canonical_bytes: Vec<Vec<u8>>,
+    pub signals: Vec<CalibrationSignalSamples>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReliabilityBin {
     pub lower_bp: u16,
     pub upper_bp: u16,
@@ -174,26 +188,49 @@ pub fn generate_signed_calibration_artifact()
 pub fn generate_signed_calibration_artifact_from_records(
     records: &[AdversaryCorpusRecord],
 ) -> Result<SignedCalibrationArtifact, CalibrationBenchmarkError> {
-    if records.is_empty() {
-        return Err(CalibrationBenchmarkError::EmptyCorpus);
-    }
-    for record in records {
-        record.validate()?;
-    }
+    let verifier_input = generate_calibration_verifier_input_from_records(records)?;
 
     let unsigned = UnsignedCalibrationArtifact {
         schema_version: CALIBRATION_UNSIGNED_SCHEMA_VERSION.to_string(),
         generated_at: CALIBRATION_GENERATED_AT.to_string(),
-        corpus_hash: corpus_hash(records)?,
-        corpus_record_count: u64::try_from(records.len()).unwrap_or(u64::MAX),
+        corpus_hash: corpus_hash_from_canonical_records(
+            &verifier_input.corpus_record_canonical_bytes,
+        ),
+        corpus_record_count: u64::try_from(verifier_input.corpus_record_canonical_bytes.len())
+            .unwrap_or(u64::MAX),
         target_alpha_bp: CALIBRATION_TARGET_ALPHA_BP,
-        signals: vec![
-            evolution_risk_report(records)?,
-            camouflage_report()?,
-            dgis_spof_report(records)?,
-        ],
+        signals: signal_reports_from_samples(&verifier_input.signals)?,
     };
     sign_unsigned_artifact(unsigned)
+}
+
+pub fn generate_calibration_verifier_input()
+-> Result<CalibrationVerifierInput, CalibrationBenchmarkError> {
+    let records = synthesize_labeled_corpus_records()?;
+    generate_calibration_verifier_input_from_records(&records)
+}
+
+pub fn generate_calibration_verifier_input_from_records(
+    records: &[AdversaryCorpusRecord],
+) -> Result<CalibrationVerifierInput, CalibrationBenchmarkError> {
+    if records.is_empty() {
+        return Err(CalibrationBenchmarkError::EmptyCorpus);
+    }
+
+    let mut corpus_record_canonical_bytes = Vec::with_capacity(records.len());
+    for record in records {
+        record.validate()?;
+        corpus_record_canonical_bytes.push(record.canonical_bytes()?);
+    }
+
+    Ok(CalibrationVerifierInput {
+        corpus_record_canonical_bytes,
+        signals: vec![
+            evolution_risk_signal_samples(records)?,
+            camouflage_signal_samples()?,
+            dgis_spof_signal_samples(records),
+        ],
+    })
 }
 
 pub fn canonical_artifact_bytes(
@@ -257,9 +294,9 @@ fn signature_for_unsigned(
     })
 }
 
-fn evolution_risk_report(
+fn evolution_risk_signal_samples(
     records: &[AdversaryCorpusRecord],
-) -> Result<CalibrationSignalReport, CalibrationBenchmarkError> {
+) -> Result<CalibrationSignalSamples, CalibrationBenchmarkError> {
     let policy = WeightingPolicy::policy_v1();
     let mut samples = Vec::with_capacity(records.len());
     for record in records {
@@ -271,7 +308,7 @@ fn evolution_risk_report(
             positive: is_positive(record),
         });
     }
-    Ok(CalibrationSignalReport {
+    Ok(CalibrationSignalSamples {
         signal_id: SIGNAL_EVOLUTION_RISK.to_string(),
         signal_schema_version: crate::security::bpet::evolution_risk_scorer::SCHEMA_VERSION
             .to_string(),
@@ -281,11 +318,11 @@ fn evolution_risk_report(
             "reliability and discrimination metrics use fixed integer basis-point arithmetic"
                 .to_string(),
         ],
-        metrics: compute_metrics(SIGNAL_EVOLUTION_RISK, &samples)?,
+        samples,
     })
 }
 
-fn camouflage_report() -> Result<CalibrationSignalReport, CalibrationBenchmarkError> {
+fn camouflage_signal_samples() -> Result<CalibrationSignalSamples, CalibrationBenchmarkError> {
     let fixtures = all_fixtures();
     let mut samples = Vec::with_capacity(fixtures.len());
     for fixture in fixtures {
@@ -301,7 +338,7 @@ fn camouflage_report() -> Result<CalibrationSignalReport, CalibrationBenchmarkEr
             positive: !fixture.expected_hints.is_empty(),
         });
     }
-    Ok(CalibrationSignalReport {
+    Ok(CalibrationSignalSamples {
         signal_id: SIGNAL_CAMOUFLAGE.to_string(),
         signal_schema_version: "bpet.camouflage_detector.v1".to_string(),
         metric_notes: vec![
@@ -309,13 +346,11 @@ fn camouflage_report() -> Result<CalibrationSignalReport, CalibrationBenchmarkEr
                 .to_string(),
             "positive labels are fixtures with one or more expected camouflage hints".to_string(),
         ],
-        metrics: compute_metrics(SIGNAL_CAMOUFLAGE, &samples)?,
+        samples,
     })
 }
 
-fn dgis_spof_report(
-    records: &[AdversaryCorpusRecord],
-) -> Result<CalibrationSignalReport, CalibrationBenchmarkError> {
+fn dgis_spof_signal_samples(records: &[AdversaryCorpusRecord]) -> CalibrationSignalSamples {
     let samples = records
         .iter()
         .map(|record| CalibrationSample {
@@ -324,14 +359,34 @@ fn dgis_spof_report(
             positive: is_positive(record),
         })
         .collect::<Vec<_>>();
-    Ok(CalibrationSignalReport {
+    CalibrationSignalSamples {
         signal_id: SIGNAL_DGIS_SPOF.to_string(),
         signal_schema_version: "dgis.spof_topology_signal.v1".to_string(),
         metric_notes: vec![
             "scores are topology-derived from corpus dependency depth, transitive fanout, maintainer overlap, and SPOF basis points".to_string(),
             "this is the deterministic corpus-side DGIS/SPOF calibration seam; full contagion simulation can be added without changing the artifact schema".to_string(),
         ],
-        metrics: compute_metrics(SIGNAL_DGIS_SPOF, &samples)?,
+        samples,
+    }
+}
+
+fn signal_reports_from_samples(
+    signal_samples: &[CalibrationSignalSamples],
+) -> Result<Vec<CalibrationSignalReport>, CalibrationBenchmarkError> {
+    signal_samples
+        .iter()
+        .map(signal_report_from_samples)
+        .collect()
+}
+
+fn signal_report_from_samples(
+    signal_samples: &CalibrationSignalSamples,
+) -> Result<CalibrationSignalReport, CalibrationBenchmarkError> {
+    Ok(CalibrationSignalReport {
+        signal_id: signal_samples.signal_id.clone(),
+        signal_schema_version: signal_samples.signal_schema_version.clone(),
+        metric_notes: signal_samples.metric_notes.clone(),
+        metrics: compute_metrics(&signal_samples.signal_id, &signal_samples.samples)?,
     })
 }
 
@@ -449,18 +504,22 @@ fn reliability_bins(samples: &[CalibrationSample]) -> Vec<ReliabilityBin> {
     let mut score_sums = [0_u64; RELIABILITY_BIN_COUNT];
     for sample in samples {
         let idx = reliability_bin_index(sample.score_bp);
-        let bin = &mut bins[idx];
-        bin.sample_count = bin.sample_count.saturating_add(1);
-        if sample.positive {
-            bin.positive_count = bin.positive_count.saturating_add(1);
+        if let (Some(bin), Some(score_sum)) = (bins.get_mut(idx), score_sums.get_mut(idx)) {
+            bin.sample_count = bin.sample_count.saturating_add(1);
+            if sample.positive {
+                bin.positive_count = bin.positive_count.saturating_add(1);
+            }
+            *score_sum = score_sum.saturating_add(u64::from(sample.score_bp));
         }
-        score_sums[idx] = score_sums[idx].saturating_add(u64::from(sample.score_bp));
     }
     for (idx, bin) in bins.iter_mut().enumerate() {
         if bin.sample_count == 0 {
             continue;
         }
-        bin.mean_score_bp = ratio_bp(score_sums[idx], bin.sample_count);
+        let Some(score_sum) = score_sums.get(idx) else {
+            continue;
+        };
+        bin.mean_score_bp = ratio_bp(*score_sum, bin.sample_count);
         bin.observed_positive_rate_bp = ratio_bp(bin.positive_count, bin.sample_count);
     }
     bins
@@ -563,14 +622,13 @@ fn brier_score_bp(samples: &[CalibrationSample]) -> u16 {
     u16::try_from(rounded.min(u128::from(MAX_BASIS_POINTS))).unwrap_or(MAX_BASIS_POINTS)
 }
 
-fn corpus_hash(records: &[AdversaryCorpusRecord]) -> Result<String, CalibrationBenchmarkError> {
+fn corpus_hash_from_canonical_records(records: &[Vec<u8>]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"bpet-calibration-corpus-v1");
     for record in records {
-        let bytes = record.canonical_bytes()?;
-        update_len_prefixed(&mut hasher, &bytes);
+        update_len_prefixed(&mut hasher, record);
     }
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn sha256_prefixed(domain: &[u8], payload: &[u8]) -> String {
