@@ -30,6 +30,13 @@ pub const RELIABILITY_BIN_COUNT: usize = 5;
 pub const RELIABILITY_BIN_WIDTH_BP: u16 = 2_000;
 pub const CALIBRATION_SIGNATURE_KEY_ID: &str = "franken-node-bpet-calibration-harness-v1";
 pub const CALIBRATION_SIGNATURE_ALGORITHM: &str = "sha256-deterministic-artifact-signature-v1";
+pub const CALIBRATION_E2E_TRACE_SCHEMA_VERSION: &str = "bpet.calibration_e2e_trace.v1";
+pub const CALIBRATION_E2E_TRACE_ID: &str = "bpet-calibration-e2e-v1";
+pub const FN_CORPUS_GENERATE_START: &str = "FN-CORPUS-GENERATE-START";
+pub const FN_CORPUS_CANONICAL_ROUNDTRIP_PASS: &str = "FN-CORPUS-CANONICAL-ROUNDTRIP-PASS";
+pub const FN_CALIB_VERIFIER_INPUT_PREPARED: &str = "FN-CALIB-VERIFIER-INPUT-PREPARED";
+pub const FN_CALIB_ARTIFACT_SIGNED: &str = "FN-CALIB-ARTIFACT-SIGNED";
+pub const FN_CALIB_SDK_RECOMPUTE_PASS: &str = "FN-CALIB-SDK-RECOMPUTE-PASS";
 
 const SIGNAL_EVOLUTION_RISK: &str = "bpet.evolution_risk_scorer";
 const SIGNAL_CAMOUFLAGE: &str = "bpet.camouflage_detector";
@@ -53,6 +60,8 @@ pub enum CalibrationBenchmarkError {
     },
     #[error("failed to serialize calibration artifact: {source}")]
     Serialize { source: serde_json::Error },
+    #[error("failed to encode calibration structured log as UTF-8: {source}")]
+    StructuredLogUtf8 { source: std::string::FromUtf8Error },
 }
 
 impl From<CorpusRecordError> for CalibrationBenchmarkError {
@@ -98,6 +107,19 @@ pub struct CalibrationSignalSamples {
 pub struct CalibrationVerifierInput {
     pub corpus_record_canonical_bytes: Vec<Vec<u8>>,
     pub signals: Vec<CalibrationSignalSamples>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalibrationStructuredLogEvent {
+    pub schema_version: String,
+    pub trace_id: String,
+    pub event_index: u64,
+    pub event_code: String,
+    pub detail: String,
+    pub corpus_record_count: u64,
+    pub signal_count: u64,
+    pub corpus_hash: String,
+    pub artifact_schema_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +279,76 @@ pub fn verify_signed_calibration_artifact(
         && ct_eq(&artifact.signature.key_id, &expected.key_id)
         && ct_eq(&artifact.signature.payload_hash, &expected.payload_hash)
         && ct_eq(&artifact.signature.signature, &expected.signature))
+}
+
+pub fn calibration_signal_report_from_samples(
+    signal_samples: &CalibrationSignalSamples,
+) -> Result<CalibrationSignalReport, CalibrationBenchmarkError> {
+    signal_report_from_samples(signal_samples)
+}
+
+pub fn calibration_e2e_structured_log_events(
+    artifact: &SignedCalibrationArtifact,
+    verifier_input: &CalibrationVerifierInput,
+    sdk_event_codes: &[String],
+) -> Vec<CalibrationStructuredLogEvent> {
+    let corpus_record_count =
+        u64::try_from(verifier_input.corpus_record_canonical_bytes.len()).unwrap_or(u64::MAX);
+    let signal_count = u64::try_from(verifier_input.signals.len()).unwrap_or(u64::MAX);
+    let sdk_detail = format!(
+        "verifier sdk recompute passed after {} sdk events",
+        sdk_event_codes.len()
+    );
+
+    [
+        (
+            FN_CORPUS_GENERATE_START,
+            "deterministic corpus generation accepted".to_string(),
+        ),
+        (
+            FN_CORPUS_CANONICAL_ROUNDTRIP_PASS,
+            "canonical corpus records round-tripped byte-identically".to_string(),
+        ),
+        (
+            FN_CALIB_VERIFIER_INPUT_PREPARED,
+            "calibration verifier input prepared".to_string(),
+        ),
+        (
+            FN_CALIB_ARTIFACT_SIGNED,
+            "signed calibration artifact generated".to_string(),
+        ),
+        (FN_CALIB_SDK_RECOMPUTE_PASS, sdk_detail),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(
+        |(index, (event_code, detail))| CalibrationStructuredLogEvent {
+            schema_version: CALIBRATION_E2E_TRACE_SCHEMA_VERSION.to_string(),
+            trace_id: CALIBRATION_E2E_TRACE_ID.to_string(),
+            event_index: u64::try_from(index).unwrap_or(u64::MAX),
+            event_code: event_code.to_string(),
+            detail,
+            corpus_record_count,
+            signal_count,
+            corpus_hash: artifact.corpus_hash.clone(),
+            artifact_schema_version: artifact.schema_version.clone(),
+        },
+    )
+    .collect()
+}
+
+pub fn calibration_structured_log_jsonl(
+    events: &[CalibrationStructuredLogEvent],
+) -> Result<String, CalibrationBenchmarkError> {
+    let mut lines = Vec::with_capacity(events.len());
+    for event in events {
+        let value = serde_json::to_value(event)
+            .map_err(|source| CalibrationBenchmarkError::Serialize { source })?;
+        let line = String::from_utf8(canonical_bytes(&value))
+            .map_err(|source| CalibrationBenchmarkError::StructuredLogUtf8 { source })?;
+        lines.push(line);
+    }
+    Ok(format!("{}\n", lines.join("\n")))
 }
 
 fn sign_unsigned_artifact(
