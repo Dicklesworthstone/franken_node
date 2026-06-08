@@ -26,6 +26,11 @@ const MAX_TEXT_BYTES: usize = 4096;
 
 pub const RESOLUTION_RECEIPT_SCHEMA: &str = crate::schema_versions::RESOLUTION_RECEIPT;
 pub const RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM: &str = "ed25519-v1";
+pub const FN_RESOLVE_RECEIPT_START: &str = "FN-RESOLVE-RECEIPT-START";
+pub const FN_RESOLVE_RECEIPT_ADMITTED: &str = "FN-RESOLVE-RECEIPT-ADMITTED";
+pub const FN_RESOLVE_RECEIPT_REJECTED: &str = "FN-RESOLVE-RECEIPT-REJECTED";
+pub const FN_RESOLVE_CAPABILITY_BUDGET_ADVISORY: &str = "FN-RESOLVE-CAPABILITY-BUDGET-ADVISORY";
+pub const FN_RESOLVE_RECEIPT_PASS: &str = "FN-RESOLVE-RECEIPT-PASS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -384,7 +389,10 @@ pub fn verify_signed_resolution_receipt(
     verifying_key: &VerifyingKey,
 ) -> ResolutionReceiptResult<bool> {
     validate_resolution_receipt(&signed.receipt)?;
-    if signed.signature_algorithm != RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM {
+    if !constant_time_eq(
+        signed.signature_algorithm.as_str(),
+        RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM,
+    ) {
         return Err(ResolutionReceiptError::SignatureAlgorithmMismatch {
             expected: RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM.to_string(),
             actual: signed.signature_algorithm.clone(),
@@ -432,6 +440,22 @@ pub fn recompute_resolution_receipt_hash(
 
 pub fn candidate_is_admissible(profile: AdmissionProfile, candidate: &CandidateAssessment) -> bool {
     rejection_reason_for(profile, candidate).is_none()
+}
+
+pub fn resolution_receipt_event_codes(
+    receipt: &ResolutionReceipt,
+) -> ResolutionReceiptResult<Vec<&'static str>> {
+    validate_resolution_receipt(receipt)?;
+    let decision_code = match receipt.decision {
+        AdmissionDecision::Admit => FN_RESOLVE_RECEIPT_ADMITTED,
+        AdmissionDecision::Reject => FN_RESOLVE_RECEIPT_REJECTED,
+    };
+    let mut codes = vec![FN_RESOLVE_RECEIPT_START, decision_code];
+    if !receipt.evidence_refs.capability_budget_refs.is_empty() {
+        codes.push(FN_RESOLVE_CAPABILITY_BUDGET_ADVISORY);
+    }
+    codes.push(FN_RESOLVE_RECEIPT_PASS);
+    Ok(codes)
 }
 
 fn seal_resolution_receipt(
