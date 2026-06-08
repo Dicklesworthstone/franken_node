@@ -856,14 +856,14 @@ fn captured_output_from(output: Output) -> CapturedProcessOutput {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, any(feature = "engine", test)))]
 fn synthetic_success_status() -> std::process::ExitStatus {
     use std::os::unix::process::ExitStatusExt;
 
     std::process::ExitStatus::from_raw(0)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, any(feature = "engine", test)))]
 fn synthetic_success_status() -> std::process::ExitStatus {
     use std::os::windows::process::ExitStatusExt;
 

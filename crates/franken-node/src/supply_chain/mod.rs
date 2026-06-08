@@ -12,6 +12,7 @@ pub mod provenance;
 pub mod provenance_gate;
 pub mod quarantine;
 pub mod reputation;
+pub mod resolution_receipt;
 pub mod revocation_integration;
 pub mod revocation_registry;
 pub mod transparency_verifier;

@@ -292,19 +292,21 @@ fn counterfactual_replay_reports_recorded_host_effect_policy_diff() -> TestResul
 
     assert_eq!(result.summary_statistics.total_decisions, 1);
     assert_eq!(result.summary_statistics.changed_decisions, 1);
-    let original_outcome = result.original_outcomes.first().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "missing original outcome")
-    })?;
+    let original_outcome = result
+        .original_outcomes
+        .first()
+        .ok_or_else(|| std::io::Error::other("missing original outcome"))?;
     let original_effect = original_outcome
         .recorded_effects
         .first()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "missing recorded effect"))?;
+        .ok_or_else(|| std::io::Error::other("missing recorded effect"))?;
     assert_eq!(original_effect.effect_kind, "http_request");
     assert_eq!(original_effect.capability_ref, "cap:http.audit");
     assert_eq!(original_effect.recorded_policy_decision, "allow");
-    let counterfactual_outcome = result.counterfactual_outcomes.first().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "missing counterfactual outcome")
-    })?;
+    let counterfactual_outcome = result
+        .counterfactual_outcomes
+        .first()
+        .ok_or_else(|| std::io::Error::other("missing counterfactual outcome"))?;
     assert!(
         counterfactual_outcome
             .rationale
@@ -316,15 +318,12 @@ fn counterfactual_replay_reports_recorded_host_effect_policy_diff() -> TestResul
         .iter()
         .find(|record| !record.effect_diffs.is_empty())
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "strict counterfactual should include effect-level diff",
-            )
+            std::io::Error::other("strict counterfactual should include effect-level diff")
         })?;
     let effect_diff = divergence
         .effect_diffs
         .first()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "missing effect diff"))?;
+        .ok_or_else(|| std::io::Error::other("missing effect diff"))?;
     assert_eq!(effect_diff.sequence_number, 7);
     assert_eq!(effect_diff.effect_kind, "http_request");
     assert_eq!(effect_diff.capability_ref, "cap:http.audit");
@@ -338,9 +337,9 @@ fn counterfactual_replay_reports_recorded_host_effect_policy_diff() -> TestResul
 
     let result_json = to_canonical_json(&result)?;
     let result_value: serde_json::Value = serde_json::from_str(&result_json)?;
-    let summary_json = result_value.get("summary_statistics").ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "missing summary statistics")
-    })?;
+    let summary_json = result_value
+        .get("summary_statistics")
+        .ok_or_else(|| std::io::Error::other("missing summary statistics"))?;
     assert_eq!(json_u64(summary_json, "total_decisions"), Some(1));
     assert_eq!(json_u64(summary_json, "changed_decisions"), Some(1));
 
@@ -348,12 +347,7 @@ fn counterfactual_replay_reports_recorded_host_effect_policy_diff() -> TestResul
         .and_then(|outcomes| outcomes.first())
         .and_then(|outcome| json_array(outcome, "recorded_effects"))
         .and_then(|effects| effects.first())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "missing serialized recorded effect",
-            )
-        })?;
+        .ok_or_else(|| std::io::Error::other("missing serialized recorded effect"))?;
     assert_eq!(json_u64(original_effect_json, "sequence_number"), Some(7));
     assert_eq!(
         json_str(original_effect_json, "effect_kind"),
@@ -378,9 +372,7 @@ fn counterfactual_replay_reports_recorded_host_effect_policy_diff() -> TestResul
 
     let divergence_json = json_array(&result_value, "divergence_points")
         .and_then(|divergences| divergences.first())
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "missing serialized divergence")
-        })?;
+        .ok_or_else(|| std::io::Error::other("missing serialized divergence"))?;
     assert_eq!(json_u64(divergence_json, "sequence_number"), Some(1));
     assert_eq!(
         json_str(divergence_json, "original_decision"),
@@ -393,9 +385,7 @@ fn counterfactual_replay_reports_recorded_host_effect_policy_diff() -> TestResul
 
     let effect_diff_json = json_array(divergence_json, "effect_diffs")
         .and_then(|diffs| diffs.first())
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "missing serialized effect diff")
-        })?;
+        .ok_or_else(|| std::io::Error::other("missing serialized effect diff"))?;
     assert_eq!(json_u64(effect_diff_json, "sequence_number"), Some(7));
     assert_eq!(
         json_str(effect_diff_json, "effect_kind"),

@@ -59,6 +59,7 @@ use subtle::ConstantTimeEq;
 pub mod bundle;
 pub mod capsule;
 pub mod counterfactual;
+pub mod resolution;
 
 /// SDK version string for compatibility checks.
 /// INV-CAPSULE-VERSIONED-API: every API surface carries a version identifier.
@@ -530,6 +531,12 @@ impl From<capsule::CapsuleError> for VerifierSdkError {
 impl From<bundle::BundleError> for VerifierSdkError {
     fn from(source: bundle::BundleError) -> Self {
         Self::Bundle(source)
+    }
+}
+
+impl From<resolution::ResolutionReceiptError> for VerifierSdkError {
+    fn from(source: resolution::ResolutionReceiptError) -> Self {
+        Self::Json(source.to_string())
     }
 }
 
@@ -1026,6 +1033,25 @@ impl VerifierSdk {
             });
         }
         Ok(report)
+    }
+
+    /// Verify a signed trust-native module-resolution receipt offline.
+    pub fn verify_resolution_receipt(
+        &self,
+        verifying_key: &VerifyingKey,
+        receipt_bytes: &[u8],
+    ) -> VerifierSdkResult<resolution::VerifiedResolutionReceipt> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let max_bytes = self.resolved_max_bundle_size_bytes();
+        if receipt_bytes.len() > max_bytes {
+            return Err(VerifierSdkError::BundleTooLarge {
+                actual_bytes: receipt_bytes.len(),
+                max_bytes,
+            });
+        }
+        resolution::verify_signed_resolution_receipt(verifying_key, receipt_bytes)
+            .map_err(VerifierSdkError::from)
     }
 
     /// Resolve the active bundle size cap for this SDK instance.

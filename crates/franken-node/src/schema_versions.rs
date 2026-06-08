@@ -105,6 +105,7 @@ pub const MANIFEST: &str = "1.0";
 pub const EXTENSION_REGISTRY: &str = "ser-v2.0";
 pub const MIGRATION_KIT: &str = "mke-v1.0";
 pub const MODULE_RESOLUTION_GRAPH: &str = "module-resolution-graph-v1";
+pub const RESOLUTION_RECEIPT: &str = "resolution-receipt-v1";
 
 // ── Remote ─────────────────────────────────────────────────────────
 pub const IDEMPOTENCY_STORE: &str = "ids-v1.0";
@@ -256,6 +257,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("extension_registry", EXTENSION_REGISTRY),
         ("migration_kit", MIGRATION_KIT),
         ("module_resolution_graph", MODULE_RESOLUTION_GRAPH),
+        ("resolution_receipt", RESOLUTION_RECEIPT),
         // Remote
         ("idempotency_store", IDEMPOTENCY_STORE),
         ("remote_eviction_saga", REMOTE_EVICTION_SAGA),

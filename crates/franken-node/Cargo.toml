@@ -769,6 +769,10 @@ name = "module_resolution_graph"
 path = "tests/module_resolution_graph.rs"
 
 [[test]]
+name = "resolution_receipt"
+path = "tests/resolution_receipt.rs"
+
+[[test]]
 name = "rewrite_suggestion_engine"
 path = "tests/rewrite_suggestion_engine.rs"
 required-features = ["admin-tools"]
