@@ -265,6 +265,10 @@ pub fn evaluate_scenario_fixture(
 
 const SYNTHETIC_CORPUS_CAPTURED_AT: &str = "1970-01-01T00:00:00Z";
 const SYNTHETIC_CORPUS_LABELER: &str = "franken-node-bpet-adversarial-scenarios-v1";
+const REAL_CORPUS_CAPTURED_AT: &str = "2026-06-08T00:00:00Z";
+const REAL_CORPUS_LABELER: &str = "franken-node-bpet-real-advisory-seed-v1";
+
+pub const REAL_LABELED_CORPUS_MIN_RECORDS: usize = 4;
 
 /// Emit deterministic labeled corpus records for every canonical adversary
 /// scenario, plus one benign control per scenario.
@@ -283,6 +287,22 @@ pub fn synthesize_labeled_corpus_records()
         records.push(benign_control);
     }
     Ok(records)
+}
+
+pub fn phase_zero_labeled_corpus_records()
+-> std::result::Result<Vec<AdversaryCorpusRecord>, AdversarialHarnessError> {
+    let mut records = synthesize_labeled_corpus_records()?;
+    records.extend(real_labeled_corpus_records());
+    Ok(records)
+}
+
+pub fn real_labeled_corpus_records() -> Vec<AdversaryCorpusRecord> {
+    vec![
+        ua_parser_compromised_record(),
+        ua_parser_patched_control_record(),
+        flatmap_stream_compromised_record(),
+        event_stream_pre_compromise_control_record(),
+    ]
 }
 
 /// Emit the labeled campaign-member record and the matched benign control for
@@ -743,6 +763,328 @@ fn provenance_ref(
         ),
         captured_at: SYNTHETIC_CORPUS_CAPTURED_AT.to_string(),
         labeler: SYNTHETIC_CORPUS_LABELER.to_string(),
+    }
+}
+
+fn ua_parser_compromised_record() -> AdversaryCorpusRecord {
+    let feature_values = real_feature_values([
+        (feature_names::CAPABILITY_INVOCATION_INTENSITY, 8_500),
+        (feature_names::RESOURCE_ENVELOPE_PRESSURE, 9_000),
+        (feature_names::NETWORK_SURFACE_AREA, 9_000),
+        (feature_names::FILESYSTEM_SURFACE_AREA, 8_500),
+        (feature_names::DECLARED_PERMISSION_SURFACE, 6_000),
+        (feature_names::CODE_COMPLEXITY, 7_000),
+        (feature_names::DEPENDENCY_SURFACE, 7_500),
+    ]);
+    let provenance = vec![
+        real_provenance_ref(
+            "real-advisory:ghsa-pjwm-rvh2-c87w",
+            CorpusProvenanceKind::RealAdvisory,
+            "https://github.com/advisories/GHSA-pjwm-rvh2-c87w",
+        ),
+        real_provenance_ref(
+            "real-advisory:cisa-2021-10-22-ua-parser-js",
+            CorpusProvenanceKind::RealAdvisory,
+            "https://www.cisa.gov/news-events/alerts/2021/10/22/malware-discovered-popular-npm-package-ua-parser-js",
+        ),
+    ];
+    real_corpus_record(RealCorpusSeed {
+        record_id: "real-bpet-v1:ua-parser-js-0.7.29:malicious",
+        package_name: "ua-parser-js",
+        package_version: "0.7.29",
+        label: CorpusGroundTruthLabel::Malicious,
+        confidence_basis_points: MAX_BASIS_POINTS,
+        evidence_refs: vec![
+            "real-advisory:ghsa-pjwm-rvh2-c87w".to_string(),
+            "real-advisory:cisa-2021-10-22-ua-parser-js".to_string(),
+        ],
+        rationale: "Real advisory seed: ua-parser-js 0.7.29 was one of the compromised npm versions carrying install-time malware.".to_string(),
+        feature_values,
+        capability_invocations: real_counts([
+            ("install_script:preinstall", 1),
+            ("credential_access", 2),
+            ("coinminer_launch", 1),
+        ]),
+        network_surface: CorpusNetworkSurface {
+            destination_classes: real_counts([("coinminer_pool", 2), ("credential_exfil_endpoint", 1)]),
+            unique_destination_count: 2,
+            egress_bytes: 1_572_864,
+        },
+        filesystem_surface: CorpusFilesystemSurface {
+            path_classes: real_counts([("install_script", 1), ("credential_store", 2)]),
+            read_ops: 8,
+            write_ops: 3,
+        },
+        dependency_topology: CorpusDependencyTopologyContext {
+            direct_dependency_count: 1,
+            transitive_dependency_count: 8,
+            max_depth: 2,
+            maintainer_overlap_count: 1,
+            single_point_of_failure_score_bp: 7_500,
+        },
+        risk_score_bp: 9_250,
+        provenance,
+    })
+}
+
+fn ua_parser_patched_control_record() -> AdversaryCorpusRecord {
+    let feature_values = real_feature_values([
+        (feature_names::CAPABILITY_INVOCATION_INTENSITY, 700),
+        (feature_names::RESOURCE_ENVELOPE_PRESSURE, 600),
+        (feature_names::NETWORK_SURFACE_AREA, 200),
+        (feature_names::FILESYSTEM_SURFACE_AREA, 500),
+        (feature_names::DECLARED_PERMISSION_SURFACE, 600),
+        (feature_names::CODE_COMPLEXITY, 1_800),
+        (feature_names::DEPENDENCY_SURFACE, 900),
+    ]);
+    let provenance = vec![
+        real_provenance_ref(
+            "real-registry:ua-parser-js-0.7.30",
+            CorpusProvenanceKind::RegistrySnapshot,
+            "https://www.npmjs.com/package/ua-parser-js/v/0.7.30",
+        ),
+        real_provenance_ref(
+            "real-advisory:cisa-2021-10-22-ua-parser-js",
+            CorpusProvenanceKind::RealAdvisory,
+            "https://www.cisa.gov/news-events/alerts/2021/10/22/malware-discovered-popular-npm-package-ua-parser-js",
+        ),
+    ];
+    real_corpus_record(RealCorpusSeed {
+        record_id: "real-bpet-v1:ua-parser-js-0.7.30:benign-control",
+        package_name: "ua-parser-js",
+        package_version: "0.7.30",
+        label: CorpusGroundTruthLabel::Benign,
+        confidence_basis_points: 8_500,
+        evidence_refs: vec![
+            "real-registry:ua-parser-js-0.7.30".to_string(),
+            "real-advisory:cisa-2021-10-22-ua-parser-js".to_string(),
+        ],
+        rationale: "Real registry control: CISA identified 0.7.30 as the patched upgrade target for the 0.7.x compromised lineage; this is a lineage-local benign control, not a universal safety claim.".to_string(),
+        feature_values,
+        capability_invocations: real_counts([("user_agent_parse", 12)]),
+        network_surface: CorpusNetworkSurface {
+            destination_classes: BTreeMap::new(),
+            unique_destination_count: 0,
+            egress_bytes: 0,
+        },
+        filesystem_surface: CorpusFilesystemSurface {
+            path_classes: real_counts([("package_source", 1)]),
+            read_ops: 1,
+            write_ops: 0,
+        },
+        dependency_topology: CorpusDependencyTopologyContext {
+            direct_dependency_count: 0,
+            transitive_dependency_count: 0,
+            max_depth: 1,
+            maintainer_overlap_count: 0,
+            single_point_of_failure_score_bp: 900,
+        },
+        risk_score_bp: 700,
+        provenance,
+    })
+}
+
+fn flatmap_stream_compromised_record() -> AdversaryCorpusRecord {
+    let feature_values = real_feature_values([
+        (feature_names::CAPABILITY_INVOCATION_INTENSITY, 7_500),
+        (feature_names::RESOURCE_ENVELOPE_PRESSURE, 7_000),
+        (feature_names::NETWORK_SURFACE_AREA, 8_500),
+        (feature_names::FILESYSTEM_SURFACE_AREA, 6_500),
+        (feature_names::DECLARED_PERMISSION_SURFACE, 4_500),
+        (feature_names::CODE_COMPLEXITY, 5_500),
+        (feature_names::DEPENDENCY_SURFACE, 8_000),
+    ]);
+    let provenance = vec![real_provenance_ref(
+        "real-advisory:azure-devops-event-stream-flatmap-stream",
+        CorpusProvenanceKind::RealAdvisory,
+        "https://devblogs.microsoft.com/devops/blocking-malicious-event-stream-and-flatmap-stream-packages/",
+    )];
+    real_corpus_record(RealCorpusSeed {
+        record_id: "real-bpet-v1:flatmap-stream-0.1.1:malicious",
+        package_name: "flatmap-stream",
+        package_version: "0.1.1",
+        label: CorpusGroundTruthLabel::Malicious,
+        confidence_basis_points: MAX_BASIS_POINTS,
+        evidence_refs: vec!["real-advisory:azure-devops-event-stream-flatmap-stream".to_string()],
+        rationale: "Real advisory seed: flatmap-stream 0.1.1 was among the npm package versions blocked as malicious in the event-stream supply-chain incident.".to_string(),
+        feature_values,
+        capability_invocations: real_counts([("wallet_scan", 3), ("secret_exfiltration", 1)]),
+        network_surface: CorpusNetworkSurface {
+            destination_classes: real_counts([("wallet_exfil_endpoint", 1), ("package_registry", 1)]),
+            unique_destination_count: 2,
+            egress_bytes: 524_288,
+        },
+        filesystem_surface: CorpusFilesystemSurface {
+            path_classes: real_counts([("home_directory", 4), ("wallet_store", 2)]),
+            read_ops: 12,
+            write_ops: 1,
+        },
+        dependency_topology: CorpusDependencyTopologyContext {
+            direct_dependency_count: 1,
+            transitive_dependency_count: 24,
+            max_depth: 4,
+            maintainer_overlap_count: 2,
+            single_point_of_failure_score_bp: 8_500,
+        },
+        risk_score_bp: 8_750,
+        provenance,
+    })
+}
+
+fn event_stream_pre_compromise_control_record() -> AdversaryCorpusRecord {
+    let feature_values = real_feature_values([
+        (feature_names::CAPABILITY_INVOCATION_INTENSITY, 1_000),
+        (feature_names::RESOURCE_ENVELOPE_PRESSURE, 800),
+        (feature_names::NETWORK_SURFACE_AREA, 400),
+        (feature_names::FILESYSTEM_SURFACE_AREA, 600),
+        (feature_names::DECLARED_PERMISSION_SURFACE, 800),
+        (feature_names::CODE_COMPLEXITY, 2_200),
+        (feature_names::DEPENDENCY_SURFACE, 2_500),
+    ]);
+    let provenance = vec![
+        real_provenance_ref(
+            "real-registry:event-stream-3.3.4",
+            CorpusProvenanceKind::RegistrySnapshot,
+            "https://www.npmjs.com/package/event-stream/v/3.3.4",
+        ),
+        real_provenance_ref(
+            "real-advisory:azure-devops-event-stream-flatmap-stream",
+            CorpusProvenanceKind::RealAdvisory,
+            "https://devblogs.microsoft.com/devops/blocking-malicious-event-stream-and-flatmap-stream-packages/",
+        ),
+    ];
+    real_corpus_record(RealCorpusSeed {
+        record_id: "real-bpet-v1:event-stream-3.3.4:benign-control",
+        package_name: "event-stream",
+        package_version: "3.3.4",
+        label: CorpusGroundTruthLabel::Benign,
+        confidence_basis_points: 8_000,
+        evidence_refs: vec![
+            "real-registry:event-stream-3.3.4".to_string(),
+            "real-advisory:azure-devops-event-stream-flatmap-stream".to_string(),
+        ],
+        rationale: "Real registry control: event-stream 3.3.4 is a pre-compromise lineage control paired against the later 3.3.6/flatmap-stream incident; label confidence is explicit because absence of known compromise is weaker than an advisory label.".to_string(),
+        feature_values,
+        capability_invocations: real_counts([("stream_transform", 64)]),
+        network_surface: CorpusNetworkSurface {
+            destination_classes: BTreeMap::new(),
+            unique_destination_count: 0,
+            egress_bytes: 0,
+        },
+        filesystem_surface: CorpusFilesystemSurface {
+            path_classes: real_counts([("package_source", 1)]),
+            read_ops: 2,
+            write_ops: 0,
+        },
+        dependency_topology: CorpusDependencyTopologyContext {
+            direct_dependency_count: 6,
+            transitive_dependency_count: 18,
+            max_depth: 3,
+            maintainer_overlap_count: 1,
+            single_point_of_failure_score_bp: 2_500,
+        },
+        risk_score_bp: 1_000,
+        provenance,
+    })
+}
+
+struct RealCorpusSeed {
+    record_id: &'static str,
+    package_name: &'static str,
+    package_version: &'static str,
+    label: CorpusGroundTruthLabel,
+    confidence_basis_points: u16,
+    evidence_refs: Vec<String>,
+    rationale: String,
+    feature_values: BTreeMap<String, u16>,
+    capability_invocations: BTreeMap<String, u64>,
+    network_surface: CorpusNetworkSurface,
+    filesystem_surface: CorpusFilesystemSurface,
+    dependency_topology: CorpusDependencyTopologyContext,
+    risk_score_bp: u16,
+    provenance: Vec<CorpusProvenanceRef>,
+}
+
+fn real_corpus_record(seed: RealCorpusSeed) -> AdversaryCorpusRecord {
+    let provenance_ref = seed
+        .provenance
+        .first()
+        .map(|entry| entry.provenance_id.clone())
+        .unwrap_or_else(|| "real-seed:missing-provenance".to_string());
+    let phenotype_features = GENOME_DIMENSIONS
+        .into_iter()
+        .map(|feature_name| {
+            let value = seed
+                .feature_values
+                .get(feature_name)
+                .copied()
+                .unwrap_or_default();
+            (
+                feature_name.to_string(),
+                CorpusFeatureObservation::known(
+                    value,
+                    EvidenceSource::Derived,
+                    provenance_ref.clone(),
+                ),
+            )
+        })
+        .collect();
+    let trajectory_point = CorpusTrajectoryPoint {
+        observed_at: REAL_CORPUS_CAPTURED_AT.to_string(),
+        package_version: seed.package_version.to_string(),
+        feature_values_bp: seed.feature_values,
+        risk_score_bp: seed.risk_score_bp,
+    };
+    AdversaryCorpusRecord {
+        schema_version: ADVERSARY_CORPUS_RECORD_SCHEMA_VERSION.to_string(),
+        record_id: seed.record_id.to_string(),
+        package_name: seed.package_name.to_string(),
+        package_version: seed.package_version.to_string(),
+        observation_timestamp: REAL_CORPUS_CAPTURED_AT.to_string(),
+        phenotype_features,
+        capability_invocations: seed.capability_invocations,
+        network_surface: seed.network_surface,
+        filesystem_surface: seed.filesystem_surface,
+        dependency_topology: seed.dependency_topology,
+        longitudinal_trajectory: vec![trajectory_point],
+        ground_truth: CorpusGroundTruth {
+            label: seed.label,
+            campaign_id: None,
+            confidence_basis_points: seed.confidence_basis_points,
+            evidence_refs: seed.evidence_refs,
+            rationale: seed.rationale,
+        },
+        provenance: seed.provenance,
+    }
+}
+
+fn real_feature_values(
+    values: impl IntoIterator<Item = (&'static str, u16)>,
+) -> BTreeMap<String, u16> {
+    values
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect()
+}
+
+fn real_counts(values: impl IntoIterator<Item = (&'static str, u64)>) -> BTreeMap<String, u64> {
+    values
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect()
+}
+
+fn real_provenance_ref(
+    provenance_id: &str,
+    kind: CorpusProvenanceKind,
+    uri: &str,
+) -> CorpusProvenanceRef {
+    CorpusProvenanceRef {
+        provenance_id: provenance_id.to_string(),
+        kind,
+        uri: uri.to_string(),
+        captured_at: REAL_CORPUS_CAPTURED_AT.to_string(),
+        labeler: REAL_CORPUS_LABELER.to_string(),
     }
 }
 

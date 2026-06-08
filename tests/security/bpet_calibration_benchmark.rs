@@ -1,19 +1,22 @@
 use std::io::Write as _;
 
 use frankenengine_node::schema_versions;
-use frankenengine_node::security::bpet::adversarial_scenarios::synthesize_labeled_corpus_records;
+use frankenengine_node::security::bpet::adversarial_scenarios::{
+    REAL_LABELED_CORPUS_MIN_RECORDS, real_labeled_corpus_records, synthesize_labeled_corpus_records,
+};
 use frankenengine_node::security::bpet::calibration_benchmark::{
     CALIBRATION_ARTIFACT_SCHEMA_VERSION, CALIBRATION_E2E_TRACE_SCHEMA_VERSION,
-    CALIBRATION_TARGET_ALPHA_BP, CalibrationSample, CalibrationSignalSamples,
-    FN_CALIB_ARTIFACT_SIGNED, FN_CALIB_SDK_RECOMPUTE_PASS, FN_CALIB_VERIFIER_INPUT_PREPARED,
-    FN_CORPUS_CANONICAL_ROUNDTRIP_PASS, FN_CORPUS_GENERATE_START, RELIABILITY_BIN_COUNT,
-    calibration_e2e_structured_log_events, calibration_signal_report_from_samples,
-    calibration_structured_log_jsonl, generate_calibration_verifier_input,
+    CALIBRATION_TARGET_ALPHA_BP, CORPUS_EXCHANGEABILITY_TRANSFER_SCHEMA_VERSION, CalibrationSample,
+    CalibrationSignalSamples, FN_CALIB_ARTIFACT_SIGNED, FN_CALIB_SDK_RECOMPUTE_PASS,
+    FN_CALIB_VERIFIER_INPUT_PREPARED, FN_CORPUS_CANONICAL_ROUNDTRIP_PASS, FN_CORPUS_GENERATE_START,
+    RELIABILITY_BIN_COUNT, calibration_e2e_structured_log_events,
+    calibration_signal_report_from_samples, calibration_structured_log_jsonl,
+    generate_calibration_verifier_input, generate_corpus_exchangeability_transfer_report,
     generate_signed_calibration_artifact, verify_signed_calibration_artifact,
 };
 use frankenengine_node::security::bpet::phenotype_extractor::{
-    ADVERSARY_CORPUS_RECORD_SCHEMA_VERSION, CorpusGroundTruthLabel, CorpusRecordError,
-    decode_canonical_corpus_record, load_corpus_record,
+    ADVERSARY_CORPUS_RECORD_SCHEMA_VERSION, CorpusGroundTruthLabel, CorpusProvenanceKind,
+    CorpusRecordError, decode_canonical_corpus_record, load_corpus_record,
 };
 use frankenengine_verifier_sdk::calibration::{
     CalibrationSample as SdkCalibrationSample,
@@ -104,6 +107,57 @@ fn corpus_records_round_trip_through_canonical_loader_and_schema_registry() {
 }
 
 #[test]
+fn real_labeled_fixture_seed_preserves_provenance_and_confidence() {
+    let records = real_labeled_corpus_records();
+
+    assert!(records.len() >= REAL_LABELED_CORPUS_MIN_RECORDS);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.ground_truth.label == CorpusGroundTruthLabel::Malicious)
+            .count(),
+        2
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.ground_truth.label == CorpusGroundTruthLabel::Benign)
+            .count(),
+        2
+    );
+    assert!(records.iter().any(|record| {
+        record
+            .provenance
+            .iter()
+            .any(|provenance| provenance.kind == CorpusProvenanceKind::RealAdvisory)
+    }));
+    assert!(records.iter().any(|record| {
+        record
+            .provenance
+            .iter()
+            .any(|provenance| provenance.kind == CorpusProvenanceKind::RegistrySnapshot)
+    }));
+    assert!(
+        records
+            .iter()
+            .all(|record| record.ground_truth.confidence_basis_points > 0)
+    );
+
+    for record in &records {
+        record.validate().expect("real corpus record validates");
+        let bytes = record.canonical_bytes().expect("canonical bytes");
+        let decoded = decode_canonical_corpus_record(&bytes).expect("canonical decode");
+        assert_eq!(decoded, *record);
+        assert!(
+            record
+                .provenance
+                .iter()
+                .all(|provenance| provenance.uri.starts_with("https://"))
+        );
+    }
+}
+
+#[test]
 fn calibration_artifact_reports_all_phase_zero_signals() {
     let artifact = generate_signed_calibration_artifact().expect("artifact");
     let signal_ids = artifact
@@ -120,6 +174,7 @@ fn calibration_artifact_reports_all_phase_zero_signals() {
             "dgis.spof_topology_signal"
         ]
     );
+    assert_eq!(artifact.corpus_record_count, 20);
 
     for signal in &artifact.signals {
         let metrics = &signal.metrics;
@@ -143,6 +198,57 @@ fn calibration_artifact_reports_all_phase_zero_signals() {
         assert!(metrics.pr_auc_bp <= 10_000);
         assert!(metrics.brier_score_bp <= 10_000);
         assert!(metrics.expected_calibration_error_bp <= 10_000);
+    }
+}
+
+#[test]
+fn transfer_report_compares_synthetic_and_real_labeled_cohorts() {
+    let report = generate_corpus_exchangeability_transfer_report().expect("transfer report");
+
+    assert_eq!(
+        report.schema_version,
+        CORPUS_EXCHANGEABILITY_TRANSFER_SCHEMA_VERSION
+    );
+    assert_eq!(report.synthetic.record_count, 16);
+    assert!(report.real.record_count >= u64::try_from(REAL_LABELED_CORPUS_MIN_RECORDS).unwrap());
+    assert_eq!(report.real.positive_count, 2);
+    assert_eq!(report.real.benign_count, 2);
+    assert!(
+        report
+            .real
+            .provenance_kinds
+            .contains(&"real_advisory".to_string())
+    );
+    assert!(
+        report
+            .real
+            .provenance_kinds
+            .contains(&"registry_snapshot".to_string())
+    );
+    assert!(
+        report
+            .audit_notes
+            .iter()
+            .any(|note| note.contains("documented minimum"))
+    );
+
+    let signal_ids = report
+        .signal_summaries
+        .iter()
+        .map(|summary| summary.signal_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        signal_ids,
+        vec!["bpet.evolution_risk_scorer", "dgis.spof_topology_signal"]
+    );
+
+    for summary in &report.signal_summaries {
+        assert_eq!(summary.synthetic_metrics.sample_count, 16);
+        assert_eq!(summary.real_metrics.sample_count, 4);
+        assert!(summary.coverage_delta_bp <= 10_000);
+        assert!(summary.false_alarm_delta_bp <= 10_000);
+        assert!(summary.expected_calibration_error_delta_bp <= 10_000);
+        assert!(summary.roc_auc_delta_bp <= 10_000);
     }
 }
 
@@ -261,11 +367,11 @@ fn verifier_sdk_recomputes_calibration_artifact_from_published_inputs() {
 
     let jsonl = calibration_structured_log_jsonl(&events).expect("structured log jsonl");
     let expected_jsonl = format!(
-        "{{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":16,\"detail\":\"deterministic corpus generation accepted\",\"event_code\":\"FN-CORPUS-GENERATE-START\",\"event_index\":0,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n\
-         {{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":16,\"detail\":\"canonical corpus records round-tripped byte-identically\",\"event_code\":\"FN-CORPUS-CANONICAL-ROUNDTRIP-PASS\",\"event_index\":1,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n\
-         {{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":16,\"detail\":\"calibration verifier input prepared\",\"event_code\":\"FN-CALIB-VERIFIER-INPUT-PREPARED\",\"event_index\":2,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n\
-         {{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":16,\"detail\":\"signed calibration artifact generated\",\"event_code\":\"FN-CALIB-ARTIFACT-SIGNED\",\"event_index\":3,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n\
-         {{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":16,\"detail\":\"verifier sdk recompute passed after 3 sdk events\",\"event_code\":\"FN-CALIB-SDK-RECOMPUTE-PASS\",\"event_index\":4,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n",
+        "{{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":20,\"detail\":\"deterministic corpus generation accepted\",\"event_code\":\"FN-CORPUS-GENERATE-START\",\"event_index\":0,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n\
+         {{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":20,\"detail\":\"canonical corpus records round-tripped byte-identically\",\"event_code\":\"FN-CORPUS-CANONICAL-ROUNDTRIP-PASS\",\"event_index\":1,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n\
+         {{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":20,\"detail\":\"calibration verifier input prepared\",\"event_code\":\"FN-CALIB-VERIFIER-INPUT-PREPARED\",\"event_index\":2,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n\
+         {{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":20,\"detail\":\"signed calibration artifact generated\",\"event_code\":\"FN-CALIB-ARTIFACT-SIGNED\",\"event_index\":3,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n\
+         {{\"artifact_schema_version\":\"bpet.calibration_artifact.v1\",\"corpus_hash\":\"{hash}\",\"corpus_record_count\":20,\"detail\":\"verifier sdk recompute passed after 3 sdk events\",\"event_code\":\"FN-CALIB-SDK-RECOMPUTE-PASS\",\"event_index\":4,\"schema_version\":\"bpet.calibration_e2e_trace.v1\",\"signal_count\":3,\"trace_id\":\"bpet-calibration-e2e-v1\"}}\n",
         hash = artifact.corpus_hash
     );
     assert_eq!(jsonl, expected_jsonl);

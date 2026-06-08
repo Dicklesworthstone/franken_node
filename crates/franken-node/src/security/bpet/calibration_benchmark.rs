@@ -5,20 +5,25 @@
 //! DGIS/SPOF signal. All externally serialized metrics are integer basis
 //! points so canonical artifact bytes are stable across platforms.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::connector::canonical_serializer::canonical_bytes;
 use crate::security::bpet::adversarial_harness::AdversarialHarnessError;
-use crate::security::bpet::adversarial_scenarios::synthesize_labeled_corpus_records;
+use crate::security::bpet::adversarial_scenarios::{
+    REAL_LABELED_CORPUS_MIN_RECORDS, phase_zero_labeled_corpus_records,
+    real_labeled_corpus_records, synthesize_labeled_corpus_records,
+};
 use crate::security::bpet::camouflage_detector::detect_camouflage;
 use crate::security::bpet::camouflage_fixtures::all_fixtures;
 use crate::security::bpet::evolution_risk_scorer::{
     FeatureVector, ScorerError, WeightingPolicy, compute_risk_score,
 };
 use crate::security::bpet::phenotype_extractor::{
-    AdversaryCorpusRecord, CorpusGroundTruthLabel, CorpusRecordError, MAX_BASIS_POINTS,
-    feature_names,
+    AdversaryCorpusRecord, CorpusGroundTruthLabel, CorpusProvenanceKind, CorpusRecordError,
+    MAX_BASIS_POINTS, feature_names,
 };
 use crate::security::constant_time::ct_eq;
 
@@ -32,6 +37,8 @@ pub const CALIBRATION_SIGNATURE_KEY_ID: &str = "franken-node-bpet-calibration-ha
 pub const CALIBRATION_SIGNATURE_ALGORITHM: &str = "sha256-deterministic-artifact-signature-v1";
 pub const CALIBRATION_E2E_TRACE_SCHEMA_VERSION: &str = "bpet.calibration_e2e_trace.v1";
 pub const CALIBRATION_E2E_TRACE_ID: &str = "bpet-calibration-e2e-v1";
+pub const CORPUS_EXCHANGEABILITY_TRANSFER_SCHEMA_VERSION: &str =
+    "bpet.corpus_exchangeability_transfer.v1";
 pub const FN_CORPUS_GENERATE_START: &str = "FN-CORPUS-GENERATE-START";
 pub const FN_CORPUS_CANONICAL_ROUNDTRIP_PASS: &str = "FN-CORPUS-CANONICAL-ROUNDTRIP-PASS";
 pub const FN_CALIB_VERIFIER_INPUT_PREPARED: &str = "FN-CALIB-VERIFIER-INPUT-PREPARED";
@@ -156,6 +163,39 @@ pub struct CalibrationSignalReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusCohortSummary {
+    pub cohort_id: String,
+    pub record_count: u64,
+    pub positive_count: u64,
+    pub benign_count: u64,
+    pub min_label_confidence_bp: u16,
+    pub mean_label_confidence_bp: u16,
+    pub provenance_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusSignalTransferSummary {
+    pub signal_id: String,
+    pub signal_schema_version: String,
+    pub synthetic_metrics: CalibrationMetrics,
+    pub real_metrics: CalibrationMetrics,
+    pub coverage_delta_bp: u16,
+    pub false_alarm_delta_bp: u16,
+    pub expected_calibration_error_delta_bp: u16,
+    pub roc_auc_delta_bp: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpusExchangeabilityTransferReport {
+    pub schema_version: String,
+    pub min_real_record_count: u64,
+    pub synthetic: CorpusCohortSummary,
+    pub real: CorpusCohortSummary,
+    pub signal_summaries: Vec<CorpusSignalTransferSummary>,
+    pub audit_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnsignedCalibrationArtifact {
     pub schema_version: String,
     pub generated_at: String,
@@ -203,7 +243,7 @@ impl SignedCalibrationArtifact {
 
 pub fn generate_signed_calibration_artifact()
 -> Result<SignedCalibrationArtifact, CalibrationBenchmarkError> {
-    let records = synthesize_labeled_corpus_records()?;
+    let records = phase_zero_labeled_corpus_records()?;
     generate_signed_calibration_artifact_from_records(&records)
 }
 
@@ -228,7 +268,7 @@ pub fn generate_signed_calibration_artifact_from_records(
 
 pub fn generate_calibration_verifier_input()
 -> Result<CalibrationVerifierInput, CalibrationBenchmarkError> {
-    let records = synthesize_labeled_corpus_records()?;
+    let records = phase_zero_labeled_corpus_records()?;
     generate_calibration_verifier_input_from_records(&records)
 }
 
@@ -285,6 +325,56 @@ pub fn calibration_signal_report_from_samples(
     signal_samples: &CalibrationSignalSamples,
 ) -> Result<CalibrationSignalReport, CalibrationBenchmarkError> {
     signal_report_from_samples(signal_samples)
+}
+
+pub fn generate_corpus_exchangeability_transfer_report()
+-> Result<CorpusExchangeabilityTransferReport, CalibrationBenchmarkError> {
+    let synthetic = synthesize_labeled_corpus_records()?;
+    let real = real_labeled_corpus_records();
+    corpus_exchangeability_transfer_report_from_records(&synthetic, &real)
+}
+
+pub fn corpus_exchangeability_transfer_report_from_records(
+    synthetic_records: &[AdversaryCorpusRecord],
+    real_records: &[AdversaryCorpusRecord],
+) -> Result<CorpusExchangeabilityTransferReport, CalibrationBenchmarkError> {
+    if synthetic_records.is_empty() || real_records.is_empty() {
+        return Err(CalibrationBenchmarkError::EmptyCorpus);
+    }
+
+    for record in synthetic_records.iter().chain(real_records) {
+        record.validate()?;
+    }
+
+    let synthetic_evolution = evolution_risk_signal_samples(synthetic_records)?;
+    let real_evolution = evolution_risk_signal_samples(real_records)?;
+    let synthetic_dgis = dgis_spof_signal_samples(synthetic_records);
+    let real_dgis = dgis_spof_signal_samples(real_records);
+
+    let real_count = u64::try_from(real_records.len()).unwrap_or(u64::MAX);
+    let min_real_record_count = u64::try_from(REAL_LABELED_CORPUS_MIN_RECORDS).unwrap_or(u64::MAX);
+    let mut audit_notes = vec![
+        "synthetic and real provenance are kept in separate cohort summaries".to_string(),
+        "label confidence is explicit; registry controls are weaker labels than malware advisories"
+            .to_string(),
+    ];
+    if real_count >= min_real_record_count {
+        audit_notes.push("real labeled seed meets the documented minimum".to_string());
+    } else {
+        audit_notes.push("real labeled seed is below the documented minimum".to_string());
+    }
+
+    Ok(CorpusExchangeabilityTransferReport {
+        schema_version: CORPUS_EXCHANGEABILITY_TRANSFER_SCHEMA_VERSION.to_string(),
+        min_real_record_count,
+        synthetic: corpus_cohort_summary("synthetic", synthetic_records),
+        real: corpus_cohort_summary("real", real_records),
+        signal_summaries: vec![
+            corpus_signal_transfer_summary(&synthetic_evolution, &real_evolution)?,
+            corpus_signal_transfer_summary(&synthetic_dgis, &real_dgis)?,
+        ],
+        audit_notes,
+    })
 }
 
 pub fn calibration_e2e_structured_log_events(
@@ -459,6 +549,82 @@ fn dgis_spof_signal_samples(records: &[AdversaryCorpusRecord]) -> CalibrationSig
             "this is the deterministic corpus-side DGIS/SPOF calibration seam; full contagion simulation can be added without changing the artifact schema".to_string(),
         ],
         samples,
+    }
+}
+
+fn corpus_cohort_summary(
+    cohort_id: &str,
+    records: &[AdversaryCorpusRecord],
+) -> CorpusCohortSummary {
+    let record_count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+    let positive_count = u64::try_from(records.iter().filter(|record| is_positive(record)).count())
+        .unwrap_or(u64::MAX);
+    let benign_count = record_count.saturating_sub(positive_count);
+    let min_label_confidence_bp = records
+        .iter()
+        .map(|record| record.ground_truth.confidence_basis_points)
+        .min()
+        .unwrap_or(0);
+    let confidence_sum = records.iter().fold(0_u64, |acc, record| {
+        acc.saturating_add(u64::from(record.ground_truth.confidence_basis_points))
+    });
+    let provenance_kinds = records
+        .iter()
+        .flat_map(|record| {
+            record
+                .provenance
+                .iter()
+                .map(|provenance| provenance_kind_label(provenance.kind).to_string())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    CorpusCohortSummary {
+        cohort_id: cohort_id.to_string(),
+        record_count,
+        positive_count,
+        benign_count,
+        min_label_confidence_bp,
+        mean_label_confidence_bp: ratio_bp(confidence_sum, record_count),
+        provenance_kinds,
+    }
+}
+
+fn corpus_signal_transfer_summary(
+    synthetic: &CalibrationSignalSamples,
+    real: &CalibrationSignalSamples,
+) -> Result<CorpusSignalTransferSummary, CalibrationBenchmarkError> {
+    let synthetic_metrics = compute_metrics(&synthetic.signal_id, &synthetic.samples)?;
+    let real_metrics = compute_metrics(&real.signal_id, &real.samples)?;
+    Ok(CorpusSignalTransferSummary {
+        signal_id: synthetic.signal_id.clone(),
+        signal_schema_version: synthetic.signal_schema_version.clone(),
+        coverage_delta_bp: abs_diff_bp(
+            synthetic_metrics.coverage_at_target_alpha_bp,
+            real_metrics.coverage_at_target_alpha_bp,
+        ),
+        false_alarm_delta_bp: abs_diff_bp(
+            synthetic_metrics.false_alarm_under_sequential_peeking_bp,
+            real_metrics.false_alarm_under_sequential_peeking_bp,
+        ),
+        expected_calibration_error_delta_bp: abs_diff_bp(
+            synthetic_metrics.expected_calibration_error_bp,
+            real_metrics.expected_calibration_error_bp,
+        ),
+        roc_auc_delta_bp: abs_diff_bp(synthetic_metrics.roc_auc_bp, real_metrics.roc_auc_bp),
+        synthetic_metrics,
+        real_metrics,
+    })
+}
+
+fn provenance_kind_label(kind: CorpusProvenanceKind) -> &'static str {
+    match kind {
+        CorpusProvenanceKind::RealAdvisory => "real_advisory",
+        CorpusProvenanceKind::SyntheticGenerator => "synthetic_generator",
+        CorpusProvenanceKind::RuntimeTrace => "runtime_trace",
+        CorpusProvenanceKind::RegistrySnapshot => "registry_snapshot",
+        CorpusProvenanceKind::OperatorAssertion => "operator_assertion",
     }
 }
 
