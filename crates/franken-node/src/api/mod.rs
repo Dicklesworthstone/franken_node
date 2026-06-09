@@ -7,6 +7,7 @@
 //! individual items inside each module when a helper is test-only or tied to a
 //! lower-level feature such as `control-plane`.
 
+pub mod compat_conformance;
 pub mod compat_gate;
 pub mod error;
 pub mod fleet_control_routes;

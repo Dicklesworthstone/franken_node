@@ -643,6 +643,12 @@ path = "tests/storage_metamorphic.rs"
 name = "cas_effect_receipt_conformance"
 path = "tests/cas_effect_receipt_conformance.rs"
 
+# bd-f5b04.2.1.2 (TNR keystone): lockstep-oracle compat conformance harness
+[[test]]
+name = "compat_lockstep_oracle_conformance"
+path = "tests/compat_lockstep_oracle_conformance.rs"
+required-features = ["control-plane"]
+
 [[test]]
 name = "control_lane_mapping_policy"
 path = "tests/control_lane_mapping_policy.rs"
