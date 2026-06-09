@@ -16,6 +16,8 @@ Governance / Program Structure
 
 - Five build tracks with exit gates and 10.x implementation mappings
 - Fifteen enhancement maps documenting generative methods
+- Frontier deferral register for rejected or parked ideas that need durable
+  rationale before future reconsideration
 - Event codes for build-program lifecycle observability
 - Invariants ensuring structural completeness and traceability
 
@@ -89,6 +91,22 @@ Governance / Program Structure
 
 ---
 
+## Frontier Deferral Register
+
+Rejected or parked frontier ideas must stay visible in
+`docs/governance/build_program.md` with a bead id, decision, rationale, and
+revisit trigger. This register prevents repeatedly re-proposing ideas that
+conflict with current evidence, deterministic replay requirements, or claim
+discipline.
+
+Current registered deferrals:
+
+| Bead | Frontier | Decision |
+|------|----------|----------|
+| `bd-f5b04.6.3` | Bayesian DBN Immune World Model | Rejected and parked until Phase 0 plus conformal calibration produce a real corpus and a deterministic inference design beats the lighter correlated-campaign path. |
+
+---
+
 ## Event Codes
 
 | Code    | Name                    | Description                                                  |
@@ -120,7 +138,9 @@ Governance / Program Structure
 3. Event codes BLD-001 through BLD-004 are defined.
 4. Invariants INV-BLD-TRACKS, INV-BLD-MAPS, INV-BLD-EXIT, INV-BLD-TRACE hold.
 5. Track-to-section mappings cover 10.1 through 10.21.
-6. Verification script passes all checks with `--json` output.
+6. Rejected or parked frontier ideas that should not be re-proposed are recorded
+   with a bead id, rationale, and revisit trigger.
+7. Verification script passes all checks with `--json` output.
 
 ## Dependencies
 

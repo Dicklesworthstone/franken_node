@@ -276,6 +276,19 @@ Additional sections covered by enhancement maps:
 
 ---
 
+## Frontier Deferral Register
+
+The build program keeps rejected frontier ideas in the same governance record as
+accepted enhancement maps so agents do not relitigate parked concepts without new
+evidence. A rejected frontier can be reopened only when its revisit trigger is
+met and the new evidence is strong enough to change the original decision.
+
+| Bead | Frontier | Decision | Rationale | Revisit Trigger |
+|------|----------|----------|-----------|-----------------|
+| `bd-f5b04.6.3` | Bayesian DBN Immune World Model | Rejected and parked | A heavyweight dynamic Bayesian network over latent supply-chain variables would require labeled corpora the project does not yet have. Exact inference in a loopy latent graph is intractable, while practical approximations pull in randomness, iteration-order sensitivity, or floating-point accumulation that conflicts with deterministic replay and canonical float rejection. The useful campaign-correlation and detector-reliability insight is better served by deterministic correlated-campaign detection plus the conformal and sentinel lanes. | Reconsider only after Phase 0 and conformal calibration have produced a real corpus, and only if a deterministic inference design beats the lighter correlated-campaign path on measured evidence. |
+
+---
+
 ## Event Codes
 
 | Code    | Name                    | Emitted When                                              |
