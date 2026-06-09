@@ -56,6 +56,24 @@ pub const VEF_POLICY_LANGUAGE: &str = "vef-policy-lang-v1";
 pub const VEF_CONSTRAINT_COMPILER: &str = "vef-constraint-compiler-v1";
 pub const VEF_POLICY_CONSTRAINTS: &str = "vef-policy-constraints-v1";
 
+// ── Compatibility ─────────────────────────────────────────────────
+pub const COMPAT_OPERATION_CONTRACT: &str = "compat-operation-contract-v1";
+pub const COMPAT_FS_READ_FILE_ARGS: &str = "compat-fs-read-file-args-v1";
+pub const COMPAT_FS_READ_FILE_RESULT: &str = "compat-fs-read-file-result-v1";
+pub const COMPAT_FS_READ_FILE_ERROR: &str = "compat-fs-read-file-error-v1";
+pub const COMPAT_FS_WRITE_FILE_ARGS: &str = "compat-fs-write-file-args-v1";
+pub const COMPAT_FS_WRITE_FILE_RESULT: &str = "compat-fs-write-file-result-v1";
+pub const COMPAT_FS_WRITE_FILE_ERROR: &str = "compat-fs-write-file-error-v1";
+pub const COMPAT_HTTP_REQUEST_ARGS: &str = "compat-http-request-args-v1";
+pub const COMPAT_HTTP_REQUEST_RESULT: &str = "compat-http-request-result-v1";
+pub const COMPAT_HTTP_REQUEST_ERROR: &str = "compat-http-request-error-v1";
+pub const COMPAT_PROCESS_ENV_ARGS: &str = "compat-process-env-args-v1";
+pub const COMPAT_PROCESS_ENV_RESULT: &str = "compat-process-env-result-v1";
+pub const COMPAT_PROCESS_ENV_ERROR: &str = "compat-process-env-error-v1";
+pub const COMPAT_MODULE_RESOLVE_ARGS: &str = "compat-module-resolve-args-v1";
+pub const COMPAT_MODULE_RESOLVE_RESULT: &str = "compat-module-resolve-result-v1";
+pub const COMPAT_MODULE_RESOLVE_ERROR: &str = "compat-module-resolve-error-v1";
+
 // ── Verifier & Evidence ────────────────────────────────────────────
 pub const VERIFIER_SDK_API: &str = "1.0.0";
 pub const VERIFIER_SDK_SCHEMA_TAG: &str = "vsk-v1.0";
@@ -206,6 +224,23 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("vef_policy_language", VEF_POLICY_LANGUAGE),
         ("vef_constraint_compiler", VEF_CONSTRAINT_COMPILER),
         ("vef_policy_constraints", VEF_POLICY_CONSTRAINTS),
+        // Compatibility
+        ("compat_operation_contract", COMPAT_OPERATION_CONTRACT),
+        ("compat_fs_read_file_args", COMPAT_FS_READ_FILE_ARGS),
+        ("compat_fs_read_file_result", COMPAT_FS_READ_FILE_RESULT),
+        ("compat_fs_read_file_error", COMPAT_FS_READ_FILE_ERROR),
+        ("compat_fs_write_file_args", COMPAT_FS_WRITE_FILE_ARGS),
+        ("compat_fs_write_file_result", COMPAT_FS_WRITE_FILE_RESULT),
+        ("compat_fs_write_file_error", COMPAT_FS_WRITE_FILE_ERROR),
+        ("compat_http_request_args", COMPAT_HTTP_REQUEST_ARGS),
+        ("compat_http_request_result", COMPAT_HTTP_REQUEST_RESULT),
+        ("compat_http_request_error", COMPAT_HTTP_REQUEST_ERROR),
+        ("compat_process_env_args", COMPAT_PROCESS_ENV_ARGS),
+        ("compat_process_env_result", COMPAT_PROCESS_ENV_RESULT),
+        ("compat_process_env_error", COMPAT_PROCESS_ENV_ERROR),
+        ("compat_module_resolve_args", COMPAT_MODULE_RESOLVE_ARGS),
+        ("compat_module_resolve_result", COMPAT_MODULE_RESOLVE_RESULT),
+        ("compat_module_resolve_error", COMPAT_MODULE_RESOLVE_ERROR),
         // Verifier & Evidence
         ("verifier_sdk_api", VERIFIER_SDK_API),
         ("verifier_sdk_schema_tag", VERIFIER_SDK_SCHEMA_TAG),
@@ -463,6 +498,10 @@ mod tests {
         assert_eq!(lookup("lane_scheduler"), Some(LANE_SCHEDULER));
         assert_eq!(lookup("control_lane_policy"), Some(CONTROL_LANE_POLICY));
         assert_eq!(lookup("n_version_oracle"), Some(N_VERSION_ORACLE));
+        assert_eq!(
+            lookup("compat_operation_contract"),
+            Some(COMPAT_OPERATION_CONTRACT)
+        );
         assert_eq!(lookup("vef_proof_generator"), Some(VEF_PROOF_GENERATOR));
         assert_eq!(
             lookup("adversary_corpus_record"),

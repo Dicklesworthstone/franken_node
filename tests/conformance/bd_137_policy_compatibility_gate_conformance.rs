@@ -36,9 +36,11 @@ use std::collections::BTreeMap;
 // code — not imported, to keep clippy -D warnings clean.)
 use frankenengine_node::api::compat_gate::{
     CompatGateOperationError, CompatGateRegistrationError, CompatGateService, CompatMode,
-    GateCheckRequest, GateDecision, ModeTransitionRequest, PolicyPredicate, ShimMetadata,
-    error_codes, event_codes,
+    CompatOperationId, CompatPolicyHook, CompatSideEffectCategory, GateCheckRequest, GateDecision,
+    ModeTransitionRequest, PolicyPredicate, ShimMetadata, error_codes, event_codes,
+    first_tranche_contract_for, first_tranche_operation_contracts,
 };
+use frankenengine_node::schema_versions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequirementLevel {
@@ -59,7 +61,7 @@ pub enum TestResult {
 // API-DRIFT REMEDIATION (bd-rjc2m.4): fn-pointer fields cannot derive Serialize/Deserialize
 // (E0277); the case table is compile-time only and never serialized — the serializable
 // surface is ConformanceRecord/ConformanceReport below (assertions unchanged).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ConformanceCase {
     pub id: &'static str,
     pub section: &'static str,
@@ -1101,5 +1103,69 @@ mod tests {
         assert!(json.contains("compliance_score"));
         assert!(json.contains("must_pass"));
         assert!(json.contains("should_pass"));
+    }
+
+    #[test]
+    fn first_tranche_operation_contracts_have_registered_schema_versions() {
+        let versions = schema_versions::all_versions();
+        let registered_schemas: std::collections::BTreeSet<&'static str> =
+            versions.iter().map(|(_, version)| *version).collect();
+
+        for contract in first_tranche_operation_contracts() {
+            for schema in [
+                contract.args_schema,
+                contract.result_schema,
+                contract.error_schema,
+            ] {
+                assert!(
+                    registered_schemas.contains(schema),
+                    "schema version {schema} is missing from schema_versions"
+                );
+            }
+
+            assert!(
+                !contract.node_error_parity.is_empty(),
+                "{} must document Node/Bun error parity",
+                contract.operation_id.registry_id()
+            );
+            assert!(
+                !contract.policy_hooks.is_empty(),
+                "{} must declare policy hooks",
+                contract.operation_id.registry_id()
+            );
+            assert!(
+                contract.resource_budget.max_duration_ms > 0,
+                "{} must declare a nonzero duration budget",
+                contract.operation_id.registry_id()
+            );
+        }
+    }
+
+    #[test]
+    fn first_tranche_operation_contracts_match_policy_surface() {
+        let http = first_tranche_contract_for(CompatOperationId::HttpRequest)
+            .expect("http request contract must be registered");
+        assert_eq!(http.operation_id.registry_id(), "compat:http:request");
+        assert_eq!(
+            http.side_effect_category,
+            CompatSideEffectCategory::NetworkEgress
+        );
+        assert!(http.policy_hooks.contains(&CompatPolicyHook::Capability));
+        assert!(http.policy_hooks.contains(&CompatPolicyHook::Ssrf));
+        assert!(http.policy_hooks.contains(&CompatPolicyHook::Profile));
+
+        let process_env = first_tranche_contract_for(CompatOperationId::ProcessEnv)
+            .expect("process env contract must be registered");
+        assert_eq!(
+            process_env.side_effect_category,
+            CompatSideEffectCategory::EnvironmentRead
+        );
+        assert!(!process_env.policy_hooks.contains(&CompatPolicyHook::Ssrf));
+        assert!(
+            process_env
+                .node_error_parity
+                .iter()
+                .any(|entry| entry.node_code == "ERR_ACCESS_DENIED" && entry.bun_code.is_none())
+        );
     }
 }
