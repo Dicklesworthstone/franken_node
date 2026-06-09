@@ -2149,6 +2149,14 @@ pub struct FleetControlManager {
     rollback_receipts: BTreeMap<String, DecisionReceipt>,
     /// File-based fleet transport for persistence (real channel + on-disk storage).
     fleet_transport: Option<FileFleetTransport>,
+    /// Optional k-of-n signed positive-validation policy governing release. When
+    /// absent, release stays fail-closed: no validations can be accepted.
+    release_validation_policy: Option<ReleaseValidationPolicy>,
+    /// Collected positive validations keyed by incident_id, deduplicated to one
+    /// entry per validator key id.
+    release_validations: BTreeMap<String, Vec<PositiveValidation>>,
+    /// Non-repudiable equivocation fault receipts produced during validation intake.
+    validator_fault_receipts: Vec<ValidatorFaultReceipt>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2410,6 +2418,9 @@ impl FleetControlManager {
             decision_trust_roots,
             rollback_receipts: BTreeMap::new(),
             fleet_transport: None,
+            release_validation_policy: None,
+            release_validations: BTreeMap::new(),
+            validator_fault_receipts: Vec::new(),
         }
     }
 
@@ -2450,6 +2461,9 @@ impl FleetControlManager {
             decision_trust_roots,
             rollback_receipts: BTreeMap::new(),
             fleet_transport: Some(transport),
+            release_validation_policy: None,
+            release_validations: BTreeMap::new(),
+            validator_fault_receipts: Vec::new(),
         })
     }
 
@@ -2921,6 +2935,9 @@ impl FleetControlManager {
             }
         }
         self.incident_convergences.remove(incident_id);
+        // Collected positive validations are scoped to a single incident incarnation;
+        // drop them so a future incident reusing the id cannot inherit stale quorum.
+        self.release_validations.remove(incident_id);
         self.sync_zone_pending_convergences(&zone_id);
 
         let event = FleetControlEvent::fleet_released(&trace.trace_id, &zone_id, incident_id);
@@ -3428,61 +3445,245 @@ impl FleetControlManager {
         Ok(())
     }
 
-    /// Validate that quarantine trigger conditions have been resolved.
-    /// Enforces fail-closed semantics: if validation cannot confirm the trigger
-    /// conditions are resolved, release is denied.
+    /// Control epoch bound into positive validations for an incident. Derived
+    /// deterministically from the incident's operation slot so each incarnation of
+    /// an action (each quarantine) has a distinct epoch and validations cannot be
+    /// replayed across re-quarantines.
+    fn expected_control_epoch(incident_id: &str) -> u64 {
+        incident_operation_slot(incident_id)
+            .map(|slot| slot.epoch)
+            .unwrap_or(0)
+    }
+
+    /// Configure the accountable k-of-n release-validation policy. Until this is
+    /// set, the release path stays fail-closed and no validations are accepted.
     ///
-    /// This replaces the flawed rollback receipt approach which could be bypassed
-    /// by external registration of fabricated receipts.
+    /// # Examples
+    /// ```ignore
+    /// let key = ed25519_dalek::SigningKey::from_bytes(&[1_u8; 32]);
+    /// let policy = ReleaseValidationPolicy::from_validator_keys(&[key.verifying_key()]);
+    /// let mut mgr = FleetControlManager::new();
+    /// mgr.configure_release_validation(policy);
+    /// ```
+    pub fn configure_release_validation(&mut self, policy: ReleaseValidationPolicy) {
+        self.release_validation_policy = Some(policy);
+    }
+
+    /// Effective release quorum (k). Zero when no policy is configured, which keeps
+    /// release fail-closed (an unreachable threshold given zero trusted validators).
+    fn release_validation_quorum(&self) -> usize {
+        self.release_validation_policy
+            .as_ref()
+            .map(|policy| policy.quorum_threshold)
+            .unwrap_or(0)
+    }
+
+    /// Recorded validator equivocation fault receipts.
+    ///
+    /// # Examples
+    /// ```ignore
+    /// let mgr = FleetControlManager::new();
+    /// assert!(mgr.validator_fault_receipts().is_empty());
+    /// ```
+    #[must_use]
+    pub fn validator_fault_receipts(&self) -> &[ValidatorFaultReceipt] {
+        &self.validator_fault_receipts
+    }
+
+    /// Submit a signed positive validation for an incident's release.
+    ///
+    /// The validation is rejected (fail-closed) when: no release policy is
+    /// configured, the signature is forged or signed by an untrusted validator,
+    /// the binding fields do not match the incident, or the timestamp is stale
+    /// (back-dated) or implausibly future-dated. If the same validator has already
+    /// submitted a *conflicting* statement for the same canonical action, an
+    /// equivocation fault receipt is recorded and the submission is rejected.
+    pub fn submit_release_validation(
+        &mut self,
+        validation: PositiveValidation,
+    ) -> Result<(), FleetControlError> {
+        let incident_id = validation.incident_id.clone();
+
+        let Some(policy) = self.release_validation_policy.as_ref() else {
+            return Err(FleetControlError::release_validation_invalid(
+                &incident_id,
+                "release-validation policy is not configured",
+            ));
+        };
+        let max_age_secs = policy.max_validation_age_secs;
+
+        // The incident must exist and the validation must bind to it exactly.
+        let incident = self.incidents.get(&incident_id).ok_or_else(|| {
+            FleetControlError::release_validation_invalid(
+                &incident_id,
+                "incident not found for validation",
+            )
+        })?;
+        let expected_epoch = Self::expected_control_epoch(&incident_id);
+        if !crate::security::constant_time::ct_eq(&validation.extension_id, &incident.extension_id)
+            || !crate::security::constant_time::ct_eq(
+                &validation.action_type,
+                &incident.action_type,
+            )
+            || !crate::security::constant_time::ct_eq(&validation.zone_id, &incident.zone_id)
+            || validation.control_epoch != expected_epoch
+        {
+            return Err(FleetControlError::release_validation_invalid(
+                &incident_id,
+                "validation binding does not match the incident (extension/action/zone/epoch)",
+            ));
+        }
+
+        // Cryptographic verification against the trusted validator set.
+        if !verify_positive_validation_signature(&validation, &policy.validators) {
+            return Err(FleetControlError::release_validation_invalid(
+                &incident_id,
+                "validation signature is invalid or signed by an untrusted validator",
+            ));
+        }
+
+        // Freshness: reject back-dated (stale) and implausibly future-dated values.
+        let issued_at = chrono::DateTime::parse_from_rfc3339(&validation.issued_at)
+            .map_err(|_| {
+                FleetControlError::release_validation_invalid(
+                    &incident_id,
+                    "validation issued_at is not a valid RFC 3339 timestamp",
+                )
+            })?
+            .with_timezone(&chrono::Utc);
+        let now = chrono::Utc::now();
+        let age = now.signed_duration_since(issued_at);
+        if age > chrono::Duration::seconds(max_age_secs) {
+            return Err(FleetControlError::release_validation_invalid(
+                &incident_id,
+                "validation is stale/back-dated beyond the freshness window",
+            ));
+        }
+        if age < chrono::Duration::seconds(-RELEASE_VALIDATION_FUTURE_SKEW_SECS) {
+            return Err(FleetControlError::release_validation_invalid(
+                &incident_id,
+                "validation is dated implausibly far in the future",
+            ));
+        }
+
+        // Equivocation / dedup against prior submissions by the same validator for
+        // the same canonical action.
+        let entry = self.release_validations.entry(incident_id.clone()).or_default();
+        if let Some(pos) = entry.iter().position(|existing| {
+            crate::security::constant_time::ct_eq(
+                &existing.validator_key_id,
+                &validation.validator_key_id,
+            ) && existing.control_epoch == validation.control_epoch
+        }) {
+            let existing = &entry[pos];
+            if !existing.semantics_agree(&validation) {
+                let fault = ValidatorFaultReceipt {
+                    fault_type: "validator_equivocation".to_string(),
+                    validator_key_id: validation.validator_key_id.clone(),
+                    incident_id: incident_id.clone(),
+                    control_epoch: validation.control_epoch,
+                    detected_at: now.to_rfc3339(),
+                    conflicting: vec![existing.clone(), validation.clone()],
+                };
+                push_bounded(
+                    &mut self.validator_fault_receipts,
+                    fault,
+                    MAX_VALIDATOR_FAULT_RECEIPTS,
+                );
+                return Err(FleetControlError::validator_equivocation(
+                    &validation.validator_key_id,
+                    &incident_id,
+                    "validator signed conflicting positive validations for the same action",
+                ));
+            }
+            // Same verdict, fresher signature: refresh in place (idempotent intake).
+            entry[pos] = validation;
+            return Ok(());
+        }
+
+        push_bounded(entry, validation, MAX_RELEASE_VALIDATIONS_PER_INCIDENT);
+        Ok(())
+    }
+
+    /// Count distinct trusted validators that have submitted a fresh, matching,
+    /// `resolved == true` attestation for the incident.
+    fn collected_release_quorum(&self, incident_id: &str, max_age_secs: i64) -> usize {
+        let now = chrono::Utc::now();
+        let expected_epoch = Self::expected_control_epoch(incident_id);
+        let mut counted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        if let Some(validations) = self.release_validations.get(incident_id) {
+            for validation in validations {
+                if !validation.resolved || validation.control_epoch != expected_epoch {
+                    continue;
+                }
+                let Ok(issued_at) = chrono::DateTime::parse_from_rfc3339(&validation.issued_at)
+                else {
+                    continue;
+                };
+                let age = now.signed_duration_since(issued_at.with_timezone(&chrono::Utc));
+                if age > chrono::Duration::seconds(max_age_secs)
+                    || age < chrono::Duration::seconds(-RELEASE_VALIDATION_FUTURE_SKEW_SECS)
+                {
+                    continue;
+                }
+                counted.insert(validation.validator_key_id.as_str());
+            }
+        }
+        counted.len()
+    }
+
+    /// Validate that quarantine/revocation trigger conditions have been resolved by
+    /// a k-of-n quorum of signed positive validations.
+    ///
+    /// Enforces fail-closed semantics: release is denied unless the configured
+    /// quorum of distinct, trusted, fresh, `resolved` attestations has been
+    /// collected for this incident. Replaces the prior unconditional denial and the
+    /// earlier rollback-receipt approach (which could be bypassed by externally
+    /// registered fabricated receipts).
     fn validate_quarantine_resolution(&self, incident_id: &str) -> Result<(), FleetControlError> {
         let incident = self.incidents.get(incident_id).ok_or_else(|| {
             FleetControlError::rollback_unverified(incident_id, "incident not found for validation")
         })?;
 
-        // For quarantine incidents, we need to validate that the extension
-        // which triggered the quarantine is now in a safe state
-        if crate::security::constant_time::ct_eq(&incident.action_type, "quarantine") {
-            // Fail-closed: Without a mechanism to positively validate that the
-            // quarantine trigger conditions are resolved, we must deny release.
-            // This prevents the bypass where rollback receipts could be fabricated.
-            //
-            // TODO: Implement extension health validation that checks:
-            // - Extension trust card status (not revoked)
-            // - Extension compliance with security policies
-            // - Extension operational metrics within acceptable bounds
-            // - No active security incidents for this extension
-            //
-            // Until proper validation is implemented, all quarantine releases
-            // are denied to maintain fail-closed security semantics.
+        let is_quarantine = crate::security::constant_time::ct_eq(&incident.action_type, "quarantine");
+        let is_revoke = crate::security::constant_time::ct_eq(&incident.action_type, "revoke");
+        if !is_quarantine && !is_revoke {
+            // Unknown action types are denied fail-closed.
             return Err(FleetControlError::rollback_unverified(
                 incident_id,
                 &format!(
-                    "quarantine release requires positive validation that trigger conditions for extension '{}' are resolved - validation not yet implemented",
-                    incident.extension_id
+                    "unknown action type '{}' - release validation not supported",
+                    incident.action_type
                 ),
             ));
         }
 
-        // For non-quarantine incidents (revocations), the same principle applies
-        // but revocation resolution requires different validation logic
-        if crate::security::constant_time::ct_eq(&incident.action_type, "revoke") {
-            return Err(FleetControlError::rollback_unverified(
-                incident_id,
-                &format!(
-                    "revocation release requires positive validation that revocation conditions for extension '{}' are resolved - validation not yet implemented",
-                    incident.extension_id
-                ),
-            ));
+        let required = self.release_validation_quorum();
+        let max_age_secs = self
+            .release_validation_policy
+            .as_ref()
+            .map(|policy| policy.max_validation_age_secs)
+            .unwrap_or(DEFAULT_RELEASE_VALIDATION_MAX_AGE_SECS);
+        let collected = self.collected_release_quorum(incident_id, max_age_secs);
+
+        // Fail-closed: no policy configured (required == 0) is treated as an
+        // unreachable quorum, and any shortfall denies release.
+        if required == 0 || collected < required {
+            let detail = if is_quarantine {
+                format!(
+                    "quarantine release requires positive validation that trigger conditions for extension '{}' are resolved - {}/{} signed validations collected",
+                    incident.extension_id, collected, required
+                )
+            } else {
+                format!(
+                    "revocation release requires positive validation that revocation conditions for extension '{}' are resolved - {}/{} signed validations collected",
+                    incident.extension_id, collected, required
+                )
+            };
+            return Err(FleetControlError::rollback_unverified(incident_id, &detail));
         }
 
-        // Unknown action types are denied fail-closed
-        Err(FleetControlError::rollback_unverified(
-            incident_id,
-            &format!(
-                "unknown action type '{}' - validation not implemented",
-                incident.action_type
-            ),
-        ))
+        Ok(())
     }
 
     /// Register convergence rollback receipt for an incident.
@@ -4927,6 +5128,218 @@ mod tests {
         assert_eq!(mgr.zone_status, zone_status);
         assert_eq!(mgr.events, events);
         assert_eq!(mgr.rollback_receipts, rollback_receipts);
+    }
+
+    // ── Accountable k-of-n signed release tests ─────────────────────────────
+
+    fn validator_key(seed: u8) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+    }
+
+    /// Set up a manager with an active quarantine and a configured 2-of-3
+    /// release-validation policy. Returns (manager, incident_id, validator keys).
+    fn manager_with_quarantine_and_policy(
+        quorum: usize,
+    ) -> (FleetControlManager, String, Vec<ed25519_dalek::SigningKey>) {
+        let mut mgr = FleetControlManager::new();
+        mgr.activate();
+        let validators = vec![validator_key(101), validator_key(102), validator_key(103)];
+        let policy = ReleaseValidationPolicy::from_validator_keys(
+            &validators
+                .iter()
+                .map(ed25519_dalek::SigningKey::verifying_key)
+                .collect::<Vec<_>>(),
+        )
+        .with_quorum(quorum);
+        mgr.configure_release_validation(policy);
+
+        let scope = test_quarantine_scope();
+        let result = mgr
+            .quarantine("ext-test", &scope, &admin_identity(), &test_trace())
+            .expect("quarantine should succeed");
+        let incident_id = format!("inc-{}", result.operation_id);
+        (mgr, incident_id, validators)
+    }
+
+    fn signed_validation_for(
+        mgr: &FleetControlManager,
+        key: &ed25519_dalek::SigningKey,
+        incident_id: &str,
+        resolved: bool,
+    ) -> PositiveValidation {
+        let incident = mgr.incidents.get(incident_id).expect("incident present");
+        let epoch = FleetControlManager::expected_control_epoch(incident_id);
+        sign_positive_validation(
+            key,
+            incident_id,
+            &incident.extension_id,
+            &incident.action_type,
+            &incident.zone_id,
+            epoch,
+            resolved,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+    }
+
+    #[test]
+    fn release_succeeds_with_k_of_n_signed_validations() {
+        let (mut mgr, incident_id, validators) = manager_with_quarantine_and_policy(2);
+
+        // One validation: still short of quorum.
+        let v0 = signed_validation_for(&mgr, &validators[0], &incident_id, true);
+        mgr.submit_release_validation(v0).expect("first validation accepted");
+        let err = mgr
+            .release(&incident_id, &admin_identity(), &test_trace())
+            .expect_err("release should fail below quorum");
+        assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
+        if let FleetControlError::RollbackUnverified { detail, .. } = &err {
+            assert!(detail.contains("1/2 signed validations collected"), "{detail}");
+        }
+
+        // Second distinct validator reaches quorum.
+        let v1 = signed_validation_for(&mgr, &validators[1], &incident_id, true);
+        mgr.submit_release_validation(v1).expect("second validation accepted");
+        let result = mgr
+            .release(&incident_id, &admin_identity(), &test_trace())
+            .expect("release should succeed at quorum");
+        assert_eq!(result.action_type, "release");
+        assert!(mgr.active_incidents().is_empty());
+        // Validations are cleaned up after release.
+        assert!(mgr.release_validations.get(&incident_id).is_none());
+    }
+
+    #[test]
+    fn duplicate_validator_does_not_double_count_toward_quorum() {
+        let (mut mgr, incident_id, validators) = manager_with_quarantine_and_policy(2);
+        let v0 = signed_validation_for(&mgr, &validators[0], &incident_id, true);
+        let v0_again = signed_validation_for(&mgr, &validators[0], &incident_id, true);
+        mgr.submit_release_validation(v0).expect("accepted");
+        mgr.submit_release_validation(v0_again)
+            .expect("idempotent refresh accepted");
+        let err = mgr
+            .release(&incident_id, &admin_identity(), &test_trace())
+            .expect_err("single validator cannot satisfy 2-of-n");
+        assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
+    }
+
+    #[test]
+    fn forged_signature_is_rejected() {
+        let (mut mgr, incident_id, validators) = manager_with_quarantine_and_policy(1);
+        let mut forged = signed_validation_for(&mgr, &validators[0], &incident_id, true);
+        // Tamper with the verdict without re-signing → signature no longer matches.
+        forged.signature_hex = hex::encode([7_u8; 64]);
+        let err = mgr
+            .submit_release_validation(forged)
+            .expect_err("forged signature must be rejected");
+        assert_eq!(err.error_code(), FLEET_RELEASE_VALIDATION_INVALID);
+    }
+
+    #[test]
+    fn untrusted_validator_is_rejected() {
+        let (mut mgr, incident_id, _validators) = manager_with_quarantine_and_policy(1);
+        let outsider = validator_key(200); // not in the policy validator set
+        let validation = signed_validation_for(&mgr, &outsider, &incident_id, true);
+        let err = mgr
+            .submit_release_validation(validation)
+            .expect_err("untrusted validator must be rejected");
+        assert_eq!(err.error_code(), FLEET_RELEASE_VALIDATION_INVALID);
+    }
+
+    #[test]
+    fn back_dated_validation_is_rejected() {
+        let (mut mgr, incident_id, validators) = manager_with_quarantine_and_policy(1);
+        let incident = mgr.incidents.get(&incident_id).expect("incident").clone();
+        let epoch = FleetControlManager::expected_control_epoch(&incident_id);
+        let stale_ts = (chrono::Utc::now() - chrono::Duration::seconds(7200)).to_rfc3339();
+        let validation = sign_positive_validation(
+            &validators[0],
+            &incident_id,
+            &incident.extension_id,
+            &incident.action_type,
+            &incident.zone_id,
+            epoch,
+            true,
+            &stale_ts,
+        );
+        let err = mgr
+            .submit_release_validation(validation)
+            .expect_err("back-dated validation must be rejected");
+        assert_eq!(err.error_code(), FLEET_RELEASE_VALIDATION_INVALID);
+        if let FleetControlError::ReleaseValidationInvalid { detail, .. } = &err {
+            assert!(detail.contains("stale/back-dated"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn equivocation_produces_fault_receipt() {
+        let (mut mgr, incident_id, validators) = manager_with_quarantine_and_policy(1);
+        // First: validator attests resolved = true.
+        let resolved = signed_validation_for(&mgr, &validators[0], &incident_id, true);
+        mgr.submit_release_validation(resolved)
+            .expect("first attestation accepted");
+        // Then the same validator signs the contradictory verdict for the same action.
+        let contradiction = signed_validation_for(&mgr, &validators[0], &incident_id, false);
+        let err = mgr
+            .submit_release_validation(contradiction)
+            .expect_err("conflicting verdict must be rejected as equivocation");
+        assert_eq!(err.error_code(), FLEET_VALIDATOR_EQUIVOCATION);
+
+        // A non-repudiable fault receipt was recorded with both signed statements.
+        let faults = mgr.validator_fault_receipts();
+        assert_eq!(faults.len(), 1);
+        assert_eq!(faults[0].fault_type, "validator_equivocation");
+        assert_eq!(faults[0].incident_id, incident_id);
+        assert_eq!(faults[0].conflicting.len(), 2);
+        assert_ne!(
+            faults[0].conflicting[0].resolved,
+            faults[0].conflicting[1].resolved
+        );
+    }
+
+    #[test]
+    fn validation_for_wrong_incident_binding_is_rejected() {
+        let (mut mgr, incident_id, validators) = manager_with_quarantine_and_policy(1);
+        let epoch = FleetControlManager::expected_control_epoch(&incident_id);
+        // Sign a validation that binds a different extension than the incident's.
+        let validation = sign_positive_validation(
+            &validators[0],
+            &incident_id,
+            "ext-different",
+            "quarantine",
+            &mgr.incidents.get(&incident_id).unwrap().zone_id.clone(),
+            epoch,
+            true,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        let err = mgr
+            .submit_release_validation(validation)
+            .expect_err("binding mismatch must be rejected");
+        assert_eq!(err.error_code(), FLEET_RELEASE_VALIDATION_INVALID);
+        if let FleetControlError::ReleaseValidationInvalid { detail, .. } = &err {
+            assert!(detail.contains("binding does not match"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn release_without_policy_stays_fail_closed() {
+        let mut mgr = FleetControlManager::new();
+        mgr.activate();
+        let scope = test_quarantine_scope();
+        let result = mgr
+            .quarantine("ext-test", &scope, &admin_identity(), &test_trace())
+            .expect("quarantine should succeed");
+        let incident_id = format!("inc-{}", result.operation_id);
+        // No policy configured: even submitting is rejected, and release fails closed.
+        let key = validator_key(101);
+        let validation = signed_validation_for(&mgr, &key, &incident_id, true);
+        let submit_err = mgr
+            .submit_release_validation(validation)
+            .expect_err("submission must fail without policy");
+        assert_eq!(submit_err.error_code(), FLEET_RELEASE_VALIDATION_INVALID);
+        let err = mgr
+            .release(&incident_id, &admin_identity(), &test_trace())
+            .expect_err("release must fail closed without policy");
+        assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
     }
 
     // ── Status tests ──────────────────────────────────────────────────────
