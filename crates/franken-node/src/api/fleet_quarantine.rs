@@ -94,7 +94,33 @@ pub const FLEET_ZONE_STATUS_CAPACITY_EXCEEDED: &str = "FLEET_ZONE_STATUS_CAPACIT
 /// fleet control surface when a non-recoverable invariant is hit on the write path.
 pub const FLEET_INTERNAL: &str = "FLEET_INTERNAL";
 
+/// A submitted positive-validation attestation is forged, back-dated, future-dated,
+/// signed by an untrusted validator, or otherwise fails verification on submission.
+pub const FLEET_RELEASE_VALIDATION_INVALID: &str = "FLEET_RELEASE_VALIDATION_INVALID";
+/// A validator equivocated: it signed two conflicting positive-validation
+/// statements for the same canonical action (incident + control epoch).
+pub const FLEET_VALIDATOR_EQUIVOCATION: &str = "FLEET_VALIDATOR_EQUIVOCATION";
+
 const FLEET_DECISION_SIGNED_PAYLOAD_DOMAIN: &[u8] = b"fleet_decision_receipt_payload_v1:";
+
+/// Domain separator binding the canonical positive-validation payload signed by
+/// each fleet release validator. Distinct from the decision-receipt domain so a
+/// decision-receipt signature can never be replayed as a positive validation.
+const FLEET_RELEASE_VALIDATION_DOMAIN: &[u8] = b"fleet_release_positive_validation_v1:";
+
+/// Default quorum threshold (k) required to release a quarantine/revocation when a
+/// release-validation policy is configured without an explicit quorum.
+const DEFAULT_RELEASE_VALIDATION_QUORUM: usize = 2;
+
+/// Default maximum age of a positive validation before it is treated as stale.
+const DEFAULT_RELEASE_VALIDATION_MAX_AGE_SECS: i64 = 3600;
+
+/// Tolerated clock skew for validations dated slightly in the future.
+const RELEASE_VALIDATION_FUTURE_SKEW_SECS: i64 = 60;
+
+/// Bound on stored positive validations per incident and recorded fault receipts.
+const MAX_RELEASE_VALIDATIONS_PER_INCIDENT: usize = 64;
+const MAX_VALIDATOR_FAULT_RECEIPTS: usize = 256;
 
 // ── Invariant Tags ────────────────────────────────────────────────────────
 
@@ -919,6 +945,284 @@ fn decode_ed25519_public_key_hex(public_key_hex: &str) -> Option<[u8; 32]> {
     <[u8; 32]>::from_hex(public_key_hex).ok()
 }
 
+// ── Accountable release: signed positive validations ──────────────────────
+
+/// A signed attestation from a fleet validator that the trigger conditions for a
+/// quarantine/revocation incident have been positively resolved.
+///
+/// Release from quarantine is no longer a local state mutation: it requires a
+/// k-of-n quorum of these attestations, each independently signed over the
+/// canonical action (incident + control epoch). Because the verdict is bound into
+/// the signed payload, a validator that signs two conflicting statements for the
+/// same canonical action produces a non-repudiable equivocation proof.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositiveValidation {
+    /// Incident the validation attests to.
+    pub incident_id: String,
+    /// Extension whose trigger conditions are attested resolved.
+    pub extension_id: String,
+    /// Canonical action type being released ("quarantine" or "revoke").
+    pub action_type: String,
+    /// Zone the incident belongs to.
+    pub zone_id: String,
+    /// Control epoch binding the validation to a specific incarnation of the action.
+    pub control_epoch: u64,
+    /// Validator verdict: `true` attests the conditions are resolved.
+    pub resolved: bool,
+    /// RFC 3339 timestamp the validator issued the attestation.
+    pub issued_at: String,
+    /// Stable key identifier of the validator's verifying key.
+    pub validator_key_id: String,
+    /// Hex-encoded Ed25519 verifying key of the validator.
+    pub public_key_hex: String,
+    /// Hex-encoded Ed25519 signature over the canonical validation payload.
+    pub signature_hex: String,
+}
+
+impl std::fmt::Debug for PositiveValidation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PositiveValidation")
+            .field("incident_id", &self.incident_id)
+            .field("extension_id", &self.extension_id)
+            .field("action_type", &self.action_type)
+            .field("zone_id", &self.zone_id)
+            .field("control_epoch", &self.control_epoch)
+            .field("resolved", &self.resolved)
+            .field("issued_at", &self.issued_at)
+            .field("validator_key_id", &self.validator_key_id)
+            .field("public_key_hex", &self.public_key_hex)
+            .field("signature_hex", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PositiveValidation {
+    /// Returns `true` when two validations bind the same canonical *semantics*
+    /// (verdict + target action) for the same incident/epoch, ignoring the
+    /// per-issue timestamp and signature. Two validations that agree semantically
+    /// are refreshes; two that disagree are equivocation.
+    fn semantics_agree(&self, other: &Self) -> bool {
+        self.resolved == other.resolved
+            && crate::security::constant_time::ct_eq(&self.extension_id, &other.extension_id)
+            && crate::security::constant_time::ct_eq(&self.action_type, &other.action_type)
+            && crate::security::constant_time::ct_eq(&self.zone_id, &other.zone_id)
+    }
+}
+
+/// Canonical, length-prefixed, domain-separated byte encoding of the fields a
+/// validator signs. The verdict and control epoch are bound so the signature
+/// cannot be re-pointed at a different decision or verdict.
+fn positive_validation_signed_bytes(
+    incident_id: &str,
+    extension_id: &str,
+    action_type: &str,
+    zone_id: &str,
+    control_epoch: u64,
+    resolved: bool,
+    issued_at: &str,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(FLEET_RELEASE_VALIDATION_DOMAIN);
+    for field in [incident_id, extension_id, action_type, zone_id, issued_at] {
+        extend_len_prefixed(&mut payload, field);
+    }
+    payload.extend_from_slice(&control_epoch.to_le_bytes());
+    payload.push(u8::from(resolved));
+    payload
+}
+
+/// Produce a signed [`PositiveValidation`] from a validator's signing key.
+///
+/// # Examples
+/// ```ignore
+/// let signing_key = ed25519_dalek::SigningKey::from_bytes(&[3_u8; 32]);
+/// let validation = sign_positive_validation(
+///     &signing_key,
+///     "inc-fleet-op-1",
+///     "ext.audit",
+///     "quarantine",
+///     "prod-us-east",
+///     0,
+///     true,
+///     "2026-06-09T00:00:00+00:00",
+/// );
+/// assert!(validation.resolved);
+/// ```
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn sign_positive_validation(
+    signing_key: &ed25519_dalek::SigningKey,
+    incident_id: &str,
+    extension_id: &str,
+    action_type: &str,
+    zone_id: &str,
+    control_epoch: u64,
+    resolved: bool,
+    issued_at: &str,
+) -> PositiveValidation {
+    let payload = positive_validation_signed_bytes(
+        incident_id,
+        extension_id,
+        action_type,
+        zone_id,
+        control_epoch,
+        resolved,
+        issued_at,
+    );
+    let signature = signing_key.sign(&payload);
+    let verifying_key = signing_key.verifying_key();
+    PositiveValidation {
+        incident_id: incident_id.to_string(),
+        extension_id: extension_id.to_string(),
+        action_type: action_type.to_string(),
+        zone_id: zone_id.to_string(),
+        control_epoch,
+        resolved,
+        issued_at: issued_at.to_string(),
+        validator_key_id: crate::supply_chain::artifact_signing::KeyId::from_verifying_key(
+            &verifying_key,
+        )
+        .to_string(),
+        public_key_hex: hex::encode(verifying_key.to_bytes()),
+        signature_hex: hex::encode(signature.to_bytes()),
+    }
+}
+
+/// Verify that a positive validation carries a valid Ed25519 signature produced by
+/// one of the trusted validator roots. Returns `true` only when the embedded key
+/// is in the trusted set AND the signature verifies over the canonical payload.
+#[must_use]
+fn verify_positive_validation_signature(
+    validation: &PositiveValidation,
+    trusted_validators: &[FleetDecisionTrustRoot],
+) -> bool {
+    let Some(verifying_key) = trusted_validator_verifying_key(validation, trusted_validators) else {
+        return false;
+    };
+    let payload = positive_validation_signed_bytes(
+        &validation.incident_id,
+        &validation.extension_id,
+        &validation.action_type,
+        &validation.zone_id,
+        validation.control_epoch,
+        validation.resolved,
+        &validation.issued_at,
+    );
+    let Ok(signature_bytes) = Vec::from_hex(&validation.signature_hex) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(&signature_bytes) else {
+        return false;
+    };
+    verifying_key.verify_strict(&payload, &signature).is_ok()
+}
+
+/// Resolve the trusted verifying key for a validation, constant-time matching the
+/// embedded key id and bytes against the configured validator roots.
+fn trusted_validator_verifying_key(
+    validation: &PositiveValidation,
+    trusted_validators: &[FleetDecisionTrustRoot],
+) -> Option<VerifyingKey> {
+    if trusted_validators.is_empty() {
+        return None;
+    }
+    let embedded_public_key = decode_ed25519_public_key_hex(&validation.public_key_hex)?;
+    for validator in trusted_validators {
+        if validator.key_id.trim().is_empty() || validator.public_key_hex.trim().is_empty() {
+            continue;
+        }
+        if !crate::security::constant_time::ct_eq(&validation.validator_key_id, &validator.key_id) {
+            continue;
+        }
+        let Some(trusted_public_key) = decode_ed25519_public_key_hex(&validator.public_key_hex)
+        else {
+            continue;
+        };
+        if !crate::security::constant_time::ct_eq_bytes(&embedded_public_key, &trusted_public_key) {
+            continue;
+        }
+        let Ok(verifying_key) = VerifyingKey::from_bytes(&trusted_public_key) else {
+            continue;
+        };
+        let expected_key_id =
+            crate::supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key)
+                .to_string();
+        if !crate::security::constant_time::ct_eq(&validator.key_id, &expected_key_id) {
+            continue;
+        }
+        return Some(verifying_key);
+    }
+    None
+}
+
+/// Policy governing the accountable, k-of-n signed release path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseValidationPolicy {
+    /// Number of distinct trusted validators (k) whose resolved attestations are
+    /// required before a quarantine/revocation may be released.
+    pub quorum_threshold: usize,
+    /// Maximum age, in seconds, of a positive validation before it is stale.
+    pub max_validation_age_secs: i64,
+    /// The trusted validator roots (n) whose signatures are accepted.
+    pub validators: Vec<FleetDecisionTrustRoot>,
+}
+
+impl ReleaseValidationPolicy {
+    /// Build a release-validation policy from a set of validator verifying keys,
+    /// using default quorum and freshness settings.
+    ///
+    /// # Examples
+    /// ```ignore
+    /// let key = ed25519_dalek::SigningKey::from_bytes(&[1_u8; 32]);
+    /// let policy = ReleaseValidationPolicy::from_validator_keys(&[key.verifying_key()]);
+    /// assert_eq!(policy.validators.len(), 1);
+    /// ```
+    #[must_use]
+    pub fn from_validator_keys(keys: &[VerifyingKey]) -> Self {
+        Self {
+            quorum_threshold: DEFAULT_RELEASE_VALIDATION_QUORUM,
+            max_validation_age_secs: DEFAULT_RELEASE_VALIDATION_MAX_AGE_SECS,
+            validators: keys
+                .iter()
+                .map(FleetDecisionTrustRoot::from_verifying_key)
+                .collect(),
+        }
+    }
+
+    /// Override the quorum threshold (k).
+    #[must_use]
+    pub fn with_quorum(mut self, quorum_threshold: usize) -> Self {
+        self.quorum_threshold = quorum_threshold;
+        self
+    }
+
+    /// Override the maximum validation age in seconds.
+    #[must_use]
+    pub fn with_max_validation_age_secs(mut self, max_validation_age_secs: i64) -> Self {
+        self.max_validation_age_secs = max_validation_age_secs;
+        self
+    }
+}
+
+/// A non-repudiable record that a validator equivocated by signing two conflicting
+/// positive-validation statements for the same canonical action. The two embedded
+/// self-signed validations are themselves the cryptographic proof of fault.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatorFaultReceipt {
+    /// Stable fault classification ("validator_equivocation").
+    pub fault_type: String,
+    /// Key id of the equivocating validator.
+    pub validator_key_id: String,
+    /// Incident the conflicting validations targeted.
+    pub incident_id: String,
+    /// Control epoch the conflicting validations targeted.
+    pub control_epoch: u64,
+    /// When the equivocation was detected (RFC 3339).
+    pub detected_at: String,
+    /// The two mutually-conflicting, self-signed validations (the proof).
+    pub conflicting: Vec<PositiveValidation>,
+}
+
 /// Convergence tracking for fleet propagation.
 /// Enforces INV-FLEET-CONVERGENCE.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1455,6 +1759,21 @@ pub enum FleetControlError {
     /// Zone-status registry is full of live entries.
     #[cfg(any(test, feature = "control-plane"))]
     ZoneStatusCapacityExceeded { code: String },
+    /// A submitted positive validation failed verification (forged signature,
+    /// untrusted validator, stale/back-dated, or future-dated).
+    ReleaseValidationInvalid {
+        code: String,
+        incident_id: String,
+        detail: String,
+    },
+    /// A validator equivocated on the canonical release action; a fault receipt
+    /// has been recorded.
+    ValidatorEquivocation {
+        code: String,
+        validator_key_id: String,
+        incident_id: String,
+        detail: String,
+    },
     /// Internal failure (durable transport, invariant violation) on the write path.
     Internal { code: String, detail: String },
 }
@@ -1581,6 +1900,33 @@ impl FleetControlError {
         }
     }
 
+    /// # Examples
+    /// ```ignore
+    /// let err = FleetControlError::release_validation_invalid("inc-op-42", "stale validation");
+    /// assert_eq!(err.error_code(), FLEET_RELEASE_VALIDATION_INVALID);
+    /// ```
+    pub fn release_validation_invalid(incident_id: &str, detail: &str) -> Self {
+        Self::ReleaseValidationInvalid {
+            code: FLEET_RELEASE_VALIDATION_INVALID.to_string(),
+            incident_id: incident_id.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+
+    /// # Examples
+    /// ```ignore
+    /// let err = FleetControlError::validator_equivocation("kid", "inc-op-42", "conflict");
+    /// assert_eq!(err.error_code(), FLEET_VALIDATOR_EQUIVOCATION);
+    /// ```
+    pub fn validator_equivocation(validator_key_id: &str, incident_id: &str, detail: &str) -> Self {
+        Self::ValidatorEquivocation {
+            code: FLEET_VALIDATOR_EQUIVOCATION.to_string(),
+            validator_key_id: validator_key_id.to_string(),
+            incident_id: incident_id.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+
     /// Construct an `Internal` failure for durable-transport persistence errors and
     /// other write-path invariant violations that aren't covered by a more specific
     /// variant.
@@ -1614,6 +1960,8 @@ impl FleetControlError {
             Self::IncidentCapacityExceeded { code } => code,
             #[cfg(any(test, feature = "control-plane"))]
             Self::ZoneStatusCapacityExceeded { code } => code,
+            Self::ReleaseValidationInvalid { code, .. } => code,
+            Self::ValidatorEquivocation { code, .. } => code,
             Self::Internal { code, .. } => code,
         }
     }
