@@ -649,6 +649,12 @@ name = "compat_lockstep_oracle_conformance"
 path = "tests/compat_lockstep_oracle_conformance.rs"
 required-features = ["control-plane"]
 
+# bd-f5b04.2.1.3 (TNR keystone): compat-API parity conformance + golden + proptest
+[[test]]
+name = "compat_api_parity_conformance"
+path = "../../tests/conformance/compat_api_parity_conformance.rs"
+required-features = ["control-plane"]
+
 [[test]]
 name = "control_lane_mapping_policy"
 path = "tests/control_lane_mapping_policy.rs"

@@ -1,0 +1,63 @@
+{
+  "schema_version": "compat-lockstep-conformance-v1.0",
+  "samples": {
+    "error_invalid_url": {
+      "outcome": "error",
+      "code": "ERR_INVALID_URL"
+    },
+    "fs_read_enoent": {
+      "outcome": "error",
+      "code": "ENOENT"
+    },
+    "fs_read_success": {
+      "outcome": "success",
+      "result": {
+        "op": "fs_read",
+        "byte_len": 11,
+        "content_sha256": "sha256:fixed"
+      }
+    },
+    "fs_write_success": {
+      "outcome": "success",
+      "result": {
+        "op": "fs_write",
+        "bytes_written": 7
+      }
+    },
+    "http_request_success": {
+      "outcome": "success",
+      "result": {
+        "op": "http_request_canonicalized",
+        "scheme": "https",
+        "host": "example.com",
+        "port": 443,
+        "path": "/",
+        "method": "GET"
+      }
+    },
+    "module_resolve_success": {
+      "outcome": "success",
+      "result": {
+        "op": "module_resolve",
+        "resolved_path": "lib/util.js",
+        "format": "commonjs"
+      }
+    },
+    "process_env_absent": {
+      "outcome": "success",
+      "result": {
+        "op": "process_env",
+        "present": false,
+        "value_sha256": null
+      }
+    },
+    "process_env_present": {
+      "outcome": "success",
+      "result": {
+        "op": "process_env",
+        "present": true,
+        "value_sha256": "sha256:fixed"
+      }
+    }
+  }
+}
