@@ -1,0 +1,75 @@
+name: tnr-ci-verification-gate
+
+on:
+  pull_request:
+    paths:
+      - "docs/headline_claims.toml"
+      - "docs/observability/tnr_event_metrics_registry.json"
+      - "docs/observability/tnr_event_metrics_registry.md"
+      - "docs/reproduction_playbook.md"
+      - "scripts/check_tnr_observability_contract.py"
+      - "scripts/reproduce.py"
+      - "scripts/check_tnr_ci_verification_gate.py"
+      - "scripts/verify_all_verification_targets.sh"
+      - "tests/test_reproduce.py"
+      - "tests/test_check_tnr_ci_verification_gate.py"
+      - "tests/test_check_tnr_observability_contract.py"
+      - ".github/workflows/tnr-ci-verification-gate.yml"
+  workflow_dispatch: {}
+
+jobs:
+  tnr-verification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Unit-test reproduction and CI gate parsers
+        run: |
+          python3 tests/test_reproduce.py
+          python3 tests/test_check_tnr_ci_verification_gate.py
+          python3 tests/test_check_tnr_observability_contract.py
+          bash scripts/verify_all_verification_targets.sh --selftest
+
+      - name: Enforce TNR observability registry
+        run: |
+          mkdir -p artifacts/tnr
+          python3 scripts/check_tnr_observability_contract.py \
+            --json > artifacts/tnr/tnr_observability_contract_gate.json
+
+      - name: Verify non-evidence dry-run cannot claim PASS
+        run: |
+          mkdir -p artifacts/tnr
+          python3 scripts/reproduce.py --dry-run --json > artifacts/tnr/reproduction_plan.json
+          python3 scripts/check_tnr_ci_verification_gate.py \
+            --report artifacts/tnr/reproduction_plan.json \
+            --allow-planned \
+            --no-artifacts \
+            --json > artifacts/tnr/reproduction_plan_gate.json
+
+      - name: Run master mock-free reproduction e2e
+        run: |
+          python3 scripts/reproduce.py --skip-install --json > artifacts/tnr/reproduction_report.stdout.json
+          cp reproduction_report.json artifacts/tnr/reproduction_report.json
+
+      - name: Enforce evidence-honesty gate
+        run: |
+          python3 scripts/check_tnr_ci_verification_gate.py \
+            --report reproduction_report.json \
+            --json > artifacts/tnr/tnr_ci_verification_gate.json
+
+      - name: Upload TNR verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tnr-ci-verification-evidence
+          path: |
+            artifacts/tnr/reproduction_plan.json
+            artifacts/tnr/reproduction_plan_gate.json
+            artifacts/tnr/reproduction_report.stdout.json
+            artifacts/tnr/reproduction_report.json
+            artifacts/tnr/reproduction_transcript.jsonl
+            artifacts/tnr/reproduction_metrics_snapshot.json
+            artifacts/tnr/tnr_ci_verification_gate.json
+            artifacts/tnr/tnr_observability_contract_gate.json

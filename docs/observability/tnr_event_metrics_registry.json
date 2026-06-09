@@ -1,0 +1,261 @@
+{
+  "schema_version": "tnr-observability-registry.v1",
+  "title": "TNR structured logging event-code and metrics registry",
+  "required_subsystems": [
+    "FN-COMPAT",
+    "FN-EFFECT",
+    "FN-CAS",
+    "FN-TTR",
+    "FN-FLOW",
+    "FN-SENTINEL",
+    "FN-CONFORMAL",
+    "FN-CAP",
+    "FN-MIGCERT",
+    "FN-MCP",
+    "FN-LTV",
+    "FN-FLEETLOG",
+    "FN-RESOLVE",
+    "FN-CORPUS",
+    "FN-CALIB"
+  ],
+  "subsystems": [
+    {
+      "id": "FN-COMPAT",
+      "surface_label": "compat_api_contract",
+      "owner_surface": "api/compat_gate + runtime/lockstep_harness",
+      "event_codes": [
+        {"code": "FN-COMPAT-001", "name": "compat_contract_loaded", "description": "Canonical compat operation contract loaded for evaluation."},
+        {"code": "FN-COMPAT-002", "name": "compat_oracle_green", "description": "Node/Bun/franken parity oracle returned a green verdict."}
+      ],
+      "error_codes": [
+        {"code": "FN-COMPAT-ERR-001", "name": "compat_oracle_divergence", "description": "Parity oracle found an unresolved semantic divergence."}
+      ],
+      "metrics": [
+        {"name": "franken_node_compat_operations_total", "type": "counter", "labels": ["operation", "verdict"], "description": "Compat operations evaluated by the parity oracle."}
+      ]
+    },
+    {
+      "id": "FN-EFFECT",
+      "surface_label": "effect_receipt",
+      "owner_surface": "runtime/effect_receipt + vef/receipt_chain",
+      "event_codes": [
+        {"code": "FN-EFFECT-001", "name": "effect_receipt_started", "description": "Host-effect receipt construction started."},
+        {"code": "FN-EFFECT-002", "name": "effect_receipt_chained", "description": "Effect receipt was appended to the receipt chain."}
+      ],
+      "error_codes": [
+        {"code": "FN-EFFECT-ERR-001", "name": "effect_receipt_invalid", "description": "Effect receipt failed canonical or chain validation."}
+      ],
+      "metrics": [
+        {"name": "franken_node_effect_receipts_total", "type": "counter", "labels": ["effect_kind", "verdict"], "description": "Effect receipts emitted by host-effect execution."}
+      ]
+    },
+    {
+      "id": "FN-CAS",
+      "surface_label": "content_addressed_store",
+      "owner_surface": "storage/cas",
+      "event_codes": [
+        {"code": "FN-CAS-001", "name": "cas_put_started", "description": "Content-addressed blob write started."},
+        {"code": "FN-CAS-002", "name": "cas_integrity_verified", "description": "Content-addressed blob integrity verified on read."}
+      ],
+      "error_codes": [
+        {"code": "FN-CAS-ERR-001", "name": "cas_integrity_mismatch", "description": "Stored bytes did not match the expected content digest."}
+      ],
+      "metrics": [
+        {"name": "franken_node_cas_blobs_total", "type": "counter", "labels": ["operation", "verdict"], "description": "CAS blob operations by operation and verdict."}
+      ]
+    },
+    {
+      "id": "FN-TTR",
+      "surface_label": "time_travel_replay",
+      "owner_surface": "replay + tools/replay_bundle",
+      "event_codes": [
+        {"code": "FN-TTR-001", "name": "replay_bundle_loaded", "description": "Replay bundle was loaded for deterministic replay."},
+        {"code": "FN-TTR-002", "name": "replay_verdict_emitted", "description": "Replay verifier emitted its final verdict."}
+      ],
+      "error_codes": [
+        {"code": "FN-TTR-ERR-001", "name": "replay_divergence", "description": "Replay diverged from the recorded evidence path."}
+      ],
+      "metrics": [
+        {"name": "franken_node_ttr_replays_total", "type": "counter", "labels": ["verdict"], "description": "Replay verification attempts by verdict."}
+      ]
+    },
+    {
+      "id": "FN-FLOW",
+      "surface_label": "information_flow",
+      "owner_surface": "security/lineage_tracker + flow ledger",
+      "event_codes": [
+        {"code": "FN-FLOW-001", "name": "flow_label_attached", "description": "Sensitive source label attached to a datum."},
+        {"code": "FN-FLOW-002", "name": "flow_sink_allowed", "description": "Sink flow allowed with matching policy or declassification receipt."}
+      ],
+      "error_codes": [
+        {"code": "FN-FLOW-ERR-001", "name": "flow_sink_blocked", "description": "Sink flow failed closed without valid declassification."}
+      ],
+      "metrics": [
+        {"name": "franken_node_flow_blocks_total", "type": "counter", "labels": ["sink", "label_class"], "description": "Information-flow sink blocks by sink and label class."}
+      ]
+    },
+    {
+      "id": "FN-SENTINEL",
+      "surface_label": "runtime_sentinel",
+      "owner_surface": "policy/bayesian_diagnostics + policy/decision_engine",
+      "event_codes": [
+        {"code": "FN-SENTINEL-001", "name": "sentinel_observation_ingested", "description": "Runtime sentinel ingested a canonical observation."},
+        {"code": "FN-SENTINEL-002", "name": "sentinel_action_selected", "description": "Sentinel selected an expected-loss-minimizing action."}
+      ],
+      "error_codes": [
+        {"code": "FN-SENTINEL-ERR-001", "name": "sentinel_guardrail_override", "description": "Hard guardrail precedence overrode probabilistic action selection."}
+      ],
+      "metrics": [
+        {"name": "franken_node_sentinel_escalations_total", "type": "counter", "labels": ["action"], "description": "Sentinel escalation actions by selected action."}
+      ]
+    },
+    {
+      "id": "FN-CONFORMAL",
+      "surface_label": "conformal_calibration",
+      "owner_surface": "security/conformal",
+      "event_codes": [
+        {"code": "FN-CONFORMAL-001", "name": "conformal_set_emitted", "description": "Conformal risk set emitted from frozen quantiles."},
+        {"code": "FN-CONFORMAL-002", "name": "aci_quantile_updated", "description": "Adaptive conformal quantile updated from realized coverage."}
+      ],
+      "error_codes": [
+        {"code": "FN-CONFORMAL-ERR-001", "name": "coverage_under_target", "description": "Empirical coverage fell below the declared target window."}
+      ],
+      "metrics": [
+        {"name": "franken_node_conformal_coverage_observations_total", "type": "counter", "labels": ["risk_class", "covered"], "description": "Conformal coverage observations by class and coverage result."}
+      ]
+    },
+    {
+      "id": "FN-CAP",
+      "surface_label": "proof_carrying_capability",
+      "owner_surface": "security/remote_cap + sdk/verifier",
+      "event_codes": [
+        {"code": "FN-CAP-001", "name": "capability_proof_issued", "description": "Capability proof or receipt issued for an actor."},
+        {"code": "FN-CAP-002", "name": "capability_proof_verified", "description": "Capability proof verified by the product or SDK."}
+      ],
+      "error_codes": [
+        {"code": "FN-CAP-ERR-001", "name": "capability_proof_rejected", "description": "Capability proof failed scope, epoch, or postcondition validation."}
+      ],
+      "metrics": [
+        {"name": "franken_node_capability_proofs_total", "type": "counter", "labels": ["scope", "verdict"], "description": "Capability proof checks by scope and verdict."}
+      ]
+    },
+    {
+      "id": "FN-MIGCERT",
+      "surface_label": "migration_certificate",
+      "owner_surface": "migration + sdk/verifier",
+      "event_codes": [
+        {"code": "FN-MIGCERT-001", "name": "migration_certificate_started", "description": "Bounded migration certificate generation started."},
+        {"code": "FN-MIGCERT-002", "name": "migration_certificate_verified", "description": "Migration certificate verified against its declared bound."}
+      ],
+      "error_codes": [
+        {"code": "FN-MIGCERT-ERR-001", "name": "migration_witness_diverged", "description": "Differential witness diverged or exceeded the certificate bound."}
+      ],
+      "metrics": [
+        {"name": "franken_node_migration_certificates_total", "type": "counter", "labels": ["rule_id", "verdict"], "description": "Migration certificates by rule and verdict."}
+      ]
+    },
+    {
+      "id": "FN-MCP",
+      "surface_label": "agent_control_surface",
+      "owner_surface": "api/mcp + control_plane/audience_token",
+      "event_codes": [
+        {"code": "FN-MCP-001", "name": "mcp_tool_invoked", "description": "MCP tool invocation accepted for dispatch."},
+        {"code": "FN-MCP-002", "name": "mcp_mutation_receipted", "description": "Mutating MCP tool emitted an agent-action receipt."}
+      ],
+      "error_codes": [
+        {"code": "FN-MCP-ERR-001", "name": "mcp_scope_denied", "description": "MCP mutation denied by audience-token scope."}
+      ],
+      "metrics": [
+        {"name": "franken_node_mcp_tool_invocations_total", "type": "counter", "labels": ["tool", "verdict"], "description": "MCP tool invocations by tool and verdict."}
+      ]
+    },
+    {
+      "id": "FN-LTV",
+      "surface_label": "long_term_verifiability",
+      "owner_surface": "crypto/schemes + control_plane/mmr_proofs",
+      "event_codes": [
+        {"code": "FN-LTV-001", "name": "ltv_anchor_dual_signed", "description": "Critical evidence anchor dual-signed under active suites."},
+        {"code": "FN-LTV-002", "name": "ltv_root_reattested", "description": "MMR root re-attested under a currently valid suite."}
+      ],
+      "error_codes": [
+        {"code": "FN-LTV-ERR-001", "name": "ltv_anteriority_unproven", "description": "Verifier could not prove anteriority for the requested time."}
+      ],
+      "metrics": [
+        {"name": "franken_node_ltv_reattestations_total", "type": "counter", "labels": ["suite", "verdict"], "description": "Long-term-verifiability root re-attestations by suite and verdict."}
+      ]
+    },
+    {
+      "id": "FN-FLEETLOG",
+      "surface_label": "accountable_fleet_log",
+      "owner_surface": "control_plane/fleet_transport + control_plane/fork_detection",
+      "event_codes": [
+        {"code": "FN-FLEETLOG-001", "name": "fleetlog_action_appended", "description": "Fleet action appended to a node MMR action log."},
+        {"code": "FN-FLEETLOG-002", "name": "fleetlog_quorum_certified", "description": "Fleet action received a k-of-n quorum certificate."}
+      ],
+      "error_codes": [
+        {"code": "FN-FLEETLOG-ERR-001", "name": "fleetlog_equivocation_proven", "description": "Conflicting signed actions proved node equivocation."}
+      ],
+      "metrics": [
+        {"name": "franken_node_fleetlog_quorum_certificates_total", "type": "counter", "labels": ["action", "verdict"], "description": "Fleet-log quorum certificates by action and verdict."}
+      ]
+    },
+    {
+      "id": "FN-RESOLVE",
+      "surface_label": "trust_native_resolver",
+      "owner_surface": "migration + supply_chain + api/compat_gate",
+      "event_codes": [
+        {"code": "FN-RESOLVE-001", "name": "resolver_candidate_scored", "description": "Package version candidate scored by trust and compatibility policy."},
+        {"code": "FN-RESOLVE-002", "name": "resolver_admission_decided", "description": "Resolver emitted an admission decision receipt."}
+      ],
+      "error_codes": [
+        {"code": "FN-RESOLVE-ERR-001", "name": "resolver_candidate_quarantined", "description": "Candidate satisfies semver but is blocked by risk or trust policy."}
+      ],
+      "metrics": [
+        {"name": "franken_node_resolver_admission_decisions_total", "type": "counter", "labels": ["decision", "reason"], "description": "Resolver admission decisions by decision and reason."}
+      ]
+    },
+    {
+      "id": "FN-CORPUS",
+      "surface_label": "tnr_corpus",
+      "owner_surface": "testing corpus + calibration artifacts",
+      "event_codes": [
+        {"code": "FN-CORPUS-001", "name": "corpus_record_loaded", "description": "TNR labeled corpus record loaded from canonical storage."},
+        {"code": "FN-CORPUS-002", "name": "corpus_hash_verified", "description": "Corpus hash verified before use by calibration or tests."}
+      ],
+      "error_codes": [
+        {"code": "FN-CORPUS-ERR-001", "name": "corpus_hash_mismatch", "description": "Corpus bytes did not match the expected canonical hash."}
+      ],
+      "metrics": [
+        {"name": "franken_node_corpus_records_total", "type": "counter", "labels": ["profile", "verdict"], "description": "Corpus records loaded by profile and verdict."}
+      ]
+    },
+    {
+      "id": "FN-CALIB",
+      "surface_label": "tnr_calibration",
+      "owner_surface": "calibration artifacts + verifier SDK recompute",
+      "event_codes": [
+        {"code": "FN-CALIB-001", "name": "calibration_run_started", "description": "Calibration run started from a pinned corpus hash."},
+        {"code": "FN-CALIB-002", "name": "calibration_artifact_signed", "description": "Calibration artifact signed and made available for SDK recompute."}
+      ],
+      "error_codes": [
+        {"code": "FN-CALIB-ERR-001", "name": "calibration_recompute_mismatch", "description": "Verifier SDK recompute did not match the signed calibration artifact."}
+      ],
+      "metrics": [
+        {"name": "franken_node_calibration_runs_total", "type": "counter", "labels": ["profile", "verdict"], "description": "Calibration runs by profile and verdict."}
+      ]
+    }
+  ],
+  "legacy_namespaces": [
+    {"id": "FN-AA", "code_ranges": [{"prefix": "FN-AA", "start": 1, "end": 8}], "description": "Ambient-authority gate legacy event-code namespace."},
+    {"id": "FN-AE", "code_ranges": [{"prefix": "FN-AE", "start": 1, "end": 8}], "description": "Anti-entropy reconciliation existing namespace."},
+    {"id": "FN-BM", "code_ranges": [{"prefix": "FN-BM", "start": 1, "end": 6}], "description": "Bounded masking legacy event-code namespace."},
+    {"id": "FN-CK", "code_ranges": [{"prefix": "FN-CK", "start": 1, "end": 8}], "description": "Checkpoint-placement legacy event-code namespace."},
+    {"id": "FN-CX", "code_ranges": [{"prefix": "FN-CX", "start": 1, "end": 10}], "description": "Cancellable-task protocol legacy event-code namespace."},
+    {"id": "FN-IFL", "code_ranges": [{"prefix": "FN-IFL", "start": 1, "end": 13}], "description": "Information-flow lineage existing namespace."},
+    {"id": "FN-LB", "code_ranges": [{"prefix": "FN-LB", "start": 1, "end": 11}], "description": "Lab runtime existing namespace."},
+    {"id": "FN-NV", "code_ranges": [{"prefix": "FN-NV", "start": 1, "end": 12}], "description": "N-version oracle existing namespace."},
+    {"id": "FN-OB", "code_ranges": [{"prefix": "FN-OB", "start": 1, "end": 13}], "description": "Obligation channel existing namespace."},
+    {"id": "FN-SG", "code_ranges": [{"prefix": "FN-SG", "start": 1, "end": 12}], "description": "Remote idempotency saga existing namespace."},
+    {"id": "FN-ZK", "code_ranges": [{"prefix": "FN-ZK", "start": 1, "end": 12}], "description": "ZK attestation existing namespace."}
+  ]
+}

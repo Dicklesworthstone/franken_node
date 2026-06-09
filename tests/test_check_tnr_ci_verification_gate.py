@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Unit tests for scripts/check_tnr_ci_verification_gate.py."""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import check_tnr_ci_verification_gate as gate
+
+
+def _executed_pass_report() -> dict:
+    finished_event = {
+        "timestamp": "2026-06-09T00:00:00Z",
+        "phase": "claim",
+        "event": "claim_execution_finished",
+        "detail": "procedure executed successfully and met threshold",
+        "claim_id": "HC-001",
+        "command": "python3 scripts/check_claim.py --json",
+        "resolved_procedure_ref": "scripts/check_claim.py",
+        "execution_state": "executed",
+        "result_kind": "pass",
+        "duration_seconds": 0.01,
+        "exit_code": 0,
+        "measured_value": "PASS",
+    }
+    return {
+        "schema_version": gate.REPORT_SCHEMA,
+        "run_mode": "executed",
+        "environment": {"os": "test", "python_version": "3.11.0"},
+        "claims": [
+            {
+                "claim_id": "HC-001",
+                "claim_text": "sample claim",
+                "verification_method": "test_suite",
+                "acceptance_threshold": "verdict = PASS",
+                "test_reference": "scripts/check_claim.py",
+                "category": "compatibility",
+                "procedure_ref": "scripts/check_claim.py",
+                "harness_kind": "python",
+                "measurement_key": "verdict",
+                "command": "python3 scripts/check_claim.py --json",
+                "resolved_procedure_ref": "scripts/check_claim.py",
+                "execution_state": "executed",
+                "result_kind": "pass",
+                "duration_seconds": 0.01,
+                "exit_code": 0,
+                "measured_value": "PASS",
+                "detail": "procedure executed successfully and met threshold",
+            }
+        ],
+        "verdict": "PASS",
+        "timestamp": "2026-06-09T00:00:01Z",
+        "duration_seconds": 0.01,
+        "claim_count": 1,
+        "passed_count": 1,
+        "failed_count": 0,
+        "error_count": 0,
+        "skip_install": True,
+        "execution_log": [finished_event],
+    }
+
+
+def _planned_report() -> dict:
+    return {
+        "schema_version": gate.REPORT_SCHEMA,
+        "run_mode": "plan",
+        "verdict": "PLANNED",
+        "claim_count": 1,
+        "claims": [
+            {
+                "claim_id": "HC-001",
+                "execution_state": "planned",
+                "result_kind": "not_run",
+            }
+        ],
+        "timestamp": "2026-06-09T00:00:01Z",
+        "execution_log": [
+            {
+                "timestamp": "2026-06-09T00:00:00Z",
+                "phase": "planning",
+                "event": "claim_planned",
+                "claim_id": "HC-001",
+                "result_kind": "not_run",
+            }
+        ],
+    }
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _load_json(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:  # pragma: no cover - assertion helper
+        raise AssertionError(f"invalid JSON fixture {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise AssertionError(f"JSON fixture must be an object: {path}")
+    return payload
+
+
+def _load_first_jsonl_row(path: Path) -> dict:
+    line = path.read_text(encoding="utf-8").splitlines()[0]
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError as exc:  # pragma: no cover - assertion helper
+        raise AssertionError(f"invalid JSONL fixture {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise AssertionError(f"JSONL row must be an object: {path}")
+    return payload
+
+
+def _write_valid_artifacts(root: Path, report: dict) -> None:
+    transcript_rel = "artifacts/tnr/reproduction_transcript.jsonl"
+    metrics_rel = "artifacts/tnr/reproduction_metrics_snapshot.json"
+    report["artifact_paths"] = {
+        "transcript_jsonl": transcript_rel,
+        "metrics_json": metrics_rel,
+    }
+    transcript_path = root / transcript_rel
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "schema_version": gate.TRANSCRIPT_SCHEMA,
+            "event_index": index,
+            "run_mode": report["run_mode"],
+            "report_timestamp": report["timestamp"],
+            "event": event,
+        }
+        for index, event in enumerate(report["execution_log"])
+    ]
+    transcript_path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    metrics = {
+        "schema_version": gate.METRICS_SCHEMA,
+        "report_schema_version": gate.REPORT_SCHEMA,
+        "run_mode": report["run_mode"],
+        "verdict": report["verdict"],
+        "timestamp": "2026-06-09T00:00:02Z",
+        "report_timestamp": report["timestamp"],
+        "report_digest_sha256": gate._report_digest(report),
+        "claim_count": report["claim_count"],
+        "passed_count": report["passed_count"],
+        "failed_count": report["failed_count"],
+        "error_count": report["error_count"],
+        "duration_seconds": report["duration_seconds"],
+        "claim_result_counts": {"pass": 1},
+        "claim_category_counts": {"compatibility": 1},
+        "claim_ids": ["HC-001"],
+        "execution_event_count": len(report["execution_log"]),
+    }
+    _write_json(root / metrics_rel, metrics)
+
+
+class TestReportHonesty(unittest.TestCase):
+    def test_planned_report_is_allowed_only_when_explicit(self) -> None:
+        report = _planned_report()
+        self.assertEqual(gate.validate_report_honesty(report, allow_planned=True), [])
+        errors = gate.validate_report_honesty(report, allow_planned=False)
+        self.assertTrue(any("non-evidence" in error for error in errors))
+
+    def test_planned_report_cannot_claim_pass(self) -> None:
+        report = _planned_report()
+        report["verdict"] = "PASS"
+        errors = gate.validate_report_honesty(report, allow_planned=True)
+        self.assertTrue(any("never report PASS" in error for error in errors))
+
+    def test_pass_claim_requires_executed_transcript_event(self) -> None:
+        report = _executed_pass_report()
+        report["execution_log"] = []
+        errors = gate.validate_report_honesty(report)
+        self.assertTrue(any("matching executed transcript event" in error for error in errors))
+
+    def test_pass_claim_requires_zero_exit(self) -> None:
+        report = _executed_pass_report()
+        report["claims"][0]["exit_code"] = 2
+        errors = gate.validate_report_honesty(report)
+        self.assertTrue(any("exit_code=0" in error for error in errors))
+
+
+class TestEvidenceArtifacts(unittest.TestCase):
+    def test_missing_artifacts_fail_executed_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = _executed_pass_report()
+            root = Path(tmpdir) / "no-such-root"
+            errors = gate.validate_evidence_artifacts(report, project_root=root)
+        self.assertIn("executed report must include artifact_paths", errors)
+
+    def test_valid_artifacts_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report = _executed_pass_report()
+            _write_valid_artifacts(root, report)
+            errors = gate.validate_evidence_artifacts(report, project_root=root)
+        self.assertEqual(errors, [])
+
+    def test_metrics_digest_mismatch_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report = _executed_pass_report()
+            _write_valid_artifacts(root, report)
+            metrics_path = root / report["artifact_paths"]["metrics_json"]
+            metrics = _load_json(metrics_path)
+            metrics["report_digest_sha256"] = "0" * 64
+            _write_json(metrics_path, metrics)
+            errors = gate.validate_evidence_artifacts(report, project_root=root)
+        self.assertTrue(any("digest" in error for error in errors))
+
+    def test_transcript_forgery_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report = _executed_pass_report()
+            _write_valid_artifacts(root, report)
+            transcript_path = root / report["artifact_paths"]["transcript_jsonl"]
+            row = _load_first_jsonl_row(transcript_path)
+            row["event"]["result_kind"] = "not_run"
+            transcript_path.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+            errors = gate.validate_evidence_artifacts(report, project_root=root)
+        self.assertTrue(any("does not match" in error for error in errors))
+
+
+class TestRunChecks(unittest.TestCase):
+    def test_run_checks_passes_with_valid_report_and_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report = _executed_pass_report()
+            _write_valid_artifacts(root, report)
+            report_path = root / "reproduction_report.json"
+            _write_json(report_path, report)
+            result = gate.run_checks(
+                report_path=report_path,
+                project_root=root,
+                require_workflow=False,
+            )
+        self.assertEqual(result["verdict"], "PASS")
+
+    def test_run_checks_fails_missing_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            result = gate.run_checks(
+                report_path=root / "missing.json",
+                project_root=root,
+                require_workflow=False,
+            )
+        self.assertEqual(result["verdict"], "FAIL")
+
+
+class TestWorkflowValidation(unittest.TestCase):
+    def test_workflow_markers_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workflow = Path(tmpdir) / "gate.yml"
+            workflow.write_text(
+                "\n".join(
+                    [
+                        "python3 tests/test_reproduce.py",
+                        "python3 tests/test_check_tnr_ci_verification_gate.py",
+                        "python3 tests/test_check_tnr_observability_contract.py",
+                        "python3 scripts/check_tnr_observability_contract.py",
+                        "scripts/verify_all_verification_targets.sh --selftest",
+                        "python3 scripts/check_tnr_ci_verification_gate.py --allow-planned",
+                        "python3 scripts/reproduce.py --skip-install --json",
+                        "reproduction_transcript.jsonl",
+                        "reproduction_metrics_snapshot.json",
+                        "actions/upload-artifact",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(gate.validate_workflow(workflow), [])
+
+    def test_workflow_missing_markers_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workflow = Path(tmpdir) / "gate.yml"
+            workflow.write_text("name: incomplete\n", encoding="utf-8")
+            errors = gate.validate_workflow(workflow)
+        self.assertGreater(len(errors), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

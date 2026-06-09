@@ -243,6 +243,24 @@ The reproduction report (`reproduction_report.json`) contains:
 Send the `reproduction_report.json` to the franken_node team for inclusion in
 the external reproduction evidence log.
 
+### 4.5 CI Evidence-Honesty Gate
+
+The TNR CI verification gate treats executed reproduction output as evidence
+only when the report and companion artifacts agree:
+
+- `reproduction_report.json` must use `run_mode = executed` before any claim can
+  be reported as `result_kind = pass`.
+- `artifacts/tnr/reproduction_transcript.jsonl` must contain the ordered
+  execution log rows from the report.
+- `artifacts/tnr/reproduction_metrics_snapshot.json` must match the report
+  counts and include the report digest.
+- `scripts/check_tnr_ci_verification_gate.py` fails the merge if a PASS claim is
+  planned, skipped, missing an executed zero-exit event, or backed by missing or
+  mismatched artifacts.
+
+Dry-run output is still useful in CI, but it must be checked with
+`--allow-planned` and must remain `PLANNED` / `not_run`.
+
 ## 5. Troubleshooting
 
 ### 5.1 Rust Nightly Not Found
