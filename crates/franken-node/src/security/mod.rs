@@ -3,6 +3,7 @@ pub mod adversary_graph;
 pub mod blake3_adapter;
 pub mod bpet;
 pub mod challenge_flow;
+pub mod conformal;
 pub mod constant_time;
 pub mod copilot_engine;
 pub mod crypto;
