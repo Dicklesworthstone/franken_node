@@ -16,6 +16,7 @@ pub mod perf_budget_guard;
 pub mod policy_explainer;
 pub mod resource_admission;
 pub mod retroactive_hardening;
+pub mod runtime_sentinel;
 
 #[cfg(test)]
 mod tests {

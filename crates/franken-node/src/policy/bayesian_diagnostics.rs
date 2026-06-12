@@ -34,6 +34,15 @@ pub const EVD_BAYES_002: &str = "EVD-BAYES-002";
 pub const EVD_BAYES_003: &str = "EVD-BAYES-003";
 /// Replay from stored observations completed.
 pub const EVD_BAYES_004: &str = "EVD-BAYES-004";
+/// Runtime Sentinel e-process evidence accepted.
+pub const EVD_SENTINEL_E_PROCESS_001: &str = "EVD-SENTINEL-EPROCESS-001";
+/// Runtime Sentinel e-process replay completed.
+pub const EVD_SENTINEL_E_PROCESS_002: &str = "EVD-SENTINEL-EPROCESS-002";
+
+/// Schema version for replay-safe Runtime Sentinel e-process evidence.
+pub const RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION: &str = "runtime-sentinel-e-process-v1";
+/// Fixed-point scale for likelihood ratios, e-values, and alpha bounds.
+pub const E_PROCESS_SCALE_PPM: u64 = 1_000_000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,6 +77,232 @@ impl Observation {
             epoch_id,
         }
     }
+}
+
+/// One fixed-point likelihood-ratio evidence item for the Runtime Sentinel.
+///
+/// `likelihood_ratio_ppm` is P(evidence | malicious) / P(evidence | benign)
+/// multiplied by [`E_PROCESS_SCALE_PPM`]. It intentionally avoids floating point
+/// so replay and verifier recomputation are bit-exact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LikelihoodRatioEvidence {
+    /// Version tag for verifier-compatible evidence replay.
+    pub schema_version: String,
+    /// Strictly increasing sequence number in the Runtime Sentinel evidence log.
+    pub sequence: u64,
+    /// Stable identifier for the signal family that produced this likelihood ratio.
+    pub signal_id: String,
+    /// Fixed-point likelihood ratio scaled by [`E_PROCESS_SCALE_PPM`].
+    pub likelihood_ratio_ppm: u64,
+    /// Canonical metadata carried alongside the evidence item.
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl LikelihoodRatioEvidence {
+    pub fn new(signal_id: impl Into<String>, sequence: u64, likelihood_ratio_ppm: u64) -> Self {
+        Self {
+            schema_version: RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION.to_string(),
+            sequence,
+            signal_id: signal_id.into(),
+            likelihood_ratio_ppm,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn from_mixture(
+        signal_id: impl Into<String>,
+        sequence: u64,
+        components: &[MixtureSprtComponent],
+    ) -> Result<Self, EProcessError> {
+        Ok(Self::new(
+            signal_id,
+            sequence,
+            mixture_likelihood_ratio_ppm(components)?,
+        ))
+    }
+}
+
+/// One deterministic mixture-SPRT component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MixtureSprtComponent {
+    /// Stable component identifier used to canonicalize mixture order.
+    pub component_id: String,
+    /// Component weight scaled by [`E_PROCESS_SCALE_PPM`].
+    pub weight_ppm: u64,
+    /// Component likelihood ratio scaled by [`E_PROCESS_SCALE_PPM`].
+    pub likelihood_ratio_ppm: u64,
+}
+
+impl MixtureSprtComponent {
+    pub fn new(
+        component_id: impl Into<String>,
+        weight_ppm: u64,
+        likelihood_ratio_ppm: u64,
+    ) -> Self {
+        Self {
+            component_id: component_id.into(),
+            weight_ppm,
+            likelihood_ratio_ppm,
+        }
+    }
+}
+
+/// Snapshot emitted after applying one e-process evidence item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EProcessUpdate {
+    /// Version tag for verifier-compatible e-process updates.
+    pub schema_version: String,
+    /// Evidence sequence applied by this update.
+    pub sequence: u64,
+    /// Signal family applied by this update.
+    pub signal_id: String,
+    /// E-value before the evidence was applied, scaled by [`E_PROCESS_SCALE_PPM`].
+    pub prior_e_value_ppm: u64,
+    /// Likelihood ratio applied by this update, scaled by [`E_PROCESS_SCALE_PPM`].
+    pub likelihood_ratio_ppm: u64,
+    /// E-value after the evidence was applied, scaled by [`E_PROCESS_SCALE_PPM`].
+    pub posterior_e_value_ppm: u64,
+    /// Ville false-alarm bound implied by the posterior e-value.
+    pub false_alarm_bound_ppm: u64,
+}
+
+/// Replay-safe anytime-valid e-process state for Runtime Sentinel evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSentinelEProcess {
+    /// Version tag for verifier-compatible e-process replay.
+    pub schema_version: String,
+    /// Current anytime-valid e-value scaled by [`E_PROCESS_SCALE_PPM`].
+    pub e_value_ppm: u64,
+    /// Number of evidence items accepted by this state.
+    pub evidence_count: u64,
+    /// Last accepted sequence number, if any.
+    pub last_sequence: Option<u64>,
+}
+
+impl RuntimeSentinelEProcess {
+    pub fn new() -> Self {
+        Self {
+            schema_version: RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION.to_string(),
+            e_value_ppm: E_PROCESS_SCALE_PPM,
+            evidence_count: 0,
+            last_sequence: None,
+        }
+    }
+
+    pub fn observe(
+        &mut self,
+        evidence: &LikelihoodRatioEvidence,
+    ) -> Result<EProcessUpdate, EProcessError> {
+        if evidence.schema_version != RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION {
+            return Err(EProcessError::SchemaVersionMismatch {
+                declared: evidence.schema_version.clone(),
+                expected: RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION.to_string(),
+            });
+        }
+        if let Some(previous) = self.last_sequence
+            && evidence.sequence <= previous
+        {
+            return Err(EProcessError::NonMonotonicSequence {
+                previous,
+                attempted: evidence.sequence,
+            });
+        }
+
+        let prior_e_value_ppm = self.e_value_ppm;
+        self.e_value_ppm = multiply_fixed_ppm(self.e_value_ppm, evidence.likelihood_ratio_ppm);
+        self.evidence_count = self.evidence_count.saturating_add(1);
+        self.last_sequence = Some(evidence.sequence);
+
+        Ok(EProcessUpdate {
+            schema_version: RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION.to_string(),
+            sequence: evidence.sequence,
+            signal_id: evidence.signal_id.clone(),
+            prior_e_value_ppm,
+            likelihood_ratio_ppm: evidence.likelihood_ratio_ppm,
+            posterior_e_value_ppm: self.e_value_ppm,
+            false_alarm_bound_ppm: self.false_alarm_bound_ppm(),
+        })
+    }
+
+    pub fn replay_from(evidence: &[LikelihoodRatioEvidence]) -> Result<Self, EProcessError> {
+        let mut state = Self::new();
+        for item in evidence {
+            state.observe(item)?;
+        }
+        Ok(state)
+    }
+
+    pub fn false_alarm_bound_ppm(&self) -> u64 {
+        false_alarm_bound_ppm_for_e_value(self.e_value_ppm)
+    }
+
+    pub fn should_escalate(&self, alpha_ppm: u64) -> bool {
+        self.false_alarm_bound_ppm() <= alpha_ppm
+    }
+}
+
+impl Default for RuntimeSentinelEProcess {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EProcessError {
+    SchemaVersionMismatch { declared: String, expected: String },
+    NonMonotonicSequence { previous: u64, attempted: u64 },
+    EmptyMixture,
+    ZeroMixtureWeight,
+}
+
+pub fn mixture_likelihood_ratio_ppm(
+    components: &[MixtureSprtComponent],
+) -> Result<u64, EProcessError> {
+    if components.is_empty() {
+        return Err(EProcessError::EmptyMixture);
+    }
+
+    let mut ordered = BTreeMap::new();
+    for component in components {
+        ordered.insert(
+            component.component_id.clone(),
+            (component.weight_ppm, component.likelihood_ratio_ppm),
+        );
+    }
+
+    let mut weighted_sum: u128 = 0;
+    let mut total_weight: u128 = 0;
+    for (weight_ppm, likelihood_ratio_ppm) in ordered.values() {
+        weighted_sum = weighted_sum.saturating_add(
+            u128::from(*weight_ppm).saturating_mul(u128::from(*likelihood_ratio_ppm)),
+        );
+        total_weight = total_weight.saturating_add(u128::from(*weight_ppm));
+    }
+    if total_weight == 0 {
+        return Err(EProcessError::ZeroMixtureWeight);
+    }
+
+    Ok(u64::try_from(weighted_sum / total_weight).unwrap_or(u64::MAX))
+}
+
+fn multiply_fixed_ppm(left_ppm: u64, right_ppm: u64) -> u64 {
+    let product = u128::from(left_ppm).saturating_mul(u128::from(right_ppm));
+    u64::try_from(product / u128::from(E_PROCESS_SCALE_PPM)).unwrap_or(u64::MAX)
+}
+
+pub fn false_alarm_bound_ppm_for_e_value(e_value_ppm: u64) -> u64 {
+    if e_value_ppm <= E_PROCESS_SCALE_PPM {
+        return E_PROCESS_SCALE_PPM;
+    }
+
+    let numerator = u128::from(E_PROCESS_SCALE_PPM).saturating_mul(u128::from(E_PROCESS_SCALE_PPM));
+    let bound = numerator.div_ceil(u128::from(e_value_ppm));
+    u64::try_from(bound.min(u128::from(E_PROCESS_SCALE_PPM))).unwrap_or(E_PROCESS_SCALE_PPM)
 }
 
 /// Confidence level of the diagnostic ranking (distinct from GuaranteeConfidence).
@@ -426,6 +661,10 @@ fn _assert_send_sync() {
     assert_sync::<BayesianDiagnostics>();
     assert_send::<RankedCandidate>();
     assert_sync::<RankedCandidate>();
+    assert_send::<RuntimeSentinelEProcess>();
+    assert_sync::<RuntimeSentinelEProcess>();
+    assert_send::<LikelihoodRatioEvidence>();
+    assert_sync::<LikelihoodRatioEvidence>();
 }
 
 // ===========================================================================
