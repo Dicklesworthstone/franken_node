@@ -43,6 +43,8 @@ pub const EVENT_DEPTH_LIMIT: &str = "FN-IFL-010";
 pub const EVENT_TAINT_MERGE: &str = "FN-IFL-011";
 pub const EVENT_HEALTH_CHECK: &str = "FN-IFL-012";
 pub const EVENT_SIGNED_LINEAGE_BUILT: &str = "FN-IFL-013";
+pub const EVENT_SENSITIVE_SOURCE_REGISTERED: &str = "FN-IFL-014";
+pub const EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED: &str = "FN-IFL-015";
 
 // Canonical event codes required by bd-2iyk acceptance criteria.
 pub const LINEAGE_TAG_ATTACHED: &str = "LINEAGE_TAG_ATTACHED";
@@ -66,6 +68,8 @@ pub const ERR_IFL_CONFIG_REJECTED: &str = "ERR_IFL_CONFIG_REJECTED";
 pub const ERR_IFL_ALREADY_QUARANTINED: &str = "ERR_IFL_ALREADY_QUARANTINED";
 pub const ERR_IFL_TIMEOUT: &str = "ERR_IFL_TIMEOUT";
 pub const ERR_SIGNED_LINEAGE_INVALID: &str = "ERR_SIGNED_LINEAGE_INVALID";
+pub const ERR_IFL_SENSITIVE_SOURCE_INVALID: &str = "ERR_IFL_SENSITIVE_SOURCE_INVALID";
+pub const ERR_IFL_SENSITIVE_SOURCE_CONFLICT: &str = "ERR_IFL_SENSITIVE_SOURCE_CONFLICT";
 
 // Canonical error codes required by bd-2iyk acceptance criteria.
 pub const ERR_LINEAGE_TAG_MISSING: &str = "ERR_LINEAGE_TAG_MISSING";
@@ -80,6 +84,16 @@ const MAX_COVERT_CHANNEL_DETECTIONS: usize = 4096;
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn looks_like_digest(digest: &str) -> bool {
+    let digest = digest.trim();
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    hex.len() >= 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn prefix_for_display(value: &str) -> &str {
+    value.get(..16).unwrap_or(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +146,14 @@ pub const INV_SENTINEL_PRECISION_THRESHOLD: &str = "INV-SENTINEL-PRECISION-THRES
 /// INV-SENTINEL-AUTO-CONTAIN: When exfiltration is detected, the sentinel
 /// auto-contains the flow without requiring manual intervention.
 pub const INV_SENTINEL_AUTO_CONTAIN: &str = "INV-SENTINEL-AUTO-CONTAIN";
+
+/// INV-IFL-SENSITIVE-SOURCE-COMMITMENT: sensitive-source labels expose only a
+/// salted commitment over a canonical descriptor, never source bytes.
+pub const INV_SENSITIVE_SOURCE_COMMITMENT: &str = "INV-IFL-SENSITIVE-SOURCE-COMMITMENT";
+
+/// INV-IFL-FLOW-LEDGER-IMMUTABLE: once a sensitive-source commitment is
+/// inserted, the same label id cannot be rebound to different descriptor data.
+pub const INV_FLOW_LEDGER_IMMUTABLE: &str = "INV-IFL-FLOW-LEDGER-IMMUTABLE";
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -525,6 +547,285 @@ pub struct LineageSnapshot {
     pub edges: Vec<FlowEdge>,
     pub labels: BTreeMap<String, TaintLabel>,
     pub schema_version: String,
+}
+
+/// Schema version for sensitive-source FlowLedger commitments.
+pub const FLOW_LEDGER_SCHEMA_VERSION: &str = "flow-ledger-v1.0";
+
+/// Canonical sensitive-source class. The descriptor intentionally avoids raw
+/// source bytes; the class describes where the protected datum came from.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensitiveSourceClass {
+    EnvVar,
+    SecretStore,
+    TokenFile,
+    PrivatePath,
+    TrustRoot,
+    OperatorConfig,
+    SensitiveNetworkResponse,
+}
+
+impl SensitiveSourceClass {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::EnvVar => "env_var",
+            Self::SecretStore => "secret_store",
+            Self::TokenFile => "token_file",
+            Self::PrivatePath => "private_path",
+            Self::TrustRoot => "trust_root",
+            Self::OperatorConfig => "operator_config",
+            Self::SensitiveNetworkResponse => "sensitive_network_response",
+        }
+    }
+}
+
+/// Canonical descriptor for a sensitive source. `digest` is a caller-provided
+/// digest/commitment for the source value or source artifact; raw secret bytes do
+/// not enter this structure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensitiveSourceDescriptor {
+    pub source_class: SensitiveSourceClass,
+    pub policy_domain: String,
+    pub owner: String,
+    pub epoch: u64,
+    pub digest: String,
+    pub severity: u32,
+    pub disclosure: BTreeMap<String, String>,
+}
+
+impl SensitiveSourceDescriptor {
+    /// Validate descriptor fields before they are committed into the ledger.
+    pub fn validate(&self) -> Result<(), LineageError> {
+        if self.policy_domain.trim().is_empty()
+            || self.owner.trim().is_empty()
+            || self.digest.trim().is_empty()
+        {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: policy_domain, owner, and digest must be non-empty",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+        if !self.digest.is_ascii() || !looks_like_digest(&self.digest) {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: digest must be digest-shaped ASCII commitment material",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+        if self.severity == 0 {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: sensitive-source severity must be greater than zero",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+        for (key, value) in &self.disclosure {
+            if key.trim().is_empty() || value.trim().is_empty() {
+                return Err(LineageError::SensitiveSourceInvalid {
+                    detail: format!(
+                        "{}: disclosure keys and values must be non-empty",
+                        ERR_IFL_SENSITIVE_SOURCE_INVALID
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Public commitment record for a sensitive source registered in a [`FlowLedger`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensitiveSourceCommitment {
+    pub label_id: String,
+    pub descriptor: SensitiveSourceDescriptor,
+    pub descriptor_digest: String,
+    pub salt_commitment: String,
+    pub source_commitment: String,
+    pub schema_version: String,
+}
+
+/// Serializable snapshot of FlowLedger sensitive-source commitments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowLedgerSnapshot {
+    pub snapshot_id: String,
+    pub source_count: usize,
+    pub commitments: Vec<SensitiveSourceCommitment>,
+    pub schema_version: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SensitiveSourceCanonicalPayload<'a> {
+    schema_version: &'static str,
+    descriptor: &'a SensitiveSourceDescriptor,
+}
+
+/// Deterministic ledger that binds sensitive source descriptors to taint labels
+/// via salted commitments, then attaches those labels to the existing lineage
+/// graph.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FlowLedger {
+    sources: BTreeMap<String, SensitiveSourceCommitment>,
+}
+
+impl FlowLedger {
+    /// Create an empty FlowLedger.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sources: BTreeMap::new(),
+        }
+    }
+
+    /// Number of sensitive source commitments currently registered.
+    #[must_use]
+    pub fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// Return a commitment by label id.
+    #[must_use]
+    pub fn commitment(&self, label_id: &str) -> Option<&SensitiveSourceCommitment> {
+        self.sources.get(label_id)
+    }
+
+    /// Deterministically derive the commitment that would be inserted for a
+    /// descriptor and salt.
+    pub fn derive_commitment(
+        descriptor: SensitiveSourceDescriptor,
+        salt: impl AsRef<[u8]>,
+    ) -> Result<SensitiveSourceCommitment, LineageError> {
+        let salt = salt.as_ref();
+        descriptor.validate()?;
+        if salt.is_empty() {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: salt must be non-empty",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+
+        let canonical = SensitiveSourceCanonicalPayload {
+            schema_version: FLOW_LEDGER_SCHEMA_VERSION,
+            descriptor: &descriptor,
+        };
+        let canonical_bytes =
+            serde_json::to_vec(&canonical).map_err(|err| LineageError::SnapshotFailed {
+                detail: format!(
+                    "{}: failed serializing sensitive-source descriptor: {err}",
+                    ERR_IFL_SNAPSHOT_FAILED
+                ),
+            })?;
+        let descriptor_digest = sha256_hex(&canonical_bytes);
+
+        let mut commitment_preimage = Vec::new();
+        commitment_preimage.extend_from_slice(FLOW_LEDGER_SCHEMA_VERSION.as_bytes());
+        commitment_preimage.push(0);
+        commitment_preimage.extend_from_slice(descriptor_digest.as_bytes());
+        commitment_preimage.push(0);
+        commitment_preimage.extend_from_slice(salt);
+
+        let source_commitment = sha256_hex(&commitment_preimage);
+        let salt_commitment = sha256_hex(salt);
+        let label_id = format!(
+            "ifl-src:{}:{}:{}",
+            descriptor.source_class.as_str(),
+            descriptor.epoch,
+            &source_commitment[..16]
+        );
+
+        Ok(SensitiveSourceCommitment {
+            label_id,
+            descriptor,
+            descriptor_digest,
+            salt_commitment,
+            source_commitment,
+            schema_version: FLOW_LEDGER_SCHEMA_VERSION.to_string(),
+        })
+    }
+
+    /// Register a sensitive source and attach its immutable label to `datum_id`.
+    /// The graph receives a `TaintLabel` whose description contains only the
+    /// source class and commitment prefix, never raw source bytes.
+    pub fn register_sensitive_source(
+        &mut self,
+        graph: &mut LineageGraph,
+        datum_id: &str,
+        descriptor: SensitiveSourceDescriptor,
+        salt: impl AsRef<[u8]>,
+    ) -> Result<String, LineageError> {
+        let _event = EVENT_SENSITIVE_SOURCE_REGISTERED;
+        let _inv_commitment = INV_SENSITIVE_SOURCE_COMMITMENT;
+        let _inv_immutable = INV_FLOW_LEDGER_IMMUTABLE;
+
+        if datum_id.trim().is_empty() {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: datum_id must be non-empty",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+
+        let commitment = Self::derive_commitment(descriptor, salt)?;
+        let label_id = commitment.label_id.clone();
+
+        if let Some(existing) = self.sources.get(&label_id) {
+            if existing != &commitment {
+                return Err(LineageError::SensitiveSourceConflict {
+                    detail: format!(
+                        "{}: label '{}' is already bound to different sensitive-source metadata",
+                        ERR_IFL_SENSITIVE_SOURCE_CONFLICT, label_id
+                    ),
+                });
+            }
+            if !graph.labels.contains_key(&label_id) {
+                let commitment_prefix = prefix_for_display(&existing.source_commitment);
+                graph.register_label(TaintLabel {
+                    id: label_id.clone(),
+                    description: format!(
+                        "sensitive source {} commitment {}",
+                        existing.descriptor.source_class.as_str(),
+                        commitment_prefix
+                    ),
+                    severity: existing.descriptor.severity,
+                });
+            }
+            graph.assign_taint(datum_id, &label_id)?;
+            return Ok(label_id);
+        }
+
+        let commitment_prefix = prefix_for_display(&commitment.source_commitment);
+        graph.register_label(TaintLabel {
+            id: label_id.clone(),
+            description: format!(
+                "sensitive source {} commitment {}",
+                commitment.descriptor.source_class.as_str(),
+                commitment_prefix
+            ),
+            severity: commitment.descriptor.severity,
+        });
+        graph.assign_taint(datum_id, &label_id)?;
+        self.sources.insert(label_id.clone(), commitment);
+        Ok(label_id)
+    }
+
+    /// Export a deterministic FlowLedger snapshot.
+    #[must_use]
+    pub fn snapshot(&self, snapshot_id: &str) -> FlowLedgerSnapshot {
+        let _event = EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED;
+        FlowLedgerSnapshot {
+            snapshot_id: snapshot_id.to_string(),
+            source_count: self.sources.len(),
+            commitments: self.sources.values().cloned().collect(),
+            schema_version: FLOW_LEDGER_SCHEMA_VERSION.to_string(),
+        }
+    }
 }
 
 /// Schema version for signed supply-chain lineage graphs.
@@ -939,6 +1240,8 @@ pub enum LineageError {
     ConfigRejected { detail: String },
     AlreadyQuarantined { detail: String },
     Timeout { detail: String },
+    SensitiveSourceInvalid { detail: String },
+    SensitiveSourceConflict { detail: String },
 }
 
 impl fmt::Display for LineageError {
@@ -954,6 +1257,8 @@ impl fmt::Display for LineageError {
             Self::ConfigRejected { detail } => write!(f, "{}", detail),
             Self::AlreadyQuarantined { detail } => write!(f, "{}", detail),
             Self::Timeout { detail } => write!(f, "{}", detail),
+            Self::SensitiveSourceInvalid { detail } => write!(f, "{}", detail),
+            Self::SensitiveSourceConflict { detail } => write!(f, "{}", detail),
         }
     }
 }
@@ -2328,6 +2633,19 @@ mod tests {
         }
     }
 
+    fn sensitive_descriptor(disclosure: BTreeMap<String, String>) -> SensitiveSourceDescriptor {
+        SensitiveSourceDescriptor {
+            source_class: SensitiveSourceClass::EnvVar,
+            policy_domain: "runtime:prod".to_string(),
+            owner: "platform-security".to_string(),
+            epoch: 42,
+            digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            severity: 90,
+            disclosure,
+        }
+    }
+
     fn make_external_edge(edge_id: &str, source: &str, timestamp_ms: u64) -> FlowEdge {
         FlowEdge {
             edge_id: edge_id.to_string(),
@@ -2502,6 +2820,130 @@ mod tests {
     #[test]
     fn test_schema_version_constant() {
         assert_eq!(SCHEMA_VERSION, "ifl-v1.0");
+    }
+
+    #[test]
+    fn flow_ledger_registers_sensitive_source_as_committed_label() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let descriptor = sensitive_descriptor(BTreeMap::from([(
+            "display_name".to_string(),
+            "operator API key".to_string(),
+        )]));
+
+        let label_id = ledger
+            .register_sensitive_source(&mut graph, "datum-secret", descriptor, b"salt-v1")
+            .unwrap();
+
+        let commitment = ledger.commitment(&label_id).unwrap();
+        let taint = graph.get_taint_set("datum-secret").unwrap();
+        let label = graph.labels.get(&label_id).unwrap();
+
+        assert_eq!(ledger.source_count(), 1);
+        assert!(label_id.starts_with("ifl-src:env_var:42:"));
+        assert!(taint.contains(&label_id));
+        assert_eq!(label.severity, 90);
+        assert!(label.description.contains("sensitive source env_var"));
+        assert!(!label.description.contains("operator-api-key"));
+        assert_eq!(commitment.schema_version, FLOW_LEDGER_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn flow_ledger_commitment_is_deterministic_for_ordered_metadata() {
+        let left = sensitive_descriptor(BTreeMap::from([
+            ("purpose".to_string(), "signing".to_string()),
+            ("region".to_string(), "iad".to_string()),
+        ]));
+        let right = sensitive_descriptor(BTreeMap::from([
+            ("region".to_string(), "iad".to_string()),
+            ("purpose".to_string(), "signing".to_string()),
+        ]));
+
+        let left_commitment = FlowLedger::derive_commitment(left, b"salt-v1").unwrap();
+        let right_commitment = FlowLedger::derive_commitment(right, b"salt-v1").unwrap();
+
+        assert_eq!(left_commitment, right_commitment);
+    }
+
+    #[test]
+    fn flow_ledger_idempotent_registration_can_label_multiple_datums() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let descriptor = sensitive_descriptor(BTreeMap::new());
+
+        let first = ledger
+            .register_sensitive_source(&mut graph, "datum-a", descriptor.clone(), b"salt-v1")
+            .unwrap();
+        let second = ledger
+            .register_sensitive_source(&mut graph, "datum-b", descriptor, b"salt-v1")
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(ledger.source_count(), 1);
+        assert!(graph.get_taint_set("datum-a").unwrap().contains(&first));
+        assert!(graph.get_taint_set("datum-b").unwrap().contains(&first));
+    }
+
+    #[test]
+    fn flow_ledger_rejects_empty_salt_without_mutating_graph() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let descriptor = sensitive_descriptor(BTreeMap::new());
+
+        let err = ledger
+            .register_sensitive_source(&mut graph, "datum-secret", descriptor, b"")
+            .expect_err("empty salt must fail closed");
+
+        assert!(err.to_string().contains(ERR_IFL_SENSITIVE_SOURCE_INVALID));
+        assert_eq!(ledger.source_count(), 0);
+        assert_eq!(graph.label_count(), 0);
+        assert!(graph.get_taint_set("datum-secret").is_none());
+    }
+
+    #[test]
+    fn flow_ledger_rejects_malformed_descriptor() {
+        let mut descriptor = sensitive_descriptor(BTreeMap::new());
+        descriptor.owner.clear();
+
+        let err = FlowLedger::derive_commitment(descriptor, b"salt-v1")
+            .expect_err("empty descriptor owner must fail closed");
+
+        assert!(err.to_string().contains(ERR_IFL_SENSITIVE_SOURCE_INVALID));
+    }
+
+    #[test]
+    fn flow_ledger_snapshot_is_sorted_and_schema_versioned() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let mut second = sensitive_descriptor(BTreeMap::new());
+        second.epoch = 7;
+        second.digest = "sha256:second".to_string();
+
+        ledger
+            .register_sensitive_source(&mut graph, "datum-b", second, b"salt-b")
+            .unwrap();
+        ledger
+            .register_sensitive_source(
+                &mut graph,
+                "datum-a",
+                sensitive_descriptor(BTreeMap::new()),
+                b"salt-a",
+            )
+            .unwrap();
+
+        let snapshot = ledger.snapshot("flow-ledger-snap-1");
+        let ids: Vec<_> = snapshot
+            .commitments
+            .iter()
+            .map(|commitment| commitment.label_id.as_str())
+            .collect();
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+
+        assert_eq!(snapshot.snapshot_id, "flow-ledger-snap-1");
+        assert_eq!(snapshot.source_count, 2);
+        assert_eq!(snapshot.schema_version, FLOW_LEDGER_SCHEMA_VERSION);
+        assert_eq!(ids, sorted_ids);
     }
 
     #[test]
@@ -4306,6 +4748,8 @@ mod tests {
             EVENT_DEPTH_LIMIT,
             EVENT_TAINT_MERGE,
             EVENT_HEALTH_CHECK,
+            EVENT_SENSITIVE_SOURCE_REGISTERED,
+            EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED,
             LINEAGE_TAG_ATTACHED,
             LINEAGE_FLOW_TRACKED,
             SENTINEL_SCAN_START,
@@ -4341,6 +4785,8 @@ mod tests {
             ERR_IFL_CONFIG_REJECTED,
             ERR_IFL_ALREADY_QUARANTINED,
             ERR_IFL_TIMEOUT,
+            ERR_IFL_SENSITIVE_SOURCE_INVALID,
+            ERR_IFL_SENSITIVE_SOURCE_CONFLICT,
             ERR_LINEAGE_TAG_MISSING,
             ERR_LINEAGE_FLOW_BROKEN,
             ERR_SENTINEL_RECALL_BELOW_THRESHOLD,
@@ -4371,6 +4817,8 @@ mod tests {
             INV_BOUNDARY_ENFORCED,
             INV_DETERMINISTIC,
             INV_SNAPSHOT_FAITHFUL,
+            INV_SENSITIVE_SOURCE_COMMITMENT,
+            INV_FLOW_LEDGER_IMMUTABLE,
         ];
 
         for constant in &invariant_constants {
