@@ -37,6 +37,18 @@ pub const FN_VSDK_NON_EXFILTRATION_START: &str = "FN-VSDK-NON-EXFILTRATION-START
 pub const FN_VSDK_NON_EXFILTRATION_EFFECT: &str = "FN-VSDK-NON-EXFILTRATION-EFFECT";
 /// Event code emitted when non-exfiltration verification succeeds.
 pub const FN_VSDK_NON_EXFILTRATION_PASS: &str = "FN-VSDK-NON-EXFILTRATION-PASS";
+/// Stable schema marker for proof-carrying capability grants.
+pub const CAPABILITY_PROOF_SCHEMA_VERSION: &str = "capability-proof-v1";
+/// Stable schema marker for proof-carrying capability receipts.
+pub const CAPABILITY_RECEIPT_SCHEMA_VERSION: &str = "capability-receipt-v1";
+/// Event code emitted when capability proof/receipt schema verification starts.
+pub const FN_VSDK_CAPABILITY_SCHEMA_START: &str = "FN-VSDK-CAPABILITY-SCHEMA-START";
+/// Event code emitted when a capability proof hash and fields verify.
+pub const FN_VSDK_CAPABILITY_PROOF_VERIFIED: &str = "FN-VSDK-CAPABILITY-PROOF-VERIFIED";
+/// Event code emitted when a capability receipt hash and bindings verify.
+pub const FN_VSDK_CAPABILITY_RECEIPT_VERIFIED: &str = "FN-VSDK-CAPABILITY-RECEIPT-VERIFIED";
+/// Event code emitted when capability proof/receipt schema verification succeeds.
+pub const FN_VSDK_CAPABILITY_SCHEMA_PASS: &str = "FN-VSDK-CAPABILITY-SCHEMA-PASS";
 
 const HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:canonical-hash:v1:";
 const SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:structural-signature:v1:";
@@ -47,6 +59,8 @@ const EFFECT_RECEIPT_HASH_DOMAIN: &[u8] = b"runtime_effect_receipt_canonical_v1:
 const EFFECT_RECEIPT_CHAIN_HASH_DOMAIN: &[u8] = b"runtime_effect_receipt_chain_v1:";
 const NON_EXFILTRATION_CLAIM_HASH_DOMAIN: &[u8] =
     b"frankenengine-verifier-sdk:non-exfiltration-claim:v1:";
+const CAPABILITY_PROOF_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:capability-proof:v1:";
+const CAPABILITY_RECEIPT_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:capability-receipt:v1:";
 const CONTENT_HASH_PREFIX: &str = "sha256:";
 const EFFECT_RECEIPT_CHAIN_GENESIS: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -323,6 +337,119 @@ pub struct NonExfiltrationVerification {
     pub event_codes: Vec<String>,
 }
 
+/// Runtime policy profile under which a capability proof was issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityPolicyProfile {
+    Strict,
+    Balanced,
+    LegacyRisky,
+}
+
+impl CapabilityPolicyProfile {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Balanced => "balanced",
+            Self::LegacyRisky => "legacy_risky",
+        }
+    }
+}
+
+/// Revocation status evidence bound into a capability proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CapabilityRevocationFreshness {
+    Fresh {
+        checked_at_millis: u64,
+        evidence_ref: String,
+    },
+    Stale {
+        last_checked_at_millis: u64,
+        evidence_ref: String,
+    },
+    Revoked {
+        revoked_at_millis: u64,
+        revocation_ref: String,
+    },
+}
+
+/// A single scope allowed by a proof-carrying capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityScope {
+    pub capability: String,
+    pub resource: String,
+    pub access: String,
+}
+
+/// A canonical postcondition hash expected or observed for a capability use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityPostcondition {
+    pub field: String,
+    pub expected_hash: String,
+}
+
+/// Proof-carrying capability grant independently checkable by the SDK.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityProof {
+    pub schema_version: String,
+    pub proof_id: String,
+    pub actor: String,
+    pub audience: String,
+    pub scopes: Vec<CapabilityScope>,
+    pub policy_profile: CapabilityPolicyProfile,
+    pub revocation_freshness: CapabilityRevocationFreshness,
+    pub epoch: u64,
+    pub side_effect_kind: EffectKind,
+    pub evidence_refs: Vec<String>,
+    pub expected_postconditions: Vec<CapabilityPostcondition>,
+    pub issued_at_millis: u64,
+    pub expires_at_millis: u64,
+    pub proof_hash: String,
+}
+
+/// Runtime receipt proving a capability use matched the issued proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityReceipt {
+    pub schema_version: String,
+    pub receipt_id: String,
+    pub proof_id: String,
+    pub proof_hash: String,
+    pub actor: String,
+    pub audience: String,
+    pub exercised_scope: CapabilityScope,
+    pub policy_profile: CapabilityPolicyProfile,
+    pub epoch: u64,
+    pub side_effect_kind: EffectKind,
+    pub effect_receipt_chain_hash: String,
+    pub observed_postconditions: Vec<CapabilityPostcondition>,
+    pub recorded_at_millis: u64,
+    pub receipt_hash: String,
+}
+
+/// Verified binding between a capability proof and a capability-use receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityReceiptVerification {
+    pub proof_id: String,
+    pub receipt_id: String,
+    pub actor: String,
+    pub audience: String,
+    pub scope: CapabilityScope,
+    pub policy_profile: String,
+    pub epoch: u64,
+    pub side_effect_kind: String,
+    pub proof_hash: String,
+    pub receipt_hash: String,
+    pub effect_receipt_chain_hash: String,
+    pub postcondition_count: usize,
+    pub evidence_ref_count: usize,
+    pub event_codes: Vec<String>,
+}
+
 /// Errors returned by replay bundle serialization and verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BundleError {
@@ -475,6 +602,27 @@ pub enum BundleError {
         effect_kind: String,
         label_set_commitment: String,
         detail: String,
+    },
+    UnsupportedCapabilityProofSchema {
+        expected: String,
+        actual: String,
+    },
+    UnsupportedCapabilityReceiptSchema {
+        expected: String,
+        actual: String,
+    },
+    InvalidCapabilityField {
+        field: &'static str,
+        reason: String,
+    },
+    MalformedCapabilityHash {
+        field: &'static str,
+        value: String,
+    },
+    CapabilityReceiptMismatch {
+        field: &'static str,
+        expected: String,
+        actual: String,
     },
 }
 
@@ -685,6 +833,30 @@ impl fmt::Display for BundleError {
             } => write!(
                 formatter,
                 "non-exfiltration violation at effect {index} ({effect_kind}): {detail}"
+            ),
+            Self::UnsupportedCapabilityProofSchema { expected, actual } => write!(
+                formatter,
+                "capability proof schema mismatch: expected {expected}, got {actual}"
+            ),
+            Self::UnsupportedCapabilityReceiptSchema { expected, actual } => write!(
+                formatter,
+                "capability receipt schema mismatch: expected {expected}, got {actual}"
+            ),
+            Self::InvalidCapabilityField { field, reason } => write!(
+                formatter,
+                "capability proof/receipt field {field} is invalid: {reason}"
+            ),
+            Self::MalformedCapabilityHash { field, value: _ } => write!(
+                formatter,
+                "capability proof/receipt field {field} is not a canonical sha256:<hex> hash"
+            ),
+            Self::CapabilityReceiptMismatch {
+                field,
+                expected: _,
+                actual: _,
+            } => write!(
+                formatter,
+                "capability receipt field {field} does not match the bound proof"
             ),
         }
     }
@@ -1244,6 +1416,437 @@ fn non_exfiltration_claim_hash(
     update_hash_vec(&mut hasher, &claim.forbidden_label_set_commitments);
     update_hash_vec(&mut hasher, &claim.external_sink_effect_kinds);
     update_hash_vec(&mut hasher, &claim.allowed_declassification_refs);
+    format!("{CONTENT_HASH_PREFIX}{}", hex::encode(hasher.finalize()))
+}
+
+#[derive(Serialize)]
+struct CapabilityProofPayload<'a> {
+    schema_version: &'a str,
+    proof_id: &'a str,
+    actor: &'a str,
+    audience: &'a str,
+    scopes: &'a [CapabilityScope],
+    policy_profile: CapabilityPolicyProfile,
+    revocation_freshness: &'a CapabilityRevocationFreshness,
+    epoch: u64,
+    side_effect_kind: EffectKind,
+    evidence_refs: &'a [String],
+    expected_postconditions: &'a [CapabilityPostcondition],
+    issued_at_millis: u64,
+    expires_at_millis: u64,
+}
+
+#[derive(Serialize)]
+struct CapabilityReceiptPayload<'a> {
+    schema_version: &'a str,
+    receipt_id: &'a str,
+    proof_id: &'a str,
+    proof_hash: &'a str,
+    actor: &'a str,
+    audience: &'a str,
+    exercised_scope: &'a CapabilityScope,
+    policy_profile: CapabilityPolicyProfile,
+    epoch: u64,
+    side_effect_kind: EffectKind,
+    effect_receipt_chain_hash: &'a str,
+    observed_postconditions: &'a [CapabilityPostcondition],
+    recorded_at_millis: u64,
+}
+
+/// Return canonical payload bytes for a capability proof, excluding `proof_hash`.
+pub fn capability_proof_canonical_bytes(proof: &CapabilityProof) -> BundleResult<Vec<u8>> {
+    validate_capability_proof_payload(proof)?;
+    canonical_bytes(&CapabilityProofPayload {
+        schema_version: &proof.schema_version,
+        proof_id: &proof.proof_id,
+        actor: &proof.actor,
+        audience: &proof.audience,
+        scopes: &proof.scopes,
+        policy_profile: proof.policy_profile,
+        revocation_freshness: &proof.revocation_freshness,
+        epoch: proof.epoch,
+        side_effect_kind: proof.side_effect_kind,
+        evidence_refs: &proof.evidence_refs,
+        expected_postconditions: &proof.expected_postconditions,
+        issued_at_millis: proof.issued_at_millis,
+        expires_at_millis: proof.expires_at_millis,
+    })
+}
+
+/// Return canonical payload bytes for a capability receipt, excluding `receipt_hash`.
+pub fn capability_receipt_canonical_bytes(receipt: &CapabilityReceipt) -> BundleResult<Vec<u8>> {
+    validate_capability_receipt_payload(receipt)?;
+    canonical_bytes(&CapabilityReceiptPayload {
+        schema_version: &receipt.schema_version,
+        receipt_id: &receipt.receipt_id,
+        proof_id: &receipt.proof_id,
+        proof_hash: &receipt.proof_hash,
+        actor: &receipt.actor,
+        audience: &receipt.audience,
+        exercised_scope: &receipt.exercised_scope,
+        policy_profile: receipt.policy_profile,
+        epoch: receipt.epoch,
+        side_effect_kind: receipt.side_effect_kind,
+        effect_receipt_chain_hash: &receipt.effect_receipt_chain_hash,
+        observed_postconditions: &receipt.observed_postconditions,
+        recorded_at_millis: receipt.recorded_at_millis,
+    })
+}
+
+/// Compute the domain-separated canonical hash for a capability proof payload.
+pub fn capability_proof_hash(proof: &CapabilityProof) -> BundleResult<String> {
+    let canonical = capability_proof_canonical_bytes(proof)?;
+    Ok(hash_with_domain(CAPABILITY_PROOF_HASH_DOMAIN, &canonical))
+}
+
+/// Compute the domain-separated canonical hash for a capability receipt payload.
+pub fn capability_receipt_hash(receipt: &CapabilityReceipt) -> BundleResult<String> {
+    let canonical = capability_receipt_canonical_bytes(receipt)?;
+    Ok(hash_with_domain(CAPABILITY_RECEIPT_HASH_DOMAIN, &canonical))
+}
+
+/// Populate the self-binding hash on a capability proof.
+pub fn seal_capability_proof(proof: &mut CapabilityProof) -> BundleResult<()> {
+    proof.proof_hash = capability_proof_hash(proof)?;
+    Ok(())
+}
+
+/// Populate the self-binding hash on a capability receipt.
+pub fn seal_capability_receipt(receipt: &mut CapabilityReceipt) -> BundleResult<()> {
+    receipt.receipt_hash = capability_receipt_hash(receipt)?;
+    Ok(())
+}
+
+/// Verify a capability proof's schema, canonical fields, and self-binding hash.
+pub fn verify_capability_proof_schema(proof: &CapabilityProof) -> BundleResult<String> {
+    validate_capability_proof_payload(proof)?;
+    validate_capability_hash("proof_hash", &proof.proof_hash)?;
+    let expected = capability_proof_hash(proof)?;
+    if !constant_time_eq(&proof.proof_hash, &expected) {
+        return Err(BundleError::CapabilityReceiptMismatch {
+            field: "proof_hash",
+            expected,
+            actual: proof.proof_hash.clone(),
+        });
+    }
+    Ok(proof.proof_hash.clone())
+}
+
+/// Verify that a capability-use receipt is bound to the supplied proof.
+pub fn verify_capability_receipt_schema(
+    proof: &CapabilityProof,
+    receipt: &CapabilityReceipt,
+) -> BundleResult<CapabilityReceiptVerification> {
+    let proof_hash = verify_capability_proof_schema(proof)?;
+    ensure_capability_revocation_is_fresh(&proof.revocation_freshness)?;
+    validate_capability_receipt_payload(receipt)?;
+    validate_capability_hash("receipt_hash", &receipt.receipt_hash)?;
+
+    let expected_receipt_hash = capability_receipt_hash(receipt)?;
+    if !constant_time_eq(&receipt.receipt_hash, &expected_receipt_hash) {
+        return Err(BundleError::CapabilityReceiptMismatch {
+            field: "receipt_hash",
+            expected: expected_receipt_hash,
+            actual: receipt.receipt_hash.clone(),
+        });
+    }
+    require_capability_match("proof_id", &proof.proof_id, &receipt.proof_id)?;
+    require_capability_match("proof_hash", &proof_hash, &receipt.proof_hash)?;
+    require_capability_match("actor", &proof.actor, &receipt.actor)?;
+    require_capability_match("audience", &proof.audience, &receipt.audience)?;
+    if proof.policy_profile != receipt.policy_profile {
+        return Err(BundleError::CapabilityReceiptMismatch {
+            field: "policy_profile",
+            expected: proof.policy_profile.label().to_string(),
+            actual: receipt.policy_profile.label().to_string(),
+        });
+    }
+    if proof.epoch != receipt.epoch {
+        return Err(BundleError::CapabilityReceiptMismatch {
+            field: "epoch",
+            expected: proof.epoch.to_string(),
+            actual: receipt.epoch.to_string(),
+        });
+    }
+    if proof.side_effect_kind != receipt.side_effect_kind {
+        return Err(BundleError::CapabilityReceiptMismatch {
+            field: "side_effect_kind",
+            expected: proof.side_effect_kind.label().to_string(),
+            actual: receipt.side_effect_kind.label().to_string(),
+        });
+    }
+    if !proof.scopes.contains(&receipt.exercised_scope) {
+        return Err(BundleError::CapabilityReceiptMismatch {
+            field: "exercised_scope",
+            expected: "scope included in proof".to_string(),
+            actual: capability_scope_key(&receipt.exercised_scope),
+        });
+    }
+    if proof.expected_postconditions != receipt.observed_postconditions {
+        return Err(BundleError::CapabilityReceiptMismatch {
+            field: "observed_postconditions",
+            expected: format!(
+                "{} expected postconditions",
+                proof.expected_postconditions.len()
+            ),
+            actual: format!(
+                "{} observed postconditions",
+                receipt.observed_postconditions.len()
+            ),
+        });
+    }
+    if receipt.recorded_at_millis < proof.issued_at_millis {
+        return Err(BundleError::InvalidCapabilityField {
+            field: "recorded_at_millis",
+            reason: "receipt predates capability proof issuance".to_string(),
+        });
+    }
+    if receipt.recorded_at_millis > proof.expires_at_millis {
+        return Err(BundleError::InvalidCapabilityField {
+            field: "recorded_at_millis",
+            reason: "receipt was recorded after capability proof expiry".to_string(),
+        });
+    }
+
+    Ok(CapabilityReceiptVerification {
+        proof_id: proof.proof_id.clone(),
+        receipt_id: receipt.receipt_id.clone(),
+        actor: proof.actor.clone(),
+        audience: proof.audience.clone(),
+        scope: receipt.exercised_scope.clone(),
+        policy_profile: proof.policy_profile.label().to_string(),
+        epoch: proof.epoch,
+        side_effect_kind: proof.side_effect_kind.label().to_string(),
+        proof_hash,
+        receipt_hash: receipt.receipt_hash.clone(),
+        effect_receipt_chain_hash: receipt.effect_receipt_chain_hash.clone(),
+        postcondition_count: proof.expected_postconditions.len(),
+        evidence_ref_count: proof.evidence_refs.len(),
+        event_codes: vec![
+            FN_VSDK_CAPABILITY_SCHEMA_START.to_string(),
+            FN_VSDK_CAPABILITY_PROOF_VERIFIED.to_string(),
+            FN_VSDK_CAPABILITY_RECEIPT_VERIFIED.to_string(),
+            FN_VSDK_CAPABILITY_SCHEMA_PASS.to_string(),
+        ],
+    })
+}
+
+fn validate_capability_proof_payload(proof: &CapabilityProof) -> BundleResult<()> {
+    if proof.schema_version != CAPABILITY_PROOF_SCHEMA_VERSION {
+        return Err(BundleError::UnsupportedCapabilityProofSchema {
+            expected: CAPABILITY_PROOF_SCHEMA_VERSION.to_string(),
+            actual: proof.schema_version.clone(),
+        });
+    }
+    validate_capability_text("proof_id", &proof.proof_id)?;
+    validate_capability_text("actor", &proof.actor)?;
+    validate_capability_text("audience", &proof.audience)?;
+    validate_capability_scopes(&proof.scopes)?;
+    validate_capability_revocation_freshness(&proof.revocation_freshness)?;
+    validate_capability_string_list("evidence_refs", &proof.evidence_refs)?;
+    validate_capability_postconditions("expected_postconditions", &proof.expected_postconditions)?;
+    if proof.issued_at_millis >= proof.expires_at_millis {
+        return Err(BundleError::InvalidCapabilityField {
+            field: "expires_at_millis",
+            reason: "capability proof must expire after issuance".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_capability_receipt_payload(receipt: &CapabilityReceipt) -> BundleResult<()> {
+    if receipt.schema_version != CAPABILITY_RECEIPT_SCHEMA_VERSION {
+        return Err(BundleError::UnsupportedCapabilityReceiptSchema {
+            expected: CAPABILITY_RECEIPT_SCHEMA_VERSION.to_string(),
+            actual: receipt.schema_version.clone(),
+        });
+    }
+    validate_capability_text("receipt_id", &receipt.receipt_id)?;
+    validate_capability_text("proof_id", &receipt.proof_id)?;
+    validate_capability_hash("proof_hash", &receipt.proof_hash)?;
+    validate_capability_text("actor", &receipt.actor)?;
+    validate_capability_text("audience", &receipt.audience)?;
+    validate_capability_scope("exercised_scope", &receipt.exercised_scope)?;
+    validate_capability_hash(
+        "effect_receipt_chain_hash",
+        &receipt.effect_receipt_chain_hash,
+    )?;
+    validate_capability_postconditions(
+        "observed_postconditions",
+        &receipt.observed_postconditions,
+    )?;
+    Ok(())
+}
+
+fn validate_capability_text(field: &'static str, value: &str) -> BundleResult<()> {
+    validate_canonical_text(field, value)?;
+    if value.len() > 512 {
+        return Err(BundleError::InvalidCapabilityField {
+            field,
+            reason: "field exceeds 512 bytes".to_string(),
+        });
+    }
+    if value
+        .bytes()
+        .any(|byte| byte == b'\0' || byte.is_ascii_control())
+    {
+        return Err(BundleError::InvalidCapabilityField {
+            field,
+            reason: "field contains a control byte".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_capability_hash(field: &'static str, value: &str) -> BundleResult<()> {
+    let Some(hex) = value.strip_prefix(CONTENT_HASH_PREFIX) else {
+        return Err(BundleError::MalformedCapabilityHash {
+            field,
+            value: value.to_string(),
+        });
+    };
+    if hex.len() != 64 || !is_canonical_lower_hex(hex) {
+        return Err(BundleError::MalformedCapabilityHash {
+            field,
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_capability_string_list(field: &'static str, values: &[String]) -> BundleResult<()> {
+    if values.is_empty() {
+        return Err(BundleError::InvalidCapabilityField {
+            field,
+            reason: "collection must not be empty".to_string(),
+        });
+    }
+    let mut previous = None;
+    for value in values {
+        validate_capability_text(field, value)?;
+        if previous.is_some_and(|prior: &str| value.as_str() <= prior) {
+            return Err(BundleError::InvalidCapabilityField {
+                field,
+                reason: "collection must be sorted and unique".to_string(),
+            });
+        }
+        previous = Some(value.as_str());
+    }
+    Ok(())
+}
+
+fn validate_capability_scopes(scopes: &[CapabilityScope]) -> BundleResult<()> {
+    if scopes.is_empty() {
+        return Err(BundleError::InvalidCapabilityField {
+            field: "scopes",
+            reason: "collection must not be empty".to_string(),
+        });
+    }
+    let mut previous = None;
+    for scope in scopes {
+        validate_capability_scope("scopes", scope)?;
+        let key = capability_scope_key(scope);
+        if previous
+            .as_deref()
+            .is_some_and(|prior| key.as_str() <= prior)
+        {
+            return Err(BundleError::InvalidCapabilityField {
+                field: "scopes",
+                reason: "collection must be sorted and unique".to_string(),
+            });
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
+
+fn validate_capability_scope(field: &'static str, scope: &CapabilityScope) -> BundleResult<()> {
+    validate_capability_text(field, &scope.capability)?;
+    validate_capability_text(field, &scope.resource)?;
+    validate_capability_text(field, &scope.access)?;
+    Ok(())
+}
+
+fn validate_capability_postconditions(
+    field: &'static str,
+    postconditions: &[CapabilityPostcondition],
+) -> BundleResult<()> {
+    if postconditions.is_empty() {
+        return Err(BundleError::InvalidCapabilityField {
+            field,
+            reason: "collection must not be empty".to_string(),
+        });
+    }
+    let mut previous = None;
+    for postcondition in postconditions {
+        validate_capability_text(field, &postcondition.field)?;
+        validate_capability_hash(field, &postcondition.expected_hash)?;
+        if previous.is_some_and(|prior: &str| postcondition.field.as_str() <= prior) {
+            return Err(BundleError::InvalidCapabilityField {
+                field,
+                reason: "collection must be sorted and unique by field".to_string(),
+            });
+        }
+        previous = Some(postcondition.field.as_str());
+    }
+    Ok(())
+}
+
+fn validate_capability_revocation_freshness(
+    freshness: &CapabilityRevocationFreshness,
+) -> BundleResult<()> {
+    match freshness {
+        CapabilityRevocationFreshness::Fresh { evidence_ref, .. }
+        | CapabilityRevocationFreshness::Stale { evidence_ref, .. } => {
+            validate_capability_text("revocation_freshness.evidence_ref", evidence_ref)
+        }
+        CapabilityRevocationFreshness::Revoked { revocation_ref, .. } => {
+            validate_capability_text("revocation_freshness.revocation_ref", revocation_ref)
+        }
+    }
+}
+
+fn ensure_capability_revocation_is_fresh(
+    freshness: &CapabilityRevocationFreshness,
+) -> BundleResult<()> {
+    if matches!(freshness, CapabilityRevocationFreshness::Fresh { .. }) {
+        Ok(())
+    } else {
+        Err(BundleError::InvalidCapabilityField {
+            field: "revocation_freshness",
+            reason: "capability proof must carry fresh revocation evidence".to_string(),
+        })
+    }
+}
+
+fn require_capability_match(field: &'static str, expected: &str, actual: &str) -> BundleResult<()> {
+    if constant_time_eq(expected, actual) {
+        Ok(())
+    } else {
+        Err(BundleError::CapabilityReceiptMismatch {
+            field,
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+        })
+    }
+}
+
+fn capability_scope_key(scope: &CapabilityScope) -> String {
+    format!(
+        "{}\x1f{}\x1f{}",
+        scope.capability, scope.resource, scope.access
+    )
+}
+
+fn hash_with_domain(domain: &[u8], canonical: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(
+        u64::try_from(canonical.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(canonical);
     format!("{CONTENT_HASH_PREFIX}{}", hex::encode(hasher.finalize()))
 }
 

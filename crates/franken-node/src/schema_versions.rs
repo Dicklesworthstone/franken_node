@@ -93,6 +93,8 @@ pub const VEF_SDK_INTEGRATION_FORMAT: &str = "1.0.0";
 pub const VEF_SDK_INTEGRATION_MIN_FORMAT: &str = "1.0.0";
 pub const VEF_RECEIPT_CHAIN: &str = "vef-receipt-chain-v1";
 pub const VEF_CONTROL_INTEGRATION: &str = "vef-control-integration-v1";
+pub const CAPABILITY_PROOF: &str = "capability-proof-v1";
+pub const CAPABILITY_RECEIPT: &str = "capability-receipt-v1";
 
 // ── Extensions ─────────────────────────────────────────────────────
 pub const CAPABILITY_ARTIFACT_CONTRACT: &str = "capability-artifact-v1.0";
@@ -269,6 +271,8 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ),
         ("vef_receipt_chain", VEF_RECEIPT_CHAIN),
         ("vef_control_integration", VEF_CONTROL_INTEGRATION),
+        ("capability_proof", CAPABILITY_PROOF),
+        ("capability_receipt", CAPABILITY_RECEIPT),
         // Extensions
         ("capability_artifact_contract", CAPABILITY_ARTIFACT_CONTRACT),
         // Claims

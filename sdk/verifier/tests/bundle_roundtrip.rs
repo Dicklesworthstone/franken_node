@@ -5,13 +5,19 @@ use frankenengine_verifier_sdk::SDK_VERSION;
 use frankenengine_verifier_sdk::VerifierSdk;
 use frankenengine_verifier_sdk::bundle::{
     BundleArtifact, BundleChunk, BundleError, BundleHeader, BundleSignature,
-    EFFECT_RECEIPT_EVENT_TYPE, EFFECT_RECEIPT_SCHEMA_VERSION, EffectKind, EffectPolicyOutcome,
-    EffectReceipt, EffectReceiptChainEntry, FN_VSDK_EFFECT_CHAIN_PASS, FN_VSDK_EFFECT_CHAIN_START,
+    CAPABILITY_PROOF_SCHEMA_VERSION, CAPABILITY_RECEIPT_SCHEMA_VERSION, CapabilityPolicyProfile,
+    CapabilityPostcondition, CapabilityProof, CapabilityReceipt, CapabilityRevocationFreshness,
+    CapabilityScope, EFFECT_RECEIPT_EVENT_TYPE, EFFECT_RECEIPT_SCHEMA_VERSION, EffectKind,
+    EffectPolicyOutcome, EffectReceipt, EffectReceiptChainEntry, FN_VSDK_CAPABILITY_PROOF_VERIFIED,
+    FN_VSDK_CAPABILITY_RECEIPT_VERIFIED, FN_VSDK_CAPABILITY_SCHEMA_PASS,
+    FN_VSDK_CAPABILITY_SCHEMA_START, FN_VSDK_EFFECT_CHAIN_PASS, FN_VSDK_EFFECT_CHAIN_START,
     FN_VSDK_EFFECT_VERIFIED, FN_VSDK_NON_EXFILTRATION_EFFECT, FN_VSDK_NON_EXFILTRATION_PASS,
     FN_VSDK_NON_EXFILTRATION_START, FlowPolicyVerdict, NonExfiltrationClaim,
-    REPLAY_BUNDLE_HASH_ALGORITHM, REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash,
-    render_effect_chain_transcript, seal, serialize, verify, verify_effect_chain,
-    verify_non_exfiltration_claim,
+    REPLAY_BUNDLE_HASH_ALGORITHM, REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent,
+    capability_proof_canonical_bytes, capability_proof_hash, capability_receipt_canonical_bytes,
+    capability_receipt_hash, hash, render_effect_chain_transcript, seal, seal_capability_proof,
+    seal_capability_receipt, serialize, verify, verify_capability_receipt_schema,
+    verify_effect_chain, verify_non_exfiltration_claim,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -26,6 +32,37 @@ const DENIED_PRE_BYTES: &[u8] = b"connect 169.254.169.254:80";
 const DENIED_ARGS_BYTES: &[u8] = br#"{"host":"metadata.internal","port":80}"#;
 const EFFECT_CHAIN_TRANSCRIPT_GOLDEN: &str =
     include_str!("fixtures/effect_chain_transcript.golden");
+const CAPABILITY_PROOF_CANONICAL_GOLDEN: &str = concat!(
+    "{\"actor\":\"agent://builder\",\"audience\":\"verifier://capability-test\",\"epoch\":42,",
+    "\"evidence_refs\":[\"effect-chain:head:001\",\"revocation:fresh:001\"],",
+    "\"expected_postconditions\":[",
+    "{\"expected_hash\":\"sha256:8e1992fd9b4c6464f3a1cd4d40f6150c8f1566e404ec70a16b2dd1529bb3ca99\",\"field\":\"http_status\"},",
+    "{\"expected_hash\":\"sha256:c082bb9237a57be2c405295f5f3e984e6e28f3a4ca84d2becabe1c331a31fba1\",\"field\":\"response_body\"}],",
+    "\"expires_at_millis\":1775003600000,\"issued_at_millis\":1775000000000,",
+    "\"policy_profile\":\"strict\",\"proof_id\":\"cap-proof-001\",",
+    "\"revocation_freshness\":{\"checked_at_millis\":1775000000000,\"evidence_ref\":\"revocation:fresh:001\",\"status\":\"fresh\"},",
+    "\"schema_version\":\"capability-proof-v1\",\"scopes\":[",
+    "{\"access\":\"read\",\"capability\":\"fs_read\",\"resource\":\"cas://workspace/app/index.js\"},",
+    "{\"access\":\"egress\",\"capability\":\"http_request\",\"resource\":\"https://api.example.test/v1/data\"}],",
+    "\"side_effect_kind\":\"http_request\"}"
+);
+const CAPABILITY_RECEIPT_CANONICAL_GOLDEN: &str = concat!(
+    "{\"actor\":\"agent://builder\",\"audience\":\"verifier://capability-test\",",
+    "\"effect_receipt_chain_hash\":\"sha256:21c645997bfda31f5752ca59026f067d63d575a0909807393f9329e447f1053a\",",
+    "\"epoch\":42,\"exercised_scope\":{\"access\":\"egress\",\"capability\":\"http_request\",",
+    "\"resource\":\"https://api.example.test/v1/data\"},\"observed_postconditions\":[",
+    "{\"expected_hash\":\"sha256:8e1992fd9b4c6464f3a1cd4d40f6150c8f1566e404ec70a16b2dd1529bb3ca99\",\"field\":\"http_status\"},",
+    "{\"expected_hash\":\"sha256:c082bb9237a57be2c405295f5f3e984e6e28f3a4ca84d2becabe1c331a31fba1\",\"field\":\"response_body\"}],",
+    "\"policy_profile\":\"strict\",",
+    "\"proof_hash\":\"sha256:d0563896cedd3f6593a94d0e564b564dfe6d0c8df28de2f1cde0ca0597d7e6ed\",",
+    "\"proof_id\":\"cap-proof-001\",\"receipt_id\":\"cap-receipt-001\",",
+    "\"recorded_at_millis\":1775000001000,\"schema_version\":\"capability-receipt-v1\",",
+    "\"side_effect_kind\":\"http_request\"}"
+);
+const CAPABILITY_PROOF_HASH_GOLDEN: &str =
+    "sha256:d0563896cedd3f6593a94d0e564b564dfe6d0c8df28de2f1cde0ca0597d7e6ed";
+const CAPABILITY_RECEIPT_HASH_GOLDEN: &str =
+    "sha256:c1fbabac7f4542e057a8299e0b5a1309e1cec466aa1e665fd39d95506824445e";
 
 #[test]
 fn replay_bundle_serialization_and_hash_are_byte_stable() {
@@ -226,6 +263,103 @@ fn non_exfiltration_claim_rejects_unauthorized_external_declassification() {
         Some("ifl-declass:http-egress-operator-secret")
     );
     assert_eq!(egress_proof.proof_outcome, "authorized_declassification");
+}
+
+#[test]
+fn capability_proof_and_receipt_schemas_are_canonical_and_bound() {
+    let proof = capability_proof_fixture();
+    let receipt = capability_receipt_fixture(&proof);
+
+    assert_eq!(
+        capability_proof_canonical_bytes(&proof).expect("proof payload should encode canonically"),
+        CAPABILITY_PROOF_CANONICAL_GOLDEN.as_bytes()
+    );
+    assert_eq!(
+        capability_receipt_canonical_bytes(&receipt)
+            .expect("receipt payload should encode canonically"),
+        CAPABILITY_RECEIPT_CANONICAL_GOLDEN.as_bytes()
+    );
+    assert_eq!(
+        capability_proof_hash(&proof).expect("proof hash should recompute"),
+        CAPABILITY_PROOF_HASH_GOLDEN
+    );
+    assert_eq!(proof.proof_hash, CAPABILITY_PROOF_HASH_GOLDEN);
+    assert_eq!(
+        capability_receipt_hash(&receipt).expect("receipt hash should recompute"),
+        CAPABILITY_RECEIPT_HASH_GOLDEN
+    );
+    assert_eq!(receipt.receipt_hash, CAPABILITY_RECEIPT_HASH_GOLDEN);
+
+    let verification = verify_capability_receipt_schema(&proof, &receipt)
+        .expect("receipt should be bound to the proof");
+    assert_eq!(verification.proof_id, "cap-proof-001");
+    assert_eq!(verification.receipt_id, "cap-receipt-001");
+    assert_eq!(verification.actor, "agent://builder");
+    assert_eq!(verification.audience, "verifier://capability-test");
+    assert_eq!(verification.policy_profile, "strict");
+    assert_eq!(verification.epoch, 42);
+    assert_eq!(verification.side_effect_kind, "http_request");
+    assert_eq!(verification.postcondition_count, 2);
+    assert_eq!(verification.evidence_ref_count, 2);
+    assert_eq!(
+        verification.event_codes,
+        vec![
+            FN_VSDK_CAPABILITY_SCHEMA_START.to_string(),
+            FN_VSDK_CAPABILITY_PROOF_VERIFIED.to_string(),
+            FN_VSDK_CAPABILITY_RECEIPT_VERIFIED.to_string(),
+            FN_VSDK_CAPABILITY_SCHEMA_PASS.to_string(),
+        ]
+    );
+}
+
+#[test]
+fn capability_receipt_schema_fails_closed_on_stale_or_tampered_bindings() {
+    let proof = capability_proof_fixture();
+    let receipt = capability_receipt_fixture(&proof);
+
+    let mut stale_proof = proof.clone();
+    stale_proof.revocation_freshness = CapabilityRevocationFreshness::Stale {
+        last_checked_at_millis: 1_774_999_000_000,
+        evidence_ref: "revocation:stale:001".to_string(),
+    };
+    seal_capability_proof(&mut stale_proof).expect("stale proof should still self-hash");
+    let err = verify_capability_receipt_schema(&stale_proof, &receipt)
+        .expect_err("stale revocation evidence must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::InvalidCapabilityField {
+            field: "revocation_freshness",
+            ..
+        }
+    ));
+
+    let mut wrong_actor = receipt.clone();
+    wrong_actor.actor = "agent://other".to_string();
+    seal_capability_receipt(&mut wrong_actor).expect("tampered receipt should self-hash");
+    let err = verify_capability_receipt_schema(&proof, &wrong_actor)
+        .expect_err("actor mismatch must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::CapabilityReceiptMismatch { field: "actor", .. }
+    ));
+
+    let mut wrong_postcondition = receipt;
+    wrong_postcondition
+        .observed_postconditions
+        .get_mut(1)
+        .expect("fixture should include response_body postcondition")
+        .expected_hash = lineage_hash("post:response_body:tampered");
+    seal_capability_receipt(&mut wrong_postcondition)
+        .expect("tampered postcondition receipt should self-hash");
+    let err = verify_capability_receipt_schema(&proof, &wrong_postcondition)
+        .expect_err("postcondition mismatch must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::CapabilityReceiptMismatch {
+            field: "observed_postconditions",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -730,6 +864,78 @@ fn operator_secret_external_sink_claim(
         ],
         allowed_declassification_refs,
     }
+}
+
+fn capability_proof_fixture() -> CapabilityProof {
+    let mut proof = CapabilityProof {
+        schema_version: CAPABILITY_PROOF_SCHEMA_VERSION.to_string(),
+        proof_id: "cap-proof-001".to_string(),
+        actor: "agent://builder".to_string(),
+        audience: "verifier://capability-test".to_string(),
+        scopes: vec![
+            CapabilityScope {
+                capability: "fs_read".to_string(),
+                resource: "cas://workspace/app/index.js".to_string(),
+                access: "read".to_string(),
+            },
+            CapabilityScope {
+                capability: "http_request".to_string(),
+                resource: "https://api.example.test/v1/data".to_string(),
+                access: "egress".to_string(),
+            },
+        ],
+        policy_profile: CapabilityPolicyProfile::Strict,
+        revocation_freshness: CapabilityRevocationFreshness::Fresh {
+            checked_at_millis: 1_775_000_000_000,
+            evidence_ref: "revocation:fresh:001".to_string(),
+        },
+        epoch: 42,
+        side_effect_kind: EffectKind::HttpRequest,
+        evidence_refs: vec![
+            "effect-chain:head:001".to_string(),
+            "revocation:fresh:001".to_string(),
+        ],
+        expected_postconditions: vec![
+            CapabilityPostcondition {
+                field: "http_status".to_string(),
+                expected_hash: lineage_hash("post:http_status:200"),
+            },
+            CapabilityPostcondition {
+                field: "response_body".to_string(),
+                expected_hash: cas_hash(EFFECT_RESULT_BYTES),
+            },
+        ],
+        issued_at_millis: 1_775_000_000_000,
+        expires_at_millis: 1_775_003_600_000,
+        proof_hash: String::new(),
+    };
+    seal_capability_proof(&mut proof).expect("capability proof fixture should seal");
+    proof
+}
+
+fn capability_receipt_fixture(proof: &CapabilityProof) -> CapabilityReceipt {
+    let mut receipt = CapabilityReceipt {
+        schema_version: CAPABILITY_RECEIPT_SCHEMA_VERSION.to_string(),
+        receipt_id: "cap-receipt-001".to_string(),
+        proof_id: proof.proof_id.clone(),
+        proof_hash: proof.proof_hash.clone(),
+        actor: proof.actor.clone(),
+        audience: proof.audience.clone(),
+        exercised_scope: proof
+            .scopes
+            .get(1)
+            .expect("fixture should include http_request scope")
+            .clone(),
+        policy_profile: proof.policy_profile,
+        epoch: proof.epoch,
+        side_effect_kind: proof.side_effect_kind,
+        effect_receipt_chain_hash: lineage_hash("effect-chain:head:001"),
+        observed_postconditions: proof.expected_postconditions.clone(),
+        recorded_at_millis: 1_775_000_001_000,
+        receipt_hash: String::new(),
+    };
+    seal_capability_receipt(&mut receipt).expect("capability receipt fixture should seal");
+    receipt
 }
 
 fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
