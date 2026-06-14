@@ -14,6 +14,7 @@ use crate::connector::canonical_serializer::canonical_bytes;
 
 pub const CONFORMAL_SAMPLE_SCHEMA_VERSION: &str = "conformal.score_sample.v1";
 pub const CONFORMAL_FROZEN_QUANTILE_SCHEMA_VERSION: &str = "conformal.frozen_quantile_artifact.v1";
+pub const CONFORMAL_ACI_STATE_SCHEMA_VERSION: &str = "conformal.aci_state.v1";
 pub const CONFORMAL_GENERATED_AT: &str = "1970-01-01T00:00:00Z";
 pub const MAX_BASIS_POINTS: u16 = 10_000;
 pub const LABEL_BENIGN: &str = "benign";
@@ -44,8 +45,12 @@ pub enum ConformalCalibrationError {
     },
     #[error("risk class `{risk_class}` has no scored samples")]
     EmptyRiskClass { risk_class: String },
+    #[error("missing conformal quantile for risk class `{risk_class}`")]
+    MissingRiskClassQuantile { risk_class: String },
     #[error("risk class mismatch: quantile is `{expected}`, sample is `{actual}`")]
     RiskClassMismatch { expected: String, actual: String },
+    #[error("ACI learning rate must be <= 10000 basis points, got {0}")]
+    InvalidLearningRate(u16),
     #[error("failed to serialize conformal artifact: {source}")]
     Serialize { source: serde_json::Error },
 }
@@ -109,6 +114,43 @@ pub struct ConformalRiskSet {
     pub score_bp: u16,
     pub quantile_bp: u16,
     pub included_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AciCoverageObservation {
+    pub sample_id: String,
+    pub risk_class: String,
+    pub covered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AciQuantileState {
+    pub schema_version: String,
+    pub risk_class: String,
+    pub target_alpha_bp: u16,
+    pub target_coverage_bp: u16,
+    pub learning_rate_bp: u16,
+    pub current_quantile_bp: u16,
+    pub observations: u64,
+    pub covered_count: u64,
+    pub miss_count: u64,
+    pub empirical_coverage_bp: u16,
+    pub coverage_gap_bp: i16,
+    pub last_event_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AciQuantileUpdate {
+    pub event_code: String,
+    pub sample_id: String,
+    pub risk_class: String,
+    pub covered: bool,
+    pub previous_quantile_bp: u16,
+    pub updated_quantile_bp: u16,
+    pub delta_bp: i16,
+    pub empirical_coverage_bp: u16,
+    pub coverage_gap_bp: i16,
+    pub observations: u64,
 }
 
 pub fn score_nonconformity(
@@ -232,6 +274,90 @@ pub fn calibrated_binary_risk_set(
     })
 }
 
+pub fn calibrated_mondrian_risk_set(
+    sample_id: &str,
+    risk_class: &str,
+    score_bp: u16,
+    artifact: &FrozenConformalArtifact,
+) -> Result<ConformalRiskSet, ConformalCalibrationError> {
+    let quantile = artifact
+        .quantiles
+        .iter()
+        .find(|quantile| quantile.risk_class == risk_class)
+        .ok_or_else(|| ConformalCalibrationError::MissingRiskClassQuantile {
+            risk_class: risk_class.to_string(),
+        })?;
+    calibrated_binary_risk_set(sample_id, risk_class, score_bp, quantile)
+}
+
+pub fn initialize_aci_state(
+    quantile: &FrozenConformalQuantile,
+    learning_rate_bp: u16,
+) -> Result<AciQuantileState, ConformalCalibrationError> {
+    validate_target_alpha(quantile.target_alpha_bp)?;
+    validate_learning_rate(learning_rate_bp)?;
+    Ok(AciQuantileState {
+        schema_version: CONFORMAL_ACI_STATE_SCHEMA_VERSION.to_string(),
+        risk_class: quantile.risk_class.clone(),
+        target_alpha_bp: quantile.target_alpha_bp,
+        target_coverage_bp: MAX_BASIS_POINTS.saturating_sub(quantile.target_alpha_bp),
+        learning_rate_bp,
+        current_quantile_bp: quantile.quantile_bp,
+        observations: 0,
+        covered_count: 0,
+        miss_count: 0,
+        empirical_coverage_bp: 0,
+        coverage_gap_bp: 0,
+        last_event_code: event_codes::ACI_QUANTILE_UPDATED.to_string(),
+    })
+}
+
+pub fn update_aci_quantile(
+    state: &mut AciQuantileState,
+    observation: &AciCoverageObservation,
+) -> Result<AciQuantileUpdate, ConformalCalibrationError> {
+    validate_aci_state(state)?;
+    validate_aci_observation(observation)?;
+    if state.risk_class != observation.risk_class {
+        return Err(ConformalCalibrationError::RiskClassMismatch {
+            expected: state.risk_class.clone(),
+            actual: observation.risk_class.clone(),
+        });
+    }
+
+    let previous_quantile_bp = state.current_quantile_bp;
+    let miss_bp = if observation.covered {
+        0_i32
+    } else {
+        i32::from(MAX_BASIS_POINTS)
+    };
+    let error_gap_bp = miss_bp - i32::from(state.target_alpha_bp);
+    let delta_bp = signed_bp_product(state.learning_rate_bp, error_gap_bp);
+    state.current_quantile_bp = clamp_quantile_delta(previous_quantile_bp, delta_bp);
+    state.observations = state.observations.saturating_add(1);
+    if observation.covered {
+        state.covered_count = state.covered_count.saturating_add(1);
+    } else {
+        state.miss_count = state.miss_count.saturating_add(1);
+    }
+    state.empirical_coverage_bp = ratio_bp(state.covered_count, state.observations);
+    state.coverage_gap_bp = coverage_gap_bp(state.empirical_coverage_bp, state.target_coverage_bp);
+    state.last_event_code = event_codes::ACI_QUANTILE_UPDATED.to_string();
+
+    Ok(AciQuantileUpdate {
+        event_code: event_codes::ACI_QUANTILE_UPDATED.to_string(),
+        sample_id: observation.sample_id.clone(),
+        risk_class: observation.risk_class.clone(),
+        covered: observation.covered,
+        previous_quantile_bp,
+        updated_quantile_bp: state.current_quantile_bp,
+        delta_bp: clamp_i32_to_i16(delta_bp),
+        empirical_coverage_bp: state.empirical_coverage_bp,
+        coverage_gap_bp: state.coverage_gap_bp,
+        observations: state.observations,
+    })
+}
+
 pub fn canonical_artifact_bytes(
     artifact: &FrozenConformalArtifact,
 ) -> Result<Vec<u8>, ConformalCalibrationError> {
@@ -349,6 +475,63 @@ fn validate_target_alpha(target_alpha_bp: u16) -> Result<(), ConformalCalibratio
     Ok(())
 }
 
+fn validate_learning_rate(learning_rate_bp: u16) -> Result<(), ConformalCalibrationError> {
+    if learning_rate_bp > MAX_BASIS_POINTS {
+        return Err(ConformalCalibrationError::InvalidLearningRate(
+            learning_rate_bp,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_aci_state(state: &AciQuantileState) -> Result<(), ConformalCalibrationError> {
+    validate_target_alpha(state.target_alpha_bp)?;
+    validate_learning_rate(state.learning_rate_bp)?;
+    if state.risk_class.trim().is_empty() {
+        return Err(ConformalCalibrationError::InvalidSample {
+            sample_id: "aci-state".to_string(),
+            field: "risk_class",
+            reason: "must not be empty".to_string(),
+        });
+    }
+    if state.current_quantile_bp > MAX_BASIS_POINTS {
+        return Err(ConformalCalibrationError::InvalidSample {
+            sample_id: "aci-state".to_string(),
+            field: "current_quantile_bp",
+            reason: "quantile exceeds 10000 basis points".to_string(),
+        });
+    }
+    let expected_target_coverage_bp = MAX_BASIS_POINTS.saturating_sub(state.target_alpha_bp);
+    if state.target_coverage_bp != expected_target_coverage_bp {
+        return Err(ConformalCalibrationError::InvalidSample {
+            sample_id: "aci-state".to_string(),
+            field: "target_coverage_bp",
+            reason: format!("expected {expected_target_coverage_bp} basis points"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_aci_observation(
+    observation: &AciCoverageObservation,
+) -> Result<(), ConformalCalibrationError> {
+    if observation.sample_id.trim().is_empty() {
+        return Err(ConformalCalibrationError::InvalidSample {
+            sample_id: observation.sample_id.clone(),
+            field: "sample_id",
+            reason: "must not be empty".to_string(),
+        });
+    }
+    if observation.risk_class.trim().is_empty() {
+        return Err(ConformalCalibrationError::InvalidSample {
+            sample_id: observation.sample_id.clone(),
+            field: "risk_class",
+            reason: "must not be empty".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn corpus_hash(samples: &[ConformalScoreSample]) -> Result<String, ConformalCalibrationError> {
     let value = serde_json::to_value(samples)
         .map_err(|source| ConformalCalibrationError::Serialize { source })?;
@@ -380,6 +563,31 @@ fn ratio_bp(numerator: u64, denominator: u64) -> u16 {
     }
     let scaled = u128::from(numerator).saturating_mul(u128::from(MAX_BASIS_POINTS));
     u16::try_from(scaled / u128::from(denominator)).unwrap_or(MAX_BASIS_POINTS)
+}
+
+fn signed_bp_product(learning_rate_bp: u16, error_gap_bp: i32) -> i32 {
+    i32::from(learning_rate_bp).saturating_mul(error_gap_bp) / i32::from(MAX_BASIS_POINTS)
+}
+
+fn clamp_quantile_delta(quantile_bp: u16, delta_bp: i32) -> u16 {
+    let updated = i32::from(quantile_bp).saturating_add(delta_bp);
+    let clamped = updated.clamp(0, i32::from(MAX_BASIS_POINTS));
+    u16::try_from(clamped).unwrap_or(MAX_BASIS_POINTS)
+}
+
+fn coverage_gap_bp(empirical_coverage_bp: u16, target_coverage_bp: u16) -> i16 {
+    let gap = i32::from(empirical_coverage_bp) - i32::from(target_coverage_bp);
+    clamp_i32_to_i16(gap)
+}
+
+fn clamp_i32_to_i16(value: i32) -> i16 {
+    if value < i32::from(i16::MIN) {
+        i16::MIN
+    } else if value > i32::from(i16::MAX) {
+        i16::MAX
+    } else {
+        i16::try_from(value).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -485,6 +693,106 @@ mod tests {
             set.included_labels,
             vec![LABEL_BENIGN.to_string(), LABEL_POSITIVE.to_string()]
         );
+    }
+
+    #[test]
+    fn mondrian_risk_set_uses_matching_risk_class_quantile() {
+        let mut artifact = freeze_quantiles(&base_samples(), 2_000).unwrap();
+        artifact.quantiles = vec![
+            FrozenConformalQuantile {
+                risk_class: "critical".to_string(),
+                sample_count: 8,
+                positive_count: 4,
+                negative_count: 4,
+                target_alpha_bp: 1_000,
+                quantile_rank: 4,
+                quantile_bp: 4_000,
+                min_nonconformity_bp: 500,
+                max_nonconformity_bp: 4_000,
+                finite_sample_coverage_floor_bp: 8_888,
+            },
+            FrozenConformalQuantile {
+                risk_class: "low".to_string(),
+                sample_count: 8,
+                positive_count: 4,
+                negative_count: 4,
+                target_alpha_bp: 1_000,
+                quantile_rank: 8,
+                quantile_bp: 6_000,
+                min_nonconformity_bp: 500,
+                max_nonconformity_bp: 6_000,
+                finite_sample_coverage_floor_bp: 8_888,
+            },
+        ];
+
+        let critical =
+            calibrated_mondrian_risk_set("candidate", "critical", 5_000, &artifact).unwrap();
+        let low = calibrated_mondrian_risk_set("candidate", "low", 5_000, &artifact).unwrap();
+
+        assert!(critical.included_labels.is_empty());
+        assert_eq!(
+            low.included_labels,
+            vec![LABEL_BENIGN.to_string(), LABEL_POSITIVE.to_string()]
+        );
+    }
+
+    #[test]
+    fn mondrian_risk_set_rejects_missing_risk_class() {
+        let artifact = freeze_quantiles(&base_samples(), 2_000).unwrap();
+
+        let err =
+            calibrated_mondrian_risk_set("candidate", "missing", 5_000, &artifact).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConformalCalibrationError::MissingRiskClassQuantile { .. }
+        ));
+    }
+
+    #[test]
+    fn aci_update_increases_after_miss_and_decays_after_coverage() {
+        let quantile = FrozenConformalQuantile {
+            risk_class: "critical".to_string(),
+            sample_count: 10,
+            positive_count: 5,
+            negative_count: 5,
+            target_alpha_bp: 1_000,
+            quantile_rank: 9,
+            quantile_bp: 2_000,
+            min_nonconformity_bp: 100,
+            max_nonconformity_bp: 2_000,
+            finite_sample_coverage_floor_bp: 8_181,
+        };
+        let mut state = initialize_aci_state(&quantile, 500).unwrap();
+
+        let miss = update_aci_quantile(
+            &mut state,
+            &AciCoverageObservation {
+                sample_id: "shifted-1".to_string(),
+                risk_class: "critical".to_string(),
+                covered: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(miss.event_code, event_codes::ACI_QUANTILE_UPDATED);
+        assert_eq!(miss.delta_bp, 450);
+        assert_eq!(miss.updated_quantile_bp, 2_450);
+        assert_eq!(state.miss_count, 1);
+
+        let covered = update_aci_quantile(
+            &mut state,
+            &AciCoverageObservation {
+                sample_id: "covered-1".to_string(),
+                risk_class: "critical".to_string(),
+                covered: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(covered.delta_bp, -50);
+        assert_eq!(covered.updated_quantile_bp, 2_400);
+        assert_eq!(covered.empirical_coverage_bp, 5_000);
+        assert_eq!(covered.coverage_gap_bp, -4_000);
+        assert_eq!(state.observations, 2);
     }
 
     #[test]
