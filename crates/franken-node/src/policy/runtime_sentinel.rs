@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::connector::canonical_serializer::canonical_bytes;
+use crate::security::conformal::{ConformalRiskSet, LABEL_POSITIVE};
 
 /// Schema version for a single canonical observation record.
 pub const RUNTIME_SENTINEL_OBSERVATION_SCHEMA_VERSION: &str = "runtime_sentinel.observation.v1";
@@ -217,6 +218,62 @@ impl SentinelSignal {
             self.magnitude_bp,
         )
     }
+}
+
+/// Convert a conformal risk set into a Sentinel likelihood signal.
+///
+/// The magnitude is the calibrated score only when the positive label remains
+/// inside the conformal set; otherwise the Sentinel receives a zero-likelihood
+/// signal while the detail string still records the audited quantile context.
+pub fn sentinel_signal_from_conformal_risk_set(
+    kind: SentinelSignalKind,
+    source: impl Into<String>,
+    risk_set: &ConformalRiskSet,
+) -> Result<SentinelSignal, SentinelObservationError> {
+    SentinelSignal::new(
+        kind,
+        source,
+        conformal_positive_likelihood_bp(risk_set),
+        conformal_signal_detail(risk_set),
+    )
+}
+
+/// Push a conformal risk-set signal onto an observation.
+///
+/// This is a convenience wrapper for integration surfaces that already own the
+/// observation lifecycle and only need to add calibrated BPET/DGIS likelihoods.
+pub fn push_conformal_risk_set_signal(
+    observation: &mut RuntimeSentinelObservation,
+    kind: SentinelSignalKind,
+    source: impl Into<String>,
+    risk_set: &ConformalRiskSet,
+) -> Result<(), SentinelObservationError> {
+    let signal = sentinel_signal_from_conformal_risk_set(kind, source, risk_set)?;
+    observation.push_signal(signal)
+}
+
+fn conformal_positive_likelihood_bp(risk_set: &ConformalRiskSet) -> u16 {
+    if risk_set
+        .included_labels
+        .iter()
+        .any(|label| label == LABEL_POSITIVE)
+    {
+        risk_set.score_bp
+    } else {
+        0
+    }
+}
+
+fn conformal_signal_detail(risk_set: &ConformalRiskSet) -> String {
+    let labels = if risk_set.included_labels.is_empty() {
+        "none".to_string()
+    } else {
+        risk_set.included_labels.join("+")
+    };
+    format!(
+        "sample_id={};risk_class={};score_bp={};quantile_bp={};labels={}",
+        risk_set.sample_id, risk_set.risk_class, risk_set.score_bp, risk_set.quantile_bp, labels
+    )
 }
 
 /// A canonical, schema-versioned record of all Sentinel evidence observed for a
@@ -485,6 +542,17 @@ mod tests {
             .expect("push 2")
     }
 
+    fn positive_risk_set() -> ConformalRiskSet {
+        ConformalRiskSet {
+            event_code: "FN-CONFORMAL-001".to_string(),
+            sample_id: "npm:@acme/risky@1.0.0".to_string(),
+            risk_class: "bpet_evolution".to_string(),
+            score_bp: 9_500,
+            quantile_bp: 1_000,
+            included_labels: vec!["positive".to_string()],
+        }
+    }
+
     #[test]
     fn schema_version_is_pinned() {
         let obs = RuntimeSentinelObservation::new("ext-1", 1, 1, "2026-06-09T00:00:00Z");
@@ -574,9 +642,45 @@ mod tests {
     }
 
     #[test]
+    fn calibrated_conformal_risk_set_signal_feeds_positive_likelihood() {
+        let risk_set = positive_risk_set();
+        let signal = sentinel_signal_from_conformal_risk_set(
+            SentinelSignalKind::BpetPhenotypeDrift,
+            "bpet:evolution",
+            &risk_set,
+        )
+        .unwrap();
+
+        assert_eq!(signal.magnitude_bp, 9_500);
+        assert!(signal.detail.contains("risk_class=bpet_evolution"));
+        assert!(signal.detail.contains("labels=positive"));
+
+        let mut observation =
+            RuntimeSentinelObservation::new("ext-calibrated", 9, 1, "2026-06-09T00:00:00Z");
+        push_conformal_risk_set_signal(
+            &mut observation,
+            SentinelSignalKind::BpetPhenotypeDrift,
+            "bpet:evolution",
+            &risk_set,
+        )
+        .unwrap();
+
+        assert_eq!(observation.signals.len(), 1);
+        assert!(
+            observation
+                .observation_hash()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+    }
+
+    #[test]
     fn empty_extension_id_rejected() {
         let obs = RuntimeSentinelObservation::new("", 1, 1, "2026-06-09T00:00:00Z");
-        assert_eq!(obs.validate(), Err(SentinelObservationError::EmptyExtensionId));
+        assert_eq!(
+            obs.validate(),
+            Err(SentinelObservationError::EmptyExtensionId)
+        );
     }
 
     #[test]
@@ -626,18 +730,12 @@ mod tests {
     fn log_orders_observations_deterministically() {
         let mut log = SentinelObservationLog::new();
         // Ingest out of order.
-        log.ingest(RuntimeSentinelObservation::new(
-            "ext-b", 2, 1, "t",
-        ))
-        .unwrap();
-        log.ingest(RuntimeSentinelObservation::new(
-            "ext-a", 1, 5, "t",
-        ))
-        .unwrap();
-        log.ingest(RuntimeSentinelObservation::new(
-            "ext-a", 1, 2, "t",
-        ))
-        .unwrap();
+        log.ingest(RuntimeSentinelObservation::new("ext-b", 2, 1, "t"))
+            .unwrap();
+        log.ingest(RuntimeSentinelObservation::new("ext-a", 1, 5, "t"))
+            .unwrap();
+        log.ingest(RuntimeSentinelObservation::new("ext-a", 1, 2, "t"))
+            .unwrap();
         let order: Vec<(u64, u64, &str)> = log
             .ordered()
             .iter()
@@ -684,10 +782,8 @@ mod tests {
         let d1 = log.digest().unwrap();
         assert_eq!(d1, log.digest().unwrap(), "digest stable across calls");
 
-        log.ingest(RuntimeSentinelObservation::new(
-            "ext-zeta", 9, 1, "t",
-        ))
-        .unwrap();
+        log.ingest(RuntimeSentinelObservation::new("ext-zeta", 9, 1, "t"))
+            .unwrap();
         assert_ne!(d1, log.digest().unwrap(), "digest changes with membership");
     }
 

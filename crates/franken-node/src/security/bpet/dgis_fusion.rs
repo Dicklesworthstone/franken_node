@@ -11,9 +11,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::security::conformal::{
+    ConformalRiskSet, FrozenConformalArtifact, calibrated_mondrian_risk_set,
+};
 use crate::security::dgis::update_copilot::TopologyRiskMetrics;
 
 pub const DGIS_FUSION_SCHEMA_VERSION: &str = "bpet-dgis-fusion-v1";
+pub const DGIS_CONFORMAL_RISK_CLASS: &str = "bpet_dgis_fusion";
 pub const DEFAULT_MAX_LOSS_MULTIPLIER: f64 = 3.0;
 pub const DEFAULT_ELEVATED_THRESHOLD: f64 = 0.40;
 pub const DEFAULT_HIGH_THRESHOLD: f64 = 0.65;
@@ -60,6 +64,8 @@ pub enum DgisFusionError {
     InvalidThresholdOrder,
     #[error("replay fingerprint serialization failed: {0}")]
     Serialization(String),
+    #[error("conformal calibration failed: {0}")]
+    ConformalCalibration(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -183,6 +189,14 @@ pub struct BpetDgisPriorityEscalation {
     pub event_codes: Vec<String>,
     pub invariant_markers: Vec<String>,
     pub replay_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibratedDgisPriorityEscalation {
+    pub priority: BpetDgisPriorityEscalation,
+    pub priority_score_basis_points: u16,
+    pub risk_set: ConformalRiskSet,
+    pub empirical_coverage_basis_points: u16,
 }
 
 #[derive(Serialize)]
@@ -321,6 +335,40 @@ pub fn prioritize_with_dgis(
     })
 }
 
+/// Run DGIS fusion and attach a conformal risk set to the combined priority.
+///
+/// This wrapper preserves [`prioritize_with_dgis`] as the single source of
+/// priority, escalation, expected-loss, and replay-fingerprint behavior.
+pub fn prioritize_with_calibrated_dgis(
+    sample_id: &str,
+    risk_class: &str,
+    input: &BpetDgisFusionInput,
+    policy: &BpetDgisFusionPolicy,
+    artifact: &FrozenConformalArtifact,
+) -> Result<CalibratedDgisPriorityEscalation, DgisFusionError> {
+    let priority = prioritize_with_dgis(input, policy)?;
+    let priority_score_basis_points = unit_to_basis_points(priority.combined_priority_score);
+    let quantile = artifact
+        .quantiles
+        .iter()
+        .find(|quantile| quantile.risk_class == risk_class)
+        .ok_or_else(|| {
+            DgisFusionError::ConformalCalibration(format!(
+                "missing conformal quantile for risk class `{risk_class}`"
+            ))
+        })?;
+    let risk_set =
+        calibrated_mondrian_risk_set(sample_id, risk_class, priority_score_basis_points, artifact)
+            .map_err(|err| DgisFusionError::ConformalCalibration(err.to_string()))?;
+
+    Ok(CalibratedDgisPriorityEscalation {
+        priority,
+        priority_score_basis_points,
+        risk_set,
+        empirical_coverage_basis_points: quantile.finite_sample_coverage_floor_bp,
+    })
+}
+
 fn validate_topology_metrics(metrics: &TopologyRiskMetrics) -> Result<(), DgisFusionError> {
     finite_nonnegative("topology.fan_out", metrics.fan_out)?;
     finite_unit(
@@ -434,6 +482,32 @@ mod tests {
         }
     }
 
+    fn conformal_artifact() -> FrozenConformalArtifact {
+        FrozenConformalArtifact {
+            schema_version: "conformal.frozen_quantile_artifact.v1".to_string(),
+            generated_at: "1970-01-01T00:00:00Z".to_string(),
+            sample_schema_version: "conformal.score_sample.v1".to_string(),
+            corpus_hash: "sha256:test-dgis".to_string(),
+            sample_count: 24,
+            risk_class_count: 1,
+            target_alpha_bp: 500,
+            quantiles: vec![crate::security::conformal::FrozenConformalQuantile {
+                risk_class: DGIS_CONFORMAL_RISK_CLASS.to_string(),
+                sample_count: 24,
+                positive_count: 12,
+                negative_count: 12,
+                target_alpha_bp: 500,
+                quantile_rank: 23,
+                quantile_bp: 3_000,
+                min_nonconformity_bp: 100,
+                max_nonconformity_bp: 3_000,
+                finite_sample_coverage_floor_bp: 9_500,
+            }],
+            event_codes: vec!["FN-CONFORMAL-001".to_string()],
+            audit_notes: vec!["test artifact".to_string()],
+        }
+    }
+
     #[test]
     fn high_centrality_bpet_anomaly_escalates_to_critical() {
         let output = prioritize_with_dgis(
@@ -484,6 +558,30 @@ mod tests {
 
         assert_eq!(a, b);
         assert!(a.replay_fingerprint.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn calibrated_wrapper_preserves_priority_and_emits_risk_set() {
+        let input = input(high_centrality_metrics());
+        let policy = BpetDgisFusionPolicy::default();
+
+        let calibrated = prioritize_with_calibrated_dgis(
+            "pkg-dgis@1.0.0",
+            DGIS_CONFORMAL_RISK_CLASS,
+            &input,
+            &policy,
+            &conformal_artifact(),
+        )
+        .unwrap();
+        let uncalibrated = prioritize_with_dgis(&input, &policy).unwrap();
+
+        assert_eq!(calibrated.priority, uncalibrated);
+        assert!(calibrated.priority_score_basis_points >= 8_000);
+        assert_eq!(calibrated.empirical_coverage_basis_points, 9_500);
+        assert_eq!(
+            calibrated.risk_set.included_labels,
+            vec!["positive".to_string()]
+        );
     }
 
     #[test]

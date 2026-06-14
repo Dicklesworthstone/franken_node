@@ -26,10 +26,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::security::conformal::{
+    ConformalRiskSet, FrozenConformalArtifact, MAX_BASIS_POINTS, calibrated_mondrian_risk_set,
+};
 use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind, TrajectorySeries};
 
 /// Hard upper bound on the number of hints a single detection pass may emit.
 pub const MAX_CAMOUFLAGE_HINTS_PER_SERIES: usize = 256;
+/// Default Mondrian risk class used when calibrating camouflage severity.
+pub const CAMOUFLAGE_CONFORMAL_RISK_CLASS: &str = "bpet_camouflage";
 
 /// Smallest legal value for `min_samples_for_detection`.
 ///
@@ -121,6 +126,18 @@ pub enum DetectorError {
     NotEnoughSamples,
     #[error("computed sample index out of range")]
     IndexOutOfRange,
+    #[error("conformal calibration failed: {0}")]
+    ConformalCalibration(String),
+}
+
+/// Camouflage hints enriched with the conformal risk set for their maximum
+/// bounded severity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CalibratedCamouflageAssessment {
+    pub hints: Vec<CamouflageHint>,
+    pub severity_score_basis_points: u16,
+    pub risk_set: ConformalRiskSet,
+    pub empirical_coverage_basis_points: u16,
 }
 
 /// Compute camouflage hints for `series` under `config`.
@@ -169,6 +186,41 @@ pub fn detect_camouflage(
     }
 
     Ok(hints)
+}
+
+/// Run the existing detector and calibrate its maximum hint severity.
+///
+/// This does not alter the hint heuristics or their ordering. It only projects
+/// the detector's bounded severity contract into the shared conformal risk-set
+/// format consumed by Sentinel, trust-card, and verifier surfaces.
+pub fn detect_calibrated_camouflage(
+    sample_id: &str,
+    risk_class: &str,
+    series: &TrajectorySeries,
+    config: &DetectorConfig,
+    artifact: &FrozenConformalArtifact,
+) -> Result<CalibratedCamouflageAssessment, DetectorError> {
+    let hints = detect_camouflage(series, config)?;
+    let severity_score_basis_points = severity_to_basis_points(max_hint_severity(&hints));
+    let quantile = artifact
+        .quantiles
+        .iter()
+        .find(|quantile| quantile.risk_class == risk_class)
+        .ok_or_else(|| {
+            DetectorError::ConformalCalibration(format!(
+                "missing conformal quantile for risk class `{risk_class}`"
+            ))
+        })?;
+    let risk_set =
+        calibrated_mondrian_risk_set(sample_id, risk_class, severity_score_basis_points, artifact)
+            .map_err(|err| DetectorError::ConformalCalibration(err.to_string()))?;
+
+    Ok(CalibratedCamouflageAssessment {
+        hints,
+        severity_score_basis_points,
+        risk_set,
+        empirical_coverage_basis_points: quantile.finite_sample_coverage_floor_bp,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -603,6 +655,19 @@ fn clamp_unit(x: f64) -> f64 {
     x.clamp(0.0, 1.0)
 }
 
+fn max_hint_severity(hints: &[CamouflageHint]) -> f64 {
+    hints
+        .iter()
+        .map(|hint| hint.severity)
+        .filter(|severity| severity.is_finite())
+        .fold(0.0_f64, f64::max)
+        .clamp(0.0, 1.0)
+}
+
+fn severity_to_basis_points(severity: f64) -> u16 {
+    (severity.clamp(0.0, 1.0) * f64::from(MAX_BASIS_POINTS)).round() as u16
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -659,6 +724,32 @@ mod tests {
             ));
         }
         build_series(&rows)
+    }
+
+    fn conformal_artifact() -> FrozenConformalArtifact {
+        FrozenConformalArtifact {
+            schema_version: "conformal.frozen_quantile_artifact.v1".to_string(),
+            generated_at: "1970-01-01T00:00:00Z".to_string(),
+            sample_schema_version: "conformal.score_sample.v1".to_string(),
+            corpus_hash: "sha256:test-camouflage".to_string(),
+            sample_count: 20,
+            risk_class_count: 1,
+            target_alpha_bp: 500,
+            quantiles: vec![crate::security::conformal::FrozenConformalQuantile {
+                risk_class: CAMOUFLAGE_CONFORMAL_RISK_CLASS.to_string(),
+                sample_count: 20,
+                positive_count: 10,
+                negative_count: 10,
+                target_alpha_bp: 500,
+                quantile_rank: 19,
+                quantile_bp: 2_500,
+                min_nonconformity_bp: 100,
+                max_nonconformity_bp: 2_500,
+                finite_sample_coverage_floor_bp: 9_500,
+            }],
+            event_codes: vec!["FN-CONFORMAL-001".to_string()],
+            audit_notes: vec!["test artifact".to_string()],
+        }
     }
 
     #[test]
@@ -931,6 +1022,34 @@ mod tests {
         let b = detect_camouflage(&series, &config).unwrap();
         assert_eq!(a, b);
         assert!(!a.is_empty(), "expected at least one hint from rich input");
+    }
+
+    #[test]
+    fn calibrated_wrapper_projects_max_hint_severity_to_risk_set() {
+        let series = phase_shift_series(16, 0.05, 0.95);
+        let config = DetectorConfig {
+            phase_shift_threshold: 0.2,
+            window_size: 4,
+            min_samples_for_detection: 4,
+            ..DetectorConfig::default()
+        };
+
+        let assessment = detect_calibrated_camouflage(
+            "pkg-camouflage@1.0.0",
+            CAMOUFLAGE_CONFORMAL_RISK_CLASS,
+            &series,
+            &config,
+            &conformal_artifact(),
+        )
+        .unwrap();
+
+        assert!(!assessment.hints.is_empty());
+        assert_eq!(assessment.severity_score_basis_points, 10_000);
+        assert_eq!(assessment.empirical_coverage_basis_points, 9_500);
+        assert_eq!(
+            assessment.risk_set.included_labels,
+            vec!["positive".to_string()]
+        );
     }
 
     #[test]

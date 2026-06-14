@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::security::bpet::economic_integration::{BpetGuidance, PlaybookUrgency};
 use crate::security::bpet::evolution_risk_scorer::ExplanationVector;
+use crate::security::conformal::{ConformalRiskSet, LABEL_POSITIVE, MAX_BASIS_POINTS};
 use crate::supply_chain::trust_card::{RiskAssessment, RiskLevel, TrustCardMutation};
 
 pub const TRUST_SURFACE_SCHEMA_VERSION: &str = "bpet-trust-surface-integration-v1";
@@ -42,6 +43,8 @@ pub struct BpetTrustSurfaceAssessment {
     pub dominant_feature: Option<String>,
     pub matched_motif_count: usize,
     pub top_motif_id: Option<String>,
+    pub calibrated_risk_set: Option<ConformalRiskSet>,
+    pub empirical_coverage_basis_points: Option<u16>,
     pub summary: String,
 }
 
@@ -92,8 +95,32 @@ pub fn assess_guidance_for_trust_surface(
         dominant_feature,
         matched_motif_count: guidance.motif_matches.len(),
         top_motif_id: top_motif.map(|motif| motif.motif_id.clone()),
+        calibrated_risk_set: None,
+        empirical_coverage_basis_points: None,
         summary,
     })
+}
+
+/// Assess BPET guidance and attach calibrated conformal risk-set evidence.
+///
+/// Positive conformal sets bump the user-facing risk level to at least `High`
+/// and append empirical coverage to the summary. The baseline guidance scoring
+/// still comes from [`assess_guidance_for_trust_surface`].
+pub fn assess_guidance_for_calibrated_trust_surface(
+    guidance: &BpetGuidance,
+    current_reputation_basis_points: u16,
+    explanation: Option<&ExplanationVector>,
+    risk_set: &ConformalRiskSet,
+    empirical_coverage_basis_points: u16,
+) -> Result<BpetTrustSurfaceAssessment, TrustSurfaceIntegrationError> {
+    let mut assessment =
+        assess_guidance_for_trust_surface(guidance, current_reputation_basis_points, explanation)?;
+    apply_calibrated_risk_set(
+        &mut assessment,
+        risk_set,
+        empirical_coverage_basis_points.min(MAX_BASIS_POINTS),
+    );
+    Ok(assessment)
 }
 
 /// Convert BPET guidance into a `TrustCardMutation` suitable for
@@ -105,6 +132,37 @@ pub fn trust_card_mutation_from_guidance(
 ) -> Result<TrustCardMutation, TrustSurfaceIntegrationError> {
     let assessment =
         assess_guidance_for_trust_surface(guidance, current_reputation_basis_points, explanation)?;
+
+    Ok(TrustCardMutation {
+        certification_level: None,
+        revocation_status: None,
+        active_quarantine: Some(assessment.active_quarantine_recommended),
+        reputation_score_basis_points: Some(assessment.reputation_score_basis_points),
+        reputation_trend: None,
+        user_facing_risk_assessment: Some(RiskAssessment {
+            level: assessment.risk_level,
+            summary: assessment.summary,
+        }),
+        last_verified_timestamp: Some(guidance.timestamp.clone()),
+        evidence_refs: None,
+    })
+}
+
+/// Convert BPET guidance plus a conformal risk set into a trust-card mutation.
+pub fn trust_card_mutation_from_calibrated_guidance(
+    guidance: &BpetGuidance,
+    current_reputation_basis_points: u16,
+    explanation: Option<&ExplanationVector>,
+    risk_set: &ConformalRiskSet,
+    empirical_coverage_basis_points: u16,
+) -> Result<TrustCardMutation, TrustSurfaceIntegrationError> {
+    let assessment = assess_guidance_for_calibrated_trust_surface(
+        guidance,
+        current_reputation_basis_points,
+        explanation,
+        risk_set,
+        empirical_coverage_basis_points,
+    )?;
 
     Ok(TrustCardMutation {
         certification_level: None,
@@ -236,6 +294,45 @@ fn trust_surface_summary(
     )
 }
 
+fn apply_calibrated_risk_set(
+    assessment: &mut BpetTrustSurfaceAssessment,
+    risk_set: &ConformalRiskSet,
+    empirical_coverage_basis_points: u16,
+) {
+    if risk_set
+        .included_labels
+        .iter()
+        .any(|label| label == LABEL_POSITIVE)
+    {
+        assessment.risk_level = assessment.risk_level.max(RiskLevel::High);
+    }
+    assessment.summary = calibrated_trust_surface_summary(
+        &assessment.summary,
+        risk_set,
+        empirical_coverage_basis_points,
+    );
+    assessment.calibrated_risk_set = Some(risk_set.clone());
+    assessment.empirical_coverage_basis_points = Some(empirical_coverage_basis_points);
+}
+
+fn calibrated_trust_surface_summary(
+    base_summary: &str,
+    risk_set: &ConformalRiskSet,
+    empirical_coverage_basis_points: u16,
+) -> String {
+    let labels = if risk_set.included_labels.is_empty() {
+        "none".to_string()
+    } else {
+        risk_set.included_labels.join("+")
+    };
+    format!(
+        "{base_summary}; calibrated BPET risk set={labels} score_bp={} quantile_bp={} ({:.2}% empirical coverage)",
+        risk_set.score_bp,
+        risk_set.quantile_bp,
+        f64::from(empirical_coverage_basis_points) / 100.0,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +411,17 @@ mod tests {
         }
     }
 
+    fn positive_risk_set() -> ConformalRiskSet {
+        ConformalRiskSet {
+            event_code: "FN-CONFORMAL-001".to_string(),
+            sample_id: "npm:@acme/suspicious@1.0.0".to_string(),
+            risk_class: "bpet_evolution".to_string(),
+            score_bp: 8_800,
+            quantile_bp: 2_000,
+            included_labels: vec!["positive".to_string()],
+        }
+    }
+
     #[test]
     fn critical_bpet_guidance_maps_to_quarantining_trust_card_mutation() {
         let guidance = guidance(0.91, PlaybookUrgency::Critical, Some(0.95));
@@ -343,6 +451,28 @@ mod tests {
         assert!(!assessment.active_quarantine_recommended);
         assert_eq!(assessment.reputation_score_basis_points, 7_400);
         assert_eq!(assessment.matched_motif_count, 0);
+    }
+
+    #[test]
+    fn calibrated_positive_set_bumps_trust_card_risk_to_high_with_coverage() {
+        let guidance = guidance(0.12, PlaybookUrgency::Routine, None);
+
+        let mutation = trust_card_mutation_from_calibrated_guidance(
+            &guidance,
+            8_000,
+            Some(&explanation()),
+            &positive_risk_set(),
+            9_500,
+        )
+        .expect("calibrated BPET guidance should map to trust-card mutation");
+
+        let risk = mutation
+            .user_facing_risk_assessment
+            .expect("risk assessment present");
+        assert_eq!(risk.level, RiskLevel::High);
+        assert!(risk.summary.contains("calibrated BPET risk set=positive"));
+        assert!(risk.summary.contains("95.00% empirical coverage"));
+        assert_eq!(mutation.active_quarantine, Some(false));
     }
 
     #[test]
