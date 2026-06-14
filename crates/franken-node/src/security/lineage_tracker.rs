@@ -45,6 +45,7 @@ pub const EVENT_HEALTH_CHECK: &str = "FN-IFL-012";
 pub const EVENT_SIGNED_LINEAGE_BUILT: &str = "FN-IFL-013";
 pub const EVENT_SENSITIVE_SOURCE_REGISTERED: &str = "FN-IFL-014";
 pub const EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED: &str = "FN-IFL-015";
+pub const EVENT_TRANSFORM_PROPAGATED: &str = "FN-IFL-016";
 
 // Canonical event codes required by bd-2iyk acceptance criteria.
 pub const LINEAGE_TAG_ATTACHED: &str = "LINEAGE_TAG_ATTACHED";
@@ -300,6 +301,46 @@ pub struct FlowEdge {
     pub quarantined: bool,
 }
 
+/// Runtime transform classes that deterministically propagate lineage labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageTransformKind {
+    Parse,
+    Concat,
+    Encode,
+    Hash,
+    Serialize,
+    Compress,
+    Encrypt,
+    Split,
+    Join,
+    Template,
+    LogFormat,
+    ModuleExport,
+    FunctionReturn,
+}
+
+impl LineageTransformKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Parse => "parse",
+            Self::Concat => "concat",
+            Self::Encode => "encode",
+            Self::Hash => "hash",
+            Self::Serialize => "serialize",
+            Self::Compress => "compress",
+            Self::Encrypt => "encrypt",
+            Self::Split => "split",
+            Self::Join => "join",
+            Self::Template => "template",
+            Self::LogFormat => "log-format",
+            Self::ModuleExport => "module-export",
+            Self::FunctionReturn => "function-return",
+        }
+    }
+}
+
 /// Taint boundary: policy rule defining allowed/denied taint crossings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaintBoundary {
@@ -395,7 +436,7 @@ fn node_matches_zone(node: &str, zone: &str) -> bool {
 }
 
 /// Per-edge pass/quarantine/alert decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowVerdict {
     Pass,
@@ -410,6 +451,14 @@ impl fmt::Display for FlowVerdict {
             FlowVerdict::Quarantine => write!(f, "quarantine"),
             FlowVerdict::Alert => write!(f, "alert"),
         }
+    }
+}
+
+fn strongest_flow_verdict(left: FlowVerdict, right: FlowVerdict) -> FlowVerdict {
+    match (left, right) {
+        (FlowVerdict::Quarantine, _) | (_, FlowVerdict::Quarantine) => FlowVerdict::Quarantine,
+        (FlowVerdict::Alert, _) | (_, FlowVerdict::Alert) => FlowVerdict::Alert,
+        (FlowVerdict::Pass, FlowVerdict::Pass) => FlowVerdict::Pass,
     }
 }
 
@@ -1591,6 +1640,103 @@ impl LineageGraph {
         self.append_edge(edge)
     }
 
+    /// Propagate labels through a deterministic runtime transform.
+    ///
+    /// Each unique input datum emits one append-only edge to the output datum.
+    /// Inputs are sorted before edge creation so replay observes a stable edge
+    /// order even when callers provide the same input set in different orders.
+    pub fn propagate_transform<I, S>(
+        &mut self,
+        input_datums: I,
+        output_datum: &str,
+        transform: LineageTransformKind,
+        timestamp_ms: u64,
+    ) -> Result<Vec<String>, LineageError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let _event_transform = EVENT_TRANSFORM_PROPAGATED;
+        let _event_prop = EVENT_TAINT_PROPAGATED;
+
+        if output_datum.trim().is_empty() {
+            return Err(LineageError::QueryInvalid {
+                detail: format!(
+                    "{}: transform output datum must be non-empty",
+                    ERR_IFL_QUERY_INVALID
+                ),
+            });
+        }
+
+        let mut inputs = BTreeSet::new();
+        for input in input_datums {
+            let input = input.as_ref();
+            if input.trim().is_empty() {
+                return Err(LineageError::QueryInvalid {
+                    detail: format!(
+                        "{}: transform input datums must be non-empty",
+                        ERR_IFL_QUERY_INVALID
+                    ),
+                });
+            }
+            inputs.insert(input.to_string());
+        }
+
+        if inputs.is_empty() {
+            return Err(LineageError::QueryInvalid {
+                detail: format!(
+                    "{}: transform requires at least one input datum",
+                    ERR_IFL_QUERY_INVALID
+                ),
+            });
+        }
+
+        let projected_edges = self.edges.len().saturating_add(inputs.len());
+        if projected_edges > self.config.max_graph_edges {
+            return Err(LineageError::GraphFull {
+                detail: format!(
+                    "{}: transform would create {} edges (max {})",
+                    ERR_IFL_GRAPH_FULL, projected_edges, self.config.max_graph_edges
+                ),
+            });
+        }
+
+        let mut merged_taint = TaintSet::new();
+        let mut source_taints = BTreeMap::new();
+        for input in &inputs {
+            let source_taint = self.datum_taints.get(input).cloned().unwrap_or_default();
+            merged_taint.merge(&source_taint);
+            source_taints.insert(input.clone(), source_taint);
+        }
+
+        let output_taint = self
+            .datum_taints
+            .entry(output_datum.to_string())
+            .or_default();
+        let had_labels = output_taint.len();
+        output_taint.merge(&merged_taint);
+        if output_taint.len() > had_labels {
+            let _event_merge = EVENT_TAINT_MERGE;
+        }
+
+        let operation = transform.as_str().to_string();
+        let mut edge_ids = Vec::with_capacity(source_taints.len());
+        for (input, source_taint) in source_taints {
+            let edge = FlowEdge {
+                edge_id: String::new(),
+                source: input,
+                sink: output_datum.to_string(),
+                operation: operation.clone(),
+                taint_set: source_taint,
+                timestamp_ms,
+                quarantined: false,
+            };
+            edge_ids.push(self.append_edge(edge)?);
+        }
+
+        Ok(edge_ids)
+    }
+
     /// Query the lineage graph.
     ///
     /// # Examples
@@ -2402,6 +2548,40 @@ impl ExfiltrationSentinel {
                 ),
             }),
         }
+    }
+
+    /// Track a deterministic runtime transform and evaluate every emitted edge.
+    pub fn track_transform<I, S>(
+        &mut self,
+        graph: &mut LineageGraph,
+        input_datums: I,
+        output_datum: &str,
+        transform: LineageTransformKind,
+        timestamp_ms: u64,
+    ) -> Result<FlowVerdict, LineageError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let _event = LINEAGE_FLOW_TRACKED;
+        let edge_ids =
+            graph.propagate_transform(input_datums, output_datum, transform, timestamp_ms)?;
+        let mut verdict = FlowVerdict::Pass;
+
+        for edge_id in edge_ids {
+            let edge = graph.get_edge(&edge_id).cloned();
+            let Some(edge) = edge else {
+                return Err(LineageError::ContainmentFailed {
+                    detail: format!(
+                        "{}: transform edge lost after propagation",
+                        ERR_LINEAGE_FLOW_BROKEN
+                    ),
+                });
+            };
+            verdict = strongest_flow_verdict(verdict, self.evaluate_edge(&edge, graph)?);
+        }
+
+        Ok(verdict)
     }
 }
 
@@ -3257,6 +3437,166 @@ mod tests {
         assert!(!edge_id.is_empty());
         let dst_taint = graph.get_taint_set("dst").unwrap();
         assert!(dst_taint.contains("PII"));
+    }
+
+    #[test]
+    fn lineage_transform_kind_operation_names_are_stable() {
+        let cases = [
+            (LineageTransformKind::Parse, "parse"),
+            (LineageTransformKind::Concat, "concat"),
+            (LineageTransformKind::Encode, "encode"),
+            (LineageTransformKind::Hash, "hash"),
+            (LineageTransformKind::Serialize, "serialize"),
+            (LineageTransformKind::Compress, "compress"),
+            (LineageTransformKind::Encrypt, "encrypt"),
+            (LineageTransformKind::Split, "split"),
+            (LineageTransformKind::Join, "join"),
+            (LineageTransformKind::Template, "template"),
+            (LineageTransformKind::LogFormat, "log-format"),
+            (LineageTransformKind::ModuleExport, "module-export"),
+            (LineageTransformKind::FunctionReturn, "function-return"),
+        ];
+
+        for (kind, operation) in cases {
+            assert_eq!(kind.as_str(), operation);
+        }
+    }
+
+    #[test]
+    fn propagate_transform_merges_labels_from_inputs_in_deterministic_order() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("PII", 10));
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("input-b", "PII").unwrap();
+        graph.assign_taint("input-a", "SECRET").unwrap();
+
+        let edge_ids = graph
+            .propagate_transform(
+                ["input-b", "input-a", "input-b"],
+                "output",
+                LineageTransformKind::Concat,
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(edge_ids, vec!["edge-1".to_string(), "edge-2".to_string()]);
+        let first = graph
+            .get_edge(edge_ids.first().expect("first transform edge"))
+            .unwrap();
+        let second = graph
+            .get_edge(edge_ids.get(1).expect("second transform edge"))
+            .unwrap();
+        let output_taint = graph.get_taint_set("output").unwrap();
+
+        assert_eq!(first.source, "input-a");
+        assert_eq!(second.source, "input-b");
+        assert_eq!(first.operation, "concat");
+        assert_eq!(second.operation, "concat");
+        assert!(first.taint_set.contains("SECRET"));
+        assert!(second.taint_set.contains("PII"));
+        assert!(output_taint.contains("SECRET"));
+        assert!(output_taint.contains("PII"));
+    }
+
+    #[test]
+    fn sensitive_source_label_propagates_through_runtime_transform() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let label_id = ledger
+            .register_sensitive_source(
+                &mut graph,
+                "internal:env",
+                sensitive_descriptor(BTreeMap::new()),
+                b"salt-v1",
+            )
+            .unwrap();
+
+        let edge_ids = graph
+            .propagate_transform(
+                ["internal:env"],
+                "internal:parsed-config",
+                LineageTransformKind::Parse,
+                55,
+            )
+            .unwrap();
+        let edge = graph
+            .get_edge(edge_ids.first().expect("sensitive source transform edge"))
+            .unwrap();
+        let output_taint = graph.get_taint_set("internal:parsed-config").unwrap();
+
+        assert_eq!(edge.operation, "parse");
+        assert!(edge.taint_set.contains(&label_id));
+        assert!(output_taint.contains(&label_id));
+        assert!(ledger.verify_graph_binding(&graph, "internal:env", &label_id));
+    }
+
+    #[test]
+    fn propagate_transform_rejects_empty_inputs_without_mutating_graph() {
+        let mut graph = LineageGraph::new(default_config());
+
+        let err = graph
+            .propagate_transform(
+                Vec::<&str>::new(),
+                "output",
+                LineageTransformKind::Encode,
+                1,
+            )
+            .expect_err("empty transform inputs must fail closed");
+
+        assert!(err.to_string().contains(ERR_IFL_QUERY_INVALID));
+        assert_eq!(graph.edge_count(), 0);
+        assert!(graph.get_taint_set("output").is_none());
+    }
+
+    #[test]
+    fn propagate_transform_rejects_graph_full_without_partial_edges() {
+        let mut config = default_config();
+        config.max_graph_edges = 1;
+        let mut graph = LineageGraph::new(config);
+        graph.register_label(make_label("PII", 10));
+        graph.assign_taint("input-a", "PII").unwrap();
+        graph.assign_taint("input-b", "PII").unwrap();
+
+        let err = graph
+            .propagate_transform(
+                ["input-a", "input-b"],
+                "output",
+                LineageTransformKind::Join,
+                1,
+            )
+            .expect_err("transform should fail before appending partial edges");
+
+        assert!(err.to_string().contains(ERR_IFL_GRAPH_FULL));
+        assert_eq!(graph.edge_count(), 0);
+        assert!(graph.get_taint_set("output").is_none());
+    }
+
+    #[test]
+    fn track_transform_quarantines_forbidden_runtime_output() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+        sentinel
+            .add_boundary(make_boundary("b1", "internal", "external", &["SECRET"]))
+            .unwrap();
+
+        let verdict = sentinel
+            .track_transform(
+                &mut graph,
+                ["internal:secret"],
+                "external:payload",
+                LineageTransformKind::Template,
+                10,
+            )
+            .unwrap();
+        let edges = graph.query(&LineageQuery::default()).unwrap();
+        let edge = edges.first().expect("tracked transform edge");
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert_eq!(edge.operation, "template");
+        assert!(edge.quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
     }
 
     #[test]
@@ -4936,6 +5276,7 @@ mod tests {
             EVENT_HEALTH_CHECK,
             EVENT_SENSITIVE_SOURCE_REGISTERED,
             EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED,
+            EVENT_TRANSFORM_PROPAGATED,
             LINEAGE_TAG_ATTACHED,
             LINEAGE_FLOW_TRACKED,
             SENTINEL_SCAN_START,
