@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt;
 use subtle::ConstantTimeEq as _;
 
@@ -21,12 +22,30 @@ pub const CALIBRATION_SIGNATURE_ALGORITHM: &str = "sha256-deterministic-artifact
 pub const FN_VSDK_CALIBRATION_RECOMPUTE_START: &str = "FN-VSDK-CALIBRATION-RECOMPUTE-START";
 pub const FN_VSDK_CALIBRATION_METRICS_RECOMPUTED: &str = "FN-VSDK-CALIBRATION-METRICS-RECOMPUTED";
 pub const FN_VSDK_CALIBRATION_ARTIFACT_PASS: &str = "FN-VSDK-CALIBRATION-ARTIFACT-PASS";
+pub const CONFORMAL_SAMPLE_SCHEMA_VERSION: &str = "conformal.score_sample.v1";
+pub const CONFORMAL_FROZEN_QUANTILE_SCHEMA_VERSION: &str = "conformal.frozen_quantile_artifact.v1";
+pub const CONFORMAL_LABEL_BENIGN: &str = "benign";
+pub const CONFORMAL_LABEL_POSITIVE: &str = "positive";
+pub const FN_VSDK_CONFORMAL_RECOMPUTE_START: &str = "FN-VSDK-CONFORMAL-RECOMPUTE-START";
+pub const FN_VSDK_CONFORMAL_QUANTILES_RECOMPUTED: &str = "FN-VSDK-CONFORMAL-QUANTILES-RECOMPUTED";
+pub const FN_VSDK_CONFORMAL_RISK_SET_RECOMPUTED: &str = "FN-VSDK-CONFORMAL-RISK-SET-RECOMPUTED";
+pub const FN_VSDK_CONFORMAL_ARTIFACT_PASS: &str = "FN-VSDK-CONFORMAL-ARTIFACT-PASS";
+pub const FN_CONFORMAL_SET_EMITTED: &str = "FN-CONFORMAL-001";
+pub const FN_CONFORMAL_ARTIFACT_EMITTED: &str = "FN-CALIB-002";
 
 const SHA256_PREFIX: &str = "sha256:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalibrationSample {
     pub sample_id: String,
+    pub score_bp: u16,
+    pub positive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalScoreSample {
+    pub sample_id: String,
+    pub risk_class: String,
     pub score_bp: u16,
     pub positive: bool,
 }
@@ -70,6 +89,44 @@ pub struct CalibrationSignalReport {
     pub signal_schema_version: String,
     pub metric_notes: Vec<String>,
     pub metrics: CalibrationMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalFrozenQuantile {
+    pub risk_class: String,
+    pub sample_count: u64,
+    pub positive_count: u64,
+    pub negative_count: u64,
+    pub target_alpha_bp: u16,
+    pub quantile_rank: u64,
+    pub quantile_bp: u16,
+    pub min_nonconformity_bp: u16,
+    pub max_nonconformity_bp: u16,
+    pub finite_sample_coverage_floor_bp: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalFrozenArtifact {
+    pub schema_version: String,
+    pub generated_at: String,
+    pub sample_schema_version: String,
+    pub corpus_hash: String,
+    pub sample_count: u64,
+    pub risk_class_count: u64,
+    pub target_alpha_bp: u16,
+    pub quantiles: Vec<ConformalFrozenQuantile>,
+    pub event_codes: Vec<String>,
+    pub audit_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalRiskSet {
+    pub event_code: String,
+    pub sample_id: String,
+    pub risk_class: String,
+    pub score_bp: u16,
+    pub quantile_bp: u16,
+    pub included_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,24 +179,88 @@ pub struct VerifiedCalibrationArtifact {
     pub event_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedConformalArtifact {
+    pub corpus_hash: String,
+    pub sample_count: u64,
+    pub risk_class_count: u64,
+    pub target_alpha_bp: u16,
+    pub event_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConformalNonconformitySample {
+    positive: bool,
+    nonconformity_bp: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalibrationVerificationError {
     Json(String),
     NonCanonicalArtifact,
-    NonCanonicalCorpusRecord { index: usize },
-    FloatingPointValue { path: String },
+    NonCanonicalCorpusRecord {
+        index: usize,
+    },
+    NonCanonicalConformalCorpus,
+    NonCanonicalConformalRiskSet,
+    FloatingPointValue {
+        path: String,
+    },
     EmptyCorpus,
-    EmptySignal { signal_id: String },
-    UnsupportedSchema { expected: String, actual: String },
-    InvalidField { field: &'static str, reason: String },
-    InvalidHash { field: &'static str, value: String },
-    CorpusRecordCountMismatch { expected: u64, actual: u64 },
-    CorpusHashMismatch { expected: String, actual: String },
-    ArtifactMismatch { surface: &'static str },
-    SignatureAlgorithmMismatch { expected: String, actual: String },
-    SignatureKeyMismatch { expected: String, actual: String },
-    SignaturePayloadHashMismatch { expected: String, actual: String },
-    SignatureMismatch { expected: String, actual: String },
+    EmptyConformalSamples,
+    EmptySignal {
+        signal_id: String,
+    },
+    UnsupportedSchema {
+        expected: String,
+        actual: String,
+    },
+    InvalidField {
+        field: &'static str,
+        reason: String,
+    },
+    InvalidHash {
+        field: &'static str,
+        value: String,
+    },
+    DuplicateConformalSample {
+        risk_class: String,
+        sample_id: String,
+    },
+    MissingConformalRiskClass {
+        risk_class: String,
+    },
+    ConformalRiskClassMismatch {
+        expected: String,
+        actual: String,
+    },
+    CorpusRecordCountMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    CorpusHashMismatch {
+        expected: String,
+        actual: String,
+    },
+    ArtifactMismatch {
+        surface: &'static str,
+    },
+    SignatureAlgorithmMismatch {
+        expected: String,
+        actual: String,
+    },
+    SignatureKeyMismatch {
+        expected: String,
+        actual: String,
+    },
+    SignaturePayloadHashMismatch {
+        expected: String,
+        actual: String,
+    },
+    SignatureMismatch {
+        expected: String,
+        actual: String,
+    },
 }
 
 impl fmt::Display for CalibrationVerificationError {
@@ -155,6 +276,12 @@ impl fmt::Display for CalibrationVerificationError {
                     "calibration corpus record {index} is not canonical"
                 )
             }
+            Self::NonCanonicalConformalCorpus => {
+                write!(formatter, "conformal corpus bytes are not canonical")
+            }
+            Self::NonCanonicalConformalRiskSet => {
+                write!(formatter, "conformal risk-set bytes are not canonical")
+            }
             Self::FloatingPointValue { path } => {
                 write!(
                     formatter,
@@ -162,6 +289,7 @@ impl fmt::Display for CalibrationVerificationError {
                 )
             }
             Self::EmptyCorpus => write!(formatter, "calibration corpus is empty"),
+            Self::EmptyConformalSamples => write!(formatter, "conformal sample corpus is empty"),
             Self::EmptySignal { signal_id } => {
                 write!(formatter, "calibration signal `{signal_id}` has no samples")
             }
@@ -178,6 +306,21 @@ impl fmt::Display for CalibrationVerificationError {
                     "calibration field {field} is not canonical hash: {value}"
                 )
             }
+            Self::DuplicateConformalSample {
+                risk_class,
+                sample_id,
+            } => write!(
+                formatter,
+                "duplicate conformal sample `{sample_id}` in risk class `{risk_class}`"
+            ),
+            Self::MissingConformalRiskClass { risk_class } => write!(
+                formatter,
+                "conformal artifact has no quantile for risk class `{risk_class}`"
+            ),
+            Self::ConformalRiskClassMismatch { expected, actual } => write!(
+                formatter,
+                "conformal risk class mismatch: expected `{expected}`, got `{actual}`"
+            ),
             Self::CorpusRecordCountMismatch { expected, actual } => write!(
                 formatter,
                 "calibration corpus count mismatch: expected {expected}, got {actual}"
@@ -273,6 +416,161 @@ pub fn verify_calibration_artifact_recomputed(
     })
 }
 
+pub fn verify_conformal_artifact_recomputed(
+    artifact_canonical_json: &[u8],
+    corpus_samples_canonical_json: &[u8],
+) -> CalibrationVerificationResult<VerifiedConformalArtifact> {
+    let artifact: ConformalFrozenArtifact = serde_json::from_slice(artifact_canonical_json)
+        .map_err(|source| CalibrationVerificationError::Json(source.to_string()))?;
+    let canonical = canonical_json_bytes(&artifact)?;
+    if canonical != artifact_canonical_json {
+        return Err(CalibrationVerificationError::NonCanonicalArtifact);
+    }
+    validate_conformal_artifact(&artifact)?;
+    validate_canonical_json_bytes(corpus_samples_canonical_json)
+        .map_err(|_| CalibrationVerificationError::NonCanonicalConformalCorpus)?;
+
+    let samples: Vec<ConformalScoreSample> = serde_json::from_slice(corpus_samples_canonical_json)
+        .map_err(|source| CalibrationVerificationError::Json(source.to_string()))?;
+    let expected =
+        recompute_conformal_artifact(&samples, artifact.target_alpha_bp, &artifact.generated_at)?;
+    if artifact != expected {
+        return Err(CalibrationVerificationError::ArtifactMismatch {
+            surface: "conformal_artifact",
+        });
+    }
+
+    Ok(VerifiedConformalArtifact {
+        corpus_hash: artifact.corpus_hash,
+        sample_count: artifact.sample_count,
+        risk_class_count: artifact.risk_class_count,
+        target_alpha_bp: artifact.target_alpha_bp,
+        event_codes: vec![
+            FN_VSDK_CONFORMAL_RECOMPUTE_START.to_string(),
+            FN_VSDK_CONFORMAL_QUANTILES_RECOMPUTED.to_string(),
+            FN_VSDK_CONFORMAL_ARTIFACT_PASS.to_string(),
+        ],
+    })
+}
+
+pub fn recompute_conformal_artifact(
+    samples: &[ConformalScoreSample],
+    target_alpha_bp: u16,
+    generated_at: &str,
+) -> CalibrationVerificationResult<ConformalFrozenArtifact> {
+    validate_conformal_target_alpha(target_alpha_bp)?;
+    validate_nonempty("generated_at", generated_at)?;
+    let ordered = ordered_conformal_samples(samples)?;
+    let mut by_class: BTreeMap<String, Vec<ConformalNonconformitySample>> = BTreeMap::new();
+    for sample in &ordered {
+        let nonconformity_bp = if sample.positive {
+            MAX_BASIS_POINTS.saturating_sub(sample.score_bp)
+        } else {
+            sample.score_bp
+        };
+        by_class
+            .entry(sample.risk_class.clone())
+            .or_default()
+            .push(ConformalNonconformitySample {
+                positive: sample.positive,
+                nonconformity_bp,
+            });
+    }
+
+    let mut quantiles = Vec::with_capacity(by_class.len());
+    for (risk_class, class_samples) in by_class {
+        quantiles.push(conformal_quantile_for_class(
+            &risk_class,
+            &class_samples,
+            target_alpha_bp,
+        )?);
+    }
+
+    Ok(ConformalFrozenArtifact {
+        schema_version: CONFORMAL_FROZEN_QUANTILE_SCHEMA_VERSION.to_string(),
+        generated_at: generated_at.to_string(),
+        sample_schema_version: CONFORMAL_SAMPLE_SCHEMA_VERSION.to_string(),
+        corpus_hash: conformal_corpus_hash(&ordered)?,
+        sample_count: u64::try_from(ordered.len()).unwrap_or(u64::MAX),
+        risk_class_count: u64::try_from(quantiles.len()).unwrap_or(u64::MAX),
+        target_alpha_bp,
+        quantiles,
+        event_codes: vec![
+            FN_CONFORMAL_ARTIFACT_EMITTED.to_string(),
+            FN_CONFORMAL_SET_EMITTED.to_string(),
+        ],
+        audit_notes: vec![
+            "split conformal coverage assumes exchangeability; adversarial shift is tracked by ACI instead of overclaiming distribution-free guarantees".to_string(),
+            "all scores, nonconformity values, and quantiles are integer basis points".to_string(),
+        ],
+    })
+}
+
+pub fn verify_conformal_risk_set_recomputed(
+    risk_set_canonical_json: &[u8],
+    artifact: &ConformalFrozenArtifact,
+) -> CalibrationVerificationResult<ConformalRiskSet> {
+    let risk_set: ConformalRiskSet = serde_json::from_slice(risk_set_canonical_json)
+        .map_err(|source| CalibrationVerificationError::Json(source.to_string()))?;
+    let canonical = canonical_json_bytes(&risk_set)?;
+    if canonical != risk_set_canonical_json {
+        return Err(CalibrationVerificationError::NonCanonicalConformalRiskSet);
+    }
+    let expected = recompute_conformal_risk_set(
+        &risk_set.sample_id,
+        &risk_set.risk_class,
+        risk_set.score_bp,
+        artifact,
+    )?;
+    if risk_set != expected {
+        return Err(CalibrationVerificationError::ArtifactMismatch {
+            surface: "conformal_risk_set",
+        });
+    }
+    Ok(risk_set)
+}
+
+pub fn recompute_conformal_risk_set(
+    sample_id: &str,
+    risk_class: &str,
+    score_bp: u16,
+    artifact: &ConformalFrozenArtifact,
+) -> CalibrationVerificationResult<ConformalRiskSet> {
+    validate_conformal_artifact(artifact)?;
+    validate_nonempty("sample_id", sample_id)?;
+    validate_nonempty("risk_class", risk_class)?;
+    if score_bp > MAX_BASIS_POINTS {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "score_bp",
+            reason: format!("must not exceed {MAX_BASIS_POINTS}"),
+        });
+    }
+    let quantile = artifact
+        .quantiles
+        .iter()
+        .find(|quantile| quantile.risk_class == risk_class)
+        .ok_or_else(|| CalibrationVerificationError::MissingConformalRiskClass {
+            risk_class: risk_class.to_string(),
+        })?;
+
+    let mut included_labels = Vec::with_capacity(2);
+    if score_bp <= quantile.quantile_bp {
+        included_labels.push(CONFORMAL_LABEL_BENIGN.to_string());
+    }
+    if MAX_BASIS_POINTS.saturating_sub(score_bp) <= quantile.quantile_bp {
+        included_labels.push(CONFORMAL_LABEL_POSITIVE.to_string());
+    }
+
+    Ok(ConformalRiskSet {
+        event_code: FN_CONFORMAL_SET_EMITTED.to_string(),
+        sample_id: sample_id.to_string(),
+        risk_class: risk_class.to_string(),
+        score_bp,
+        quantile_bp: quantile.quantile_bp,
+        included_labels,
+    })
+}
+
 fn validate_artifact(artifact: &SignedCalibrationArtifact) -> CalibrationVerificationResult<()> {
     if artifact.schema_version != CALIBRATION_ARTIFACT_SCHEMA_VERSION {
         return Err(CalibrationVerificationError::UnsupportedSchema {
@@ -298,6 +596,122 @@ fn validate_artifact(artifact: &SignedCalibrationArtifact) -> CalibrationVerific
     validate_nonempty("signature.key_id", &artifact.signature.key_id)?;
     validate_sha256_hash("signature.payload_hash", &artifact.signature.payload_hash)?;
     validate_sha256_hash("signature.signature", &artifact.signature.signature)
+}
+
+fn validate_conformal_artifact(
+    artifact: &ConformalFrozenArtifact,
+) -> CalibrationVerificationResult<()> {
+    if artifact.schema_version != CONFORMAL_FROZEN_QUANTILE_SCHEMA_VERSION {
+        return Err(CalibrationVerificationError::UnsupportedSchema {
+            expected: CONFORMAL_FROZEN_QUANTILE_SCHEMA_VERSION.to_string(),
+            actual: artifact.schema_version.clone(),
+        });
+    }
+    validate_nonempty("generated_at", &artifact.generated_at)?;
+    if artifact.sample_schema_version != CONFORMAL_SAMPLE_SCHEMA_VERSION {
+        return Err(CalibrationVerificationError::UnsupportedSchema {
+            expected: CONFORMAL_SAMPLE_SCHEMA_VERSION.to_string(),
+            actual: artifact.sample_schema_version.clone(),
+        });
+    }
+    validate_sha256_hash("corpus_hash", &artifact.corpus_hash)?;
+    validate_conformal_target_alpha(artifact.target_alpha_bp)?;
+    if artifact.quantiles.is_empty() {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "quantiles",
+            reason: "at least one conformal quantile is required".to_string(),
+        });
+    }
+    if artifact.risk_class_count != u64::try_from(artifact.quantiles.len()).unwrap_or(u64::MAX) {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "risk_class_count",
+            reason: "must equal quantiles length".to_string(),
+        });
+    }
+    let mut seen = BTreeMap::new();
+    let mut sample_total = 0_u64;
+    for quantile in &artifact.quantiles {
+        validate_conformal_quantile(quantile)?;
+        sample_total = sample_total.saturating_add(quantile.sample_count);
+        if seen
+            .insert(quantile.risk_class.as_str(), quantile.quantile_bp)
+            .is_some()
+        {
+            return Err(CalibrationVerificationError::DuplicateConformalSample {
+                risk_class: quantile.risk_class.clone(),
+                sample_id: "quantile".to_string(),
+            });
+        }
+    }
+    if artifact.sample_count != sample_total {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "sample_count",
+            reason: "must equal the sum of per-risk-class quantile sample counts".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_conformal_quantile(
+    quantile: &ConformalFrozenQuantile,
+) -> CalibrationVerificationResult<()> {
+    validate_nonempty("risk_class", &quantile.risk_class)?;
+    validate_conformal_target_alpha(quantile.target_alpha_bp)?;
+    if quantile.sample_count == 0 {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "sample_count",
+            reason: "must be greater than zero".to_string(),
+        });
+    }
+    if quantile
+        .positive_count
+        .saturating_add(quantile.negative_count)
+        != quantile.sample_count
+    {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "sample_count",
+            reason: "must equal positive_count + negative_count".to_string(),
+        });
+    }
+    if quantile.quantile_rank == 0 || quantile.quantile_rank > quantile.sample_count {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "quantile_rank",
+            reason: "must be in 1..=sample_count".to_string(),
+        });
+    }
+    for (field, value) in [
+        ("quantile_bp", quantile.quantile_bp),
+        ("min_nonconformity_bp", quantile.min_nonconformity_bp),
+        ("max_nonconformity_bp", quantile.max_nonconformity_bp),
+        (
+            "finite_sample_coverage_floor_bp",
+            quantile.finite_sample_coverage_floor_bp,
+        ),
+    ] {
+        if value > MAX_BASIS_POINTS {
+            return Err(CalibrationVerificationError::InvalidField {
+                field,
+                reason: format!("must not exceed {MAX_BASIS_POINTS}"),
+            });
+        }
+    }
+    if quantile.min_nonconformity_bp > quantile.max_nonconformity_bp {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "min_nonconformity_bp",
+            reason: "must not exceed max_nonconformity_bp".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_conformal_target_alpha(target_alpha_bp: u16) -> CalibrationVerificationResult<()> {
+    if target_alpha_bp >= MAX_BASIS_POINTS {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "target_alpha_bp",
+            reason: format!("must be less than {MAX_BASIS_POINTS}"),
+        });
+    }
+    Ok(())
 }
 
 fn validate_nonempty(field: &'static str, value: &str) -> CalibrationVerificationResult<()> {
@@ -585,6 +999,102 @@ fn brier_score_bp(samples: &[CalibrationSample]) -> u16 {
     u16::try_from(rounded.min(u128::from(MAX_BASIS_POINTS))).unwrap_or(MAX_BASIS_POINTS)
 }
 
+fn ordered_conformal_samples(
+    samples: &[ConformalScoreSample],
+) -> CalibrationVerificationResult<Vec<ConformalScoreSample>> {
+    if samples.is_empty() {
+        return Err(CalibrationVerificationError::EmptyConformalSamples);
+    }
+    let mut ordered = BTreeMap::new();
+    for sample in samples {
+        validate_conformal_sample(sample)?;
+        let key = (sample.risk_class.clone(), sample.sample_id.clone());
+        if ordered.insert(key, sample.clone()).is_some() {
+            return Err(CalibrationVerificationError::DuplicateConformalSample {
+                risk_class: sample.risk_class.clone(),
+                sample_id: sample.sample_id.clone(),
+            });
+        }
+    }
+    Ok(ordered.into_values().collect())
+}
+
+fn validate_conformal_sample(sample: &ConformalScoreSample) -> CalibrationVerificationResult<()> {
+    validate_nonempty("sample_id", &sample.sample_id)?;
+    validate_nonempty("risk_class", &sample.risk_class)?;
+    if sample.score_bp > MAX_BASIS_POINTS {
+        return Err(CalibrationVerificationError::InvalidField {
+            field: "score_bp",
+            reason: format!("must not exceed {MAX_BASIS_POINTS}"),
+        });
+    }
+    Ok(())
+}
+
+fn conformal_quantile_for_class(
+    risk_class: &str,
+    samples: &[ConformalNonconformitySample],
+    target_alpha_bp: u16,
+) -> CalibrationVerificationResult<ConformalFrozenQuantile> {
+    if samples.is_empty() {
+        return Err(CalibrationVerificationError::MissingConformalRiskClass {
+            risk_class: risk_class.to_string(),
+        });
+    }
+    let mut values = samples
+        .iter()
+        .map(|sample| sample.nonconformity_bp)
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    let rank = conformal_quantile_rank(values.len(), target_alpha_bp)?;
+    let quantile_bp = values[rank.saturating_sub(1)];
+    let sample_count = u64::try_from(samples.len()).unwrap_or(u64::MAX);
+    let positive_count =
+        u64::try_from(samples.iter().filter(|sample| sample.positive).count()).unwrap_or(u64::MAX);
+
+    Ok(ConformalFrozenQuantile {
+        risk_class: risk_class.to_string(),
+        sample_count,
+        positive_count,
+        negative_count: sample_count.saturating_sub(positive_count),
+        target_alpha_bp,
+        quantile_rank: u64::try_from(rank).unwrap_or(u64::MAX),
+        quantile_bp,
+        min_nonconformity_bp: values[0],
+        max_nonconformity_bp: values[values.len().saturating_sub(1)],
+        finite_sample_coverage_floor_bp: floor_ratio_bp(
+            u64::try_from(rank).unwrap_or(u64::MAX),
+            sample_count.saturating_add(1),
+        ),
+    })
+}
+
+fn conformal_quantile_rank(
+    sample_count: usize,
+    target_alpha_bp: u16,
+) -> CalibrationVerificationResult<usize> {
+    if sample_count == 0 {
+        return Err(CalibrationVerificationError::EmptyConformalSamples);
+    }
+    validate_conformal_target_alpha(target_alpha_bp)?;
+    let numerator = u128::try_from(sample_count.saturating_add(1))
+        .unwrap_or(u128::MAX)
+        .saturating_mul(u128::from(MAX_BASIS_POINTS.saturating_sub(target_alpha_bp)));
+    let rank = ceil_div(numerator, u128::from(MAX_BASIS_POINTS));
+    let rank = usize::try_from(rank).unwrap_or(usize::MAX);
+    Ok(rank.clamp(1, sample_count))
+}
+
+fn conformal_corpus_hash(
+    samples: &[ConformalScoreSample],
+) -> CalibrationVerificationResult<String> {
+    let payload = canonical_json_bytes(&samples.to_vec())?;
+    Ok(sha256_zero_prefixed(
+        b"conformal-calibration-corpus-v1",
+        &payload,
+    ))
+}
+
 fn corpus_hash_from_canonical_records(
     records: &[Vec<u8>],
 ) -> CalibrationVerificationResult<String> {
@@ -616,6 +1126,14 @@ fn signature_for_unsigned(
         payload_hash,
         signature,
     })
+}
+
+fn ceil_div(numerator: u128, denominator: u128) -> u128 {
+    if numerator == 0 {
+        0
+    } else {
+        numerator.saturating_sub(1) / denominator + 1
+    }
 }
 
 fn canonical_json_bytes(value: &impl Serialize) -> CalibrationVerificationResult<Vec<u8>> {
@@ -688,6 +1206,14 @@ fn sha256_prefixed(domain: &[u8], payload: &[u8]) -> String {
     format!("{SHA256_PREFIX}{}", hex::encode(hasher.finalize()))
 }
 
+fn sha256_zero_prefixed(domain: &[u8], payload: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update([0]);
+    hasher.update(payload);
+    format!("{SHA256_PREFIX}{}", hex::encode(hasher.finalize()))
+}
+
 fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     hasher.update(len.to_le_bytes());
@@ -707,6 +1233,14 @@ fn ratio_bp(numerator: u64, denominator: u64) -> u16 {
         .saturating_add(denominator / 2)
         / denominator;
     u16::try_from(scaled.min(u64::from(MAX_BASIS_POINTS))).unwrap_or(MAX_BASIS_POINTS)
+}
+
+fn floor_ratio_bp(numerator: u64, denominator: u64) -> u16 {
+    if denominator == 0 {
+        return 0;
+    }
+    let scaled = u128::from(numerator).saturating_mul(u128::from(MAX_BASIS_POINTS));
+    u16::try_from(scaled / u128::from(denominator)).unwrap_or(MAX_BASIS_POINTS)
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
@@ -768,6 +1302,31 @@ mod tests {
         }
     }
 
+    fn conformal_sample(
+        sample_id: &str,
+        risk_class: &str,
+        score_bp: u16,
+        positive: bool,
+    ) -> ConformalScoreSample {
+        ConformalScoreSample {
+            sample_id: sample_id.to_string(),
+            risk_class: risk_class.to_string(),
+            score_bp,
+            positive,
+        }
+    }
+
+    fn conformal_samples() -> Vec<ConformalScoreSample> {
+        vec![
+            conformal_sample("s4", "evolution", 4_000, false),
+            conformal_sample("s1", "evolution", 9_000, true),
+            conformal_sample("s3", "evolution", 2_000, false),
+            conformal_sample("s2", "evolution", 8_000, true),
+            conformal_sample("c1", "camouflage", 6_000, true),
+            conformal_sample("c2", "camouflage", 1_000, false),
+        ]
+    }
+
     #[test]
     fn recomputed_calibration_artifact_verifies() {
         let records = sample_records();
@@ -825,6 +1384,79 @@ mod tests {
         assert!(matches!(
             error,
             CalibrationVerificationError::NonCanonicalCorpusRecord { index: 0 }
+        ));
+    }
+
+    #[test]
+    fn recomputed_conformal_artifact_and_risk_set_verify() {
+        let samples = conformal_samples();
+        let artifact =
+            recompute_conformal_artifact(&samples, 2_000, "1970-01-01T00:00:00Z").unwrap();
+        let artifact_bytes = canonical_json_bytes(&artifact).expect("canonical artifact");
+        let sample_bytes = canonical_json_bytes(&samples).expect("canonical samples");
+
+        let verified =
+            verify_conformal_artifact_recomputed(&artifact_bytes, &sample_bytes).unwrap();
+
+        assert_eq!(verified.sample_count, 6);
+        assert_eq!(verified.risk_class_count, 2);
+        assert_eq!(verified.target_alpha_bp, 2_000);
+        assert_eq!(
+            verified.event_codes,
+            vec![
+                FN_VSDK_CONFORMAL_RECOMPUTE_START.to_string(),
+                FN_VSDK_CONFORMAL_QUANTILES_RECOMPUTED.to_string(),
+                FN_VSDK_CONFORMAL_ARTIFACT_PASS.to_string()
+            ]
+        );
+
+        let risk_set =
+            recompute_conformal_risk_set("candidate", "evolution", 8_500, &artifact).unwrap();
+        let risk_set_bytes = canonical_json_bytes(&risk_set).expect("canonical risk set");
+        let verified_risk_set =
+            verify_conformal_risk_set_recomputed(&risk_set_bytes, &artifact).unwrap();
+
+        assert_eq!(verified_risk_set.quantile_bp, 4_000);
+        assert_eq!(
+            verified_risk_set.included_labels,
+            vec![CONFORMAL_LABEL_POSITIVE.to_string()]
+        );
+    }
+
+    #[test]
+    fn conformal_sample_mismatch_fails_closed() {
+        let samples = conformal_samples();
+        let artifact =
+            recompute_conformal_artifact(&samples, 2_000, "1970-01-01T00:00:00Z").unwrap();
+        let artifact_bytes = canonical_json_bytes(&artifact).expect("canonical artifact");
+        let mut tampered_samples = samples;
+        tampered_samples[0].score_bp = 9_999;
+        let tampered_sample_bytes =
+            canonical_json_bytes(&tampered_samples).expect("canonical samples");
+
+        let error = verify_conformal_artifact_recomputed(&artifact_bytes, &tampered_sample_bytes)
+            .expect_err("tampered conformal sample corpus must fail");
+
+        assert!(matches!(
+            error,
+            CalibrationVerificationError::ArtifactMismatch {
+                surface: "conformal_artifact"
+            }
+        ));
+    }
+
+    #[test]
+    fn conformal_missing_risk_class_fails_closed() {
+        let samples = conformal_samples();
+        let artifact =
+            recompute_conformal_artifact(&samples, 2_000, "1970-01-01T00:00:00Z").unwrap();
+
+        let error =
+            recompute_conformal_risk_set("candidate", "missing", 5_000, &artifact).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CalibrationVerificationError::MissingConformalRiskClass { .. }
         ));
     }
 }

@@ -1,0 +1,135 @@
+{
+  "schema_version": "franken_node.conformal_verifier_evidence.v1",
+  "bead_id": "bd-f5b04.3.2.5",
+  "purpose": "Verifier SDK recomputation fixture for Mondrian split-conformal coverage artifacts.",
+  "source_paths": [
+    "sdk/verifier/src/calibration.rs",
+    "crates/franken-node/src/security/conformal.rs"
+  ],
+  "target_alpha_bp": 2000,
+  "generated_at": "1970-01-01T00:00:00Z",
+  "sample_schema_version": "conformal.score_sample.v1",
+  "frozen_artifact_schema_version": "conformal.frozen_quantile_artifact.v1",
+  "corpus": {
+    "hash": "sha256:31a0705613c893c1e67f772b1db5ea7ecdd3a8b56efd933e51e2f0bd010bfc67",
+    "hash_domain": "conformal-calibration-corpus-v1",
+    "hash_separator_hex": "00",
+    "canonical_json": "[{\"positive\":true,\"risk_class\":\"camouflage\",\"sample_id\":\"c1\",\"score_bp\":6000},{\"positive\":false,\"risk_class\":\"camouflage\",\"sample_id\":\"c2\",\"score_bp\":1000},{\"positive\":true,\"risk_class\":\"evolution\",\"sample_id\":\"s1\",\"score_bp\":9000},{\"positive\":true,\"risk_class\":\"evolution\",\"sample_id\":\"s2\",\"score_bp\":8000},{\"positive\":false,\"risk_class\":\"evolution\",\"sample_id\":\"s3\",\"score_bp\":2000},{\"positive\":false,\"risk_class\":\"evolution\",\"sample_id\":\"s4\",\"score_bp\":4000}]",
+    "samples": [
+      {
+        "positive": true,
+        "risk_class": "camouflage",
+        "sample_id": "c1",
+        "score_bp": 6000
+      },
+      {
+        "positive": false,
+        "risk_class": "camouflage",
+        "sample_id": "c2",
+        "score_bp": 1000
+      },
+      {
+        "positive": true,
+        "risk_class": "evolution",
+        "sample_id": "s1",
+        "score_bp": 9000
+      },
+      {
+        "positive": true,
+        "risk_class": "evolution",
+        "sample_id": "s2",
+        "score_bp": 8000
+      },
+      {
+        "positive": false,
+        "risk_class": "evolution",
+        "sample_id": "s3",
+        "score_bp": 2000
+      },
+      {
+        "positive": false,
+        "risk_class": "evolution",
+        "sample_id": "s4",
+        "score_bp": 4000
+      }
+    ]
+  },
+  "frozen_artifact": {
+    "canonical_json": "{\"audit_notes\":[\"split conformal coverage assumes exchangeability; adversarial shift is tracked by ACI instead of overclaiming distribution-free guarantees\",\"all scores, nonconformity values, and quantiles are integer basis points\"],\"corpus_hash\":\"sha256:31a0705613c893c1e67f772b1db5ea7ecdd3a8b56efd933e51e2f0bd010bfc67\",\"event_codes\":[\"FN-CALIB-002\",\"FN-CONFORMAL-001\"],\"generated_at\":\"1970-01-01T00:00:00Z\",\"quantiles\":[{\"finite_sample_coverage_floor_bp\":6666,\"max_nonconformity_bp\":4000,\"min_nonconformity_bp\":1000,\"negative_count\":1,\"positive_count\":1,\"quantile_bp\":4000,\"quantile_rank\":2,\"risk_class\":\"camouflage\",\"sample_count\":2,\"target_alpha_bp\":2000},{\"finite_sample_coverage_floor_bp\":8000,\"max_nonconformity_bp\":4000,\"min_nonconformity_bp\":1000,\"negative_count\":2,\"positive_count\":2,\"quantile_bp\":4000,\"quantile_rank\":4,\"risk_class\":\"evolution\",\"sample_count\":4,\"target_alpha_bp\":2000}],\"risk_class_count\":2,\"sample_count\":6,\"sample_schema_version\":\"conformal.score_sample.v1\",\"schema_version\":\"conformal.frozen_quantile_artifact.v1\",\"target_alpha_bp\":2000}",
+    "object": {
+      "audit_notes": [
+        "split conformal coverage assumes exchangeability; adversarial shift is tracked by ACI instead of overclaiming distribution-free guarantees",
+        "all scores, nonconformity values, and quantiles are integer basis points"
+      ],
+      "corpus_hash": "sha256:31a0705613c893c1e67f772b1db5ea7ecdd3a8b56efd933e51e2f0bd010bfc67",
+      "event_codes": [
+        "FN-CALIB-002",
+        "FN-CONFORMAL-001"
+      ],
+      "generated_at": "1970-01-01T00:00:00Z",
+      "quantiles": [
+        {
+          "finite_sample_coverage_floor_bp": 6666,
+          "max_nonconformity_bp": 4000,
+          "min_nonconformity_bp": 1000,
+          "negative_count": 1,
+          "positive_count": 1,
+          "quantile_bp": 4000,
+          "quantile_rank": 2,
+          "risk_class": "camouflage",
+          "sample_count": 2,
+          "target_alpha_bp": 2000
+        },
+        {
+          "finite_sample_coverage_floor_bp": 8000,
+          "max_nonconformity_bp": 4000,
+          "min_nonconformity_bp": 1000,
+          "negative_count": 2,
+          "positive_count": 2,
+          "quantile_bp": 4000,
+          "quantile_rank": 4,
+          "risk_class": "evolution",
+          "sample_count": 4,
+          "target_alpha_bp": 2000
+        }
+      ],
+      "risk_class_count": 2,
+      "sample_count": 6,
+      "sample_schema_version": "conformal.score_sample.v1",
+      "schema_version": "conformal.frozen_quantile_artifact.v1",
+      "target_alpha_bp": 2000
+    }
+  },
+  "risk_set": {
+    "canonical_json": "{\"event_code\":\"FN-CONFORMAL-001\",\"included_labels\":[\"positive\"],\"quantile_bp\":4000,\"risk_class\":\"evolution\",\"sample_id\":\"candidate\",\"score_bp\":8500}",
+    "object": {
+      "event_code": "FN-CONFORMAL-001",
+      "included_labels": [
+        "positive"
+      ],
+      "quantile_bp": 4000,
+      "risk_class": "evolution",
+      "sample_id": "candidate",
+      "score_bp": 8500
+    }
+  },
+  "expected_verifier_events": [
+    "FN-VSDK-CONFORMAL-RECOMPUTE-START",
+    "FN-VSDK-CONFORMAL-QUANTILES-RECOMPUTED",
+    "FN-VSDK-CONFORMAL-ARTIFACT-PASS"
+  ],
+  "validation": {
+    "passed": [
+      "rustfmt --edition 2024 --check sdk/verifier/src/calibration.rs",
+      "git diff --check",
+      "rch exec -- cargo check -p frankenengine-verifier-sdk --lib",
+      "rch exec -- cargo clippy -p frankenengine-verifier-sdk --lib -- -D warnings"
+    ],
+    "blocked": [
+      {
+        "command": "rch exec -- cargo test -p frankenengine-verifier-sdk calibration",
+        "reason": "Remote cargo test failed before SDK tests because dev-dependency frankenengine-node pulled sibling /dp/frankenpandas/crates/fp-io, where fp_frame::to_datetime_values_with_options is unresolved and IndexLabel::{Float64,Bool} are absent."
+      }
+    ]
+  }
+}
