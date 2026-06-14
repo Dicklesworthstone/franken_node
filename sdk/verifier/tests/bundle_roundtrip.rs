@@ -13,9 +13,10 @@ use frankenengine_verifier_sdk::bundle::{
     FN_VSDK_NON_EXFILTRATION_START, FlowPolicyVerdict, NonExfiltrationClaim,
     REPLAY_BUNDLE_HASH_ALGORITHM, REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent,
     capability_proof_canonical_bytes, capability_proof_hash, capability_receipt_canonical_bytes,
-    capability_receipt_hash, hash, render_effect_chain_transcript, seal, seal_capability_proof,
-    seal_capability_receipt, serialize, verify, verify_capability_receipt_schema,
-    verify_effect_chain, verify_non_exfiltration_claim,
+    capability_receipt_hash, hash, render_capability_verification_transcript,
+    render_effect_chain_transcript, seal, seal_capability_proof, seal_capability_receipt,
+    serialize, verify, verify_capability_receipt_schema, verify_effect_chain,
+    verify_non_exfiltration_claim,
 };
 use frankenengine_verifier_sdk::counterfactual::{
     CounterfactualCapabilityDecision, CounterfactualCapabilityError,
@@ -35,6 +36,8 @@ const DENIED_PRE_BYTES: &[u8] = b"connect 169.254.169.254:80";
 const DENIED_ARGS_BYTES: &[u8] = br#"{"host":"metadata.internal","port":80}"#;
 const EFFECT_CHAIN_TRANSCRIPT_GOLDEN: &str =
     include_str!("fixtures/effect_chain_transcript.golden");
+const CAPABILITY_VERIFICATION_TRANSCRIPT_GOLDEN: &str =
+    include_str!("fixtures/capability_verification_transcript.golden");
 const CAPABILITY_PROOF_CANONICAL_GOLDEN: &str = concat!(
     "{\"actor\":\"agent://builder\",\"audience\":\"verifier://capability-test\",\"epoch\":42,",
     "\"evidence_refs\":[\"effect-chain:head:001\",\"revocation:fresh:001\"],",
@@ -219,7 +222,7 @@ fn effect_chain_sdk_proves_selective_disclosure_non_exfiltration_claims() {
 }
 
 #[test]
-fn non_exfiltration_claim_rejects_unauthorized_external_declassification() {
+fn non_exfiltration_claim_rejects_unauthorized_external_declassification() -> Result<(), String> {
     let mut bundle = effect_chain_replay_bundle();
     let mut egress_receipt = timeline_effect_entry(&bundle, 1).receipt;
     egress_receipt.policy_outcome = EffectPolicyOutcome::Allowed {
@@ -239,16 +242,18 @@ fn non_exfiltration_claim_rejects_unauthorized_external_declassification() {
         &operator_secret_external_sink_claim(Vec::new()),
     )
     .expect_err("undisclosed external declassification must fail closed");
-    assert!(matches!(
-        err,
+    match err {
         BundleError::NonExfiltrationViolation {
             index: 1,
-            ref effect_kind,
-            ref label_set_commitment,
+            effect_kind,
+            label_set_commitment,
             ..
-        } if effect_kind == "http_request"
-            && label_set_commitment == &lineage_hash("labels:operator_secret")
-    ));
+        } => {
+            assert_eq!(effect_kind, "http_request");
+            assert_eq!(label_set_commitment, lineage_hash("labels:operator_secret"));
+        }
+        other => return Err(format!("unexpected non-exfiltration error: {other:?}")),
+    }
 
     let proof = verify_non_exfiltration_claim(
         &bundle_bytes,
@@ -266,6 +271,7 @@ fn non_exfiltration_claim_rejects_unauthorized_external_declassification() {
         Some("ifl-declass:http-egress-operator-secret")
     );
     assert_eq!(egress_proof.proof_outcome, "authorized_declassification");
+    Ok(())
 }
 
 #[test]
@@ -313,6 +319,8 @@ fn capability_proof_and_receipt_schemas_are_canonical_and_bound() {
             FN_VSDK_CAPABILITY_SCHEMA_PASS.to_string(),
         ]
     );
+    let transcript = render_capability_verification_transcript(&verification);
+    assert_eq!(transcript, CAPABILITY_VERIFICATION_TRANSCRIPT_GOLDEN);
 }
 
 #[test]
@@ -346,6 +354,19 @@ fn capability_receipt_schema_fails_closed_on_stale_or_tampered_bindings() {
         BundleError::CapabilityReceiptMismatch { field: "actor", .. }
     ));
 
+    let mut wrong_scope = receipt.clone();
+    wrong_scope.exercised_scope.resource = "https://api.example.test/v1/private".to_string();
+    seal_capability_receipt(&mut wrong_scope).expect("tampered scope receipt should self-hash");
+    let err = verify_capability_receipt_schema(&proof, &wrong_scope)
+        .expect_err("out-of-proof exercised scope must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::CapabilityReceiptMismatch {
+            field: "exercised_scope",
+            ..
+        }
+    ));
+
     let mut wrong_postcondition = receipt;
     wrong_postcondition
         .observed_postconditions
@@ -366,7 +387,8 @@ fn capability_receipt_schema_fails_closed_on_stale_or_tampered_bindings() {
 }
 
 #[test]
-fn verifier_sdk_checks_capability_proofs_and_counterfactual_decisions_offline() {
+fn verifier_sdk_checks_capability_proofs_and_counterfactual_decisions_offline() -> Result<(), String>
+{
     let proof = capability_proof_fixture();
     let receipt = capability_receipt_fixture(&proof);
     let sdk = VerifierSdk::new("verifier://capability-test");
@@ -384,6 +406,42 @@ fn verifier_sdk_checks_capability_proofs_and_counterfactual_decisions_offline() 
         receipt_verification.scope, receipt.exercised_scope,
         "receipt verification must disclose the exercised capability scope"
     );
+
+    let mut stale_proof = proof.clone();
+    stale_proof.revocation_freshness = CapabilityRevocationFreshness::Stale {
+        last_checked_at_millis: 1_774_999_000_000,
+        evidence_ref: "revocation:stale:001".to_string(),
+    };
+    seal_capability_proof(&mut stale_proof).expect("stale proof should still self-hash");
+    let err = sdk
+        .verify_capability_receipt(&stale_proof, &receipt)
+        .expect_err("SDK receipt verification must fail closed on stale revocation evidence");
+    assert!(matches!(
+        err,
+        VerifierSdkError::Bundle(BundleError::InvalidCapabilityField {
+            field: "revocation_freshness",
+            ..
+        })
+    ));
+
+    let mut wrong_postcondition = receipt.clone();
+    wrong_postcondition
+        .observed_postconditions
+        .get_mut(1)
+        .expect("fixture should include response_body postcondition")
+        .expected_hash = lineage_hash("post:response_body:sdk-tampered");
+    seal_capability_receipt(&mut wrong_postcondition)
+        .expect("tampered postcondition receipt should self-hash");
+    let err = sdk
+        .verify_capability_receipt(&proof, &wrong_postcondition)
+        .expect_err("SDK receipt verification must fail closed on postcondition drift");
+    assert!(matches!(
+        err,
+        VerifierSdkError::Bundle(BundleError::CapabilityReceiptMismatch {
+            field: "observed_postconditions",
+            ..
+        })
+    ));
 
     let request = capability_counterfactual_request(&proof);
     let allowed = sdk
@@ -423,30 +481,37 @@ fn verifier_sdk_checks_capability_proofs_and_counterfactual_decisions_offline() 
             CounterfactualCapabilityDecision::Allow,
         )
         .expect_err("counterfactual allow must fail closed for an out-of-scope request");
-    assert!(matches!(
-        err,
+    match err {
         VerifierSdkError::CounterfactualCapability(
             CounterfactualCapabilityError::DecisionMismatch {
-                ref expected,
-                ref actual,
-                ref reason,
+                expected,
+                actual,
+                reason,
             },
-        ) if expected == "deny"
-            && actual == "allow"
-            && reason == "requested scope is outside capability proof"
-    ));
+        ) => {
+            assert_eq!(expected, "deny");
+            assert_eq!(actual, "allow");
+            assert_eq!(reason, "requested scope is outside capability proof");
+        }
+        other => {
+            return Err(format!(
+                "unexpected counterfactual capability error: {other:?}"
+            ));
+        }
+    }
 
     let foreign_sdk = VerifierSdk::new("verifier://other");
     let err = foreign_sdk
         .verify_capability_proof(&proof)
         .expect_err("foreign verifier audience must be rejected");
-    assert!(matches!(
-        err,
-        VerifierSdkError::SessionVerifierMismatch {
-            ref expected,
-            ref actual,
-        } if expected == "verifier://other" && actual == "verifier://capability-test"
-    ));
+    match err {
+        VerifierSdkError::SessionVerifierMismatch { expected, actual } => {
+            assert_eq!(expected, "verifier://other");
+            assert_eq!(actual, "verifier://capability-test");
+        }
+        other => return Err(format!("unexpected verifier mismatch error: {other:?}")),
+    }
+    Ok(())
 }
 
 #[test]
@@ -472,7 +537,8 @@ fn third_party_style_fnbundle_reader_uses_facade_and_prints_verified_effects() {
 }
 
 #[test]
-fn effect_chain_verification_rejects_tampered_receipts_bytes_order_and_versions() {
+fn effect_chain_verification_rejects_tampered_receipts_bytes_order_and_versions()
+-> Result<(), String> {
     let mut receipt_tampered = effect_chain_replay_bundle();
     let mut first_entry = timeline_effect_entry(&receipt_tampered, 0);
     first_entry.receipt.trace_id = "forged-trace".to_string();
@@ -528,14 +594,12 @@ fn effect_chain_verification_rejects_tampered_receipts_bytes_order_and_versions(
     set_timeline_effect_entry(&mut unsupported_receipt_schema, 0, first_entry);
     let err = verify_effect_chain_bytes(&unsupported_receipt_schema)
         .expect_err("unknown effect receipt schema must fail closed");
-    assert!(matches!(
-        err,
+    match err {
         BundleError::UnsupportedEffectReceiptSchema {
-            index: 0,
-            ref actual,
-            ..
-        } if actual == "effect-receipt-v9.0"
-    ));
+            index: 0, actual, ..
+        } => assert_eq!(actual, "effect-receipt-v9.0"),
+        other => return Err(format!("unexpected effect receipt schema error: {other:?}")),
+    }
 
     let mut malformed_lineage = effect_chain_replay_bundle();
     let mut first_entry = timeline_effect_entry(&malformed_lineage, 0);
@@ -551,6 +615,7 @@ fn effect_chain_verification_rejects_tampered_receipts_bytes_order_and_versions(
             ..
         }
     ));
+    Ok(())
 }
 
 fn canonical_replay_bundle() -> ReplayBundle {

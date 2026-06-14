@@ -9,6 +9,7 @@ use std::fmt;
 
 use chrono::{DateTime, FixedOffset};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use hex::FromHex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -1631,6 +1632,38 @@ pub fn verify_capability_receipt_schema(
     })
 }
 
+/// Render a deterministic operator transcript for a verified capability use.
+#[must_use]
+pub fn render_capability_verification_transcript(report: &CapabilityReceiptVerification) -> String {
+    let mut transcript = String::new();
+    transcript.push_str(&format!(
+        "{FN_VSDK_CAPABILITY_SCHEMA_START} proof_id={} receipt_id={} actor={} audience={}\n",
+        report.proof_id, report.receipt_id, report.actor, report.audience
+    ));
+    transcript.push_str(&format!(
+        "{FN_VSDK_CAPABILITY_PROOF_VERIFIED} proof_hash={} policy_profile={} epoch={} side_effect_kind={} evidence_refs={}\n",
+        report.proof_hash,
+        report.policy_profile,
+        report.epoch,
+        report.side_effect_kind,
+        report.evidence_ref_count
+    ));
+    transcript.push_str(&format!(
+        "{FN_VSDK_CAPABILITY_RECEIPT_VERIFIED} receipt_hash={} scope_capability={} scope_access={} scope_resource={} effect_receipt_chain_hash={} postconditions={}\n",
+        report.receipt_hash,
+        report.scope.capability,
+        report.scope.access,
+        report.scope.resource,
+        report.effect_receipt_chain_hash,
+        report.postcondition_count
+    ));
+    transcript.push_str(&format!(
+        "{FN_VSDK_CAPABILITY_SCHEMA_PASS} proof_id={} receipt_id={}\n",
+        report.proof_id, report.receipt_id
+    ));
+    transcript
+}
+
 fn validate_capability_proof_payload(proof: &CapabilityProof) -> BundleResult<()> {
     if proof.schema_version != CAPABILITY_PROOF_SCHEMA_VERSION {
         return Err(BundleError::UnsupportedCapabilityProofSchema {
@@ -2419,7 +2452,7 @@ fn decode_canonical_artifact_hex(path: &str, bytes_hex: &str) -> Result<Vec<u8>,
             source: "artifact bytes_hex must use canonical lowercase hex".to_string(),
         });
     }
-    hex::decode(bytes_hex).map_err(|source| BundleError::InvalidArtifactHex {
+    Vec::from_hex(bytes_hex).map_err(|source| BundleError::InvalidArtifactHex {
         path: path.to_string(),
         source: source.to_string(),
     })

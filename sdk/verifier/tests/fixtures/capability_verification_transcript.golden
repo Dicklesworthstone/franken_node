@@ -1,0 +1,4 @@
+FN-VSDK-CAPABILITY-SCHEMA-START proof_id=cap-proof-001 receipt_id=cap-receipt-001 actor=agent://builder audience=verifier://capability-test
+FN-VSDK-CAPABILITY-PROOF-VERIFIED proof_hash=sha256:d0563896cedd3f6593a94d0e564b564dfe6d0c8df28de2f1cde0ca0597d7e6ed policy_profile=strict epoch=42 side_effect_kind=http_request evidence_refs=2
+FN-VSDK-CAPABILITY-RECEIPT-VERIFIED receipt_hash=sha256:c1fbabac7f4542e057a8299e0b5a1309e1cec466aa1e665fd39d95506824445e scope_capability=http_request scope_access=egress scope_resource=https://api.example.test/v1/data effect_receipt_chain_hash=sha256:21c645997bfda31f5752ca59026f067d63d575a0909807393f9329e447f1053a postconditions=2
+FN-VSDK-CAPABILITY-SCHEMA-PASS proof_id=cap-proof-001 receipt_id=cap-receipt-001
