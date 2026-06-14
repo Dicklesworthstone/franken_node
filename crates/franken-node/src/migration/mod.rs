@@ -2629,11 +2629,47 @@ struct EsmImportRewrite {
     manual_findings: Vec<String>,
 }
 
+const COMMONJS_TO_ESM_REWRITE_RULE_ID: &str = "rewrite:cjs-require-to-esm";
+const COMMONJS_TO_ESM_REWRITE_RULE_VERSION: &str = "1.0.0";
+const COMMONJS_TO_ESM_PRECONDITION_ID: &str = "precondition:cjs-static-require-no-dynamic-no-cache";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommonJsRewritePreconditionProof {
+    rule_id: &'static str,
+    rule_version: &'static str,
+    precondition_id: &'static str,
+    parser_rewrite_count: usize,
+    line_rewrite_count: usize,
+    failures: Vec<String>,
+}
+
+impl CommonJsRewritePreconditionProof {
+    fn passed(&self) -> bool {
+        self.failures.is_empty() && self.parser_rewrite_count == self.line_rewrite_count
+    }
+
+    fn rule_context(&self) -> String {
+        format!(
+            "{}@{} {}",
+            self.rule_id, self.rule_version, self.precondition_id
+        )
+    }
+
+    fn manual_findings(&self) -> Vec<String> {
+        let rule_context = self.rule_context();
+        self.failures
+            .iter()
+            .map(|failure| format!("{failure}; refused by {rule_context}"))
+            .collect()
+    }
+}
+
 #[derive(Debug, Default)]
 struct CommonJsParserAnalysis {
     static_require_declarations: usize,
     dynamic_require_calls: usize,
     create_require_calls: usize,
+    require_cache_accesses: usize,
     dynamic_import_calls: usize,
     commonjs_export_objects: usize,
     risky_commonjs_exports: usize,
@@ -2675,66 +2711,20 @@ fn rewrite_commonjs_requires(source: &str) -> CommonJsRewrite {
         }
     }
 
-    let mut manual_findings = BTreeSet::new();
-    if has_esm_syntax && (rewrite_count > 0 || risky_requires > 0 || risky_exports > 0) {
-        manual_findings.insert(
-            "ESM/CJS module mixing detected; automatic require() rewrite skipped".to_string(),
-        );
-    }
-    if let Err(reason) = parser_analysis.as_ref() {
-        manual_findings.insert(reason.clone());
-    }
-    if let Ok(analysis) = parser_analysis.as_ref() {
-        if analysis.dynamic_require_calls > 0 {
-            manual_findings.insert(format!(
-                "dynamic or non-literal require() usage detected in {} place(s); manual migration required",
-                analysis.dynamic_require_calls
-            ));
-        }
-        if analysis.create_require_calls > 0 {
-            manual_findings.insert(format!(
-                "createRequire() usage detected in {} place(s); manual migration required",
-                analysis.create_require_calls
-            ));
-        }
-        if analysis.dynamic_import_calls > 0 {
-            manual_findings.insert(format!(
-                "dynamic import() usage detected in {} place(s); manual migration required",
-                analysis.dynamic_import_calls
-            ));
-        }
-        if analysis.risky_commonjs_exports > 0 {
-            manual_findings.insert(
-                "CommonJS export assignment detected; manual ESM export migration required"
-                    .to_string(),
-            );
-        }
-        let parser_rewrite_count = analysis
-            .static_require_declarations
-            .saturating_add(analysis.commonjs_export_objects);
-        if parser_rewrite_count != rewrite_count && parser_rewrite_count > 0 {
-            manual_findings.insert(
-                "parser-backed CommonJS rewrite coverage mismatch; manual migration required"
-                    .to_string(),
-            );
-        }
-    }
-    if risky_exports > 0 {
-        manual_findings.insert(
-            "CommonJS export assignment detected; manual ESM export migration required".to_string(),
-        );
-    }
-    if risky_requires > 0 {
-        manual_findings.insert(format!(
-            "dynamic or non-literal require() usage detected in {risky_requires} place(s); manual migration required"
-        ));
-    }
+    let precondition_proof = prove_commonjs_to_esm_precondition(
+        parser_analysis.as_ref(),
+        has_esm_syntax,
+        rewrite_count,
+        risky_requires,
+        risky_exports,
+    );
+    let manual_findings = precondition_proof.manual_findings();
 
-    if !manual_findings.is_empty() || rewrite_count == 0 {
+    if !precondition_proof.passed() || rewrite_count == 0 {
         return CommonJsRewrite {
             rewritten_content: source.to_string(),
             rewrite_count: 0,
-            manual_findings: manual_findings.into_iter().collect(),
+            manual_findings,
         };
     }
 
@@ -2756,6 +2746,89 @@ fn rewrite_commonjs_requires(source: &str) -> CommonJsRewrite {
         rewritten_content,
         rewrite_count,
         manual_findings: Vec::new(),
+    }
+}
+
+fn prove_commonjs_to_esm_precondition(
+    parser_analysis: Result<&CommonJsParserAnalysis, &String>,
+    has_esm_syntax: bool,
+    line_rewrite_count: usize,
+    risky_requires: usize,
+    risky_exports: usize,
+) -> CommonJsRewritePreconditionProof {
+    let mut failures = BTreeSet::new();
+    let mut parser_rewrite_count = 0_usize;
+
+    if has_esm_syntax && (line_rewrite_count > 0 || risky_requires > 0 || risky_exports > 0) {
+        failures
+            .insert("ESM/CJS module mixing detected; automatic require() rewrite skipped".into());
+    }
+
+    match parser_analysis {
+        Ok(analysis) => {
+            parser_rewrite_count = analysis
+                .static_require_declarations
+                .saturating_add(analysis.commonjs_export_objects);
+            if analysis.dynamic_require_calls > 0 {
+                failures.insert(format!(
+                    "dynamic or non-literal require() usage detected in {} place(s); manual migration required",
+                    analysis.dynamic_require_calls
+                ));
+            }
+            if analysis.create_require_calls > 0 {
+                failures.insert(format!(
+                    "createRequire() usage detected in {} place(s); manual migration required",
+                    analysis.create_require_calls
+                ));
+            }
+            if analysis.require_cache_accesses > 0 {
+                failures.insert(format!(
+                    "require.cache access detected in {} place(s); manual migration required",
+                    analysis.require_cache_accesses
+                ));
+            }
+            if analysis.dynamic_import_calls > 0 {
+                failures.insert(format!(
+                    "dynamic import() usage detected in {} place(s); manual migration required",
+                    analysis.dynamic_import_calls
+                ));
+            }
+            if analysis.risky_commonjs_exports > 0 || risky_exports > 0 {
+                failures.insert(
+                    "CommonJS export assignment detected; manual ESM export migration required"
+                        .to_string(),
+                );
+            }
+            if parser_rewrite_count != line_rewrite_count {
+                failures.insert(
+                    "parser-backed CommonJS rewrite coverage mismatch; manual migration required"
+                        .to_string(),
+                );
+            }
+        }
+        Err(reason) => {
+            failures.insert(reason.clone());
+            if risky_exports > 0 {
+                failures.insert(
+                    "CommonJS export assignment detected; manual ESM export migration required"
+                        .to_string(),
+                );
+            }
+            if risky_requires > 0 {
+                failures.insert(format!(
+                    "dynamic or non-literal require() usage detected in {risky_requires} place(s); manual migration required"
+                ));
+            }
+        }
+    }
+
+    CommonJsRewritePreconditionProof {
+        rule_id: COMMONJS_TO_ESM_REWRITE_RULE_ID,
+        rule_version: COMMONJS_TO_ESM_REWRITE_RULE_VERSION,
+        precondition_id: COMMONJS_TO_ESM_PRECONDITION_ID,
+        parser_rewrite_count,
+        line_rewrite_count,
+        failures: failures.into_iter().collect(),
     }
 }
 
@@ -2921,6 +2994,7 @@ fn analyze_commonjs_js_node(node: Node<'_>, source: &[u8], analysis: &mut Common
     match node.kind() {
         "variable_declarator" => analyze_commonjs_variable_declarator(node, source, analysis),
         "call_expression" => analyze_commonjs_call_expression(node, source, analysis),
+        "member_expression" => analyze_commonjs_member_expression(node, source, analysis),
         "assignment_expression" => analyze_commonjs_assignment(node, source, analysis),
         _ => {}
     }
@@ -2973,6 +3047,22 @@ fn analyze_commonjs_call_expression(
         }
     } else if function_text == "createRequire" || function_text.ends_with(".createRequire") {
         analysis.create_require_calls = analysis.create_require_calls.saturating_add(1);
+    }
+}
+
+fn analyze_commonjs_member_expression(
+    node: Node<'_>,
+    source: &[u8],
+    analysis: &mut CommonJsParserAnalysis,
+) {
+    let Some(object) = node.child_by_field_name("object") else {
+        return;
+    };
+    let Some(property) = node.child_by_field_name("property") else {
+        return;
+    };
+    if js_node_text_eq(object, source, "require") && js_node_text_eq(property, source, "cache") {
+        analysis.require_cache_accesses = analysis.require_cache_accesses.saturating_add(1);
     }
 }
 
@@ -5726,6 +5816,21 @@ mod tests {
     }
 
     #[test]
+    fn commonjs_rewrite_precondition_proof_accepts_static_equivalence_class() {
+        let source = "const fs = require('fs');\nmodule.exports = { fs };\n";
+        let analysis = analyze_commonjs_with_js_parser(source).expect("parser analysis");
+        let proof = prove_commonjs_to_esm_precondition(Ok(&analysis), false, 2, 0, 0);
+
+        assert!(proof.passed());
+        assert_eq!(proof.rule_id, COMMONJS_TO_ESM_REWRITE_RULE_ID);
+        assert_eq!(proof.rule_version, COMMONJS_TO_ESM_REWRITE_RULE_VERSION);
+        assert_eq!(proof.precondition_id, COMMONJS_TO_ESM_PRECONDITION_ID);
+        assert_eq!(proof.parser_rewrite_count, 2);
+        assert_eq!(proof.line_rewrite_count, 2);
+        assert!(proof.manual_findings().is_empty());
+    }
+
+    #[test]
     fn rewrite_commonjs_requires_bails_on_computed_require() {
         let source = "const target = './plugin';\nconst plugin = require(target);\n";
 
@@ -5735,6 +5840,21 @@ mod tests {
         assert_eq!(rewrite.rewritten_content, source);
         assert!(rewrite.manual_findings.iter().any(|finding| {
             finding.contains("dynamic or non-literal require() usage detected")
+        }));
+    }
+
+    #[test]
+    fn rewrite_commonjs_requires_bails_on_require_cache_access() {
+        let source = "const fs = require('fs');\nconsole.log(require.cache, fs.existsSync('package.json'));\n";
+
+        let rewrite = rewrite_commonjs_requires(source);
+
+        assert_eq!(rewrite.rewrite_count, 0);
+        assert_eq!(rewrite.rewritten_content, source);
+        assert!(rewrite.manual_findings.iter().any(|finding| {
+            finding.contains("require.cache access detected")
+                && finding.contains(COMMONJS_TO_ESM_REWRITE_RULE_ID)
+                && finding.contains(COMMONJS_TO_ESM_PRECONDITION_ID)
         }));
     }
 
