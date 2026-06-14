@@ -96,6 +96,10 @@ fn prefix_for_display(value: &str) -> &str {
     value.get(..16).unwrap_or(value)
 }
 
+fn severity_matches(left: u32, right: u32) -> bool {
+    left.cmp(&right).is_eq()
+}
+
 // ---------------------------------------------------------------------------
 // Invariant identifiers
 // ---------------------------------------------------------------------------
@@ -649,12 +653,26 @@ pub struct SensitiveSourceCommitment {
     pub schema_version: String,
 }
 
+/// Binding proving that a sensitive-source commitment label was attached to a
+/// concrete lineage datum. This records commitments and identifiers, never
+/// source bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensitiveSourceBinding {
+    pub datum_id: String,
+    pub label_id: String,
+    pub descriptor_digest: String,
+    pub source_commitment: String,
+    pub schema_version: String,
+}
+
 /// Serializable snapshot of FlowLedger sensitive-source commitments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowLedgerSnapshot {
     pub snapshot_id: String,
     pub source_count: usize,
+    pub binding_count: usize,
     pub commitments: Vec<SensitiveSourceCommitment>,
+    pub bindings: Vec<SensitiveSourceBinding>,
     pub schema_version: String,
 }
 
@@ -670,6 +688,7 @@ struct SensitiveSourceCanonicalPayload<'a> {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlowLedger {
     sources: BTreeMap<String, SensitiveSourceCommitment>,
+    datum_bindings: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl FlowLedger {
@@ -678,6 +697,7 @@ impl FlowLedger {
     pub fn new() -> Self {
         Self {
             sources: BTreeMap::new(),
+            datum_bindings: BTreeMap::new(),
         }
     }
 
@@ -691,6 +711,12 @@ impl FlowLedger {
     #[must_use]
     pub fn commitment(&self, label_id: &str) -> Option<&SensitiveSourceCommitment> {
         self.sources.get(label_id)
+    }
+
+    /// Return the sensitive-source labels attached to a datum by this ledger.
+    #[must_use]
+    pub fn labels_for_datum(&self, datum_id: &str) -> Option<&BTreeSet<String>> {
+        self.datum_bindings.get(datum_id)
     }
 
     /// Deterministically derive the commitment that would be inserted for a
@@ -785,46 +811,104 @@ impl FlowLedger {
                 });
             }
             if !graph.labels.contains_key(&label_id) {
-                let commitment_prefix = prefix_for_display(&existing.source_commitment);
                 graph.register_label(TaintLabel {
                     id: label_id.clone(),
-                    description: format!(
-                        "sensitive source {} commitment {}",
-                        existing.descriptor.source_class.as_str(),
-                        commitment_prefix
-                    ),
+                    description: Self::label_description(existing),
                     severity: existing.descriptor.severity,
                 });
             }
             graph.assign_taint(datum_id, &label_id)?;
+            self.record_binding(datum_id, &label_id);
             return Ok(label_id);
         }
 
-        let commitment_prefix = prefix_for_display(&commitment.source_commitment);
         graph.register_label(TaintLabel {
             id: label_id.clone(),
-            description: format!(
-                "sensitive source {} commitment {}",
-                commitment.descriptor.source_class.as_str(),
-                commitment_prefix
-            ),
+            description: Self::label_description(&commitment),
             severity: commitment.descriptor.severity,
         });
         graph.assign_taint(datum_id, &label_id)?;
+        self.record_binding(datum_id, &label_id);
         self.sources.insert(label_id.clone(), commitment);
         Ok(label_id)
+    }
+
+    /// Verify that a registered sensitive-source label is bound both in this
+    /// ledger and in the lineage graph.
+    #[must_use]
+    pub fn verify_graph_binding(
+        &self,
+        graph: &LineageGraph,
+        datum_id: &str,
+        label_id: &str,
+    ) -> bool {
+        let Some(commitment) = self.sources.get(label_id) else {
+            return false;
+        };
+        let Some(bound_labels) = self.datum_bindings.get(datum_id) else {
+            return false;
+        };
+        if !bound_labels.contains(label_id) {
+            return false;
+        }
+        let Some(taint_set) = graph.get_taint_set(datum_id) else {
+            return false;
+        };
+        let Some(label) = graph.labels.get(label_id) else {
+            return false;
+        };
+
+        taint_set.contains(label_id)
+            && severity_matches(label.severity, commitment.descriptor.severity)
+            && label.description == Self::label_description(commitment)
     }
 
     /// Export a deterministic FlowLedger snapshot.
     #[must_use]
     pub fn snapshot(&self, snapshot_id: &str) -> FlowLedgerSnapshot {
         let _event = EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED;
+        let bindings = self.binding_records();
         FlowLedgerSnapshot {
             snapshot_id: snapshot_id.to_string(),
             source_count: self.sources.len(),
+            binding_count: bindings.len(),
             commitments: self.sources.values().cloned().collect(),
+            bindings,
             schema_version: FLOW_LEDGER_SCHEMA_VERSION.to_string(),
         }
+    }
+
+    fn record_binding(&mut self, datum_id: &str, label_id: &str) {
+        self.datum_bindings
+            .entry(datum_id.to_string())
+            .or_default()
+            .insert(label_id.to_string());
+    }
+
+    fn binding_records(&self) -> Vec<SensitiveSourceBinding> {
+        self.datum_bindings
+            .iter()
+            .flat_map(|(datum_id, labels)| {
+                labels.iter().filter_map(move |label_id| {
+                    let commitment = self.sources.get(label_id)?;
+                    Some(SensitiveSourceBinding {
+                        datum_id: datum_id.clone(),
+                        label_id: label_id.clone(),
+                        descriptor_digest: commitment.descriptor_digest.clone(),
+                        source_commitment: commitment.source_commitment.clone(),
+                        schema_version: FLOW_LEDGER_SCHEMA_VERSION.to_string(),
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn label_description(commitment: &SensitiveSourceCommitment) -> String {
+        format!(
+            "sensitive source {} commitment {}",
+            commitment.descriptor.source_class.as_str(),
+            prefix_for_display(&commitment.source_commitment)
+        )
     }
 }
 
@@ -2882,6 +2966,28 @@ mod tests {
         assert_eq!(ledger.source_count(), 1);
         assert!(graph.get_taint_set("datum-a").unwrap().contains(&first));
         assert!(graph.get_taint_set("datum-b").unwrap().contains(&first));
+        assert!(ledger.labels_for_datum("datum-a").unwrap().contains(&first));
+        assert!(ledger.verify_graph_binding(&graph, "datum-a", &first));
+        assert!(ledger.verify_graph_binding(&graph, "datum-b", &first));
+    }
+
+    #[test]
+    fn flow_ledger_binding_verification_fails_when_graph_is_detached() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let label_id = ledger
+            .register_sensitive_source(
+                &mut graph,
+                "datum-secret",
+                sensitive_descriptor(BTreeMap::new()),
+                b"salt-v1",
+            )
+            .unwrap();
+        let detached_graph = LineageGraph::new(default_config());
+
+        assert!(!ledger.verify_graph_binding(&detached_graph, "datum-secret", &label_id));
+        assert!(!ledger.verify_graph_binding(&graph, "other-datum", &label_id));
+        assert!(!ledger.verify_graph_binding(&graph, "datum-secret", "missing-label"));
     }
 
     #[test]
@@ -2942,8 +3048,88 @@ mod tests {
 
         assert_eq!(snapshot.snapshot_id, "flow-ledger-snap-1");
         assert_eq!(snapshot.source_count, 2);
+        assert_eq!(snapshot.binding_count, 2);
         assert_eq!(snapshot.schema_version, FLOW_LEDGER_SCHEMA_VERSION);
         assert_eq!(ids, sorted_ids);
+        assert_eq!(snapshot.bindings.len(), 2);
+        assert_eq!(
+            snapshot.bindings[0].schema_version,
+            FLOW_LEDGER_SCHEMA_VERSION
+        );
+        assert_ne!(snapshot.bindings[0].datum_id, snapshot.bindings[1].datum_id);
+    }
+
+    #[test]
+    fn flow_ledger_snapshot_binds_commitments_to_lineage_datums() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let label_id = ledger
+            .register_sensitive_source(
+                &mut graph,
+                "datum-secret",
+                sensitive_descriptor(BTreeMap::from([(
+                    "display_name".to_string(),
+                    "operator credential".to_string(),
+                )])),
+                b"salt-v1",
+            )
+            .unwrap();
+
+        let snapshot = ledger.snapshot("flow-ledger-snap-bindings");
+        let binding = snapshot.bindings.first().unwrap();
+        let commitment = ledger.commitment(&label_id).unwrap();
+        let label = graph.labels.get(&label_id).unwrap();
+
+        assert_eq!(snapshot.binding_count, 1);
+        assert_eq!(binding.datum_id, "datum-secret");
+        assert_eq!(binding.label_id, label_id);
+        assert_eq!(binding.descriptor_digest, commitment.descriptor_digest);
+        assert_eq!(binding.source_commitment, commitment.source_commitment);
+        assert!(!label.description.contains("salt-v1"));
+        assert!(!label.description.contains(&commitment.descriptor.digest));
+        assert!(ledger.verify_graph_binding(&graph, "datum-secret", &label_id));
+    }
+
+    #[test]
+    fn flow_ledger_supports_all_sensitive_source_classes_as_committed_labels() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let classes = [
+            SensitiveSourceClass::EnvVar,
+            SensitiveSourceClass::SecretStore,
+            SensitiveSourceClass::TokenFile,
+            SensitiveSourceClass::PrivatePath,
+            SensitiveSourceClass::TrustRoot,
+            SensitiveSourceClass::OperatorConfig,
+            SensitiveSourceClass::SensitiveNetworkResponse,
+        ];
+
+        for (index, source_class) in classes.iter().cloned().enumerate() {
+            let mut descriptor = sensitive_descriptor(BTreeMap::from([(
+                "classification".to_string(),
+                "selective-disclosure-only".to_string(),
+            )]));
+            descriptor.source_class = source_class.clone();
+            descriptor.epoch = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+            descriptor.digest = format!("sha256:{:064x}", index + 1);
+            let digest = descriptor.digest.clone();
+            let datum_id = format!("datum-{index}");
+            let salt = format!("salt-{index}");
+
+            let label_id = ledger
+                .register_sensitive_source(&mut graph, &datum_id, descriptor, salt.as_bytes())
+                .unwrap();
+            let label = graph.labels.get(&label_id).unwrap();
+
+            assert!(label_id.starts_with(&format!("ifl-src:{}:", source_class.as_str())));
+            assert!(ledger.verify_graph_binding(&graph, &datum_id, &label_id));
+            assert!(!label.description.contains(&digest));
+            assert!(!label.description.contains(&salt));
+        }
+
+        let snapshot = ledger.snapshot("flow-ledger-all-classes");
+        assert_eq!(snapshot.source_count, classes.len());
+        assert_eq!(snapshot.binding_count, classes.len());
     }
 
     #[test]
