@@ -294,6 +294,10 @@ pub struct RunArgs {
     /// and results are compared. Divergence blocks execution.
     #[arg(long)]
     pub lockstep_preflight: bool,
+
+    /// Run the canonical first-tranche compat-op oracle before execution.
+    #[arg(long)]
+    pub compat_preflight: bool,
 }
 
 impl RunArgs {

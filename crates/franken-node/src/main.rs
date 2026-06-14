@@ -686,6 +686,8 @@ struct RunExecutionReceiptCore {
     telemetry_summary: Option<RunExecutionTelemetrySummary>,
     ssrf_violations: Vec<String>,
     lockstep_verdict: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compat_preflight: Option<serde_json::Value>,
     violation_count: usize,
     auto_quarantined_extensions: Vec<String>,
 }
@@ -6135,6 +6137,133 @@ fn parse_runtime_override(raw: Option<&str>) -> Result<Option<config::PreferredR
     .transpose()
 }
 
+#[cfg(feature = "control-plane")]
+fn sanitize_run_trace_segment(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "run".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[cfg(feature = "control-plane")]
+fn run_compat_preflight_report(
+    project_root: &Path,
+    trace_id: &str,
+    requested_runtime: config::PreferredRuntime,
+) -> Result<serde_json::Value> {
+    use frankenengine_node::api::compat_conformance::{
+        COMPAT_CONFORMANCE_SCHEMA, ConformanceConfig, DEFAULT_HARNESS_TIMEOUT_MS, FrankenLeg,
+        LockstepSignal, run_first_tranche_conformance,
+    };
+
+    let state_dir = ensure_state_dir(project_root)?;
+    let fixture_dir = state_dir
+        .join("compat-divergence-fixtures")
+        .join(sanitize_run_trace_segment(trace_id));
+    let sandbox = tempfile::Builder::new()
+        .prefix("franken_node_run_compat_")
+        .tempdir()
+        .context("failed creating run compat preflight sandbox")?;
+    let franken = FrankenLeg::new(sandbox.path());
+    let verdicts = run_first_tranche_conformance(
+        &franken,
+        &[],
+        &ConformanceConfig {
+            timeout_ms: DEFAULT_HARNESS_TIMEOUT_MS,
+            fixture_output_dir: Some(fixture_dir.clone()),
+        },
+    );
+
+    let mut total_cases = 0usize;
+    let mut total_divergences = 0usize;
+    let mut red_operations = Vec::new();
+    let mut emitted_fixtures = Vec::new();
+    let mut operations = Vec::new();
+
+    for verdict in &verdicts {
+        total_cases += verdict.cases_tested;
+        total_divergences += verdict.oracle.stats.total_divergences;
+        if verdict.signal == LockstepSignal::Red {
+            red_operations.push(verdict.operation_id.clone());
+        }
+        emitted_fixtures.extend(verdict.emitted_fixtures.clone());
+        operations.push(serde_json::json!({
+            "operation_id": verdict.operation_id,
+            "signal": verdict.signal.as_str(),
+            "cases_tested": verdict.cases_tested,
+            "reference_runtimes": verdict.reference_runtimes,
+            "total_divergences": verdict.oracle.stats.total_divergences,
+            "high_risk_divergences": verdict.oracle.stats.high_risk_count,
+            "diverged_boundaries": verdict.diverged_boundaries,
+            "emitted_fixtures": verdict.emitted_fixtures,
+            "skipped_legs": verdict.skipped_legs,
+        }));
+    }
+
+    let status = if red_operations.is_empty() {
+        "green"
+    } else {
+        "red"
+    };
+    let report = serde_json::json!({
+        "schema_version": "run-compat-preflight-v1.0",
+        "compat_conformance_schema": COMPAT_CONFORMANCE_SCHEMA,
+        "trace_id": trace_id,
+        "requested_runtime": requested_runtime.to_string(),
+        "status": status,
+        "operation_count": operations.len(),
+        "total_cases": total_cases,
+        "total_divergences": total_divergences,
+        "red_operations": red_operations,
+        "fixture_output_dir": fixture_dir.display().to_string(),
+        "emitted_fixtures": emitted_fixtures,
+        "operations": operations,
+    });
+
+    if !report["red_operations"]
+        .as_array()
+        .is_some_and(|operations| operations.is_empty())
+    {
+        return Err(ActionableError::new(
+            format!(
+                "run compat preflight diverged for operation(s): {}",
+                report["red_operations"]
+            ),
+            format!(
+                "inspect divergence fixtures under {} and fix the compat-op implementation before rerunning",
+                fixture_dir.display()
+            ),
+        )
+        .into());
+    }
+
+    Ok(report)
+}
+
+#[cfg(not(feature = "control-plane"))]
+fn run_compat_preflight_report(
+    _project_root: &Path,
+    _trace_id: &str,
+    _requested_runtime: config::PreferredRuntime,
+) -> Result<serde_json::Value> {
+    Err(ActionableError::new(
+        "run compat preflight requires the control-plane feature",
+        "rebuild franken-node with --features control-plane or omit --compat-preflight",
+    )
+    .into())
+}
+
 fn write_migration_report_file(
     rendered: &str,
     out_path: &Path,
@@ -7356,6 +7485,7 @@ fn build_run_execution_receipt(
     ssrf_violations: Vec<String>,
     auto_quarantined_extensions: Vec<String>,
     lockstep_verdict: Option<serde_json::Value>,
+    compat_preflight: Option<serde_json::Value>,
 ) -> Result<RunExecutionReceipt> {
     let violation_count = ssrf_violations.len();
     let mut core = RunExecutionReceiptCore {
@@ -7374,6 +7504,7 @@ fn build_run_execution_receipt(
         telemetry_summary: summarize_run_telemetry(dispatch.telemetry.as_ref()),
         ssrf_violations,
         lockstep_verdict,
+        compat_preflight,
         violation_count,
         auto_quarantined_extensions,
     };
@@ -11080,6 +11211,8 @@ struct RunStructuredLogLine {
     trace_id: String,
     span_id: String,
     surface: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
 }
 
 fn run_structured_log_line(
@@ -11089,6 +11222,17 @@ fn run_structured_log_line(
     trace_id: &str,
     span_name: &str,
 ) -> RunStructuredLogLine {
+    run_structured_log_line_with_details(timestamp, event_code, message, trace_id, span_name, None)
+}
+
+fn run_structured_log_line_with_details(
+    timestamp: &str,
+    event_code: &str,
+    message: &str,
+    trace_id: &str,
+    span_name: &str,
+    details: Option<serde_json::Value>,
+) -> RunStructuredLogLine {
     RunStructuredLogLine {
         timestamp: timestamp.to_string(),
         level: "info",
@@ -11097,6 +11241,7 @@ fn run_structured_log_line(
         trace_id: trace_id.to_string(),
         span_id: format!("run-{}", span_name),
         surface: "CLI-RUN",
+        details,
     }
 }
 
@@ -11151,6 +11296,106 @@ fn render_run_structured_logs_jsonl(
     );
     lines.push_str(&serde_json::to_string(&dispatch_line)?);
     lines.push('\n');
+
+    if let Some(compat) = receipt.core.compat_preflight.as_ref() {
+        let status = compat
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let operation_count = compat
+            .get("operation_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let total_cases = compat
+            .get("total_cases")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let total_divergences = compat
+            .get("total_divergences")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let compat_start = run_structured_log_line_with_details(
+            &now,
+            "FN-COMPAT-001",
+            &format!(
+                "run compat preflight {status}: operations={operation_count} cases={total_cases} divergences={total_divergences}"
+            ),
+            trace_id,
+            "compat-preflight",
+            Some(serde_json::json!({
+                "status": status,
+                "operation_count": operation_count,
+                "total_cases": total_cases,
+                "total_divergences": total_divergences,
+            })),
+        );
+        lines.push_str(&serde_json::to_string(&compat_start)?);
+        lines.push('\n');
+
+        if let Some(operations) = compat
+            .get("operations")
+            .and_then(serde_json::Value::as_array)
+        {
+            for operation in operations {
+                let signal = operation
+                    .get("signal")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let event_code = if signal == "green" {
+                    "FN-COMPAT-002"
+                } else {
+                    "FN-COMPAT-003"
+                };
+                let operation_id = operation
+                    .get("operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let cases_tested = operation
+                    .get("cases_tested")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let divergences = operation
+                    .get("total_divergences")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let op_line = run_structured_log_line_with_details(
+                    &now,
+                    event_code,
+                    &format!(
+                        "compat operation {signal}: operation={operation_id} cases={cases_tested} divergences={divergences}"
+                    ),
+                    trace_id,
+                    &format!("compat-{operation_id}"),
+                    Some(serde_json::json!({
+                        "operation_id": operation_id,
+                        "signal": signal,
+                        "cases_tested": cases_tested,
+                        "total_divergences": divergences,
+                    })),
+                );
+                lines.push_str(&serde_json::to_string(&op_line)?);
+                lines.push('\n');
+            }
+        }
+
+        if let Some(fixtures) = compat
+            .get("emitted_fixtures")
+            .and_then(serde_json::Value::as_array)
+        {
+            for fixture in fixtures.iter().filter_map(serde_json::Value::as_str) {
+                let fixture_line = run_structured_log_line_with_details(
+                    &now,
+                    "FN-COMPAT-004",
+                    &format!("compat divergence fixture emitted: {fixture}"),
+                    trace_id,
+                    "compat-fixture",
+                    Some(serde_json::json!({ "path": fixture })),
+                );
+                lines.push_str(&serde_json::to_string(&fixture_line)?);
+                lines.push('\n');
+            }
+        }
+    }
 
     // Event: receipt written
     let receipt_line = run_structured_log_line(
@@ -26275,6 +26520,7 @@ fn main() -> Result<()> {
                 runtime,
                 engine_bin,
                 lockstep_preflight,
+                compat_preflight,
             } = args;
 
             let profile_override = parse_profile_override(Some(&policy))?;
@@ -26339,6 +26585,16 @@ fn main() -> Result<()> {
 
             let requested_runtime = parse_runtime_override(runtime.as_deref())?
                 .unwrap_or(resolved.config.runtime.preferred);
+            let project_root = run_project_root(&app_path);
+            let compat_preflight_report = if compat_preflight {
+                Some(run_compat_preflight_report(
+                    &project_root,
+                    &trace_id,
+                    requested_runtime,
+                )?)
+            } else {
+                None
+            };
 
             // Extract trusted extension IDs from preflight for TOCTOU validation (bd-zqz0q)
             let trusted_extension_ids = match &preflight.verdict {
@@ -26359,7 +26615,6 @@ fn main() -> Result<()> {
                 &trusted_extension_ids,
                 now_unix_secs(),
             )?;
-            let project_root = run_project_root(&app_path);
             let ssrf_violations = extract_ssrf_violations(dispatch.telemetry.as_ref());
             let auto_quarantined_extensions = maybe_auto_quarantine_run_dependencies(
                 &project_root,
@@ -26377,6 +26632,7 @@ fn main() -> Result<()> {
                 ssrf_violations,
                 auto_quarantined_extensions,
                 lockstep_verdict,
+                compat_preflight_report,
             )?;
             let receipt_path = persist_run_execution_receipt(
                 &project_root,
@@ -27715,6 +27971,7 @@ mod run_trust_gate_tests {
             ssrf_violations.clone(),
             Vec::new(),
             None,
+            None,
         )
         .expect("first receipt");
         let second = build_run_execution_receipt(
@@ -27725,6 +27982,7 @@ mod run_trust_gate_tests {
             &dispatch,
             ssrf_violations,
             Vec::new(),
+            None,
             None,
         )
         .expect("second receipt");
@@ -27800,6 +28058,7 @@ mod run_trust_gate_tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
         )
         .expect("receipt");
 
@@ -27833,6 +28092,7 @@ mod run_trust_gate_tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
         )
         .expect("receipt one");
         let receipt_two = build_run_execution_receipt(
@@ -27849,6 +28109,7 @@ mod run_trust_gate_tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
         )
         .expect("receipt two");
         let receipt_three = build_run_execution_receipt(
@@ -27864,6 +28125,7 @@ mod run_trust_gate_tests {
             ),
             Vec::new(),
             Vec::new(),
+            None,
             None,
         )
         .expect("receipt three");
@@ -29300,6 +29562,7 @@ mod run_trust_gate_tests {
                 vec![], // ssrf_violations
                 vec![], // auto_quarantined_extensions
                 None,   // lockstep_verdict
+                None,   // compat_preflight
             )
             .expect("receipt generation should succeed");
 
@@ -29332,6 +29595,7 @@ mod run_trust_gate_tests {
                 &dispatch,
                 vec![],
                 vec![],
+                None,
                 None,
             )
             .expect("second receipt generation should succeed");

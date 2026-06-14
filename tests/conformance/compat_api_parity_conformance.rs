@@ -27,8 +27,10 @@
 //! --nocapture`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Output};
 
+use assert_cmd::Command as CargoCommand;
 use frankenengine_node::api::compat_conformance::{
     COMPAT_CONFORMANCE_SCHEMA, CanonicalOutcome, CanonicalResult, CompatFixtureCase, CompatInput,
     ConformanceConfig, ConformanceLeg, FrankenLeg, LockstepSignal, SandboxSpec,
@@ -309,6 +311,93 @@ fn golden_path() -> PathBuf {
         .join("../../tests/golden/compat_api_canonical_schema.json")
 }
 
+fn find_node_binary() -> Option<PathBuf> {
+    for candidate in ["node", "/usr/bin/node", "/usr/local/bin/node"] {
+        if let Ok(output) = ProcessCommand::new(candidate).arg("--version").output()
+            && output.status.success()
+        {
+            return Some(PathBuf::from(candidate));
+        }
+    }
+    None
+}
+
+fn node_command(node: &Path) -> ProcessCommand {
+    match node.to_string_lossy().as_ref() {
+        "node" => ProcessCommand::new("node"),
+        "/usr/bin/node" => ProcessCommand::new("/usr/bin/node"),
+        "/usr/local/bin/node" => ProcessCommand::new("/usr/local/bin/node"),
+        other => {
+            assert!(false, "unexpected Node.js binary path: {other}");
+            ProcessCommand::new("node")
+        }
+    }
+}
+
+fn run_node_with_node_on_path(cwd: &Path, args: &[&str], node: &Path) -> Output {
+    let mut command = node_command(node);
+    command
+        .current_dir(cwd)
+        .args(args)
+        .env("FRANKEN_COMPAT_SENTINEL", "present")
+        .env("FRANKEN_ENGINE_BIN", "")
+        .env("FRANKEN_NODE_ENGINE_BINARY_PATH", "");
+    if let Some(node_dir) = node.parent() {
+        let current_path = std::env::var_os("PATH").unwrap_or_default();
+        command.env(
+            "PATH",
+            format!("{}:{}", node_dir.display(), current_path.to_string_lossy()),
+        );
+    }
+    command.output().expect("spawn command")
+}
+
+fn run_franken_node_with_node_on_path(cwd: &Path, args: &[&str], node: &Path) -> Output {
+    let mut command = CargoCommand::cargo_bin("franken-node").expect("franken-node binary");
+    command
+        .current_dir(cwd)
+        .args(args)
+        .env("FRANKEN_COMPAT_SENTINEL", "present")
+        .env("FRANKEN_ENGINE_BIN", "")
+        .env("FRANKEN_NODE_ENGINE_BINARY_PATH", "");
+    if let Some(node_dir) = node.parent() {
+        let current_path = std::env::var_os("PATH").unwrap_or_default();
+        command.env(
+            "PATH",
+            format!("{}:{}", node_dir.display(), current_path.to_string_lossy()),
+        );
+    }
+    command.output().expect("spawn franken-node")
+}
+
+fn compat_app_line(stdout: &[u8]) -> serde_json::Value {
+    let rendered = String::from_utf8_lossy(stdout);
+    let Some(line) = rendered
+        .lines()
+        .find_map(|line| line.strip_prefix("COMPAT_APP:"))
+    else {
+        assert!(
+            rendered.contains("COMPAT_APP:"),
+            "missing COMPAT_APP line in stdout:\n{rendered}"
+        );
+        return serde_json::Value::Null;
+    };
+    serde_json::from_str(line).expect("COMPAT_APP json")
+}
+
+fn compat_events(stderr: &[u8]) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| {
+            value
+                .get("event_code")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|code| code.starts_with("FN-COMPAT-"))
+        })
+        .collect()
+}
+
 /// Representative canonical outcomes (one+ per CanonicalResult variant + the
 /// error envelope) whose serialized shapes must remain frozen.
 fn golden_samples() -> BTreeMap<String, CanonicalOutcome> {
@@ -421,4 +510,170 @@ fn canonical_op_schemas_are_golden_locked() {
          bump COMPAT_CONFORMANCE_SCHEMA and regenerate with FRANKEN_REGEN_GOLDEN=1"
     );
     log("golden", "canonical op schemas match the frozen golden");
+}
+
+#[test]
+fn run_level_real_node_project_emits_compat_preflight_transcript() {
+    let Some(node) = find_node_binary() else {
+        log(
+            "run-e2e",
+            "skipping because no real Node.js binary is available",
+        );
+        return;
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx\"\n\n[security]\nauthorized_api_keys = [\"fnode-fixture-compat-run-e2e\"]\n",
+    )
+    .expect("write config");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"name":"compat-run-e2e","version":"1.0.0","main":"index.js"}"#,
+    )
+    .expect("write package");
+    std::fs::write(tmp.path().join("input.txt"), "franken compat\n").expect("write input");
+    std::fs::write(
+        tmp.path().join("helper.js"),
+        "module.exports = { ok: true };\n",
+    )
+    .expect("write helper");
+    std::fs::write(
+        tmp.path().join("index.js"),
+        r#"
+const fs = require('fs');
+const http = require('http');
+const input = fs.readFileSync('input.txt', 'utf8');
+fs.writeFileSync('output.txt', input.toUpperCase());
+const resolved = require.resolve('./helper.js');
+const req = http.request('http://Example.COM:8080/path?q=1', { method: 'post' });
+const httpShape = { method: req.method, path: req.path, host: req.getHeader('host') };
+req.on('error', () => {});
+req.destroy();
+process.stdout.write('COMPAT_APP:' + JSON.stringify({
+  read: input,
+  wrote: fs.readFileSync('output.txt', 'utf8'),
+  env: process.env.FRANKEN_COMPAT_SENTINEL,
+  resolvedHelper: resolved.endsWith('helper.js'),
+  http: httpShape
+}) + '\n');
+"#,
+    )
+    .expect("write app");
+
+    let direct = run_node_with_node_on_path(tmp.path(), &["index.js"], &node);
+    assert!(
+        direct.status.success(),
+        "direct node run failed\nstderr:\n{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+    let direct_app = compat_app_line(&direct.stdout);
+
+    let run = run_franken_node_with_node_on_path(
+        tmp.path(),
+        &[
+            "run",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "node",
+            "--compat-preflight",
+            "--structured-logs-jsonl",
+            "index.js",
+        ],
+        &node,
+    );
+    assert!(
+        run.status.success(),
+        "franken-node run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(compat_app_line(&run.stdout), direct_app);
+
+    let events = compat_events(&run.stderr);
+    let transcript: Vec<serde_json::Value> = events
+        .iter()
+        .map(|event| {
+            serde_json::json!({
+                "event_code": event["event_code"],
+                "message": event["message"],
+                "details": event["details"],
+            })
+        })
+        .collect();
+    let expected = serde_json::json!([
+        {
+            "event_code": "FN-COMPAT-001",
+            "message": "run compat preflight green: operations=5 cases=22 divergences=0",
+            "details": {
+                "operation_count": 5,
+                "status": "green",
+                "total_cases": 22,
+                "total_divergences": 0
+            }
+        },
+        {
+            "event_code": "FN-COMPAT-002",
+            "message": "compat operation green: operation=compat:fs:readFile cases=5 divergences=0",
+            "details": {
+                "cases_tested": 5,
+                "operation_id": "compat:fs:readFile",
+                "signal": "green",
+                "total_divergences": 0
+            }
+        },
+        {
+            "event_code": "FN-COMPAT-002",
+            "message": "compat operation green: operation=compat:fs:writeFile cases=3 divergences=0",
+            "details": {
+                "cases_tested": 3,
+                "operation_id": "compat:fs:writeFile",
+                "signal": "green",
+                "total_divergences": 0
+            }
+        },
+        {
+            "event_code": "FN-COMPAT-002",
+            "message": "compat operation green: operation=compat:http:request cases=5 divergences=0",
+            "details": {
+                "cases_tested": 5,
+                "operation_id": "compat:http:request",
+                "signal": "green",
+                "total_divergences": 0
+            }
+        },
+        {
+            "event_code": "FN-COMPAT-002",
+            "message": "compat operation green: operation=compat:process:env cases=4 divergences=0",
+            "details": {
+                "cases_tested": 4,
+                "operation_id": "compat:process:env",
+                "signal": "green",
+                "total_divergences": 0
+            }
+        },
+        {
+            "event_code": "FN-COMPAT-002",
+            "message": "compat operation green: operation=compat:module:resolve cases=5 divergences=0",
+            "details": {
+                "cases_tested": 5,
+                "operation_id": "compat:module:resolve",
+                "signal": "green",
+                "total_divergences": 0
+            }
+        }
+    ]);
+    assert_eq!(serde_json::Value::Array(transcript), expected);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["event_code"] == "FN-COMPAT-003"),
+        "green run should not emit RED compat events"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("output.txt")).expect("read output"),
+        "FRANKEN COMPAT\n"
+    );
 }

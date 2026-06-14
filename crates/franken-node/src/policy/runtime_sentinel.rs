@@ -62,9 +62,9 @@ pub enum SentinelObservationError {
     #[error("field `{field}` contains a forbidden control character")]
     ForbiddenControlChar { field: &'static str },
     /// A signal magnitude exceeded the basis-point ceiling.
-    #[error("signal from `{source}` has magnitude {magnitude_bp} bp > {max} bp")]
+    #[error("signal from `{signal_source}` has magnitude {magnitude_bp} bp > {max} bp")]
     MagnitudeOutOfRange {
-        source: String,
+        signal_source: String,
         magnitude_bp: u16,
         max: u16,
     },
@@ -199,7 +199,7 @@ impl SentinelSignal {
     pub fn validate(&self) -> Result<(), SentinelObservationError> {
         if self.magnitude_bp > SENTINEL_SIGNAL_MAX_MAGNITUDE_BP {
             return Err(SentinelObservationError::MagnitudeOutOfRange {
-                source: self.source.clone(),
+                signal_source: self.source.clone(),
                 magnitude_bp: self.magnitude_bp,
                 max: SENTINEL_SIGNAL_MAX_MAGNITUDE_BP,
             });
