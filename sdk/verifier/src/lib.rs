@@ -333,6 +333,7 @@ pub enum VerifierSdkError {
     UnsupportedSdk(String),
     Capsule(capsule::CapsuleError),
     Bundle(bundle::BundleError),
+    CounterfactualCapability(counterfactual::CounterfactualCapabilityError),
     UnauthenticatedStructuralBundle {
         bundle_id: String,
         verifier_identity: String,
@@ -420,6 +421,12 @@ impl fmt::Display for VerifierSdkError {
             Self::UnsupportedSdk(message) => write!(formatter, "{message}"),
             Self::Capsule(source) => write!(formatter, "capsule verification failed: {source}"),
             Self::Bundle(source) => write!(formatter, "bundle verification failed: {source}"),
+            Self::CounterfactualCapability(source) => {
+                write!(
+                    formatter,
+                    "counterfactual capability validation failed: {source}"
+                )
+            }
             Self::UnauthenticatedStructuralBundle {
                 bundle_id,
                 verifier_identity,
@@ -532,6 +539,12 @@ impl From<capsule::CapsuleError> for VerifierSdkError {
 impl From<bundle::BundleError> for VerifierSdkError {
     fn from(source: bundle::BundleError) -> Self {
         Self::Bundle(source)
+    }
+}
+
+impl From<counterfactual::CounterfactualCapabilityError> for VerifierSdkError {
+    fn from(source: counterfactual::CounterfactualCapabilityError) -> Self {
+        Self::CounterfactualCapability(source)
     }
 }
 
@@ -1061,6 +1074,47 @@ impl VerifierSdk {
         Ok(proof)
     }
 
+    /// Verify a proof-carrying capability grant offline.
+    pub fn verify_capability_proof(
+        &self,
+        proof: &bundle::CapabilityProof,
+    ) -> VerifierSdkResult<String> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let proof_hash = bundle::verify_capability_proof_schema(proof)?;
+        self.verify_capability_audience(&proof.audience)?;
+        Ok(proof_hash)
+    }
+
+    /// Verify a capability-use receipt against the supplied proof.
+    pub fn verify_capability_receipt(
+        &self,
+        proof: &bundle::CapabilityProof,
+        receipt: &bundle::CapabilityReceipt,
+    ) -> VerifierSdkResult<bundle::CapabilityReceiptVerification> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let report = bundle::verify_capability_receipt_schema(proof, receipt)?;
+        self.verify_capability_audience(&report.audience)?;
+        Ok(report)
+    }
+
+    /// Replay an allow/deny capability decision without producer-runtime access.
+    pub fn validate_counterfactual_capability_decision(
+        &self,
+        proof: &bundle::CapabilityProof,
+        request: &counterfactual::CounterfactualCapabilityRequest,
+        decision: counterfactual::CounterfactualCapabilityDecision,
+    ) -> VerifierSdkResult<counterfactual::CounterfactualCapabilityValidation> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        self.verify_capability_audience(&proof.audience)?;
+        let validation =
+            counterfactual::validate_counterfactual_capability_decision(proof, request, decision)?;
+        self.verify_capability_audience(&validation.audience)?;
+        Ok(validation)
+    }
+
     /// Verify a signed trust-native module-resolution receipt offline.
     pub fn verify_resolution_receipt(
         &self,
@@ -1452,6 +1506,17 @@ impl VerifierSdk {
             return Err(VerifierSdkError::SessionVerifierMismatch {
                 expected: self.verifier_identity.clone(),
                 actual: bundle.verifier_identity.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn verify_capability_audience(&self, audience: &str) -> Result<(), VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
+        if !constant_time_eq(audience, &self.verifier_identity) {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: self.verifier_identity.clone(),
+                actual: audience.to_string(),
             });
         }
         Ok(())

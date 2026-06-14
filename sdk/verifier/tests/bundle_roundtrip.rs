@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use frankenengine_verifier_sdk::SDK_VERSION;
-use frankenengine_verifier_sdk::VerifierSdk;
 use frankenengine_verifier_sdk::bundle::{
     BundleArtifact, BundleChunk, BundleError, BundleHeader, BundleSignature,
     CAPABILITY_PROOF_SCHEMA_VERSION, CAPABILITY_RECEIPT_SCHEMA_VERSION, CapabilityPolicyProfile,
@@ -19,6 +17,11 @@ use frankenengine_verifier_sdk::bundle::{
     seal_capability_receipt, serialize, verify, verify_capability_receipt_schema,
     verify_effect_chain, verify_non_exfiltration_claim,
 };
+use frankenengine_verifier_sdk::counterfactual::{
+    CounterfactualCapabilityDecision, CounterfactualCapabilityError,
+    CounterfactualCapabilityRequest, validate_counterfactual_capability_decision,
+};
+use frankenengine_verifier_sdk::{SDK_VERSION, VerifierSdk, VerifierSdkError};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -359,6 +362,90 @@ fn capability_receipt_schema_fails_closed_on_stale_or_tampered_bindings() {
             field: "observed_postconditions",
             ..
         }
+    ));
+}
+
+#[test]
+fn verifier_sdk_checks_capability_proofs_and_counterfactual_decisions_offline() {
+    let proof = capability_proof_fixture();
+    let receipt = capability_receipt_fixture(&proof);
+    let sdk = VerifierSdk::new("verifier://capability-test");
+
+    let proof_hash = sdk
+        .verify_capability_proof(&proof)
+        .expect("facade should verify capability proof schema and audience");
+    assert_eq!(proof_hash, CAPABILITY_PROOF_HASH_GOLDEN);
+
+    let receipt_verification = sdk
+        .verify_capability_receipt(&proof, &receipt)
+        .expect("facade should verify capability receipt binding");
+    assert_eq!(receipt_verification.receipt_id, "cap-receipt-001");
+    assert_eq!(
+        receipt_verification.scope, receipt.exercised_scope,
+        "receipt verification must disclose the exercised capability scope"
+    );
+
+    let request = capability_counterfactual_request(&proof);
+    let allowed = sdk
+        .validate_counterfactual_capability_decision(
+            &proof,
+            &request,
+            CounterfactualCapabilityDecision::Allow,
+        )
+        .expect("matching counterfactual allow decision should verify offline");
+    assert!(allowed.allowed);
+    assert_eq!(allowed.decision, "allow");
+    assert_eq!(allowed.expected_decision, "allow");
+    assert_eq!(
+        allowed.reason,
+        "proof and request bindings permit capability"
+    );
+    assert_eq!(allowed.scope, receipt.exercised_scope);
+
+    let mut out_of_scope_request = request.clone();
+    out_of_scope_request.requested_scope.resource =
+        "https://api.example.test/v1/private".to_string();
+    let denied = validate_counterfactual_capability_decision(
+        &proof,
+        &out_of_scope_request,
+        CounterfactualCapabilityDecision::Deny,
+    )
+    .expect("counterfactual deny should verify when the requested scope is not in the proof");
+    assert!(!denied.allowed);
+    assert_eq!(denied.decision, "deny");
+    assert_eq!(denied.expected_decision, "deny");
+    assert_eq!(denied.reason, "requested scope is outside capability proof");
+
+    let err = sdk
+        .validate_counterfactual_capability_decision(
+            &proof,
+            &out_of_scope_request,
+            CounterfactualCapabilityDecision::Allow,
+        )
+        .expect_err("counterfactual allow must fail closed for an out-of-scope request");
+    assert!(matches!(
+        err,
+        VerifierSdkError::CounterfactualCapability(
+            CounterfactualCapabilityError::DecisionMismatch {
+                ref expected,
+                ref actual,
+                ref reason,
+            },
+        ) if expected == "deny"
+            && actual == "allow"
+            && reason == "requested scope is outside capability proof"
+    ));
+
+    let foreign_sdk = VerifierSdk::new("verifier://other");
+    let err = foreign_sdk
+        .verify_capability_proof(&proof)
+        .expect_err("foreign verifier audience must be rejected");
+    assert!(matches!(
+        err,
+        VerifierSdkError::SessionVerifierMismatch {
+            ref expected,
+            ref actual,
+        } if expected == "verifier://other" && actual == "verifier://capability-test"
     ));
 }
 
@@ -936,6 +1023,22 @@ fn capability_receipt_fixture(proof: &CapabilityProof) -> CapabilityReceipt {
     };
     seal_capability_receipt(&mut receipt).expect("capability receipt fixture should seal");
     receipt
+}
+
+fn capability_counterfactual_request(proof: &CapabilityProof) -> CounterfactualCapabilityRequest {
+    CounterfactualCapabilityRequest {
+        actor: proof.actor.clone(),
+        audience: proof.audience.clone(),
+        requested_scope: proof
+            .scopes
+            .get(1)
+            .expect("fixture should include http_request scope")
+            .clone(),
+        policy_profile: proof.policy_profile,
+        epoch: proof.epoch,
+        side_effect_kind: proof.side_effect_kind,
+        observed_postconditions: proof.expected_postconditions.clone(),
+    }
 }
 
 fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
