@@ -46,6 +46,8 @@ pub const EVENT_SIGNED_LINEAGE_BUILT: &str = "FN-IFL-013";
 pub const EVENT_SENSITIVE_SOURCE_REGISTERED: &str = "FN-IFL-014";
 pub const EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED: &str = "FN-IFL-015";
 pub const EVENT_TRANSFORM_PROPAGATED: &str = "FN-IFL-016";
+pub const EVENT_DECLASSIFICATION_RECEIPT_REGISTERED: &str = "FN-IFL-017";
+pub const EVENT_SINK_ENFORCED: &str = "FN-IFL-018";
 
 // Canonical event codes required by bd-2iyk acceptance criteria.
 pub const LINEAGE_TAG_ATTACHED: &str = "LINEAGE_TAG_ATTACHED";
@@ -71,6 +73,8 @@ pub const ERR_IFL_TIMEOUT: &str = "ERR_IFL_TIMEOUT";
 pub const ERR_SIGNED_LINEAGE_INVALID: &str = "ERR_SIGNED_LINEAGE_INVALID";
 pub const ERR_IFL_SENSITIVE_SOURCE_INVALID: &str = "ERR_IFL_SENSITIVE_SOURCE_INVALID";
 pub const ERR_IFL_SENSITIVE_SOURCE_CONFLICT: &str = "ERR_IFL_SENSITIVE_SOURCE_CONFLICT";
+pub const ERR_IFL_DECLASSIFICATION_INVALID: &str = "ERR_IFL_DECLASSIFICATION_INVALID";
+pub const ERR_IFL_SINK_POLICY_INVALID: &str = "ERR_IFL_SINK_POLICY_INVALID";
 
 // Canonical error codes required by bd-2iyk acceptance criteria.
 pub const ERR_LINEAGE_TAG_MISSING: &str = "ERR_LINEAGE_TAG_MISSING";
@@ -159,6 +163,10 @@ pub const INV_SENSITIVE_SOURCE_COMMITMENT: &str = "INV-IFL-SENSITIVE-SOURCE-COMM
 /// INV-IFL-FLOW-LEDGER-IMMUTABLE: once a sensitive-source commitment is
 /// inserted, the same label id cannot be rebound to different descriptor data.
 pub const INV_FLOW_LEDGER_IMMUTABLE: &str = "INV-IFL-FLOW-LEDGER-IMMUTABLE";
+
+/// INV-IFL-DECLASSIFICATION-SCOPED: Declassification receipts are bound to the
+/// exact sink, epoch, label set, actor, purpose, and revocation freshness window.
+pub const INV_DECLASSIFICATION_SCOPED: &str = "INV-IFL-DECLASSIFICATION-SCOPED";
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -483,6 +491,331 @@ pub struct ContainmentReceipt {
     pub quarantine_timestamp_ms: u64,
     pub containment_action: String,
     pub success: bool,
+}
+
+pub const DECLASSIFICATION_SCHEMA_VERSION: &str = "declassification-v1.0";
+
+/// Sensitive sink classes that require declassification for forbidden labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowSinkKind {
+    NetworkEgress,
+    ExternalFileWrite,
+    SubprocessArgs,
+    SubprocessStdin,
+    Log,
+    PackagePublish,
+    ReplayBundleExport,
+    VerifierExport,
+    FleetControlMessage,
+}
+
+impl FlowSinkKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NetworkEgress => "network_egress",
+            Self::ExternalFileWrite => "external_file_write",
+            Self::SubprocessArgs => "subprocess_args",
+            Self::SubprocessStdin => "subprocess_stdin",
+            Self::Log => "log",
+            Self::PackagePublish => "package_publish",
+            Self::ReplayBundleExport => "replay_bundle_export",
+            Self::VerifierExport => "verifier_export",
+            Self::FleetControlMessage => "fleet_control_message",
+        }
+    }
+}
+
+/// Fail-closed policy for a concrete sink.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowSinkPolicy {
+    pub policy_id: String,
+    pub sink_id: String,
+    pub sink_kind: FlowSinkKind,
+    pub epoch: u64,
+    pub actor: String,
+    pub purpose: String,
+    pub forbidden_labels: BTreeSet<String>,
+    pub deny_all: bool,
+    pub max_revocation_age_ms: u64,
+}
+
+impl FlowSinkPolicy {
+    pub fn validate(&self) -> Result<(), LineageError> {
+        validate_declassification_text("sink policy", "policy_id", &self.policy_id)?;
+        validate_declassification_text("sink policy", "sink_id", &self.sink_id)?;
+        validate_declassification_text("sink policy", "actor", &self.actor)?;
+        validate_declassification_text("sink policy", "purpose", &self.purpose)?;
+        if self.max_revocation_age_ms == 0 {
+            return Err(LineageError::SinkPolicyInvalid {
+                detail: format!(
+                    "{}: max_revocation_age_ms must be greater than zero",
+                    ERR_IFL_SINK_POLICY_INVALID
+                ),
+            });
+        }
+        if !self.deny_all && self.forbidden_labels.is_empty() {
+            return Err(LineageError::SinkPolicyInvalid {
+                detail: format!(
+                    "{}: sink policy must deny at least one label or set deny_all",
+                    ERR_IFL_SINK_POLICY_INVALID
+                ),
+            });
+        }
+        for label in &self.forbidden_labels {
+            validate_declassification_text("sink policy", "forbidden_label", label)?;
+        }
+        Ok(())
+    }
+
+    fn required_labels(&self, taint_set: &TaintSet) -> BTreeSet<String> {
+        if self.deny_all {
+            return taint_set.labels.clone();
+        }
+        taint_set
+            .labels
+            .intersection(&self.forbidden_labels)
+            .cloned()
+            .collect()
+    }
+}
+
+/// Signed declassification authority for one exact sink and forbidden label set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclassificationReceipt {
+    pub receipt_id: String,
+    pub sink_id: String,
+    pub sink_kind: FlowSinkKind,
+    pub epoch: u64,
+    pub labels: BTreeSet<String>,
+    pub label_set_commitment: String,
+    pub actor: String,
+    pub purpose: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub revocation_checked_at_ms: u64,
+    pub signer_id: String,
+    pub signature_ref: String,
+    pub schema_version: String,
+}
+
+#[derive(Serialize)]
+struct DeclassificationReceiptCanonicalPayload<'a> {
+    schema_version: &'static str,
+    sink_id: &'a str,
+    sink_kind: &'a str,
+    epoch: u64,
+    labels: &'a BTreeSet<String>,
+    label_set_commitment: &'a str,
+    actor: &'a str,
+    purpose: &'a str,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+    revocation_checked_at_ms: u64,
+    signer_id: &'a str,
+    signature_ref: &'a str,
+}
+
+#[derive(Serialize)]
+struct LabelSetCommitmentPayload<'a> {
+    schema_version: &'static str,
+    labels: &'a BTreeSet<String>,
+}
+
+impl DeclassificationReceipt {
+    pub fn scoped(
+        policy: &FlowSinkPolicy,
+        labels: BTreeSet<String>,
+        issued_at_ms: u64,
+        expires_at_ms: u64,
+        revocation_checked_at_ms: u64,
+        signer_id: &str,
+        signature_ref: &str,
+    ) -> Result<Self, LineageError> {
+        let _event = EVENT_DECLASSIFICATION_RECEIPT_REGISTERED;
+        policy.validate()?;
+        let label_set_commitment = label_set_commitment(&labels)?;
+        let mut receipt = Self {
+            receipt_id: String::new(),
+            sink_id: policy.sink_id.clone(),
+            sink_kind: policy.sink_kind,
+            epoch: policy.epoch,
+            labels,
+            label_set_commitment,
+            actor: policy.actor.clone(),
+            purpose: policy.purpose.clone(),
+            issued_at_ms,
+            expires_at_ms,
+            revocation_checked_at_ms,
+            signer_id: signer_id.to_string(),
+            signature_ref: signature_ref.to_string(),
+            schema_version: DECLASSIFICATION_SCHEMA_VERSION.to_string(),
+        };
+        receipt.validate()?;
+        receipt.receipt_id = receipt.expected_receipt_id()?;
+        Ok(receipt)
+    }
+
+    pub fn validate(&self) -> Result<(), LineageError> {
+        validate_declassification_text("declassification receipt", "sink_id", &self.sink_id)?;
+        validate_declassification_text("declassification receipt", "actor", &self.actor)?;
+        validate_declassification_text("declassification receipt", "purpose", &self.purpose)?;
+        validate_declassification_text("declassification receipt", "signer_id", &self.signer_id)?;
+        validate_declassification_text(
+            "declassification receipt",
+            "signature_ref",
+            &self.signature_ref,
+        )?;
+        if self.schema_version != DECLASSIFICATION_SCHEMA_VERSION {
+            return Err(declassification_invalid(
+                "unsupported declassification receipt schema version",
+            ));
+        }
+        if self.labels.is_empty() {
+            return Err(declassification_invalid(
+                "declassification receipt must bind at least one label",
+            ));
+        }
+        for label in &self.labels {
+            validate_declassification_text("declassification receipt", "label", label)?;
+        }
+        if self.issued_at_ms >= self.expires_at_ms {
+            return Err(declassification_invalid(
+                "issued_at_ms must be before expires_at_ms",
+            ));
+        }
+        let expected_commitment = label_set_commitment(&self.labels)?;
+        if !crate::security::constant_time::ct_eq(&self.label_set_commitment, &expected_commitment)
+        {
+            return Err(declassification_invalid(
+                "label_set_commitment does not match receipt labels",
+            ));
+        }
+        if !self.receipt_id.is_empty() {
+            let expected_receipt_id = self.expected_receipt_id()?;
+            if !crate::security::constant_time::ct_eq(&self.receipt_id, &expected_receipt_id) {
+                return Err(declassification_invalid(
+                    "receipt_id does not match canonical declassification payload",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn covers(
+        &self,
+        policy: &FlowSinkPolicy,
+        required_labels: &BTreeSet<String>,
+        timestamp_ms: u64,
+    ) -> bool {
+        let _inv = INV_DECLASSIFICATION_SCOPED;
+        if self.validate().is_err() || policy.validate().is_err() || required_labels.is_empty() {
+            return false;
+        }
+        let Ok(required_label_commitment) = label_set_commitment(required_labels) else {
+            return false;
+        };
+        let same_scope = crate::security::constant_time::ct_eq(&self.sink_id, &policy.sink_id)
+            && crate::security::constant_time::ct_eq(
+                self.sink_kind.as_str(),
+                policy.sink_kind.as_str(),
+            )
+            && crate::security::constant_time::ct_eq_bytes(
+                &self.epoch.to_be_bytes(),
+                &policy.epoch.to_be_bytes(),
+            )
+            && crate::security::constant_time::ct_eq(&self.actor, &policy.actor)
+            && crate::security::constant_time::ct_eq(&self.purpose, &policy.purpose)
+            && crate::security::constant_time::ct_eq(
+                &self.label_set_commitment,
+                &required_label_commitment,
+            );
+        if !same_scope {
+            return false;
+        }
+        if timestamp_ms < self.issued_at_ms || timestamp_ms >= self.expires_at_ms {
+            return false;
+        }
+        if self.revocation_checked_at_ms > timestamp_ms {
+            return false;
+        }
+        timestamp_ms.saturating_sub(self.revocation_checked_at_ms) < policy.max_revocation_age_ms
+    }
+
+    fn expected_receipt_id(&self) -> Result<String, LineageError> {
+        let canonical = DeclassificationReceiptCanonicalPayload {
+            schema_version: DECLASSIFICATION_SCHEMA_VERSION,
+            sink_id: &self.sink_id,
+            sink_kind: self.sink_kind.as_str(),
+            epoch: self.epoch,
+            labels: &self.labels,
+            label_set_commitment: &self.label_set_commitment,
+            actor: &self.actor,
+            purpose: &self.purpose,
+            issued_at_ms: self.issued_at_ms,
+            expires_at_ms: self.expires_at_ms,
+            revocation_checked_at_ms: self.revocation_checked_at_ms,
+            signer_id: &self.signer_id,
+            signature_ref: &self.signature_ref,
+        };
+        let canonical_bytes =
+            serde_json::to_vec(&canonical).map_err(|err| LineageError::SnapshotFailed {
+                detail: format!(
+                    "{}: failed serializing declassification receipt: {err}",
+                    ERR_IFL_SNAPSHOT_FAILED
+                ),
+            })?;
+        Ok(format!(
+            "ifl-declass:{}",
+            prefix_for_display(&sha256_hex(&canonical_bytes))
+        ))
+    }
+}
+
+fn label_set_commitment(labels: &BTreeSet<String>) -> Result<String, LineageError> {
+    if labels.is_empty() {
+        return Err(declassification_invalid(
+            "label set commitment requires at least one label",
+        ));
+    }
+    let canonical = LabelSetCommitmentPayload {
+        schema_version: DECLASSIFICATION_SCHEMA_VERSION,
+        labels,
+    };
+    let canonical_bytes =
+        serde_json::to_vec(&canonical).map_err(|err| LineageError::SnapshotFailed {
+            detail: format!(
+                "{}: failed serializing declassification label set: {err}",
+                ERR_IFL_SNAPSHOT_FAILED
+            ),
+        })?;
+    Ok(sha256_hex(&canonical_bytes))
+}
+
+fn validate_declassification_text(
+    scope: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), LineageError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed != value || value.contains('\0') {
+        return Err(declassification_invalid(&format!(
+            "{scope} {field} must be non-empty, trimmed, and null-free"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(declassification_invalid(&format!(
+            "{scope} {field} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn declassification_invalid(detail: &str) -> LineageError {
+    LineageError::DeclassificationInvalid {
+        detail: format!("{}: {detail}", ERR_IFL_DECLASSIFICATION_INVALID),
+    }
 }
 
 /// Tuning knobs for the sentinel.
@@ -1375,6 +1708,8 @@ pub enum LineageError {
     Timeout { detail: String },
     SensitiveSourceInvalid { detail: String },
     SensitiveSourceConflict { detail: String },
+    DeclassificationInvalid { detail: String },
+    SinkPolicyInvalid { detail: String },
 }
 
 impl fmt::Display for LineageError {
@@ -1392,6 +1727,8 @@ impl fmt::Display for LineageError {
             Self::Timeout { detail } => write!(f, "{}", detail),
             Self::SensitiveSourceInvalid { detail } => write!(f, "{}", detail),
             Self::SensitiveSourceConflict { detail } => write!(f, "{}", detail),
+            Self::DeclassificationInvalid { detail } => write!(f, "{}", detail),
+            Self::SinkPolicyInvalid { detail } => write!(f, "{}", detail),
         }
     }
 }
@@ -2130,6 +2467,104 @@ impl ExfiltrationSentinel {
         }
 
         Ok(worst_verdict)
+    }
+
+    /// Enforce a concrete sink policy against an existing flow edge.
+    ///
+    /// Forbidden labels fail closed unless a declassification receipt is signed,
+    /// scoped to the exact sink/epoch/actor/purpose, bound to the exact forbidden
+    /// label set, unexpired, and revocation-fresh at `timestamp_ms`.
+    pub fn evaluate_sink(
+        &mut self,
+        graph: &mut LineageGraph,
+        edge_id: &str,
+        policy: &FlowSinkPolicy,
+        declassification: Option<&DeclassificationReceipt>,
+        timestamp_ms: u64,
+    ) -> Result<FlowVerdict, LineageError> {
+        let _event = EVENT_SINK_ENFORCED;
+        let _inv = INV_DECLASSIFICATION_SCOPED;
+        policy.validate()?;
+
+        let edge =
+            graph
+                .get_edge(edge_id)
+                .cloned()
+                .ok_or_else(|| LineageError::ContainmentFailed {
+                    detail: format!(
+                        "{}: sink flow edge '{}' not found",
+                        ERR_IFL_CONTAINMENT_FAILED, edge_id
+                    ),
+                })?;
+
+        if !crate::security::constant_time::ct_eq(&edge.sink, &policy.sink_id) {
+            return Err(LineageError::SinkPolicyInvalid {
+                detail: format!(
+                    "{}: sink policy '{}' targets '{}' but edge '{}' targets '{}'",
+                    ERR_IFL_SINK_POLICY_INVALID,
+                    policy.policy_id,
+                    policy.sink_id,
+                    edge.edge_id,
+                    edge.sink
+                ),
+            });
+        }
+
+        if edge.quarantined {
+            return Err(LineageError::AlreadyQuarantined {
+                detail: format!(
+                    "{}: edge '{}' already quarantined",
+                    ERR_IFL_ALREADY_QUARANTINED, edge.edge_id
+                ),
+            });
+        }
+
+        let required_labels = policy.required_labels(&edge.taint_set);
+        if required_labels.is_empty() {
+            return Ok(FlowVerdict::Pass);
+        }
+
+        if declassification
+            .is_some_and(|receipt| receipt.covers(policy, &required_labels, timestamp_ms))
+        {
+            return Ok(FlowVerdict::Pass);
+        }
+
+        self.alert_counter = self.alert_counter.saturating_add(1);
+        let alert_id = format!("alert-{}", self.alert_counter);
+        let _event_alert = EVENT_EXFIL_ALERT;
+        let alert = ExfiltrationAlert {
+            alert_id: alert_id.clone(),
+            edge_id: edge.edge_id.clone(),
+            violated_boundary: policy.policy_id.clone(),
+            taint_labels: required_labels.clone(),
+            verdict: FlowVerdict::Quarantine,
+            timestamp_ms,
+            detail: format!(
+                "Forbidden labels {:?} reached sink '{}' ({}) without a valid scoped declassification receipt",
+                required_labels,
+                policy.sink_id,
+                policy.sink_kind.as_str()
+            ),
+        };
+        self.alerts.insert(alert_id.clone(), alert);
+
+        let _event_quarantine = EVENT_FLOW_QUARANTINED;
+        graph.quarantine_edge(&edge.edge_id)?;
+        self.receipt_counter = self.receipt_counter.saturating_add(1);
+        let receipt_id = format!("receipt-{}", self.receipt_counter);
+        let _event_receipt = EVENT_CONTAINMENT_RECEIPT;
+        let receipt = ContainmentReceipt {
+            receipt_id: receipt_id.clone(),
+            alert_id,
+            edge_id: edge.edge_id,
+            quarantine_timestamp_ms: timestamp_ms,
+            containment_action: "quarantine_sink_flow".to_string(),
+            success: true,
+        };
+        self.receipts.insert(receipt_id, receipt);
+
+        Ok(FlowVerdict::Quarantine)
     }
 
     /// Get all alerts.
@@ -2897,6 +3332,20 @@ mod tests {
         }
     }
 
+    fn make_sink_policy(denied: &[&str]) -> FlowSinkPolicy {
+        FlowSinkPolicy {
+            policy_id: "sink-policy-1".to_string(),
+            sink_id: "external:api".to_string(),
+            sink_kind: FlowSinkKind::NetworkEgress,
+            epoch: 7,
+            actor: "agent-alpha".to_string(),
+            purpose: "support-case-123".to_string(),
+            forbidden_labels: denied.iter().map(|label| (*label).to_string()).collect(),
+            deny_all: false,
+            max_revocation_age_ms: 10,
+        }
+    }
+
     fn sensitive_descriptor(disclosure: BTreeMap<String, String>) -> SensitiveSourceDescriptor {
         SensitiveSourceDescriptor {
             source_class: SensitiveSourceClass::EnvVar,
@@ -3596,6 +4045,159 @@ mod tests {
         assert_eq!(verdict, FlowVerdict::Quarantine);
         assert_eq!(edge.operation, "template");
         assert!(edge.quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
+    }
+
+    #[test]
+    fn evaluate_sink_quarantines_forbidden_label_without_declassification() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["SECRET"]);
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, None, 20)
+            .unwrap();
+        let edge = graph.get_edge(&edge_id).unwrap();
+        let alert = sentinel.alerts().values().next().unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert!(edge.quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
+        assert_eq!(sentinel.receipt_count(), 1);
+        assert_eq!(alert.violated_boundary, "sink-policy-1");
+        assert!(alert.taint_labels.contains("SECRET"));
+    }
+
+    #[test]
+    fn evaluate_sink_allows_exact_scoped_declassification_receipt() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["SECRET"]);
+        let receipt = DeclassificationReceipt::scoped(
+            &policy,
+            BTreeSet::from(["SECRET".to_string()]),
+            10,
+            50,
+            19,
+            "ops-signer",
+            "signature:declass-1",
+        )
+        .unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, Some(&receipt), 20)
+            .unwrap();
+        let edge = graph.get_edge(&edge_id).unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Pass);
+        assert!(!edge.quarantined);
+        assert_eq!(sentinel.alert_count(), 0);
+        assert_eq!(sentinel.receipt_count(), 0);
+        assert!(receipt.receipt_id.starts_with("ifl-declass:"));
+        assert!(!receipt.label_set_commitment.is_empty());
+    }
+
+    #[test]
+    fn evaluate_sink_rejects_receipt_bound_to_wrong_sink() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["SECRET"]);
+        let mut wrong_policy = policy.clone();
+        wrong_policy.sink_id = "external:other-api".to_string();
+        let receipt = DeclassificationReceipt::scoped(
+            &wrong_policy,
+            BTreeSet::from(["SECRET".to_string()]),
+            10,
+            50,
+            19,
+            "ops-signer",
+            "signature:wrong-sink",
+        )
+        .unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, Some(&receipt), 20)
+            .unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert!(graph.get_edge(&edge_id).unwrap().quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
+    }
+
+    #[test]
+    fn evaluate_sink_rejects_stale_revocation_receipt() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["SECRET"]);
+        let receipt = DeclassificationReceipt::scoped(
+            &policy,
+            BTreeSet::from(["SECRET".to_string()]),
+            1,
+            50,
+            9,
+            "ops-signer",
+            "signature:stale-revocation",
+        )
+        .unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, Some(&receipt), 20)
+            .unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert!(graph.get_edge(&edge_id).unwrap().quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
+    }
+
+    #[test]
+    fn evaluate_sink_requires_receipt_for_exact_forbidden_label_set() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.register_label(make_label("PII", 70));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        graph.assign_taint("internal:secret", "PII").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["PII", "SECRET"]);
+        let receipt = DeclassificationReceipt::scoped(
+            &policy,
+            BTreeSet::from(["SECRET".to_string()]),
+            10,
+            50,
+            19,
+            "ops-signer",
+            "signature:partial-labels",
+        )
+        .unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, Some(&receipt), 20)
+            .unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert!(graph.get_edge(&edge_id).unwrap().quarantined);
         assert_eq!(sentinel.alert_count(), 1);
     }
 
@@ -5277,6 +5879,8 @@ mod tests {
             EVENT_SENSITIVE_SOURCE_REGISTERED,
             EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED,
             EVENT_TRANSFORM_PROPAGATED,
+            EVENT_DECLASSIFICATION_RECEIPT_REGISTERED,
+            EVENT_SINK_ENFORCED,
             LINEAGE_TAG_ATTACHED,
             LINEAGE_FLOW_TRACKED,
             SENTINEL_SCAN_START,
@@ -5314,6 +5918,8 @@ mod tests {
             ERR_IFL_TIMEOUT,
             ERR_IFL_SENSITIVE_SOURCE_INVALID,
             ERR_IFL_SENSITIVE_SOURCE_CONFLICT,
+            ERR_IFL_DECLASSIFICATION_INVALID,
+            ERR_IFL_SINK_POLICY_INVALID,
             ERR_LINEAGE_TAG_MISSING,
             ERR_LINEAGE_FLOW_BROKEN,
             ERR_SENTINEL_RECALL_BELOW_THRESHOLD,
@@ -5346,6 +5952,7 @@ mod tests {
             INV_SNAPSHOT_FAITHFUL,
             INV_SENSITIVE_SOURCE_COMMITMENT,
             INV_FLOW_LEDGER_IMMUTABLE,
+            INV_DECLASSIFICATION_SCOPED,
         ];
 
         for constant in &invariant_constants {
