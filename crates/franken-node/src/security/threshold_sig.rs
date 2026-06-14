@@ -4,11 +4,13 @@
 //! below threshold are rejected. Verification failures produce stable,
 //! machine-readable failure reasons.
 
+use crate::control_plane::mmr_proofs::{InclusionProof, MmrRoot, ProofError, verify_inclusion};
 #[cfg(test)]
 use crate::push_bounded;
 use crate::security::constant_time;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -38,6 +40,17 @@ const INLINE_SIGNING_MESSAGE_BYTES: usize = SIGNING_MESSAGE_DOMAIN_LEN
     + INLINE_SIGNING_MESSAGE_IDENTIFIER_BYTES
     + 8
     + INLINE_SIGNING_MESSAGE_CONTENT_HASH_BYTES;
+pub const CAPABILITY_APPROVAL_ARTIFACT_ID: &str = "capability-approval";
+pub const CAPABILITY_APPROVAL_CONNECTOR_ID: &str = "franken-node-capability";
+pub const FN_CAPABILITY_APPROVAL_START: &str = "FN-CAPABILITY-APPROVAL-START";
+pub const FN_CAPABILITY_APPROVAL_THRESHOLD_VERIFIED: &str =
+    "FN-CAPABILITY-APPROVAL-THRESHOLD-VERIFIED";
+pub const FN_CAPABILITY_APPROVAL_MMR_VERIFIED: &str = "FN-CAPABILITY-APPROVAL-MMR-VERIFIED";
+pub const FN_CAPABILITY_APPROVAL_PASS: &str = "FN-CAPABILITY-APPROVAL-PASS";
+
+const CAPABILITY_APPROVAL_HASH_DOMAIN: &[u8] = b"capability_approval_threshold_mmr_v1:";
+const SHA256_HEX_LEN: usize = 64;
+const MAX_CAPABILITY_APPROVAL_RISKS: usize = 16;
 
 /// Threshold configuration: k-of-n quorum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +373,77 @@ pub struct PublicationArtifact {
     pub signatures: Vec<PartialSignature>,
 }
 
+/// Why a capability grant needs multi-party approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityApprovalRisk {
+    SameZone,
+    CrossZone,
+    CrossTenant,
+    HighRiskScope,
+}
+
+impl CapabilityApprovalRisk {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SameZone => "same_zone",
+            Self::CrossZone => "cross_zone",
+            Self::CrossTenant => "cross_tenant",
+            Self::HighRiskScope => "high_risk_scope",
+        }
+    }
+
+    const fn requires_multi_party_approval(self) -> bool {
+        matches!(
+            self,
+            Self::CrossZone | Self::CrossTenant | Self::HighRiskScope
+        )
+    }
+}
+
+/// Canonical capability approval request bound into threshold signatures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityApprovalRequest {
+    pub approval_id: String,
+    pub actor: String,
+    pub audience: String,
+    pub scope_hash: String,
+    pub source_zone: String,
+    pub target_zone: String,
+    pub source_tenant: String,
+    pub target_tenant: String,
+    pub epoch: u64,
+    pub risk_classifications: Vec<CapabilityApprovalRisk>,
+    pub mmr_marker_hash: String,
+}
+
+/// Evidence package for cross-zone, cross-tenant, or high-risk capability approvals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityApprovalEvidence {
+    pub request: CapabilityApprovalRequest,
+    pub threshold_config: ThresholdConfig,
+    pub approval_artifact: PublicationArtifact,
+    pub mmr_root: MmrRoot,
+    pub mmr_inclusion_proof: InclusionProof,
+    pub trace_id: String,
+    pub timestamp: String,
+}
+
+/// Verified approval summary suitable for audit logs and verifier transcripts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityApprovalVerification {
+    pub approval_id: String,
+    pub approved: bool,
+    pub valid_signatures: u32,
+    pub threshold: u32,
+    pub mmr_tree_size: u64,
+    pub mmr_root_hash: String,
+    pub mmr_marker_hash: String,
+    pub event_codes: Vec<String>,
+}
+
 // ── Verification result ─────────────────────────────────────────────
 
 /// Result of threshold signature verification.
@@ -386,6 +470,85 @@ pub enum FailureReason {
     InvalidArtifactId { reason: String },
     InvalidConnectorId { reason: String },
 }
+
+/// Errors for threshold+MMR capability approval verification.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapabilityApprovalError {
+    #[serde(rename = "CAP_APPROVAL_NOT_REQUIRED")]
+    ApprovalNotRequired,
+    #[serde(rename = "CAP_APPROVAL_REQUEST_INVALID")]
+    RequestInvalid { reason: String },
+    #[serde(rename = "CAP_APPROVAL_ARTIFACT_CONTEXT_MISMATCH")]
+    ArtifactContextMismatch {
+        field: String,
+        expected: String,
+        actual: String,
+    },
+    #[serde(rename = "CAP_APPROVAL_CONTENT_HASH_MISMATCH")]
+    ContentHashMismatch { expected: String, actual: String },
+    #[serde(rename = "CAP_APPROVAL_THRESHOLD_REJECTED")]
+    ThresholdRejected { result: VerificationResult },
+    #[serde(rename = "CAP_APPROVAL_MMR_REJECTED")]
+    MmrRejected { proof_error: ProofError },
+}
+
+impl CapabilityApprovalError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::ApprovalNotRequired => "CAP_APPROVAL_NOT_REQUIRED",
+            Self::RequestInvalid { .. } => "CAP_APPROVAL_REQUEST_INVALID",
+            Self::ArtifactContextMismatch { .. } => "CAP_APPROVAL_ARTIFACT_CONTEXT_MISMATCH",
+            Self::ContentHashMismatch { .. } => "CAP_APPROVAL_CONTENT_HASH_MISMATCH",
+            Self::ThresholdRejected { .. } => "CAP_APPROVAL_THRESHOLD_REJECTED",
+            Self::MmrRejected { .. } => "CAP_APPROVAL_MMR_REJECTED",
+        }
+    }
+}
+
+impl fmt::Display for CapabilityApprovalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApprovalNotRequired => {
+                write!(f, "CAP_APPROVAL_NOT_REQUIRED: approval is not required")
+            }
+            Self::RequestInvalid { reason } => {
+                write!(
+                    f,
+                    "CAP_APPROVAL_REQUEST_INVALID: {}",
+                    display_safe_text(reason)
+                )
+            }
+            Self::ArtifactContextMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "CAP_APPROVAL_ARTIFACT_CONTEXT_MISMATCH: field={} expected={} actual={}",
+                display_safe_text(field),
+                display_safe_text(expected),
+                display_safe_text(actual)
+            ),
+            Self::ContentHashMismatch { expected, actual } => write!(
+                f,
+                "CAP_APPROVAL_CONTENT_HASH_MISMATCH: expected={} actual={}",
+                display_safe_text(expected),
+                display_safe_text(actual)
+            ),
+            Self::ThresholdRejected { result } => write!(
+                f,
+                "CAP_APPROVAL_THRESHOLD_REJECTED: valid_signatures={} threshold={}",
+                result.valid_signatures, result.threshold
+            ),
+            Self::MmrRejected { proof_error } => {
+                write!(f, "CAP_APPROVAL_MMR_REJECTED: {proof_error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CapabilityApprovalError {}
 
 impl fmt::Display for FailureReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -438,6 +601,62 @@ fn extend_len_prefixed_field(msg: &mut Vec<u8>, value: &str) {
     let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
     msg.extend_from_slice(&value_len.to_le_bytes());
     msg.extend_from_slice(value.as_bytes());
+}
+
+fn update_len_prefixed_hash(hasher: &mut Sha256, value: &str) {
+    hasher.update((u64::try_from(value.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn canonical_capability_approval_risk_labels(
+    risks: &[CapabilityApprovalRisk],
+) -> Vec<&'static str> {
+    let mut labels = Vec::with_capacity(risks.len());
+    for risk in risks {
+        labels.push(risk.label());
+    }
+    labels.sort_unstable();
+    labels.dedup();
+    labels
+}
+
+pub fn risks_require_multi_party_approval(risks: &[CapabilityApprovalRisk]) -> bool {
+    risks
+        .iter()
+        .any(|risk| (*risk).requires_multi_party_approval())
+}
+
+pub fn capability_request_requires_multi_party_approval(
+    request: &CapabilityApprovalRequest,
+) -> bool {
+    let crosses_zone = !constant_time::ct_eq(&request.source_zone, &request.target_zone);
+    let crosses_tenant = !constant_time::ct_eq(&request.source_tenant, &request.target_tenant);
+
+    crosses_zone
+        || crosses_tenant
+        || risks_require_multi_party_approval(&request.risk_classifications)
+}
+
+/// Canonical, domain-separated hash bound into approval threshold signatures.
+pub fn capability_approval_content_hash(request: &CapabilityApprovalRequest) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(CAPABILITY_APPROVAL_HASH_DOMAIN);
+    update_len_prefixed_hash(&mut hasher, &request.approval_id);
+    update_len_prefixed_hash(&mut hasher, &request.actor);
+    update_len_prefixed_hash(&mut hasher, &request.audience);
+    update_len_prefixed_hash(&mut hasher, &request.scope_hash);
+    update_len_prefixed_hash(&mut hasher, &request.source_zone);
+    update_len_prefixed_hash(&mut hasher, &request.target_zone);
+    update_len_prefixed_hash(&mut hasher, &request.source_tenant);
+    update_len_prefixed_hash(&mut hasher, &request.target_tenant);
+    hasher.update(request.epoch.to_le_bytes());
+    let risk_labels = canonical_capability_approval_risk_labels(&request.risk_classifications);
+    hasher.update((u64::try_from(risk_labels.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    for label in risk_labels {
+        update_len_prefixed_hash(&mut hasher, label);
+    }
+    update_len_prefixed_hash(&mut hasher, &request.mmr_marker_hash);
+    hex::encode(hasher.finalize())
 }
 
 /// Build the domain-separated message for signing/verification.
@@ -558,6 +777,192 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
 
 fn invalid_connector_id_reason(connector_id: &str) -> Option<String> {
     invalid_identifier_reason("connector_id", connector_id)
+}
+
+fn invalid_capability_approval_text_reason(field_name: &str, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Some(format!("{field_name} must not be empty"));
+    }
+    if trimmed != value {
+        return Some(format!(
+            "{field_name} contains leading or trailing whitespace"
+        ));
+    }
+    if value.contains('\0') {
+        return Some(format!("{field_name} must not contain null bytes"));
+    }
+    if value.len() > MAX_THRESHOLD_IDENTIFIER_BYTES {
+        return Some(format!(
+            "{field_name} must not exceed {MAX_THRESHOLD_IDENTIFIER_BYTES} bytes"
+        ));
+    }
+    None
+}
+
+fn invalid_capability_approval_hash_reason(field_name: &str, value: &str) -> Option<String> {
+    if value.len() != SHA256_HEX_LEN {
+        return Some(format!(
+            "{field_name} must be a 64-character lowercase hex digest"
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Some(format!("{field_name} must be lowercase hex"));
+    }
+    None
+}
+
+fn validate_capability_approval_request(
+    request: &CapabilityApprovalRequest,
+) -> Result<(), CapabilityApprovalError> {
+    if let Some(reason) = invalid_identifier_reason("approval_id", &request.approval_id) {
+        return Err(CapabilityApprovalError::RequestInvalid { reason });
+    }
+
+    for (field_name, value) in [
+        ("actor", request.actor.as_str()),
+        ("audience", request.audience.as_str()),
+        ("source_zone", request.source_zone.as_str()),
+        ("target_zone", request.target_zone.as_str()),
+        ("source_tenant", request.source_tenant.as_str()),
+        ("target_tenant", request.target_tenant.as_str()),
+    ] {
+        if let Some(reason) = invalid_capability_approval_text_reason(field_name, value) {
+            return Err(CapabilityApprovalError::RequestInvalid { reason });
+        }
+    }
+
+    for (field_name, value) in [
+        ("scope_hash", request.scope_hash.as_str()),
+        ("mmr_marker_hash", request.mmr_marker_hash.as_str()),
+    ] {
+        if let Some(reason) = invalid_capability_approval_hash_reason(field_name, value) {
+            return Err(CapabilityApprovalError::RequestInvalid { reason });
+        }
+    }
+
+    if request.risk_classifications.is_empty() {
+        return Err(CapabilityApprovalError::RequestInvalid {
+            reason: "risk_classifications must not be empty".to_string(),
+        });
+    }
+    if request.risk_classifications.len() > MAX_CAPABILITY_APPROVAL_RISKS {
+        return Err(CapabilityApprovalError::RequestInvalid {
+            reason: format!(
+                "risk_classifications must not exceed {MAX_CAPABILITY_APPROVAL_RISKS} entries"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_capability_approval_evidence(
+    evidence: &CapabilityApprovalEvidence,
+) -> Result<(), CapabilityApprovalError> {
+    validate_capability_approval_request(&evidence.request)?;
+    for (field_name, value) in [
+        ("trace_id", evidence.trace_id.as_str()),
+        ("timestamp", evidence.timestamp.as_str()),
+    ] {
+        if let Some(reason) = invalid_capability_approval_text_reason(field_name, value) {
+            return Err(CapabilityApprovalError::RequestInvalid { reason });
+        }
+    }
+    Ok(())
+}
+
+fn capability_artifact_context_mismatch(
+    field: &str,
+    expected: &str,
+    actual: &str,
+) -> CapabilityApprovalError {
+    CapabilityApprovalError::ArtifactContextMismatch {
+        field: field.to_string(),
+        expected: expected.to_string(),
+        actual: actual.to_string(),
+    }
+}
+
+/// Verify a capability approval with both threshold signatures and MMR inclusion proof.
+pub fn verify_capability_multi_party_approval(
+    evidence: &CapabilityApprovalEvidence,
+) -> Result<CapabilityApprovalVerification, CapabilityApprovalError> {
+    validate_capability_approval_evidence(evidence)?;
+
+    if !capability_request_requires_multi_party_approval(&evidence.request) {
+        return Err(CapabilityApprovalError::ApprovalNotRequired);
+    }
+
+    if !constant_time::ct_eq(
+        &evidence.approval_artifact.artifact_id,
+        CAPABILITY_APPROVAL_ARTIFACT_ID,
+    ) {
+        return Err(capability_artifact_context_mismatch(
+            "artifact_id",
+            CAPABILITY_APPROVAL_ARTIFACT_ID,
+            &evidence.approval_artifact.artifact_id,
+        ));
+    }
+    if !constant_time::ct_eq(
+        &evidence.approval_artifact.connector_id,
+        CAPABILITY_APPROVAL_CONNECTOR_ID,
+    ) {
+        return Err(capability_artifact_context_mismatch(
+            "connector_id",
+            CAPABILITY_APPROVAL_CONNECTOR_ID,
+            &evidence.approval_artifact.connector_id,
+        ));
+    }
+
+    let expected_content_hash = capability_approval_content_hash(&evidence.request);
+    if !constant_time::ct_eq(
+        &expected_content_hash,
+        &evidence.approval_artifact.content_hash,
+    ) {
+        return Err(CapabilityApprovalError::ContentHashMismatch {
+            expected: expected_content_hash,
+            actual: evidence.approval_artifact.content_hash.clone(),
+        });
+    }
+
+    let threshold_result = verify_threshold(
+        &evidence.threshold_config,
+        &evidence.approval_artifact,
+        &evidence.trace_id,
+        &evidence.timestamp,
+    );
+    if !threshold_result.verified {
+        return Err(CapabilityApprovalError::ThresholdRejected {
+            result: threshold_result,
+        });
+    }
+
+    verify_inclusion(
+        &evidence.mmr_inclusion_proof,
+        &evidence.mmr_root,
+        &evidence.request.mmr_marker_hash,
+    )
+    .map_err(|proof_error| CapabilityApprovalError::MmrRejected { proof_error })?;
+
+    Ok(CapabilityApprovalVerification {
+        approval_id: evidence.request.approval_id.clone(),
+        approved: true,
+        valid_signatures: threshold_result.valid_signatures,
+        threshold: threshold_result.threshold,
+        mmr_tree_size: evidence.mmr_root.tree_size,
+        mmr_root_hash: evidence.mmr_root.root_hash.clone(),
+        mmr_marker_hash: evidence.request.mmr_marker_hash.clone(),
+        event_codes: vec![
+            FN_CAPABILITY_APPROVAL_START.to_string(),
+            FN_CAPABILITY_APPROVAL_THRESHOLD_VERIFIED.to_string(),
+            FN_CAPABILITY_APPROVAL_MMR_VERIFIED.to_string(),
+            FN_CAPABILITY_APPROVAL_PASS.to_string(),
+        ],
+    })
 }
 
 fn artifact_identifier_failure(artifact: &PublicationArtifact) -> Option<FailureReason> {
@@ -1129,6 +1534,10 @@ impl std::error::Error for ThresholdError {}
 
 #[cfg(test)]
 mod tests {
+    use crate::control_plane::marker_stream::{MarkerEventType, MarkerStream};
+    use crate::control_plane::mmr_proofs::{
+        InclusionProof, MmrCheckpoint, MmrRoot, mmr_inclusion_proof,
+    };
     use crate::lock_utils::try_lock;
 
     use super::*;
@@ -1203,6 +1612,91 @@ mod tests {
             connector_id: TEST_CONNECTOR_ID.into(),
             content_hash: hash.to_string(),
             signatures: sigs,
+        }
+    }
+
+    fn test_hash(label: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"threshold_sig_capability_test_hash_v1:");
+        hasher.update((u64::try_from(label.len()).unwrap_or(u64::MAX)).to_le_bytes());
+        hasher.update(label.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    fn capability_approval_mmr_for_test() -> (MmrRoot, InclusionProof, String) {
+        let mut stream = MarkerStream::new();
+        let payload_hash = test_hash("capability-approval-marker-payload");
+        let marker = stream
+            .append(
+                MarkerEventType::TrustDecision,
+                &payload_hash,
+                1_700_000_000,
+                "trace-capability-approval",
+            )
+            .expect("marker append should succeed")
+            .clone();
+        let mut checkpoint = MmrCheckpoint::enabled();
+        let root = checkpoint
+            .rebuild_from_stream(&stream)
+            .expect("checkpoint rebuild should succeed");
+        let proof = mmr_inclusion_proof(&stream, &checkpoint, marker.sequence)
+            .expect("inclusion proof should build");
+
+        (root, proof, marker.marker_hash)
+    }
+
+    fn capability_approval_evidence(
+        signature_count: usize,
+        risk_classifications: Vec<CapabilityApprovalRisk>,
+        source_zone: &str,
+        target_zone: &str,
+        source_tenant: &str,
+        target_tenant: &str,
+    ) -> CapabilityApprovalEvidence {
+        let (signing_keys, config) = test_config(2, 3);
+        let (mmr_root, mmr_inclusion_proof, mmr_marker_hash) = capability_approval_mmr_for_test();
+        let request = CapabilityApprovalRequest {
+            approval_id: "approval-1".to_string(),
+            actor: "agent-alpha".to_string(),
+            audience: "runtime-verifier".to_string(),
+            scope_hash: test_hash("capability-scope"),
+            source_zone: source_zone.to_string(),
+            target_zone: target_zone.to_string(),
+            source_tenant: source_tenant.to_string(),
+            target_tenant: target_tenant.to_string(),
+            epoch: 42,
+            risk_classifications,
+            mmr_marker_hash,
+        };
+        let content_hash = capability_approval_content_hash(&request);
+        let signatures = signing_keys
+            .iter()
+            .zip(config.signer_keys.iter())
+            .take(signature_count)
+            .map(|(signing_key, key)| {
+                sign(
+                    signing_key,
+                    &key.key_id,
+                    CAPABILITY_APPROVAL_ARTIFACT_ID,
+                    CAPABILITY_APPROVAL_CONNECTOR_ID,
+                    &content_hash,
+                )
+            })
+            .collect();
+
+        CapabilityApprovalEvidence {
+            request,
+            threshold_config: config,
+            approval_artifact: PublicationArtifact {
+                artifact_id: CAPABILITY_APPROVAL_ARTIFACT_ID.to_string(),
+                connector_id: CAPABILITY_APPROVAL_CONNECTOR_ID.to_string(),
+                content_hash,
+                signatures,
+            },
+            mmr_root,
+            mmr_inclusion_proof,
+            trace_id: "trace-capability-approval".to_string(),
+            timestamp: "2026-06-14T00:00:00Z".to_string(),
         }
     }
 
@@ -1318,6 +1812,172 @@ mod tests {
         let result = verify_threshold(&config, &artifact, "t1", "ts");
         assert!(result.verified);
         assert_eq!(result.valid_signatures, 3);
+    }
+
+    #[test]
+    fn capability_multi_party_approval_accepts_cross_zone_threshold_and_mmr() {
+        let evidence = capability_approval_evidence(
+            2,
+            vec![CapabilityApprovalRisk::CrossZone],
+            "zone-a",
+            "zone-b",
+            "tenant-a",
+            "tenant-a",
+        );
+
+        let report = verify_capability_multi_party_approval(&evidence)
+            .expect("cross-zone approval should verify");
+
+        assert!(report.approved);
+        assert_eq!(report.approval_id, "approval-1");
+        assert_eq!(report.valid_signatures, 2);
+        assert_eq!(report.threshold, 2);
+        assert_eq!(report.mmr_tree_size, 1);
+        assert_eq!(report.mmr_marker_hash, evidence.request.mmr_marker_hash);
+        assert_eq!(
+            report.event_codes,
+            vec![
+                FN_CAPABILITY_APPROVAL_START.to_string(),
+                FN_CAPABILITY_APPROVAL_THRESHOLD_VERIFIED.to_string(),
+                FN_CAPABILITY_APPROVAL_MMR_VERIFIED.to_string(),
+                FN_CAPABILITY_APPROVAL_PASS.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn capability_multi_party_approval_accepts_cross_tenant_even_without_risk_label() {
+        let evidence = capability_approval_evidence(
+            2,
+            vec![CapabilityApprovalRisk::SameZone],
+            "zone-a",
+            "zone-a",
+            "tenant-a",
+            "tenant-b",
+        );
+
+        let report = verify_capability_multi_party_approval(&evidence)
+            .expect("cross-tenant approval should verify");
+
+        assert!(report.approved);
+        assert_eq!(report.valid_signatures, 2);
+    }
+
+    #[test]
+    fn capability_multi_party_approval_rejects_same_zone_without_high_risk() {
+        let evidence = capability_approval_evidence(
+            2,
+            vec![CapabilityApprovalRisk::SameZone],
+            "zone-a",
+            "zone-a",
+            "tenant-a",
+            "tenant-a",
+        );
+
+        let err = verify_capability_multi_party_approval(&evidence)
+            .expect_err("same-zone approval should not be accepted as required approval");
+
+        assert_eq!(err, CapabilityApprovalError::ApprovalNotRequired);
+        assert_eq!(err.code(), "CAP_APPROVAL_NOT_REQUIRED");
+    }
+
+    #[test]
+    fn capability_multi_party_approval_rejects_below_threshold() {
+        let evidence = capability_approval_evidence(
+            1,
+            vec![CapabilityApprovalRisk::HighRiskScope],
+            "zone-a",
+            "zone-a",
+            "tenant-a",
+            "tenant-a",
+        );
+
+        let err = verify_capability_multi_party_approval(&evidence)
+            .expect_err("below-threshold approval must fail closed");
+
+        assert!(matches!(
+            err,
+            CapabilityApprovalError::ThresholdRejected { .. }
+        ));
+        if let CapabilityApprovalError::ThresholdRejected { result } = err {
+            assert_eq!(result.valid_signatures, 1);
+            assert_eq!(result.threshold, 2);
+            assert_eq!(
+                result.failure_reason,
+                Some(FailureReason::BelowThreshold { have: 1, need: 2 })
+            );
+        }
+    }
+
+    #[test]
+    fn capability_multi_party_approval_rejects_content_hash_mismatch() {
+        let mut evidence = capability_approval_evidence(
+            2,
+            vec![CapabilityApprovalRisk::CrossZone],
+            "zone-a",
+            "zone-b",
+            "tenant-a",
+            "tenant-a",
+        );
+        let expected = evidence.approval_artifact.content_hash.clone();
+        evidence.approval_artifact.content_hash = test_hash("tampered-approval-content");
+
+        let err = verify_capability_multi_party_approval(&evidence)
+            .expect_err("tampered approval content hash must fail closed");
+
+        assert_eq!(
+            err,
+            CapabilityApprovalError::ContentHashMismatch {
+                expected,
+                actual: test_hash("tampered-approval-content"),
+            }
+        );
+    }
+
+    #[test]
+    fn capability_multi_party_approval_rejects_wrong_artifact_context() {
+        let mut evidence = capability_approval_evidence(
+            2,
+            vec![CapabilityApprovalRisk::CrossTenant],
+            "zone-a",
+            "zone-a",
+            "tenant-a",
+            "tenant-b",
+        );
+        evidence.approval_artifact.connector_id = "wrong-connector".to_string();
+
+        let err = verify_capability_multi_party_approval(&evidence)
+            .expect_err("wrong connector context must fail closed");
+
+        assert_eq!(
+            err,
+            CapabilityApprovalError::ArtifactContextMismatch {
+                field: "connector_id".to_string(),
+                expected: CAPABILITY_APPROVAL_CONNECTOR_ID.to_string(),
+                actual: "wrong-connector".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn capability_multi_party_approval_rejects_tampered_mmr_root() {
+        let mut evidence = capability_approval_evidence(
+            2,
+            vec![CapabilityApprovalRisk::CrossZone],
+            "zone-a",
+            "zone-b",
+            "tenant-a",
+            "tenant-a",
+        );
+        evidence.mmr_root.root_hash = test_hash("wrong-mmr-root");
+
+        let err = verify_capability_multi_party_approval(&evidence)
+            .expect_err("tampered MMR root must fail closed");
+
+        assert!(matches!(err, CapabilityApprovalError::MmrRejected { .. }));
+        if let CapabilityApprovalError::MmrRejected { proof_error } = err {
+            assert_eq!(proof_error.code(), "MMR_ROOT_MISMATCH");
+        }
     }
 
     #[test]
