@@ -7,9 +7,9 @@ use frankenengine_verifier_sdk::bundle::{
     BundleArtifact, BundleChunk, BundleError, BundleHeader, BundleSignature,
     EFFECT_RECEIPT_EVENT_TYPE, EFFECT_RECEIPT_SCHEMA_VERSION, EffectKind, EffectPolicyOutcome,
     EffectReceipt, EffectReceiptChainEntry, FN_VSDK_EFFECT_CHAIN_PASS, FN_VSDK_EFFECT_CHAIN_START,
-    FN_VSDK_EFFECT_VERIFIED, REPLAY_BUNDLE_HASH_ALGORITHM, REPLAY_BUNDLE_SCHEMA_VERSION,
-    ReplayBundle, TimelineEvent, hash, render_effect_chain_transcript, seal, serialize, verify,
-    verify_effect_chain,
+    FN_VSDK_EFFECT_VERIFIED, FlowPolicyVerdict, REPLAY_BUNDLE_HASH_ALGORITHM,
+    REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash,
+    render_effect_chain_transcript, seal, serialize, verify, verify_effect_chain,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -89,6 +89,15 @@ fn effect_chain_bundle_verifies_cas_backed_receipts_and_transcript() {
         first.result_hash.as_deref(),
         Some(cas_hash(EFFECT_RESULT_BYTES).as_str())
     );
+    assert_eq!(first.flow_policy_verdict, "declassified");
+    assert_eq!(
+        first.declassification_ref.as_deref(),
+        Some("ifl-declass:network-egress-allow-001")
+    );
+    assert_eq!(
+        first.label_set_commitment,
+        lineage_hash("labels:operator_secret")
+    );
     assert!(
         first
             .cas_bindings
@@ -103,6 +112,9 @@ fn effect_chain_bundle_verifies_cas_backed_receipts_and_transcript() {
     assert_eq!(second.effect_kind, "http_request");
     assert_eq!(second.outcome, "denied");
     assert_eq!(second.result_hash, None);
+    assert_eq!(second.flow_policy_verdict, "blocked");
+    assert!(second.output_lineage_hash.is_none());
+    assert!(second.declassification_ref.is_none());
     assert_eq!(
         second.cas_bindings.len(),
         2,
@@ -199,6 +211,21 @@ fn effect_chain_verification_rejects_tampered_receipts_bytes_order_and_versions(
             ref actual,
             ..
         } if actual == "effect-receipt-v9.0"
+    ));
+
+    let mut malformed_lineage = effect_chain_replay_bundle();
+    let mut first_entry = timeline_effect_entry(&malformed_lineage, 0);
+    first_entry.receipt.label_set_commitment = "sha256:ABC".to_string();
+    set_timeline_effect_entry(&mut malformed_lineage, 0, first_entry);
+    let err = verify_effect_chain_bytes(&malformed_lineage)
+        .expect_err("malformed lineage commitments must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::MalformedEffectLineageHash {
+            index: 0,
+            field: "label_set_commitment",
+            ..
+        }
     ));
 }
 
@@ -359,6 +386,11 @@ fn effect_chain_replay_bundle() -> ReplayBundle {
             args_hash,
             result_hash: Some(result_hash),
             post_state_hash: Some(post_hash),
+            input_lineage_hash: lineage_hash("operator_secret:input"),
+            output_lineage_hash: Some(lineage_hash("operator_secret:output")),
+            label_set_commitment: lineage_hash("labels:operator_secret"),
+            declassification_ref: Some("ifl-declass:network-egress-allow-001".to_string()),
+            flow_policy_verdict: FlowPolicyVerdict::Declassified,
             recorded_at_millis: 1_775_000_000_000,
         },
         EffectReceipt {
@@ -373,6 +405,11 @@ fn effect_chain_replay_bundle() -> ReplayBundle {
             args_hash: denied_args_hash,
             result_hash: None,
             post_state_hash: None,
+            input_lineage_hash: lineage_hash("operator_secret:input"),
+            output_lineage_hash: None,
+            label_set_commitment: lineage_hash("labels:operator_secret"),
+            declassification_ref: None,
+            flow_policy_verdict: FlowPolicyVerdict::Blocked,
             recorded_at_millis: 1_775_000_000_001,
         },
     ];
@@ -543,6 +580,12 @@ fn cas_hash(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+fn lineage_hash(label: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
 fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"runtime_effect_receipt_canonical_v1:");
@@ -563,6 +606,11 @@ fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
     update_hash_str(&mut hasher, &receipt.args_hash);
     update_optional_hash_str(&mut hasher, receipt.result_hash.as_deref());
     update_optional_hash_str(&mut hasher, receipt.post_state_hash.as_deref());
+    update_hash_str(&mut hasher, &receipt.input_lineage_hash);
+    update_optional_hash_str(&mut hasher, receipt.output_lineage_hash.as_deref());
+    update_hash_str(&mut hasher, &receipt.label_set_commitment);
+    update_optional_hash_str(&mut hasher, receipt.declassification_ref.as_deref());
+    hasher.update([flow_policy_verdict_tag(receipt.flow_policy_verdict)]);
     hasher.update(receipt.recorded_at_millis.to_le_bytes());
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
@@ -607,6 +655,14 @@ fn policy_outcome_tag(outcome: &EffectPolicyOutcome) -> u8 {
     match outcome {
         EffectPolicyOutcome::Allowed { .. } => 1,
         EffectPolicyOutcome::Denied { .. } => 2,
+    }
+}
+
+fn flow_policy_verdict_tag(verdict: FlowPolicyVerdict) -> u8 {
+    match verdict {
+        FlowPolicyVerdict::LabelClean => 1,
+        FlowPolicyVerdict::Declassified => 2,
+        FlowPolicyVerdict::Blocked => 3,
     }
 }
 

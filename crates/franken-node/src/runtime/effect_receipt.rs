@@ -39,7 +39,13 @@ use crate::storage::cas::ContentHash;
 
 /// Schema/format version for the EffectReceipt wire shape. Local copy per the
 /// `schema_versions` convention.
-pub const EFFECT_RECEIPT_SCHEMA: &str = "effect-receipt-v1.0";
+pub const EFFECT_RECEIPT_SCHEMA: &str = "effect-receipt-v1.1";
+/// Deterministic placeholder for effects whose payload has no sensitive lineage.
+pub const EFFECT_RECEIPT_EMPTY_LINEAGE_HASH: &str =
+    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+/// Deterministic commitment for an empty label set.
+pub const EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT: &str =
+    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// Domain separator for the canonical receipt preimage.
 const RECEIPT_HASH_DOMAIN: &[u8] = b"runtime_effect_receipt_canonical_v1:";
@@ -112,6 +118,97 @@ impl PolicyOutcome {
     }
 }
 
+/// Information-flow verdict bound into the effect receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowPolicyVerdict {
+    /// The effect payload was label-clean at the host boundary.
+    LabelClean,
+    /// The payload carried forbidden labels but a scoped declassification receipt
+    /// authorized this exact effect.
+    Declassified,
+    /// The flow policy blocked the effect before execution.
+    Blocked,
+}
+
+impl FlowPolicyVerdict {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::LabelClean => 1,
+            Self::Declassified => 2,
+            Self::Blocked => 3,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LabelClean => "label_clean",
+            Self::Declassified => "declassified",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+/// Lineage fields attached to an [`EffectReceipt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectLineageFields {
+    pub input_lineage_hash: String,
+    pub output_lineage_hash: Option<String>,
+    pub label_set_commitment: String,
+    pub declassification_ref: Option<String>,
+    pub flow_policy_verdict: FlowPolicyVerdict,
+}
+
+impl EffectLineageFields {
+    pub fn label_clean_allowed() -> Self {
+        Self {
+            input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+            output_lineage_hash: Some(EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string()),
+            label_set_commitment: EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT.to_string(),
+            declassification_ref: None,
+            flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+        }
+    }
+
+    pub fn label_clean_denied() -> Self {
+        Self {
+            input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+            output_lineage_hash: None,
+            label_set_commitment: EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT.to_string(),
+            declassification_ref: None,
+            flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+        }
+    }
+
+    pub fn declassified(
+        input_lineage_hash: impl Into<String>,
+        output_lineage_hash: impl Into<String>,
+        label_set_commitment: impl Into<String>,
+        declassification_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            input_lineage_hash: input_lineage_hash.into(),
+            output_lineage_hash: Some(output_lineage_hash.into()),
+            label_set_commitment: label_set_commitment.into(),
+            declassification_ref: Some(declassification_ref.into()),
+            flow_policy_verdict: FlowPolicyVerdict::Declassified,
+        }
+    }
+
+    pub fn blocked(
+        input_lineage_hash: impl Into<String>,
+        label_set_commitment: impl Into<String>,
+    ) -> Self {
+        Self {
+            input_lineage_hash: input_lineage_hash.into(),
+            output_lineage_hash: None,
+            label_set_commitment: label_set_commitment.into(),
+            declassification_ref: None,
+            flow_policy_verdict: FlowPolicyVerdict::Blocked,
+        }
+    }
+}
+
 /// Errors surfaced by the effect-receipt chain. Every variant fails closed.
 #[derive(Debug, thiserror::Error)]
 pub enum EffectReceiptError {
@@ -126,6 +223,10 @@ pub enum EffectReceiptError {
     AllowedMissingHash { field: &'static str },
     #[error("denied effect receipt must not carry a {field}")]
     DeniedHasHash { field: &'static str },
+    #[error("effect receipt lineage field {field} must be canonical sha256:<hex>")]
+    MalformedLineageHash { field: &'static str, value: String },
+    #[error("effect receipt lineage policy invalid: {detail}")]
+    LineagePolicyInvalid { detail: String },
     #[error("effect receipt chain is at capacity ({max} entries)")]
     CapacityExceeded { max: usize },
     #[error("chain integrity violation at index {index}: {detail}")]
@@ -152,6 +253,17 @@ pub struct EffectReceipt {
     pub result_hash: Option<ContentHash>,
     /// CAS hash of the relevant state after the effect. `None` when denied.
     pub post_state_hash: Option<ContentHash>,
+    /// Canonical lineage-chain hash of inputs consumed by this effect.
+    pub input_lineage_hash: String,
+    /// Canonical lineage-chain hash after this effect. `None` when the effect
+    /// did not execute.
+    pub output_lineage_hash: Option<String>,
+    /// Commitment to the exact label set observed at this boundary.
+    pub label_set_commitment: String,
+    /// Optional signed declassification receipt id authorizing this flow.
+    pub declassification_ref: Option<String>,
+    /// Information-flow policy verdict for the effect payload.
+    pub flow_policy_verdict: FlowPolicyVerdict,
     /// UTC milliseconds the receipt was recorded (supplied by the caller's
     /// clock discipline; this module never reads the wall clock).
     pub recorded_at_millis: u64,
@@ -171,6 +283,34 @@ impl EffectReceipt {
         post_state_hash: ContentHash,
         recorded_at_millis: u64,
     ) -> Self {
+        Self::allowed_with_lineage(
+            seq,
+            trace_id,
+            effect_kind,
+            capability_ref,
+            pre_state_hash,
+            args_hash,
+            result_hash,
+            post_state_hash,
+            recorded_at_millis,
+            EffectLineageFields::label_clean_allowed(),
+        )
+    }
+
+    /// Build a receipt for an authorized effect with explicit lineage metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn allowed_with_lineage(
+        seq: u64,
+        trace_id: impl Into<String>,
+        effect_kind: EffectKind,
+        capability_ref: impl Into<String>,
+        pre_state_hash: ContentHash,
+        args_hash: ContentHash,
+        result_hash: ContentHash,
+        post_state_hash: ContentHash,
+        recorded_at_millis: u64,
+        lineage: EffectLineageFields,
+    ) -> Self {
         Self {
             schema_version: EFFECT_RECEIPT_SCHEMA.to_string(),
             seq,
@@ -183,6 +323,11 @@ impl EffectReceipt {
             args_hash,
             result_hash: Some(result_hash),
             post_state_hash: Some(post_state_hash),
+            input_lineage_hash: lineage.input_lineage_hash,
+            output_lineage_hash: lineage.output_lineage_hash,
+            label_set_commitment: lineage.label_set_commitment,
+            declassification_ref: lineage.declassification_ref,
+            flow_policy_verdict: lineage.flow_policy_verdict,
             recorded_at_millis,
         }
     }
@@ -199,6 +344,30 @@ impl EffectReceipt {
         args_hash: ContentHash,
         recorded_at_millis: u64,
     ) -> Self {
+        Self::denied_with_lineage(
+            seq,
+            trace_id,
+            effect_kind,
+            reason,
+            pre_state_hash,
+            args_hash,
+            recorded_at_millis,
+            EffectLineageFields::label_clean_denied(),
+        )
+    }
+
+    /// Build a fail-closed denied receipt with explicit lineage metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn denied_with_lineage(
+        seq: u64,
+        trace_id: impl Into<String>,
+        effect_kind: EffectKind,
+        reason: impl Into<String>,
+        pre_state_hash: ContentHash,
+        args_hash: ContentHash,
+        recorded_at_millis: u64,
+        lineage: EffectLineageFields,
+    ) -> Self {
         Self {
             schema_version: EFFECT_RECEIPT_SCHEMA.to_string(),
             seq,
@@ -211,6 +380,11 @@ impl EffectReceipt {
             args_hash,
             result_hash: None,
             post_state_hash: None,
+            input_lineage_hash: lineage.input_lineage_hash,
+            output_lineage_hash: lineage.output_lineage_hash,
+            label_set_commitment: lineage.label_set_commitment,
+            declassification_ref: lineage.declassification_ref,
+            flow_policy_verdict: lineage.flow_policy_verdict,
             recorded_at_millis,
         }
     }
@@ -233,6 +407,21 @@ impl EffectReceipt {
         if self.trace_id.trim().is_empty() {
             return Err(EffectReceiptError::EmptyField { field: "trace_id" });
         }
+        validate_lineage_hash("input_lineage_hash", &self.input_lineage_hash)?;
+        validate_lineage_hash("label_set_commitment", &self.label_set_commitment)?;
+        if let Some(output_lineage_hash) = &self.output_lineage_hash {
+            validate_lineage_hash("output_lineage_hash", output_lineage_hash)?;
+        }
+        if self
+            .declassification_ref
+            .as_ref()
+            .is_some_and(|declassification_ref| declassification_ref.trim().is_empty())
+        {
+            return Err(EffectReceiptError::EmptyField {
+                field: "declassification_ref",
+            });
+        }
+        let is_allowed = matches!(&self.policy_outcome, PolicyOutcome::Allowed { .. });
         match &self.policy_outcome {
             PolicyOutcome::Allowed { capability_ref } => {
                 if capability_ref.trim().is_empty() {
@@ -250,6 +439,11 @@ impl EffectReceipt {
                         field: "post_state_hash",
                     });
                 }
+                if self.output_lineage_hash.is_none() {
+                    return Err(EffectReceiptError::AllowedMissingHash {
+                        field: "output_lineage_hash",
+                    });
+                }
             }
             PolicyOutcome::Denied { reason } => {
                 if reason.trim().is_empty() {
@@ -263,6 +457,47 @@ impl EffectReceipt {
                 if self.post_state_hash.is_some() {
                     return Err(EffectReceiptError::DeniedHasHash {
                         field: "post_state_hash",
+                    });
+                }
+                if self.output_lineage_hash.is_some() {
+                    return Err(EffectReceiptError::DeniedHasHash {
+                        field: "output_lineage_hash",
+                    });
+                }
+            }
+        }
+        match self.flow_policy_verdict {
+            FlowPolicyVerdict::LabelClean => {
+                if self.declassification_ref.is_some() {
+                    return Err(EffectReceiptError::LineagePolicyInvalid {
+                        detail: "label-clean effects must not carry declassification_ref"
+                            .to_string(),
+                    });
+                }
+            }
+            FlowPolicyVerdict::Declassified => {
+                if !is_allowed {
+                    return Err(EffectReceiptError::LineagePolicyInvalid {
+                        detail: "declassified flow verdict requires an allowed effect".to_string(),
+                    });
+                }
+                if self.declassification_ref.is_none() {
+                    return Err(EffectReceiptError::LineagePolicyInvalid {
+                        detail: "declassified flow verdict requires declassification_ref"
+                            .to_string(),
+                    });
+                }
+            }
+            FlowPolicyVerdict::Blocked => {
+                if is_allowed {
+                    return Err(EffectReceiptError::LineagePolicyInvalid {
+                        detail: "blocked flow verdict requires a denied effect".to_string(),
+                    });
+                }
+                if self.declassification_ref.is_some() {
+                    return Err(EffectReceiptError::LineagePolicyInvalid {
+                        detail: "blocked flow verdict must not carry declassification_ref"
+                            .to_string(),
                     });
                 }
             }
@@ -289,6 +524,11 @@ impl EffectReceipt {
         update_str(&mut h, self.args_hash.as_str());
         update_opt_hash(&mut h, self.result_hash.as_ref());
         update_opt_hash(&mut h, self.post_state_hash.as_ref());
+        update_str(&mut h, &self.input_lineage_hash);
+        update_opt_str(&mut h, self.output_lineage_hash.as_deref());
+        update_str(&mut h, &self.label_set_commitment);
+        update_opt_str(&mut h, self.declassification_ref.as_deref());
+        h.update([self.flow_policy_verdict.tag()]);
         h.update(self.recorded_at_millis.to_le_bytes());
         format!("sha256:{}", hex::encode(h.finalize()))
     }
@@ -312,6 +552,36 @@ fn update_opt_hash(h: &mut Sha256, value: Option<&ContentHash>) {
         }
         None => h.update([0u8]),
     }
+}
+
+fn update_opt_str(h: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            h.update([1u8]);
+            update_str(h, value);
+        }
+        None => h.update([0u8]),
+    }
+}
+
+fn validate_lineage_hash(field: &'static str, value: &str) -> Result<(), EffectReceiptError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(EffectReceiptError::MalformedLineageHash {
+            field,
+            value: value.to_string(),
+        });
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(EffectReceiptError::MalformedLineageHash {
+            field,
+            value: value.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn compute_chain_hash(index: u64, prev_chain_hash: &str, receipt_hash: &str) -> String {
@@ -464,6 +734,10 @@ mod tests {
         content_hash(s.as_bytes())
     }
 
+    fn lineage_hash(s: &str) -> String {
+        format!("sha256:{}", hex::encode(Sha256::digest(s.as_bytes())))
+    }
+
     fn allowed(seq: u64) -> EffectReceipt {
         EffectReceipt::allowed(
             seq,
@@ -484,6 +758,13 @@ mod tests {
         assert!(r.validate().is_ok());
         assert!(r.result_hash.is_some());
         assert!(r.post_state_hash.is_some());
+        assert_eq!(r.flow_policy_verdict, FlowPolicyVerdict::LabelClean);
+        assert!(r.output_lineage_hash.is_some());
+        assert!(r.declassification_ref.is_none());
+        assert_eq!(
+            r.label_set_commitment,
+            EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT
+        );
     }
 
     #[test]
@@ -566,6 +847,138 @@ mod tests {
         let mut other = allowed(0);
         other.seq = 1;
         assert_ne!(a, other.receipt_hash(), "seq change changes the hash");
+    }
+
+    #[test]
+    fn receipt_hash_commits_to_lineage_fields() {
+        let baseline = allowed(0).receipt_hash();
+        let receipt = EffectReceipt::allowed_with_lineage(
+            0,
+            "trace-1",
+            EffectKind::FsRead,
+            "cap-token-7",
+            h("pre"),
+            h("args"),
+            h("result"),
+            h("post"),
+            1000,
+            EffectLineageFields::declassified(
+                lineage_hash("input"),
+                lineage_hash("output"),
+                lineage_hash("labels:operator_secret"),
+                "ifl-declass:receipt-7",
+            ),
+        );
+        assert!(receipt.validate().is_ok());
+        assert_eq!(receipt.flow_policy_verdict, FlowPolicyVerdict::Declassified);
+        assert_eq!(
+            receipt.declassification_ref.as_deref(),
+            Some("ifl-declass:receipt-7")
+        );
+        assert_ne!(
+            baseline,
+            receipt.receipt_hash(),
+            "lineage metadata must be committed into the canonical receipt hash"
+        );
+    }
+
+    #[test]
+    fn declassified_verdict_requires_receipt_ref_and_allowed_effect() {
+        let mut missing_ref = EffectReceipt::allowed_with_lineage(
+            0,
+            "trace-1",
+            EffectKind::FsWrite,
+            "cap-token-7",
+            h("pre"),
+            h("args"),
+            h("result"),
+            h("post"),
+            1000,
+            EffectLineageFields::declassified(
+                lineage_hash("input"),
+                lineage_hash("output"),
+                lineage_hash("labels"),
+                "ifl-declass:receipt-7",
+            ),
+        );
+        missing_ref.declassification_ref = None;
+        assert!(matches!(
+            missing_ref.validate(),
+            Err(EffectReceiptError::LineagePolicyInvalid { .. })
+        ));
+
+        let denied = EffectReceipt::denied_with_lineage(
+            0,
+            "trace-1",
+            EffectKind::HttpRequest,
+            "flow_policy: blocked",
+            h("pre"),
+            h("args"),
+            1000,
+            EffectLineageFields {
+                output_lineage_hash: None,
+                ..EffectLineageFields::declassified(
+                    lineage_hash("input"),
+                    lineage_hash("output"),
+                    lineage_hash("labels"),
+                    "ifl-declass:receipt-7",
+                )
+            },
+        );
+        assert!(matches!(
+            denied.validate(),
+            Err(EffectReceiptError::LineagePolicyInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn blocked_flow_verdict_requires_denied_effect_without_output_lineage() {
+        let blocked = EffectReceipt::denied_with_lineage(
+            0,
+            "trace-1",
+            EffectKind::HttpRequest,
+            "flow_policy: forbidden label reached network egress",
+            h("pre"),
+            h("args"),
+            1000,
+            EffectLineageFields::blocked(lineage_hash("input"), lineage_hash("operator_secret")),
+        );
+        assert!(blocked.validate().is_ok());
+        assert_eq!(blocked.flow_policy_verdict, FlowPolicyVerdict::Blocked);
+        assert!(blocked.output_lineage_hash.is_none());
+        assert!(blocked.declassification_ref.is_none());
+
+        let allowed = EffectReceipt::allowed_with_lineage(
+            0,
+            "trace-1",
+            EffectKind::HttpRequest,
+            "cap-token-7",
+            h("pre"),
+            h("args"),
+            h("result"),
+            h("post"),
+            1000,
+            EffectLineageFields::blocked(lineage_hash("input"), lineage_hash("operator_secret")),
+        );
+        assert!(matches!(
+            allowed.validate(),
+            Err(EffectReceiptError::AllowedMissingHash {
+                field: "output_lineage_hash"
+            })
+        ));
+    }
+
+    #[test]
+    fn malformed_lineage_hash_fails_closed() {
+        let mut receipt = allowed(0);
+        receipt.label_set_commitment = "sha256:ABC".to_string();
+        assert!(matches!(
+            receipt.validate(),
+            Err(EffectReceiptError::MalformedLineageHash {
+                field: "label_set_commitment",
+                ..
+            })
+        ));
     }
 
     #[test]

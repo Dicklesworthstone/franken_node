@@ -24,7 +24,7 @@ pub const REPLAY_BUNDLE_HASH_ALGORITHM: &str = "sha256";
 /// Timeline event type that carries one proof-carrying host-effect receipt.
 pub const EFFECT_RECEIPT_EVENT_TYPE: &str = "effect_receipt";
 /// Stable schema marker for effect receipts embedded in verifier SDK bundles.
-pub const EFFECT_RECEIPT_SCHEMA_VERSION: &str = "effect-receipt-v1.0";
+pub const EFFECT_RECEIPT_SCHEMA_VERSION: &str = "effect-receipt-v1.1";
 /// Event code emitted when offline effect-chain verification starts.
 pub const FN_VSDK_EFFECT_CHAIN_START: &str = "FN-VSDK-EFFECT-CHAIN-START";
 /// Event code emitted for each verified effect receipt.
@@ -183,6 +183,33 @@ impl EffectPolicyOutcome {
     }
 }
 
+/// Information-flow verdict bound into an effect receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowPolicyVerdict {
+    LabelClean,
+    Declassified,
+    Blocked,
+}
+
+impl FlowPolicyVerdict {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::LabelClean => 1,
+            Self::Declassified => 2,
+            Self::Blocked => 3,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::LabelClean => "label_clean",
+            Self::Declassified => "declassified",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
 /// Effect receipt wire shape accepted by offline SDK verification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -196,6 +223,11 @@ pub struct EffectReceipt {
     pub args_hash: String,
     pub result_hash: Option<String>,
     pub post_state_hash: Option<String>,
+    pub input_lineage_hash: String,
+    pub output_lineage_hash: Option<String>,
+    pub label_set_commitment: String,
+    pub declassification_ref: Option<String>,
+    pub flow_policy_verdict: FlowPolicyVerdict,
     pub recorded_at_millis: u64,
 }
 
@@ -229,6 +261,11 @@ pub struct VerifiedEffect {
     pub outcome: String,
     pub capability_ref: Option<String>,
     pub result_hash: Option<String>,
+    pub input_lineage_hash: String,
+    pub output_lineage_hash: Option<String>,
+    pub label_set_commitment: String,
+    pub declassification_ref: Option<String>,
+    pub flow_policy_verdict: String,
     pub cas_bindings: Vec<VerifiedCasBinding>,
 }
 
@@ -353,6 +390,15 @@ pub enum BundleError {
         index: u64,
         field: &'static str,
         value: String,
+    },
+    MalformedEffectLineageHash {
+        index: u64,
+        field: &'static str,
+        value: String,
+    },
+    EffectReceiptLineagePolicy {
+        index: u64,
+        detail: String,
     },
     EffectReceiptAllowedMissingHash {
         index: u64,
@@ -528,6 +574,18 @@ impl fmt::Display for BundleError {
             } => write!(
                 formatter,
                 "effect receipt {index} field {field} is not a canonical sha256:<hex> content hash"
+            ),
+            Self::MalformedEffectLineageHash {
+                index,
+                field,
+                value: _,
+            } => write!(
+                formatter,
+                "effect receipt {index} lineage field {field} is not a canonical sha256:<hex> hash"
+            ),
+            Self::EffectReceiptLineagePolicy { index, detail } => write!(
+                formatter,
+                "effect receipt {index} lineage policy invalid: {detail}"
             ),
             Self::EffectReceiptAllowedMissingHash { index, field } => write!(
                 formatter,
@@ -855,6 +913,11 @@ pub fn verify_effect_chain_in_bundle(
                 .capability_ref()
                 .map(str::to_string),
             result_hash: entry.receipt.result_hash.clone(),
+            input_lineage_hash: entry.receipt.input_lineage_hash.clone(),
+            output_lineage_hash: entry.receipt.output_lineage_hash.clone(),
+            label_set_commitment: entry.receipt.label_set_commitment.clone(),
+            declassification_ref: entry.receipt.declassification_ref.clone(),
+            flow_policy_verdict: entry.receipt.flow_policy_verdict.label().to_string(),
             cas_bindings,
         });
 
@@ -886,14 +949,21 @@ pub fn render_effect_chain_transcript(report: &EffectChainVerification) -> Strin
     for effect in &report.verified_effects {
         let capability = effect.capability_ref.as_deref().unwrap_or("none");
         let result_hash = effect.result_hash.as_deref().unwrap_or("none");
+        let output_lineage_hash = effect.output_lineage_hash.as_deref().unwrap_or("none");
+        let declassification_ref = effect.declassification_ref.as_deref().unwrap_or("none");
         transcript.push_str(&format!(
-            "{FN_VSDK_EFFECT_VERIFIED} index={} seq={} kind={} outcome={} capability_ref={} result_hash={} cas_bindings={}\n",
+            "{FN_VSDK_EFFECT_VERIFIED} index={} seq={} kind={} outcome={} capability_ref={} result_hash={} flow_policy_verdict={} input_lineage_hash={} output_lineage_hash={} label_set_commitment={} declassification_ref={} cas_bindings={}\n",
             effect.index,
             effect.seq,
             effect.effect_kind,
             effect.outcome,
             capability,
             result_hash,
+            effect.flow_policy_verdict,
+            effect.input_lineage_hash,
+            output_lineage_hash,
+            effect.label_set_commitment,
+            declassification_ref,
             effect.cas_bindings.len()
         ));
     }
@@ -954,7 +1024,23 @@ fn validate_effect_receipt(index: u64, receipt: &EffectReceipt) -> BundleResult<
     }
     validate_effect_content_hash(index, "pre_state_hash", &receipt.pre_state_hash)?;
     validate_effect_content_hash(index, "args_hash", &receipt.args_hash)?;
-    match receipt.policy_outcome {
+    validate_effect_lineage_hash(index, "input_lineage_hash", &receipt.input_lineage_hash)?;
+    validate_effect_lineage_hash(index, "label_set_commitment", &receipt.label_set_commitment)?;
+    if let Some(output_lineage_hash) = &receipt.output_lineage_hash {
+        validate_effect_lineage_hash(index, "output_lineage_hash", output_lineage_hash)?;
+    }
+    if receipt
+        .declassification_ref
+        .as_ref()
+        .is_some_and(|declassification_ref| declassification_ref.trim().is_empty())
+    {
+        return Err(BundleError::EffectReceiptLineagePolicy {
+            index,
+            detail: "declassification_ref must not be empty".to_string(),
+        });
+    }
+    let is_allowed = matches!(&receipt.policy_outcome, EffectPolicyOutcome::Allowed { .. });
+    match &receipt.policy_outcome {
         EffectPolicyOutcome::Allowed { .. } => {
             if receipt.result_hash.is_none() {
                 return Err(BundleError::EffectReceiptAllowedMissingHash {
@@ -966,6 +1052,12 @@ fn validate_effect_receipt(index: u64, receipt: &EffectReceipt) -> BundleResult<
                 return Err(BundleError::EffectReceiptAllowedMissingHash {
                     index,
                     field: "post_state_hash",
+                });
+            }
+            if receipt.output_lineage_hash.is_none() {
+                return Err(BundleError::EffectReceiptAllowedMissingHash {
+                    index,
+                    field: "output_lineage_hash",
                 });
             }
         }
@@ -982,6 +1074,50 @@ fn validate_effect_receipt(index: u64, receipt: &EffectReceipt) -> BundleResult<
                     field: "post_state_hash",
                 });
             }
+            if receipt.output_lineage_hash.is_some() {
+                return Err(BundleError::EffectReceiptDeniedHasHash {
+                    index,
+                    field: "output_lineage_hash",
+                });
+            }
+        }
+    }
+    match receipt.flow_policy_verdict {
+        FlowPolicyVerdict::LabelClean => {
+            if receipt.declassification_ref.is_some() {
+                return Err(BundleError::EffectReceiptLineagePolicy {
+                    index,
+                    detail: "label-clean effects must not carry declassification_ref".to_string(),
+                });
+            }
+        }
+        FlowPolicyVerdict::Declassified => {
+            if !is_allowed {
+                return Err(BundleError::EffectReceiptLineagePolicy {
+                    index,
+                    detail: "declassified flow verdict requires an allowed effect".to_string(),
+                });
+            }
+            if receipt.declassification_ref.is_none() {
+                return Err(BundleError::EffectReceiptLineagePolicy {
+                    index,
+                    detail: "declassified flow verdict requires declassification_ref".to_string(),
+                });
+            }
+        }
+        FlowPolicyVerdict::Blocked => {
+            if is_allowed {
+                return Err(BundleError::EffectReceiptLineagePolicy {
+                    index,
+                    detail: "blocked flow verdict requires a denied effect".to_string(),
+                });
+            }
+            if receipt.declassification_ref.is_some() {
+                return Err(BundleError::EffectReceiptLineagePolicy {
+                    index,
+                    detail: "blocked flow verdict must not carry declassification_ref".to_string(),
+                });
+            }
         }
     }
     if let Some(hash) = &receipt.result_hash {
@@ -989,6 +1125,24 @@ fn validate_effect_receipt(index: u64, receipt: &EffectReceipt) -> BundleResult<
     }
     if let Some(hash) = &receipt.post_state_hash {
         validate_effect_content_hash(index, "post_state_hash", hash)?;
+    }
+    Ok(())
+}
+
+fn validate_effect_lineage_hash(index: u64, field: &'static str, value: &str) -> BundleResult<()> {
+    let Some(hex) = value.strip_prefix(CONTENT_HASH_PREFIX) else {
+        return Err(BundleError::MalformedEffectLineageHash {
+            index,
+            field,
+            value: value.to_string(),
+        });
+    };
+    if hex.len() != 64 || !is_canonical_lower_hex(hex) {
+        return Err(BundleError::MalformedEffectLineageHash {
+            index,
+            field,
+            value: value.to_string(),
+        });
     }
     Ok(())
 }
@@ -1092,6 +1246,11 @@ fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
     update_hash_str(&mut hasher, &receipt.args_hash);
     update_optional_hash_str(&mut hasher, receipt.result_hash.as_deref());
     update_optional_hash_str(&mut hasher, receipt.post_state_hash.as_deref());
+    update_hash_str(&mut hasher, &receipt.input_lineage_hash);
+    update_optional_hash_str(&mut hasher, receipt.output_lineage_hash.as_deref());
+    update_hash_str(&mut hasher, &receipt.label_set_commitment);
+    update_optional_hash_str(&mut hasher, receipt.declassification_ref.as_deref());
+    hasher.update([receipt.flow_policy_verdict.tag()]);
     hasher.update(receipt.recorded_at_millis.to_le_bytes());
     format!("{CONTENT_HASH_PREFIX}{}", hex::encode(hasher.finalize()))
 }
