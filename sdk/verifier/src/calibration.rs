@@ -1327,6 +1327,23 @@ mod tests {
         ]
     }
 
+    fn conformal_bpet_trust_surface_samples() -> Vec<ConformalScoreSample> {
+        vec![
+            conformal_sample("e1", "bpet_evolution", 9_000, true),
+            conformal_sample("e2", "bpet_evolution", 8_000, true),
+            conformal_sample("e3", "bpet_evolution", 2_000, false),
+            conformal_sample("e4", "bpet_evolution", 4_000, false),
+            conformal_sample("c1", "bpet_camouflage", 9_500, true),
+            conformal_sample("c2", "bpet_camouflage", 8_500, true),
+            conformal_sample("c3", "bpet_camouflage", 1_500, false),
+            conformal_sample("c4", "bpet_camouflage", 3_500, false),
+            conformal_sample("d1", "bpet_dgis_fusion", 9_200, true),
+            conformal_sample("d2", "bpet_dgis_fusion", 7_800, true),
+            conformal_sample("d3", "bpet_dgis_fusion", 1_600, false),
+            conformal_sample("d4", "bpet_dgis_fusion", 3_600, false),
+        ]
+    }
+
     #[test]
     fn recomputed_calibration_artifact_verifies() {
         let records = sample_records();
@@ -1421,6 +1438,64 @@ mod tests {
             verified_risk_set.included_labels,
             vec![CONFORMAL_LABEL_POSITIVE.to_string()]
         );
+    }
+
+    #[test]
+    fn bpet_trust_surface_conformal_sets_recompute_from_canonical_sdk_inputs() {
+        let samples = conformal_bpet_trust_surface_samples();
+        let artifact =
+            recompute_conformal_artifact(&samples, 2_000, "1970-01-01T00:00:00Z").unwrap();
+        let artifact_bytes = canonical_json_bytes(&artifact).expect("canonical artifact");
+        let sample_bytes = canonical_json_bytes(&samples).expect("canonical samples");
+
+        let verified =
+            verify_conformal_artifact_recomputed(&artifact_bytes, &sample_bytes).unwrap();
+
+        assert_eq!(verified.sample_count, 12);
+        assert_eq!(verified.risk_class_count, 3);
+        assert_eq!(
+            artifact.event_codes,
+            vec![
+                FN_CONFORMAL_ARTIFACT_EMITTED.to_string(),
+                FN_CONFORMAL_SET_EMITTED.to_string()
+            ]
+        );
+        assert!(artifact.corpus_hash.starts_with("sha256:"));
+        assert!(artifact.audit_notes.iter().any(|note| {
+            note.contains("assumes exchangeability")
+                && note.contains("ACI")
+                && note.contains("distribution-free guarantees")
+        }));
+
+        for (sample_id, risk_class, score_bp, expected_quantile_bp) in [
+            ("npm:@acme/evolution@1.0.0", "bpet_evolution", 10_000, 4_000),
+            (
+                "npm:@acme/camouflage@1.0.0",
+                "bpet_camouflage",
+                10_000,
+                3_500,
+            ),
+            (
+                "npm:@acme/critical-auth@1.0.0",
+                "bpet_dgis_fusion",
+                8_047,
+                3_600,
+            ),
+        ] {
+            let risk_set =
+                recompute_conformal_risk_set(sample_id, risk_class, score_bp, &artifact).unwrap();
+            let risk_set_bytes = canonical_json_bytes(&risk_set).expect("canonical risk set");
+            let verified_risk_set =
+                verify_conformal_risk_set_recomputed(&risk_set_bytes, &artifact).unwrap();
+
+            assert_eq!(verified_risk_set.event_code, FN_CONFORMAL_SET_EMITTED);
+            assert_eq!(verified_risk_set.risk_class, risk_class);
+            assert_eq!(verified_risk_set.quantile_bp, expected_quantile_bp);
+            assert_eq!(
+                verified_risk_set.included_labels,
+                vec![CONFORMAL_LABEL_POSITIVE.to_string()]
+            );
+        }
     }
 
     #[test]

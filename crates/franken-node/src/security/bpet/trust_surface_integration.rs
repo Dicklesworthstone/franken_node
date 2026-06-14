@@ -333,6 +333,35 @@ fn calibrated_trust_surface_summary(
     )
 }
 
+/// Render calibrated trust-surface assessments as a deterministic transcript.
+pub fn render_calibrated_trust_surface_transcript(
+    assessments: &[BpetTrustSurfaceAssessment],
+) -> String {
+    assessments
+        .iter()
+        .filter_map(|assessment| {
+            let risk_set = assessment.calibrated_risk_set.as_ref()?;
+            let labels = if risk_set.included_labels.is_empty() {
+                "none".to_string()
+            } else {
+                risk_set.included_labels.join("+")
+            };
+            Some(format!(
+                "event={} package={} risk_class={} level={:?} labels={} score_bp={} quantile_bp={} coverage_bp={}",
+                risk_set.event_code,
+                assessment.package_name,
+                risk_set.risk_class,
+                assessment.risk_level,
+                labels,
+                risk_set.score_bp,
+                risk_set.quantile_bp,
+                assessment.empirical_coverage_basis_points.unwrap_or_default(),
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

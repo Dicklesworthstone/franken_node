@@ -614,6 +614,118 @@ mod tests {
         ]
     }
 
+    fn sample_from_nonconformity(
+        id: &str,
+        risk_class: &str,
+        nonconformity_bp: u16,
+        positive: bool,
+    ) -> ConformalScoreSample {
+        let score_bp = if positive {
+            MAX_BASIS_POINTS.saturating_sub(nonconformity_bp)
+        } else {
+            nonconformity_bp
+        };
+        sample(id, risk_class, score_bp, positive)
+    }
+
+    fn calibration_samples_for_class(risk_class: &str) -> Vec<ConformalScoreSample> {
+        [
+            500_u16, 600, 700, 800, 900, 1_000, 1_500, 2_000, 3_000, 4_000,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, nonconformity_bp)| {
+            sample_from_nonconformity(
+                &format!("{risk_class}-cal-{index:02}"),
+                risk_class,
+                nonconformity_bp,
+                index % 2 == 0,
+            )
+        })
+        .collect()
+    }
+
+    fn heldout_samples_for_class(risk_class: &str) -> Vec<ConformalScoreSample> {
+        [
+            400_u16, 650, 750, 900, 1_100, 1_400, 1_800, 2_200, 3_000, 4_500,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, nonconformity_bp)| {
+            sample_from_nonconformity(
+                &format!("{risk_class}-heldout-{index:02}"),
+                risk_class,
+                nonconformity_bp,
+                index % 2 == 0,
+            )
+        })
+        .collect()
+    }
+
+    fn expected_label(sample: &ConformalScoreSample) -> &str {
+        if sample.positive {
+            LABEL_POSITIVE
+        } else {
+            LABEL_BENIGN
+        }
+    }
+
+    fn risk_set_covers_sample(set: &ConformalRiskSet, sample: &ConformalScoreSample) -> bool {
+        set.included_labels
+            .iter()
+            .any(|label| label == expected_label(sample))
+    }
+
+    fn empirical_coverage_bp(
+        artifact: &FrozenConformalArtifact,
+        samples: &[ConformalScoreSample],
+    ) -> u16 {
+        let covered = samples
+            .iter()
+            .filter(|sample| {
+                let set = calibrated_mondrian_risk_set(
+                    &sample.sample_id,
+                    &sample.risk_class,
+                    sample.score_bp,
+                    artifact,
+                )
+                .expect("held-out sample has a matching quantile");
+                risk_set_covers_sample(&set, sample)
+            })
+            .count();
+        ratio_bp(
+            u64::try_from(covered).unwrap_or(u64::MAX),
+            u64::try_from(samples.len()).unwrap_or(u64::MAX),
+        )
+    }
+
+    fn quantile_for<'a>(
+        artifact: &'a FrozenConformalArtifact,
+        risk_class: &str,
+    ) -> &'a FrozenConformalQuantile {
+        artifact
+            .quantiles
+            .iter()
+            .find(|quantile| quantile.risk_class == risk_class)
+            .expect("risk class quantile exists")
+    }
+
+    fn shifted_positive(sample_id: &str) -> ConformalScoreSample {
+        sample(sample_id, "critical", 7_000, true)
+    }
+
+    fn covered_by_current_aci_state(
+        state: &AciQuantileState,
+        sample: &ConformalScoreSample,
+    ) -> bool {
+        let nonconformity_bp = if sample.positive {
+            MAX_BASIS_POINTS.saturating_sub(sample.score_bp)
+        } else {
+            sample.score_bp
+        };
+        nonconformity_bp <= state.current_quantile_bp
+    }
+
     #[test]
     fn nonconformity_scoring_is_label_symmetric() {
         let positive = score_nonconformity(&sample("p", "risk", 9_000, true)).unwrap();
@@ -655,6 +767,30 @@ mod tests {
             forward.canonical_bytes().unwrap(),
             reversed.canonical_bytes().unwrap()
         );
+    }
+
+    #[test]
+    fn exchangeable_heldout_empirical_coverage_meets_target_without_overclaim() {
+        let mut calibration = calibration_samples_for_class("critical");
+        calibration.extend(calibration_samples_for_class("low"));
+        let artifact = freeze_quantiles(&calibration, 2_000).unwrap();
+
+        assert_eq!(quantile_for(&artifact, "critical").quantile_bp, 3_000);
+        assert_eq!(quantile_for(&artifact, "low").quantile_bp, 3_000);
+        assert!(
+            artifact
+                .audit_notes
+                .iter()
+                .any(|note| note.contains("assumes exchangeability"))
+        );
+        assert!(artifact.audit_notes.iter().any(|note| note.contains("ACI")));
+
+        let mut heldout = heldout_samples_for_class("critical");
+        heldout.extend(heldout_samples_for_class("low"));
+        let coverage_bp = empirical_coverage_bp(&artifact, &heldout);
+
+        assert_eq!(coverage_bp, 9_000);
+        assert!(coverage_bp >= MAX_BASIS_POINTS.saturating_sub(artifact.target_alpha_bp));
     }
 
     #[test]
@@ -793,6 +929,72 @@ mod tests {
         assert_eq!(covered.empirical_coverage_bp, 5_000);
         assert_eq!(covered.coverage_gap_bp, -4_000);
         assert_eq!(state.observations, 2);
+    }
+
+    #[test]
+    fn adversarial_shift_degrades_plain_split_conformal_and_aci_recovers_tail_coverage() {
+        let quantile = FrozenConformalQuantile {
+            risk_class: "critical".to_string(),
+            sample_count: 10,
+            positive_count: 5,
+            negative_count: 5,
+            target_alpha_bp: 2_000,
+            quantile_rank: 8,
+            quantile_bp: 1_000,
+            min_nonconformity_bp: 100,
+            max_nonconformity_bp: 1_000,
+            finite_sample_coverage_floor_bp: 7_272,
+        };
+        let mut artifact = freeze_quantiles(&calibration_samples_for_class("critical"), 2_000)
+            .expect("calibration artifact");
+        artifact.quantiles = vec![quantile.clone()];
+
+        let shifted = (0..50)
+            .map(|index| shifted_positive(&format!("shifted-{index:02}")))
+            .collect::<Vec<_>>();
+        let plain_coverage_bp = empirical_coverage_bp(&artifact, &shifted);
+        let target_coverage_bp = MAX_BASIS_POINTS.saturating_sub(quantile.target_alpha_bp);
+
+        assert_eq!(plain_coverage_bp, 0);
+        assert!(plain_coverage_bp < target_coverage_bp);
+
+        let mut state = initialize_aci_state(&quantile, 1_000).unwrap();
+        for index in 0..7 {
+            let sample = shifted_positive(&format!("warmup-{index:02}"));
+            let covered = covered_by_current_aci_state(&state, &sample);
+            update_aci_quantile(
+                &mut state,
+                &AciCoverageObservation {
+                    sample_id: sample.sample_id,
+                    risk_class: sample.risk_class,
+                    covered,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(state.current_quantile_bp, 3_600);
+
+        let mut tail_covered = 0_u64;
+        for sample in shifted {
+            let covered = covered_by_current_aci_state(&state, &sample);
+            if covered {
+                tail_covered = tail_covered.saturating_add(1);
+            }
+            update_aci_quantile(
+                &mut state,
+                &AciCoverageObservation {
+                    sample_id: sample.sample_id,
+                    risk_class: sample.risk_class,
+                    covered,
+                },
+            )
+            .unwrap();
+        }
+        let tail_coverage_bp = ratio_bp(tail_covered, 50);
+
+        assert_eq!(tail_coverage_bp, target_coverage_bp);
+        assert_eq!(state.last_event_code, event_codes::ACI_QUANTILE_UPDATED);
+        assert!(state.observations > 50);
     }
 
     #[test]
