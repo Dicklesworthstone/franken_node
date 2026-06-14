@@ -1036,6 +1036,31 @@ impl VerifierSdk {
         Ok(report)
     }
 
+    /// Verify a selective-disclosure non-exfiltration claim over a replay bundle.
+    pub fn verify_non_exfiltration_claim_bundle(
+        &self,
+        bundle_bytes: &[u8],
+        claim: &bundle::NonExfiltrationClaim,
+    ) -> VerifierSdkResult<bundle::NonExfiltrationVerification> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let max_bytes = self.resolved_max_bundle_size_bytes();
+        if bundle_bytes.len() > max_bytes {
+            return Err(VerifierSdkError::BundleTooLarge {
+                actual_bytes: bundle_bytes.len(),
+                max_bytes,
+            });
+        }
+        let proof = bundle::verify_non_exfiltration_claim(bundle_bytes, claim)?;
+        if !constant_time_eq(&proof.verifier_identity, &self.verifier_identity) {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: self.verifier_identity.clone(),
+                actual: proof.verifier_identity,
+            });
+        }
+        Ok(proof)
+    }
+
     /// Verify a signed trust-native module-resolution receipt offline.
     pub fn verify_resolution_receipt(
         &self,

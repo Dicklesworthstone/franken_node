@@ -4,7 +4,7 @@
 //! artifact integrity, and detached Ed25519 signatures over sealed bundle
 //! identity.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use chrono::{DateTime, FixedOffset};
@@ -31,6 +31,12 @@ pub const FN_VSDK_EFFECT_CHAIN_START: &str = "FN-VSDK-EFFECT-CHAIN-START";
 pub const FN_VSDK_EFFECT_VERIFIED: &str = "FN-VSDK-EFFECT-VERIFIED";
 /// Event code emitted when offline effect-chain verification succeeds.
 pub const FN_VSDK_EFFECT_CHAIN_PASS: &str = "FN-VSDK-EFFECT-CHAIN-PASS";
+/// Event code emitted when non-exfiltration verification starts.
+pub const FN_VSDK_NON_EXFILTRATION_START: &str = "FN-VSDK-NON-EXFILTRATION-START";
+/// Event code emitted for each effect considered by a non-exfiltration proof.
+pub const FN_VSDK_NON_EXFILTRATION_EFFECT: &str = "FN-VSDK-NON-EXFILTRATION-EFFECT";
+/// Event code emitted when non-exfiltration verification succeeds.
+pub const FN_VSDK_NON_EXFILTRATION_PASS: &str = "FN-VSDK-NON-EXFILTRATION-PASS";
 
 const HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:canonical-hash:v1:";
 const SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:structural-signature:v1:";
@@ -39,6 +45,8 @@ const ED25519_BUNDLE_SIGNATURE_DOMAIN: &[u8] =
 const CAS_HASH_DOMAIN: &[u8] = b"storage_cas_content_hash_v1:";
 const EFFECT_RECEIPT_HASH_DOMAIN: &[u8] = b"runtime_effect_receipt_canonical_v1:";
 const EFFECT_RECEIPT_CHAIN_HASH_DOMAIN: &[u8] = b"runtime_effect_receipt_chain_v1:";
+const NON_EXFILTRATION_CLAIM_HASH_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:non-exfiltration-claim:v1:";
 const CONTENT_HASH_PREFIX: &str = "sha256:";
 const EFFECT_RECEIPT_CHAIN_GENESIS: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -280,6 +288,41 @@ pub struct EffectChainVerification {
     pub event_codes: Vec<String>,
 }
 
+/// Selective-disclosure non-exfiltration claim checked over a verified effect chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonExfiltrationClaim {
+    /// Sensitive label-set commitments disclosed to this verifier.
+    pub forbidden_label_set_commitments: Vec<String>,
+    /// Host-effect kinds considered external sinks for this claim.
+    pub external_sink_effect_kinds: Vec<String>,
+    /// Scoped declassification receipts accepted by this verifier.
+    pub allowed_declassification_refs: Vec<String>,
+}
+
+/// One selectively disclosed effect proof in a non-exfiltration verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonExfiltrationEffectProof {
+    pub index: u64,
+    pub effect_kind: String,
+    pub disclosed_label_set_commitment: Option<String>,
+    pub flow_policy_verdict: String,
+    pub declassification_ref: Option<String>,
+    pub proof_outcome: String,
+}
+
+/// SDK proof that forbidden labels did not reach the disclosed sink set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonExfiltrationVerification {
+    pub bundle_id: String,
+    pub verifier_identity: String,
+    pub effect_count: usize,
+    pub head_chain_hash: String,
+    pub claim_hash: String,
+    pub claim: NonExfiltrationClaim,
+    pub examined_effects: Vec<NonExfiltrationEffectProof>,
+    pub event_codes: Vec<String>,
+}
+
 /// Errors returned by replay bundle serialization and verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BundleError {
@@ -415,6 +458,22 @@ pub enum BundleError {
     },
     EffectChainIntegrity {
         index: u64,
+        detail: String,
+    },
+    EmptyNonExfiltrationClaim {
+        field: &'static str,
+    },
+    MalformedNonExfiltrationLabelCommitment {
+        value: String,
+    },
+    InvalidNonExfiltrationClaimValue {
+        field: &'static str,
+        value: String,
+    },
+    NonExfiltrationViolation {
+        index: u64,
+        effect_kind: String,
+        label_set_commitment: String,
         detail: String,
     },
 }
@@ -606,6 +665,26 @@ impl fmt::Display for BundleError {
             Self::EffectChainIntegrity { index, detail } => write!(
                 formatter,
                 "effect receipt chain integrity violation at index {index}: {detail}"
+            ),
+            Self::EmptyNonExfiltrationClaim { field } => {
+                write!(formatter, "non-exfiltration claim field is empty: {field}")
+            }
+            Self::MalformedNonExfiltrationLabelCommitment { value: _ } => write!(
+                formatter,
+                "non-exfiltration claim label commitment must be canonical sha256:<hex>"
+            ),
+            Self::InvalidNonExfiltrationClaimValue { field, value: _ } => write!(
+                formatter,
+                "non-exfiltration claim field {field} contains a non-canonical value"
+            ),
+            Self::NonExfiltrationViolation {
+                index,
+                effect_kind,
+                label_set_commitment: _,
+                detail,
+            } => write!(
+                formatter,
+                "non-exfiltration violation at effect {index} ({effect_kind}): {detail}"
             ),
         }
     }
@@ -972,6 +1051,211 @@ pub fn render_effect_chain_transcript(report: &EffectChainVerification) -> Strin
         report.bundle_id, report.head_chain_hash
     ));
     transcript
+}
+
+/// Verify a replay bundle and prove a selective-disclosure non-exfiltration claim.
+pub fn verify_non_exfiltration_claim(
+    bytes: &[u8],
+    claim: &NonExfiltrationClaim,
+) -> BundleResult<NonExfiltrationVerification> {
+    let report = verify_effect_chain(bytes)?;
+    verify_non_exfiltration_claim_in_report(&report, claim)
+}
+
+/// Prove a selective-disclosure non-exfiltration claim over an already verified chain.
+pub fn verify_non_exfiltration_claim_in_report(
+    report: &EffectChainVerification,
+    claim: &NonExfiltrationClaim,
+) -> BundleResult<NonExfiltrationVerification> {
+    let claim = normalize_non_exfiltration_claim(claim)?;
+    let forbidden: BTreeSet<&str> = claim
+        .forbidden_label_set_commitments
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let sinks: BTreeSet<&str> = claim
+        .external_sink_effect_kinds
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let allowed_declassifications: BTreeSet<&str> = claim
+        .allowed_declassification_refs
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    let mut examined_effects = Vec::with_capacity(report.verified_effects.len());
+    for effect in &report.verified_effects {
+        let label_matches = forbidden.contains(effect.label_set_commitment.as_str());
+        let is_external_sink = sinks.contains(effect.effect_kind.as_str());
+        let disclosed_label_set_commitment =
+            label_matches.then(|| effect.label_set_commitment.clone());
+        let declassification_ref = if label_matches {
+            effect.declassification_ref.clone()
+        } else {
+            None
+        };
+
+        let proof_outcome = if !label_matches {
+            "label_not_disclosed"
+        } else if !is_external_sink {
+            "not_external_sink"
+        } else if effect.flow_policy_verdict == "blocked" && effect.outcome == "denied" {
+            "blocked_before_sink"
+        } else if effect.flow_policy_verdict == "declassified"
+            && effect
+                .declassification_ref
+                .as_deref()
+                .is_some_and(|declassification_ref| {
+                    allowed_declassifications.contains(declassification_ref)
+                })
+        {
+            "authorized_declassification"
+        } else {
+            return Err(BundleError::NonExfiltrationViolation {
+                index: effect.index,
+                effect_kind: effect.effect_kind.clone(),
+                label_set_commitment: effect.label_set_commitment.clone(),
+                detail: format!(
+                    "forbidden label commitment reached {} with verdict {}",
+                    effect.effect_kind, effect.flow_policy_verdict
+                ),
+            });
+        };
+
+        examined_effects.push(NonExfiltrationEffectProof {
+            index: effect.index,
+            effect_kind: effect.effect_kind.clone(),
+            disclosed_label_set_commitment,
+            flow_policy_verdict: effect.flow_policy_verdict.clone(),
+            declassification_ref,
+            proof_outcome: proof_outcome.to_string(),
+        });
+    }
+
+    Ok(NonExfiltrationVerification {
+        bundle_id: report.bundle_id.clone(),
+        verifier_identity: report.verifier_identity.clone(),
+        effect_count: report.effect_count,
+        head_chain_hash: report.head_chain_hash.clone(),
+        claim_hash: non_exfiltration_claim_hash(report, &claim),
+        claim,
+        examined_effects,
+        event_codes: vec![
+            FN_VSDK_NON_EXFILTRATION_START.to_string(),
+            FN_VSDK_NON_EXFILTRATION_EFFECT.to_string(),
+            FN_VSDK_NON_EXFILTRATION_PASS.to_string(),
+        ],
+    })
+}
+
+fn normalize_non_exfiltration_claim(
+    claim: &NonExfiltrationClaim,
+) -> BundleResult<NonExfiltrationClaim> {
+    if claim.forbidden_label_set_commitments.is_empty() {
+        return Err(BundleError::EmptyNonExfiltrationClaim {
+            field: "forbidden_label_set_commitments",
+        });
+    }
+    if claim.external_sink_effect_kinds.is_empty() {
+        return Err(BundleError::EmptyNonExfiltrationClaim {
+            field: "external_sink_effect_kinds",
+        });
+    }
+
+    let mut forbidden_label_set_commitments = claim.forbidden_label_set_commitments.clone();
+    for commitment in &forbidden_label_set_commitments {
+        validate_non_exfiltration_label_commitment(commitment)?;
+    }
+    forbidden_label_set_commitments.sort();
+    forbidden_label_set_commitments.dedup();
+
+    let mut external_sink_effect_kinds = claim.external_sink_effect_kinds.clone();
+    for effect_kind in &external_sink_effect_kinds {
+        validate_non_exfiltration_effect_kind(effect_kind)?;
+    }
+    external_sink_effect_kinds.sort();
+    external_sink_effect_kinds.dedup();
+
+    let mut allowed_declassification_refs = claim.allowed_declassification_refs.clone();
+    for declassification_ref in &allowed_declassification_refs {
+        validate_non_exfiltration_claim_text(
+            "allowed_declassification_refs",
+            declassification_ref,
+        )?;
+    }
+    allowed_declassification_refs.sort();
+    allowed_declassification_refs.dedup();
+
+    Ok(NonExfiltrationClaim {
+        forbidden_label_set_commitments,
+        external_sink_effect_kinds,
+        allowed_declassification_refs,
+    })
+}
+
+fn validate_non_exfiltration_label_commitment(value: &str) -> BundleResult<()> {
+    let Some(hex) = value.strip_prefix(CONTENT_HASH_PREFIX) else {
+        return Err(BundleError::MalformedNonExfiltrationLabelCommitment {
+            value: value.to_string(),
+        });
+    };
+    if hex.len() != 64 || !is_canonical_lower_hex(hex) {
+        return Err(BundleError::MalformedNonExfiltrationLabelCommitment {
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_non_exfiltration_effect_kind(value: &str) -> BundleResult<()> {
+    validate_non_exfiltration_claim_text("external_sink_effect_kinds", value)?;
+    if !matches!(
+        value,
+        "fs_read" | "fs_write" | "net_connect" | "http_request" | "spawn" | "module_resolve"
+    ) {
+        return Err(BundleError::InvalidNonExfiltrationClaimValue {
+            field: "external_sink_effect_kinds",
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_non_exfiltration_claim_text(field: &'static str, value: &str) -> BundleResult<()> {
+    if value.trim().is_empty() || value.trim() != value {
+        return Err(BundleError::InvalidNonExfiltrationClaimValue {
+            field,
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn non_exfiltration_claim_hash(
+    report: &EffectChainVerification,
+    claim: &NonExfiltrationClaim,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(NON_EXFILTRATION_CLAIM_HASH_DOMAIN);
+    update_hash_str(&mut hasher, &report.bundle_id);
+    update_hash_str(&mut hasher, &report.verifier_identity);
+    update_hash_str(&mut hasher, &report.head_chain_hash);
+    update_hash_vec(&mut hasher, &claim.forbidden_label_set_commitments);
+    update_hash_vec(&mut hasher, &claim.external_sink_effect_kinds);
+    update_hash_vec(&mut hasher, &claim.allowed_declassification_refs);
+    format!("{CONTENT_HASH_PREFIX}{}", hex::encode(hasher.finalize()))
+}
+
+fn update_hash_vec(hasher: &mut Sha256, values: &[String]) {
+    hasher.update(
+        u64::try_from(values.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for value in values {
+        update_hash_str(hasher, value);
+    }
 }
 
 #[derive(Debug, Clone)]

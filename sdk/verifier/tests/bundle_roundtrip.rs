@@ -7,9 +7,11 @@ use frankenengine_verifier_sdk::bundle::{
     BundleArtifact, BundleChunk, BundleError, BundleHeader, BundleSignature,
     EFFECT_RECEIPT_EVENT_TYPE, EFFECT_RECEIPT_SCHEMA_VERSION, EffectKind, EffectPolicyOutcome,
     EffectReceipt, EffectReceiptChainEntry, FN_VSDK_EFFECT_CHAIN_PASS, FN_VSDK_EFFECT_CHAIN_START,
-    FN_VSDK_EFFECT_VERIFIED, FlowPolicyVerdict, REPLAY_BUNDLE_HASH_ALGORITHM,
-    REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash,
+    FN_VSDK_EFFECT_VERIFIED, FN_VSDK_NON_EXFILTRATION_EFFECT, FN_VSDK_NON_EXFILTRATION_PASS,
+    FN_VSDK_NON_EXFILTRATION_START, FlowPolicyVerdict, NonExfiltrationClaim,
+    REPLAY_BUNDLE_HASH_ALGORITHM, REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent, hash,
     render_effect_chain_transcript, seal, serialize, verify, verify_effect_chain,
+    verify_non_exfiltration_claim,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -123,6 +125,107 @@ fn effect_chain_bundle_verifies_cas_backed_receipts_and_transcript() {
 
     let transcript = render_effect_chain_transcript(&report);
     assert_eq!(transcript, EFFECT_CHAIN_TRANSCRIPT_GOLDEN);
+}
+
+#[test]
+fn effect_chain_sdk_proves_selective_disclosure_non_exfiltration_claims() {
+    let bundle = effect_chain_replay_bundle();
+    let bundle_bytes = serialize(&bundle).expect("effect-chain fixture should serialize");
+    let claim = operator_secret_external_sink_claim(Vec::new());
+
+    let proof = verify_non_exfiltration_claim(&bundle_bytes, &claim)
+        .expect("blocked external sink should prove non-exfiltration");
+
+    assert_eq!(proof.bundle_id, "effect-chain-bundle-001");
+    assert_eq!(proof.verifier_identity, "verifier://effect-chain-test");
+    assert_eq!(proof.effect_count, 2);
+    assert!(proof.claim_hash.starts_with("sha256:"));
+    assert_eq!(
+        proof.event_codes,
+        vec![
+            FN_VSDK_NON_EXFILTRATION_START.to_string(),
+            FN_VSDK_NON_EXFILTRATION_EFFECT.to_string(),
+            FN_VSDK_NON_EXFILTRATION_PASS.to_string(),
+        ]
+    );
+    assert_eq!(proof.claim.forbidden_label_set_commitments.len(), 1);
+    assert_eq!(proof.examined_effects.len(), 2);
+    let first_effect = proof
+        .examined_effects
+        .first()
+        .expect("first proof effect should be present");
+    let second_effect = proof
+        .examined_effects
+        .get(1)
+        .expect("second proof effect should be present");
+    assert_eq!(
+        first_effect.disclosed_label_set_commitment.as_deref(),
+        Some(lineage_hash("labels:operator_secret").as_str())
+    );
+    assert_eq!(first_effect.proof_outcome, "not_external_sink");
+    assert_eq!(second_effect.effect_kind, "http_request");
+    assert_eq!(
+        second_effect.disclosed_label_set_commitment.as_deref(),
+        Some(lineage_hash("labels:operator_secret").as_str())
+    );
+    assert_eq!(second_effect.proof_outcome, "blocked_before_sink");
+    assert!(second_effect.declassification_ref.is_none());
+
+    let sdk = VerifierSdk::new("verifier://effect-chain-test");
+    let facade_proof = sdk
+        .verify_non_exfiltration_claim_bundle(&bundle_bytes, &claim)
+        .expect("facade should verify the same non-exfiltration claim");
+    assert_eq!(proof, facade_proof);
+}
+
+#[test]
+fn non_exfiltration_claim_rejects_unauthorized_external_declassification() {
+    let mut bundle = effect_chain_replay_bundle();
+    let mut egress_receipt = timeline_effect_entry(&bundle, 1).receipt;
+    egress_receipt.policy_outcome = EffectPolicyOutcome::Allowed {
+        capability_ref: "cap-http-egress-01".to_string(),
+    };
+    egress_receipt.result_hash = Some(cas_hash(EFFECT_RESULT_BYTES));
+    egress_receipt.post_state_hash = Some(cas_hash(EFFECT_POST_BYTES));
+    egress_receipt.output_lineage_hash = Some(lineage_hash("operator_secret:egress"));
+    egress_receipt.declassification_ref =
+        Some("ifl-declass:http-egress-operator-secret".to_string());
+    egress_receipt.flow_policy_verdict = FlowPolicyVerdict::Declassified;
+    replace_effect_receipt_and_reseal_chain(&mut bundle, 1, egress_receipt);
+    let bundle_bytes = serialize(&bundle).expect("effect-chain fixture should serialize");
+
+    let err = verify_non_exfiltration_claim(
+        &bundle_bytes,
+        &operator_secret_external_sink_claim(Vec::new()),
+    )
+    .expect_err("undisclosed external declassification must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::NonExfiltrationViolation {
+            index: 1,
+            ref effect_kind,
+            ref label_set_commitment,
+            ..
+        } if effect_kind == "http_request"
+            && label_set_commitment == &lineage_hash("labels:operator_secret")
+    ));
+
+    let proof = verify_non_exfiltration_claim(
+        &bundle_bytes,
+        &operator_secret_external_sink_claim(vec![
+            "ifl-declass:http-egress-operator-secret".to_string(),
+        ]),
+    )
+    .expect("disclosed scoped declassification should satisfy the claim");
+    let egress_proof = proof
+        .examined_effects
+        .get(1)
+        .expect("egress proof effect should be present");
+    assert_eq!(
+        egress_proof.declassification_ref.as_deref(),
+        Some("ifl-declass:http-egress-operator-secret")
+    );
+    assert_eq!(egress_proof.proof_outcome, "authorized_declassification");
 }
 
 #[test]
@@ -529,6 +632,35 @@ fn set_timeline_effect_entry(
     reseal_bundle(bundle);
 }
 
+fn replace_effect_receipt_and_reseal_chain(
+    bundle: &mut ReplayBundle,
+    index: usize,
+    receipt: EffectReceipt,
+) {
+    let mut receipts = bundle
+        .timeline
+        .iter()
+        .cloned()
+        .map(|event| {
+            serde_json::from_value::<EffectReceiptChainEntry>(event.payload)
+                .expect("timeline payload should be an effect entry")
+                .receipt
+        })
+        .collect::<Vec<_>>();
+    let target_receipt = receipts
+        .get_mut(index)
+        .expect("effect receipt index should exist");
+    *target_receipt = receipt;
+    for (event, entry) in bundle
+        .timeline
+        .iter_mut()
+        .zip(seal_effect_entries(receipts))
+    {
+        event.payload = serde_json::to_value(entry).expect("entry should encode as JSON");
+    }
+    reseal_bundle(bundle);
+}
+
 fn replace_artifact_bytes(bundle: &mut ReplayBundle, path: &str, bytes: &[u8]) {
     let media_type = bundle
         .artifacts
@@ -584,6 +716,20 @@ fn lineage_hash(label: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(label.as_bytes());
     format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn operator_secret_external_sink_claim(
+    allowed_declassification_refs: Vec<String>,
+) -> NonExfiltrationClaim {
+    NonExfiltrationClaim {
+        forbidden_label_set_commitments: vec![lineage_hash("labels:operator_secret")],
+        external_sink_effect_kinds: vec![
+            "http_request".to_string(),
+            "net_connect".to_string(),
+            "spawn".to_string(),
+        ],
+        allowed_declassification_refs,
+    }
 }
 
 fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
