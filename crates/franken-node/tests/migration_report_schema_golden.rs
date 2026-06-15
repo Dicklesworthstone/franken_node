@@ -5,7 +5,11 @@
 //! any schema change would break audit tooling and compliance validation.
 
 use frankenengine_node::connector::migration_artifact::{
-    MigrationArtifact, generate_reference_artifact,
+    BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION, ConformancePropertyClass, MigrationArtifact,
+    compute_behavioral_conformance_certificate_hash, error_codes, generate_reference_artifact,
+    generate_reference_behavioral_conformance_certificate,
+    validate_behavioral_conformance_certificate,
+    verify_behavioral_conformance_certificate_signature,
 };
 use serde_json::Value;
 use std::{fs, path::Path};
@@ -32,6 +36,136 @@ fn assert_real_hex_field(value: &Value, field: &str) {
         text.chars().all(|ch| ch.is_ascii_hexdigit()),
         "{field} should be hex encoded: {text}"
     );
+}
+
+#[test]
+fn behavioral_conformance_certificate_schema_exports_bound_and_ledger_chain() {
+    let certificate = generate_reference_behavioral_conformance_certificate();
+    let json_value: Value = serde_json::to_value(&certificate)
+        .expect("Behavioral conformance certificate should convert to JSON value");
+
+    assert_eq!(
+        json_value["schema_version"],
+        BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION
+    );
+    assert_real_hex_field(json_value.get("source_hash").unwrap(), "source_hash");
+    assert_real_hex_field(json_value.get("target_hash").unwrap(), "target_hash");
+    assert_real_hex_field(
+        json_value.get("lockstep_verdict_hash").unwrap(),
+        "lockstep_verdict_hash",
+    );
+    assert_real_hex_field(json_value.get("content_hash").unwrap(), "content_hash");
+
+    let bound = json_value
+        .get("bound")
+        .and_then(Value::as_object)
+        .expect("certificate must expose first-class bound object");
+    let input_scope = bound
+        .get("input_scope")
+        .and_then(Value::as_array)
+        .expect("bound.input_scope must be an array");
+    assert_eq!(input_scope.len(), 1);
+    assert_eq!(input_scope[0]["input_class"], "commonjs-module");
+    assert_eq!(
+        input_scope[0]["selector"],
+        "fixtures/migration/commonjs/*.js"
+    );
+    assert_eq!(input_scope[0]["count"], 128);
+    assert_real_hex_field(&input_scope[0]["digest"], "bound.input_scope[0].digest");
+
+    let property_classes = bound
+        .get("property_classes")
+        .and_then(Value::as_array)
+        .expect("bound.property_classes must be an array");
+    assert_eq!(
+        property_classes,
+        &vec![
+            Value::String("syntax_equivalence".to_string()),
+            Value::String("observable_output".to_string()),
+            Value::String("error_behavior".to_string()),
+        ]
+    );
+    assert_eq!(
+        certificate.bound.property_classes,
+        vec![
+            ConformancePropertyClass::SyntaxEquivalence,
+            ConformancePropertyClass::ObservableOutput,
+            ConformancePropertyClass::ErrorBehavior,
+        ]
+    );
+
+    let coverage = bound
+        .get("coverage")
+        .and_then(Value::as_object)
+        .expect("bound.coverage must be an object");
+    assert_eq!(coverage["covered_cases"], 128);
+    assert_eq!(coverage["total_cases"], 128);
+    assert_eq!(coverage["coverage_ratio"], 1.0);
+    assert_eq!(
+        coverage["measurement_method"],
+        "deterministic-lockstep-corpus-v1"
+    );
+
+    let ledger_chain = json_value
+        .get("ledger_chain")
+        .and_then(Value::as_object)
+        .expect("certificate must expose ledger_chain object");
+    assert!(ledger_chain["previous_certificate_hash"].is_null());
+    assert_eq!(ledger_chain["certificate_sequence"], 0);
+    assert_eq!(
+        ledger_chain["ledger_domain"],
+        "observability:evidence-ledger-v2"
+    );
+    assert_real_hex_field(
+        ledger_chain.get("evidence_ledger_entry_hash").unwrap(),
+        "ledger_chain.evidence_ledger_entry_hash",
+    );
+
+    let validation = validate_behavioral_conformance_certificate(&certificate);
+    assert!(validation.valid, "errors: {:?}", validation.errors);
+    assert!(verify_behavioral_conformance_certificate_signature(
+        &certificate
+    ));
+}
+
+#[test]
+fn behavioral_conformance_certificate_rejects_unbounded_and_unlinked_claims() {
+    let mut missing_bound = generate_reference_behavioral_conformance_certificate();
+    missing_bound.bound.input_scope.clear();
+    missing_bound.content_hash = compute_behavioral_conformance_certificate_hash(&missing_bound);
+    let validation = validate_behavioral_conformance_certificate(&missing_bound);
+    assert!(!validation.valid);
+    assert!(
+        validation
+            .errors
+            .iter()
+            .any(|error| error.contains(error_codes::ERR_MA_BOUND_INVALID)),
+        "expected bound validation error, got {:?}",
+        validation.errors
+    );
+
+    let mut bad_chain = generate_reference_behavioral_conformance_certificate();
+    bad_chain.ledger_chain.previous_certificate_hash = Some("not-a-sha256".to_string());
+    bad_chain.content_hash = compute_behavioral_conformance_certificate_hash(&bad_chain);
+    let validation = validate_behavioral_conformance_certificate(&bad_chain);
+    assert!(!validation.valid);
+    assert!(
+        validation.errors.iter().any(|error| {
+            error.contains(error_codes::ERR_MA_INVALID_SCHEMA)
+                && error.contains("ledger_chain.previous_certificate_hash")
+        }),
+        "expected previous hash validation error, got {:?}",
+        validation.errors
+    );
+
+    let mut tampered_bound = generate_reference_behavioral_conformance_certificate();
+    assert!(verify_behavioral_conformance_certificate_signature(
+        &tampered_bound
+    ));
+    tampered_bound.bound.coverage.covered_cases = 127;
+    assert!(!verify_behavioral_conformance_certificate_signature(
+        &tampered_bound
+    ));
 }
 
 #[test]

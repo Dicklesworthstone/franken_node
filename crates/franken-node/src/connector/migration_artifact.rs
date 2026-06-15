@@ -11,6 +11,8 @@
 //! - Rollback receipts with signer identity and procedure hash
 //! - Confidence intervals with dry-run success rate and historical similarity
 //! - Verifier metadata with replay capsule refs and assertion schemas
+//! - Behavioral conformance certificates with machine-readable bounded coverage
+//! - Ledger-chain bindings for certificate audit continuity
 //! - Deterministic serialization via BTreeMap
 //! - Reference artifact generator for testing and validation
 //!
@@ -24,6 +26,10 @@
 //! - **INV-MA-VERIFIER-COMPLETE**: Verifier metadata includes at least one replay
 //!   capsule ref and one expected state hash.
 //! - **INV-MA-DETERMINISTIC**: Same inputs produce byte-identical serialized output.
+//! - **INV-MA-BOUND-FIRST-CLASS**: Behavioral certificates expose their bounded
+//!   input, property, and coverage scope as structured fields.
+//! - **INV-MA-LEDGER-CHAINED**: Behavioral certificates bind to evidence ledger
+//!   entry hashes and prior certificate hashes.
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -33,6 +39,8 @@ use std::collections::BTreeMap;
 const ROLLBACK_RECEIPT_SIGNING_KEY: &[u8] =
     b"franken_node.connector.migration_artifact.rollback_receipt_sign_v1";
 const MIGRATION_ARTIFACT_SIGNING_KEY: &[u8] = b"franken_node.connector.migration_artifact.sign_v1";
+const BEHAVIORAL_CONFORMANCE_CERTIFICATE_SIGNING_KEY: &[u8] =
+    b"franken_node.connector.migration_artifact.behavioral_conformance_certificate.sign_v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -69,6 +77,8 @@ pub mod error_codes {
     pub const ERR_MA_MISSING_ROLLBACK: &str = "ERR_MA_MISSING_ROLLBACK";
     pub const ERR_MA_CONFIDENCE_LOW: &str = "ERR_MA_CONFIDENCE_LOW";
     pub const ERR_MA_VERSION_UNSUPPORTED: &str = "ERR_MA_VERSION_UNSUPPORTED";
+    pub const ERR_MA_BOUND_INVALID: &str = "ERR_MA_BOUND_INVALID";
+    pub const ERR_MA_LEDGER_CHAIN_INVALID: &str = "ERR_MA_LEDGER_CHAIN_INVALID";
 }
 
 // ---------------------------------------------------------------------------
@@ -82,10 +92,15 @@ pub mod invariants {
     pub const INV_MA_VERSIONED: &str = "INV-MA-VERSIONED";
     pub const INV_MA_VERIFIER_COMPLETE: &str = "INV-MA-VERIFIER-COMPLETE";
     pub const INV_MA_DETERMINISTIC: &str = "INV-MA-DETERMINISTIC";
+    pub const INV_MA_BOUND_FIRST_CLASS: &str = "INV-MA-BOUND-FIRST-CLASS";
+    pub const INV_MA_LEDGER_CHAINED: &str = "INV-MA-LEDGER-CHAINED";
 }
 
 /// Schema version for the current migration artifact format.
 pub const SCHEMA_VERSION: &str = "ma-v1.0";
+
+/// Schema version for bounded behavioral conformance certificates.
+pub const BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION: &str = "bcc-v1.0";
 
 // ---------------------------------------------------------------------------
 // ArtifactVersion
@@ -215,6 +230,121 @@ pub struct VerifierMetadata {
     pub assertion_schemas: Vec<String>,
     /// Descriptions of verification procedures.
     pub verification_procedures: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// BehavioralConformanceCertificate
+// ---------------------------------------------------------------------------
+
+/// The concrete input slice covered by a behavioral conformance certificate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoundedInputScope {
+    /// Human-stable input class name, such as "commonjs-module".
+    pub input_class: String,
+    /// Deterministic selector for the covered corpus slice.
+    pub selector: String,
+    /// Number of concrete inputs covered by this scope.
+    pub count: u64,
+    /// SHA-256 digest over the ordered covered input identifiers.
+    pub digest: String,
+}
+
+/// Property classes that a behavioral conformance certificate can bind.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConformancePropertyClass {
+    SyntaxEquivalence,
+    ObservableOutput,
+    ErrorBehavior,
+    SideEffectBoundary,
+    TemporalBehavior,
+    ResourceUse,
+    Custom(String),
+}
+
+/// Coverage statement for the certificate's bounded behavioral claim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoundCoverage {
+    /// Number of covered lockstep cases.
+    pub covered_cases: u64,
+    /// Total cases in the declared bounded scope.
+    pub total_cases: u64,
+    /// Covered fraction in [0.0, 1.0].
+    pub coverage_ratio: f64,
+    /// Deterministic method used to derive the coverage statement.
+    pub measurement_method: String,
+}
+
+/// First-class machine-readable BOUND for a behavioral conformance certificate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BehavioralConformanceBound {
+    /// Which inputs are in scope.
+    pub input_scope: Vec<BoundedInputScope>,
+    /// Which behavioral property classes are in scope.
+    pub property_classes: Vec<ConformancePropertyClass>,
+    /// Coverage over the declared scope.
+    pub coverage: BoundCoverage,
+}
+
+/// Evidence-ledger chain binding for a behavioral conformance certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertificateLedgerChain {
+    /// Prior certificate content hash, or None for the genesis certificate.
+    pub previous_certificate_hash: Option<String>,
+    /// Evidence ledger entry hash that records this certificate.
+    pub evidence_ledger_entry_hash: String,
+    /// Monotonic sequence within the certificate ledger domain.
+    pub certificate_sequence: u64,
+    /// Stable ledger domain identifier, e.g. "observability:evidence-ledger-v2".
+    pub ledger_domain: String,
+}
+
+/// Bounded certificate for verifier-certified behavioral migration claims.
+///
+/// The certificate intentionally avoids claiming global equivalence. Its
+/// `bound` field names the concrete inputs, property classes, and coverage
+/// for which `lockstep_verdict_hash` applies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BehavioralConformanceCertificate {
+    /// Schema version (e.g. "bcc-v1.0").
+    pub schema_version: String,
+    /// SHA-256 hash of the pre-migration source.
+    pub source_hash: String,
+    /// SHA-256 hash of the post-migration target.
+    pub target_hash: String,
+    /// Stable migration rule identifier.
+    pub rule_id: String,
+    /// Version of the migration rule.
+    pub rule_version: String,
+    /// Structured proof that the rule preconditions held.
+    pub precondition_proof: BTreeMap<String, serde_json::Value>,
+    /// SHA-256 hash of the bounded lockstep verdict.
+    pub lockstep_verdict_hash: String,
+    /// First-class bounded claim metadata.
+    pub bound: BehavioralConformanceBound,
+    /// Evidence-ledger chain binding.
+    pub ledger_chain: CertificateLedgerChain,
+    /// Deterministic content hash over unsigned certificate fields.
+    pub content_hash: String,
+    /// Timestamp of certificate creation (RFC 3339).
+    pub created_at: String,
+    /// Signature over the canonical certificate payload.
+    pub signature: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UnsignedBehavioralConformanceCertificate<'a> {
+    schema_version: &'a str,
+    source_hash: &'a str,
+    target_hash: &'a str,
+    rule_id: &'a str,
+    rule_version: &'a str,
+    precondition_proof: &'a BTreeMap<String, serde_json::Value>,
+    lockstep_verdict_hash: &'a str,
+    bound: &'a BehavioralConformanceBound,
+    ledger_chain: &'a CertificateLedgerChain,
+    content_hash: &'a str,
+    created_at: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +490,146 @@ pub fn validate_artifact(artifact: &MigrationArtifact) -> ValidationResult {
     }
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn push_hash_error(errors: &mut Vec<String>, field: &str, value: &str) {
+    errors.push(format!(
+        "{}: {field} must be a 64-character SHA-256 hex digest, got '{value}'",
+        error_codes::ERR_MA_INVALID_SCHEMA
+    ));
+}
+
+/// Validate a bounded behavioral conformance certificate against its schema.
+pub fn validate_behavioral_conformance_certificate(
+    certificate: &BehavioralConformanceCertificate,
+) -> ValidationResult {
+    let mut errors = Vec::new();
+    let warnings = Vec::new();
+
+    if certificate.signature.is_empty() {
+        errors.push(format!(
+            "{}: certificate signature is empty",
+            error_codes::ERR_MA_SIGNATURE_INVALID
+        ));
+    }
+
+    if certificate.schema_version != BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION {
+        errors.push(format!(
+            "{}: unsupported certificate schema version '{}'",
+            error_codes::ERR_MA_VERSION_UNSUPPORTED,
+            certificate.schema_version
+        ));
+    }
+
+    for (field, value) in [
+        ("source_hash", certificate.source_hash.as_str()),
+        ("target_hash", certificate.target_hash.as_str()),
+        (
+            "lockstep_verdict_hash",
+            certificate.lockstep_verdict_hash.as_str(),
+        ),
+        ("content_hash", certificate.content_hash.as_str()),
+        (
+            "ledger_chain.evidence_ledger_entry_hash",
+            certificate.ledger_chain.evidence_ledger_entry_hash.as_str(),
+        ),
+    ] {
+        if !is_sha256_hex(value) {
+            push_hash_error(&mut errors, field, value);
+        }
+    }
+
+    if let Some(previous_hash) = &certificate.ledger_chain.previous_certificate_hash
+        && !is_sha256_hex(previous_hash)
+    {
+        push_hash_error(
+            &mut errors,
+            "ledger_chain.previous_certificate_hash",
+            previous_hash,
+        );
+    }
+
+    if certificate.rule_id.trim().is_empty() {
+        errors.push(format!(
+            "{}: rule_id is required",
+            error_codes::ERR_MA_INVALID_SCHEMA
+        ));
+    }
+    if certificate.rule_version.trim().is_empty() {
+        errors.push(format!(
+            "{}: rule_version is required",
+            error_codes::ERR_MA_INVALID_SCHEMA
+        ));
+    }
+    if certificate.precondition_proof.is_empty() {
+        errors.push(format!(
+            "{}: precondition_proof is required",
+            error_codes::ERR_MA_INVALID_SCHEMA
+        ));
+    }
+
+    if certificate.bound.input_scope.is_empty() {
+        errors.push(format!(
+            "{}: bound.input_scope must name at least one input scope",
+            error_codes::ERR_MA_BOUND_INVALID
+        ));
+    }
+    for (index, scope) in certificate.bound.input_scope.iter().enumerate() {
+        if scope.input_class.trim().is_empty()
+            || scope.selector.trim().is_empty()
+            || scope.count == 0
+            || !is_sha256_hex(&scope.digest)
+        {
+            errors.push(format!(
+                "{}: bound.input_scope[{index}] has invalid class, selector, count, or digest",
+                error_codes::ERR_MA_BOUND_INVALID
+            ));
+        }
+    }
+
+    if certificate.bound.property_classes.is_empty() {
+        errors.push(format!(
+            "{}: bound.property_classes must name at least one property class",
+            error_codes::ERR_MA_BOUND_INVALID
+        ));
+    }
+
+    let coverage = &certificate.bound.coverage;
+    if coverage.total_cases == 0
+        || coverage.covered_cases > coverage.total_cases
+        || !(0.0..=1.0).contains(&coverage.coverage_ratio)
+        || coverage.measurement_method.trim().is_empty()
+    {
+        errors.push(format!(
+            "{}: bound.coverage must have nonzero total cases, covered<=total, ratio in [0.0, 1.0], and a measurement method",
+            error_codes::ERR_MA_BOUND_INVALID
+        ));
+    }
+
+    if certificate.ledger_chain.ledger_domain.trim().is_empty() {
+        errors.push(format!(
+            "{}: ledger_chain.ledger_domain is required",
+            error_codes::ERR_MA_LEDGER_CHAIN_INVALID
+        ));
+    }
+
+    let expected_content_hash = compute_behavioral_conformance_certificate_hash(certificate);
+    if !crate::security::constant_time::ct_eq(&certificate.content_hash, &expected_content_hash) {
+        errors.push(format!(
+            "{}: content_hash does not match certificate payload",
+            error_codes::ERR_MA_INVALID_SCHEMA
+        ));
+    }
+
+    ValidationResult {
+        valid: errors.is_empty(),
+        errors,
+        warnings,
+    }
+}
+
 /// Compute the content hash for a migration artifact.
 ///
 /// # INV-MA-DETERMINISTIC
@@ -406,6 +676,38 @@ pub fn compute_content_hash(artifact: &MigrationArtifact) -> String {
     ))
 }
 
+/// Compute the content hash for a behavioral conformance certificate.
+pub fn compute_behavioral_conformance_certificate_hash(
+    certificate: &BehavioralConformanceCertificate,
+) -> String {
+    if !certificate.bound.coverage.coverage_ratio.is_finite() {
+        return hex::encode(Sha256::digest(
+            b"behavioral_conformance_certificate_hash_v1:__non_finite_coverage_ratio__",
+        ));
+    }
+
+    let canonical = serde_json::json!({
+        "schema_version": certificate.schema_version,
+        "source_hash": certificate.source_hash,
+        "target_hash": certificate.target_hash,
+        "rule_id": certificate.rule_id,
+        "rule_version": certificate.rule_version,
+        "precondition_proof": certificate.precondition_proof,
+        "lockstep_verdict_hash": certificate.lockstep_verdict_hash,
+        "bound": certificate.bound,
+        "ledger_chain": certificate.ledger_chain,
+    });
+    let bytes =
+        serde_json::to_vec(&canonical).unwrap_or_else(|e| format!("__serde_err:{e}").into_bytes());
+    hex::encode(Sha256::digest(
+        [
+            b"behavioral_conformance_certificate_hash_v1:" as &[u8],
+            bytes.as_slice(),
+        ]
+        .concat(),
+    ))
+}
+
 fn canonical_rollback_receipt_payload(receipt: &RollbackReceipt) -> Vec<u8> {
     serde_json::to_vec(&UnsignedRollbackReceipt {
         original_state_ref: &receipt.original_state_ref,
@@ -448,6 +750,39 @@ fn sign_artifact(artifact: &MigrationArtifact) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+fn canonical_behavioral_conformance_certificate_payload(
+    certificate: &BehavioralConformanceCertificate,
+) -> Vec<u8> {
+    serde_json::to_vec(&UnsignedBehavioralConformanceCertificate {
+        schema_version: &certificate.schema_version,
+        source_hash: &certificate.source_hash,
+        target_hash: &certificate.target_hash,
+        rule_id: &certificate.rule_id,
+        rule_version: &certificate.rule_version,
+        precondition_proof: &certificate.precondition_proof,
+        lockstep_verdict_hash: &certificate.lockstep_verdict_hash,
+        bound: &certificate.bound,
+        ledger_chain: &certificate.ledger_chain,
+        content_hash: &certificate.content_hash,
+        created_at: &certificate.created_at,
+    })
+    .unwrap_or_else(|error| {
+        format!("__behavioral_conformance_certificate_serde_error:{error}").into_bytes()
+    })
+}
+
+fn sign_behavioral_conformance_certificate(
+    certificate: &BehavioralConformanceCertificate,
+) -> String {
+    let mut mac = HmacSha256::new_from_slice(BEHAVIORAL_CONFORMANCE_CERTIFICATE_SIGNING_KEY)
+        .expect("behavioral conformance certificate signing key is valid");
+    mac.update(b"behavioral_conformance_certificate_sign_v1:");
+    mac.update(&canonical_behavioral_conformance_certificate_payload(
+        certificate,
+    ));
+    hex::encode(mac.finalize().into_bytes())
+}
+
 pub fn verify_artifact_signatures(artifact: &MigrationArtifact) -> bool {
     let expected_rollback_signature = sign_rollback_receipt(&artifact.rollback_receipt);
     if !crate::security::constant_time::ct_eq(
@@ -459,6 +794,13 @@ pub fn verify_artifact_signatures(artifact: &MigrationArtifact) -> bool {
 
     let expected_artifact_signature = sign_artifact(artifact);
     crate::security::constant_time::ct_eq(&artifact.signature, &expected_artifact_signature)
+}
+
+pub fn verify_behavioral_conformance_certificate_signature(
+    certificate: &BehavioralConformanceCertificate,
+) -> bool {
+    let expected_signature = sign_behavioral_conformance_certificate(certificate);
+    crate::security::constant_time::ct_eq(&certificate.signature, &expected_signature)
 }
 
 // ---------------------------------------------------------------------------
@@ -552,6 +894,62 @@ pub fn generate_reference_artifact() -> MigrationArtifact {
     artifact
 }
 
+/// Generate a reference bounded behavioral conformance certificate.
+pub fn generate_reference_behavioral_conformance_certificate() -> BehavioralConformanceCertificate {
+    let mut precondition_proof = BTreeMap::new();
+    precondition_proof.insert(
+        "rule".to_string(),
+        serde_json::json!("rewrite:cjs-require-to-esm@1.0.0"),
+    );
+    precondition_proof.insert("require_cache_absent".to_string(), serde_json::json!(true));
+    precondition_proof.insert(
+        "source_ast_hash".to_string(),
+        serde_json::json!("1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"),
+    );
+
+    let mut certificate = BehavioralConformanceCertificate {
+        schema_version: BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION.to_string(),
+        source_hash: "aa11".repeat(16),
+        target_hash: "bb22".repeat(16),
+        rule_id: "rewrite:cjs-require-to-esm".to_string(),
+        rule_version: "1.0.0".to_string(),
+        precondition_proof,
+        lockstep_verdict_hash: "cc33".repeat(16),
+        bound: BehavioralConformanceBound {
+            input_scope: vec![BoundedInputScope {
+                input_class: "commonjs-module".to_string(),
+                selector: "fixtures/migration/commonjs/*.js".to_string(),
+                count: 128,
+                digest: "dd44".repeat(16),
+            }],
+            property_classes: vec![
+                ConformancePropertyClass::SyntaxEquivalence,
+                ConformancePropertyClass::ObservableOutput,
+                ConformancePropertyClass::ErrorBehavior,
+            ],
+            coverage: BoundCoverage {
+                covered_cases: 128,
+                total_cases: 128,
+                coverage_ratio: 1.0,
+                measurement_method: "deterministic-lockstep-corpus-v1".to_string(),
+            },
+        },
+        ledger_chain: CertificateLedgerChain {
+            previous_certificate_hash: None,
+            evidence_ledger_entry_hash: "ee55".repeat(16),
+            certificate_sequence: 0,
+            ledger_domain: "observability:evidence-ledger-v2".to_string(),
+        },
+        content_hash: String::new(),
+        created_at: "2026-02-21T00:00:00Z".to_string(),
+        signature: String::new(),
+    };
+
+    certificate.content_hash = compute_behavioral_conformance_certificate_hash(&certificate);
+    certificate.signature = sign_behavioral_conformance_certificate(&certificate);
+    certificate
+}
+
 // ---------------------------------------------------------------------------
 // Audit event
 // ---------------------------------------------------------------------------
@@ -628,6 +1026,51 @@ mod tests {
     }
 
     #[test]
+    fn test_reference_behavioral_conformance_certificate_has_first_class_bound() {
+        let certificate = generate_reference_behavioral_conformance_certificate();
+
+        assert_eq!(
+            certificate.schema_version,
+            BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION
+        );
+        assert_eq!(certificate.bound.input_scope.len(), 1);
+        assert_eq!(
+            certificate.bound.property_classes,
+            vec![
+                ConformancePropertyClass::SyntaxEquivalence,
+                ConformancePropertyClass::ObservableOutput,
+                ConformancePropertyClass::ErrorBehavior,
+            ]
+        );
+        assert_eq!(certificate.bound.coverage.covered_cases, 128);
+        assert_eq!(certificate.bound.coverage.total_cases, 128);
+
+        let value = serde_json::to_value(&certificate).unwrap();
+        assert!(value.get("bound").is_some());
+        assert_eq!(
+            value["bound"]["input_scope"][0]["input_class"],
+            "commonjs-module"
+        );
+        assert_eq!(value["bound"]["property_classes"][0], "syntax_equivalence");
+        assert_eq!(value["bound"]["coverage"]["coverage_ratio"], 1.0);
+    }
+
+    #[test]
+    fn test_reference_behavioral_conformance_certificate_is_ledger_chained() {
+        let certificate = generate_reference_behavioral_conformance_certificate();
+
+        assert_eq!(
+            certificate.ledger_chain.ledger_domain,
+            "observability:evidence-ledger-v2"
+        );
+        assert!(certificate.ledger_chain.previous_certificate_hash.is_none());
+        assert!(is_sha256_hex(
+            &certificate.ledger_chain.evidence_ledger_entry_hash
+        ));
+        assert_eq!(certificate.ledger_chain.certificate_sequence, 0);
+    }
+
+    #[test]
     fn test_reference_artifact_confidence_calibrated() {
         let artifact = generate_reference_artifact();
         let ci = &artifact.confidence_interval;
@@ -648,11 +1091,67 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_reference_behavioral_conformance_certificate_passes() {
+        let certificate = generate_reference_behavioral_conformance_certificate();
+
+        let result = validate_behavioral_conformance_certificate(&certificate);
+
+        assert!(result.valid, "errors: {:?}", result.errors);
+        assert!(verify_behavioral_conformance_certificate_signature(
+            &certificate
+        ));
+    }
+
+    #[test]
     fn test_reference_artifact_signature_detects_tampering() {
         let mut artifact = generate_reference_artifact();
         assert!(verify_artifact_signatures(&artifact));
         artifact.steps[0].rollback_action.push_str("_tampered");
         assert!(!verify_artifact_signatures(&artifact));
+    }
+
+    #[test]
+    fn test_behavioral_conformance_certificate_signature_detects_bound_tampering() {
+        let mut certificate = generate_reference_behavioral_conformance_certificate();
+        assert!(verify_behavioral_conformance_certificate_signature(
+            &certificate
+        ));
+
+        certificate.bound.coverage.covered_cases = 127;
+
+        assert!(!verify_behavioral_conformance_certificate_signature(
+            &certificate
+        ));
+    }
+
+    #[test]
+    fn test_behavioral_conformance_certificate_validation_rejects_stale_content_hash() {
+        let mut certificate = generate_reference_behavioral_conformance_certificate();
+        certificate.bound.input_scope[0].selector = "fixtures/other/*.js".to_string();
+        certificate.signature = sign_behavioral_conformance_certificate(&certificate);
+
+        let result = validate_behavioral_conformance_certificate(&certificate);
+
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|error| {
+            error.contains(error_codes::ERR_MA_INVALID_SCHEMA)
+                && error.contains("content_hash does not match")
+        }));
+    }
+
+    #[test]
+    fn test_behavioral_conformance_certificate_hash_changes_with_bound() {
+        let certificate = generate_reference_behavioral_conformance_certificate();
+        let mut changed = certificate.clone();
+        changed
+            .bound
+            .property_classes
+            .push(ConformancePropertyClass::SideEffectBoundary);
+
+        assert_ne!(
+            certificate.content_hash,
+            compute_behavioral_conformance_certificate_hash(&changed)
+        );
     }
 
     #[test]
@@ -744,6 +1243,74 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("ERR_MA_INVALID_SCHEMA"))
         );
+    }
+
+    #[test]
+    fn test_validate_certificate_missing_bound_inputs_fails() {
+        let mut certificate = generate_reference_behavioral_conformance_certificate();
+        certificate.bound.input_scope.clear();
+        certificate.content_hash = compute_behavioral_conformance_certificate_hash(&certificate);
+        certificate.signature = sign_behavioral_conformance_certificate(&certificate);
+
+        let result = validate_behavioral_conformance_certificate(&certificate);
+
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains(error_codes::ERR_MA_BOUND_INVALID))
+        );
+    }
+
+    #[test]
+    fn test_validate_certificate_bad_coverage_fails() {
+        let mut certificate = generate_reference_behavioral_conformance_certificate();
+        certificate.bound.coverage.covered_cases = 129;
+        certificate.content_hash = compute_behavioral_conformance_certificate_hash(&certificate);
+        certificate.signature = sign_behavioral_conformance_certificate(&certificate);
+
+        let result = validate_behavioral_conformance_certificate(&certificate);
+
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains(error_codes::ERR_MA_BOUND_INVALID))
+        );
+    }
+
+    #[test]
+    fn test_validate_certificate_bad_ledger_hash_fails() {
+        let mut certificate = generate_reference_behavioral_conformance_certificate();
+        certificate.ledger_chain.evidence_ledger_entry_hash = "not-a-hash".to_string();
+        certificate.content_hash = compute_behavioral_conformance_certificate_hash(&certificate);
+        certificate.signature = sign_behavioral_conformance_certificate(&certificate);
+
+        let result = validate_behavioral_conformance_certificate(&certificate);
+
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|error| {
+            error.contains(error_codes::ERR_MA_INVALID_SCHEMA)
+                && error.contains("ledger_chain.evidence_ledger_entry_hash")
+        }));
+    }
+
+    #[test]
+    fn test_validate_certificate_bad_previous_hash_fails() {
+        let mut certificate = generate_reference_behavioral_conformance_certificate();
+        certificate.ledger_chain.previous_certificate_hash = Some("short".to_string());
+        certificate.content_hash = compute_behavioral_conformance_certificate_hash(&certificate);
+        certificate.signature = sign_behavioral_conformance_certificate(&certificate);
+
+        let result = validate_behavioral_conformance_certificate(&certificate);
+
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|error| {
+            error.contains(error_codes::ERR_MA_INVALID_SCHEMA)
+                && error.contains("ledger_chain.previous_certificate_hash")
+        }));
     }
 
     // ── Determinism ───────────────────────────────────────────────────
@@ -929,6 +1496,14 @@ mod tests {
     }
 
     #[test]
+    fn test_behavioral_conformance_certificate_serde_roundtrip() {
+        let certificate = generate_reference_behavioral_conformance_certificate();
+        let json = serde_json::to_string(&certificate).unwrap();
+        let parsed: BehavioralConformanceCertificate = serde_json::from_str(&json).unwrap();
+        assert_eq!(certificate, parsed);
+    }
+
+    #[test]
     fn test_migration_step_serde_roundtrip() {
         let step = MigrationStep {
             action_type: "test".to_string(),
@@ -1039,6 +1614,11 @@ mod tests {
             error_codes::ERR_MA_VERSION_UNSUPPORTED,
             "ERR_MA_VERSION_UNSUPPORTED"
         );
+        assert_eq!(error_codes::ERR_MA_BOUND_INVALID, "ERR_MA_BOUND_INVALID");
+        assert_eq!(
+            error_codes::ERR_MA_LEDGER_CHAIN_INVALID,
+            "ERR_MA_LEDGER_CHAIN_INVALID"
+        );
     }
 
     // ── Invariants ────────────────────────────────────────────────────
@@ -1060,6 +1640,11 @@ mod tests {
             "INV-MA-VERIFIER-COMPLETE"
         );
         assert_eq!(invariants::INV_MA_DETERMINISTIC, "INV-MA-DETERMINISTIC");
+        assert_eq!(
+            invariants::INV_MA_BOUND_FIRST_CLASS,
+            "INV-MA-BOUND-FIRST-CLASS"
+        );
+        assert_eq!(invariants::INV_MA_LEDGER_CHAINED, "INV-MA-LEDGER-CHAINED");
     }
 
     // ── Schema version ────────────────────────────────────────────────
@@ -1067,6 +1652,10 @@ mod tests {
     #[test]
     fn test_schema_version() {
         assert_eq!(SCHEMA_VERSION, "ma-v1.0");
+        assert_eq!(
+            BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION,
+            "bcc-v1.0"
+        );
     }
 
     // ── Send + Sync ───────────────────────────────────────────────────
@@ -1086,6 +1675,18 @@ mod tests {
         assert_sync::<ConfidenceInterval>();
         assert_send::<VerifierMetadata>();
         assert_sync::<VerifierMetadata>();
+        assert_send::<BoundedInputScope>();
+        assert_sync::<BoundedInputScope>();
+        assert_send::<ConformancePropertyClass>();
+        assert_sync::<ConformancePropertyClass>();
+        assert_send::<BoundCoverage>();
+        assert_sync::<BoundCoverage>();
+        assert_send::<BehavioralConformanceBound>();
+        assert_sync::<BehavioralConformanceBound>();
+        assert_send::<CertificateLedgerChain>();
+        assert_sync::<CertificateLedgerChain>();
+        assert_send::<BehavioralConformanceCertificate>();
+        assert_sync::<BehavioralConformanceCertificate>();
         assert_send::<ArtifactVersion>();
         assert_sync::<ArtifactVersion>();
         assert_send::<ValidationResult>();
