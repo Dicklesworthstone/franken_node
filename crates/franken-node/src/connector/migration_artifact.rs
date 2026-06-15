@@ -68,6 +68,14 @@ pub mod event_codes {
     pub const MA_CONFIDENCE_CHECK: &str = "MA-007";
     /// Migration artifact version negotiated.
     pub const MA_VERSION_NEGOTIATED: &str = "MA-008";
+    /// Bounded migration certificate emitted with first-class scope metadata.
+    pub const FN_MIGCERT_GENERATED: &str = "FN-MIGCERT-001";
+    /// Certificate bound, coverage, and ledger-chain invariants verified.
+    pub const FN_MIGCERT_BOUND_VERIFIED: &str = "FN-MIGCERT-002";
+    /// Differential witness bound to the migration certificate verified.
+    pub const FN_MIGCERT_DIFFERENTIAL_WITNESS_VERIFIED: &str = "FN-MIGCERT-003";
+    /// Offline verifier SDK migration-equivalence certification completed.
+    pub const FN_MIGCERT_SDK_CERTIFIED: &str = "FN-MIGCERT-004";
 }
 
 // ---------------------------------------------------------------------------

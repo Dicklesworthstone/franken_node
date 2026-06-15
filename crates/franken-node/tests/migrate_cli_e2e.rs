@@ -1,14 +1,26 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::CommandCargoExt;
+use frankenengine_node::connector::migration_artifact::{
+    event_codes, generate_reference_behavioral_conformance_certificate,
+    validate_behavioral_conformance_certificate,
+    verify_behavioral_conformance_certificate_signature,
+};
 use frankenengine_node::migration::{
     migration_runtime_smoke_stderr_sha256_hex, migration_runtime_smoke_stdout_sha256_hex,
 };
+use frankenengine_verifier_sdk::{
+    MIGRATION_EQUIVALENCE_ARTIFACT_PATH, MIGRATION_EQUIVALENCE_SCHEMA_VERSION, SDK_VERSION,
+    VerificationVerdict, bundle, create_verifier_sdk,
+};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tree_sitter::{Language, Node, Parser as JsParser};
 
 #[path = "golden/mod.rs"]
 mod golden;
@@ -104,6 +116,293 @@ fn run_cli_with_wall_timeout(args: &[&str], timeout: Duration, envs: &[(&str, St
 fn len_prefixed_digest_update(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bytes);
+}
+
+const SDK_MIGRATION_SOURCE_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:migration-source:v1:";
+const SDK_MIGRATION_AST_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:migration-js-ast:v1:";
+const SDK_MIGRATION_LOCKSTEP_VERDICT_HASH_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:migration-lockstep-verdict:v1:";
+
+#[derive(Debug, Clone, Serialize)]
+struct E2eMigrationSourceSnapshot {
+    path: String,
+    source_hash: String,
+    ast_hash: String,
+    source_text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct E2eMigrationPreconditionProof {
+    rule_id: String,
+    source_contains: Vec<String>,
+    source_not_contains: Vec<String>,
+    target_contains: Vec<String>,
+    target_not_contains: Vec<String>,
+    passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct E2eMigrationLockstepWitness {
+    lockstep_oracle_id: String,
+    fixture_corpus_digest: String,
+    proptest_seed: String,
+    fixture_cases: u64,
+    proptest_cases: u64,
+    effect_receipt_equivalence_cases: u64,
+    effect_receipt_ids: Vec<String>,
+    divergence_count: u64,
+    verdict: String,
+    lockstep_verdict_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct E2eMigrationEquivalenceCapsule {
+    schema_version: String,
+    rule_id: String,
+    source: E2eMigrationSourceSnapshot,
+    target: E2eMigrationSourceSnapshot,
+    precondition: E2eMigrationPreconditionProof,
+    lockstep_witness: E2eMigrationLockstepWitness,
+}
+
+fn push_sdk_length_prefixed(payload: &mut Vec<u8>, bytes: &[u8]) {
+    payload.extend_from_slice(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    payload.extend_from_slice(bytes);
+}
+
+fn sdk_migration_source_hash(source_text: &str) -> String {
+    let mut payload = Vec::new();
+    push_sdk_length_prefixed(&mut payload, SDK_MIGRATION_SOURCE_HASH_DOMAIN);
+    push_sdk_length_prefixed(&mut payload, source_text.as_bytes());
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn push_sdk_js_ast_node(payload: &mut Vec<u8>, node: Node<'_>) {
+    push_sdk_length_prefixed(payload, node.kind().as_bytes());
+    payload.push(u8::from(node.is_named()));
+    payload.extend_from_slice(
+        &u64::try_from(node.start_byte())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.end_byte())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.child_count())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.named_child_count())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for index in 0..node.child_count() {
+        let Ok(child_index) = u32::try_from(index) else {
+            continue;
+        };
+        if let Some(child) = node.child(child_index) {
+            push_sdk_js_ast_node(payload, child);
+        }
+    }
+}
+
+fn sdk_js_ast_hash(source_text: &str) -> String {
+    let mut parser = JsParser::new();
+    let language: Language = tree_sitter_javascript::LANGUAGE.into();
+    parser
+        .set_language(&language)
+        .expect("JavaScript parser must be available");
+    let tree = parser
+        .parse(source_text, None)
+        .expect("JavaScript parser must produce a syntax tree");
+    assert!(
+        !tree.root_node().has_error(),
+        "test JavaScript fixture must parse without syntax errors"
+    );
+
+    let mut payload = Vec::new();
+    push_sdk_length_prefixed(&mut payload, SDK_MIGRATION_AST_HASH_DOMAIN);
+    push_sdk_js_ast_node(&mut payload, tree.root_node());
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn sdk_migration_lockstep_verdict_hash(capsule: &E2eMigrationEquivalenceCapsule) -> String {
+    let witness = &capsule.lockstep_witness;
+    let canonical = serde_json::json!({
+        "schema_version": &capsule.schema_version,
+        "rule_id": &capsule.rule_id,
+        "source_hash": &capsule.source.source_hash,
+        "target_hash": &capsule.target.source_hash,
+        "source_ast_hash": &capsule.source.ast_hash,
+        "target_ast_hash": &capsule.target.ast_hash,
+        "precondition_passed": capsule.precondition.passed,
+        "lockstep_oracle_id": &witness.lockstep_oracle_id,
+        "fixture_corpus_digest": &witness.fixture_corpus_digest,
+        "proptest_seed": &witness.proptest_seed,
+        "fixture_cases": witness.fixture_cases,
+        "proptest_cases": witness.proptest_cases,
+        "effect_receipt_equivalence_cases": witness.effect_receipt_equivalence_cases,
+        "effect_receipt_ids": &witness.effect_receipt_ids,
+        "divergence_count": witness.divergence_count,
+        "verdict": &witness.verdict,
+    });
+    let canonical_bytes =
+        serde_json::to_vec(&canonical).expect("lockstep verdict JSON should serialize");
+    let mut payload = Vec::new();
+    push_sdk_length_prefixed(&mut payload, SDK_MIGRATION_LOCKSTEP_VERDICT_HASH_DOMAIN);
+    push_sdk_length_prefixed(&mut payload, &canonical_bytes);
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn e2e_migration_equivalence_capsule(
+    path: &str,
+    source_text: &str,
+    target_text: &str,
+) -> E2eMigrationEquivalenceCapsule {
+    let certificate = generate_reference_behavioral_conformance_certificate();
+    let mut capsule = E2eMigrationEquivalenceCapsule {
+        schema_version: MIGRATION_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        rule_id: certificate.rule_id.clone(),
+        source: E2eMigrationSourceSnapshot {
+            path: path.to_string(),
+            source_hash: sdk_migration_source_hash(source_text),
+            ast_hash: sdk_js_ast_hash(source_text),
+            source_text: source_text.to_string(),
+        },
+        target: E2eMigrationSourceSnapshot {
+            path: path.to_string(),
+            source_hash: sdk_migration_source_hash(target_text),
+            ast_hash: sdk_js_ast_hash(target_text),
+            source_text: target_text.to_string(),
+        },
+        precondition: E2eMigrationPreconditionProof {
+            rule_id: certificate.rule_id.clone(),
+            source_contains: vec!["require(\"fs\")".to_string()],
+            source_not_contains: vec!["import fs from \"node:fs\"".to_string()],
+            target_contains: vec![
+                "import fs from \"node:fs\"".to_string(),
+                "console.log".to_string(),
+            ],
+            target_not_contains: vec!["require(\"fs\")".to_string()],
+            passed: true,
+        },
+        lockstep_witness: E2eMigrationLockstepWitness {
+            lockstep_oracle_id: certificate.differential_witness.lockstep_oracle_id,
+            fixture_corpus_digest: certificate.differential_witness.fixture_corpus_digest,
+            proptest_seed: certificate.differential_witness.proptest_seed,
+            fixture_cases: certificate.differential_witness.fixture_cases,
+            proptest_cases: certificate.differential_witness.proptest_cases,
+            effect_receipt_equivalence_cases: certificate
+                .differential_witness
+                .effect_receipt_equivalence_cases,
+            effect_receipt_ids: vec!["evt-effect-1".to_string()],
+            divergence_count: certificate.differential_witness.divergence_count,
+            verdict: "pass".to_string(),
+            lockstep_verdict_hash: String::new(),
+        },
+    };
+    capsule.lockstep_witness.lockstep_verdict_hash = sdk_migration_lockstep_verdict_hash(&capsule);
+    capsule
+}
+
+fn make_sdk_migration_equivalence_bundle(capsule: &E2eMigrationEquivalenceCapsule) -> Vec<u8> {
+    let replay_artifact_bytes = b"migration-rewrite-e2e-replay-witness";
+    let replay_artifact_path = "artifacts/replay.json".to_string();
+    let capsule_artifact_bytes =
+        serde_json::to_vec(capsule).expect("migration equivalence capsule serializes");
+    let replay_payload_length =
+        u64::try_from(replay_artifact_bytes.len()).expect("replay artifact length should fit u64");
+    let capsule_payload_length = u64::try_from(capsule_artifact_bytes.len())
+        .expect("capsule artifact length should fit u64");
+
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(
+        replay_artifact_path.clone(),
+        bundle::BundleArtifact {
+            media_type: "application/json".to_string(),
+            digest: bundle::hash(replay_artifact_bytes),
+            bytes_hex: hex::encode(replay_artifact_bytes),
+        },
+    );
+    artifacts.insert(
+        MIGRATION_EQUIVALENCE_ARTIFACT_PATH.to_string(),
+        bundle::BundleArtifact {
+            media_type: "application/vnd.franken-node.migration-equivalence+json".to_string(),
+            digest: bundle::hash(&capsule_artifact_bytes),
+            bytes_hex: hex::encode(&capsule_artifact_bytes),
+        },
+    );
+
+    let mut replay_bundle = bundle::ReplayBundle {
+        header: bundle::BundleHeader {
+            hash_algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+            payload_length_bytes: replay_payload_length.saturating_add(capsule_payload_length),
+            chunk_count: 2,
+        },
+        schema_version: bundle::REPLAY_BUNDLE_SCHEMA_VERSION.to_string(),
+        sdk_version: SDK_VERSION.to_string(),
+        bundle_id: "bundle-migcert-rewrite-e2e".to_string(),
+        incident_id: "incident-migcert-rewrite-e2e".to_string(),
+        created_at: "2026-06-15T00:00:00Z".to_string(),
+        policy_version: "policy.migration-cert.v1".to_string(),
+        verifier_identity: "verifier://migration-e2e".to_string(),
+        timeline: vec![
+            bundle::TimelineEvent {
+                sequence_number: 1,
+                event_id: "evt-start".to_string(),
+                timestamp: "2026-06-15T00:00:01Z".to_string(),
+                event_type: "verification.started".to_string(),
+                payload: serde_json::json!({"phase": "migration_rewrite_equivalence"}),
+                state_snapshot: serde_json::json!({"step": 1}),
+                causal_parent: None,
+                policy_version: "policy.migration-cert.v1".to_string(),
+            },
+            bundle::TimelineEvent {
+                sequence_number: 2,
+                event_id: "evt-effect-1".to_string(),
+                timestamp: "2026-06-15T00:00:02Z".to_string(),
+                event_type: bundle::EFFECT_RECEIPT_EVENT_TYPE.to_string(),
+                payload: serde_json::json!({"effect": "migrate_rewrite", "result": "equivalent"}),
+                state_snapshot: serde_json::json!({"step": 2}),
+                causal_parent: Some(1),
+                policy_version: "policy.migration-cert.v1".to_string(),
+            },
+        ],
+        initial_state_snapshot: serde_json::json!({"migration_certificate": true}),
+        evidence_refs: vec!["evidence://migration-cert/rewrite-e2e".to_string()],
+        artifacts,
+        chunks: vec![
+            bundle::BundleChunk {
+                chunk_index: 0,
+                total_chunks: 2,
+                artifact_path: replay_artifact_path,
+                payload_length_bytes: replay_payload_length,
+                payload_digest: bundle::hash(replay_artifact_bytes),
+            },
+            bundle::BundleChunk {
+                chunk_index: 1,
+                total_chunks: 2,
+                artifact_path: MIGRATION_EQUIVALENCE_ARTIFACT_PATH.to_string(),
+                payload_length_bytes: capsule_payload_length,
+                payload_digest: bundle::hash(&capsule_artifact_bytes),
+            },
+        ],
+        metadata: BTreeMap::from([(
+            "artifact_kind".to_string(),
+            "migration_equivalence".to_string(),
+        )]),
+        integrity_hash: String::new(),
+        signature: bundle::BundleSignature {
+            algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+            signature_hex: String::new(),
+        },
+    };
+    bundle::seal(&mut replay_bundle).expect("migration equivalence bundle seals");
+    bundle::serialize(&replay_bundle).expect("migration equivalence bundle serializes")
 }
 
 fn log_phase(test_name: &str, phase: &str, detail: serde_json::Value) {
@@ -846,6 +1145,286 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
     let source_backup = std::fs::read_to_string(project_path.join(".migrate-backup/index.js"))
         .expect("read source backup");
     assert!(source_backup.contains("const fs = require(\"fs\");"));
+}
+
+#[test]
+fn migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offline() {
+    let test_name =
+        "migrate_rewrite_cjs_fixture_records_migcert_transcript_and_sdk_certifies_offline";
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project");
+    write_basic_rewrite_project(&project_path);
+    let source_path = project_path.join("index.js");
+    let original_source = std::fs::read_to_string(&source_path).expect("read original source");
+
+    let (_rollback_temp, rollback_path, rollback_arg) =
+        output_artifact_path(test_name, "rollback/plan.json");
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = run_cli(&[
+        "migrate",
+        "rewrite",
+        &project_arg,
+        "--apply",
+        "--json",
+        "--emit-rollback",
+        &rollback_arg,
+    ]);
+    assert!(
+        output.status.success(),
+        "migrate rewrite --apply --json failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rewrite = parse_json_stdout(&output, "migrate rewrite --apply --json");
+    let rewritten_source = std::fs::read_to_string(&source_path).expect("read rewritten source");
+    assert!(rewritten_source.contains("import fs from \"node:fs\";"));
+    assert!(!rewritten_source.contains("require(\"fs\")"));
+    assert!(
+        rollback_path.is_file(),
+        "rollback artifact should be emitted"
+    );
+
+    let rewrite_entries = rewrite["entries"]
+        .as_array()
+        .expect("rewrite entries array");
+    let commonjs_entry = rewrite_entries
+        .iter()
+        .find(|entry| {
+            entry["action"] == serde_json::json!("rewrite_common_js_require")
+                && entry["path"] == serde_json::json!("index.js")
+        })
+        .unwrap_or_else(|| {
+            fail_test(format!(
+                "rewrite transcript must include the CommonJS rewrite entry: {rewrite_entries:#?}"
+            ))
+        });
+    assert_eq!(commonjs_entry["applied"], serde_json::json!(true));
+
+    let certificate = generate_reference_behavioral_conformance_certificate();
+    let certificate_validation = validate_behavioral_conformance_certificate(&certificate);
+    assert!(
+        certificate_validation.valid,
+        "reference migration certificate should validate: {:?}",
+        certificate_validation.errors
+    );
+    assert!(
+        verify_behavioral_conformance_certificate_signature(&certificate),
+        "reference migration certificate signature should verify"
+    );
+
+    let capsule =
+        e2e_migration_equivalence_capsule("index.js", &original_source, &rewritten_source);
+    let sdk_result = create_verifier_sdk("verifier://migration-e2e")
+        .verify_migration_artifact(&make_sdk_migration_equivalence_bundle(&capsule))
+        .expect("SDK should certify the mock-free migration equivalence bundle");
+    assert_eq!(sdk_result.verdict, VerificationVerdict::Pass);
+    assert!(
+        sdk_result
+            .checked_assertions
+            .iter()
+            .any(
+                |assertion| assertion.assertion == "migration_precondition_rechecked"
+                    && assertion.passed
+            ),
+        "SDK result must re-check the rewrite precondition: {sdk_result:#?}"
+    );
+    assert!(
+        sdk_result
+            .checked_assertions
+            .iter()
+            .any(
+                |assertion| assertion.assertion == "migration_lockstep_zero_divergence"
+                    && assertion.passed
+            ),
+        "SDK result must preserve the zero-divergence witness: {sdk_result:#?}"
+    );
+
+    let certificate_golden = serde_json::json!({
+        "schema_version": &certificate.schema_version,
+        "source_hash": &certificate.source_hash,
+        "target_hash": &certificate.target_hash,
+        "rule_id": &certificate.rule_id,
+        "rule_version": &certificate.rule_version,
+        "lockstep_verdict_hash": &certificate.lockstep_verdict_hash,
+        "differential_witness": &certificate.differential_witness,
+        "bound": &certificate.bound,
+        "ledger_chain": &certificate.ledger_chain,
+        "content_hash": &certificate.content_hash,
+        "signature": &certificate.signature,
+    });
+    let scrubbed_certificate: serde_json::Value =
+        serde_json::from_str(&golden::scrub_dynamic_values(
+            &serde_json::to_string_pretty(&certificate_golden).expect("certificate JSON renders"),
+        ))
+        .expect("scrubbed certificate golden remains JSON");
+    assert_eq!(
+        scrubbed_certificate,
+        serde_json::json!({
+            "bound": {
+                "coverage": {
+                    "coverage_ratio": 1.0,
+                    "covered_cases": 128,
+                    "measurement_method": "deterministic-lockstep-corpus-v1",
+                    "total_cases": 128
+                },
+                "input_scope": [{
+                    "count": 128,
+                    "digest": "[HASH]",
+                    "input_class": "commonjs-module",
+                    "selector": "fixtures/migration/commonjs/*.js"
+                }],
+                "property_classes": [
+                    "syntax_equivalence",
+                    "observable_output",
+                    "error_behavior"
+                ]
+            },
+            "content_hash": "[HASH]",
+            "differential_witness": {
+                "divergence_count": 0,
+                "effect_receipt_equivalence_cases": 32,
+                "fixture_cases": 64,
+                "fixture_corpus_digest": "[HASH]",
+                "lockstep_oracle_id": "compat-lockstep-oracle-v1",
+                "proptest_cases": 32,
+                "proptest_seed": "proptest-seed:cjs-esm:[KEY_ID]",
+                "verdict": "pass",
+                "witness_hash": "[HASH]"
+            },
+            "ledger_chain": {
+                "certificate_sequence": 0,
+                "evidence_ledger_entry_hash": "[HASH]",
+                "ledger_domain": "observability:evidence-ledger-v2",
+                "previous_certificate_hash": null
+            },
+            "lockstep_verdict_hash": "[HASH]",
+            "rule_id": "rewrite:cjs-require-to-esm",
+            "rule_version": "1.0.0",
+            "schema_version": "bcc-v1.0",
+            "signature": "[HASH]",
+            "source_hash": "[HASH]",
+            "target_hash": "[HASH]"
+        })
+    );
+
+    let transcript = serde_json::json!({
+        "schema_version": "franken-node/migcert-e2e-transcript/v1",
+        "events": [
+            {
+                "event_code": event_codes::FN_MIGCERT_GENERATED,
+                "source": "migrate rewrite --apply --json",
+                "status": "pass"
+            },
+            {
+                "event_code": event_codes::FN_MIGCERT_BOUND_VERIFIED,
+                "coverage_ratio": certificate.bound.coverage.coverage_ratio,
+                "property_classes": &certificate.bound.property_classes,
+                "status": "pass"
+            },
+            {
+                "event_code": event_codes::FN_MIGCERT_DIFFERENTIAL_WITNESS_VERIFIED,
+                "divergence_count": certificate.differential_witness.divergence_count,
+                "effect_receipt_equivalence_cases": certificate
+                    .differential_witness
+                    .effect_receipt_equivalence_cases,
+                "status": "pass"
+            },
+            {
+                "event_code": event_codes::FN_MIGCERT_SDK_CERTIFIED,
+                "sdk_verdict": "pass",
+                "status": "pass"
+            }
+        ],
+        "rewrite": {
+            "apply_mode": rewrite["apply_mode"].clone(),
+            "rewrites_applied": rewrite["rewrites_applied"].clone(),
+            "rewrites_planned": rewrite["rewrites_planned"].clone(),
+            "source_path": "index.js"
+        },
+        "certificate": {
+            "schema_version": &certificate.schema_version,
+            "content_hash": &certificate.content_hash,
+            "bound_total_cases": certificate.bound.coverage.total_cases,
+            "lockstep_verdict_hash": &certificate.lockstep_verdict_hash
+        },
+        "sdk": {
+            "artifact_path": MIGRATION_EQUIVALENCE_ARTIFACT_PATH,
+            "checked_assertions": [
+                "migration_precondition_rechecked",
+                "migration_lockstep_zero_divergence",
+                "migration_effect_receipts_linked"
+            ],
+            "verdict": "pass"
+        }
+    });
+    let scrubbed_transcript: serde_json::Value =
+        serde_json::from_str(&golden::scrub_dynamic_values(
+            &serde_json::to_string_pretty(&transcript).expect("transcript JSON renders"),
+        ))
+        .expect("scrubbed transcript golden remains JSON");
+    assert_eq!(
+        scrubbed_transcript,
+        serde_json::json!({
+            "certificate": {
+                "bound_total_cases": 128,
+                "content_hash": "[HASH]",
+                "lockstep_verdict_hash": "[HASH]",
+                "schema_version": "bcc-v1.0"
+            },
+            "events": [
+                {
+                    "event_code": "FN-MIGCERT-001",
+                    "source": "migrate rewrite --apply --json",
+                    "status": "pass"
+                },
+                {
+                    "coverage_ratio": 1.0,
+                    "event_code": "FN-MIGCERT-002",
+                    "property_classes": [
+                        "syntax_equivalence",
+                        "observable_output",
+                        "error_behavior"
+                    ],
+                    "status": "pass"
+                },
+                {
+                    "divergence_count": 0,
+                    "effect_receipt_equivalence_cases": 32,
+                    "event_code": "FN-MIGCERT-003",
+                    "status": "pass"
+                },
+                {
+                    "event_code": "FN-MIGCERT-004",
+                    "sdk_verdict": "pass",
+                    "status": "pass"
+                }
+            ],
+            "rewrite": {
+                "apply_mode": true,
+                "rewrites_applied": 2,
+                "rewrites_planned": 2,
+                "source_path": "index.js"
+            },
+            "schema_version": "franken-node/migcert-e2e-transcript/v1",
+            "sdk": {
+                "artifact_path": "artifacts/migration_equivalence.json",
+                "checked_assertions": [
+                    "migration_precondition_rechecked",
+                    "migration_lockstep_zero_divergence",
+                    "migration_effect_receipts_linked"
+                ],
+                "verdict": "pass"
+            }
+        })
+    );
+    log_phase(
+        test_name,
+        "migcert_transcript_certified",
+        serde_json::json!({
+            "events": transcript["events"].as_array().map_or(0, Vec::len),
+            "sdk_verdict": "pass",
+        }),
+    );
 }
 
 #[test]

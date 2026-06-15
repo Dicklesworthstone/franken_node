@@ -7,13 +7,25 @@
 use frankenengine_node::connector::migration_artifact::{
     BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION, ConformancePropertyClass, MigrationArtifact,
     compute_behavioral_conformance_certificate_hash, compute_differential_witness_hash,
-    error_codes, generate_reference_artifact,
+    error_codes, event_codes, generate_reference_artifact,
     generate_reference_behavioral_conformance_certificate,
     validate_behavioral_conformance_certificate,
     verify_behavioral_conformance_certificate_signature,
 };
-use serde_json::Value;
-use std::{fs, path::Path};
+use frankenengine_verifier_sdk::{
+    MIGRATION_EQUIVALENCE_ARTIFACT_PATH, MIGRATION_EQUIVALENCE_SCHEMA_VERSION, SDK_VERSION,
+    VerificationVerdict, bundle, create_verifier_sdk,
+};
+use serde::Serialize;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, fs, path::Path};
+use tree_sitter::{Language, Node, Parser as JsParser};
+
+const SDK_MIGRATION_SOURCE_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:migration-source:v1:";
+const SDK_MIGRATION_AST_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:migration-js-ast:v1:";
+const SDK_MIGRATION_LOCKSTEP_VERDICT_HASH_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:migration-lockstep-verdict:v1:";
 
 /// Create a deterministic migration artifact for golden testing
 fn create_deterministic_migration_artifact() -> MigrationArtifact {
@@ -36,6 +48,307 @@ fn assert_real_hex_field(value: &Value, field: &str) {
     assert!(
         text.chars().all(|ch| ch.is_ascii_hexdigit()),
         "{field} should be hex encoded: {text}"
+    );
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TestMigrationSourceSnapshot {
+    path: String,
+    source_hash: String,
+    ast_hash: String,
+    source_text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TestMigrationPreconditionProof {
+    rule_id: String,
+    source_contains: Vec<String>,
+    source_not_contains: Vec<String>,
+    target_contains: Vec<String>,
+    target_not_contains: Vec<String>,
+    passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TestMigrationLockstepWitness {
+    lockstep_oracle_id: String,
+    fixture_corpus_digest: String,
+    proptest_seed: String,
+    fixture_cases: u64,
+    proptest_cases: u64,
+    effect_receipt_equivalence_cases: u64,
+    effect_receipt_ids: Vec<String>,
+    divergence_count: u64,
+    verdict: String,
+    lockstep_verdict_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TestMigrationEquivalenceCapsule {
+    schema_version: String,
+    rule_id: String,
+    source: TestMigrationSourceSnapshot,
+    target: TestMigrationSourceSnapshot,
+    precondition: TestMigrationPreconditionProof,
+    lockstep_witness: TestMigrationLockstepWitness,
+}
+
+fn push_sdk_length_prefixed(payload: &mut Vec<u8>, bytes: &[u8]) {
+    payload.extend_from_slice(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    payload.extend_from_slice(bytes);
+}
+
+fn sdk_migration_source_hash(source_text: &str) -> String {
+    let mut payload = Vec::new();
+    push_sdk_length_prefixed(&mut payload, SDK_MIGRATION_SOURCE_HASH_DOMAIN);
+    push_sdk_length_prefixed(&mut payload, source_text.as_bytes());
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn push_sdk_js_ast_node(payload: &mut Vec<u8>, node: Node<'_>) {
+    push_sdk_length_prefixed(payload, node.kind().as_bytes());
+    payload.push(u8::from(node.is_named()));
+    payload.extend_from_slice(
+        &u64::try_from(node.start_byte())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.end_byte())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.child_count())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.named_child_count())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for index in 0..node.child_count() {
+        let Ok(child_index) = u32::try_from(index) else {
+            continue;
+        };
+        if let Some(child) = node.child(child_index) {
+            push_sdk_js_ast_node(payload, child);
+        }
+    }
+}
+
+fn sdk_js_ast_hash(source_text: &str) -> String {
+    let mut parser = JsParser::new();
+    let language: Language = tree_sitter_javascript::LANGUAGE.into();
+    parser
+        .set_language(&language)
+        .expect("JavaScript parser must be available");
+    let tree = parser
+        .parse(source_text, None)
+        .expect("JavaScript parser must produce a syntax tree");
+    assert!(
+        !tree.root_node().has_error(),
+        "test JavaScript fixture must parse without syntax errors"
+    );
+
+    let mut payload = Vec::new();
+    push_sdk_length_prefixed(&mut payload, SDK_MIGRATION_AST_HASH_DOMAIN);
+    push_sdk_js_ast_node(&mut payload, tree.root_node());
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn sdk_migration_lockstep_verdict_hash(capsule: &TestMigrationEquivalenceCapsule) -> String {
+    let witness = &capsule.lockstep_witness;
+    let canonical = json!({
+        "schema_version": &capsule.schema_version,
+        "rule_id": &capsule.rule_id,
+        "source_hash": &capsule.source.source_hash,
+        "target_hash": &capsule.target.source_hash,
+        "source_ast_hash": &capsule.source.ast_hash,
+        "target_ast_hash": &capsule.target.ast_hash,
+        "precondition_passed": capsule.precondition.passed,
+        "lockstep_oracle_id": &witness.lockstep_oracle_id,
+        "fixture_corpus_digest": &witness.fixture_corpus_digest,
+        "proptest_seed": &witness.proptest_seed,
+        "fixture_cases": witness.fixture_cases,
+        "proptest_cases": witness.proptest_cases,
+        "effect_receipt_equivalence_cases": witness.effect_receipt_equivalence_cases,
+        "effect_receipt_ids": &witness.effect_receipt_ids,
+        "divergence_count": witness.divergence_count,
+        "verdict": &witness.verdict,
+    });
+    let canonical_bytes =
+        serde_json::to_vec(&canonical).expect("lockstep verdict JSON should serialize");
+    let mut payload = Vec::new();
+    push_sdk_length_prefixed(&mut payload, SDK_MIGRATION_LOCKSTEP_VERDICT_HASH_DOMAIN);
+    push_sdk_length_prefixed(&mut payload, &canonical_bytes);
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn reference_sdk_equivalence_capsule() -> TestMigrationEquivalenceCapsule {
+    let certificate = generate_reference_behavioral_conformance_certificate();
+    let source_text = "const value = require(\"dep\");\nmodule.exports = value;\n".to_string();
+    let target_text = "import value from \"dep\";\nexport default value;\n".to_string();
+    let mut capsule = TestMigrationEquivalenceCapsule {
+        schema_version: MIGRATION_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+        rule_id: certificate.rule_id.clone(),
+        source: TestMigrationSourceSnapshot {
+            path: "src/input.cjs".to_string(),
+            source_hash: sdk_migration_source_hash(&source_text),
+            ast_hash: sdk_js_ast_hash(&source_text),
+            source_text,
+        },
+        target: TestMigrationSourceSnapshot {
+            path: "src/output.mjs".to_string(),
+            source_hash: sdk_migration_source_hash(&target_text),
+            ast_hash: sdk_js_ast_hash(&target_text),
+            source_text: target_text,
+        },
+        precondition: TestMigrationPreconditionProof {
+            rule_id: certificate.rule_id.clone(),
+            source_contains: vec!["require(\"dep\")".to_string()],
+            source_not_contains: vec!["import value".to_string()],
+            target_contains: vec!["import value".to_string(), "export default".to_string()],
+            target_not_contains: vec!["require(\"dep\")".to_string()],
+            passed: true,
+        },
+        lockstep_witness: TestMigrationLockstepWitness {
+            lockstep_oracle_id: certificate.differential_witness.lockstep_oracle_id,
+            fixture_corpus_digest: certificate.differential_witness.fixture_corpus_digest,
+            proptest_seed: certificate.differential_witness.proptest_seed,
+            fixture_cases: certificate.differential_witness.fixture_cases,
+            proptest_cases: certificate.differential_witness.proptest_cases,
+            effect_receipt_equivalence_cases: certificate
+                .differential_witness
+                .effect_receipt_equivalence_cases,
+            effect_receipt_ids: vec!["evt-effect-1".to_string()],
+            divergence_count: certificate.differential_witness.divergence_count,
+            verdict: "pass".to_string(),
+            lockstep_verdict_hash: String::new(),
+        },
+    };
+    capsule.lockstep_witness.lockstep_verdict_hash = sdk_migration_lockstep_verdict_hash(&capsule);
+    capsule
+}
+
+fn make_sdk_migration_equivalence_bundle(capsule: &TestMigrationEquivalenceCapsule) -> Vec<u8> {
+    let replay_artifact_bytes = b"migration-replay-witness";
+    let replay_artifact_path = "artifacts/replay.json".to_string();
+    let capsule_artifact_bytes =
+        serde_json::to_vec(capsule).expect("migration equivalence capsule serializes");
+    let replay_payload_length =
+        u64::try_from(replay_artifact_bytes.len()).expect("replay artifact length should fit u64");
+    let capsule_payload_length = u64::try_from(capsule_artifact_bytes.len())
+        .expect("capsule artifact length should fit u64");
+
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(
+        replay_artifact_path.clone(),
+        bundle::BundleArtifact {
+            media_type: "application/json".to_string(),
+            digest: bundle::hash(replay_artifact_bytes),
+            bytes_hex: hex::encode(replay_artifact_bytes),
+        },
+    );
+    artifacts.insert(
+        MIGRATION_EQUIVALENCE_ARTIFACT_PATH.to_string(),
+        bundle::BundleArtifact {
+            media_type: "application/vnd.franken-node.migration-equivalence+json".to_string(),
+            digest: bundle::hash(&capsule_artifact_bytes),
+            bytes_hex: hex::encode(&capsule_artifact_bytes),
+        },
+    );
+
+    let mut replay_bundle = bundle::ReplayBundle {
+        header: bundle::BundleHeader {
+            hash_algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+            payload_length_bytes: replay_payload_length.saturating_add(capsule_payload_length),
+            chunk_count: 2,
+        },
+        schema_version: bundle::REPLAY_BUNDLE_SCHEMA_VERSION.to_string(),
+        sdk_version: SDK_VERSION.to_string(),
+        bundle_id: "bundle-migcert-product-golden".to_string(),
+        incident_id: "incident-migcert-product-golden".to_string(),
+        created_at: "2026-06-15T00:00:00Z".to_string(),
+        policy_version: "policy.migration-cert.v1".to_string(),
+        verifier_identity: "verifier://alpha".to_string(),
+        timeline: vec![
+            bundle::TimelineEvent {
+                sequence_number: 1,
+                event_id: "evt-start".to_string(),
+                timestamp: "2026-06-15T00:00:01Z".to_string(),
+                event_type: "verification.started".to_string(),
+                payload: json!({"phase": "migration_equivalence"}),
+                state_snapshot: json!({"step": 1}),
+                causal_parent: None,
+                policy_version: "policy.migration-cert.v1".to_string(),
+            },
+            bundle::TimelineEvent {
+                sequence_number: 2,
+                event_id: "evt-effect-1".to_string(),
+                timestamp: "2026-06-15T00:00:02Z".to_string(),
+                event_type: bundle::EFFECT_RECEIPT_EVENT_TYPE.to_string(),
+                payload: json!({"effect": "module_resolve", "result": "equivalent"}),
+                state_snapshot: json!({"step": 2}),
+                causal_parent: Some(1),
+                policy_version: "policy.migration-cert.v1".to_string(),
+            },
+        ],
+        initial_state_snapshot: json!({"migration_certificate": true}),
+        evidence_refs: vec!["evidence://migration-cert/product-golden".to_string()],
+        artifacts,
+        chunks: vec![
+            bundle::BundleChunk {
+                chunk_index: 0,
+                total_chunks: 2,
+                artifact_path: replay_artifact_path,
+                payload_length_bytes: replay_payload_length,
+                payload_digest: bundle::hash(replay_artifact_bytes),
+            },
+            bundle::BundleChunk {
+                chunk_index: 1,
+                total_chunks: 2,
+                artifact_path: MIGRATION_EQUIVALENCE_ARTIFACT_PATH.to_string(),
+                payload_length_bytes: capsule_payload_length,
+                payload_digest: bundle::hash(&capsule_artifact_bytes),
+            },
+        ],
+        metadata: BTreeMap::from([(
+            "artifact_kind".to_string(),
+            "migration_equivalence".to_string(),
+        )]),
+        integrity_hash: String::new(),
+        signature: bundle::BundleSignature {
+            algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+            signature_hex: String::new(),
+        },
+    };
+    bundle::seal(&mut replay_bundle).expect("migration equivalence bundle seals");
+    bundle::serialize(&replay_bundle).expect("migration equivalence bundle serializes")
+}
+
+fn assertion_passed(result: &frankenengine_verifier_sdk::VerificationResult, name: &str) -> bool {
+    result
+        .checked_assertions
+        .iter()
+        .any(|assertion| assertion.assertion == name && assertion.passed)
+}
+
+fn assertion_failed(result: &frankenengine_verifier_sdk::VerificationResult, name: &str) -> bool {
+    result
+        .checked_assertions
+        .iter()
+        .any(|assertion| assertion.assertion == name && !assertion.passed)
+}
+
+fn assert_lower_sha256_hex(value: &str, field: &str) {
+    assert_eq!(value.len(), 64, "{field} should be 64 hex characters");
+    assert!(
+        value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+        "{field} should be lowercase SHA-256 hex: {value}"
     );
 }
 
@@ -215,6 +528,220 @@ fn behavioral_conformance_certificate_rejects_unbounded_and_unlinked_claims() {
         "expected differential witness validation error, got {:?}",
         validation.errors
     );
+}
+
+#[test]
+fn behavioral_conformance_certificate_transcript_uses_stable_migcert_event_codes() {
+    let certificate = generate_reference_behavioral_conformance_certificate();
+    let validation = validate_behavioral_conformance_certificate(&certificate);
+    assert!(validation.valid, "errors: {:?}", validation.errors);
+
+    let transcript = json!([
+        {
+            "event_code": event_codes::FN_MIGCERT_GENERATED,
+            "rule_id": certificate.rule_id,
+            "schema_version": certificate.schema_version,
+            "bound": certificate.bound,
+        },
+        {
+            "event_code": event_codes::FN_MIGCERT_BOUND_VERIFIED,
+            "coverage_ratio": certificate.bound.coverage.coverage_ratio,
+            "covered_cases": certificate.bound.coverage.covered_cases,
+            "total_cases": certificate.bound.coverage.total_cases,
+        },
+        {
+            "event_code": event_codes::FN_MIGCERT_DIFFERENTIAL_WITNESS_VERIFIED,
+            "lockstep_oracle_id": certificate.differential_witness.lockstep_oracle_id,
+            "divergence_count": certificate.differential_witness.divergence_count,
+            "effect_receipt_equivalence_cases": certificate
+                .differential_witness
+                .effect_receipt_equivalence_cases,
+        },
+        {
+            "event_code": event_codes::FN_MIGCERT_SDK_CERTIFIED,
+            "sdk_artifact": MIGRATION_EQUIVALENCE_ARTIFACT_PATH,
+            "sdk_schema_version": MIGRATION_EQUIVALENCE_SCHEMA_VERSION,
+        },
+    ]);
+
+    let events = transcript.as_array().expect("transcript must be an array");
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[0]["event_code"], event_codes::FN_MIGCERT_GENERATED);
+    assert_eq!(
+        events[1]["event_code"],
+        event_codes::FN_MIGCERT_BOUND_VERIFIED
+    );
+    assert_eq!(
+        events[2]["event_code"],
+        event_codes::FN_MIGCERT_DIFFERENTIAL_WITNESS_VERIFIED
+    );
+    assert_eq!(
+        events[3]["event_code"],
+        event_codes::FN_MIGCERT_SDK_CERTIFIED
+    );
+    assert_eq!(events[0]["bound"]["input_scope"][0]["count"], 128);
+    assert_eq!(events[1]["coverage_ratio"], 1.0);
+    assert_eq!(events[2]["divergence_count"], 0);
+    assert_eq!(
+        events[3]["sdk_artifact"],
+        MIGRATION_EQUIVALENCE_ARTIFACT_PATH
+    );
+}
+
+#[test]
+fn behavioral_conformance_certificate_rejects_bound_and_witness_case_drift() {
+    let mut bad_precondition = generate_reference_behavioral_conformance_certificate();
+    bad_precondition.precondition_proof.clear();
+    bad_precondition.content_hash =
+        compute_behavioral_conformance_certificate_hash(&bad_precondition);
+    let validation = validate_behavioral_conformance_certificate(&bad_precondition);
+    assert!(!validation.valid);
+    assert!(
+        validation
+            .errors
+            .iter()
+            .any(|error| error.contains("precondition_proof is required")),
+        "expected machine-readable precondition proof error, got {:?}",
+        validation.errors
+    );
+
+    let mut bad_case_total = generate_reference_behavioral_conformance_certificate();
+    bad_case_total.bound.coverage.total_cases =
+        bad_case_total.bound.coverage.total_cases.saturating_add(1);
+    bad_case_total.content_hash = compute_behavioral_conformance_certificate_hash(&bad_case_total);
+    let validation = validate_behavioral_conformance_certificate(&bad_case_total);
+    assert!(!validation.valid);
+    assert!(
+        validation.errors.iter().any(|error| {
+            error.contains(error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID)
+                && error.contains("case total")
+        }),
+        "expected differential witness case-total error, got {:?}",
+        validation.errors
+    );
+
+    let mut missing_effect_receipts = generate_reference_behavioral_conformance_certificate();
+    missing_effect_receipts
+        .differential_witness
+        .effect_receipt_equivalence_cases = 0;
+    missing_effect_receipts.differential_witness.witness_hash =
+        compute_differential_witness_hash(&missing_effect_receipts.differential_witness);
+    missing_effect_receipts.lockstep_verdict_hash = missing_effect_receipts
+        .differential_witness
+        .witness_hash
+        .clone();
+    missing_effect_receipts.content_hash =
+        compute_behavioral_conformance_certificate_hash(&missing_effect_receipts);
+    let validation = validate_behavioral_conformance_certificate(&missing_effect_receipts);
+    assert!(!validation.valid);
+    assert!(
+        validation.errors.iter().any(|error| {
+            error.contains(error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID)
+                && error.contains("effect-receipt")
+        }),
+        "expected effect-receipt witness error, got {:?}",
+        validation.errors
+    );
+}
+
+#[test]
+fn verifier_sdk_certifies_reference_migration_equivalence_bundle_offline() {
+    let certificate = generate_reference_behavioral_conformance_certificate();
+    let capsule = reference_sdk_equivalence_capsule();
+    assert_ne!(
+        certificate.lockstep_verdict_hash, capsule.lockstep_witness.lockstep_verdict_hash,
+        "product certificate and SDK equivalence hashes use distinct domains"
+    );
+    assert_eq!(
+        certificate.differential_witness.lockstep_oracle_id,
+        capsule.lockstep_witness.lockstep_oracle_id
+    );
+    assert_eq!(
+        certificate
+            .differential_witness
+            .effect_receipt_equivalence_cases,
+        capsule.lockstep_witness.effect_receipt_equivalence_cases
+    );
+
+    let artifact = make_sdk_migration_equivalence_bundle(&capsule);
+    let result = create_verifier_sdk("verifier://alpha")
+        .verify_migration_artifact(&artifact)
+        .expect("SDK should verify product migration-equivalence bundle");
+
+    assert_eq!(result.verdict, VerificationVerdict::Pass);
+    assert!(
+        result
+            .checked_assertions
+            .iter()
+            .all(|assertion| assertion.passed)
+    );
+    assert!(assertion_passed(
+        &result,
+        "migration_equivalence_capsule_present"
+    ));
+    assert!(assertion_passed(&result, "migration_source_ast_reparsed"));
+    assert!(assertion_passed(&result, "migration_target_ast_reparsed"));
+    assert!(assertion_passed(
+        &result,
+        "migration_precondition_rechecked"
+    ));
+    assert!(assertion_passed(
+        &result,
+        "migration_effect_receipt_refs_resolve"
+    ));
+    assert!(assertion_passed(
+        &result,
+        "migration_lockstep_verdict_hash_recomputed"
+    ));
+    assert_lower_sha256_hex(&result.artifact_binding_hash, "artifact_binding_hash");
+}
+
+#[test]
+fn verifier_sdk_refuses_migration_bundle_when_precondition_does_not_hold() {
+    let mut capsule = reference_sdk_equivalence_capsule();
+    capsule
+        .precondition
+        .source_contains
+        .push("require(\"missing-precondition\")".to_string());
+    capsule.lockstep_witness.lockstep_verdict_hash = sdk_migration_lockstep_verdict_hash(&capsule);
+    let artifact = make_sdk_migration_equivalence_bundle(&capsule);
+
+    let result = create_verifier_sdk("verifier://alpha")
+        .verify_migration_artifact(&artifact)
+        .expect("SDK should return a signed failure result for precondition drift");
+
+    assert_eq!(result.verdict, VerificationVerdict::Fail);
+    assert!(assertion_failed(
+        &result,
+        "migration_precondition_rechecked"
+    ));
+    assert!(assertion_passed(
+        &result,
+        "migration_lockstep_verdict_hash_recomputed"
+    ));
+}
+
+#[test]
+fn verifier_sdk_refuses_behavior_changing_migration_witness() {
+    let mut capsule = reference_sdk_equivalence_capsule();
+    capsule.lockstep_witness.divergence_count = 1;
+    capsule.lockstep_witness.verdict = "fail".to_string();
+    capsule.lockstep_witness.lockstep_verdict_hash = sdk_migration_lockstep_verdict_hash(&capsule);
+    let artifact = make_sdk_migration_equivalence_bundle(&capsule);
+
+    let result = create_verifier_sdk("verifier://alpha")
+        .verify_migration_artifact(&artifact)
+        .expect("SDK should return a signed failure result for divergent witness");
+
+    assert_eq!(result.verdict, VerificationVerdict::Fail);
+    assert!(assertion_failed(
+        &result,
+        "migration_lockstep_zero_divergence"
+    ));
+    assert!(assertion_passed(
+        &result,
+        "migration_lockstep_verdict_hash_recomputed"
+    ));
 }
 
 #[test]

@@ -60,6 +60,8 @@ mod observability {
 }
 #[allow(dead_code)]
 mod security {
+    #[path = "conformal.rs"]
+    pub mod conformal;
     #[path = "constant_time.rs"]
     pub mod constant_time;
     #[path = "crypto.rs"]
