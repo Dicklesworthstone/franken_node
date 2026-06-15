@@ -1096,7 +1096,8 @@ fn verify_positive_validation_signature(
     validation: &PositiveValidation,
     trusted_validators: &[FleetDecisionTrustRoot],
 ) -> bool {
-    let Some(verifying_key) = trusted_validator_verifying_key(validation, trusted_validators) else {
+    let Some(verifying_key) = trusted_validator_verifying_key(validation, trusted_validators)
+    else {
         return false;
     };
     let payload = positive_validation_signed_bytes(
@@ -3568,7 +3569,10 @@ impl FleetControlManager {
 
         // Equivocation / dedup against prior submissions by the same validator for
         // the same canonical action.
-        let entry = self.release_validations.entry(incident_id.clone()).or_default();
+        let entry = self
+            .release_validations
+            .entry(incident_id.clone())
+            .or_default();
         if let Some(pos) = entry.iter().position(|existing| {
             crate::security::constant_time::ct_eq(
                 &existing.validator_key_id,
@@ -3645,7 +3649,8 @@ impl FleetControlManager {
             FleetControlError::rollback_unverified(incident_id, "incident not found for validation")
         })?;
 
-        let is_quarantine = crate::security::constant_time::ct_eq(&incident.action_type, "quarantine");
+        let is_quarantine =
+            crate::security::constant_time::ct_eq(&incident.action_type, "quarantine");
         let is_revoke = crate::security::constant_time::ct_eq(&incident.action_type, "revoke");
         if !is_quarantine && !is_revoke {
             // Unknown action types are denied fail-closed.
@@ -5187,18 +5192,23 @@ mod tests {
 
         // One validation: still short of quorum.
         let v0 = signed_validation_for(&mgr, &validators[0], &incident_id, true);
-        mgr.submit_release_validation(v0).expect("first validation accepted");
+        mgr.submit_release_validation(v0)
+            .expect("first validation accepted");
         let err = mgr
             .release(&incident_id, &admin_identity(), &test_trace())
             .expect_err("release should fail below quorum");
         assert_eq!(err.error_code(), FLEET_ROLLBACK_UNVERIFIED);
         if let FleetControlError::RollbackUnverified { detail, .. } = &err {
-            assert!(detail.contains("1/2 signed validations collected"), "{detail}");
+            assert!(
+                detail.contains("1/2 signed validations collected"),
+                "{detail}"
+            );
         }
 
         // Second distinct validator reaches quorum.
         let v1 = signed_validation_for(&mgr, &validators[1], &incident_id, true);
-        mgr.submit_release_validation(v1).expect("second validation accepted");
+        mgr.submit_release_validation(v1)
+            .expect("second validation accepted");
         let result = mgr
             .release(&incident_id, &admin_identity(), &test_trace())
             .expect("release should succeed at quorum");

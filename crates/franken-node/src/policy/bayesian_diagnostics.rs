@@ -38,6 +38,18 @@ pub const EVD_BAYES_004: &str = "EVD-BAYES-004";
 pub const EVD_SENTINEL_E_PROCESS_001: &str = "EVD-SENTINEL-EPROCESS-001";
 /// Runtime Sentinel e-process replay completed.
 pub const EVD_SENTINEL_E_PROCESS_002: &str = "EVD-SENTINEL-EPROCESS-002";
+/// Runtime Sentinel canonical observation accepted into the replay log.
+pub const FN_SENTINEL_OBSERVATION_INGESTED: &str = "FN-SENTINEL-001";
+/// Runtime Sentinel e-process update emitted after applying evidence.
+pub const FN_SENTINEL_E_PROCESS_UPDATED: &str = "FN-SENTINEL-002";
+/// Runtime Sentinel guardrail precedence overrode a probabilistic recommendation.
+pub const FN_SENTINEL_GUARDRAIL_PRECEDENCE: &str = "FN-SENTINEL-003";
+/// Runtime Sentinel escalation evidence was signed and appended to the ledger.
+pub const FN_SENTINEL_LEDGER_RECEIPT_APPENDED: &str = "FN-SENTINEL-004";
+/// Runtime Sentinel hardening transition preserved monotonicity or valid rollback.
+pub const FN_SENTINEL_HARDENING_MONOTONIC: &str = "FN-SENTINEL-005";
+/// Runtime Sentinel verifier replay recomputed the same e-process state.
+pub const FN_SENTINEL_REPLAY_VERIFIED: &str = "FN-SENTINEL-006";
 
 /// Schema version for replay-safe Runtime Sentinel e-process evidence.
 pub const RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION: &str = "runtime-sentinel-e-process-v1";

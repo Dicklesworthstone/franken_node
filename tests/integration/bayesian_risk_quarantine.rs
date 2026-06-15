@@ -1,12 +1,31 @@
 //! Integration fixture checks for bd-274s:
 //! deterministic Bayesian risk updates and reproducible quarantine actions.
 
+use ed25519_dalek::SigningKey;
+use frankenengine_node::observability::evidence_ledger::{
+    DecisionKind, EvidenceEntry, EvidenceLedger, LedgerCapacity, sign_evidence_entry,
+};
+use frankenengine_node::policy::bayesian_diagnostics::{
+    CandidateRef, E_PROCESS_SCALE_PPM, FN_SENTINEL_E_PROCESS_UPDATED,
+    FN_SENTINEL_GUARDRAIL_PRECEDENCE, FN_SENTINEL_HARDENING_MONOTONIC,
+    FN_SENTINEL_LEDGER_RECEIPT_APPENDED, FN_SENTINEL_OBSERVATION_INGESTED,
+    FN_SENTINEL_REPLAY_VERIFIED, LikelihoodRatioEvidence, RankedCandidate, RuntimeSentinelEProcess,
+};
+use frankenengine_node::policy::decision_engine::{DecisionEngine, DecisionReason};
+use frankenengine_node::policy::guardrail_monitor::{GuardrailMonitorSet, SystemState};
+use frankenengine_node::policy::hardening_state_machine::{
+    GovernanceRollbackArtifact, HardeningLevel, HardeningStateMachine,
+};
+use frankenengine_node::policy::runtime_sentinel::{
+    RuntimeSentinelObservation, SentinelObservationLog, SentinelSignal, SentinelSignalKind,
+};
 use frankenengine_node::security::adversary_graph::AdversaryPosterior;
 use frankenengine_node::security::quarantine_controller::{
     ControlAction, DEFAULT_QUARANTINE_SCOPE, QuarantineController, QuarantineControllerError,
     QuarantineThresholdPolicy,
 };
 use serde::Deserialize;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs;
@@ -125,6 +144,323 @@ fn valid_hash(value: &str) -> bool {
         return false;
     };
     hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn sentinel_signal(
+    kind: SentinelSignalKind,
+    source: &str,
+    magnitude_bp: u16,
+    detail: &str,
+) -> SentinelSignal {
+    SentinelSignal::new(kind, source, magnitude_bp, detail).expect("valid sentinel signal")
+}
+
+fn sentinel_evidence(
+    sequence: u64,
+    signal_id: &str,
+    likelihood_ratio_ppm: u64,
+) -> LikelihoodRatioEvidence {
+    LikelihoodRatioEvidence::new(signal_id, sequence, likelihood_ratio_ppm)
+}
+
+fn sentinel_candidate(id: &str, posterior_prob: f64, guardrail_filtered: bool) -> RankedCandidate {
+    RankedCandidate {
+        candidate_ref: CandidateRef::new(id),
+        posterior_prob,
+        prior_prob: 0.5,
+        observation_count: 32,
+        confidence_interval: (posterior_prob - 0.01, posterior_prob + 0.01),
+        guardrail_filtered,
+    }
+}
+
+fn sentinel_system_state() -> SystemState {
+    SystemState {
+        memory_used_bytes: 256_000_000,
+        memory_budget_bytes: 1_000_000_000,
+        durability_level: 0.99,
+        hardening_level: HardeningLevel::Standard,
+        proposed_hardening_level: None,
+        evidence_emission_active: true,
+        memory_tail_risk: None,
+        reliability_telemetry: None,
+        epoch_id: 91,
+    }
+}
+
+fn sentinel_governance_artifact() -> GovernanceRollbackArtifact {
+    GovernanceRollbackArtifact {
+        artifact_id: "GOV-SENTINEL-2026-001".to_string(),
+        approver_id: "policy-board@franken.node".to_string(),
+        reason: "Bounded operator rollback after signed escalation review".to_string(),
+        timestamp: 91_500,
+        signature: "sig:sentinel-governance-rollback".to_string(),
+    }
+}
+
+fn signed_sentinel_ledger_entry(
+    decision_id: &str,
+    trace_id: &str,
+    payload: Value,
+    key: &SigningKey,
+) -> EvidenceEntry {
+    let mut entry = EvidenceEntry {
+        schema_version: "runtime-sentinel-decision-v1".to_string(),
+        entry_id: None,
+        decision_id: decision_id.to_string(),
+        decision_kind: DecisionKind::Quarantine,
+        decision_time: "2026-06-15T20:10:00Z".to_string(),
+        timestamp_ms: 91_000,
+        trace_id: trace_id.to_string(),
+        epoch_id: 91,
+        payload,
+        size_bytes: 0,
+        signature: String::new(),
+        prev_entry_hash: String::new(),
+    };
+    sign_evidence_entry(&mut entry, key);
+    entry
+}
+
+fn transcript_codes(transcript: &[Value]) -> Vec<&str> {
+    transcript
+        .iter()
+        .map(|event| {
+            event
+                .get("event_code")
+                .and_then(Value::as_str)
+                .expect("event code")
+        })
+        .collect()
+}
+
+#[test]
+fn sentinel_transcript_replays_eprocess_and_ledgers_signed_escalation() {
+    let mut observation =
+        RuntimeSentinelObservation::new("npm:@acme/risky-sentinel", 91, 1, "2026-06-15T20:10:00Z");
+    observation
+        .push_signal(sentinel_signal(
+            SentinelSignalKind::PolicyViolation,
+            "guardrail:ambient-authority",
+            10_000,
+            "ambient authority denied",
+        ))
+        .expect("push policy signal");
+    observation
+        .push_signal(sentinel_signal(
+            SentinelSignalKind::CamouflageHint,
+            "trajectory:gaming",
+            8_750,
+            "GradualCreep",
+        ))
+        .expect("push camouflage signal");
+
+    let mut observation_log = SentinelObservationLog::new();
+    observation_log
+        .ingest(observation)
+        .expect("observation is canonical");
+    let observation_digest = observation_log.digest().expect("log digest");
+
+    let evidence = [
+        sentinel_evidence(1, "policy_violation", E_PROCESS_SCALE_PPM * 2),
+        sentinel_evidence(2, "camouflage_hint", E_PROCESS_SCALE_PPM * 5),
+        sentinel_evidence(3, "effect_receipt_anomaly", E_PROCESS_SCALE_PPM * 2),
+    ];
+
+    let mut live_process = RuntimeSentinelEProcess::new();
+    let updates: Vec<_> = evidence
+        .iter()
+        .map(|item| live_process.observe(item).expect("e-process update"))
+        .collect();
+    let replayed_process =
+        RuntimeSentinelEProcess::replay_from(&evidence).expect("verifier replay");
+
+    assert_eq!(
+        live_process, replayed_process,
+        "verifier recomputation must recover the exact fixed-point e-process state"
+    );
+    assert!(
+        live_process.should_escalate(50_000),
+        "20x e-value should cross the alpha=0.05 escalation boundary"
+    );
+    assert_eq!(live_process.false_alarm_bound_ppm(), 50_000);
+
+    let candidates = [
+        sentinel_candidate("terminate-extension", 0.999, true),
+        sentinel_candidate("quarantine-extension", 0.001, false),
+    ];
+    let outcome = DecisionEngine::new(91).decide(
+        &candidates,
+        &GuardrailMonitorSet::new(),
+        &sentinel_system_state(),
+    );
+
+    assert_eq!(
+        outcome.reason,
+        DecisionReason::TopCandidateBlockedFallbackUsed { fallback_rank: 1 }
+    );
+    assert_eq!(
+        outcome.chosen,
+        Some(CandidateRef::new("quarantine-extension"))
+    );
+    assert_eq!(
+        outcome
+            .blocked
+            .first()
+            .expect("guardrail-filtered candidate is recorded")
+            .candidate,
+        CandidateRef::new("terminate-extension")
+    );
+
+    let mut hardening = HardeningStateMachine::with_level(HardeningLevel::Standard);
+    let escalation = hardening
+        .escalate(HardeningLevel::Enhanced, 91_100, "trace-sentinel-91")
+        .expect("sentinel escalation hardens");
+    let regression = hardening.escalate(HardeningLevel::Baseline, 91_200, "trace-sentinel-91");
+    assert!(
+        regression.is_err(),
+        "plain downshift must be rejected after escalation"
+    );
+    let rollback = hardening
+        .governance_rollback(
+            HardeningLevel::Standard,
+            &sentinel_governance_artifact(),
+            91_300,
+            "trace-sentinel-91",
+        )
+        .expect("signed governance rollback");
+    assert_eq!(escalation.to_level, HardeningLevel::Enhanced);
+    assert_eq!(rollback.to_level, HardeningLevel::Standard);
+
+    let transcript = vec![
+        json!({
+            "event_code": FN_SENTINEL_OBSERVATION_INGESTED,
+            "observation_log_digest": observation_digest,
+        }),
+        json!({
+            "event_code": FN_SENTINEL_E_PROCESS_UPDATED,
+            "updates": updates,
+            "evidence_count": live_process.evidence_count,
+            "e_value_ppm": live_process.e_value_ppm,
+            "false_alarm_bound_ppm": live_process.false_alarm_bound_ppm(),
+        }),
+        json!({
+            "event_code": FN_SENTINEL_GUARDRAIL_PRECEDENCE,
+            "chosen": outcome.chosen,
+            "blocked": outcome.blocked,
+            "reason": outcome.reason,
+        }),
+        json!({
+            "event_code": FN_SENTINEL_HARDENING_MONOTONIC,
+            "transition_count": hardening.transition_count(),
+            "current_level": hardening.current_level().label(),
+        }),
+        json!({
+            "event_code": FN_SENTINEL_REPLAY_VERIFIED,
+            "replayed_e_value_ppm": replayed_process.e_value_ppm,
+            "replayed_evidence_count": replayed_process.evidence_count,
+        }),
+    ];
+    assert_eq!(
+        transcript_codes(&transcript),
+        vec![
+            FN_SENTINEL_OBSERVATION_INGESTED,
+            FN_SENTINEL_E_PROCESS_UPDATED,
+            FN_SENTINEL_GUARDRAIL_PRECEDENCE,
+            FN_SENTINEL_HARDENING_MONOTONIC,
+            FN_SENTINEL_REPLAY_VERIFIED,
+        ],
+        "inline golden transcript must keep stable FN-SENTINEL event order"
+    );
+
+    let key = SigningKey::from_bytes(&[0x5E; 32]);
+    let mut ledger =
+        EvidenceLedger::with_verifying_key(LedgerCapacity::new(4, 16_384), key.verifying_key());
+    let ledger_entry = signed_sentinel_ledger_entry(
+        "sentinel-quarantine-npm-acme-risky",
+        "trace-sentinel-91",
+        json!({
+            "event_code": FN_SENTINEL_LEDGER_RECEIPT_APPENDED,
+            "transcript": transcript,
+            "decision": "quarantine-extension",
+            "rollback_command": "franken-node trust release npm:@acme/risky-sentinel --trace trace-sentinel-91",
+        }),
+        &key,
+    );
+    let entry_id = ledger
+        .append(ledger_entry)
+        .expect("signed sentinel evidence appends");
+
+    assert_eq!(entry_id.0, 1);
+    assert_eq!(ledger.len(), 1);
+    let stored = ledger.iter_all().next().expect("stored ledger entry");
+    assert_eq!(stored.1.decision_kind, DecisionKind::Quarantine);
+    assert_eq!(
+        stored.1.payload["event_code"],
+        json!(FN_SENTINEL_LEDGER_RECEIPT_APPENDED)
+    );
+    assert!(
+        stored.1.payload["rollback_command"]
+            .as_str()
+            .expect("rollback command")
+            .contains("trust release"),
+        "signed ledger payload must retain an operator rollback command"
+    );
+}
+
+#[test]
+fn sentinel_benign_streams_respect_anytime_false_alarm_bound() {
+    const ALPHA_PPM: u64 = 50_000;
+    const BENIGN_STREAMS: u64 = 64;
+
+    let mut false_alarm_streams = 0_u64;
+    for stream_id in 0..BENIGN_STREAMS {
+        let mut process = RuntimeSentinelEProcess::new();
+        let mut ever_escalated = false;
+
+        for step in 1..=32_u64 {
+            let likelihood_ratio_ppm = if (stream_id + step) % 2 == 0 {
+                1_100_000
+            } else {
+                900_000
+            };
+            let evidence = sentinel_evidence(step, "benign_control", likelihood_ratio_ppm);
+            process
+                .observe(&evidence)
+                .expect("benign evidence sequence is monotonic");
+            ever_escalated |= process.should_escalate(ALPHA_PPM);
+        }
+
+        if ever_escalated {
+            false_alarm_streams = false_alarm_streams.saturating_add(1);
+        }
+    }
+
+    let allowed_false_alarms =
+        (BENIGN_STREAMS.saturating_mul(ALPHA_PPM)).div_ceil(E_PROCESS_SCALE_PPM);
+    assert!(
+        false_alarm_streams <= allowed_false_alarms,
+        "continuous peeking false alarms {false_alarm_streams} exceeded Ville bound allowance {allowed_false_alarms}"
+    );
+
+    let planted_malicious = [
+        sentinel_evidence(1, "planted_malice", 2_500_000),
+        sentinel_evidence(2, "planted_malice", 2_500_000),
+        sentinel_evidence(3, "planted_malice", 2_500_000),
+        sentinel_evidence(4, "planted_malice", 2_500_000),
+    ];
+    let planted_process =
+        RuntimeSentinelEProcess::replay_from(&planted_malicious).expect("planted replay");
+
+    assert!(
+        planted_process.should_escalate(ALPHA_PPM),
+        "planted malicious stream must cross the same anytime-valid boundary"
+    );
+    assert_eq!(
+        planted_process.false_alarm_bound_ppm(),
+        25_600,
+        "2.5^4 e-value should produce the expected fixed-point Ville bound"
+    );
 }
 
 #[test]
