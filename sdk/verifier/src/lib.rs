@@ -44,17 +44,19 @@
 //! - INV-CAPSULE-VERDICT-REPRODUCIBLE: Same capsule always produces the same verdict.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use hex::FromHex;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use tree_sitter::{Language, Node, Parser as JsParser};
 
 pub mod bundle;
 pub mod calibration;
@@ -74,6 +76,20 @@ pub const CRYPTOGRAPHIC_SECURITY_POSTURE: &str = "cryptographic_ed25519_authenti
 
 /// Stable rule id for guardrails that must fence the workspace SDK surface.
 pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_VERIFIER_SDK";
+
+/// Bundle artifact path for the migration-equivalence capsule consumed by
+/// `VerifierSdk::verify_migration_artifact`.
+pub const MIGRATION_EQUIVALENCE_ARTIFACT_PATH: &str = "artifacts/migration_equivalence.json";
+
+/// Schema marker for trustless SDK-side migration equivalence capsules.
+pub const MIGRATION_EQUIVALENCE_SCHEMA_VERSION: &str = "vsdk-migration-equivalence-v1.0";
+
+const MIGRATION_SOURCE_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:migration-source:v1:";
+const MIGRATION_AST_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:migration-js-ast:v1:";
+const MIGRATION_LOCKSTEP_VERDICT_HASH_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:migration-lockstep-verdict:v1:";
+const MIGRATION_EQUIVALENCE_BINDING_HASH_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:migration-equivalence-binding:v1:";
 
 // ---------------------------------------------------------------------------
 // Event codes (public-facing)
@@ -705,19 +721,18 @@ impl VerifierSdk {
         self.validate_current_verifier_identity()?;
         let verified = bundle::verify(artifact)?;
         self.verify_bundle_belongs_to_current_verifier(&verified)?;
+        let equivalence = verify_migration_equivalence_capsule(&verified);
+        let verdict = if equivalence.all_passed() {
+            VerificationVerdict::Pass
+        } else {
+            VerificationVerdict::Fail
+        };
 
         self.build_result(
             VerificationOperation::MigrationArtifact,
-            VerificationVerdict::Pass,
-            vec![AssertionResult {
-                assertion: "migration_artifact_verified".to_string(),
-                passed: true,
-                detail: format!(
-                    "migration artifact cryptographically verified from bundle {}",
-                    verified.bundle_id
-                ),
-            }],
-            verified.integrity_hash,
+            verdict,
+            equivalence.checked_assertions,
+            equivalence.artifact_binding_hash,
         )
     }
 
@@ -2072,6 +2087,559 @@ fn validate_session_provenance(session: &VerificationSession) -> Result<(), Veri
     Ok(())
 }
 
+#[derive(Debug)]
+struct MigrationEquivalenceVerification {
+    checked_assertions: Vec<AssertionResult>,
+    artifact_binding_hash: String,
+}
+
+impl MigrationEquivalenceVerification {
+    fn all_passed(&self) -> bool {
+        self.checked_assertions
+            .iter()
+            .all(|assertion| assertion.passed)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationEquivalenceCapsule {
+    schema_version: String,
+    rule_id: String,
+    source: MigrationSourceSnapshot,
+    target: MigrationSourceSnapshot,
+    precondition: MigrationPreconditionProof,
+    lockstep_witness: MigrationLockstepWitness,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationSourceSnapshot {
+    path: String,
+    source_text: String,
+    source_hash: String,
+    ast_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationPreconditionProof {
+    rule_id: String,
+    #[serde(default)]
+    source_contains: Vec<String>,
+    #[serde(default)]
+    source_not_contains: Vec<String>,
+    #[serde(default)]
+    target_contains: Vec<String>,
+    #[serde(default)]
+    target_not_contains: Vec<String>,
+    passed: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationLockstepWitness {
+    lockstep_oracle_id: String,
+    fixture_corpus_digest: String,
+    proptest_seed: String,
+    fixture_cases: u64,
+    proptest_cases: u64,
+    effect_receipt_equivalence_cases: u64,
+    #[serde(default)]
+    effect_receipt_ids: Vec<String>,
+    divergence_count: u64,
+    verdict: String,
+    lockstep_verdict_hash: String,
+}
+
+fn verify_migration_equivalence_capsule(
+    replay_bundle: &bundle::ReplayBundle,
+) -> MigrationEquivalenceVerification {
+    let mut assertions = vec![AssertionResult {
+        assertion: "migration_bundle_structural_verified".to_string(),
+        passed: true,
+        detail: format!(
+            "migration artifact bundle {} passed canonical bundle verification",
+            replay_bundle.bundle_id
+        ),
+    }];
+
+    let Some(capsule_artifact) = replay_bundle
+        .artifacts
+        .get(MIGRATION_EQUIVALENCE_ARTIFACT_PATH)
+    else {
+        assertions.push(AssertionResult {
+            assertion: "migration_equivalence_capsule_present".to_string(),
+            passed: false,
+            detail: format!("missing required artifact {MIGRATION_EQUIVALENCE_ARTIFACT_PATH}"),
+        });
+        return MigrationEquivalenceVerification {
+            artifact_binding_hash: migration_equivalence_binding_hash(
+                &replay_bundle.integrity_hash,
+                "",
+                "",
+                "",
+            ),
+            checked_assertions: assertions,
+        };
+    };
+
+    assertions.push(AssertionResult {
+        assertion: "migration_equivalence_capsule_present".to_string(),
+        passed: true,
+        detail: format!("found {MIGRATION_EQUIVALENCE_ARTIFACT_PATH}"),
+    });
+
+    let media_type_ok = capsule_artifact.media_type == "application/json"
+        || capsule_artifact.media_type == "application/vnd.franken-node.migration-equivalence+json";
+    assertions.push(AssertionResult {
+        assertion: "migration_equivalence_capsule_media_type".to_string(),
+        passed: media_type_ok,
+        detail: if media_type_ok {
+            capsule_artifact.media_type.clone()
+        } else {
+            format!("unsupported media type {}", capsule_artifact.media_type)
+        },
+    });
+
+    let capsule_bytes = match Vec::from_hex(&capsule_artifact.bytes_hex) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            assertions.push(AssertionResult {
+                assertion: "migration_equivalence_capsule_json".to_string(),
+                passed: false,
+                detail: format!("capsule bytes were not valid hex: {error}"),
+            });
+            return MigrationEquivalenceVerification {
+                artifact_binding_hash: migration_equivalence_binding_hash(
+                    &replay_bundle.integrity_hash,
+                    "",
+                    "",
+                    "",
+                ),
+                checked_assertions: assertions,
+            };
+        }
+    };
+
+    let capsule = match serde_json::from_slice::<MigrationEquivalenceCapsule>(&capsule_bytes) {
+        Ok(capsule) => {
+            assertions.push(AssertionResult {
+                assertion: "migration_equivalence_capsule_json".to_string(),
+                passed: true,
+                detail: "capsule JSON decoded".to_string(),
+            });
+            capsule
+        }
+        Err(error) => {
+            assertions.push(AssertionResult {
+                assertion: "migration_equivalence_capsule_json".to_string(),
+                passed: false,
+                detail: format!("capsule JSON rejected: {error}"),
+            });
+            return MigrationEquivalenceVerification {
+                artifact_binding_hash: migration_equivalence_binding_hash(
+                    &replay_bundle.integrity_hash,
+                    "",
+                    "",
+                    "",
+                ),
+                checked_assertions: assertions,
+            };
+        }
+    };
+
+    let schema_ok = capsule.schema_version == MIGRATION_EQUIVALENCE_SCHEMA_VERSION;
+    assertions.push(AssertionResult {
+        assertion: "migration_equivalence_schema_version".to_string(),
+        passed: schema_ok,
+        detail: if schema_ok {
+            capsule.schema_version.clone()
+        } else {
+            format!(
+                "expected {}, got {}",
+                MIGRATION_EQUIVALENCE_SCHEMA_VERSION, capsule.schema_version
+            )
+        },
+    });
+
+    let rule_ok =
+        !capsule.rule_id.trim().is_empty() && capsule.rule_id == capsule.precondition.rule_id;
+    assertions.push(AssertionResult {
+        assertion: "migration_equivalence_rule_bound".to_string(),
+        passed: rule_ok,
+        detail: if rule_ok {
+            format!("rule_id={}", capsule.rule_id)
+        } else {
+            "capsule rule_id is empty or not bound to precondition proof".to_string()
+        },
+    });
+
+    let source_hash = verify_migration_source_snapshot("source", &capsule.source, &mut assertions);
+    let target_hash = verify_migration_source_snapshot("target", &capsule.target, &mut assertions);
+    let source_ast_hash = verify_migration_ast_snapshot("source", &capsule.source, &mut assertions);
+    let target_ast_hash = verify_migration_ast_snapshot("target", &capsule.target, &mut assertions);
+    verify_migration_precondition(&capsule, &mut assertions);
+    verify_migration_effect_receipts(replay_bundle, &capsule, &mut assertions);
+    verify_migration_lockstep_witness(&capsule, &mut assertions);
+
+    let recomputed_lockstep_hash = compute_migration_lockstep_verdict_hash(
+        &capsule,
+        &source_hash,
+        &target_hash,
+        &source_ast_hash,
+        &target_ast_hash,
+    );
+    let lockstep_hash_ok = is_canonical_sha256_hex(&capsule.lockstep_witness.lockstep_verdict_hash)
+        && constant_time_eq(
+            &capsule.lockstep_witness.lockstep_verdict_hash,
+            &recomputed_lockstep_hash,
+        );
+    assertions.push(AssertionResult {
+        assertion: "migration_lockstep_verdict_hash_recomputed".to_string(),
+        passed: lockstep_hash_ok,
+        detail: if lockstep_hash_ok {
+            "lockstep verdict hash matched SDK recomputation".to_string()
+        } else {
+            "lockstep verdict hash did not match SDK recomputation".to_string()
+        },
+    });
+
+    MigrationEquivalenceVerification {
+        artifact_binding_hash: migration_equivalence_binding_hash(
+            &replay_bundle.integrity_hash,
+            &recomputed_lockstep_hash,
+            &source_ast_hash,
+            &target_ast_hash,
+        ),
+        checked_assertions: assertions,
+    }
+}
+
+fn verify_migration_source_snapshot(
+    label: &'static str,
+    snapshot: &MigrationSourceSnapshot,
+    assertions: &mut Vec<AssertionResult>,
+) -> String {
+    let path_ok = !snapshot.path.trim().is_empty() && snapshot.path == snapshot.path.trim();
+    assertions.push(AssertionResult {
+        assertion: format!("migration_{label}_path_canonical"),
+        passed: path_ok,
+        detail: if path_ok {
+            snapshot.path.clone()
+        } else {
+            "path must be non-empty without surrounding whitespace".to_string()
+        },
+    });
+
+    let source_nonempty = !snapshot.source_text.trim().is_empty();
+    assertions.push(AssertionResult {
+        assertion: format!("migration_{label}_source_present"),
+        passed: source_nonempty,
+        detail: if source_nonempty {
+            format!("{} bytes", snapshot.source_text.len())
+        } else {
+            "source text is empty".to_string()
+        },
+    });
+
+    let recomputed = compute_migration_source_hash(&snapshot.source_text);
+    let hash_ok = is_canonical_sha256_hex(&snapshot.source_hash)
+        && constant_time_eq(&snapshot.source_hash, &recomputed);
+    assertions.push(AssertionResult {
+        assertion: format!("migration_{label}_source_hash_recomputed"),
+        passed: hash_ok,
+        detail: if hash_ok {
+            "source hash matched SDK recomputation".to_string()
+        } else {
+            "source hash did not match SDK recomputation".to_string()
+        },
+    });
+    recomputed
+}
+
+fn verify_migration_ast_snapshot(
+    label: &'static str,
+    snapshot: &MigrationSourceSnapshot,
+    assertions: &mut Vec<AssertionResult>,
+) -> String {
+    match compute_js_ast_hash(&snapshot.source_text) {
+        Ok(recomputed) => {
+            let ast_ok = is_canonical_sha256_hex(&snapshot.ast_hash)
+                && constant_time_eq(&snapshot.ast_hash, &recomputed);
+            assertions.push(AssertionResult {
+                assertion: format!("migration_{label}_ast_reparsed"),
+                passed: ast_ok,
+                detail: if ast_ok {
+                    "JavaScript AST hash matched SDK parse".to_string()
+                } else {
+                    "JavaScript AST hash did not match SDK parse".to_string()
+                },
+            });
+            recomputed
+        }
+        Err(error) => {
+            assertions.push(AssertionResult {
+                assertion: format!("migration_{label}_ast_reparsed"),
+                passed: false,
+                detail: error,
+            });
+            String::new()
+        }
+    }
+}
+
+fn verify_migration_precondition(
+    capsule: &MigrationEquivalenceCapsule,
+    assertions: &mut Vec<AssertionResult>,
+) {
+    let proof = &capsule.precondition;
+    let clauses_present = !proof.source_contains.is_empty()
+        || !proof.source_not_contains.is_empty()
+        || !proof.target_contains.is_empty()
+        || !proof.target_not_contains.is_empty();
+    let fragments_nonempty = proof
+        .source_contains
+        .iter()
+        .chain(&proof.source_not_contains)
+        .chain(&proof.target_contains)
+        .chain(&proof.target_not_contains)
+        .all(|fragment| !fragment.is_empty());
+    assertions.push(AssertionResult {
+        assertion: "migration_precondition_machine_readable".to_string(),
+        passed: clauses_present && fragments_nonempty,
+        detail: if clauses_present && fragments_nonempty {
+            "precondition clauses are explicit".to_string()
+        } else {
+            "precondition proof must include non-empty machine-checkable clauses".to_string()
+        },
+    });
+
+    let recomputed = clauses_present
+        && fragments_nonempty
+        && proof
+            .source_contains
+            .iter()
+            .all(|fragment| capsule.source.source_text.contains(fragment))
+        && proof
+            .source_not_contains
+            .iter()
+            .all(|fragment| !capsule.source.source_text.contains(fragment))
+        && proof
+            .target_contains
+            .iter()
+            .all(|fragment| capsule.target.source_text.contains(fragment))
+        && proof
+            .target_not_contains
+            .iter()
+            .all(|fragment| !capsule.target.source_text.contains(fragment));
+    let precondition_ok = proof.passed && recomputed;
+    assertions.push(AssertionResult {
+        assertion: "migration_precondition_rechecked".to_string(),
+        passed: precondition_ok,
+        detail: if precondition_ok {
+            "precondition proof recomputed as pass".to_string()
+        } else {
+            format!(
+                "precondition proof failed SDK recomputation: claimed={}, recomputed={}",
+                proof.passed, recomputed
+            )
+        },
+    });
+}
+
+fn verify_migration_effect_receipts(
+    replay_bundle: &bundle::ReplayBundle,
+    capsule: &MigrationEquivalenceCapsule,
+    assertions: &mut Vec<AssertionResult>,
+) {
+    let referenced_ids = &capsule.lockstep_witness.effect_receipt_ids;
+    let ids_nonempty = !referenced_ids.is_empty();
+    assertions.push(AssertionResult {
+        assertion: "migration_effect_receipt_refs_present".to_string(),
+        passed: ids_nonempty,
+        detail: if ids_nonempty {
+            format!("{} effect receipt refs", referenced_ids.len())
+        } else {
+            "lockstep witness must reference at least one effect receipt event".to_string()
+        },
+    });
+
+    let effect_events: BTreeSet<&str> = replay_bundle
+        .timeline
+        .iter()
+        .filter(|event| event.event_type == bundle::EFFECT_RECEIPT_EVENT_TYPE)
+        .map(|event| event.event_id.as_str())
+        .collect();
+    let refs_resolve = ids_nonempty
+        && referenced_ids
+            .iter()
+            .all(|event_id| effect_events.contains(event_id.as_str()));
+    assertions.push(AssertionResult {
+        assertion: "migration_effect_receipt_refs_resolve".to_string(),
+        passed: refs_resolve,
+        detail: if refs_resolve {
+            "all lockstep witness effect receipt refs resolve in bundle timeline".to_string()
+        } else {
+            "one or more lockstep witness effect receipt refs were absent from bundle timeline"
+                .to_string()
+        },
+    });
+}
+
+fn verify_migration_lockstep_witness(
+    capsule: &MigrationEquivalenceCapsule,
+    assertions: &mut Vec<AssertionResult>,
+) {
+    let witness = &capsule.lockstep_witness;
+    let metadata_ok = !witness.lockstep_oracle_id.trim().is_empty()
+        && is_canonical_sha256_hex(&witness.fixture_corpus_digest)
+        && !witness.proptest_seed.trim().is_empty();
+    assertions.push(AssertionResult {
+        assertion: "migration_lockstep_witness_metadata".to_string(),
+        passed: metadata_ok,
+        detail: if metadata_ok {
+            format!("oracle_id={}", witness.lockstep_oracle_id)
+        } else {
+            "lockstep witness must name an oracle, corpus digest, and proptest seed".to_string()
+        },
+    });
+
+    let counts_ok = witness.fixture_cases > 0
+        && witness.proptest_cases > 0
+        && witness.effect_receipt_equivalence_cases > 0;
+    assertions.push(AssertionResult {
+        assertion: "migration_lockstep_witness_counts_nonzero".to_string(),
+        passed: counts_ok,
+        detail: if counts_ok {
+            format!(
+                "fixture={}, proptest={}, effect_receipt={}",
+                witness.fixture_cases,
+                witness.proptest_cases,
+                witness.effect_receipt_equivalence_cases
+            )
+        } else {
+            "fixture, proptest, and effect-receipt case counts must all be nonzero".to_string()
+        },
+    });
+
+    let zero_divergence = witness.verdict == "pass" && witness.divergence_count == 0;
+    assertions.push(AssertionResult {
+        assertion: "migration_lockstep_zero_divergence".to_string(),
+        passed: zero_divergence,
+        detail: if zero_divergence {
+            "lockstep witness is a zero-divergence pass".to_string()
+        } else {
+            "lockstep witness must be verdict=pass with divergence_count=0".to_string()
+        },
+    });
+}
+
+fn compute_migration_source_hash(source_text: &str) -> String {
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, MIGRATION_SOURCE_HASH_DOMAIN);
+    push_length_prefixed(&mut payload, source_text.as_bytes());
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn compute_js_ast_hash(source_text: &str) -> Result<String, String> {
+    let mut parser = JsParser::new();
+    let language: Language = tree_sitter_javascript::LANGUAGE.into();
+    parser
+        .set_language(&language)
+        .map_err(|error| format!("JavaScript parser unavailable: {error}"))?;
+    let tree = parser
+        .parse(source_text, None)
+        .ok_or_else(|| "JavaScript parser produced no syntax tree".to_string())?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Err("JavaScript parser rejected migration source".to_string());
+    }
+
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, MIGRATION_AST_HASH_DOMAIN);
+    push_js_ast_node(&mut payload, root);
+    Ok(hex::encode(Sha256::digest(&payload)))
+}
+
+fn push_js_ast_node(payload: &mut Vec<u8>, node: Node<'_>) {
+    push_length_prefixed(payload, node.kind().as_bytes());
+    payload.push(u8::from(node.is_named()));
+    payload.extend_from_slice(
+        &u64::try_from(node.start_byte())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.end_byte())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.child_count())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.named_child_count())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for index in 0..node.child_count() {
+        let Ok(child_index) = u32::try_from(index) else {
+            continue;
+        };
+        if let Some(child) = node.child(child_index) {
+            push_js_ast_node(payload, child);
+        }
+    }
+}
+
+fn compute_migration_lockstep_verdict_hash(
+    capsule: &MigrationEquivalenceCapsule,
+    source_hash: &str,
+    target_hash: &str,
+    source_ast_hash: &str,
+    target_ast_hash: &str,
+) -> String {
+    let witness = &capsule.lockstep_witness;
+    let canonical = serde_json::json!({
+        "schema_version": &capsule.schema_version,
+        "rule_id": &capsule.rule_id,
+        "source_hash": source_hash,
+        "target_hash": target_hash,
+        "source_ast_hash": source_ast_hash,
+        "target_ast_hash": target_ast_hash,
+        "precondition_passed": capsule.precondition.passed,
+        "lockstep_oracle_id": &witness.lockstep_oracle_id,
+        "fixture_corpus_digest": &witness.fixture_corpus_digest,
+        "proptest_seed": &witness.proptest_seed,
+        "fixture_cases": witness.fixture_cases,
+        "proptest_cases": witness.proptest_cases,
+        "effect_receipt_equivalence_cases": witness.effect_receipt_equivalence_cases,
+        "effect_receipt_ids": &witness.effect_receipt_ids,
+        "divergence_count": witness.divergence_count,
+        "verdict": &witness.verdict,
+    });
+    let canonical_bytes = serde_json::to_vec(&canonical)
+        .unwrap_or_else(|error| format!("__serde:{error}").into_bytes());
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, MIGRATION_LOCKSTEP_VERDICT_HASH_DOMAIN);
+    push_length_prefixed(&mut payload, &canonical_bytes);
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn migration_equivalence_binding_hash(
+    bundle_integrity_hash: &str,
+    lockstep_verdict_hash: &str,
+    source_ast_hash: &str,
+    target_ast_hash: &str,
+) -> String {
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, MIGRATION_EQUIVALENCE_BINDING_HASH_DOMAIN);
+    push_length_prefixed(&mut payload, bundle_integrity_hash.as_bytes());
+    push_length_prefixed(&mut payload, lockstep_verdict_hash.as_bytes());
+    push_length_prefixed(&mut payload, source_ast_hash.as_bytes());
+    push_length_prefixed(&mut payload, target_ast_hash.as_bytes());
+    hex::encode(Sha256::digest(&payload))
+}
+
 fn is_canonical_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -2141,6 +2709,156 @@ mod tests {
         };
         bundle::seal(&mut replay_bundle).expect("test replay bundle should seal");
         bundle::serialize(&replay_bundle).expect("test replay bundle should serialize")
+    }
+
+    fn reference_migration_equivalence_capsule() -> MigrationEquivalenceCapsule {
+        let source_text = "const value = require(\"dep\");\nmodule.exports = value;\n".to_string();
+        let target_text = "import value from \"dep\";\nexport default value;\n".to_string();
+        let mut capsule = MigrationEquivalenceCapsule {
+            schema_version: MIGRATION_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+            rule_id: "rewrite:cjs-require-to-esm".to_string(),
+            source: MigrationSourceSnapshot {
+                path: "src/input.cjs".to_string(),
+                source_hash: compute_migration_source_hash(&source_text),
+                ast_hash: compute_js_ast_hash(&source_text)
+                    .expect("reference source should parse as JavaScript"),
+                source_text,
+            },
+            target: MigrationSourceSnapshot {
+                path: "src/output.mjs".to_string(),
+                source_hash: compute_migration_source_hash(&target_text),
+                ast_hash: compute_js_ast_hash(&target_text)
+                    .expect("reference target should parse as JavaScript"),
+                source_text: target_text,
+            },
+            precondition: MigrationPreconditionProof {
+                rule_id: "rewrite:cjs-require-to-esm".to_string(),
+                source_contains: vec!["require(\"dep\")".to_string()],
+                source_not_contains: vec!["import value".to_string()],
+                target_contains: vec!["import value".to_string(), "export default".to_string()],
+                target_not_contains: vec!["require(\"dep\")".to_string()],
+                passed: true,
+            },
+            lockstep_witness: MigrationLockstepWitness {
+                lockstep_oracle_id: "compat-lockstep-oracle-v1".to_string(),
+                fixture_corpus_digest: "aa".repeat(32),
+                proptest_seed: "proptest-seed:cjs-esm:0000000000000001".to_string(),
+                fixture_cases: 1,
+                proptest_cases: 1,
+                effect_receipt_equivalence_cases: 1,
+                effect_receipt_ids: vec!["evt-effect-1".to_string()],
+                divergence_count: 0,
+                verdict: "pass".to_string(),
+                lockstep_verdict_hash: String::new(),
+            },
+        };
+        capsule.lockstep_witness.lockstep_verdict_hash = compute_migration_lockstep_verdict_hash(
+            &capsule,
+            &capsule.source.source_hash,
+            &capsule.target.source_hash,
+            &capsule.source.ast_hash,
+            &capsule.target.ast_hash,
+        );
+        capsule
+    }
+
+    fn make_migration_equivalence_bundle_bytes(
+        verifier_identity: &str,
+        capsule: &MigrationEquivalenceCapsule,
+    ) -> Vec<u8> {
+        let replay_artifact_bytes = b"replay-bundle-artifact";
+        let replay_artifact_path = "artifacts/replay.json".to_string();
+        let capsule_artifact_bytes =
+            serde_json::to_vec(capsule).expect("migration equivalence capsule should serialize");
+        let capsule_payload_len = u64::try_from(capsule_artifact_bytes.len())
+            .expect("capsule artifact length should fit in u64");
+        let replay_payload_len = u64::try_from(replay_artifact_bytes.len())
+            .expect("replay artifact length should fit in u64");
+
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(
+            replay_artifact_path.clone(),
+            bundle::BundleArtifact {
+                media_type: "application/json".to_string(),
+                digest: bundle::hash(replay_artifact_bytes),
+                bytes_hex: hex::encode(replay_artifact_bytes),
+            },
+        );
+        artifacts.insert(
+            MIGRATION_EQUIVALENCE_ARTIFACT_PATH.to_string(),
+            bundle::BundleArtifact {
+                media_type: "application/vnd.franken-node.migration-equivalence+json".to_string(),
+                digest: bundle::hash(&capsule_artifact_bytes),
+                bytes_hex: hex::encode(&capsule_artifact_bytes),
+            },
+        );
+
+        let mut replay_bundle = bundle::ReplayBundle {
+            header: bundle::BundleHeader {
+                hash_algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+                payload_length_bytes: replay_payload_len.saturating_add(capsule_payload_len),
+                chunk_count: 2,
+            },
+            schema_version: bundle::REPLAY_BUNDLE_SCHEMA_VERSION.to_string(),
+            sdk_version: SDK_VERSION.to_string(),
+            bundle_id: "bundle-alpha".to_string(),
+            incident_id: "incident-alpha".to_string(),
+            created_at: "2026-02-21T00:00:00Z".to_string(),
+            policy_version: "policy.v1".to_string(),
+            verifier_identity: verifier_identity.to_string(),
+            timeline: vec![
+                bundle::TimelineEvent {
+                    sequence_number: 1,
+                    event_id: "evt-1".to_string(),
+                    timestamp: "2026-02-21T00:00:01Z".to_string(),
+                    event_type: "verification.started".to_string(),
+                    payload: json!({"phase": "migration_equivalence"}),
+                    state_snapshot: json!({"step": 1}),
+                    causal_parent: None,
+                    policy_version: "policy.v1".to_string(),
+                },
+                bundle::TimelineEvent {
+                    sequence_number: 2,
+                    event_id: "evt-effect-1".to_string(),
+                    timestamp: "2026-02-21T00:00:02Z".to_string(),
+                    event_type: bundle::EFFECT_RECEIPT_EVENT_TYPE.to_string(),
+                    payload: json!({"effect": "module_resolve", "result": "equivalent"}),
+                    state_snapshot: json!({"step": 2}),
+                    causal_parent: Some(1),
+                    policy_version: "policy.v1".to_string(),
+                },
+            ],
+            initial_state_snapshot: json!({"baseline": true}),
+            evidence_refs: vec!["evidence://capsule/alpha".to_string()],
+            artifacts,
+            chunks: vec![
+                bundle::BundleChunk {
+                    chunk_index: 0,
+                    total_chunks: 2,
+                    artifact_path: replay_artifact_path,
+                    payload_length_bytes: replay_payload_len,
+                    payload_digest: bundle::hash(replay_artifact_bytes),
+                },
+                bundle::BundleChunk {
+                    chunk_index: 1,
+                    total_chunks: 2,
+                    artifact_path: MIGRATION_EQUIVALENCE_ARTIFACT_PATH.to_string(),
+                    payload_length_bytes: capsule_payload_len,
+                    payload_digest: bundle::hash(&capsule_artifact_bytes),
+                },
+            ],
+            metadata: BTreeMap::from([(
+                "artifact_kind".to_string(),
+                "migration_equivalence".to_string(),
+            )]),
+            integrity_hash: String::new(),
+            signature: bundle::BundleSignature {
+                algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+                signature_hex: String::new(),
+            },
+        };
+        bundle::seal(&mut replay_bundle).expect("test migration bundle should seal");
+        bundle::serialize(&replay_bundle).expect("test migration bundle should serialize")
     }
 
     #[test]
@@ -2910,23 +3628,54 @@ mod tests {
     }
 
     #[test]
-    fn verify_migration_artifact_accepts_structural_same_verifier_bundle() {
+    fn verify_migration_artifact_accepts_trustless_same_verifier_bundle() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let artifact = make_migration_equivalence_bundle_bytes(
+            "verifier://alpha",
+            &reference_migration_equivalence_capsule(),
+        );
+
+        let result = sdk
+            .verify_migration_artifact(&artifact)
+            .expect("trustless same-verifier migration bundle should verify");
+
+        assert_eq!(result.operation, VerificationOperation::MigrationArtifact);
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+        assert_eq!(result.verifier_identity, "verifier://alpha");
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_source_ast_reparsed" && assertion.passed
+        }));
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_precondition_rechecked" && assertion.passed
+        }));
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_lockstep_verdict_hash_recomputed" && assertion.passed
+        }));
+    }
+
+    #[test]
+    fn verify_migration_artifact_rejects_structural_only_bundle() {
         let sdk = create_verifier_sdk("verifier://alpha");
         let artifact = make_replay_bundle_bytes("verifier://alpha");
 
         let result = sdk
             .verify_migration_artifact(&artifact)
-            .expect("structural same-verifier bundle should verify");
+            .expect("structural-only bundle should produce a signed fail result");
 
         assert_eq!(result.operation, VerificationOperation::MigrationArtifact);
-        assert_eq!(result.verdict, VerificationVerdict::Pass);
-        assert_eq!(result.verifier_identity, "verifier://alpha");
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_equivalence_capsule_present" && !assertion.passed
+        }));
     }
 
     #[test]
     fn verify_migration_artifact_rejects_foreign_verifier_bundle() {
         let sdk = create_verifier_sdk("verifier://alpha");
-        let foreign_artifact = make_replay_bundle_bytes("verifier://beta");
+        let foreign_artifact = make_migration_equivalence_bundle_bytes(
+            "verifier://beta",
+            &reference_migration_equivalence_capsule(),
+        );
 
         let err = sdk
             .verify_migration_artifact(&foreign_artifact)
@@ -2936,6 +3685,61 @@ mod tests {
             err,
             VerifierSdkError::SessionVerifierMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn verify_migration_artifact_rechecks_precondition() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut capsule = reference_migration_equivalence_capsule();
+        capsule.precondition.source_contains = vec!["not-present-in-source".to_string()];
+        let artifact = make_migration_equivalence_bundle_bytes("verifier://alpha", &capsule);
+
+        let result = sdk
+            .verify_migration_artifact(&artifact)
+            .expect("precondition failure should produce a signed fail result");
+
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_precondition_rechecked" && !assertion.passed
+        }));
+    }
+
+    #[test]
+    fn verify_migration_artifact_reparses_asts_and_rejects_drift() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut capsule = reference_migration_equivalence_capsule();
+        capsule.source.source_text =
+            "const value = require(\"dep\");\nmodule.exports = value.extra;\n".to_string();
+        let artifact = make_migration_equivalence_bundle_bytes("verifier://alpha", &capsule);
+
+        let result = sdk
+            .verify_migration_artifact(&artifact)
+            .expect("AST drift should produce a signed fail result");
+
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_source_ast_reparsed" && !assertion.passed
+        }));
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_source_source_hash_recomputed" && !assertion.passed
+        }));
+    }
+
+    #[test]
+    fn verify_migration_artifact_recomputes_lockstep_hash() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut capsule = reference_migration_equivalence_capsule();
+        capsule.lockstep_witness.lockstep_verdict_hash = "bb".repeat(32);
+        let artifact = make_migration_equivalence_bundle_bytes("verifier://alpha", &capsule);
+
+        let result = sdk
+            .verify_migration_artifact(&artifact)
+            .expect("lockstep hash drift should produce a signed fail result");
+
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_lockstep_verdict_hash_recomputed" && !assertion.passed
+        }));
     }
 
     #[test]
