@@ -6,7 +6,8 @@
 
 use frankenengine_node::connector::migration_artifact::{
     BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION, ConformancePropertyClass, MigrationArtifact,
-    compute_behavioral_conformance_certificate_hash, error_codes, generate_reference_artifact,
+    compute_behavioral_conformance_certificate_hash, compute_differential_witness_hash,
+    error_codes, generate_reference_artifact,
     generate_reference_behavioral_conformance_certificate,
     validate_behavioral_conformance_certificate,
     verify_behavioral_conformance_certificate_signature,
@@ -55,6 +56,35 @@ fn behavioral_conformance_certificate_schema_exports_bound_and_ledger_chain() {
         "lockstep_verdict_hash",
     );
     assert_real_hex_field(json_value.get("content_hash").unwrap(), "content_hash");
+    let differential_witness = json_value
+        .get("differential_witness")
+        .and_then(Value::as_object)
+        .expect("certificate must expose differential_witness object");
+    assert_eq!(
+        differential_witness["lockstep_oracle_id"],
+        "compat-lockstep-oracle-v1"
+    );
+    assert_real_hex_field(
+        differential_witness.get("fixture_corpus_digest").unwrap(),
+        "differential_witness.fixture_corpus_digest",
+    );
+    assert_eq!(
+        differential_witness["proptest_seed"],
+        "proptest-seed:cjs-esm:0000000000000001"
+    );
+    assert_eq!(differential_witness["fixture_cases"], 64);
+    assert_eq!(differential_witness["proptest_cases"], 32);
+    assert_eq!(differential_witness["effect_receipt_equivalence_cases"], 32);
+    assert_eq!(differential_witness["divergence_count"], 0);
+    assert_eq!(differential_witness["verdict"], "pass");
+    assert_real_hex_field(
+        differential_witness.get("witness_hash").unwrap(),
+        "differential_witness.witness_hash",
+    );
+    assert_eq!(
+        json_value["lockstep_verdict_hash"],
+        differential_witness["witness_hash"]
+    );
 
     let bound = json_value
         .get("bound")
@@ -166,6 +196,25 @@ fn behavioral_conformance_certificate_rejects_unbounded_and_unlinked_claims() {
     assert!(!verify_behavioral_conformance_certificate_signature(
         &tampered_bound
     ));
+
+    let mut divergent_witness = generate_reference_behavioral_conformance_certificate();
+    divergent_witness.differential_witness.divergence_count = 1;
+    divergent_witness.differential_witness.witness_hash =
+        compute_differential_witness_hash(&divergent_witness.differential_witness);
+    divergent_witness.lockstep_verdict_hash =
+        divergent_witness.differential_witness.witness_hash.clone();
+    divergent_witness.content_hash =
+        compute_behavioral_conformance_certificate_hash(&divergent_witness);
+    let validation = validate_behavioral_conformance_certificate(&divergent_witness);
+    assert!(!validation.valid);
+    assert!(
+        validation
+            .errors
+            .iter()
+            .any(|error| error.contains(error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID)),
+        "expected differential witness validation error, got {:?}",
+        validation.errors
+    );
 }
 
 #[test]

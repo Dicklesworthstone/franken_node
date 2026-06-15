@@ -13,6 +13,7 @@
 //! - Verifier metadata with replay capsule refs and assertion schemas
 //! - Behavioral conformance certificates with machine-readable bounded coverage
 //! - Ledger-chain bindings for certificate audit continuity
+//! - Differential witnesses binding fixture, proptest, and effect-receipt equivalence evidence
 //! - Deterministic serialization via BTreeMap
 //! - Reference artifact generator for testing and validation
 //!
@@ -30,6 +31,8 @@
 //!   input, property, and coverage scope as structured fields.
 //! - **INV-MA-LEDGER-CHAINED**: Behavioral certificates bind to evidence ledger
 //!   entry hashes and prior certificate hashes.
+//! - **INV-MA-DIFFERENTIAL-WITNESS-BOUND**: Behavioral certificates bind their
+//!   lockstep verdict hash to a structured zero-divergence differential witness.
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -79,6 +82,7 @@ pub mod error_codes {
     pub const ERR_MA_VERSION_UNSUPPORTED: &str = "ERR_MA_VERSION_UNSUPPORTED";
     pub const ERR_MA_BOUND_INVALID: &str = "ERR_MA_BOUND_INVALID";
     pub const ERR_MA_LEDGER_CHAIN_INVALID: &str = "ERR_MA_LEDGER_CHAIN_INVALID";
+    pub const ERR_MA_DIFFERENTIAL_WITNESS_INVALID: &str = "ERR_MA_DIFFERENTIAL_WITNESS_INVALID";
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +98,7 @@ pub mod invariants {
     pub const INV_MA_DETERMINISTIC: &str = "INV-MA-DETERMINISTIC";
     pub const INV_MA_BOUND_FIRST_CLASS: &str = "INV-MA-BOUND-FIRST-CLASS";
     pub const INV_MA_LEDGER_CHAINED: &str = "INV-MA-LEDGER-CHAINED";
+    pub const INV_MA_DIFFERENTIAL_WITNESS_BOUND: &str = "INV-MA-DIFFERENTIAL-WITNESS-BOUND";
 }
 
 /// Schema version for the current migration artifact format.
@@ -286,6 +291,49 @@ pub struct BehavioralConformanceBound {
     pub coverage: BoundCoverage,
 }
 
+/// Result of the differential witness run bound into a certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DifferentialWitnessVerdict {
+    Pass,
+    Fail,
+}
+
+/// Structured differential witness behind a bounded lockstep verdict.
+///
+/// This is intentionally a summary witness, not an unbounded equivalence claim:
+/// it names the lockstep oracle, binds the fixture/proptest/effect-receipt
+/// case counts, and records zero divergences for the covered input scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DifferentialWitness {
+    /// Stable lockstep oracle implementation identifier.
+    pub lockstep_oracle_id: String,
+    /// SHA-256 digest over the ordered fixture corpus case identifiers.
+    pub fixture_corpus_digest: String,
+    /// Deterministic seed material for proptest-generated inputs.
+    pub proptest_seed: String,
+    /// Number of fixture-corpus cases exercised by the oracle.
+    pub fixture_cases: u64,
+    /// Number of proptest-generated cases exercised by the oracle.
+    pub proptest_cases: u64,
+    /// Number of effect-receipt equivalence cases exercised.
+    pub effect_receipt_equivalence_cases: u64,
+    /// Number of observed behavioral divergences.
+    pub divergence_count: u64,
+    /// Pass/fail verdict over the bounded differential run.
+    pub verdict: DifferentialWitnessVerdict,
+    /// SHA-256 digest over the structured witness fields above.
+    pub witness_hash: String,
+}
+
+impl DifferentialWitness {
+    pub fn total_cases(&self) -> u64 {
+        self.fixture_cases
+            .saturating_add(self.proptest_cases)
+            .saturating_add(self.effect_receipt_equivalence_cases)
+    }
+}
+
 /// Evidence-ledger chain binding for a behavioral conformance certificate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CertificateLedgerChain {
@@ -303,7 +351,8 @@ pub struct CertificateLedgerChain {
 ///
 /// The certificate intentionally avoids claiming global equivalence. Its
 /// `bound` field names the concrete inputs, property classes, and coverage
-/// for which `lockstep_verdict_hash` applies.
+/// for which `lockstep_verdict_hash` applies, while `differential_witness`
+/// explains the zero-divergence oracle run behind that hash.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BehavioralConformanceCertificate {
     /// Schema version (e.g. "bcc-v1.0").
@@ -320,6 +369,8 @@ pub struct BehavioralConformanceCertificate {
     pub precondition_proof: BTreeMap<String, serde_json::Value>,
     /// SHA-256 hash of the bounded lockstep verdict.
     pub lockstep_verdict_hash: String,
+    /// Structured zero-divergence differential witness bound to the verdict hash.
+    pub differential_witness: DifferentialWitness,
     /// First-class bounded claim metadata.
     pub bound: BehavioralConformanceBound,
     /// Evidence-ledger chain binding.
@@ -341,6 +392,7 @@ struct UnsignedBehavioralConformanceCertificate<'a> {
     rule_version: &'a str,
     precondition_proof: &'a BTreeMap<String, serde_json::Value>,
     lockstep_verdict_hash: &'a str,
+    differential_witness: &'a DifferentialWitness,
     bound: &'a BehavioralConformanceBound,
     ledger_chain: &'a CertificateLedgerChain,
     content_hash: &'a str,
@@ -535,6 +587,17 @@ pub fn validate_behavioral_conformance_certificate(
             "ledger_chain.evidence_ledger_entry_hash",
             certificate.ledger_chain.evidence_ledger_entry_hash.as_str(),
         ),
+        (
+            "differential_witness.fixture_corpus_digest",
+            certificate
+                .differential_witness
+                .fixture_corpus_digest
+                .as_str(),
+        ),
+        (
+            "differential_witness.witness_hash",
+            certificate.differential_witness.witness_hash.as_str(),
+        ),
     ] {
         if !is_sha256_hex(value) {
             push_hash_error(&mut errors, field, value);
@@ -608,6 +671,56 @@ pub fn validate_behavioral_conformance_certificate(
         ));
     }
 
+    let differential_witness = &certificate.differential_witness;
+    if differential_witness.lockstep_oracle_id.trim().is_empty()
+        || differential_witness.proptest_seed.trim().is_empty()
+        || differential_witness.fixture_cases == 0
+        || differential_witness.proptest_cases == 0
+        || differential_witness.effect_receipt_equivalence_cases == 0
+    {
+        errors.push(format!(
+            "{}: differential_witness must name an oracle and include fixture, proptest, and effect-receipt cases",
+            error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID
+        ));
+    }
+    if !matches!(
+        differential_witness.verdict,
+        DifferentialWitnessVerdict::Pass
+    ) || differential_witness.divergence_count != 0
+    {
+        errors.push(format!(
+            "{}: differential_witness must be a zero-divergence pass verdict",
+            error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID
+        ));
+    }
+    let witness_total_cases = differential_witness.total_cases();
+    if witness_total_cases != coverage.covered_cases || witness_total_cases != coverage.total_cases
+    {
+        errors.push(format!(
+            "{}: differential_witness case total must equal bound.coverage covered and total cases",
+            error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID
+        ));
+    }
+    let expected_witness_hash = compute_differential_witness_hash(differential_witness);
+    if !crate::security::constant_time::ct_eq(
+        &differential_witness.witness_hash,
+        &expected_witness_hash,
+    ) {
+        errors.push(format!(
+            "{}: differential_witness.witness_hash does not match witness payload",
+            error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID
+        ));
+    }
+    if !crate::security::constant_time::ct_eq(
+        &certificate.lockstep_verdict_hash,
+        &differential_witness.witness_hash,
+    ) {
+        errors.push(format!(
+            "{}: lockstep_verdict_hash must equal differential_witness.witness_hash",
+            error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID
+        ));
+    }
+
     if certificate.ledger_chain.ledger_domain.trim().is_empty() {
         errors.push(format!(
             "{}: ledger_chain.ledger_domain is required",
@@ -676,6 +789,29 @@ pub fn compute_content_hash(artifact: &MigrationArtifact) -> String {
     ))
 }
 
+/// Compute the digest for a differential witness, excluding its self-hash field.
+pub fn compute_differential_witness_hash(witness: &DifferentialWitness) -> String {
+    let canonical = serde_json::json!({
+        "lockstep_oracle_id": witness.lockstep_oracle_id,
+        "fixture_corpus_digest": witness.fixture_corpus_digest,
+        "proptest_seed": witness.proptest_seed,
+        "fixture_cases": witness.fixture_cases,
+        "proptest_cases": witness.proptest_cases,
+        "effect_receipt_equivalence_cases": witness.effect_receipt_equivalence_cases,
+        "divergence_count": witness.divergence_count,
+        "verdict": witness.verdict,
+    });
+    let bytes =
+        serde_json::to_vec(&canonical).unwrap_or_else(|e| format!("__serde_err:{e}").into_bytes());
+    hex::encode(Sha256::digest(
+        [
+            b"migration_differential_witness_hash_v1:" as &[u8],
+            bytes.as_slice(),
+        ]
+        .concat(),
+    ))
+}
+
 /// Compute the content hash for a behavioral conformance certificate.
 pub fn compute_behavioral_conformance_certificate_hash(
     certificate: &BehavioralConformanceCertificate,
@@ -694,6 +830,7 @@ pub fn compute_behavioral_conformance_certificate_hash(
         "rule_version": certificate.rule_version,
         "precondition_proof": certificate.precondition_proof,
         "lockstep_verdict_hash": certificate.lockstep_verdict_hash,
+        "differential_witness": certificate.differential_witness,
         "bound": certificate.bound,
         "ledger_chain": certificate.ledger_chain,
     });
@@ -761,6 +898,7 @@ fn canonical_behavioral_conformance_certificate_payload(
         rule_version: &certificate.rule_version,
         precondition_proof: &certificate.precondition_proof,
         lockstep_verdict_hash: &certificate.lockstep_verdict_hash,
+        differential_witness: &certificate.differential_witness,
         bound: &certificate.bound,
         ledger_chain: &certificate.ledger_chain,
         content_hash: &certificate.content_hash,
@@ -907,6 +1045,19 @@ pub fn generate_reference_behavioral_conformance_certificate() -> BehavioralConf
         serde_json::json!("1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"),
     );
 
+    let mut differential_witness = DifferentialWitness {
+        lockstep_oracle_id: "compat-lockstep-oracle-v1".to_string(),
+        fixture_corpus_digest: "cc33".repeat(16),
+        proptest_seed: "proptest-seed:cjs-esm:0000000000000001".to_string(),
+        fixture_cases: 64,
+        proptest_cases: 32,
+        effect_receipt_equivalence_cases: 32,
+        divergence_count: 0,
+        verdict: DifferentialWitnessVerdict::Pass,
+        witness_hash: String::new(),
+    };
+    differential_witness.witness_hash = compute_differential_witness_hash(&differential_witness);
+
     let mut certificate = BehavioralConformanceCertificate {
         schema_version: BEHAVIORAL_CONFORMANCE_CERTIFICATE_SCHEMA_VERSION.to_string(),
         source_hash: "aa11".repeat(16),
@@ -914,7 +1065,8 @@ pub fn generate_reference_behavioral_conformance_certificate() -> BehavioralConf
         rule_id: "rewrite:cjs-require-to-esm".to_string(),
         rule_version: "1.0.0".to_string(),
         precondition_proof,
-        lockstep_verdict_hash: "cc33".repeat(16),
+        lockstep_verdict_hash: differential_witness.witness_hash.clone(),
+        differential_witness,
         bound: BehavioralConformanceBound {
             input_scope: vec![BoundedInputScope {
                 input_class: "commonjs-module".to_string(),
@@ -1044,15 +1196,38 @@ mod tests {
         );
         assert_eq!(certificate.bound.coverage.covered_cases, 128);
         assert_eq!(certificate.bound.coverage.total_cases, 128);
+        assert_eq!(certificate.differential_witness.fixture_cases, 64);
+        assert_eq!(certificate.differential_witness.proptest_cases, 32);
+        assert_eq!(
+            certificate
+                .differential_witness
+                .effect_receipt_equivalence_cases,
+            32
+        );
+        assert_eq!(certificate.differential_witness.divergence_count, 0);
+        assert_eq!(
+            certificate.differential_witness.verdict,
+            DifferentialWitnessVerdict::Pass
+        );
+        assert_eq!(
+            certificate.lockstep_verdict_hash,
+            certificate.differential_witness.witness_hash
+        );
 
         let value = serde_json::to_value(&certificate).unwrap();
         assert!(value.get("bound").is_some());
+        assert!(value.get("differential_witness").is_some());
         assert_eq!(
             value["bound"]["input_scope"][0]["input_class"],
             "commonjs-module"
         );
         assert_eq!(value["bound"]["property_classes"][0], "syntax_equivalence");
         assert_eq!(value["bound"]["coverage"]["coverage_ratio"], 1.0);
+        assert_eq!(
+            value["differential_witness"]["lockstep_oracle_id"],
+            "compat-lockstep-oracle-v1"
+        );
+        assert_eq!(value["differential_witness"]["verdict"], "pass");
     }
 
     #[test]
@@ -1068,6 +1243,30 @@ mod tests {
             &certificate.ledger_chain.evidence_ledger_entry_hash
         ));
         assert_eq!(certificate.ledger_chain.certificate_sequence, 0);
+    }
+
+    #[test]
+    fn test_reference_behavioral_conformance_certificate_has_bound_differential_witness() {
+        let certificate = generate_reference_behavioral_conformance_certificate();
+        let witness = &certificate.differential_witness;
+
+        assert_eq!(witness.lockstep_oracle_id, "compat-lockstep-oracle-v1");
+        assert_eq!(witness.fixture_cases + witness.proptest_cases, 96);
+        assert_eq!(witness.effect_receipt_equivalence_cases, 32);
+        assert_eq!(
+            witness.total_cases(),
+            certificate.bound.coverage.covered_cases
+        );
+        assert_eq!(
+            witness.total_cases(),
+            certificate.bound.coverage.total_cases
+        );
+        assert_eq!(witness.witness_hash.len(), 64);
+        assert_eq!(witness.witness_hash, certificate.lockstep_verdict_hash);
+        assert_eq!(
+            witness.witness_hash,
+            compute_differential_witness_hash(witness)
+        );
     }
 
     #[test]
@@ -1152,6 +1351,58 @@ mod tests {
             certificate.content_hash,
             compute_behavioral_conformance_certificate_hash(&changed)
         );
+    }
+
+    #[test]
+    fn test_behavioral_conformance_certificate_hash_changes_with_differential_witness() {
+        let certificate = generate_reference_behavioral_conformance_certificate();
+        let mut changed = certificate.clone();
+        changed.differential_witness.proptest_seed =
+            "proptest-seed:cjs-esm:0000000000000002".to_string();
+        changed.differential_witness.witness_hash =
+            compute_differential_witness_hash(&changed.differential_witness);
+        changed.lockstep_verdict_hash = changed.differential_witness.witness_hash.clone();
+
+        assert_ne!(
+            certificate.content_hash,
+            compute_behavioral_conformance_certificate_hash(&changed)
+        );
+    }
+
+    #[test]
+    fn test_validate_certificate_rejects_differential_witness_divergence() {
+        let mut certificate = generate_reference_behavioral_conformance_certificate();
+        certificate.differential_witness.divergence_count = 1;
+        certificate.differential_witness.verdict = DifferentialWitnessVerdict::Fail;
+        certificate.differential_witness.witness_hash =
+            compute_differential_witness_hash(&certificate.differential_witness);
+        certificate.lockstep_verdict_hash = certificate.differential_witness.witness_hash.clone();
+        certificate.content_hash = compute_behavioral_conformance_certificate_hash(&certificate);
+        certificate.signature = sign_behavioral_conformance_certificate(&certificate);
+
+        let result = validate_behavioral_conformance_certificate(&certificate);
+
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|error| {
+            error.contains(error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID)
+                && error.contains("zero-divergence")
+        }));
+    }
+
+    #[test]
+    fn test_validate_certificate_rejects_unbound_differential_witness_hash() {
+        let mut certificate = generate_reference_behavioral_conformance_certificate();
+        certificate.differential_witness.proptest_cases = 31;
+        certificate.content_hash = compute_behavioral_conformance_certificate_hash(&certificate);
+        certificate.signature = sign_behavioral_conformance_certificate(&certificate);
+
+        let result = validate_behavioral_conformance_certificate(&certificate);
+
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|error| {
+            error.contains(error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID)
+                && error.contains("witness_hash")
+        }));
     }
 
     #[test]
@@ -1619,6 +1870,10 @@ mod tests {
             error_codes::ERR_MA_LEDGER_CHAIN_INVALID,
             "ERR_MA_LEDGER_CHAIN_INVALID"
         );
+        assert_eq!(
+            error_codes::ERR_MA_DIFFERENTIAL_WITNESS_INVALID,
+            "ERR_MA_DIFFERENTIAL_WITNESS_INVALID"
+        );
     }
 
     // ── Invariants ────────────────────────────────────────────────────
@@ -1645,6 +1900,10 @@ mod tests {
             "INV-MA-BOUND-FIRST-CLASS"
         );
         assert_eq!(invariants::INV_MA_LEDGER_CHAINED, "INV-MA-LEDGER-CHAINED");
+        assert_eq!(
+            invariants::INV_MA_DIFFERENTIAL_WITNESS_BOUND,
+            "INV-MA-DIFFERENTIAL-WITNESS-BOUND"
+        );
     }
 
     // ── Schema version ────────────────────────────────────────────────
@@ -1685,6 +1944,10 @@ mod tests {
         assert_sync::<BehavioralConformanceBound>();
         assert_send::<CertificateLedgerChain>();
         assert_sync::<CertificateLedgerChain>();
+        assert_send::<DifferentialWitnessVerdict>();
+        assert_sync::<DifferentialWitnessVerdict>();
+        assert_send::<DifferentialWitness>();
+        assert_sync::<DifferentialWitness>();
         assert_send::<BehavioralConformanceCertificate>();
         assert_sync::<BehavioralConformanceCertificate>();
         assert_send::<ArtifactVersion>();
