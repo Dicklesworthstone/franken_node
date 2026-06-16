@@ -5,9 +5,9 @@
 //! update the constant here and grep for its old value to find any hardcoded
 //! references that were missed.
 //!
-//! **Note:** existing modules still define their own local copies.  This registry
-//! is the *authoritative* catalogue — a future migration task will re-export from
-//! here.
+//! **Note:** some existing modules still define their own local copies.  This
+//! registry is the *authoritative* catalogue; product modules should re-export
+//! from here as their schemas are centralized.
 
 // ── Runtime & Scheduling ───────────────────────────────────────────
 pub const LANE_SCHEDULER: &str = "ls-v1.0";
@@ -23,6 +23,7 @@ pub const HARDWARE_PLANNER: &str = "hwp-v1.0";
 pub const INCIDENT_LAB: &str = "incident-lab-v1.0";
 pub const AUTHORITY_AUDIT: &str = "aa-v1.0";
 pub const SPECULATION_PROOF_EXECUTOR: &str = "speculation-proof-v1.0";
+pub const EFFECT_RECEIPT: &str = "effect-receipt-v1.1";
 
 // ── Control Plane ──────────────────────────────────────────────────
 pub const TRANSITION_ABORT: &str = "ta-v1.0";
@@ -119,6 +120,7 @@ pub const REGISTRY_STAKING_GOVERNANCE: &str = "staking-v1.0";
 
 // ── Storage ────────────────────────────────────────────────────────
 pub const STORAGE_MODEL: &str = "1.0.0";
+pub const CONTENT_ADDRESSED_STORE: &str = "cas-v1.0";
 
 // ── Supply Chain ───────────────────────────────────────────────────
 pub const MANIFEST: &str = "1.0";
@@ -193,6 +195,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("incident_lab", INCIDENT_LAB),
         ("authority_audit", AUTHORITY_AUDIT),
         ("speculation_proof_executor", SPECULATION_PROOF_EXECUTOR),
+        ("effect_receipt", EFFECT_RECEIPT),
         // Control Plane
         ("transition_abort", TRANSITION_ABORT),
         ("control_lane_policy", CONTROL_LANE_POLICY),
@@ -291,6 +294,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("registry_staking_governance", REGISTRY_STAKING_GOVERNANCE),
         // Storage
         ("storage_model", STORAGE_MODEL),
+        ("content_addressed_store", CONTENT_ADDRESSED_STORE),
         // Supply Chain
         ("manifest", MANIFEST),
         ("extension_registry", EXTENSION_REGISTRY),
@@ -473,7 +477,15 @@ mod tests {
             EXTENSION_REGISTRY,
             crate::supply_chain::extension_registry::REGISTRY_VERSION
         );
+        assert_eq!(
+            EFFECT_RECEIPT,
+            crate::runtime::effect_receipt::EFFECT_RECEIPT_SCHEMA
+        );
         assert_eq!(STORAGE_MODEL, crate::storage::models::MODEL_SCHEMA_VERSION);
+        assert_eq!(
+            CONTENT_ADDRESSED_STORE,
+            crate::storage::cas::CONTENT_ADDRESSED_STORE_SCHEMA
+        );
     }
 
     #[test]
@@ -510,6 +522,11 @@ mod tests {
         assert_eq!(
             lookup("adversary_corpus_record"),
             Some(ADVERSARY_CORPUS_RECORD)
+        );
+        assert_eq!(lookup("effect_receipt"), Some(EFFECT_RECEIPT));
+        assert_eq!(
+            lookup("content_addressed_store"),
+            Some(CONTENT_ADDRESSED_STORE)
         );
         assert_eq!(lookup("extension_registry"), Some(EXTENSION_REGISTRY));
         assert_eq!(lookup("verify_cli_contract"), Some(VERIFY_CLI_CONTRACT));

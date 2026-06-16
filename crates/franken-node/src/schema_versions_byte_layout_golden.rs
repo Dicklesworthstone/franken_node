@@ -101,7 +101,7 @@ mod frozen_canonical_byte_layout_golden_tests {
         );
 
         // Pin expected count - this will fail first time, showing the actual count
-        let expected_count = 110; // Update this when adding schemas
+        let expected_count = 131; // Update this when adding schemas
         if entry_count != expected_count {
             panic!(
                 "Schema registry has {} entries, expected {}. \
@@ -121,20 +121,9 @@ mod frozen_canonical_byte_layout_golden_tests {
             "SHA-256 hash should be 71 chars (sha256: + 64 hex chars)"
         );
 
-        // TODO: Replace this placeholder with actual golden hash baseline
-        // Run this test once to get the real hash value, then replace the placeholder below
-        if count_hash == "sha256:0000000000000000000000000000000000000000000000000000000000000000" {
-            panic!(
-                "Golden hash not yet established. Run test to get actual hash:\n\
-                   Actual hash: {}\n\
-                   Replace the placeholder in the code with this value.",
-                count_hash
-            );
-        }
-
         // Golden hash baseline - any change indicates schema registry modification
         let expected_hash =
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+            "sha256:8bc6658c0d02b399b434e3256c0d47f327eb5aef4c53f04ec974a05d9d09a319";
         assert_eq!(
             count_hash, expected_hash,
             "Schema registry entry count hash changed - this indicates API surface modification.\
@@ -207,22 +196,9 @@ mod frozen_canonical_byte_layout_golden_tests {
             "Should test multiple critical constants"
         );
 
-        // TODO: Replace this placeholder with actual golden hash baseline
-        // Run this test once to get the real hash value, then replace the placeholder below
-        if constants_hash
-            == "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-        {
-            panic!(
-                "Golden hash not yet established. Run test to get actual hash:\n\
-                   Actual hash: {}\n\
-                   Replace the placeholder in the code with this value.",
-                constants_hash
-            );
-        }
-
         // Golden hash baseline - any change indicates critical constants modification
         let expected_hash =
-            "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+            "sha256:dc2000d100005761856f863673826b1eedc3ed1254c03030b3be6c899acf531e";
         assert_eq!(
             constants_hash, expected_hash,
             "Critical constants hash changed - this indicates protocol-critical version drift.\
@@ -295,22 +271,9 @@ mod frozen_canonical_byte_layout_golden_tests {
             "Schema registry should have no duplicate names"
         );
 
-        // TODO: Replace this placeholder with actual golden hash baseline
-        // Run this test once to get the real hash value, then replace the placeholder below
-        if structure_hash
-            == "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-        {
-            panic!(
-                "Golden hash not yet established. Run test to get actual hash:\n\
-                   Actual hash: {}\n\
-                   Replace the placeholder in the code with this value.",
-                structure_hash
-            );
-        }
-
         // Golden hash baseline - any change indicates schema registry structure modification
         let expected_hash =
-            "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+            "sha256:6024d1c0a55c127b81f9a474fd71fb916a04a3914a095f28aa5bbbbfc027523d";
         assert_eq!(
             structure_hash, expected_hash,
             "Schema registry structure hash changed - this indicates schema modification (add/remove/rename).\

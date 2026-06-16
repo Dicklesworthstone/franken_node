@@ -37,9 +37,8 @@ use sha2::{Digest, Sha256};
 use crate::security::constant_time::ct_eq;
 use crate::storage::cas::ContentHash;
 
-/// Schema/format version for the EffectReceipt wire shape. Local copy per the
-/// `schema_versions` convention.
-pub const EFFECT_RECEIPT_SCHEMA: &str = "effect-receipt-v1.1";
+/// Schema/format version for the EffectReceipt wire shape.
+pub const EFFECT_RECEIPT_SCHEMA: &str = crate::schema_versions::EFFECT_RECEIPT;
 /// Deterministic placeholder for effects whose payload has no sensitive lineage.
 pub const EFFECT_RECEIPT_EMPTY_LINEAGE_HASH: &str =
     "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
