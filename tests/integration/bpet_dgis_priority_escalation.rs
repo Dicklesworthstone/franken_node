@@ -20,12 +20,17 @@ use frankenengine_node::security::bpet::trust_surface_integration::{
     assess_guidance_for_calibrated_trust_surface, render_calibrated_trust_surface_transcript,
     trust_card_mutation_from_calibrated_guidance,
 };
-use frankenengine_node::security::conformal::{FrozenConformalArtifact, FrozenConformalQuantile};
+use frankenengine_node::security::conformal::{
+    CONFORMAL_FROZEN_QUANTILE_SCHEMA_VERSION, CONFORMAL_GENERATED_AT,
+    CONFORMAL_SAMPLE_SCHEMA_VERSION, ConformalScoreSample, FrozenConformalArtifact,
+    FrozenConformalQuantile, event_codes, freeze_quantiles, score_nonconformity_samples,
+};
 use frankenengine_node::security::dgis::update_copilot::TopologyRiskMetrics;
 use frankenengine_node::security::trajectory_gaming::{
     TrajectorySample, TrajectorySeries, append_sample,
 };
 use frankenengine_node::supply_chain::trust_card::{RiskLevel, TrustCardMutation};
+use sha2::{Digest, Sha256};
 
 type CapabilitySampleRow = (i64, BTreeMap<String, f64>, BTreeMap<String, f64>);
 
@@ -185,6 +190,31 @@ fn bpet_conformal_artifact() -> FrozenConformalArtifact {
     }
 }
 
+fn conformal_sample(
+    id: &str,
+    risk_class: &str,
+    score_bp: u16,
+    positive: bool,
+) -> ConformalScoreSample {
+    ConformalScoreSample {
+        sample_id: id.to_string(),
+        risk_class: risk_class.to_string(),
+        score_bp,
+        positive,
+    }
+}
+
+fn phase0_style_conformal_samples() -> Vec<ConformalScoreSample> {
+    vec![
+        conformal_sample("s4", "evolution", 4_000, false),
+        conformal_sample("s1", "evolution", 9_000, true),
+        conformal_sample("s3", "evolution", 2_000, false),
+        conformal_sample("s2", "evolution", 8_000, true),
+        conformal_sample("c1", "camouflage", 6_000, true),
+        conformal_sample("c2", "camouflage", 1_000, false),
+    ]
+}
+
 fn cap(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
     pairs
         .iter()
@@ -243,6 +273,98 @@ fn high_centrality_trajectory_anomaly_escalates_with_expected_loss_context() {
         output
             .invariant_markers
             .contains(&invariants::INV_BPET_DGIS_TOPOLOGY_AMPLIFICATION.to_string())
+    );
+}
+
+#[test]
+fn phase0_style_frozen_quantile_artifact_matches_canonical_contract() {
+    let mut samples = phase0_style_conformal_samples();
+    samples.rotate_left(3);
+
+    let scored = score_nonconformity_samples(&samples).unwrap();
+    let scored_contract = scored
+        .iter()
+        .map(|sample| {
+            (
+                sample.sample_id.as_str(),
+                sample.risk_class.as_str(),
+                sample.score_bp,
+                sample.positive,
+                sample.nonconformity_bp,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scored_contract,
+        vec![
+            ("c1", "camouflage", 6_000, true, 4_000),
+            ("c2", "camouflage", 1_000, false, 1_000),
+            ("s1", "evolution", 9_000, true, 1_000),
+            ("s2", "evolution", 8_000, true, 2_000),
+            ("s3", "evolution", 2_000, false, 2_000),
+            ("s4", "evolution", 4_000, false, 4_000),
+        ]
+    );
+
+    let artifact = freeze_quantiles(&samples, 2_000).unwrap();
+
+    assert_eq!(
+        artifact.schema_version,
+        CONFORMAL_FROZEN_QUANTILE_SCHEMA_VERSION
+    );
+    assert_eq!(
+        artifact.sample_schema_version,
+        CONFORMAL_SAMPLE_SCHEMA_VERSION
+    );
+    assert_eq!(artifact.generated_at, CONFORMAL_GENERATED_AT);
+    assert_eq!(
+        artifact.corpus_hash,
+        "sha256:31a0705613c893c1e67f772b1db5ea7ecdd3a8b56efd933e51e2f0bd010bfc67"
+    );
+    assert_eq!(artifact.sample_count, 6);
+    assert_eq!(artifact.risk_class_count, 2);
+    assert_eq!(artifact.target_alpha_bp, 2_000);
+    assert_eq!(
+        artifact.event_codes,
+        vec![
+            event_codes::CONFORMAL_ARTIFACT_EMITTED.to_string(),
+            event_codes::CONFORMAL_SET_EMITTED.to_string(),
+        ]
+    );
+    assert_eq!(
+        artifact.quantiles,
+        vec![
+            FrozenConformalQuantile {
+                risk_class: "camouflage".to_string(),
+                sample_count: 2,
+                positive_count: 1,
+                negative_count: 1,
+                target_alpha_bp: 2_000,
+                quantile_rank: 2,
+                quantile_bp: 4_000,
+                min_nonconformity_bp: 1_000,
+                max_nonconformity_bp: 4_000,
+                finite_sample_coverage_floor_bp: 6_666,
+            },
+            FrozenConformalQuantile {
+                risk_class: "evolution".to_string(),
+                sample_count: 4,
+                positive_count: 2,
+                negative_count: 2,
+                target_alpha_bp: 2_000,
+                quantile_rank: 4,
+                quantile_bp: 4_000,
+                min_nonconformity_bp: 1_000,
+                max_nonconformity_bp: 4_000,
+                finite_sample_coverage_floor_bp: 8_000,
+            },
+        ]
+    );
+
+    let canonical = artifact.canonical_bytes().unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(&canonical)),
+        "0a7142f10dcc1c0868aa8fd62e176d536ee2797e45639f796d11b7da91e7c5a2"
     );
 }
 
