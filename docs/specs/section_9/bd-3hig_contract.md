@@ -103,6 +103,7 @@ Current registered deferrals:
 
 | Bead | Frontier | Decision |
 |------|----------|----------|
+| `bd-f5b04.6.1` | Intra-Fleet Secure Aggregation / Cross-Org Differential Privacy | Stage secure aggregation for a single organization's fleet, but defer cross-org DP until a real deployment network and measured privacy-noise budget prove rare-event detection will not be swamped. |
 | `bd-f5b04.6.3` | Bayesian DBN Immune World Model | Rejected and parked until Phase 0 plus conformal calibration produce a real corpus and a deterministic inference design beats the lighter correlated-campaign path. |
 
 ---
