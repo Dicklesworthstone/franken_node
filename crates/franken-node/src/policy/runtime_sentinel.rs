@@ -27,8 +27,14 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use ed25519_dalek::SigningKey;
+
 use crate::connector::canonical_serializer::canonical_bytes;
+use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry, sign_evidence_entry};
 use crate::security::conformal::{ConformalRiskSet, LABEL_POSITIVE};
+use crate::security::quarantine_controller::ControlAction;
+
+use super::hardening_state_machine::HardeningLevel;
 
 /// Schema version for a single canonical observation record.
 pub const RUNTIME_SENTINEL_OBSERVATION_SCHEMA_VERSION: &str = "runtime_sentinel.observation.v1";
@@ -50,6 +56,18 @@ pub const MAX_SIGNALS_PER_OBSERVATION: usize = 256;
 
 /// Maximum number of observations retained in a single in-memory log.
 pub const MAX_OBSERVATIONS_PER_LOG: usize = 100_000;
+
+/// Schema version for Runtime Sentinel expected-loss decisions.
+pub const RUNTIME_SENTINEL_DECISION_SCHEMA_VERSION: &str = "runtime_sentinel.decision.v1";
+
+/// Runtime Sentinel selected an expected-loss containment action.
+pub const FN_SENTINEL_EXPECTED_LOSS_SELECTED: &str = "FN-SENTINEL-007";
+
+/// Runtime Sentinel produced a signed escalation receipt payload.
+pub const FN_SENTINEL_ESCALATION_RECEIPT_SIGNED: &str = "FN-SENTINEL-008";
+
+const PROBABILITY_SCALE_BP: u16 = 10_000;
+const PPM_PER_BP: u64 = 100;
 
 /// Errors raised while constructing or ingesting Sentinel observations.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -81,6 +99,31 @@ pub enum SentinelObservationError {
         epoch: u64,
         sequence: u64,
     },
+}
+
+/// Errors raised while constructing expected-loss Sentinel decisions.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SentinelDecisionError {
+    #[error("sentinel decision field `{field}` must not be empty")]
+    EmptyField { field: &'static str },
+    #[error("sentinel decision field `{field}` contains a forbidden control character")]
+    ForbiddenControlChar { field: &'static str },
+    #[error("probability field `{field}` has {value} bp > 10000 bp")]
+    ProbabilityOutOfRange { field: &'static str, value: u16 },
+    #[error("expected-loss matrix must contain one row for every containment ladder action")]
+    IncompleteLossMatrix,
+    #[error("duplicate expected-loss row for action `{action}`")]
+    DuplicateAction { action: &'static str },
+    #[error("expected-loss value for action `{action}` must be finite in basis points")]
+    InvalidLoss { action: &'static str },
+    #[error("unsupported Sentinel decision schema version `{version}`")]
+    InvalidSchemaVersion { version: String },
+    #[error("hash field `{field}` must be sha256:<64 lowercase-or-uppercase hex chars>")]
+    InvalidHash { field: &'static str },
+    #[error("evidence_count must be positive for a signed Sentinel decision")]
+    EmptyEvidence,
+    #[error("failed to serialize Sentinel decision payload: {0}")]
+    PayloadSerialization(String),
 }
 
 /// The category of evidence a [`SentinelSignal`] carries.
@@ -217,6 +260,392 @@ impl SentinelSignal {
             self.detail.as_str(),
             self.magnitude_bp,
         )
+    }
+}
+
+/// Runtime Sentinel containment ladder ordered from least to most restrictive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SentinelContainmentAction {
+    Allow,
+    Harden,
+    SafeMode,
+    Quarantine,
+}
+
+impl SentinelContainmentAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Harden => "harden",
+            Self::SafeMode => "safe_mode",
+            Self::Quarantine => "quarantine",
+        }
+    }
+
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Allow => 0,
+            Self::Harden => 1,
+            Self::SafeMode => 2,
+            Self::Quarantine => 3,
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> [Self; 4] {
+        [Self::Allow, Self::Harden, Self::SafeMode, Self::Quarantine]
+    }
+
+    #[must_use]
+    pub const fn requires_safe_mode(self) -> bool {
+        matches!(self, Self::SafeMode | Self::Quarantine)
+    }
+
+    #[must_use]
+    pub const fn hardening_floor(self) -> Option<HardeningLevel> {
+        match self {
+            Self::Allow => None,
+            Self::Harden => Some(HardeningLevel::Enhanced),
+            Self::SafeMode => Some(HardeningLevel::Maximum),
+            Self::Quarantine => Some(HardeningLevel::Critical),
+        }
+    }
+
+    #[must_use]
+    pub const fn quarantine_control_action(self) -> Option<ControlAction> {
+        match self {
+            Self::Allow => None,
+            Self::Harden => Some(ControlAction::Throttle),
+            Self::SafeMode => Some(ControlAction::Isolate),
+            Self::Quarantine => Some(ControlAction::Quarantine),
+        }
+    }
+
+    #[must_use]
+    pub const fn decision_kind(self) -> DecisionKind {
+        match self {
+            Self::Allow => DecisionKind::Admit,
+            Self::Harden | Self::SafeMode => DecisionKind::Escalate,
+            Self::Quarantine => DecisionKind::Quarantine,
+        }
+    }
+}
+
+/// One action row in the Sentinel expected-loss matrix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentinelActionLoss {
+    pub action: SentinelContainmentAction,
+    pub benign_loss_bp: u32,
+    pub malicious_loss_bp: u32,
+}
+
+impl SentinelActionLoss {
+    #[must_use]
+    pub const fn new(
+        action: SentinelContainmentAction,
+        benign_loss_bp: u32,
+        malicious_loss_bp: u32,
+    ) -> Self {
+        Self {
+            action,
+            benign_loss_bp,
+            malicious_loss_bp,
+        }
+    }
+}
+
+/// Expected-loss score for one containment action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentinelActionScore {
+    pub action: SentinelContainmentAction,
+    pub expected_loss_bp: u64,
+    pub benign_component_bp: u64,
+    pub malicious_component_bp: u64,
+    pub dominant_outcome: String,
+}
+
+/// Inputs committed into a Runtime Sentinel action receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentinelDecisionInput {
+    pub principal_id: String,
+    pub trace_id: String,
+    pub epoch: u64,
+    pub posterior_malice_bp: u16,
+    pub e_value_ppm: u64,
+    pub false_alarm_bound_ppm: u64,
+    pub evidence_count: u64,
+    pub evidence_hash: String,
+    pub observation_log_digest: String,
+}
+
+impl SentinelDecisionInput {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        principal_id: impl Into<String>,
+        trace_id: impl Into<String>,
+        epoch: u64,
+        posterior_malice_bp: u16,
+        e_value_ppm: u64,
+        false_alarm_bound_ppm: u64,
+        evidence_count: u64,
+        evidence_hash: impl Into<String>,
+        observation_log_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            principal_id: principal_id.into(),
+            trace_id: trace_id.into(),
+            epoch,
+            posterior_malice_bp,
+            e_value_ppm,
+            false_alarm_bound_ppm,
+            evidence_count,
+            evidence_hash: evidence_hash.into(),
+            observation_log_digest: observation_log_digest.into(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), SentinelDecisionError> {
+        reject_decision_string("principal_id", &self.principal_id)?;
+        reject_decision_string("trace_id", &self.trace_id)?;
+        if self.posterior_malice_bp > PROBABILITY_SCALE_BP {
+            return Err(SentinelDecisionError::ProbabilityOutOfRange {
+                field: "posterior_malice_bp",
+                value: self.posterior_malice_bp,
+            });
+        }
+        if self.evidence_count == 0 {
+            return Err(SentinelDecisionError::EmptyEvidence);
+        }
+        validate_hash("evidence_hash", &self.evidence_hash)?;
+        validate_hash("observation_log_digest", &self.observation_log_digest)?;
+        Ok(())
+    }
+}
+
+/// Counterfactual threshold note committed into an escalation receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentinelCounterfactualReceipt {
+    pub observation_ref: String,
+    pub prior_action: SentinelContainmentAction,
+    pub posterior_action: SentinelContainmentAction,
+    pub prior_e_value_ppm: u64,
+    pub posterior_e_value_ppm: u64,
+    pub threshold_action: SentinelContainmentAction,
+    pub rationale: String,
+}
+
+impl SentinelCounterfactualReceipt {
+    #[must_use]
+    pub fn threshold_crossing(
+        observation_ref: impl Into<String>,
+        prior_action: SentinelContainmentAction,
+        posterior_action: SentinelContainmentAction,
+        prior_e_value_ppm: u64,
+        posterior_e_value_ppm: u64,
+        threshold_action: SentinelContainmentAction,
+    ) -> Self {
+        let observation_ref = observation_ref.into();
+        Self {
+            rationale: format!(
+                "observation_ref={observation_ref} moved action from {} to {} at threshold {}",
+                prior_action.as_str(),
+                posterior_action.as_str(),
+                threshold_action.as_str()
+            ),
+            observation_ref,
+            prior_action,
+            posterior_action,
+            prior_e_value_ppm,
+            posterior_e_value_ppm,
+            threshold_action,
+        }
+    }
+}
+
+/// Deterministic expected-loss containment policy for the Runtime Sentinel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentinelExpectedLossPolicy {
+    pub schema_version: String,
+    pub guardrail_floor: SentinelContainmentAction,
+    pub losses: Vec<SentinelActionLoss>,
+}
+
+impl SentinelExpectedLossPolicy {
+    /// Construct a schema-versioned expected-loss policy over the full ladder.
+    ///
+    /// # Errors
+    /// Returns [`SentinelDecisionError`] when the loss matrix is incomplete or
+    /// contains duplicate action rows.
+    pub fn new(
+        losses: Vec<SentinelActionLoss>,
+        guardrail_floor: SentinelContainmentAction,
+    ) -> Result<Self, SentinelDecisionError> {
+        validate_loss_rows(&losses)?;
+        Ok(Self {
+            schema_version: RUNTIME_SENTINEL_DECISION_SCHEMA_VERSION.to_string(),
+            guardrail_floor,
+            losses,
+        })
+    }
+
+    /// Select the minimum expected-loss action after applying the guardrail floor.
+    ///
+    /// # Errors
+    /// Returns [`SentinelDecisionError`] when the policy schema is unsupported,
+    /// the loss matrix is invalid, or the decision input fails validation.
+    pub fn decide(
+        &self,
+        input: SentinelDecisionInput,
+        counterfactual: Option<SentinelCounterfactualReceipt>,
+    ) -> Result<SentinelActionDecision, SentinelDecisionError> {
+        if self.schema_version != RUNTIME_SENTINEL_DECISION_SCHEMA_VERSION {
+            return Err(SentinelDecisionError::InvalidSchemaVersion {
+                version: self.schema_version.clone(),
+            });
+        }
+        validate_loss_rows(&self.losses)?;
+        input.validate()?;
+
+        let mut scores = self
+            .losses
+            .iter()
+            .map(|row| score_loss_row(row, input.posterior_malice_bp))
+            .collect::<Result<Vec<_>, _>>()?;
+        scores.sort_by(|left, right| {
+            left.expected_loss_bp
+                .cmp(&right.expected_loss_bp)
+                .then_with(|| left.action.rank().cmp(&right.action.rank()))
+        });
+
+        let raw_selected_action = scores
+            .first()
+            .map(|score| score.action)
+            .ok_or(SentinelDecisionError::IncompleteLossMatrix)?;
+        let selected_action = raw_selected_action.max(self.guardrail_floor);
+        let selected_score = scores
+            .iter()
+            .find(|score| score.action == selected_action)
+            .cloned()
+            .ok_or(SentinelDecisionError::IncompleteLossMatrix)?;
+        let guardrail_applied = selected_action != raw_selected_action;
+        let decision_id = sentinel_decision_id(&input, selected_action);
+        let confidence_bp = confidence_bp_from_false_alarm(input.false_alarm_bound_ppm);
+        let rationale = format!(
+            "selected_action={};raw_argmin={};posterior_malice_bp={};e_value_ppm={};false_alarm_bound_ppm={};guardrail_floor={};guardrail_applied={};dominant_outcome={}",
+            selected_action.as_str(),
+            raw_selected_action.as_str(),
+            input.posterior_malice_bp,
+            input.e_value_ppm,
+            input.false_alarm_bound_ppm,
+            self.guardrail_floor.as_str(),
+            guardrail_applied,
+            selected_score.dominant_outcome
+        );
+
+        Ok(SentinelActionDecision {
+            schema_version: RUNTIME_SENTINEL_DECISION_SCHEMA_VERSION.to_string(),
+            event_code: FN_SENTINEL_EXPECTED_LOSS_SELECTED.to_string(),
+            decision_id,
+            principal_id: input.principal_id,
+            trace_id: input.trace_id,
+            epoch: input.epoch,
+            posterior_malice_bp: input.posterior_malice_bp,
+            e_value_ppm: input.e_value_ppm,
+            false_alarm_bound_ppm: input.false_alarm_bound_ppm,
+            evidence_count: input.evidence_count,
+            evidence_hash: input.evidence_hash,
+            observation_log_digest: input.observation_log_digest,
+            raw_selected_action,
+            guardrail_floor: self.guardrail_floor,
+            guardrail_applied,
+            selected_action,
+            selected_expected_loss_bp: selected_score.expected_loss_bp,
+            confidence_bp,
+            scores,
+            rationale,
+            counterfactual,
+        })
+    }
+}
+
+impl Default for SentinelExpectedLossPolicy {
+    fn default() -> Self {
+        Self {
+            schema_version: RUNTIME_SENTINEL_DECISION_SCHEMA_VERSION.to_string(),
+            guardrail_floor: SentinelContainmentAction::Allow,
+            losses: vec![
+                SentinelActionLoss::new(SentinelContainmentAction::Allow, 0, 10_000),
+                SentinelActionLoss::new(SentinelContainmentAction::Harden, 800, 5_200),
+                SentinelActionLoss::new(SentinelContainmentAction::SafeMode, 2_500, 2_200),
+                SentinelActionLoss::new(SentinelContainmentAction::Quarantine, 7_000, 400),
+            ],
+        }
+    }
+}
+
+/// Receipt-ready decision selected by [`SentinelExpectedLossPolicy`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentinelActionDecision {
+    pub schema_version: String,
+    pub event_code: String,
+    pub decision_id: String,
+    pub principal_id: String,
+    pub trace_id: String,
+    pub epoch: u64,
+    pub posterior_malice_bp: u16,
+    pub e_value_ppm: u64,
+    pub false_alarm_bound_ppm: u64,
+    pub evidence_count: u64,
+    pub evidence_hash: String,
+    pub observation_log_digest: String,
+    pub raw_selected_action: SentinelContainmentAction,
+    pub guardrail_floor: SentinelContainmentAction,
+    pub guardrail_applied: bool,
+    pub selected_action: SentinelContainmentAction,
+    pub selected_expected_loss_bp: u64,
+    pub confidence_bp: u16,
+    pub scores: Vec<SentinelActionScore>,
+    pub rationale: String,
+    pub counterfactual: Option<SentinelCounterfactualReceipt>,
+}
+
+impl SentinelActionDecision {
+    /// Sign this Sentinel action decision as an evidence-ledger entry.
+    ///
+    /// # Errors
+    /// Returns [`SentinelDecisionError`] if the JSON payload cannot be serialized.
+    pub fn to_signed_evidence_entry(
+        &self,
+        decision_time: impl Into<String>,
+        timestamp_ms: u64,
+        signing_key: &SigningKey,
+    ) -> Result<EvidenceEntry, SentinelDecisionError> {
+        let payload = serde_json::json!({
+            "event_code": FN_SENTINEL_ESCALATION_RECEIPT_SIGNED,
+            "decision": self,
+        });
+        let mut entry = EvidenceEntry {
+            schema_version: self.schema_version.clone(),
+            entry_id: None,
+            decision_id: self.decision_id.clone(),
+            decision_kind: self.selected_action.decision_kind(),
+            decision_time: decision_time.into(),
+            timestamp_ms,
+            trace_id: self.trace_id.clone(),
+            epoch_id: self.epoch,
+            payload,
+            size_bytes: 0,
+            signature: String::new(),
+            prev_entry_hash: String::new(),
+        };
+        serde_json::to_vec(&entry.payload)
+            .map_err(|err| SentinelDecisionError::PayloadSerialization(err.to_string()))?;
+        sign_evidence_entry(&mut entry, signing_key);
+        Ok(entry)
     }
 }
 
@@ -514,6 +943,126 @@ fn reject_control_chars(field: &'static str, value: &str) -> Result<(), Sentinel
         return Err(SentinelObservationError::ForbiddenControlChar { field });
     }
     Ok(())
+}
+
+fn reject_decision_string(field: &'static str, value: &str) -> Result<(), SentinelDecisionError> {
+    if value.trim().is_empty() {
+        return Err(SentinelDecisionError::EmptyField { field });
+    }
+    if value.chars().any(|c| c.is_control()) {
+        return Err(SentinelDecisionError::ForbiddenControlChar { field });
+    }
+    Ok(())
+}
+
+fn validate_hash(field: &'static str, value: &str) -> Result<(), SentinelDecisionError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(SentinelDecisionError::InvalidHash { field });
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(SentinelDecisionError::InvalidHash { field });
+    }
+    Ok(())
+}
+
+fn validate_loss_rows(losses: &[SentinelActionLoss]) -> Result<(), SentinelDecisionError> {
+    if losses.len() != SentinelContainmentAction::all().len() {
+        return Err(SentinelDecisionError::IncompleteLossMatrix);
+    }
+
+    let mut seen = [false; 4];
+    for row in losses {
+        let index = usize::from(row.action.rank());
+        let Some(slot) = seen.get_mut(index) else {
+            return Err(SentinelDecisionError::InvalidLoss {
+                action: row.action.as_str(),
+            });
+        };
+        if *slot {
+            return Err(SentinelDecisionError::DuplicateAction {
+                action: row.action.as_str(),
+            });
+        }
+        *slot = true;
+    }
+
+    if seen.iter().all(|value| *value) {
+        Ok(())
+    } else {
+        Err(SentinelDecisionError::IncompleteLossMatrix)
+    }
+}
+
+fn score_loss_row(
+    row: &SentinelActionLoss,
+    posterior_malice_bp: u16,
+) -> Result<SentinelActionScore, SentinelDecisionError> {
+    let posterior = u64::from(posterior_malice_bp);
+    let benign = u64::from(PROBABILITY_SCALE_BP.saturating_sub(posterior_malice_bp));
+    let benign_component_bp = weighted_loss_component(row.benign_loss_bp, benign, row.action)?;
+    let malicious_component_bp =
+        weighted_loss_component(row.malicious_loss_bp, posterior, row.action)?;
+    let expected_loss_bp = benign_component_bp.saturating_add(malicious_component_bp);
+    let dominant_outcome = if malicious_component_bp >= benign_component_bp {
+        "malicious"
+    } else {
+        "benign"
+    }
+    .to_string();
+
+    Ok(SentinelActionScore {
+        action: row.action,
+        expected_loss_bp,
+        benign_component_bp,
+        malicious_component_bp,
+        dominant_outcome,
+    })
+}
+
+fn weighted_loss_component(
+    loss_bp: u32,
+    probability_bp: u64,
+    action: SentinelContainmentAction,
+) -> Result<u64, SentinelDecisionError> {
+    let weighted = u128::from(loss_bp) * u128::from(probability_bp);
+    let rounded = weighted.saturating_add(u128::from(PROBABILITY_SCALE_BP / 2))
+        / u128::from(PROBABILITY_SCALE_BP);
+    u64::try_from(rounded).map_err(|_| SentinelDecisionError::InvalidLoss {
+        action: action.as_str(),
+    })
+}
+
+fn confidence_bp_from_false_alarm(false_alarm_bound_ppm: u64) -> u16 {
+    let false_alarm_bp = false_alarm_bound_ppm.div_ceil(PPM_PER_BP);
+    let confidence = u64::from(PROBABILITY_SCALE_BP).saturating_sub(false_alarm_bp);
+    u16::try_from(confidence.min(u64::from(PROBABILITY_SCALE_BP))).unwrap_or(PROBABILITY_SCALE_BP)
+}
+
+fn sentinel_decision_id(
+    input: &SentinelDecisionInput,
+    action: SentinelContainmentAction,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"runtime_sentinel_decision_v1:");
+    hasher.update(len_to_u64(input.principal_id.len()).to_le_bytes());
+    hasher.update(input.principal_id.as_bytes());
+    hasher.update(len_to_u64(input.trace_id.len()).to_le_bytes());
+    hasher.update(input.trace_id.as_bytes());
+    hasher.update(input.epoch.to_le_bytes());
+    hasher.update(input.posterior_malice_bp.to_le_bytes());
+    hasher.update(input.e_value_ppm.to_le_bytes());
+    hasher.update(input.false_alarm_bound_ppm.to_le_bytes());
+    hasher.update(input.evidence_count.to_le_bytes());
+    hasher.update(len_to_u64(input.evidence_hash.len()).to_le_bytes());
+    hasher.update(input.evidence_hash.as_bytes());
+    hasher.update(len_to_u64(input.observation_log_digest.len()).to_le_bytes());
+    hasher.update(input.observation_log_digest.as_bytes());
+    hasher.update([action.rank()]);
+    format!("sentinel-{}", hex::encode(hasher.finalize()))
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

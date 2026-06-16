@@ -17,7 +17,10 @@ use frankenengine_node::policy::hardening_state_machine::{
     GovernanceRollbackArtifact, HardeningLevel, HardeningStateMachine,
 };
 use frankenengine_node::policy::runtime_sentinel::{
-    RuntimeSentinelObservation, SentinelObservationLog, SentinelSignal, SentinelSignalKind,
+    FN_SENTINEL_ESCALATION_RECEIPT_SIGNED, FN_SENTINEL_EXPECTED_LOSS_SELECTED,
+    RuntimeSentinelObservation, SentinelActionLoss, SentinelContainmentAction,
+    SentinelCounterfactualReceipt, SentinelDecisionInput, SentinelExpectedLossPolicy,
+    SentinelObservationLog, SentinelSignal, SentinelSignalKind,
 };
 use frankenengine_node::security::adversary_graph::AdversaryPosterior;
 use frankenengine_node::security::quarantine_controller::{
@@ -234,6 +237,33 @@ fn transcript_codes(transcript: &[Value]) -> Vec<&str> {
         .collect()
 }
 
+fn sentinel_decision_input(posterior_malice_bp: u16) -> SentinelDecisionInput {
+    SentinelDecisionInput::new(
+        "npm:@acme/risky-sentinel",
+        "trace-sentinel-91",
+        91,
+        posterior_malice_bp,
+        20_000_000,
+        50_000,
+        3,
+        VALID_EVIDENCE_HASH,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+}
+
+fn low_risk_argmin_policy(floor: SentinelContainmentAction) -> SentinelExpectedLossPolicy {
+    SentinelExpectedLossPolicy::new(
+        vec![
+            SentinelActionLoss::new(SentinelContainmentAction::Allow, 0, 2_000),
+            SentinelActionLoss::new(SentinelContainmentAction::Harden, 700, 2_500),
+            SentinelActionLoss::new(SentinelContainmentAction::SafeMode, 3_000, 1_500),
+            SentinelActionLoss::new(SentinelContainmentAction::Quarantine, 8_000, 200),
+        ],
+        floor,
+    )
+    .expect("valid low-risk policy")
+}
+
 #[test]
 fn sentinel_transcript_replays_eprocess_and_ledgers_signed_escalation() {
     let mut observation =
@@ -406,6 +436,145 @@ fn sentinel_transcript_replays_eprocess_and_ledgers_signed_escalation() {
             .contains("trust release"),
         "signed ledger payload must retain an operator rollback command"
     );
+}
+
+#[test]
+fn sentinel_expected_loss_policy_selects_argmin_and_respects_guardrail_floor() {
+    let policy = low_risk_argmin_policy(SentinelContainmentAction::SafeMode);
+    let decision = policy
+        .decide(sentinel_decision_input(1_500), None)
+        .expect("expected-loss decision");
+
+    assert_eq!(decision.event_code, FN_SENTINEL_EXPECTED_LOSS_SELECTED);
+    assert_eq!(
+        decision.raw_selected_action,
+        SentinelContainmentAction::Allow
+    );
+    assert_eq!(
+        decision.selected_action,
+        SentinelContainmentAction::SafeMode
+    );
+    assert!(decision.guardrail_applied);
+    assert_eq!(
+        decision.selected_action.hardening_floor(),
+        Some(HardeningLevel::Maximum)
+    );
+    assert!(decision.selected_action.requires_safe_mode());
+    assert_eq!(
+        decision.selected_action.quarantine_control_action(),
+        Some(ControlAction::Isolate)
+    );
+    assert_eq!(decision.confidence_bp, 9_500);
+    assert!(
+        decision.rationale.contains("e_value_ppm=20000000"),
+        "receipt rationale must bind the anytime-valid e-value"
+    );
+    assert!(
+        decision.rationale.contains("posterior_malice_bp=1500"),
+        "receipt rationale must bind the posterior"
+    );
+}
+
+#[test]
+fn sentinel_expected_loss_receipt_signs_ledger_payload_with_counterfactual_threshold() {
+    let counterfactual = SentinelCounterfactualReceipt::threshold_crossing(
+        "obs:policy_violation:seq3",
+        SentinelContainmentAction::SafeMode,
+        SentinelContainmentAction::Quarantine,
+        4_000_000,
+        20_000_000,
+        SentinelContainmentAction::Quarantine,
+    );
+    let decision = SentinelExpectedLossPolicy::default()
+        .decide(sentinel_decision_input(8_200), Some(counterfactual))
+        .expect("default policy decision");
+
+    assert_eq!(
+        decision.selected_action,
+        SentinelContainmentAction::Quarantine
+    );
+    assert!(!decision.guardrail_applied);
+    let receipt_counterfactual = decision
+        .counterfactual
+        .as_ref()
+        .expect("counterfactual threshold receipt");
+    assert_eq!(
+        receipt_counterfactual.observation_ref,
+        "obs:policy_violation:seq3"
+    );
+    assert!(
+        receipt_counterfactual
+            .rationale
+            .contains("moved action from safe_mode to quarantine")
+    );
+
+    let key = SigningKey::from_bytes(&[0xC7; 32]);
+    let entry = decision
+        .to_signed_evidence_entry("2026-06-15T20:11:00Z", 91_100, &key)
+        .expect("signed receipt entry");
+
+    assert_eq!(entry.decision_kind, DecisionKind::Quarantine);
+    assert_eq!(entry.schema_version, "runtime_sentinel.decision.v1");
+    assert_eq!(
+        entry.payload["event_code"],
+        json!(FN_SENTINEL_ESCALATION_RECEIPT_SIGNED)
+    );
+    assert_eq!(
+        entry.payload["decision"]["event_code"],
+        json!(FN_SENTINEL_EXPECTED_LOSS_SELECTED)
+    );
+    assert_eq!(
+        entry.payload["decision"]["selected_action"],
+        json!("quarantine")
+    );
+    assert_eq!(
+        entry.payload["decision"]["counterfactual"]["observation_ref"],
+        json!("obs:policy_violation:seq3")
+    );
+
+    let mut ledger =
+        EvidenceLedger::with_verifying_key(LedgerCapacity::new(2, 16_384), key.verifying_key());
+    let entry_id = ledger.append(entry).expect("signed receipt appends");
+    assert_eq!(entry_id.0, 1);
+    assert_eq!(ledger.len(), 1);
+}
+
+#[test]
+fn sentinel_quarantine_action_actuates_existing_hardening_and_quarantine_surfaces() {
+    let decision = SentinelExpectedLossPolicy::default()
+        .decide(sentinel_decision_input(8_200), None)
+        .expect("default policy decision");
+    assert_eq!(
+        decision.selected_action,
+        SentinelContainmentAction::Quarantine
+    );
+
+    let mut hardening = HardeningStateMachine::with_level(HardeningLevel::Standard);
+    assert_eq!(
+        decision.selected_action.hardening_floor(),
+        Some(HardeningLevel::Critical)
+    );
+    let transition = hardening
+        .escalate(HardeningLevel::Critical, 91_200, &decision.trace_id)
+        .expect("quarantine action hardens to critical");
+    assert_eq!(transition.to_level, HardeningLevel::Critical);
+    assert_eq!(hardening.current_level(), HardeningLevel::Critical);
+
+    let controller = controller();
+    let control = controller
+        .decide_for_posterior_with_context(
+            &decision.principal_id,
+            f64::from(decision.posterior_malice_bp) / 10_000.0,
+            decision.evidence_count,
+            &decision.evidence_hash,
+            DEFAULT_QUARANTINE_SCOPE,
+            &decision.trace_id,
+        )
+        .expect("valid quarantine evidence context")
+        .expect("posterior should require quarantine control");
+
+    assert_eq!(control.action, ControlAction::Quarantine);
+    assert!(controller.verify_decision(&control));
 }
 
 #[test]
