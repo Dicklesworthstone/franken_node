@@ -4,9 +4,16 @@
 //! tool descriptors. It is intentionally an in-process catalog/dispatch surface,
 //! matching `api::service`: it does not bind a socket or claim to be a live MCP
 //! transport. Read tools are callable without an audience capability token;
-//! mutating tools are discoverable but fail closed until the follow-on mutation
-//! gating bead wires audience-token verification and receipt emission.
+//! mutating tools require an audience-bound token chain and emit a signed
+//! agent-action receipt into the evidence ledger.
 
+use crate::control_plane::audience_token::{ActionScope, TokenChain, TokenError, TokenValidator};
+use crate::observability::evidence_ledger::{
+    DecisionKind, EntryId, EvidenceEntry, EvidenceLedger, LedgerError,
+};
+use crate::security::decision_receipt::{
+    Decision, Ed25519PrivateKey, Receipt, ReceiptError, SignedReceipt, sign_receipt,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -20,6 +27,10 @@ pub const FN_MCP_CATALOG_BUILT: &str = "FN-MCP-001";
 pub const FN_MCP_READ_DISPATCHED: &str = "FN-MCP-002";
 /// MCP tool rejected by fail-closed dispatch rules.
 pub const FN_MCP_TOOL_REJECTED: &str = "FN-MCP-003";
+/// Mutating MCP tool authorized and recorded in the agent-action ledger.
+pub const FN_MCP_MUTATION_DISPATCHED: &str = "FN-MCP-004";
+
+const MCP_AGENT_ACTION_LEDGER_SCHEMA_VERSION: &str = "mcp-agent-action-ledger-v1";
 
 /// Whether an MCP tool can mutate product state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +63,7 @@ pub struct McpToolDescriptor {
     pub lifecycle: String,
     pub access: McpToolAccess,
     pub requires_capability_token: bool,
+    pub required_action_scope: Option<String>,
     pub route_auth_method: String,
     pub policy_hook: String,
     pub trace_propagation: bool,
@@ -69,6 +81,8 @@ impl McpToolDescriptor {
             lifecycle: route.lifecycle.as_str().to_string(),
             access,
             requires_capability_token: access.requires_capability_token(),
+            required_action_scope: required_action_scope_for_route(route)
+                .map(|scope| scope.label().to_string()),
             route_auth_method: auth_method_label(&route.auth_method).to_string(),
             policy_hook: route.policy_hook.hook_id.clone(),
             trace_propagation: route.trace_propagation,
@@ -87,6 +101,19 @@ pub struct McpToolRequest {
     pub principal: String,
 }
 
+/// Request envelope for mutating MCP tool dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpMutationRequest {
+    pub tool_name: String,
+    #[serde(default)]
+    pub arguments: Value,
+    pub trace_id: String,
+    pub principal: String,
+    pub audience: String,
+    pub token_chain: TokenChain,
+    pub rollback_command: String,
+}
+
 /// Response envelope for read-only in-process MCP dispatch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolResponse {
@@ -96,6 +123,31 @@ pub struct McpToolResponse {
     pub trace_id: String,
     pub principal: String,
     pub descriptor: McpToolDescriptor,
+    pub output: Value,
+}
+
+/// Mutable dependencies for one mutating MCP dispatch.
+pub struct McpMutationContext<'a> {
+    pub token_validator: &'a mut TokenValidator,
+    pub evidence_ledger: &'a mut EvidenceLedger,
+    pub receipt_signing_key: &'a Ed25519PrivateKey,
+    pub now_ms: u64,
+    pub epoch_id: u64,
+}
+
+/// Response envelope for authorized mutating MCP dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpMutationResponse {
+    pub ok: bool,
+    pub event_code: String,
+    pub tool_name: String,
+    pub trace_id: String,
+    pub principal: String,
+    pub audience: String,
+    pub descriptor: McpToolDescriptor,
+    pub required_action_scope: String,
+    pub receipt: SignedReceipt,
+    pub ledger_entry_id: String,
     pub output: Value,
 }
 
@@ -125,6 +177,91 @@ impl McpError {
             detail: format!(
                 "MCP tool '{}' maps to {} {} and requires an audience capability token",
                 descriptor.name, descriptor.route_method, descriptor.route_path
+            ),
+            trace_id: trace_id.to_string(),
+        }
+    }
+
+    fn read_tool_not_mutating(descriptor: &McpToolDescriptor, trace_id: &str) -> Self {
+        Self {
+            event_code: FN_MCP_TOOL_REJECTED.to_string(),
+            code: "FN_MCP_READ_TOOL_NOT_MUTATING".to_string(),
+            detail: format!(
+                "MCP tool '{}' maps to read-only route {} {}",
+                descriptor.name, descriptor.route_method, descriptor.route_path
+            ),
+            trace_id: trace_id.to_string(),
+        }
+    }
+
+    fn rollback_required(descriptor: &McpToolDescriptor, trace_id: &str) -> Self {
+        Self {
+            event_code: FN_MCP_TOOL_REJECTED.to_string(),
+            code: "FN_MCP_ROLLBACK_REQUIRED".to_string(),
+            detail: format!(
+                "MCP mutating tool '{}' requires a rollback_command in its signed receipt",
+                descriptor.name
+            ),
+            trace_id: trace_id.to_string(),
+        }
+    }
+
+    fn token_rejected(descriptor: &McpToolDescriptor, trace_id: &str, source: &TokenError) -> Self {
+        Self {
+            event_code: FN_MCP_TOOL_REJECTED.to_string(),
+            code: source.code.clone(),
+            detail: format!(
+                "MCP tool '{}' audience-token validation failed: {}",
+                descriptor.name, source.message
+            ),
+            trace_id: trace_id.to_string(),
+        }
+    }
+
+    fn scope_denied(
+        descriptor: &McpToolDescriptor,
+        trace_id: &str,
+        required_scope: ActionScope,
+    ) -> Self {
+        Self {
+            event_code: FN_MCP_TOOL_REJECTED.to_string(),
+            code: "FN_MCP_CAPABILITY_SCOPE_DENIED".to_string(),
+            detail: format!(
+                "MCP tool '{}' requires '{}' scope",
+                descriptor.name,
+                required_scope.label()
+            ),
+            trace_id: trace_id.to_string(),
+        }
+    }
+
+    fn receipt_failed(
+        descriptor: &McpToolDescriptor,
+        trace_id: &str,
+        source: &ReceiptError,
+    ) -> Self {
+        Self {
+            event_code: FN_MCP_TOOL_REJECTED.to_string(),
+            code: "FN_MCP_RECEIPT_SIGNING_FAILED".to_string(),
+            detail: format!(
+                "MCP tool '{}' could not produce a signed decision receipt: {source}",
+                descriptor.name
+            ),
+            trace_id: trace_id.to_string(),
+        }
+    }
+
+    fn ledger_append_failed(
+        descriptor: &McpToolDescriptor,
+        trace_id: &str,
+        source: &LedgerError,
+    ) -> Self {
+        Self {
+            event_code: FN_MCP_TOOL_REJECTED.to_string(),
+            code: "FN_MCP_LEDGER_APPEND_FAILED".to_string(),
+            detail: format!(
+                "MCP tool '{}' could not append agent-action evidence: {source}",
+                descriptor.name
             ),
             trace_id: trace_id.to_string(),
         }
@@ -193,6 +330,115 @@ impl McpControlSurface {
             }),
         })
     }
+
+    pub fn dispatch_mutation(
+        &self,
+        request: McpMutationRequest,
+        context: &mut McpMutationContext<'_>,
+    ) -> Result<McpMutationResponse, McpError> {
+        let descriptor = self
+            .tools
+            .get(&request.tool_name)
+            .ok_or_else(|| McpError::unknown_tool(&request.tool_name, &request.trace_id))?;
+
+        if !descriptor.access.requires_capability_token() {
+            return Err(McpError::read_tool_not_mutating(
+                descriptor,
+                &request.trace_id,
+            ));
+        }
+
+        if request.rollback_command.trim().is_empty() {
+            return Err(McpError::rollback_required(descriptor, &request.trace_id));
+        }
+
+        let required_scope = required_action_scope_for_descriptor(descriptor);
+        context
+            .token_validator
+            .verify_chain(
+                &request.token_chain,
+                &request.audience,
+                context.now_ms,
+                &request.trace_id,
+            )
+            .map_err(|source| McpError::token_rejected(descriptor, &request.trace_id, &source))?;
+
+        let leaf = request
+            .token_chain
+            .leaf()
+            .ok_or_else(|| McpError::capability_required(descriptor, &request.trace_id))?;
+        if !leaf.capabilities.contains(&required_scope) {
+            return Err(McpError::scope_denied(
+                descriptor,
+                &request.trace_id,
+                required_scope,
+            ));
+        }
+
+        let output = json!({
+            "authorized": true,
+            "contract": descriptor,
+            "arguments": request.arguments.clone(),
+            "required_action_scope": required_scope.label(),
+            "token_id": leaf.token_id.as_str(),
+        });
+        let receipt_input = json!({
+            "tool_name": request.tool_name.as_str(),
+            "route_method": descriptor.route_method.as_str(),
+            "route_path": descriptor.route_path.as_str(),
+            "policy_hook": descriptor.policy_hook.as_str(),
+            "principal": request.principal.as_str(),
+            "audience": request.audience.as_str(),
+            "required_action_scope": required_scope.label(),
+            "token_id": leaf.token_id.as_str(),
+            "arguments": request.arguments.clone(),
+        });
+        let receipt = Receipt::new(
+            &format!("mcp.{}", descriptor.name),
+            &request.principal,
+            &request.audience,
+            &receipt_input,
+            &output,
+            Decision::Approved,
+            "MCP mutating tool authorized by audience-bound capability token",
+            vec![format!("mcp-tool:{}", descriptor.name)],
+            vec![
+                "FN-MCP-MUTATION-GATE".to_string(),
+                "INV-ABT-AUDIENCE".to_string(),
+                "INV-ABT-ATTENUATION".to_string(),
+            ],
+            1.0,
+            &request.rollback_command,
+        )
+        .map_err(|source| McpError::receipt_failed(descriptor, &request.trace_id, &source))?;
+        let signed_receipt = sign_receipt(&receipt, context.receipt_signing_key)
+            .map_err(|source| McpError::receipt_failed(descriptor, &request.trace_id, &source))?;
+
+        let ledger_entry_id = append_agent_action_entry(
+            context.evidence_ledger,
+            context.epoch_id,
+            context.now_ms,
+            &request.trace_id,
+            decision_kind_for_scope(required_scope),
+            &signed_receipt,
+            descriptor,
+        )
+        .map_err(|source| McpError::ledger_append_failed(descriptor, &request.trace_id, &source))?;
+
+        Ok(McpMutationResponse {
+            ok: true,
+            event_code: FN_MCP_MUTATION_DISPATCHED.to_string(),
+            tool_name: request.tool_name,
+            trace_id: request.trace_id,
+            principal: request.principal,
+            audience: request.audience,
+            descriptor: descriptor.clone(),
+            required_action_scope: required_scope.label().to_string(),
+            receipt: signed_receipt,
+            ledger_entry_id: ledger_entry_id.to_string(),
+            output,
+        })
+    }
 }
 
 impl Default for McpControlSurface {
@@ -207,6 +453,72 @@ pub fn build_mcp_control_surface() -> McpControlSurface {
 
 fn mcp_tool_name(route: &RouteMetadata) -> String {
     route.policy_hook.hook_id.replace('.', "_")
+}
+
+fn required_action_scope_for_route(route: &RouteMetadata) -> Option<ActionScope> {
+    if !McpToolAccess::from_route(route).requires_capability_token() {
+        return None;
+    }
+
+    let route_text = format!("{} {}", route.path, route.policy_hook.hook_id);
+    Some(required_action_scope_for_text(&route_text))
+}
+
+fn required_action_scope_for_descriptor(descriptor: &McpToolDescriptor) -> ActionScope {
+    let route_text = format!("{} {}", descriptor.route_path, descriptor.policy_hook);
+    required_action_scope_for_text(&route_text)
+}
+
+fn required_action_scope_for_text(route_text: &str) -> ActionScope {
+    if route_text.contains("rollback") {
+        ActionScope::Rollback
+    } else if route_text.contains("migrate") {
+        ActionScope::Migrate
+    } else if route_text.contains("release") || route_text.contains("promote") {
+        ActionScope::Promote
+    } else if route_text.contains("quarantine") || route_text.contains("revoke") {
+        ActionScope::Revoke
+    } else {
+        ActionScope::Configure
+    }
+}
+
+fn decision_kind_for_scope(scope: ActionScope) -> DecisionKind {
+    match scope {
+        ActionScope::Migrate | ActionScope::Configure => DecisionKind::Escalate,
+        ActionScope::Rollback => DecisionKind::Rollback,
+        ActionScope::Promote => DecisionKind::Release,
+        ActionScope::Revoke => DecisionKind::Quarantine,
+    }
+}
+
+fn append_agent_action_entry(
+    evidence_ledger: &mut EvidenceLedger,
+    epoch_id: u64,
+    now_ms: u64,
+    trace_id: &str,
+    decision_kind: DecisionKind,
+    signed_receipt: &SignedReceipt,
+    descriptor: &McpToolDescriptor,
+) -> Result<EntryId, LedgerError> {
+    evidence_ledger.append(EvidenceEntry {
+        schema_version: MCP_AGENT_ACTION_LEDGER_SCHEMA_VERSION.to_string(),
+        entry_id: None,
+        decision_id: signed_receipt.receipt.receipt_id.clone(),
+        decision_kind,
+        decision_time: signed_receipt.receipt.timestamp.clone(),
+        timestamp_ms: now_ms,
+        trace_id: trace_id.to_string(),
+        epoch_id,
+        payload: json!({
+            "event_code": FN_MCP_MUTATION_DISPATCHED,
+            "tool": descriptor,
+            "receipt": signed_receipt,
+        }),
+        size_bytes: 0,
+        signature: String::new(),
+        prev_entry_hash: String::new(),
+    })
 }
 
 fn auth_method_label(method: &AuthMethod) -> &'static str {
