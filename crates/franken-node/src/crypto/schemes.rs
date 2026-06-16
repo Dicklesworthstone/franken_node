@@ -51,6 +51,108 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 const ED25519_SIGNATURE_PREIMAGE_DOMAIN: &[u8] = b"ed25519_signature_v1:";
 
+/// Stable internal scheme identifier retained for trait-level routing.
+pub const ED25519_SIGNATURE_SCHEME_ID: &str = "ed25519_v1";
+/// External signature version string already committed into signed artifacts.
+pub const ED25519_V1_SIGNATURE_VERSION: &str = "ed25519-v1";
+/// Versioned crypto-suite discriminator for the current Ed25519-only suite.
+pub const ED25519_V1_CRYPTO_SUITE: &str = "ed25519-v1";
+/// Default suite used by new signed artifacts until callers opt into another suite.
+pub const DEFAULT_CRYPTO_SUITE: &str = ED25519_V1_CRYPTO_SUITE;
+/// Schema tag for the crypto-suite registry itself.
+pub const CRYPTO_SUITE_REGISTRY_SCHEMA: &str = crate::schema_versions::CRYPTO_SUITE_REGISTRY;
+
+/// Versioned crypto-suite metadata shared by signers, verifiers, and schema migration code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CryptoSuite {
+    pub id: &'static str,
+    pub registry_schema: &'static str,
+    pub signature_scheme_id: &'static str,
+    pub signature_algorithm: &'static str,
+    pub signature_version: &'static str,
+}
+
+/// Error returned by crypto-suite registry and migration helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CryptoSuiteError {
+    UnknownSuite { suite_id: String },
+    UnsupportedSignatureVersion { signature_version: String },
+}
+
+impl std::fmt::Display for CryptoSuiteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownSuite { suite_id } => {
+                write!(formatter, "unknown crypto suite '{suite_id}'")
+            }
+            Self::UnsupportedSignatureVersion { signature_version } => write!(
+                formatter,
+                "unsupported crypto-suite signature version '{signature_version}'"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CryptoSuiteError {}
+
+static ED25519_V1_SUITE: CryptoSuite = CryptoSuite {
+    id: ED25519_V1_CRYPTO_SUITE,
+    registry_schema: CRYPTO_SUITE_REGISTRY_SCHEMA,
+    signature_scheme_id: ED25519_SIGNATURE_SCHEME_ID,
+    signature_algorithm: ED25519_V1_SIGNATURE_VERSION,
+    signature_version: ED25519_V1_SIGNATURE_VERSION,
+};
+
+/// Complete registry of crypto suites this build can validate.
+pub static REGISTERED_CRYPTO_SUITES: &[CryptoSuite] = &[ED25519_V1_SUITE];
+
+#[must_use]
+pub fn registered_crypto_suites() -> &'static [CryptoSuite] {
+    REGISTERED_CRYPTO_SUITES
+}
+
+#[must_use]
+pub fn default_crypto_suite() -> &'static CryptoSuite {
+    &ED25519_V1_SUITE
+}
+
+#[must_use]
+pub fn default_crypto_suite_id() -> &'static str {
+    default_crypto_suite().id
+}
+
+pub fn validate_crypto_suite(suite_id: &str) -> Result<&'static CryptoSuite, CryptoSuiteError> {
+    REGISTERED_CRYPTO_SUITES
+        .iter()
+        .find(|suite| suite.id == suite_id)
+        .ok_or_else(|| CryptoSuiteError::UnknownSuite {
+            suite_id: suite_id.to_string(),
+        })
+}
+
+pub fn crypto_suite_for_signature_version(
+    signature_version: &str,
+) -> Result<&'static CryptoSuite, CryptoSuiteError> {
+    REGISTERED_CRYPTO_SUITES
+        .iter()
+        .find(|suite| suite.signature_version == signature_version)
+        .ok_or_else(|| CryptoSuiteError::UnsupportedSignatureVersion {
+            signature_version: signature_version.to_string(),
+        })
+}
+
+pub fn upgrade_signature_version_to_crypto_suite(
+    signature_version: &str,
+) -> Result<&'static str, CryptoSuiteError> {
+    crypto_suite_for_signature_version(signature_version).map(|suite| suite.id)
+}
+
+pub fn downgrade_crypto_suite_to_signature_version(
+    suite_id: &str,
+) -> Result<&'static str, CryptoSuiteError> {
+    validate_crypto_suite(suite_id).map(|suite| suite.signature_version)
+}
+
 fn len_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -296,7 +398,7 @@ impl SignatureScheme for Ed25519Scheme {
     type Error = Ed25519Error;
 
     fn scheme_id() -> &'static str {
-        "ed25519_v1"
+        ED25519_SIGNATURE_SCHEME_ID
     }
 
     fn generate_keypair() -> Result<(Self::PublicKey, Self::SecretKey), Self::Error> {
@@ -842,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_ed25519_scheme_id() {
-        assert_eq!(Ed25519Scheme::scheme_id(), "ed25519_v1");
+        assert_eq!(Ed25519Scheme::scheme_id(), ED25519_SIGNATURE_SCHEME_ID);
     }
 
     // ── Preparsed handle tests ──

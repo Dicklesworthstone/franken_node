@@ -101,7 +101,7 @@ mod frozen_canonical_byte_layout_golden_tests {
         );
 
         // Pin expected count - this will fail first time, showing the actual count
-        let expected_count = 131; // Update this when adding schemas
+        let expected_count = 132; // Update this when adding schemas
         if entry_count != expected_count {
             panic!(
                 "Schema registry has {} entries, expected {}. \
@@ -123,7 +123,7 @@ mod frozen_canonical_byte_layout_golden_tests {
 
         // Golden hash baseline - any change indicates schema registry modification
         let expected_hash =
-            "sha256:8bc6658c0d02b399b434e3256c0d47f327eb5aef4c53f04ec974a05d9d09a319";
+            "sha256:11ec2984780a6d07f5049439616769f4da5d6fbf42f3cce1c5f2d5cc72c09178";
         assert_eq!(
             count_hash, expected_hash,
             "Schema registry entry count hash changed - this indicates API surface modification.\
@@ -273,7 +273,7 @@ mod frozen_canonical_byte_layout_golden_tests {
 
         // Golden hash baseline - any change indicates schema registry structure modification
         let expected_hash =
-            "sha256:6024d1c0a55c127b81f9a474fd71fb916a04a3914a095f28aa5bbbbfc027523d";
+            "sha256:84560e71d9274c6ae28a190ee8c576157a4c4948542afe37a6dbf129e3b1d0fc";
         assert_eq!(
             structure_hash, expected_hash,
             "Schema registry structure hash changed - this indicates schema modification (add/remove/rename).\

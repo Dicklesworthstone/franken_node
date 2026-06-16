@@ -242,7 +242,7 @@ fn test_crypto_constant_time_properties() {
 /// Test scheme ID consistency and algorithm identification.
 #[test]
 fn test_crypto_scheme_identification() {
-    assert_eq!(Ed25519Scheme::scheme_id(), "ed25519_v1");
+    assert_eq!(Ed25519Scheme::scheme_id(), ED25519_SIGNATURE_SCHEME_ID);
 
     // Scheme ID should be consistent across instances
     let id1 = Ed25519Scheme::scheme_id();
@@ -252,6 +252,50 @@ fn test_crypto_scheme_identification() {
     // Should be a valid identifier format
     assert!(id1.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
     assert!(!id1.is_empty());
+}
+
+#[test]
+fn test_crypto_suite_registry_identifies_default_ed25519_suite() {
+    let suite = default_crypto_suite();
+
+    assert_eq!(suite.id, ED25519_V1_CRYPTO_SUITE);
+    assert_eq!(suite.id, DEFAULT_CRYPTO_SUITE);
+    assert_eq!(suite.registry_schema, CRYPTO_SUITE_REGISTRY_SCHEMA);
+    assert_eq!(suite.signature_scheme_id, Ed25519Scheme::scheme_id());
+    assert_eq!(suite.signature_algorithm, ED25519_V1_SIGNATURE_VERSION);
+    assert_eq!(suite.signature_version, ED25519_V1_SIGNATURE_VERSION);
+    assert_eq!(registered_crypto_suites(), &[*suite]);
+}
+
+#[test]
+fn test_crypto_suite_registry_migration_helpers_roundtrip_legacy_signature_version() {
+    assert_eq!(
+        upgrade_signature_version_to_crypto_suite(ED25519_V1_SIGNATURE_VERSION).unwrap(),
+        ED25519_V1_CRYPTO_SUITE
+    );
+    assert_eq!(
+        downgrade_crypto_suite_to_signature_version(ED25519_V1_CRYPTO_SUITE).unwrap(),
+        ED25519_V1_SIGNATURE_VERSION
+    );
+    assert_eq!(
+        crypto_suite_for_signature_version(ED25519_V1_SIGNATURE_VERSION)
+            .unwrap()
+            .id,
+        ED25519_V1_CRYPTO_SUITE
+    );
+}
+
+#[test]
+fn test_crypto_suite_registry_rejects_unknown_suite_and_signature_version() {
+    assert!(matches!(
+        validate_crypto_suite("ed25519-v2"),
+        Err(CryptoSuiteError::UnknownSuite { suite_id }) if suite_id == "ed25519-v2"
+    ));
+    assert!(matches!(
+        crypto_suite_for_signature_version("ed25519-v2"),
+        Err(CryptoSuiteError::UnsupportedSignatureVersion { signature_version })
+            if signature_version == "ed25519-v2"
+    ));
 }
 
 /// Test length-prefixed domain separation prevents collision attacks.

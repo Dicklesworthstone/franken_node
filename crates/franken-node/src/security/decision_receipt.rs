@@ -21,7 +21,10 @@ use chrono::{DateTime, Utc};
 // through the crate crypto trait surface below.
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
-use frankenengine_node::crypto::{Ed25519Scheme, SignatureScheme};
+use frankenengine_node::crypto::{
+    ED25519_V1_CRYPTO_SUITE, ED25519_V1_SIGNATURE_VERSION, Ed25519Scheme, SignatureScheme,
+    validate_crypto_suite,
+};
 use frankenengine_node::runtime::clock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,7 +94,9 @@ mod canonical_f64 {
 pub type Ed25519PrivateKey = SigningKey;
 pub type Ed25519PublicKey = VerifyingKey;
 /// Canonical signature algorithm/version bound into every decision receipt payload.
-pub const DECISION_RECEIPT_SIGNATURE_VERSION: &str = "ed25519-v1";
+pub const DECISION_RECEIPT_SIGNATURE_VERSION: &str = ED25519_V1_SIGNATURE_VERSION;
+/// Canonical crypto-suite discriminator bound into every decision receipt payload.
+pub const DECISION_RECEIPT_CRYPTO_SUITE: &str = ED25519_V1_CRYPTO_SUITE;
 /// CBOR export envelope schema for decision receipt bundles.
 pub const DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION: &str = "decision-receipt-cbor-v2";
 /// Maximum age in seconds for receipt freshness validation (fail-closed).
@@ -120,6 +125,8 @@ pub struct Receipt {
     pub timestamp: String,
     /// Signature algorithm/version committed into the canonical payload.
     pub signature_version: String,
+    /// Versioned crypto-suite discriminator committed into the canonical payload.
+    pub crypto_suite: String,
     /// Unique nonce for replay protection (prevents receipt reuse attacks).
     pub nonce: String,
     /// Audience binding to prevent cross-context receipt abuse.
@@ -266,6 +273,16 @@ pub enum ReceiptError {
         expected: &'static str,
         found: String,
     },
+    #[error("unsupported decision receipt crypto_suite '{found}'")]
+    UnsupportedCryptoSuite { found: String },
+    #[error(
+        "decision receipt crypto_suite '{crypto_suite}' expects signature_version '{expected}', got '{found}'"
+    )]
+    CryptoSuiteSignatureVersionMismatch {
+        crypto_suite: String,
+        expected: &'static str,
+        found: String,
+    },
     #[error("high-impact action '{action_name}' requires a signed receipt")]
     MissingHighImpactReceipt { action_name: String },
     #[error("hash-chain mismatch: expected {expected}, got {actual}")]
@@ -336,6 +353,7 @@ impl Receipt {
             actor_identity: actor_identity.to_string(),
             timestamp: clock::wall_now().to_rfc3339(),
             signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
+            crypto_suite: DECISION_RECEIPT_CRYPTO_SUITE.to_string(),
             nonce: Uuid::now_v7().simple().to_string(),
             audience: audience.to_string(),
             input_hash: hash_canonical_json(input)?,
@@ -505,6 +523,7 @@ pub fn sign_receipt(
     validate_receipt_payload_fields(receipt)?;
     validate_confidence(receipt.confidence)?;
     validate_signature_version(&receipt.signature_version)?;
+    validate_crypto_suite_binding(&receipt.signature_version, &receipt.crypto_suite)?;
     let payload = canonical_json(receipt)?;
 
     // Use the raw trait path because the receipt's canonical JSON is already
@@ -553,6 +572,10 @@ pub fn verify_receipt_with_audience(
     validate_receipt_payload_fields(&signed.receipt)?;
     validate_confidence(signed.receipt.confidence)?;
     validate_signature_version(&signed.receipt.signature_version)?;
+    validate_crypto_suite_binding(
+        &signed.receipt.signature_version,
+        &signed.receipt.crypto_suite,
+    )?;
 
     // Check timestamp freshness to prevent replay via clock skew (fail-closed)
     validate_timestamp_freshness(&signed.receipt.timestamp)?;
@@ -633,6 +656,10 @@ pub fn verify_hash_chain(receipts: &[SignedReceipt]) -> Result<(), ReceiptError>
     for (idx, signed) in receipts.iter().enumerate() {
         validate_receipt_payload_fields(&signed.receipt)?;
         validate_signature_version(&signed.receipt.signature_version)?;
+        validate_crypto_suite_binding(
+            &signed.receipt.signature_version,
+            &signed.receipt.crypto_suite,
+        )?;
         let expected_previous = if idx == 0 {
             None
         } else {
@@ -986,6 +1013,7 @@ fn validate_receipt_payload_fields(receipt: &Receipt) -> Result<(), ReceiptError
         ("actor_identity", receipt.actor_identity.as_str()),
         ("timestamp", receipt.timestamp.as_str()),
         ("signature_version", receipt.signature_version.as_str()),
+        ("crypto_suite", receipt.crypto_suite.as_str()),
         ("nonce", receipt.nonce.as_str()),
         ("audience", receipt.audience.as_str()),
         ("input_hash", receipt.input_hash.as_str()),
@@ -1070,6 +1098,25 @@ fn validate_signature_version(signature_version: &str) -> Result<(), ReceiptErro
 
     Err(ReceiptError::UnsupportedSignatureVersion {
         expected: DECISION_RECEIPT_SIGNATURE_VERSION,
+        found: signature_version.to_string(),
+    })
+}
+
+fn validate_crypto_suite_binding(
+    signature_version: &str,
+    crypto_suite: &str,
+) -> Result<(), ReceiptError> {
+    let suite =
+        validate_crypto_suite(crypto_suite).map_err(|_| ReceiptError::UnsupportedCryptoSuite {
+            found: crypto_suite.to_string(),
+        })?;
+    if crate::security::constant_time::ct_eq(signature_version, suite.signature_version) {
+        return Ok(());
+    }
+
+    Err(ReceiptError::CryptoSuiteSignatureVersionMismatch {
+        crypto_suite: crypto_suite.to_string(),
+        expected: suite.signature_version,
         found: signature_version.to_string(),
     })
 }
@@ -1271,6 +1318,12 @@ mod tests {
     }
 
     #[test]
+    fn receipt_new_sets_crypto_suite() {
+        let receipt = make_receipt("quarantine", Decision::Approved);
+        assert_eq!(receipt.crypto_suite, DECISION_RECEIPT_CRYPTO_SUITE);
+    }
+
+    #[test]
     fn demo_signing_key_is_test_support_fixture_only() {
         let first = demo_signing_key();
         let second = demo_signing_key();
@@ -1396,6 +1449,23 @@ mod tests {
     }
 
     #[test]
+    fn verify_receipt_rejects_unknown_crypto_suite() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.receipt.crypto_suite = "ed25519-v2".to_string();
+
+        let err = verify_receipt(&signed, &public_key)
+            .expect_err("unknown crypto suite must fail verification");
+
+        assert!(matches!(
+            err,
+            ReceiptError::UnsupportedCryptoSuite { ref found } if found == "ed25519-v2"
+        ));
+    }
+
+    #[test]
     fn unversioned_signed_receipt_json_fails_before_verification() {
         let key = demo_signing_key();
         let signed =
@@ -1410,6 +1480,23 @@ mod tests {
             .expect_err("missing signature_version must fail deserialization");
 
         assert!(err.to_string().contains("signature_version"));
+    }
+
+    #[test]
+    fn unsigned_crypto_suite_signed_receipt_json_fails_before_verification() {
+        let key = demo_signing_key();
+        let signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        let mut legacy_json = serde_json::to_value(&signed).expect("signed receipt to JSON");
+        legacy_json
+            .as_object_mut()
+            .expect("signed receipt JSON object")
+            .remove("crypto_suite");
+
+        let err = serde_json::from_value::<SignedReceipt>(legacy_json)
+            .expect_err("missing crypto_suite must fail deserialization");
+
+        assert!(err.to_string().contains("crypto_suite"));
     }
 
     #[test]

@@ -20,6 +20,7 @@ const MAX_TEXT_BYTES: usize = 4096;
 
 pub const RESOLUTION_RECEIPT_SCHEMA_VERSION: &str = "resolution-receipt-v1";
 pub const RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM: &str = "ed25519-v1";
+pub const RESOLUTION_RECEIPT_CRYPTO_SUITE: &str = "ed25519-v1";
 pub const FN_VSDK_RESOLUTION_RECEIPT_START: &str = "FN-VSDK-RESOLUTION-RECEIPT-START";
 pub const FN_VSDK_RESOLUTION_RECEIPT_VERIFIED: &str = "FN-VSDK-RESOLUTION-RECEIPT-VERIFIED";
 pub const FN_VSDK_RESOLUTION_RECEIPT_PASS: &str = "FN-VSDK-RESOLUTION-RECEIPT-PASS";
@@ -134,6 +135,7 @@ pub struct ResolutionEvidenceRefs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionReceipt {
     pub schema_version: String,
+    pub crypto_suite: String,
     pub receipt_id: String,
     pub issued_at_millis: u64,
     pub module_graph_hash: String,
@@ -160,6 +162,7 @@ pub struct SignedResolutionReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedResolutionReceipt {
     pub receipt_id: String,
+    pub crypto_suite: String,
     pub package_name: String,
     pub requested_range: String,
     pub policy_profile: AdmissionProfile,
@@ -175,6 +178,7 @@ pub struct VerifiedResolutionReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ResolutionReceiptPayload<'a> {
     schema_version: &'a str,
+    crypto_suite: &'a str,
     receipt_id: &'a str,
     issued_at_millis: u64,
     module_graph_hash: &'a str,
@@ -278,12 +282,14 @@ pub fn verify_signed_resolution_receipt(
         return Err(ResolutionReceiptError::NonCanonicalEncoding);
     }
     validate_receipt(&signed.receipt)?;
-    if !matches!(
+    let expected_signature_algorithm =
+        signature_algorithm_for_crypto_suite(&signed.receipt.crypto_suite)?;
+    if !constant_time_eq(
         signed.signature_algorithm.as_str(),
-        RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM
+        expected_signature_algorithm,
     ) {
         return Err(ResolutionReceiptError::SignatureAlgorithmMismatch {
-            expected: RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM.to_string(),
+            expected: expected_signature_algorithm.to_string(),
             actual: signed.signature_algorithm.clone(),
         });
     }
@@ -308,6 +314,7 @@ pub fn verify_signed_resolution_receipt(
 
     Ok(VerifiedResolutionReceipt {
         receipt_id: signed.receipt.receipt_id,
+        crypto_suite: signed.receipt.crypto_suite,
         package_name: signed.receipt.package_name,
         requested_range: signed.receipt.requested_range,
         policy_profile: signed.receipt.policy_profile,
@@ -335,6 +342,7 @@ fn validate_receipt(receipt: &ResolutionReceipt) -> ResolutionReceiptResult<()> 
             actual: receipt.schema_version.clone(),
         });
     }
+    validate_crypto_suite("crypto_suite", &receipt.crypto_suite)?;
     validate_nonempty("receipt_id", &receipt.receipt_id)?;
     validate_sha256_hash("module_graph_hash", &receipt.module_graph_hash)?;
     validate_nonempty("package_name", &receipt.package_name)?;
@@ -521,6 +529,7 @@ fn recompute_receipt_hash(receipt: &ResolutionReceipt) -> ResolutionReceiptResul
 fn canonical_payload_bytes(receipt: &ResolutionReceipt) -> ResolutionReceiptResult<Vec<u8>> {
     canonical_json_bytes(&ResolutionReceiptPayload {
         schema_version: &receipt.schema_version,
+        crypto_suite: &receipt.crypto_suite,
         receipt_id: &receipt.receipt_id,
         issued_at_millis: receipt.issued_at_millis,
         module_graph_hash: &receipt.module_graph_hash,
@@ -534,6 +543,22 @@ fn canonical_payload_bytes(receipt: &ResolutionReceipt) -> ResolutionReceiptResu
         evidence_refs: &receipt.evidence_refs,
         rationale: &receipt.rationale,
     })
+}
+
+fn validate_crypto_suite(field: &'static str, value: &str) -> ResolutionReceiptResult<()> {
+    validate_nonempty(field, value)?;
+    if !constant_time_eq(value, RESOLUTION_RECEIPT_CRYPTO_SUITE) {
+        return Err(ResolutionReceiptError::InvalidField {
+            field,
+            reason: format!("unsupported crypto suite: {value}"),
+        });
+    }
+    Ok(())
+}
+
+fn signature_algorithm_for_crypto_suite(value: &str) -> ResolutionReceiptResult<&'static str> {
+    validate_crypto_suite("crypto_suite", value)?;
+    Ok(RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM)
 }
 
 fn canonical_receipt_bytes(receipt: &ResolutionReceipt) -> ResolutionReceiptResult<Vec<u8>> {
@@ -590,4 +615,124 @@ fn signer_key_id(verifying_key: &VerifyingKey) -> String {
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
     left.as_bytes().ct_eq(right.as_bytes()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer as _, SigningKey};
+
+    fn sha256_ref(label: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(label.as_bytes());
+        format!("{SHA256_PREFIX}{}", hex::encode(hasher.finalize()))
+    }
+
+    fn candidate(version: &str) -> CandidateAssessment {
+        CandidateAssessment {
+            version: version.to_string(),
+            package_path: format!("pkg-{version}.tgz"),
+            resolved_url: Some(format!("https://registry.example/pkg-{version}.tgz")),
+            integrity: Some(sha256_ref(version)),
+            trust_card_ref: format!("trust-card:{version}"),
+            trust_status: TrustCardStatus::Trusted,
+            bpet_risk_ref: format!("bpet:{version}"),
+            bpet_risk: RiskTier::Low,
+            dgis_risk_ref: format!("dgis:{version}"),
+            dgis_risk: RiskTier::Low,
+            revocation_freshness_ref: format!("revocation:{version}"),
+            revocation_freshness: RevocationFreshness::Fresh,
+            compat_oracle_ref: format!("compat:{version}"),
+            compat_status: CompatibilityStatus::Compatible,
+            capability_budget_ref: format!("cap-budget:{version}"),
+        }
+    }
+
+    fn receipt() -> ResolutionReceipt {
+        let mut receipt = ResolutionReceipt {
+            schema_version: RESOLUTION_RECEIPT_SCHEMA_VERSION.to_string(),
+            crypto_suite: RESOLUTION_RECEIPT_CRYPTO_SUITE.to_string(),
+            receipt_id: "receipt-1".to_string(),
+            issued_at_millis: 1_700_000_000_000,
+            module_graph_hash: sha256_ref("module-graph"),
+            package_name: "demo-package".to_string(),
+            requested_range: "^1".to_string(),
+            policy_profile: AdmissionProfile::Strict,
+            capability_budget_mode: CapabilityBudgetMode::Advisory,
+            decision: AdmissionDecision::Admit,
+            selected_version: Some(candidate("1.2.3")),
+            rejected_alternatives: Vec::new(),
+            evidence_refs: ResolutionEvidenceRefs {
+                trust_card_refs: vec!["trust-card:1.2.3".to_string()],
+                bpet_risk_refs: vec!["bpet:1.2.3".to_string()],
+                dgis_risk_refs: vec!["dgis:1.2.3".to_string()],
+                revocation_freshness_refs: vec!["revocation:1.2.3".to_string()],
+                compat_oracle_refs: vec!["compat:1.2.3".to_string()],
+                capability_budget_refs: vec!["cap-budget:1.2.3".to_string()],
+                policy_refs: vec!["policy-profile:strict".to_string()],
+            },
+            rationale: "demo-package@1.2.3 admitted".to_string(),
+            canonical_hash: String::new(),
+        };
+        receipt.canonical_hash = recompute_receipt_hash(&receipt).expect("canonical hash");
+        receipt
+    }
+
+    fn signed_receipt() -> (SigningKey, SignedResolutionReceipt) {
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let receipt = receipt();
+        let payload = signature_payload(&receipt).expect("signature payload");
+        let signature = signing_key.sign(&payload);
+        let signed = SignedResolutionReceipt {
+            receipt,
+            signer_key_id: signer_key_id(&signing_key.verifying_key()),
+            signature_algorithm: RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM.to_string(),
+            signature: hex::encode(signature.to_bytes()),
+        };
+        (signing_key, signed)
+    }
+
+    #[test]
+    fn verify_signed_resolution_receipt_preserves_crypto_suite() {
+        let (signing_key, signed) = signed_receipt();
+        let bytes = canonical_json_bytes(&signed).expect("canonical signed receipt");
+
+        let verified =
+            verify_signed_resolution_receipt(&signing_key.verifying_key(), &bytes).expect("verify");
+
+        assert_eq!(verified.crypto_suite, RESOLUTION_RECEIPT_CRYPTO_SUITE);
+    }
+
+    #[test]
+    fn validate_receipt_rejects_unknown_crypto_suite() {
+        let mut receipt = receipt();
+        receipt.crypto_suite = "ed25519-v2".to_string();
+        receipt.canonical_hash = recompute_receipt_hash(&receipt).expect("canonical hash");
+
+        let err = validate_receipt(&receipt).expect_err("unknown suite must fail");
+
+        assert!(matches!(
+            err,
+            ResolutionReceiptError::InvalidField {
+                field: "crypto_suite",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn verify_signed_resolution_receipt_rejects_algorithm_suite_mismatch() {
+        let (signing_key, mut signed) = signed_receipt();
+        signed.signature_algorithm = "ed25519-v2".to_string();
+        let bytes = canonical_json_bytes(&signed).expect("canonical signed receipt");
+
+        let err = verify_signed_resolution_receipt(&signing_key.verifying_key(), &bytes)
+            .expect_err("outer algorithm must match signed crypto suite");
+
+        assert!(matches!(
+            err,
+            ResolutionReceiptError::SignatureAlgorithmMismatch { ref actual, .. }
+                if actual == "ed25519-v2"
+        ));
+    }
 }

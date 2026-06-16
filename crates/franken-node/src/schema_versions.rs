@@ -111,6 +111,7 @@ pub const CONFORMANCE_SUITE_VERSION: &str = "1.0.0";
 pub const INTENT_FIREWALL: &str = "fw-v1.0";
 pub const ADVERSARY_CORPUS_RECORD: &str = "bpet-adversary-corpus-record-v1";
 pub const DECISION_RECEIPT_CBOR_EXPORT: &str = "decision-receipt-cbor-v2";
+pub const CRYPTO_SUITE_REGISTRY: &str = "crypto-suite-registry-v1";
 pub const ZK_ATTESTATION: &str = "zka-v1.0";
 pub const STAKING_GOVERNANCE: &str = "staking-v1.0";
 pub const LINEAGE_TRACKER: &str = "ifl-v1.0";
@@ -287,6 +288,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("intent_firewall", INTENT_FIREWALL),
         ("adversary_corpus_record", ADVERSARY_CORPUS_RECORD),
         ("decision_receipt_cbor_export", DECISION_RECEIPT_CBOR_EXPORT),
+        ("crypto_suite_registry", CRYPTO_SUITE_REGISTRY),
         ("zk_attestation", ZK_ATTESTATION),
         ("staking_governance", STAKING_GOVERNANCE),
         ("lineage_tracker", LINEAGE_TRACKER),
@@ -474,6 +476,10 @@ mod tests {
     #[test]
     fn representative_supply_chain_and_storage_versions_match_authoritative_sources() {
         assert_eq!(
+            CRYPTO_SUITE_REGISTRY,
+            crate::crypto::CRYPTO_SUITE_REGISTRY_SCHEMA
+        );
+        assert_eq!(
             EXTENSION_REGISTRY,
             crate::supply_chain::extension_registry::REGISTRY_VERSION
         );
@@ -528,6 +534,7 @@ mod tests {
             lookup("content_addressed_store"),
             Some(CONTENT_ADDRESSED_STORE)
         );
+        assert_eq!(lookup("crypto_suite_registry"), Some(CRYPTO_SUITE_REGISTRY));
         assert_eq!(lookup("extension_registry"), Some(EXTENSION_REGISTRY));
         assert_eq!(lookup("verify_cli_contract"), Some(VERIFY_CLI_CONTRACT));
     }
