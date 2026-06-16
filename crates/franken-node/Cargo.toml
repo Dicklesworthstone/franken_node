@@ -1172,6 +1172,11 @@ name = "e2e_audience_token_chain_lifecycle"
 path = "tests/e2e_audience_token_chain_lifecycle.rs"
 
 [[test]]
+name = "mcp_control_surface_contract"
+path = "tests/mcp_control_surface_contract.rs"
+required-features = ["control-plane"]
+
+[[test]]
 name = "e2e_mmr_proofs_lifecycle"
 path = "tests/e2e_mmr_proofs_lifecycle.rs"
 

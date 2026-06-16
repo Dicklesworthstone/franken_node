@@ -12,6 +12,7 @@ pub mod compat_gate;
 pub mod error;
 pub mod fleet_control_routes;
 pub mod fleet_quarantine;
+pub mod mcp;
 pub mod middleware;
 pub mod operator_routes;
 pub mod proof_pipeline_routes;
