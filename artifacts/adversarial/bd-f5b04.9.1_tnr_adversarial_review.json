@@ -1,0 +1,103 @@
+{
+  "schema_version": "franken-node.tnr_adversarial_review.v1",
+  "bead_id": "bd-f5b04.9.1",
+  "artifact_id": "bd-f5b04.9.1_tnr_adversarial_review",
+  "generated_at_utc": "2026-06-16T07:59:59Z",
+  "reviewer_agent": "NavyTurtle",
+  "status": "release_gating_review_recorded",
+  "overall_decision": "docs_extended_with_one_release_gate_obligation",
+  "documents_updated": [
+    "README.md",
+    "docs/doctrine/security_and_trust.md"
+  ],
+  "threats": [
+    {
+      "threat_id": "TNR-ADV-001",
+      "name": "CAS poisoning and EffectReceipt forgery",
+      "attack_surface": "Tampered content-addressed bytes, hash-confusion, receipt back-dating, or chain-splice across host-effect evidence.",
+      "defense_primitive": "CAS read-time hash verification plus canonical, domain-separated, length-prefixed EffectReceipt hashes and chain-link recomputation.",
+      "implementation_state": "covered_by_existing_regression",
+      "regression_anchors": [
+        "crates/franken-node/tests/cas_effect_receipt_conformance.rs",
+        "crates/franken-node/src/runtime/effect_receipt.rs"
+      ],
+      "release_gate_decision": "green_for_documented_surface"
+    },
+    {
+      "threat_id": "TNR-ADV-002",
+      "name": "Declassification authority abuse",
+      "attack_surface": "Forged, over-scoped, expired, wrong-sink, or wrong-epoch declassification receipts.",
+      "defense_primitive": "Receipt id recomputation over exact sink policy, forbidden label set, actor, purpose, epoch, and revocation freshness.",
+      "implementation_state": "covered_by_existing_regression",
+      "regression_anchors": [
+        "crates/franken-node/src/security/lineage_tracker.rs",
+        "tests/security/exfiltration_sentinel_scenarios.rs"
+      ],
+      "release_gate_decision": "green_for_documented_surface"
+    },
+    {
+      "threat_id": "TNR-ADV-003",
+      "name": "MCP mutation abuse",
+      "attack_surface": "Scope escalation, delegation beyond parent authority, missing rollback evidence, or replayed mutation sessions.",
+      "defense_primitive": "Audience-bound capability token chains, attenuated delegation, rollback commands, signed action receipts, and session digest verification.",
+      "implementation_state": "covered_by_existing_regression",
+      "regression_anchors": [
+        "crates/franken-node/src/api/mcp.rs",
+        "crates/franken-node/tests/mcp_control_surface_contract.rs"
+      ],
+      "release_gate_decision": "green_for_documented_surface"
+    },
+    {
+      "threat_id": "TNR-ADV-004",
+      "name": "LTV witness collusion and crypto-suite downgrade",
+      "attack_surface": "Collusive re-attestation, stale witness reuse, or downgrade to a weaker crypto_suite discriminator.",
+      "defense_primitive": "Release gate must require witness independence evidence, suite-discriminator binding, and fail-closed re-attestation verification before LTV claims ship.",
+      "implementation_state": "release_gate_obligation",
+      "regression_anchors": [
+        "crates/franken-node/tests/threshold_sig_quorum_metamorphic.rs",
+        "docs/specs/crypto_trait_abstraction.md"
+      ],
+      "release_gate_decision": "hold_ltv_release_claims_until_ltv_specific_regression_exists"
+    },
+    {
+      "threat_id": "TNR-ADV-005",
+      "name": "Conformal calibration and Sentinel signal poisoning",
+      "attack_surface": "Poisoned Phase-0 corpus records, shifted calibration signals, or Sybil-amplified Sentinel inputs.",
+      "defense_primitive": "Signed calibration artifacts, canonical corpus exchange, verifier recomputation, and signal-poisoning/Sybil thresholds.",
+      "implementation_state": "covered_by_existing_regression",
+      "regression_anchors": [
+        "tests/security/bpet_calibration_benchmark.rs",
+        "docs/policy/signal_poisoning_sybil_defense.md",
+        "docs/policy/risk_signal_poisoning_sybil.md"
+      ],
+      "release_gate_decision": "green_for_documented_surface"
+    },
+    {
+      "threat_id": "TNR-ADV-006",
+      "name": "Fleet-log equivocation and quorum replay",
+      "attack_surface": "Partition/catch-up races, conflicting validator attestations, duplicate partial signatures, or quorum-certificate replay.",
+      "defense_primitive": "Canonical action hashing, distinct-validator quorum accounting, equivocation fault receipts, and threshold-signature replay rejection.",
+      "implementation_state": "covered_by_existing_regression",
+      "regression_anchors": [
+        "crates/franken-node/src/api/fleet_quarantine.rs",
+        "tests/security/threshold_signature_verification.rs",
+        "crates/franken-node/tests/threshold_sig_quorum_metamorphic.rs"
+      ],
+      "release_gate_decision": "green_for_documented_surface"
+    }
+  ],
+  "summary": {
+    "threats_reviewed": 6,
+    "covered_by_existing_regression": 5,
+    "release_gate_obligations": 1,
+    "release_gate_obligation_ids": [
+      "TNR-ADV-004"
+    ]
+  },
+  "signing": {
+    "signature_algorithm": "sha256-canonical-v1",
+    "key_id": "navy-turtle-review-v1",
+    "canonical_payload_sha256": "ea7e78b97f771f8308530748e9069e8e558b9673c0d03cdc13e9a9221c2ab1f5",
+    "signature": "c47038c9eb02017f2c8bcc85f336962580c6457ee177c20cf23bcd98d24235d6"
+  }
+}
