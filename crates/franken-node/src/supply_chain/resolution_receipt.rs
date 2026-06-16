@@ -2,9 +2,11 @@
 //!
 //! A [`ResolutionReceipt`] records why one package version was admitted or why
 //! every candidate was rejected for a specific trust profile. The receipt is
-//! intentionally advisory-only: it binds package-resolution facts to trust-card,
-//! BPET, DGIS, revocation, compatibility, and capability-budget evidence without
-//! pretending the runtime can meter host effects before Phase 1 lands.
+//! binds package-resolution facts to trust-card, BPET, DGIS, revocation,
+//! compatibility, and capability-budget evidence. Budget evidence can remain
+//! advisory for pre-Phase-1 callers, or it can be enforced against runtime
+//! [`crate::runtime::effect_receipt::EffectReceipt`] records when host-effect
+//! metering is available.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hex::FromHex;
@@ -13,6 +15,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
+
+use crate::runtime::effect_receipt::{EffectKind, EffectReceipt};
+use crate::storage::cas::ContentHash;
 
 const RESOLUTION_RECEIPT_HASH_DOMAIN: &[u8] = b"franken-node/resolution-receipt/payload-hash/v1:";
 const RESOLUTION_RECEIPT_SIGNATURE_DOMAIN: &[u8] = b"franken-node/resolution-receipt/signature/v1:";
@@ -30,6 +35,10 @@ pub const FN_RESOLVE_RECEIPT_START: &str = "FN-RESOLVE-RECEIPT-START";
 pub const FN_RESOLVE_RECEIPT_ADMITTED: &str = "FN-RESOLVE-RECEIPT-ADMITTED";
 pub const FN_RESOLVE_RECEIPT_REJECTED: &str = "FN-RESOLVE-RECEIPT-REJECTED";
 pub const FN_RESOLVE_CAPABILITY_BUDGET_ADVISORY: &str = "FN-RESOLVE-CAPABILITY-BUDGET-ADVISORY";
+pub const FN_RESOLVE_CAPABILITY_BUDGET_ENFORCED: &str = "FN-RESOLVE-CAPABILITY-BUDGET-ENFORCED";
+pub const FN_RESOLVE_CAPABILITY_BUDGET_DENIED: &str = "FN-RESOLVE-CAPABILITY-BUDGET-DENIED";
+pub const FN_RESOLVE_CAPABILITY_BUDGET_EFFECT_RECEIPT: &str =
+    "FN-RESOLVE-CAPABILITY-BUDGET-EFFECT-RECEIPT";
 pub const FN_RESOLVE_RECEIPT_PASS: &str = "FN-RESOLVE-RECEIPT-PASS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +65,13 @@ impl AdmissionProfile {
 pub enum AdmissionDecision {
     Admit,
     Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityBudgetMode {
+    Advisory,
+    Enforced,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +183,7 @@ pub struct ResolutionReceipt {
     pub package_name: String,
     pub requested_range: String,
     pub policy_profile: AdmissionProfile,
+    pub capability_budget_mode: CapabilityBudgetMode,
     pub decision: AdmissionDecision,
     pub selected_version: Option<CandidateAssessment>,
     pub rejected_alternatives: Vec<RejectedAlternative>,
@@ -192,11 +209,56 @@ struct ResolutionReceiptPayload<'a> {
     package_name: &'a str,
     requested_range: &'a str,
     policy_profile: AdmissionProfile,
+    capability_budget_mode: CapabilityBudgetMode,
     decision: AdmissionDecision,
     selected_version: &'a Option<CandidateAssessment>,
     rejected_alternatives: &'a [RejectedAlternative],
     evidence_refs: &'a ResolutionEvidenceRefs,
     rationale: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionReceiptRequest {
+    pub receipt_id: String,
+    pub issued_at_millis: u64,
+    pub module_graph_hash: String,
+    pub package_name: String,
+    pub requested_range: String,
+    pub policy_profile: AdmissionProfile,
+    pub capability_budget_mode: CapabilityBudgetMode,
+    pub candidates: Vec<CandidateAssessment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityBudgetPolicy {
+    pub max_module_resolve_effects: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityBudgetUsage {
+    pub module_resolve_effects_used: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleResolveBudgetAttempt {
+    pub seq: u64,
+    pub trace_id: String,
+    pub pre_state_hash: ContentHash,
+    pub args_hash: ContentHash,
+    pub recorded_at_millis: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityBudgetMeteringDecision {
+    pub mode: CapabilityBudgetMode,
+    pub allowed: bool,
+    pub over_budget: bool,
+    pub capability_budget_ref: String,
+    pub used_before: u64,
+    pub attempted_after: u64,
+    pub max_allowed: u64,
+    pub effect_receipt: Option<EffectReceipt>,
+    pub event_codes: Vec<&'static str>,
 }
 
 #[derive(Debug)]
@@ -292,6 +354,32 @@ pub fn build_resolution_receipt(
     policy_profile: AdmissionProfile,
     candidates: Vec<CandidateAssessment>,
 ) -> ResolutionReceiptResult<ResolutionReceipt> {
+    build_resolution_receipt_from_request(ResolutionReceiptRequest {
+        receipt_id: receipt_id.into(),
+        issued_at_millis,
+        module_graph_hash: module_graph_hash.into(),
+        package_name: package_name.into(),
+        requested_range: requested_range.into(),
+        policy_profile,
+        capability_budget_mode: CapabilityBudgetMode::Advisory,
+        candidates,
+    })
+}
+
+pub fn build_resolution_receipt_from_request(
+    request: ResolutionReceiptRequest,
+) -> ResolutionReceiptResult<ResolutionReceipt> {
+    let ResolutionReceiptRequest {
+        receipt_id,
+        issued_at_millis,
+        module_graph_hash,
+        package_name,
+        requested_range,
+        policy_profile,
+        capability_budget_mode,
+        candidates,
+    } = request;
+
     if candidates.is_empty() {
         return Err(ResolutionReceiptError::EmptyCandidates);
     }
@@ -334,8 +422,6 @@ pub fn build_resolution_receipt(
     } else {
         AdmissionDecision::Reject
     };
-    let package_name = package_name.into();
-    let requested_range = requested_range.into();
     let rationale = match &selected_version {
         Some(selected) => format!(
             "{}@{} admitted under {} profile; {} alternatives rejected or superseded",
@@ -354,12 +440,13 @@ pub fn build_resolution_receipt(
 
     seal_resolution_receipt(ResolutionReceipt {
         schema_version: RESOLUTION_RECEIPT_SCHEMA.to_string(),
-        receipt_id: receipt_id.into(),
+        receipt_id,
         issued_at_millis,
-        module_graph_hash: module_graph_hash.into(),
+        module_graph_hash,
         package_name,
         requested_range,
         policy_profile,
+        capability_budget_mode,
         decision,
         selected_version,
         rejected_alternatives,
@@ -442,6 +529,68 @@ pub fn candidate_is_admissible(profile: AdmissionProfile, candidate: &CandidateA
     rejection_reason_for(profile, candidate).is_none()
 }
 
+pub fn meter_module_resolve_capability_budget(
+    receipt: &ResolutionReceipt,
+    policy: CapabilityBudgetPolicy,
+    usage: CapabilityBudgetUsage,
+    attempt: ModuleResolveBudgetAttempt,
+) -> ResolutionReceiptResult<CapabilityBudgetMeteringDecision> {
+    validate_resolution_receipt(receipt)?;
+    let Some(selected) = &receipt.selected_version else {
+        return Err(ResolutionReceiptError::InvalidField {
+            field: "selected_version",
+            reason: "capability-budget metering requires an admitted module".to_string(),
+        });
+    };
+
+    let attempted_after = usage.module_resolve_effects_used.saturating_add(1);
+    let over_budget = attempted_after > policy.max_module_resolve_effects;
+    let mut event_codes = match receipt.capability_budget_mode {
+        CapabilityBudgetMode::Advisory => vec![FN_RESOLVE_CAPABILITY_BUDGET_ADVISORY],
+        CapabilityBudgetMode::Enforced => vec![FN_RESOLVE_CAPABILITY_BUDGET_ENFORCED],
+    };
+    let mut allowed = true;
+    let mut effect_receipt = None;
+
+    if over_budget && receipt.capability_budget_mode == CapabilityBudgetMode::Enforced {
+        allowed = false;
+        let reason = format!(
+            "capability budget exceeded for {}: module_resolve effects {} > {}",
+            selected.capability_budget_ref, attempted_after, policy.max_module_resolve_effects
+        );
+        let denied = EffectReceipt::denied(
+            attempt.seq,
+            attempt.trace_id,
+            EffectKind::ModuleResolve,
+            reason,
+            attempt.pre_state_hash,
+            attempt.args_hash,
+            attempt.recorded_at_millis,
+        );
+        denied
+            .validate()
+            .map_err(|source| ResolutionReceiptError::InvalidField {
+                field: "effect_receipt",
+                reason: source.to_string(),
+            })?;
+        event_codes.push(FN_RESOLVE_CAPABILITY_BUDGET_DENIED);
+        event_codes.push(FN_RESOLVE_CAPABILITY_BUDGET_EFFECT_RECEIPT);
+        effect_receipt = Some(denied);
+    }
+
+    Ok(CapabilityBudgetMeteringDecision {
+        mode: receipt.capability_budget_mode,
+        allowed,
+        over_budget,
+        capability_budget_ref: selected.capability_budget_ref.clone(),
+        used_before: usage.module_resolve_effects_used,
+        attempted_after,
+        max_allowed: policy.max_module_resolve_effects,
+        effect_receipt,
+        event_codes,
+    })
+}
+
 pub fn resolution_receipt_event_codes(
     receipt: &ResolutionReceipt,
 ) -> ResolutionReceiptResult<Vec<&'static str>> {
@@ -452,7 +601,10 @@ pub fn resolution_receipt_event_codes(
     };
     let mut codes = vec![FN_RESOLVE_RECEIPT_START, decision_code];
     if !receipt.evidence_refs.capability_budget_refs.is_empty() {
-        codes.push(FN_RESOLVE_CAPABILITY_BUDGET_ADVISORY);
+        codes.push(match receipt.capability_budget_mode {
+            CapabilityBudgetMode::Advisory => FN_RESOLVE_CAPABILITY_BUDGET_ADVISORY,
+            CapabilityBudgetMode::Enforced => FN_RESOLVE_CAPABILITY_BUDGET_ENFORCED,
+        });
     }
     codes.push(FN_RESOLVE_RECEIPT_PASS);
     Ok(codes)
@@ -713,6 +865,7 @@ fn canonical_payload_bytes(receipt: &ResolutionReceipt) -> ResolutionReceiptResu
         package_name: &receipt.package_name,
         requested_range: &receipt.requested_range,
         policy_profile: receipt.policy_profile,
+        capability_budget_mode: receipt.capability_budget_mode,
         decision: receipt.decision,
         selected_version: &receipt.selected_version,
         rejected_alternatives: &receipt.rejected_alternatives,

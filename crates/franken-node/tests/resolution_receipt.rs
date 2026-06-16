@@ -1,15 +1,21 @@
 use ed25519_dalek::SigningKey;
+use frankenengine_node::runtime::effect_receipt::{EffectKind, PolicyOutcome};
+use frankenengine_node::storage::cas::content_hash;
 use frankenengine_node::supply_chain::module_resolution_graph::{
     build_canonical_module_resolution_graph, canonical_module_resolution_graph_bytes,
 };
 use frankenengine_node::supply_chain::resolution_receipt::{
-    AdmissionDecision, AdmissionProfile, CandidateAssessment, CompatibilityStatus,
-    FN_RESOLVE_CAPABILITY_BUDGET_ADVISORY, FN_RESOLVE_RECEIPT_ADMITTED, FN_RESOLVE_RECEIPT_PASS,
-    FN_RESOLVE_RECEIPT_REJECTED, FN_RESOLVE_RECEIPT_START, RESOLUTION_RECEIPT_SCHEMA,
-    ResolutionRejectionReason, RevocationFreshness, RiskTier, TrustCardStatus,
-    build_resolution_receipt, candidate_is_admissible, canonical_resolution_receipt_bytes,
-    resolution_receipt_event_codes, serialize_signed_resolution_receipt, sign_resolution_receipt,
-    verify_signed_resolution_receipt,
+    AdmissionDecision, AdmissionProfile, CandidateAssessment, CapabilityBudgetMode,
+    CapabilityBudgetPolicy, CapabilityBudgetUsage, CompatibilityStatus,
+    FN_RESOLVE_CAPABILITY_BUDGET_ADVISORY, FN_RESOLVE_CAPABILITY_BUDGET_DENIED,
+    FN_RESOLVE_CAPABILITY_BUDGET_EFFECT_RECEIPT, FN_RESOLVE_CAPABILITY_BUDGET_ENFORCED,
+    FN_RESOLVE_RECEIPT_ADMITTED, FN_RESOLVE_RECEIPT_PASS, FN_RESOLVE_RECEIPT_REJECTED,
+    FN_RESOLVE_RECEIPT_START, ModuleResolveBudgetAttempt, RESOLUTION_RECEIPT_SCHEMA,
+    ResolutionReceiptRequest, ResolutionRejectionReason, RevocationFreshness, RiskTier,
+    TrustCardStatus, build_resolution_receipt, build_resolution_receipt_from_request,
+    candidate_is_admissible, canonical_resolution_receipt_bytes,
+    meter_module_resolve_capability_budget, resolution_receipt_event_codes,
+    serialize_signed_resolution_receipt, sign_resolution_receipt, verify_signed_resolution_receipt,
 };
 use frankenengine_verifier_sdk::VerifierSdk;
 use frankenengine_verifier_sdk::resolution::{
@@ -182,6 +188,146 @@ fn fixture_project_receipt_bytes_are_deterministic_and_sdk_verifiable() {
     assert_eq!(
         verified.rejected_alternative_count,
         first.rejected_alternatives.len()
+    );
+}
+
+#[test]
+fn enforced_capability_budget_denies_over_budget_module_resolve_with_effect_receipt() {
+    let receipt = build_resolution_receipt_from_request(ResolutionReceiptRequest {
+        receipt_id: "receipt-enforced-budget".to_string(),
+        issued_at_millis: 1_778_000_000_020,
+        module_graph_hash: GRAPH_HASH.to_string(),
+        package_name: "left-pad".to_string(),
+        requested_range: "^1.5".to_string(),
+        policy_profile: AdmissionProfile::Strict,
+        capability_budget_mode: CapabilityBudgetMode::Enforced,
+        candidates: vec![candidate(
+            "1.5.0",
+            TrustCardStatus::Trusted,
+            RiskTier::Low,
+            RiskTier::Low,
+            RevocationFreshness::Fresh,
+            CompatibilityStatus::Compatible,
+        )],
+    })
+    .expect("enforced receipt");
+
+    assert_eq!(
+        receipt.capability_budget_mode,
+        CapabilityBudgetMode::Enforced
+    );
+    assert_eq!(
+        resolution_receipt_event_codes(&receipt).expect("event codes"),
+        vec![
+            FN_RESOLVE_RECEIPT_START,
+            FN_RESOLVE_RECEIPT_ADMITTED,
+            FN_RESOLVE_CAPABILITY_BUDGET_ENFORCED,
+            FN_RESOLVE_RECEIPT_PASS,
+        ]
+    );
+
+    let decision = meter_module_resolve_capability_budget(
+        &receipt,
+        CapabilityBudgetPolicy {
+            max_module_resolve_effects: 2,
+        },
+        CapabilityBudgetUsage {
+            module_resolve_effects_used: 2,
+        },
+        ModuleResolveBudgetAttempt {
+            seq: 9,
+            trace_id: "trace-cap-budget-denied".to_string(),
+            pre_state_hash: content_hash(b"resolver-view-before-denial"),
+            args_hash: content_hash(b"require('left-pad')"),
+            recorded_at_millis: 1_778_000_000_021,
+        },
+    )
+    .expect("budget decision");
+
+    assert!(!decision.allowed);
+    assert!(decision.over_budget);
+    assert_eq!(decision.used_before, 2);
+    assert_eq!(decision.attempted_after, 3);
+    assert_eq!(decision.max_allowed, 2);
+    assert_eq!(
+        decision.capability_budget_ref,
+        "cap-budget://left-pad@1.5.0"
+    );
+    assert_eq!(
+        decision.event_codes,
+        vec![
+            FN_RESOLVE_CAPABILITY_BUDGET_ENFORCED,
+            FN_RESOLVE_CAPABILITY_BUDGET_DENIED,
+            FN_RESOLVE_CAPABILITY_BUDGET_EFFECT_RECEIPT,
+        ]
+    );
+
+    let effect_receipt = decision
+        .effect_receipt
+        .expect("enforced over-budget denial is receipted");
+    effect_receipt.validate().expect("effect receipt validates");
+    assert_eq!(effect_receipt.effect_kind, EffectKind::ModuleResolve);
+    assert_eq!(effect_receipt.seq, 9);
+    assert_eq!(effect_receipt.trace_id, "trace-cap-budget-denied");
+    assert!(effect_receipt.result_hash.is_none());
+    assert!(effect_receipt.post_state_hash.is_none());
+    assert!(matches!(
+        effect_receipt.policy_outcome,
+        PolicyOutcome::Denied { ref reason }
+            if reason.contains("capability budget exceeded")
+                && reason.contains("module_resolve effects 3 > 2")
+    ));
+}
+
+#[test]
+fn advisory_capability_budget_allows_over_budget_module_resolve_without_pche_requirement() {
+    let receipt = build_resolution_receipt(
+        "receipt-advisory-budget",
+        1_778_000_000_030,
+        GRAPH_HASH,
+        "left-pad",
+        "^1.5",
+        AdmissionProfile::Strict,
+        vec![candidate(
+            "1.5.0",
+            TrustCardStatus::Trusted,
+            RiskTier::Low,
+            RiskTier::Low,
+            RevocationFreshness::Fresh,
+            CompatibilityStatus::Compatible,
+        )],
+    )
+    .expect("advisory receipt");
+
+    assert_eq!(
+        receipt.capability_budget_mode,
+        CapabilityBudgetMode::Advisory
+    );
+
+    let decision = meter_module_resolve_capability_budget(
+        &receipt,
+        CapabilityBudgetPolicy {
+            max_module_resolve_effects: 2,
+        },
+        CapabilityBudgetUsage {
+            module_resolve_effects_used: 2,
+        },
+        ModuleResolveBudgetAttempt {
+            seq: 10,
+            trace_id: "trace-cap-budget-advisory".to_string(),
+            pre_state_hash: content_hash(b"resolver-view-before-advisory"),
+            args_hash: content_hash(b"require('left-pad')"),
+            recorded_at_millis: 1_778_000_000_031,
+        },
+    )
+    .expect("budget decision");
+
+    assert!(decision.allowed);
+    assert!(decision.over_budget);
+    assert!(decision.effect_receipt.is_none());
+    assert_eq!(
+        decision.event_codes,
+        vec![FN_RESOLVE_CAPABILITY_BUDGET_ADVISORY]
     );
 }
 

@@ -41,6 +41,13 @@ pub enum AdmissionDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CapabilityBudgetMode {
+    Advisory,
+    Enforced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TrustCardStatus {
     Trusted,
     Unknown,
@@ -133,6 +140,7 @@ pub struct ResolutionReceipt {
     pub package_name: String,
     pub requested_range: String,
     pub policy_profile: AdmissionProfile,
+    pub capability_budget_mode: CapabilityBudgetMode,
     pub decision: AdmissionDecision,
     pub selected_version: Option<CandidateAssessment>,
     pub rejected_alternatives: Vec<RejectedAlternative>,
@@ -155,6 +163,7 @@ pub struct VerifiedResolutionReceipt {
     pub package_name: String,
     pub requested_range: String,
     pub policy_profile: AdmissionProfile,
+    pub capability_budget_mode: CapabilityBudgetMode,
     pub decision: AdmissionDecision,
     pub selected_version: Option<String>,
     pub rejected_alternative_count: usize,
@@ -172,6 +181,7 @@ struct ResolutionReceiptPayload<'a> {
     package_name: &'a str,
     requested_range: &'a str,
     policy_profile: AdmissionProfile,
+    capability_budget_mode: CapabilityBudgetMode,
     decision: AdmissionDecision,
     selected_version: &'a Option<CandidateAssessment>,
     rejected_alternatives: &'a [RejectedAlternative],
@@ -268,7 +278,10 @@ pub fn verify_signed_resolution_receipt(
         return Err(ResolutionReceiptError::NonCanonicalEncoding);
     }
     validate_receipt(&signed.receipt)?;
-    if signed.signature_algorithm != RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM {
+    if !matches!(
+        signed.signature_algorithm.as_str(),
+        RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM
+    ) {
         return Err(ResolutionReceiptError::SignatureAlgorithmMismatch {
             expected: RESOLUTION_RECEIPT_SIGNATURE_ALGORITHM.to_string(),
             actual: signed.signature_algorithm.clone(),
@@ -298,6 +311,7 @@ pub fn verify_signed_resolution_receipt(
         package_name: signed.receipt.package_name,
         requested_range: signed.receipt.requested_range,
         policy_profile: signed.receipt.policy_profile,
+        capability_budget_mode: signed.receipt.capability_budget_mode,
         decision: signed.receipt.decision,
         selected_version: signed
             .receipt
@@ -513,6 +527,7 @@ fn canonical_payload_bytes(receipt: &ResolutionReceipt) -> ResolutionReceiptResu
         package_name: &receipt.package_name,
         requested_range: &receipt.requested_range,
         policy_profile: receipt.policy_profile,
+        capability_budget_mode: receipt.capability_budget_mode,
         decision: receipt.decision,
         selected_version: &receipt.selected_version,
         rejected_alternatives: &receipt.rejected_alternatives,
