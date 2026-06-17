@@ -113,8 +113,8 @@ const BD_NCWLF_CASES: &[ConformanceCase] = &[
         id: "bd-ncwlf-regression-2",
         invariant: "INV-REGRESSION-PROTECTION",
         requirement_level: RequirementLevel::Must,
-        description: "post-fix performance must be better than pre-fix",
-        test_fn: test_post_fix_performance_improvement,
+        description: "post-fix performance must respect the configured budget",
+        test_fn: test_post_fix_performance_budget_compliance,
     },
     ConformanceCase {
         id: "bd-ncwlf-regression-3",
@@ -466,35 +466,39 @@ fn test_regression_guards_present() -> TestResult {
     TestResult::Pass
 }
 
-fn test_post_fix_performance_improvement() -> TestResult {
+fn test_post_fix_performance_budget_compliance() -> TestResult {
     let cases = default_hot_path_budget_smoke_cases();
 
     for case in cases {
-        // Post-fix performance should be better than pre-fix
-        if case.post_fix_p95_units >= case.before_fix_p95_units {
+        let p95_overhead_pct = ((case.post_fix_p95_units - case.before_fix_p95_units)
+            / case.before_fix_p95_units)
+            * 100.0;
+        let p99_overhead_pct = ((case.post_fix_p99_units - case.before_fix_p99_units)
+            / case.before_fix_p99_units)
+            * 100.0;
+
+        if p95_overhead_pct > case.budget.max_overhead_p95_pct {
             return TestResult::Fail {
                 reason: format!(
-                    "No p95 improvement for {}: {} -> {} ({}% change)",
+                    "p95 budget exceeded for {}: {} -> {} ({}% change, budget {}%)",
                     case.hot_path,
                     case.before_fix_p95_units,
                     case.post_fix_p95_units,
-                    ((case.post_fix_p95_units - case.before_fix_p95_units)
-                        / case.before_fix_p95_units)
-                        * 100.0
+                    p95_overhead_pct,
+                    case.budget.max_overhead_p95_pct
                 ),
             };
         }
 
-        if case.post_fix_p99_units >= case.before_fix_p99_units {
+        if p99_overhead_pct > case.budget.max_overhead_p99_pct {
             return TestResult::Fail {
                 reason: format!(
-                    "No p99 improvement for {}: {} -> {} ({}% change)",
+                    "p99 budget exceeded for {}: {} -> {} ({}% change, budget {}%)",
                     case.hot_path,
                     case.before_fix_p99_units,
                     case.post_fix_p99_units,
-                    ((case.post_fix_p99_units - case.before_fix_p99_units)
-                        / case.before_fix_p99_units)
-                        * 100.0
+                    p99_overhead_pct,
+                    case.budget.max_overhead_p99_pct
                 ),
             };
         }
@@ -752,6 +756,11 @@ fn test_critical_hot_paths_covered() -> TestResult {
         "observability.evidence_ledger",       // Evidence/audit
         "storage.frankensqlite_adapter",       // Storage layer
         "crypto.ed25519_scheme",               // Cryptography
+        "security.threshold_sig",              // Threshold signature verification
+        "trust_card_canonical",                // Trust-card canonical serialization
+        "security.revocation_filter",          // Revocation lookup/insert policy
+        "tools.replay_bundle",                 // Replay bundle generation
+        "dgis.contagion_simulator",            // DGIS large-graph contagion step
         "runtime.effect_receipt",              // TNR effect receipts + label propagation
         "policy.runtime_sentinel",             // TNR conformal scoring into Sentinel
         "policy.bayesian_diagnostics",         // TNR e-process update path

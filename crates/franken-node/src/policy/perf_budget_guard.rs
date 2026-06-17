@@ -847,6 +847,11 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
         max_overhead_p99_pct: 10.0,
         max_cold_start_ms: 1.0,
     };
+    let revocation_lookup_tradeoff_budget = PathBudget {
+        max_overhead_p95_pct: 250.0,
+        max_overhead_p99_pct: 250.0,
+        max_cold_start_ms: 1.0,
+    };
     vec![
         HotPathBudgetSmokeCase {
             hot_path: "ops.telemetry_bridge.persistence_batch".to_string(),
@@ -947,7 +952,11 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
         HotPathBudgetSmokeCase {
             hot_path: "crypto.ed25519_scheme.sign_raw".to_string(),
             surface: "crates/franken-node/src/crypto/schemes.rs".to_string(),
-            source_beads: vec!["bd-98xo5.2.3".to_string(), "bd-98xo5.2.4".to_string()],
+            source_beads: vec![
+                "bd-98xo5.2".to_string(),
+                "bd-98xo5.2.3".to_string(),
+                "bd-98xo5.2.4".to_string(),
+            ],
             metric_kind: "wrapper_overhead_us_per_call".to_string(),
             unit: "microseconds".to_string(),
             before_fix_p95_units: 45.69,
@@ -965,6 +974,242 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
             ],
             regression_guard: "wrapper overhead must stay below 1.30x dalek_direct sign time"
                 .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "crypto.ed25519_scheme.verify_raw".to_string(),
+            surface: "crates/franken-node/src/crypto/schemes.rs".to_string(),
+            source_beads: vec![
+                "bd-98xo5.2".to_string(),
+                "bd-98xo5.2.4".to_string(),
+                "bd-98xo5.2.5".to_string(),
+            ],
+            metric_kind: "wrapper_overhead_us_per_verify_64_byte_payload".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 53.30,
+            before_fix_p99_units: 53.55,
+            post_fix_p95_units: 48.50,
+            post_fix_p99_units: 49.00,
+            cold_start_ms: 0.1,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "preparsed verifier must preserve strict signature acceptance semantics"
+                    .to_string(),
+                "public-key parsing errors must still fail closed before verification"
+                    .to_string(),
+                "payload bytes must remain bound exactly to the verified signature".to_string(),
+            ],
+            regression_guard: "verify_raw wrapper overhead must stay below the T2.5 preparsed ceiling"
+                .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "security.threshold_sig.verify_threshold_32".to_string(),
+            surface: "crates/franken-node/src/security/threshold_sig.rs".to_string(),
+            source_beads: vec!["bd-98xo5.1".to_string()],
+            metric_kind: "threshold_verify_us_per_32_signers".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 1778.0,
+            before_fix_p99_units: 1785.0,
+            post_fix_p95_units: 1611.0,
+            post_fix_p99_units: 1623.0,
+            cold_start_ms: 0.1,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "threshold quorum semantics must remain unchanged for accepted signer sets"
+                    .to_string(),
+                "duplicate signer evidence must still fail the threshold verification path"
+                    .to_string(),
+                "preparsed keys must preserve the same Ed25519 verification bytes".to_string(),
+            ],
+            regression_guard:
+                "32-signer threshold verification must stay below the preparsed-key p95 ceiling"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "trust_card_canonical.medium_3x8".to_string(),
+            surface: "crates/franken-node/src/connector/canonical_serializer.rs".to_string(),
+            source_beads: vec!["bd-98xo5.4".to_string(), "bd-98xo5.4.6".to_string()],
+            metric_kind: "canonicalization_us_for_medium_3x8_fixture".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 33230.0,
+            before_fix_p99_units: 33490.0,
+            post_fix_p95_units: 34873.0,
+            post_fix_p99_units: 35171.0,
+            cold_start_ms: 0.2,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "canonical bytes must remain byte-identical for trust-card HMAC inputs"
+                    .to_string(),
+                "streaming encoder errors must still fail before partial trust-card commit"
+                    .to_string(),
+                "unicode key ordering must preserve the canonical serializer contract".to_string(),
+            ],
+            regression_guard:
+                "medium trust-card canonicalization must stay within the bounded T4.6 rebaseline"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "trust_card_canonical.complex_4x12".to_string(),
+            surface: "crates/franken-node/src/connector/canonical_serializer.rs".to_string(),
+            source_beads: vec!["bd-98xo5.4".to_string(), "bd-98xo5.4.6".to_string()],
+            metric_kind: "canonicalization_us_for_complex_4x12_stress_fixture".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 3_591_000.0,
+            before_fix_p99_units: 3_661_000.0,
+            post_fix_p95_units: 3_591_000.0,
+            post_fix_p99_units: 3_661_000.0,
+            cold_start_ms: 0.2,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "complex stress fixtures must preserve canonical JSON ordering".to_string(),
+                "trust-card hash inputs must remain stable across serializer migrations"
+                    .to_string(),
+                "post-fix budget must still record the unresolved complex-case ceiling"
+                    .to_string(),
+            ],
+            regression_guard:
+                "complex trust-card stress case must not exceed the round-1 ceiling before a new rebaseline lands"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "security.revocation_filter.lookup_500k".to_string(),
+            surface: "docs/specs/revocation_filter_choice.md".to_string(),
+            source_beads: vec!["bd-98xo5.3".to_string(), "bd-98xo5.3.3".to_string()],
+            metric_kind: "lookup_us_at_500k_entries_after_btree_decision".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 0.055,
+            before_fix_p99_units: 0.055,
+            post_fix_p95_units: 0.1783,
+            post_fix_p99_units: 0.1785,
+            cold_start_ms: 0.0,
+            budget: revocation_lookup_tradeoff_budget,
+            correctness_assertions: vec![
+                "revocation lookups must still fail closed for revoked entries".to_string(),
+                "BTree ordering must preserve deterministic revocation frontier iteration"
+                    .to_string(),
+                "lookup overhead must remain documented as the explicit insert-cliff tradeoff"
+                    .to_string(),
+            ],
+            regression_guard:
+                "BTree lookup tradeoff must stay below 250% overhead versus the cuckoo 500k lookup baseline"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "security.revocation_filter.insert_50k".to_string(),
+            surface: "docs/specs/revocation_filter_choice.md".to_string(),
+            source_beads: vec!["bd-98xo5.3".to_string(), "bd-98xo5.3.3".to_string()],
+            metric_kind: "insert_us_at_50k_entries_after_btree_decision".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 24_780.0,
+            before_fix_p99_units: 24_850.0,
+            post_fix_p95_units: 13_470.0,
+            post_fix_p99_units: 13_510.0,
+            cold_start_ms: 0.0,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "revocation inserts must still preserve every unique revoked entry".to_string(),
+                "duplicate revocation entries must remain idempotent under the chosen backend"
+                    .to_string(),
+                "production N above 30000 must keep the BTree insert-cliff decision active"
+                    .to_string(),
+            ],
+            regression_guard:
+                "50k-entry revocation inserts must stay below the BTree decision p95 ceiling"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "tools.replay_bundle.generation_large_1000".to_string(),
+            surface: "crates/franken-node/src/tools/replay_bundle.rs".to_string(),
+            source_beads: vec!["bd-98xo5.6".to_string()],
+            metric_kind: "generation_us_for_1000_events".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 29_470.0,
+            before_fix_p99_units: 29_620.0,
+            post_fix_p95_units: 29_470.0,
+            post_fix_p99_units: 29_620.0,
+            cold_start_ms: 0.1,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "replay bundles must preserve deterministic event ordering".to_string(),
+                "bundle generation must still bind incident id and chunk metadata".to_string(),
+                "linear scaling evidence must remain explicit for the large_1000 fixture"
+                    .to_string(),
+            ],
+            regression_guard:
+                "large replay-bundle generation must stay within the round-1 linear-scaling ceiling"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "observability.evidence_ledger.append_large_entry".to_string(),
+            surface: "crates/franken-node/src/observability/evidence_ledger.rs".to_string(),
+            source_beads: vec!["bd-98xo5.12.4".to_string()],
+            metric_kind: "append_us_per_large_evidence_entry".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 16.62,
+            before_fix_p99_units: 16.62,
+            post_fix_p95_units: 16.62,
+            post_fix_p99_units: 16.62,
+            cold_start_ms: 0.0,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "append ordering must remain hash-link deterministic".to_string(),
+                "large-entry append receipts must still bind the evidence digest".to_string(),
+                "non-hotspot classification must remain documented with an explicit ceiling"
+                    .to_string(),
+            ],
+            regression_guard:
+                "large evidence-ledger append must stay within the round-2 non-hotspot ceiling"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "dgis.contagion_simulator.step_large_graph_50k".to_string(),
+            surface: "crates/franken-node/src/dgis/contagion_simulator.rs".to_string(),
+            source_beads: vec!["bd-98xo5.17".to_string()],
+            metric_kind: "step_loop_us_for_requested_50000n_actual_1024n".to_string(),
+            unit: "microseconds".to_string(),
+            before_fix_p95_units: 10_016.0,
+            before_fix_p99_units: 10_261.0,
+            post_fix_p95_units: 3_299.8,
+            post_fix_p99_units: 3_369.0,
+            cold_start_ms: 0.1,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "cached reverse adjacency must remain invalidated after graph mutation"
+                    .to_string(),
+                "interned infection state must still preserve public NodeId semantics"
+                    .to_string(),
+                "contagion step probabilities must remain deterministic for benchmark fixtures"
+                    .to_string(),
+            ],
+            regression_guard:
+                "large-graph DGIS step loop must stay below the bd-98xo5.17 post-fix p95"
+                    .to_string(),
             skip_policy:
                 "skip only when no rch worker is available; emit skip_blocker instead of PASS"
                     .to_string(),

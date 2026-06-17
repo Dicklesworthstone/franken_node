@@ -28,7 +28,7 @@
         "max_cold_start_ms": 1.0
       },
       "correctness_assertions": [
-        "ready envelopes are drained FIFO before the adapter lock is taken",
+        "ready envelopes must be drained FIFO before the adapter lock is taken",
         "write failures still increment persistence drop metrics",
         "audit payload keys remain bridge_seq ordered"
       ],
@@ -83,9 +83,9 @@
       "correctness_assertions": [
         "ledger length checks do not clone full entry payloads",
         "append ordering remains hash-link deterministic",
-        "diagnostic output is not required for correctness of append receipts"
+        "diagnostic output must not be required for correctness of append receipts"
       ],
-      "regression_guard": "ledger metadata checks must remain metadata-only in the smoke budget",
+      "regression_guard": "ledger metadata checks must remain metadata-only and below pre-fix clone work",
       "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
     },
     {
@@ -107,8 +107,8 @@
         "max_cold_start_ms": 1.0
       },
       "correctness_assertions": [
-        "write authorization is checked before persistence",
-        "audit-log class writes retain deterministic keys",
+        "write authorization must be checked before persistence",
+        "audit-log class writes must retain deterministic keys",
         "event subscriber absence must not force eager event formatting"
       ],
       "regression_guard": "write-path allocation work must not return to the pre-budget eager format shape",
@@ -118,6 +118,7 @@
       "hot_path": "crypto.ed25519_scheme.sign_raw",
       "surface": "crates/franken-node/src/crypto/schemes.rs",
       "source_beads": [
+        "bd-98xo5.2",
         "bd-98xo5.2.3",
         "bd-98xo5.2.4"
       ],
@@ -134,11 +135,251 @@
         "max_cold_start_ms": 1.0
       },
       "correctness_assertions": [
-        "preparsed signer produces byte-identical signatures vs stateless sign_raw",
-        "preparsed verifier accepts same set of signatures as verify_strict path",
-        "ZeroizeOnDrop is upheld for the cached SigningKey"
+        "preparsed signer must produce byte-identical signatures vs stateless sign_raw",
+        "preparsed verifier must accept same set of signatures as verify_strict path",
+        "ZeroizeOnDrop must be upheld for the cached SigningKey"
       ],
       "regression_guard": "wrapper overhead must stay below 1.30x dalek_direct sign time",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "crypto.ed25519_scheme.verify_raw",
+      "surface": "crates/franken-node/src/crypto/schemes.rs",
+      "source_beads": [
+        "bd-98xo5.2",
+        "bd-98xo5.2.4",
+        "bd-98xo5.2.5"
+      ],
+      "metric_kind": "wrapper_overhead_us_per_verify_64_byte_payload",
+      "unit": "microseconds",
+      "before_fix_p95_units": 53.3,
+      "before_fix_p99_units": 53.55,
+      "post_fix_p95_units": 48.5,
+      "post_fix_p99_units": 49.0,
+      "cold_start_ms": 0.1,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "preparsed verifier must preserve strict signature acceptance semantics",
+        "public-key parsing errors must still fail closed before verification",
+        "payload bytes must remain bound exactly to the verified signature"
+      ],
+      "regression_guard": "verify_raw wrapper overhead must stay below the T2.5 preparsed ceiling",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "security.threshold_sig.verify_threshold_32",
+      "surface": "crates/franken-node/src/security/threshold_sig.rs",
+      "source_beads": [
+        "bd-98xo5.1"
+      ],
+      "metric_kind": "threshold_verify_us_per_32_signers",
+      "unit": "microseconds",
+      "before_fix_p95_units": 1778.0,
+      "before_fix_p99_units": 1785.0,
+      "post_fix_p95_units": 1611.0,
+      "post_fix_p99_units": 1623.0,
+      "cold_start_ms": 0.1,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "threshold quorum semantics must remain unchanged for accepted signer sets",
+        "duplicate signer evidence must still fail the threshold verification path",
+        "preparsed keys must preserve the same Ed25519 verification bytes"
+      ],
+      "regression_guard": "32-signer threshold verification must stay below the preparsed-key p95 ceiling",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "trust_card_canonical.medium_3x8",
+      "surface": "crates/franken-node/src/connector/canonical_serializer.rs",
+      "source_beads": [
+        "bd-98xo5.4",
+        "bd-98xo5.4.6"
+      ],
+      "metric_kind": "canonicalization_us_for_medium_3x8_fixture",
+      "unit": "microseconds",
+      "before_fix_p95_units": 33230.0,
+      "before_fix_p99_units": 33490.0,
+      "post_fix_p95_units": 34873.0,
+      "post_fix_p99_units": 35171.0,
+      "cold_start_ms": 0.2,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "canonical bytes must remain byte-identical for trust-card HMAC inputs",
+        "streaming encoder errors must still fail before partial trust-card commit",
+        "unicode key ordering must preserve the canonical serializer contract"
+      ],
+      "regression_guard": "medium trust-card canonicalization must stay within the bounded T4.6 rebaseline",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "trust_card_canonical.complex_4x12",
+      "surface": "crates/franken-node/src/connector/canonical_serializer.rs",
+      "source_beads": [
+        "bd-98xo5.4",
+        "bd-98xo5.4.6"
+      ],
+      "metric_kind": "canonicalization_us_for_complex_4x12_stress_fixture",
+      "unit": "microseconds",
+      "before_fix_p95_units": 3591000.0,
+      "before_fix_p99_units": 3661000.0,
+      "post_fix_p95_units": 3591000.0,
+      "post_fix_p99_units": 3661000.0,
+      "cold_start_ms": 0.2,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "complex stress fixtures must preserve canonical JSON ordering",
+        "trust-card hash inputs must remain stable across serializer migrations",
+        "post-fix budget must still record the unresolved complex-case ceiling"
+      ],
+      "regression_guard": "complex trust-card stress case must not exceed the round-1 ceiling before a new rebaseline lands",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "security.revocation_filter.lookup_500k",
+      "surface": "docs/specs/revocation_filter_choice.md",
+      "source_beads": [
+        "bd-98xo5.3",
+        "bd-98xo5.3.3"
+      ],
+      "metric_kind": "lookup_us_at_500k_entries_after_btree_decision",
+      "unit": "microseconds",
+      "before_fix_p95_units": 0.055,
+      "before_fix_p99_units": 0.055,
+      "post_fix_p95_units": 0.1783,
+      "post_fix_p99_units": 0.1785,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 250.0,
+        "max_overhead_p99_pct": 250.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "revocation lookups must still fail closed for revoked entries",
+        "BTree ordering must preserve deterministic revocation frontier iteration",
+        "lookup overhead must remain documented as the explicit insert-cliff tradeoff"
+      ],
+      "regression_guard": "BTree lookup tradeoff must stay below 250% overhead versus the cuckoo 500k lookup baseline",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "security.revocation_filter.insert_50k",
+      "surface": "docs/specs/revocation_filter_choice.md",
+      "source_beads": [
+        "bd-98xo5.3",
+        "bd-98xo5.3.3"
+      ],
+      "metric_kind": "insert_us_at_50k_entries_after_btree_decision",
+      "unit": "microseconds",
+      "before_fix_p95_units": 24780.0,
+      "before_fix_p99_units": 24850.0,
+      "post_fix_p95_units": 13470.0,
+      "post_fix_p99_units": 13510.0,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "revocation inserts must still preserve every unique revoked entry",
+        "duplicate revocation entries must remain idempotent under the chosen backend",
+        "production N above 30000 must keep the BTree insert-cliff decision active"
+      ],
+      "regression_guard": "50k-entry revocation inserts must stay below the BTree decision p95 ceiling",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "tools.replay_bundle.generation_large_1000",
+      "surface": "crates/franken-node/src/tools/replay_bundle.rs",
+      "source_beads": [
+        "bd-98xo5.6"
+      ],
+      "metric_kind": "generation_us_for_1000_events",
+      "unit": "microseconds",
+      "before_fix_p95_units": 29470.0,
+      "before_fix_p99_units": 29620.0,
+      "post_fix_p95_units": 29470.0,
+      "post_fix_p99_units": 29620.0,
+      "cold_start_ms": 0.1,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "replay bundles must preserve deterministic event ordering",
+        "bundle generation must still bind incident id and chunk metadata",
+        "linear scaling evidence must remain explicit for the large_1000 fixture"
+      ],
+      "regression_guard": "large replay-bundle generation must stay within the round-1 linear-scaling ceiling",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "observability.evidence_ledger.append_large_entry",
+      "surface": "crates/franken-node/src/observability/evidence_ledger.rs",
+      "source_beads": [
+        "bd-98xo5.12.4"
+      ],
+      "metric_kind": "append_us_per_large_evidence_entry",
+      "unit": "microseconds",
+      "before_fix_p95_units": 16.62,
+      "before_fix_p99_units": 16.62,
+      "post_fix_p95_units": 16.62,
+      "post_fix_p99_units": 16.62,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "append ordering must remain hash-link deterministic",
+        "large-entry append receipts must still bind the evidence digest",
+        "non-hotspot classification must remain documented with an explicit ceiling"
+      ],
+      "regression_guard": "large evidence-ledger append must stay within the round-2 non-hotspot ceiling",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "dgis.contagion_simulator.step_large_graph_50k",
+      "surface": "crates/franken-node/src/dgis/contagion_simulator.rs",
+      "source_beads": [
+        "bd-98xo5.17"
+      ],
+      "metric_kind": "step_loop_us_for_requested_50000n_actual_1024n",
+      "unit": "microseconds",
+      "before_fix_p95_units": 10016.0,
+      "before_fix_p99_units": 10261.0,
+      "post_fix_p95_units": 3299.8,
+      "post_fix_p99_units": 3369.0,
+      "cold_start_ms": 0.1,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "cached reverse adjacency must remain invalidated after graph mutation",
+        "interned infection state must still preserve public NodeId semantics",
+        "contagion step probabilities must remain deterministic for benchmark fixtures"
+      ],
+      "regression_guard": "large-graph DGIS step loop must stay below the bd-98xo5.17 post-fix p95",
       "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
     },
     {
@@ -322,7 +563,7 @@
         "hot_path": "observability.evidence_ledger.len_snapshot",
         "measurement": {
           "hot_path": "observability.evidence_ledger.len_snapshot",
-          "baseline_p50_us": 8.4,
+          "baseline_p50_us": 8.399999999999999,
           "baseline_p95_us": 12.0,
           "baseline_p99_us": 16.0,
           "integrated_p50_us": 2.0999999999999996,
@@ -360,16 +601,187 @@
         "hot_path": "crypto.ed25519_scheme.sign_raw",
         "measurement": {
           "hot_path": "crypto.ed25519_scheme.sign_raw",
-          "baseline_p50_us": 42.0,
+          "baseline_p50_us": 31.982999999999997,
           "baseline_p95_us": 45.69,
           "baseline_p99_us": 48.0,
-          "integrated_p50_us": 24.0,
+          "integrated_p50_us": 18.2,
           "integrated_p95_us": 26.0,
           "integrated_p99_us": 28.0,
           "cold_start_ms": 0.1
         },
-        "overhead_p95_pct": -43.1,
-        "overhead_p99_pct": -41.7,
+        "overhead_p95_pct": -43.09476909608229,
+        "overhead_p99_pct": -41.66666666666667,
+        "cold_start_ms": 0.1,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "crypto.ed25519_scheme.verify_raw",
+        "measurement": {
+          "hot_path": "crypto.ed25519_scheme.verify_raw",
+          "baseline_p50_us": 37.309999999999995,
+          "baseline_p95_us": 53.3,
+          "baseline_p99_us": 53.55,
+          "integrated_p50_us": 33.949999999999996,
+          "integrated_p95_us": 48.5,
+          "integrated_p99_us": 49.0,
+          "cold_start_ms": 0.1
+        },
+        "overhead_p95_pct": -9.005628517823636,
+        "overhead_p99_pct": -8.496732026143786,
+        "cold_start_ms": 0.1,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "security.threshold_sig.verify_threshold_32",
+        "measurement": {
+          "hot_path": "security.threshold_sig.verify_threshold_32",
+          "baseline_p50_us": 1244.6,
+          "baseline_p95_us": 1778.0,
+          "baseline_p99_us": 1785.0,
+          "integrated_p50_us": 1127.6999999999998,
+          "integrated_p95_us": 1611.0,
+          "integrated_p99_us": 1623.0,
+          "cold_start_ms": 0.1
+        },
+        "overhead_p95_pct": -9.392575928008998,
+        "overhead_p99_pct": -9.07563025210084,
+        "cold_start_ms": 0.1,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "trust_card_canonical.medium_3x8",
+        "measurement": {
+          "hot_path": "trust_card_canonical.medium_3x8",
+          "baseline_p50_us": 23261.0,
+          "baseline_p95_us": 33230.0,
+          "baseline_p99_us": 33490.0,
+          "integrated_p50_us": 24411.1,
+          "integrated_p95_us": 34873.0,
+          "integrated_p99_us": 35171.0,
+          "cold_start_ms": 0.2
+        },
+        "overhead_p95_pct": 4.944327414986458,
+        "overhead_p99_pct": 5.019408778739922,
+        "cold_start_ms": 0.2,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "trust_card_canonical.complex_4x12",
+        "measurement": {
+          "hot_path": "trust_card_canonical.complex_4x12",
+          "baseline_p50_us": 2513700.0,
+          "baseline_p95_us": 3591000.0,
+          "baseline_p99_us": 3661000.0,
+          "integrated_p50_us": 2513700.0,
+          "integrated_p95_us": 3591000.0,
+          "integrated_p99_us": 3661000.0,
+          "cold_start_ms": 0.2
+        },
+        "overhead_p95_pct": 0.0,
+        "overhead_p99_pct": 0.0,
+        "cold_start_ms": 0.2,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "security.revocation_filter.lookup_500k",
+        "measurement": {
+          "hot_path": "security.revocation_filter.lookup_500k",
+          "baseline_p50_us": 0.0385,
+          "baseline_p95_us": 0.055,
+          "baseline_p99_us": 0.055,
+          "integrated_p50_us": 0.12480999999999998,
+          "integrated_p95_us": 0.1783,
+          "integrated_p99_us": 0.1785,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": 224.18181818181816,
+        "overhead_p99_pct": 224.54545454545456,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "security.revocation_filter.insert_50k",
+        "measurement": {
+          "hot_path": "security.revocation_filter.insert_50k",
+          "baseline_p50_us": 17346.0,
+          "baseline_p95_us": 24780.0,
+          "baseline_p99_us": 24850.0,
+          "integrated_p50_us": 9429.0,
+          "integrated_p95_us": 13470.0,
+          "integrated_p99_us": 13510.0,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": -45.64164648910412,
+        "overhead_p99_pct": -45.63380281690141,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "tools.replay_bundle.generation_large_1000",
+        "measurement": {
+          "hot_path": "tools.replay_bundle.generation_large_1000",
+          "baseline_p50_us": 20629.0,
+          "baseline_p95_us": 29470.0,
+          "baseline_p99_us": 29620.0,
+          "integrated_p50_us": 20629.0,
+          "integrated_p95_us": 29470.0,
+          "integrated_p99_us": 29620.0,
+          "cold_start_ms": 0.1
+        },
+        "overhead_p95_pct": 0.0,
+        "overhead_p99_pct": 0.0,
+        "cold_start_ms": 0.1,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "observability.evidence_ledger.append_large_entry",
+        "measurement": {
+          "hot_path": "observability.evidence_ledger.append_large_entry",
+          "baseline_p50_us": 11.634,
+          "baseline_p95_us": 16.62,
+          "baseline_p99_us": 16.62,
+          "integrated_p50_us": 11.634,
+          "integrated_p95_us": 16.62,
+          "integrated_p99_us": 16.62,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": 0.0,
+        "overhead_p99_pct": 0.0,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "dgis.contagion_simulator.step_large_graph_50k",
+        "measurement": {
+          "hot_path": "dgis.contagion_simulator.step_large_graph_50k",
+          "baseline_p50_us": 7011.2,
+          "baseline_p95_us": 10016.0,
+          "baseline_p99_us": 10261.0,
+          "integrated_p50_us": 2309.86,
+          "integrated_p95_us": 3299.8,
+          "integrated_p99_us": 3369.0,
+          "cold_start_ms": 0.1
+        },
+        "overhead_p95_pct": -67.0547124600639,
+        "overhead_p99_pct": -67.16694279310009,
         "cold_start_ms": 0.1,
         "within_budget": true,
         "violations": [],
@@ -471,8 +883,8 @@
         "flamegraph_path": null
       }
     ],
-    "total_paths": 10,
-    "paths_within_budget": 10,
+    "total_paths": 19,
+    "paths_within_budget": 19,
     "paths_over_budget": 0
   },
   "events": [
@@ -564,6 +976,168 @@
       "code": "PRF-002",
       "hot_path": "crypto.ed25519_scheme.sign_raw",
       "detail": "p95=-43.1%, p99=-41.7%, cold=0.1ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "crypto.ed25519_scheme.verify_raw",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "crypto.ed25519_scheme.verify_raw",
+      "detail": "Cold-start: 0.10ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "crypto.ed25519_scheme.verify_raw",
+      "detail": "p95=-9.0%, p99=-8.5%, cold=0.1ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "security.threshold_sig.verify_threshold_32",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "security.threshold_sig.verify_threshold_32",
+      "detail": "Cold-start: 0.10ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "security.threshold_sig.verify_threshold_32",
+      "detail": "p95=-9.4%, p99=-9.1%, cold=0.1ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "trust_card_canonical.medium_3x8",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "trust_card_canonical.medium_3x8",
+      "detail": "Cold-start: 0.20ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "trust_card_canonical.medium_3x8",
+      "detail": "p95=4.9%, p99=5.0%, cold=0.2ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "trust_card_canonical.complex_4x12",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "trust_card_canonical.complex_4x12",
+      "detail": "Cold-start: 0.20ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "trust_card_canonical.complex_4x12",
+      "detail": "p95=0.0%, p99=0.0%, cold=0.2ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "security.revocation_filter.lookup_500k",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "security.revocation_filter.lookup_500k",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "security.revocation_filter.lookup_500k",
+      "detail": "p95=224.2%, p99=224.5%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "security.revocation_filter.insert_50k",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "security.revocation_filter.insert_50k",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "security.revocation_filter.insert_50k",
+      "detail": "p95=-45.6%, p99=-45.6%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "tools.replay_bundle.generation_large_1000",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "tools.replay_bundle.generation_large_1000",
+      "detail": "Cold-start: 0.10ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "tools.replay_bundle.generation_large_1000",
+      "detail": "p95=0.0%, p99=0.0%, cold=0.1ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "observability.evidence_ledger.append_large_entry",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "observability.evidence_ledger.append_large_entry",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "observability.evidence_ledger.append_large_entry",
+      "detail": "p95=0.0%, p99=0.0%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "dgis.contagion_simulator.step_large_graph_50k",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "dgis.contagion_simulator.step_large_graph_50k",
+      "detail": "Cold-start: 0.10ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "dgis.contagion_simulator.step_large_graph_50k",
+      "detail": "p95=-67.1%, p99=-67.2%, cold=0.1ms",
       "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
     },
     {

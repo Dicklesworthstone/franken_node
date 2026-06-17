@@ -8,8 +8,11 @@ creating a second performance schema. It is intentionally a CI smoke contract,
 not an authoritative wall-clock benchmark. It records deterministic work-unit
 budgets for hot paths where the relevant regression shape is lock acquisition,
 full-vector clone work, eager formatting, serialized persistence work,
-per-effect receipt hashing, label propagation, conformal scoring, e-process
-updates, or amortized long-term re-attestation.
+cryptographic key parsing, threshold verification, canonical JSON
+serialization, revocation-filter scaling, replay bundle generation, evidence
+ledger appends, DGIS contagion steps, per-effect receipt hashing, label
+propagation, conformal scoring, e-process updates, or amortized long-term
+re-attestation.
 
 ## Evidence
 
@@ -43,7 +46,16 @@ The evidence includes:
 | `control_plane.fleet_transport.read_snapshot` | `bd-42obl` | Exclusive lock and clone work per read |
 | `observability.evidence_ledger.len_snapshot` | `bd-1689l`, `bd-2ahez` | Ledger clone and diagnostic serialization work |
 | `storage.frankensqlite_adapter.write_event` | `bd-1ulnv` | Eager string allocation work per write |
-| `crypto.ed25519_scheme.sign_raw` | `bd-98xo5.2.3`, `bd-98xo5.2.4` | Wrapper overhead per signature |
+| `crypto.ed25519_scheme.sign_raw` | `bd-98xo5.2`, `bd-98xo5.2.3`, `bd-98xo5.2.4` | Wrapper overhead per signature |
+| `crypto.ed25519_scheme.verify_raw` | `bd-98xo5.2`, `bd-98xo5.2.4`, `bd-98xo5.2.5` | Wrapper overhead per verification |
+| `security.threshold_sig.verify_threshold_32` | `bd-98xo5.1` | Threshold verification over 32 signers |
+| `trust_card_canonical.medium_3x8` | `bd-98xo5.4`, `bd-98xo5.4.6` | Medium trust-card canonicalization rebaseline |
+| `trust_card_canonical.complex_4x12` | `bd-98xo5.4`, `bd-98xo5.4.6` | Complex trust-card stress ceiling |
+| `security.revocation_filter.lookup_500k` | `bd-98xo5.3`, `bd-98xo5.3.3` | BTree lookup tradeoff at 500k entries |
+| `security.revocation_filter.insert_50k` | `bd-98xo5.3`, `bd-98xo5.3.3` | Insert-cliff mitigation at 50k entries |
+| `tools.replay_bundle.generation_large_1000` | `bd-98xo5.6` | Large replay-bundle generation ceiling |
+| `observability.evidence_ledger.append_large_entry` | `bd-98xo5.12.4` | Large evidence-ledger append ceiling |
+| `dgis.contagion_simulator.step_large_graph_50k` | `bd-98xo5.17` | Large-graph DGIS step-loop optimization |
 | `runtime.effect_receipt.construct_and_hash` | `bd-f5b04.2.2.1`, `bd-f5b04.9.2` | Per-syscall receipt construction and CAS hashing |
 | `runtime.effect_receipt.label_propagation_transform` | `bd-f5b04.2.2.1`, `bd-f5b04.9.2` | Lineage label propagation per transform |
 | `policy.runtime_sentinel.conformal_score_lookup` | `bd-f5b04.3.1.1`, `bd-f5b04.9.2` | Frozen-quantile lookup per Sentinel decision |
@@ -53,6 +65,12 @@ The evidence includes:
 Each case must keep at least three correctness assertions next to the metric so
 future optimization changes do not pass by removing trust, ordering, audit, or
 persistence behavior.
+
+Most cases are post-fix improvements. A small number are deliberately bounded
+tradeoffs or no-op ceilings because the performance round classified the
+surface as a policy decision or a non-hotspot. Those cases still pass only when
+their post-fix numbers remain inside the configured `PathBudget`; a regression
+outside that budget is a failing report.
 
 The TNR cases are also represented in the registered Criterion bench target
 `crates/franken-node/benches/perf_wins.rs`, which is already listed in

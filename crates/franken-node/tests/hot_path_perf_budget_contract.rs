@@ -13,6 +13,19 @@ const EXPECTED_TNR_HOT_PATHS: [&str; 5] = [
     "verifier_sdk.long_term_verification.reattestation",
 ];
 
+const EXPECTED_PERF_EPIC_HOT_PATHS: [&str; 10] = [
+    "crypto.ed25519_scheme.sign_raw",
+    "crypto.ed25519_scheme.verify_raw",
+    "security.threshold_sig.verify_threshold_32",
+    "trust_card_canonical.medium_3x8",
+    "trust_card_canonical.complex_4x12",
+    "security.revocation_filter.lookup_500k",
+    "security.revocation_filter.insert_50k",
+    "tools.replay_bundle.generation_large_1000",
+    "observability.evidence_ledger.append_large_entry",
+    "dgis.contagion_simulator.step_large_graph_50k",
+];
+
 fn committed_evidence() -> Result<Value, Box<dyn std::error::Error>> {
     Ok(serde_json::from_str(include_str!(
         "../../../artifacts/performance_budgets/bd-ncwlf_hot_path_budget_evidence.json"
@@ -57,7 +70,17 @@ fn hot_path_budget_smoke_pairs_every_metric_with_correctness_assertions()
     let report = run_default_hot_path_budget_smoke()?;
 
     assert!(report.overall_pass);
-    assert_eq!(report.cases.len(), 10);
+    assert_eq!(report.cases.len(), 19);
+    for expected in EXPECTED_PERF_EPIC_HOT_PATHS {
+        assert!(
+            report.cases.iter().any(|case| case.hot_path == expected
+                && case
+                    .source_beads
+                    .iter()
+                    .any(|bead| bead.starts_with("bd-98xo5"))),
+            "missing bd-98xo5 perf epic budget case for {expected}"
+        );
+    }
     for expected in EXPECTED_TNR_HOT_PATHS {
         assert!(
             report.cases.iter().any(|case| {
@@ -82,10 +105,23 @@ fn hot_path_budget_smoke_pairs_every_metric_with_correctness_assertions()
             "missing correctness assertions for {}",
             case.hot_path
         );
+        let p95_overhead_pct = ((case.post_fix_p95_units - case.before_fix_p95_units)
+            / case.before_fix_p95_units)
+            * 100.0;
+        let p99_overhead_pct = ((case.post_fix_p99_units - case.before_fix_p99_units)
+            / case.before_fix_p99_units)
+            * 100.0;
         assert!(
-            case.post_fix_p95_units < case.before_fix_p95_units,
-            "post-fix p95 must improve for {}",
-            case.hot_path
+            p95_overhead_pct <= case.budget.max_overhead_p95_pct,
+            "post-fix p95 exceeds budget for {}: {p95_overhead_pct}% > {}%",
+            case.hot_path,
+            case.budget.max_overhead_p95_pct
+        );
+        assert!(
+            p99_overhead_pct <= case.budget.max_overhead_p99_pct,
+            "post-fix p99 exceeds budget for {}: {p99_overhead_pct}% > {}%",
+            case.hot_path,
+            case.budget.max_overhead_p99_pct
         );
         assert!(
             case.regression_guard.contains("must"),
@@ -126,7 +162,7 @@ fn hot_path_budget_smoke_skip_mode_reports_explicit_blocker()
     );
     assert!(report.gate_result.is_none());
     assert!(report.events.is_empty());
-    assert_eq!(report.cases.len(), 10);
+    assert_eq!(report.cases.len(), 19);
 
     Ok(())
 }
