@@ -9,9 +9,8 @@
 //! Pattern 4: Spec-Derived Test Matrix with comprehensive requirement coverage
 
 use frankenengine_node::policy::bayesian_diagnostics::{
-    BayesianDiagnostics, CandidateRef, DiagnosticConfidence, E_PROCESS_SCALE_PPM,
-    LikelihoodRatioEvidence, MixtureSprtComponent, Observation, RankedCandidate,
-    RuntimeSentinelEProcess,
+    BayesianDiagnostics, CandidateRef, E_PROCESS_SCALE_PPM, LikelihoodRatioEvidence,
+    MixtureSprtComponent, Observation, RuntimeSentinelEProcess,
 };
 use serde::{Deserialize, Serialize};
 
@@ -438,7 +437,7 @@ fn test_edge_case_guardrail_filtering() -> TestResult {
 // ---------------------------------------------------------------------------
 
 fn test_integration_full_bayesian_workflow() -> TestResult {
-    let mut diagnostics = BayesianDiagnostics::with_epoch(test_epoch());
+    let mut diagnostics = BayesianDiagnostics::new().with_epoch(test_epoch());
 
     // Simulate a full workflow: observations -> ranking -> transparency check
     let observations = vec![
@@ -574,6 +573,46 @@ fn test_e_process_rejects_non_monotonic_replay() -> TestResult {
     match RuntimeSentinelEProcess::replay_from(&evidence) {
         Ok(state) => TestResult::Fail {
             reason: format!("non-monotonic evidence was accepted: {state:?}"),
+        },
+        Err(_) => TestResult::Pass,
+    }
+}
+
+fn test_e_process_rejects_empty_signal_identity() -> TestResult {
+    let mut state = RuntimeSentinelEProcess::new();
+    let evidence = LikelihoodRatioEvidence::new("", 1, E_PROCESS_SCALE_PPM);
+
+    match state.observe(&evidence) {
+        Ok(update) => TestResult::Fail {
+            reason: format!("empty signal identity was accepted: {update:?}"),
+        },
+        Err(_) => TestResult::Pass,
+    }
+}
+
+fn test_e_process_rejects_duplicate_mixture_components() -> TestResult {
+    let components = vec![
+        MixtureSprtComponent::new("duplicate", 500_000, E_PROCESS_SCALE_PPM * 2),
+        MixtureSprtComponent::new("duplicate", 500_000, E_PROCESS_SCALE_PPM * 4),
+    ];
+
+    match LikelihoodRatioEvidence::from_mixture("ambiguous", 1, &components) {
+        Ok(evidence) => TestResult::Fail {
+            reason: format!("duplicate mixture component was accepted: {evidence:?}"),
+        },
+        Err(_) => TestResult::Pass,
+    }
+}
+
+fn test_e_process_rejects_zero_weight_mixture_component() -> TestResult {
+    let components = vec![
+        MixtureSprtComponent::new("ignored_component", 0, E_PROCESS_SCALE_PPM * 4),
+        MixtureSprtComponent::new("active_component", 1_000_000, E_PROCESS_SCALE_PPM * 2),
+    ];
+
+    match LikelihoodRatioEvidence::from_mixture("zero_weight", 1, &components) {
+        Ok(evidence) => TestResult::Fail {
+            reason: format!("zero-weight mixture component was accepted: {evidence:?}"),
         },
         Err(_) => TestResult::Pass,
     }
@@ -716,6 +755,27 @@ const CONFORMANCE_TESTS: &[ConformanceTestCase] = &[
     },
     ConformanceTestCase {
         id: "BD2IGI-EPROC-004",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Runtime Sentinel e-process rejects empty signal identity",
+        test_fn: test_e_process_rejects_empty_signal_identity,
+    },
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-005",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Mixture-SPRT rejects duplicate component identifiers",
+        test_fn: test_e_process_rejects_duplicate_mixture_components,
+    },
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-006",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Mixture-SPRT rejects zero-weight components",
+        test_fn: test_e_process_rejects_zero_weight_mixture_component,
+    },
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-007",
         requirement_level: RequirementLevel::Must,
         category: TestCategory::EProcess,
         description: "Ville false-alarm bound controls escalation",

@@ -121,6 +121,21 @@ impl LikelihoodRatioEvidence {
         }
     }
 
+    fn validate(&self) -> Result<(), EProcessError> {
+        if self.signal_id.is_empty() {
+            return Err(EProcessError::EmptySignalId);
+        }
+        reject_e_process_control_chars("signal_id", &self.signal_id)?;
+        for (key, value) in &self.metadata {
+            if key.is_empty() {
+                return Err(EProcessError::EmptyMetadataKey);
+            }
+            reject_e_process_control_chars("metadata.key", key)?;
+            reject_e_process_control_chars("metadata.value", value)?;
+        }
+        Ok(())
+    }
+
     pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
         self.metadata = metadata;
         self
@@ -131,11 +146,13 @@ impl LikelihoodRatioEvidence {
         sequence: u64,
         components: &[MixtureSprtComponent],
     ) -> Result<Self, EProcessError> {
-        Ok(Self::new(
+        let evidence = Self::new(
             signal_id,
             sequence,
             mixture_likelihood_ratio_ppm(components)?,
-        ))
+        );
+        evidence.validate()?;
+        Ok(evidence)
     }
 }
 
@@ -161,6 +178,19 @@ impl MixtureSprtComponent {
             weight_ppm,
             likelihood_ratio_ppm,
         }
+    }
+
+    fn validate(&self) -> Result<(), EProcessError> {
+        if self.component_id.is_empty() {
+            return Err(EProcessError::EmptyMixtureComponentId);
+        }
+        reject_e_process_control_chars("component_id", &self.component_id)?;
+        if self.weight_ppm == 0 {
+            return Err(EProcessError::ZeroMixtureComponentWeight {
+                component_id: self.component_id.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -216,6 +246,7 @@ impl RuntimeSentinelEProcess {
                 expected: RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION.to_string(),
             });
         }
+        evidence.validate()?;
         if let Some(previous) = self.last_sequence
             && evidence.sequence <= previous
         {
@@ -267,8 +298,14 @@ impl Default for RuntimeSentinelEProcess {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EProcessError {
     SchemaVersionMismatch { declared: String, expected: String },
+    EmptySignalId,
+    EmptyMetadataKey,
+    ForbiddenControlChar { field: &'static str },
     NonMonotonicSequence { previous: u64, attempted: u64 },
     EmptyMixture,
+    EmptyMixtureComponentId,
+    DuplicateMixtureComponent { component_id: String },
+    ZeroMixtureComponentWeight { component_id: String },
     ZeroMixtureWeight,
 }
 
@@ -281,10 +318,18 @@ pub fn mixture_likelihood_ratio_ppm(
 
     let mut ordered = BTreeMap::new();
     for component in components {
-        ordered.insert(
-            component.component_id.clone(),
-            (component.weight_ppm, component.likelihood_ratio_ppm),
-        );
+        component.validate()?;
+        if ordered
+            .insert(
+                component.component_id.clone(),
+                (component.weight_ppm, component.likelihood_ratio_ppm),
+            )
+            .is_some()
+        {
+            return Err(EProcessError::DuplicateMixtureComponent {
+                component_id: component.component_id.clone(),
+            });
+        }
     }
 
     let mut weighted_sum: u128 = 0;
@@ -315,6 +360,13 @@ pub fn false_alarm_bound_ppm_for_e_value(e_value_ppm: u64) -> u64 {
     let numerator = u128::from(E_PROCESS_SCALE_PPM).saturating_mul(u128::from(E_PROCESS_SCALE_PPM));
     let bound = numerator.div_ceil(u128::from(e_value_ppm));
     u64::try_from(bound.min(u128::from(E_PROCESS_SCALE_PPM))).unwrap_or(E_PROCESS_SCALE_PPM)
+}
+
+fn reject_e_process_control_chars(field: &'static str, value: &str) -> Result<(), EProcessError> {
+    if value.chars().any(char::is_control) {
+        return Err(EProcessError::ForbiddenControlChar { field });
+    }
+    Ok(())
 }
 
 /// Confidence level of the diagnostic ranking (distinct from GuaranteeConfidence).
