@@ -13,11 +13,13 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signature, Signer as _, SigningKey};
-use frankenengine_node::crypto::{Ed25519Scheme, SignatureScheme};
+use frankenengine_node::crypto::{Ed25519Scheme, HybridCriticalAnchorTrustPolicy, SignatureScheme};
 use frankenengine_node::security::blake3_adapter::{HashProvider, Sha2HmacProvider};
 use frankenengine_node::security::decision_receipt::{
-    Decision, Receipt, sign_receipt, verify_receipt,
+    Decision, Receipt, sign_receipt, sign_receipt_critical_anchor, verify_receipt,
+    verify_receipt_critical_anchor,
 };
+use hex::FromHex as _;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -288,6 +290,80 @@ fn verify_receipt_accepts_trait_routed_sign_receipt_output() {
         "verify_receipt must accept signatures produced by sign_receipt; \
          a regression here means the migration broke its own happy path",
     );
+}
+
+/// Integration-level guard for the hybrid Ed25519 + hash-OTS receipt anchor.
+///
+/// The inline crypto unit test is currently blocked by the repo-wide
+/// `franken_node_inline_tests` cfg drift, so this test proves the same policy at
+/// the public decision-receipt boundary: normal mode requires both signatures,
+/// but either constituent family can independently carry the anchor after the
+/// other is distrusted or unavailable.
+#[test]
+fn receipt_critical_anchor_hybrid_policy_survives_each_single_algorithm_degradation() {
+    let signing_key = SigningKey::from_bytes(&[91_u8; 32]);
+    let public_key = signing_key.verifying_key();
+    let signed = sign_receipt(&deterministic_receipt(), &signing_key)
+        .expect("deterministic receipt should sign");
+    let hash_ots_secret_key = [23_u8; 32];
+
+    let anchor_signature =
+        sign_receipt_critical_anchor(&signed, &signing_key, &hash_ots_secret_key)
+            .expect("critical anchor should sign with both algorithms");
+
+    let baseline = verify_receipt_critical_anchor(&signed, &public_key, &anchor_signature)
+        .expect("fresh critical anchor should verify");
+    assert!(baseline.fully_verified());
+    assert!(baseline.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+    assert!(baseline.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+    assert!(baseline.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+
+    let wrong_public_key = SigningKey::from_bytes(&[92_u8; 32]).verifying_key();
+    let ed25519_degraded =
+        verify_receipt_critical_anchor(&signed, &wrong_public_key, &anchor_signature)
+            .expect("hash-based half should still be checkable with wrong Ed25519 key");
+    assert!(!ed25519_degraded.ed25519_valid);
+    assert!(ed25519_degraded.hash_based_valid);
+    assert!(!ed25519_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+    assert!(!ed25519_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+    assert!(ed25519_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+
+    let mut hash_degraded_signature = anchor_signature.clone();
+    let mut hash_signature_bytes =
+        Vec::<u8>::from_hex(&hash_degraded_signature.hash_ots_signature_hex)
+            .expect("hash-OTS signature should be hex");
+    let first_byte = hash_signature_bytes
+        .first_mut()
+        .expect("hash-OTS signature should not be empty");
+    *first_byte ^= 0x80;
+    hash_degraded_signature.hash_ots_signature_hex = hex::encode(hash_signature_bytes);
+
+    let hash_degraded =
+        verify_receipt_critical_anchor(&signed, &public_key, &hash_degraded_signature)
+            .expect("Ed25519 half should still be checkable with bad hash-OTS signature");
+    assert!(hash_degraded.ed25519_valid);
+    assert!(!hash_degraded.hash_based_valid);
+    assert!(!hash_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+    assert!(hash_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+    assert!(!hash_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+
+    let fully_broken =
+        verify_receipt_critical_anchor(&signed, &wrong_public_key, &hash_degraded_signature)
+            .expect("verification should report both halves false, not fail open");
+    assert!(!fully_broken.fully_verified());
+    assert!(!fully_broken.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+    assert!(!fully_broken.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+    assert!(!fully_broken.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+
+    let mut different_anchor = signed.clone();
+    different_anchor.chain_hash.push_str(":tampered");
+    let tampered_chain_hash =
+        verify_receipt_critical_anchor(&different_anchor, &public_key, &anchor_signature)
+            .expect("receipt chain-hash mismatch should verify false rather than panic");
+    assert!(!tampered_chain_hash.fully_verified());
+    assert!(!tampered_chain_hash.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+    assert!(!tampered_chain_hash.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+    assert!(!tampered_chain_hash.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
 }
 
 /// Guard against a well-meaning later refactor that swaps `sign_raw` for
