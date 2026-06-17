@@ -157,8 +157,9 @@ use frankenengine_node::{
     ops, runtime,
     security::{
         decision_receipt::{
-            DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt, ReceiptQuery,
-            append_signed_receipt, export_receipts_to_path, sign_receipt, write_receipts_markdown,
+            DECISION_RECEIPT_CRYPTO_SUITE, DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt,
+            ReceiptQuery, append_signed_receipt, export_receipts_to_path, sign_receipt,
+            write_receipts_markdown,
         },
         remote_cap::{
             CapabilityGate, CapabilityProvider, RemoteCap, RemoteCapError, RemoteOperation,
@@ -17069,6 +17070,7 @@ fn sign_incident_counterfactual_contract_receipt(
         actor_identity: input.operator_id.to_string(),
         timestamp: input.timestamp.to_string(),
         signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
+        crypto_suite: DECISION_RECEIPT_CRYPTO_SUITE.to_string(),
         nonce: Uuid::now_v7().simple().to_string(),
         audience: "franken-node".to_string(), // audience binding
         input_hash: input.input_hash.to_string(),

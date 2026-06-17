@@ -49,6 +49,53 @@ impl fmt::Display for Ed25519Error {
 
 impl std::error::Error for Ed25519Error {}
 
+/// Error types for the hash-based one-time signature anchor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HashOtsError {
+    /// The secret key seed has an invalid length.
+    InvalidSecretKeyLength { expected: usize, actual: usize },
+    /// The expanded public key has an invalid length.
+    InvalidPublicKeyLength { expected: usize, actual: usize },
+    /// The one-time signature has an invalid length.
+    InvalidSignatureLength { expected: usize, actual: usize },
+    /// A serialized hybrid anchor component could not be decoded.
+    DecodeFailed(String),
+    /// Ed25519 signing failed while building a hybrid anchor.
+    Ed25519Failed(String),
+}
+
+impl fmt::Display for HashOtsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidSecretKeyLength { expected, actual } => {
+                write!(
+                    f,
+                    "Invalid hash-OTS secret key length: expected {}, got {}",
+                    expected, actual
+                )
+            }
+            Self::InvalidPublicKeyLength { expected, actual } => {
+                write!(
+                    f,
+                    "Invalid hash-OTS public key length: expected {}, got {}",
+                    expected, actual
+                )
+            }
+            Self::InvalidSignatureLength { expected, actual } => {
+                write!(
+                    f,
+                    "Invalid hash-OTS signature length: expected {}, got {}",
+                    expected, actual
+                )
+            }
+            Self::DecodeFailed(msg) => write!(f, "Hash-OTS decode failed: {}", msg),
+            Self::Ed25519Failed(msg) => write!(f, "Hybrid Ed25519 component failed: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for HashOtsError {}
+
 /// Error types for key material operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeyMaterialError {

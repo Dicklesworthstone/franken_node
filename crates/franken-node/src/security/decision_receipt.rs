@@ -22,8 +22,9 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
 use frankenengine_node::crypto::{
-    ED25519_V1_CRYPTO_SUITE, ED25519_V1_SIGNATURE_VERSION, Ed25519Scheme, SignatureScheme,
-    validate_crypto_suite,
+    ED25519_V1_CRYPTO_SUITE, ED25519_V1_SIGNATURE_VERSION, Ed25519Scheme,
+    HybridCriticalAnchorSignature, HybridCriticalAnchorVerification, SignatureScheme,
+    sign_hybrid_critical_anchor, validate_crypto_suite, verify_hybrid_critical_anchor,
 };
 use frankenengine_node::runtime::clock;
 use serde::{Deserialize, Serialize};
@@ -543,6 +544,39 @@ pub fn sign_receipt(
         chain_hash,
         signature: signature_b64,
     })
+}
+
+/// Dual-sign the receipt chain hash as a critical durability anchor.
+///
+/// This leaves the canonical receipt payload and legacy Ed25519 receipt
+/// signature untouched; the hybrid envelope is an additional anchor over the
+/// hash-chain commitment that can remain durable if one algorithm family is
+/// later distrusted.
+pub fn sign_receipt_critical_anchor(
+    signed: &SignedReceipt,
+    signing_key: &Ed25519PrivateKey,
+    hash_ots_secret_key: &[u8; 32],
+) -> Result<HybridCriticalAnchorSignature, ReceiptError> {
+    sign_hybrid_critical_anchor(
+        signed.chain_hash.as_bytes(),
+        &signing_key.to_bytes(),
+        hash_ots_secret_key,
+    )
+    .map_err(|source| ReceiptError::Internal(format!("failed to sign receipt anchor: {source}")))
+}
+
+/// Verify a dual-signed critical anchor over the receipt chain hash.
+pub fn verify_receipt_critical_anchor(
+    signed: &SignedReceipt,
+    public_key: &Ed25519PublicKey,
+    anchor_signature: &HybridCriticalAnchorSignature,
+) -> Result<HybridCriticalAnchorVerification, ReceiptError> {
+    verify_hybrid_critical_anchor(
+        signed.chain_hash.as_bytes(),
+        public_key.as_bytes(),
+        anchor_signature,
+    )
+    .map_err(|source| ReceiptError::Internal(format!("failed to verify receipt anchor: {source}")))
 }
 
 /// Verify signature and hash-chain material for a signed receipt.
@@ -1266,6 +1300,7 @@ fn ensure_parent_dir(path: &Path) -> Result<(), ReceiptError> {
 mod tests {
     use super::*;
     use crate::security::constant_time;
+    use frankenengine_node::crypto::HybridCriticalAnchorTrustPolicy;
     use serde_json::json;
     use std::sync::{Mutex, OnceLock};
 
@@ -1416,6 +1451,48 @@ mod tests {
         let signed = sign_receipt(&receipt, &key).expect("sign");
         let verified = verify_receipt(&signed, &public_key).expect("verify");
         assert!(verified);
+    }
+
+    #[test]
+    fn receipt_critical_anchor_hybrid_signature_roundtrips() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let hash_ots_secret_key = [53_u8; 32];
+        let receipt = make_receipt("quarantine", Decision::Approved);
+        let signed = sign_receipt(&receipt, &key).expect("sign");
+
+        let anchor_signature =
+            sign_receipt_critical_anchor(&signed, &key, &hash_ots_secret_key).expect("anchor sign");
+        let verification = verify_receipt_critical_anchor(&signed, &public_key, &anchor_signature)
+            .expect("anchor verify");
+
+        assert!(verification.fully_verified());
+        assert!(verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+        assert!(verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+        assert!(verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+    }
+
+    #[test]
+    fn receipt_critical_anchor_hybrid_rejects_different_chain_hash() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let hash_ots_secret_key = [59_u8; 32];
+        let receipt = make_receipt("quarantine", Decision::Approved);
+        let signed = sign_receipt(&receipt, &key).expect("sign");
+        let anchor_signature =
+            sign_receipt_critical_anchor(&signed, &key, &hash_ots_secret_key).expect("anchor sign");
+        let mut different_anchor = signed.clone();
+        different_anchor.chain_hash = format!("{}00", signed.chain_hash);
+
+        let verification =
+            verify_receipt_critical_anchor(&different_anchor, &public_key, &anchor_signature)
+                .expect("anchor verify");
+
+        assert!(!verification.ed25519_valid);
+        assert!(!verification.hash_based_valid);
+        assert!(!verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+        assert!(!verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+        assert!(!verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
     }
 
     #[test]

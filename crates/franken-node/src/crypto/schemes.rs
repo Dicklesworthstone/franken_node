@@ -46,8 +46,15 @@
 //!
 //! This is hashed (blake3 or SHA-256 depending on feature flags) before signing.
 
-use crate::crypto::error::Ed25519Error;
+use crate::crypto::error::{Ed25519Error, HashOtsError};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use rand::RngCore as _;
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 const ED25519_SIGNATURE_PREIMAGE_DOMAIN: &[u8] = b"ed25519_signature_v1:";
 
@@ -57,10 +64,28 @@ pub const ED25519_SIGNATURE_SCHEME_ID: &str = "ed25519_v1";
 pub const ED25519_V1_SIGNATURE_VERSION: &str = "ed25519-v1";
 /// Versioned crypto-suite discriminator for the current Ed25519-only suite.
 pub const ED25519_V1_CRYPTO_SUITE: &str = "ed25519-v1";
+/// Stable internal scheme identifier for the hash-based one-time anchor.
+pub const HASH_OTS_V1_SIGNATURE_SCHEME_ID: &str = "hash_ots_v1";
+/// External signature version for the hash-based one-time anchor.
+pub const HASH_OTS_V1_SIGNATURE_VERSION: &str = "hash-ots-v1";
+/// Versioned crypto-suite discriminator for the hash-based one-time anchor.
+pub const HASH_OTS_V1_CRYPTO_SUITE: &str = "hash-ots-v1";
+/// Stable internal scheme identifier for dual Ed25519 + hash-OTS anchors.
+pub const HYBRID_ED25519_HASH_OTS_V1_SIGNATURE_SCHEME_ID: &str = "hybrid_ed25519_hash_ots_v1";
+/// External signature version for dual Ed25519 + hash-OTS anchors.
+pub const HYBRID_ED25519_HASH_OTS_V1_SIGNATURE_VERSION: &str = "ed25519-v1+hash-ots-v1";
+/// Versioned crypto-suite discriminator for dual Ed25519 + hash-OTS anchors.
+pub const HYBRID_ED25519_HASH_OTS_V1_CRYPTO_SUITE: &str = "ed25519-v1+hash-ots-v1";
 /// Default suite used by new signed artifacts until callers opt into another suite.
 pub const DEFAULT_CRYPTO_SUITE: &str = ED25519_V1_CRYPTO_SUITE;
 /// Schema tag for the crypto-suite registry itself.
 pub const CRYPTO_SUITE_REGISTRY_SCHEMA: &str = crate::schema_versions::CRYPTO_SUITE_REGISTRY;
+/// Secret seed size for `hash-ots-v1`.
+pub const HASH_OTS_V1_SECRET_KEY_BYTES: usize = 32;
+/// Expanded public key size for `hash-ots-v1`.
+pub const HASH_OTS_V1_PUBLIC_KEY_BYTES: usize = 16_384;
+/// Signature size for `hash-ots-v1`.
+pub const HASH_OTS_V1_SIGNATURE_BYTES: usize = 8_192;
 
 /// Versioned crypto-suite metadata shared by signers, verifiers, and schema migration code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,8 +128,28 @@ static ED25519_V1_SUITE: CryptoSuite = CryptoSuite {
     signature_version: ED25519_V1_SIGNATURE_VERSION,
 };
 
+static HASH_OTS_V1_SUITE: CryptoSuite = CryptoSuite {
+    id: HASH_OTS_V1_CRYPTO_SUITE,
+    registry_schema: CRYPTO_SUITE_REGISTRY_SCHEMA,
+    signature_scheme_id: HASH_OTS_V1_SIGNATURE_SCHEME_ID,
+    signature_algorithm: HASH_OTS_V1_SIGNATURE_VERSION,
+    signature_version: HASH_OTS_V1_SIGNATURE_VERSION,
+};
+
+static HYBRID_ED25519_HASH_OTS_V1_SUITE: CryptoSuite = CryptoSuite {
+    id: HYBRID_ED25519_HASH_OTS_V1_CRYPTO_SUITE,
+    registry_schema: CRYPTO_SUITE_REGISTRY_SCHEMA,
+    signature_scheme_id: HYBRID_ED25519_HASH_OTS_V1_SIGNATURE_SCHEME_ID,
+    signature_algorithm: HYBRID_ED25519_HASH_OTS_V1_SIGNATURE_VERSION,
+    signature_version: HYBRID_ED25519_HASH_OTS_V1_SIGNATURE_VERSION,
+};
+
 /// Complete registry of crypto suites this build can validate.
-pub static REGISTERED_CRYPTO_SUITES: &[CryptoSuite] = &[ED25519_V1_SUITE];
+pub static REGISTERED_CRYPTO_SUITES: &[CryptoSuite] = &[
+    ED25519_V1_SUITE,
+    HASH_OTS_V1_SUITE,
+    HYBRID_ED25519_HASH_OTS_V1_SUITE,
+];
 
 #[must_use]
 pub fn registered_crypto_suites() -> &'static [CryptoSuite] {
@@ -155,6 +200,287 @@ pub fn downgrade_crypto_suite_to_signature_version(
 
 fn len_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+const HASH_OTS_V1_PAIR_COUNT: usize = 256;
+const HASH_OTS_V1_FRAGMENT_BYTES: usize = 32;
+const HASH_OTS_V1_DERIVE_DOMAIN: &[u8] = b"franken_node:hash_ots_v1:derive:";
+const HASH_OTS_V1_PUBLIC_DOMAIN: &[u8] = b"franken_node:hash_ots_v1:public:";
+const HASH_OTS_V1_MESSAGE_DOMAIN: &[u8] = b"franken_node:hash_ots_v1:message:";
+const HASH_OTS_V1_DOMAIN_MESSAGE_DOMAIN: &[u8] = b"franken_node:hash_ots_v1:domain_message:";
+const HYBRID_CRITICAL_ANCHOR_DOMAIN: &[u8] = b"franken_node:hybrid_critical_anchor:v1:";
+
+fn sha256_chunks(domain: &[u8], chunks: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    for chunk in chunks {
+        hasher.update(len_to_u64(chunk.len()).to_le_bytes());
+        hasher.update(chunk);
+    }
+    hasher.finalize().into()
+}
+
+fn hash_ots_secret_fragment(secret_key: &[u8; 32], bit_index: usize, bit_value: u8) -> [u8; 32] {
+    sha256_chunks(
+        HASH_OTS_V1_DERIVE_DOMAIN,
+        &[
+            &secret_key[..],
+            &len_to_u64(bit_index).to_le_bytes(),
+            &[bit_value],
+        ],
+    )
+}
+
+fn hash_ots_public_fragment(secret_fragment: &[u8; 32]) -> [u8; 32] {
+    sha256_chunks(HASH_OTS_V1_PUBLIC_DOMAIN, &[&secret_fragment[..]])
+}
+
+fn hash_ots_message_digest(message: &[u8]) -> [u8; 32] {
+    sha256_chunks(HASH_OTS_V1_MESSAGE_DOMAIN, &[message])
+}
+
+fn hash_ots_domain_message(domain: &[u8], message: &[u8]) -> Vec<u8> {
+    let digest = sha256_chunks(HASH_OTS_V1_DOMAIN_MESSAGE_DOMAIN, &[domain, message]);
+    digest.to_vec()
+}
+
+fn hash_ots_digest_bit(digest: &[u8; 32], bit_index: usize) -> u8 {
+    let byte = digest[bit_index / 8];
+    (byte >> (7 - (bit_index % 8))) & 1
+}
+
+fn hash_ots_public_key_from_secret(secret_key: &[u8; 32]) -> Vec<u8> {
+    let mut public_key = Vec::with_capacity(HASH_OTS_V1_PUBLIC_KEY_BYTES);
+    for bit_index in 0..HASH_OTS_V1_PAIR_COUNT {
+        for bit_value in [0_u8, 1_u8] {
+            let fragment = hash_ots_secret_fragment(secret_key, bit_index, bit_value);
+            public_key.extend_from_slice(&hash_ots_public_fragment(&fragment));
+        }
+    }
+    public_key
+}
+
+fn hash_ots_sign_raw(secret_key: &[u8; 32], message: &[u8]) -> Vec<u8> {
+    let digest = hash_ots_message_digest(message);
+    let mut signature = Vec::with_capacity(HASH_OTS_V1_SIGNATURE_BYTES);
+    for bit_index in 0..HASH_OTS_V1_PAIR_COUNT {
+        let bit_value = hash_ots_digest_bit(&digest, bit_index);
+        signature.extend_from_slice(&hash_ots_secret_fragment(secret_key, bit_index, bit_value));
+    }
+    signature
+}
+
+fn critical_anchor_preimage(anchor: &[u8]) -> [u8; 32] {
+    sha256_chunks(HYBRID_CRITICAL_ANCHOR_DOMAIN, &[anchor])
+}
+
+/// Hash-based one-time signature scheme used as a durability-diverse anchor.
+///
+/// This is intentionally named `hash-ots-v1`, not SPHINCS+. It is a local
+/// Lamport-style one-time anchor built from SHA-256 so critical roots can carry
+/// a hash-only verification path alongside Ed25519.
+#[derive(Debug, Clone)]
+pub struct HashOtsV1Scheme;
+
+impl HashOtsV1Scheme {
+    #[must_use]
+    pub fn public_key_from_secret_key(secret_key: &[u8; 32]) -> Vec<u8> {
+        hash_ots_public_key_from_secret(secret_key)
+    }
+}
+
+impl SignatureScheme for HashOtsV1Scheme {
+    type PublicKey = Vec<u8>;
+    type SecretKey = [u8; HASH_OTS_V1_SECRET_KEY_BYTES];
+    type Signature = Vec<u8>;
+    type Error = HashOtsError;
+
+    fn scheme_id() -> &'static str {
+        HASH_OTS_V1_SIGNATURE_SCHEME_ID
+    }
+
+    fn generate_keypair() -> Result<(Self::PublicKey, Self::SecretKey), Self::Error> {
+        let mut secret_key = [0_u8; HASH_OTS_V1_SECRET_KEY_BYTES];
+        let mut rng = OsRng;
+        rng.fill_bytes(&mut secret_key);
+        Ok((hash_ots_public_key_from_secret(&secret_key), secret_key))
+    }
+
+    fn sign_with_domain(
+        secret_key: &Self::SecretKey,
+        domain: &[u8],
+        message: &[u8],
+    ) -> Result<Self::Signature, Self::Error> {
+        let preimage = hash_ots_domain_message(domain, message);
+        Self::sign_raw(secret_key, &preimage)
+    }
+
+    fn verify_with_domain(
+        public_key: &Self::PublicKey,
+        domain: &[u8],
+        message: &[u8],
+        signature: &Self::Signature,
+    ) -> bool {
+        let preimage = hash_ots_domain_message(domain, message);
+        Self::verify_raw(public_key, &preimage, signature)
+    }
+
+    fn sign_raw(
+        secret_key: &Self::SecretKey,
+        message: &[u8],
+    ) -> Result<Self::Signature, Self::Error> {
+        Ok(hash_ots_sign_raw(secret_key, message))
+    }
+
+    fn verify_raw(
+        public_key: &Self::PublicKey,
+        message: &[u8],
+        signature: &Self::Signature,
+    ) -> bool {
+        if public_key.len() != HASH_OTS_V1_PUBLIC_KEY_BYTES
+            || signature.len() != HASH_OTS_V1_SIGNATURE_BYTES
+        {
+            return false;
+        }
+
+        let digest = hash_ots_message_digest(message);
+        let mut valid = 1_u8;
+        for bit_index in 0..HASH_OTS_V1_PAIR_COUNT {
+            let signature_offset = bit_index * HASH_OTS_V1_FRAGMENT_BYTES;
+            let mut signature_fragment = [0_u8; HASH_OTS_V1_FRAGMENT_BYTES];
+            signature_fragment.copy_from_slice(
+                &signature[signature_offset..signature_offset + HASH_OTS_V1_FRAGMENT_BYTES],
+            );
+
+            let expected_public_fragment = hash_ots_public_fragment(&signature_fragment);
+            let bit_value = usize::from(hash_ots_digest_bit(&digest, bit_index));
+            let public_offset = ((bit_index * 2) + bit_value) * HASH_OTS_V1_FRAGMENT_BYTES;
+            valid &= expected_public_fragment
+                .as_ref()
+                .ct_eq(&public_key[public_offset..public_offset + HASH_OTS_V1_FRAGMENT_BYTES])
+                .unwrap_u8();
+        }
+        valid == 1
+    }
+
+    fn public_key_from_bytes(bytes: &[u8]) -> Result<Self::PublicKey, Self::Error> {
+        if bytes.len() != HASH_OTS_V1_PUBLIC_KEY_BYTES {
+            return Err(HashOtsError::InvalidPublicKeyLength {
+                expected: HASH_OTS_V1_PUBLIC_KEY_BYTES,
+                actual: bytes.len(),
+            });
+        }
+        Ok(bytes.to_vec())
+    }
+
+    fn signature_from_bytes(bytes: &[u8]) -> Result<Self::Signature, Self::Error> {
+        if bytes.len() != HASH_OTS_V1_SIGNATURE_BYTES {
+            return Err(HashOtsError::InvalidSignatureLength {
+                expected: HASH_OTS_V1_SIGNATURE_BYTES,
+                actual: bytes.len(),
+            });
+        }
+        Ok(bytes.to_vec())
+    }
+}
+
+/// Detached dual-signature envelope for critical audit anchors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HybridCriticalAnchorSignature {
+    pub crypto_suite: String,
+    pub ed25519_signature_b64: String,
+    pub hash_ots_public_key_hex: String,
+    pub hash_ots_signature_hex: String,
+}
+
+/// Verification result for a hybrid critical-anchor envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HybridCriticalAnchorVerification {
+    pub ed25519_valid: bool,
+    pub hash_based_valid: bool,
+}
+
+/// Trust policy selected after deciding which algorithm families are still acceptable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HybridCriticalAnchorTrustPolicy {
+    /// Normal verification path: require both signature families to validate.
+    RequireBoth,
+    /// Fallback after the hash-based family is unavailable or explicitly distrusted.
+    RequireEd25519,
+    /// Fallback after Ed25519 is unavailable or explicitly distrusted.
+    RequireHashBased,
+}
+
+impl HybridCriticalAnchorVerification {
+    #[must_use]
+    pub const fn fully_verified(self) -> bool {
+        self.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth)
+    }
+
+    #[must_use]
+    pub const fn valid_under(self, policy: HybridCriticalAnchorTrustPolicy) -> bool {
+        match policy {
+            HybridCriticalAnchorTrustPolicy::RequireBoth => {
+                self.ed25519_valid && self.hash_based_valid
+            }
+            HybridCriticalAnchorTrustPolicy::RequireEd25519 => self.ed25519_valid,
+            HybridCriticalAnchorTrustPolicy::RequireHashBased => self.hash_based_valid,
+        }
+    }
+}
+
+pub fn sign_hybrid_critical_anchor(
+    anchor: &[u8],
+    ed25519_secret_key: &[u8; 32],
+    hash_ots_secret_key: &[u8; 32],
+) -> Result<HybridCriticalAnchorSignature, HashOtsError> {
+    let preimage = critical_anchor_preimage(anchor);
+    let ed25519_signature = Ed25519Scheme::sign_raw(ed25519_secret_key, &preimage)
+        .map_err(|source| HashOtsError::Ed25519Failed(source.to_string()))?;
+    let hash_ots_public_key = HashOtsV1Scheme::public_key_from_secret_key(hash_ots_secret_key);
+    let hash_ots_signature = HashOtsV1Scheme::sign_raw(hash_ots_secret_key, &preimage)?;
+
+    Ok(HybridCriticalAnchorSignature {
+        crypto_suite: HYBRID_ED25519_HASH_OTS_V1_CRYPTO_SUITE.to_string(),
+        ed25519_signature_b64: BASE64_STANDARD.encode(ed25519_signature),
+        hash_ots_public_key_hex: hex::encode(hash_ots_public_key),
+        hash_ots_signature_hex: hex::encode(hash_ots_signature),
+    })
+}
+
+pub fn verify_hybrid_critical_anchor(
+    anchor: &[u8],
+    ed25519_public_key: &[u8; 32],
+    signature: &HybridCriticalAnchorSignature,
+) -> Result<HybridCriticalAnchorVerification, HashOtsError> {
+    if signature.crypto_suite != HYBRID_ED25519_HASH_OTS_V1_CRYPTO_SUITE {
+        return Err(HashOtsError::DecodeFailed(format!(
+            "unsupported hybrid crypto_suite '{}'",
+            signature.crypto_suite
+        )));
+    }
+
+    let preimage = critical_anchor_preimage(anchor);
+    let ed25519_signature_bytes = BASE64_STANDARD
+        .decode(&signature.ed25519_signature_b64)
+        .map_err(|source| HashOtsError::DecodeFailed(source.to_string()))?;
+    let ed25519_signature = Ed25519Scheme::signature_from_bytes(&ed25519_signature_bytes)
+        .map_err(|source| HashOtsError::Ed25519Failed(source.to_string()))?;
+    let hash_ots_public_key_bytes = hex::decode(&signature.hash_ots_public_key_hex)
+        .map_err(|source| HashOtsError::DecodeFailed(source.to_string()))?;
+    let hash_ots_public_key = HashOtsV1Scheme::public_key_from_bytes(&hash_ots_public_key_bytes)?;
+    let hash_ots_signature_bytes = hex::decode(&signature.hash_ots_signature_hex)
+        .map_err(|source| HashOtsError::DecodeFailed(source.to_string()))?;
+    let hash_ots_signature = HashOtsV1Scheme::signature_from_bytes(&hash_ots_signature_bytes)?;
+
+    Ok(HybridCriticalAnchorVerification {
+        ed25519_valid: Ed25519Scheme::verify_raw(ed25519_public_key, &preimage, &ed25519_signature),
+        hash_based_valid: HashOtsV1Scheme::verify_raw(
+            &hash_ots_public_key,
+            &preimage,
+            &hash_ots_signature,
+        ),
+    })
 }
 
 /// Unified signature scheme abstraction with domain separation support.
