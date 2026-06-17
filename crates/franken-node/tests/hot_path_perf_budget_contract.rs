@@ -5,6 +5,14 @@ use frankenengine_node::policy::perf_budget_guard::{
 };
 use serde_json::{Value, json};
 
+const EXPECTED_TNR_HOT_PATHS: [&str; 5] = [
+    "runtime.effect_receipt.construct_and_hash",
+    "runtime.effect_receipt.label_propagation_transform",
+    "policy.runtime_sentinel.conformal_score_lookup",
+    "policy.bayesian_diagnostics.e_process_update",
+    "verifier_sdk.long_term_verification.reattestation",
+];
+
 fn committed_evidence() -> Result<Value, Box<dyn std::error::Error>> {
     Ok(serde_json::from_str(include_str!(
         "../../../artifacts/performance_budgets/bd-ncwlf_hot_path_budget_evidence.json"
@@ -49,7 +57,16 @@ fn hot_path_budget_smoke_pairs_every_metric_with_correctness_assertions()
     let report = run_default_hot_path_budget_smoke()?;
 
     assert!(report.overall_pass);
-    assert_eq!(report.cases.len(), 5);
+    assert_eq!(report.cases.len(), 10);
+    for expected in EXPECTED_TNR_HOT_PATHS {
+        assert!(
+            report.cases.iter().any(|case| {
+                case.hot_path == expected
+                    && case.source_beads.iter().any(|bead| bead == "bd-f5b04.9.2")
+            }),
+            "missing TNR hot-path budget case for {expected}"
+        );
+    }
     for case in &report.cases {
         assert!(!case.hot_path.is_empty());
         // Ed25519 case uses microseconds; others use deterministic_work_units
@@ -109,7 +126,7 @@ fn hot_path_budget_smoke_skip_mode_reports_explicit_blocker()
     );
     assert!(report.gate_result.is_none());
     assert!(report.events.is_empty());
-    assert_eq!(report.cases.len(), 5);
+    assert_eq!(report.cases.len(), 10);
 
     Ok(())
 }

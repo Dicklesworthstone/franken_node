@@ -7,7 +7,9 @@ budget policy, timing measurement, and gate-report structures instead of
 creating a second performance schema. It is intentionally a CI smoke contract,
 not an authoritative wall-clock benchmark. It records deterministic work-unit
 budgets for hot paths where the relevant regression shape is lock acquisition,
-full-vector clone work, eager formatting, or serialized persistence work.
+full-vector clone work, eager formatting, serialized persistence work,
+per-effect receipt hashing, label propagation, conformal scoring, e-process
+updates, or amortized long-term re-attestation.
 
 ## Evidence
 
@@ -41,10 +43,20 @@ The evidence includes:
 | `control_plane.fleet_transport.read_snapshot` | `bd-42obl` | Exclusive lock and clone work per read |
 | `observability.evidence_ledger.len_snapshot` | `bd-1689l`, `bd-2ahez` | Ledger clone and diagnostic serialization work |
 | `storage.frankensqlite_adapter.write_event` | `bd-1ulnv` | Eager string allocation work per write |
+| `crypto.ed25519_scheme.sign_raw` | `bd-98xo5.2.3`, `bd-98xo5.2.4` | Wrapper overhead per signature |
+| `runtime.effect_receipt.construct_and_hash` | `bd-f5b04.2.2.1`, `bd-f5b04.9.2` | Per-syscall receipt construction and CAS hashing |
+| `runtime.effect_receipt.label_propagation_transform` | `bd-f5b04.2.2.1`, `bd-f5b04.9.2` | Lineage label propagation per transform |
+| `policy.runtime_sentinel.conformal_score_lookup` | `bd-f5b04.3.1.1`, `bd-f5b04.9.2` | Frozen-quantile lookup per Sentinel decision |
+| `policy.bayesian_diagnostics.e_process_update` | `bd-f5b04.3.1.2`, `bd-f5b04.9.2` | Fixed-point e-process update per observation |
+| `verifier_sdk.long_term_verification.reattestation` | `bd-f5b04.5.1.6`, `bd-f5b04.9.2` | Amortized MMR root re-attestation cost |
 
 Each case must keep at least three correctness assertions next to the metric so
 future optimization changes do not pass by removing trust, ordering, audit, or
 persistence behavior.
+
+The TNR cases are also represented in the registered Criterion bench target
+`crates/franken-node/benches/perf_wins.rs`, which is already listed in
+`crates/franken-node/Cargo.toml` as `[[bench]] name = "perf_wins"`.
 
 ## CI Smoke Command
 

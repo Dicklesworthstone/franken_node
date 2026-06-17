@@ -861,7 +861,7 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
             cold_start_ms: 0.0,
             budget: budget.clone(),
             correctness_assertions: vec![
-                "ready envelopes are drained FIFO before the adapter lock is taken".to_string(),
+                "ready envelopes must be drained FIFO before the adapter lock is taken".to_string(),
                 "write failures still increment persistence drop metrics".to_string(),
                 "audit payload keys remain bridge_seq ordered".to_string(),
             ],
@@ -910,10 +910,12 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
             correctness_assertions: vec![
                 "ledger length checks do not clone full entry payloads".to_string(),
                 "append ordering remains hash-link deterministic".to_string(),
-                "diagnostic output is not required for correctness of append receipts".to_string(),
+                "diagnostic output must not be required for correctness of append receipts"
+                    .to_string(),
             ],
             regression_guard:
-                "ledger metadata checks must remain metadata-only in the smoke budget".to_string(),
+                "ledger metadata checks must remain metadata-only and below pre-fix clone work"
+                    .to_string(),
             skip_policy:
                 "skip only when no rch worker is available; emit skip_blocker instead of PASS"
                     .to_string(),
@@ -931,8 +933,8 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
             cold_start_ms: 0.0,
             budget: budget.clone(),
             correctness_assertions: vec![
-                "write authorization is checked before persistence".to_string(),
-                "audit-log class writes retain deterministic keys".to_string(),
+                "write authorization must be checked before persistence".to_string(),
+                "audit-log class writes must retain deterministic keys".to_string(),
                 "event subscriber absence must not force eager event formatting".to_string(),
             ],
             regression_guard:
@@ -953,16 +955,137 @@ pub fn default_hot_path_budget_smoke_cases() -> Vec<HotPathBudgetSmokeCase> {
             post_fix_p95_units: 26.0,
             post_fix_p99_units: 28.0,
             cold_start_ms: 0.1,
-            budget,
+            budget: budget.clone(),
             correctness_assertions: vec![
-                "preparsed signer produces byte-identical signatures vs stateless sign_raw"
+                "preparsed signer must produce byte-identical signatures vs stateless sign_raw"
                     .to_string(),
-                "preparsed verifier accepts same set of signatures as verify_strict path"
+                "preparsed verifier must accept same set of signatures as verify_strict path"
                     .to_string(),
-                "ZeroizeOnDrop is upheld for the cached SigningKey".to_string(),
+                "ZeroizeOnDrop must be upheld for the cached SigningKey".to_string(),
             ],
             regression_guard: "wrapper overhead must stay below 1.30x dalek_direct sign time"
                 .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "runtime.effect_receipt.construct_and_hash".to_string(),
+            surface: "crates/franken-node/src/runtime/effect_receipt.rs".to_string(),
+            source_beads: vec!["bd-f5b04.2.2.1".to_string(), "bd-f5b04.9.2".to_string()],
+            metric_kind: "per_syscall_receipt_construction_and_cas_hash_work".to_string(),
+            unit: "deterministic_work_units".to_string(),
+            before_fix_p95_units: 24.0,
+            before_fix_p99_units: 32.0,
+            post_fix_p95_units: 7.0,
+            post_fix_p99_units: 9.0,
+            cold_start_ms: 0.0,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "receipt hashes remain domain-separated and length-prefixed".to_string(),
+                "allowed receipts still bind pre-state, args, result, and post-state hashes"
+                    .to_string(),
+                "append-only chain linkage still fails closed on tampering".to_string(),
+            ],
+            regression_guard:
+                "per-syscall receipt construction must stay under 7 deterministic p95 work units"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "runtime.effect_receipt.label_propagation_transform".to_string(),
+            surface: "crates/franken-node/src/runtime/effect_receipt.rs".to_string(),
+            source_beads: vec!["bd-f5b04.2.2.1".to_string(), "bd-f5b04.9.2".to_string()],
+            metric_kind: "lineage_label_propagation_work_per_transform".to_string(),
+            unit: "deterministic_work_units".to_string(),
+            before_fix_p95_units: 20.0,
+            before_fix_p99_units: 26.0,
+            post_fix_p95_units: 4.0,
+            post_fix_p99_units: 5.0,
+            cold_start_ms: 0.0,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "input lineage hashes remain canonical sha256 digests".to_string(),
+                "declassification receipts are still required for declassified flows".to_string(),
+                "blocked lineage verdicts still suppress result and output hashes".to_string(),
+            ],
+            regression_guard:
+                "label propagation must not exceed 4 deterministic p95 work units per transform"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "policy.runtime_sentinel.conformal_score_lookup".to_string(),
+            surface: "crates/franken-node/src/policy/runtime_sentinel.rs".to_string(),
+            source_beads: vec!["bd-f5b04.3.1.1".to_string(), "bd-f5b04.9.2".to_string()],
+            metric_kind: "frozen_quantile_signal_lookup_work_per_decision".to_string(),
+            unit: "deterministic_work_units".to_string(),
+            before_fix_p95_units: 18.0,
+            before_fix_p99_units: 22.0,
+            post_fix_p95_units: 3.0,
+            post_fix_p99_units: 4.0,
+            cold_start_ms: 0.0,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "positive-label membership still drives Sentinel likelihood magnitude".to_string(),
+                "risk class and quantile metadata remain in the signal detail".to_string(),
+                "all conformal scores remain integer basis-point values".to_string(),
+            ],
+            regression_guard:
+                "frozen-quantile conformal lookup must stay at or below 3 deterministic p95 work units"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "policy.bayesian_diagnostics.e_process_update".to_string(),
+            surface: "crates/franken-node/src/policy/bayesian_diagnostics.rs".to_string(),
+            source_beads: vec!["bd-f5b04.3.1.2".to_string(), "bd-f5b04.9.2".to_string()],
+            metric_kind: "fixed_point_e_process_update_work_per_observation".to_string(),
+            unit: "deterministic_work_units".to_string(),
+            before_fix_p95_units: 14.0,
+            before_fix_p99_units: 18.0,
+            post_fix_p95_units: 2.0,
+            post_fix_p99_units: 3.0,
+            cold_start_ms: 0.0,
+            budget: budget.clone(),
+            correctness_assertions: vec![
+                "e-process evidence sequence monotonicity remains enforced".to_string(),
+                "Ville false-alarm bounds remain fixed-point and replay-safe".to_string(),
+                "posterior e-values still saturate instead of overflowing".to_string(),
+            ],
+            regression_guard:
+                "one Sentinel e-process observation update must stay under 2 deterministic p95 work units"
+                    .to_string(),
+            skip_policy:
+                "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+                    .to_string(),
+        },
+        HotPathBudgetSmokeCase {
+            hot_path: "verifier_sdk.long_term_verification.reattestation".to_string(),
+            surface: "sdk/verifier/src/lib.rs".to_string(),
+            source_beads: vec!["bd-f5b04.5.1.6".to_string(), "bd-f5b04.9.2".to_string()],
+            metric_kind: "amortized_mmr_root_reattestation_work_per_epoch".to_string(),
+            unit: "deterministic_work_units".to_string(),
+            before_fix_p95_units: 64.0,
+            before_fix_p99_units: 80.0,
+            post_fix_p95_units: 12.0,
+            post_fix_p99_units: 16.0,
+            cold_start_ms: 0.2,
+            budget,
+            correctness_assertions: vec![
+                "verify-as-of-T still proves root anteriority before accepting evidence".to_string(),
+                "MMR prefix links remain checked across retained and witnessed roots".to_string(),
+                "post-compromise and backdated witnesses still produce fail verdicts".to_string(),
+            ],
+            regression_guard:
+                "amortized LTV re-attestation must stay below 12 deterministic p95 work units"
+                    .to_string(),
             skip_policy:
                 "skip only when no rch worker is available; emit skip_blocker instead of PASS"
                     .to_string(),

@@ -7,14 +7,13 @@
 //! - INV-REGRESSION-PROTECTION: regression guards must prevent degradation
 //! - INV-SKIP-MODE-HONESTY: skip mode must not emit false positives
 
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use frankenengine_node::policy::perf_budget_guard::{
-    BenchmarkMeasurement, GateResult, HOT_PATH_SMOKE_BEAD_ID, HOT_PATH_SMOKE_SCHEMA_VERSION,
-    HOT_PATH_SMOKE_TRACE_ID, HotPathBudgetSmokeCase, HotPathBudgetSmokeMode,
-    HotPathBudgetSmokeReport, PathBudget, PerfBudgetError, default_hot_path_budget_smoke_cases,
-    hot_path_budget_smoke_policy, hot_path_budget_smoke_to_json, run_hot_path_budget_smoke,
+    HOT_PATH_SMOKE_BEAD_ID, HOT_PATH_SMOKE_SCHEMA_VERSION, HotPathBudgetSmokeCase,
+    HotPathBudgetSmokeMode, HotPathBudgetSmokeReport, PathBudget,
+    default_hot_path_budget_smoke_cases, hot_path_budget_smoke_policy,
+    hot_path_budget_smoke_to_json, run_hot_path_budget_smoke,
 };
 
 #[derive(Debug, Clone)]
@@ -748,11 +747,15 @@ fn test_critical_hot_paths_covered() -> TestResult {
 
     // Verify coverage of critical system areas
     let critical_areas = [
-        "ops.telemetry_bridge",          // Telemetry/observability
-        "control_plane.fleet_transport", // Control plane
-        "observability.evidence_ledger", // Evidence/audit
-        "storage.frankensqlite_adapter", // Storage layer
-        "crypto.ed25519_scheme",         // Cryptography
+        "ops.telemetry_bridge",                // Telemetry/observability
+        "control_plane.fleet_transport",       // Control plane
+        "observability.evidence_ledger",       // Evidence/audit
+        "storage.frankensqlite_adapter",       // Storage layer
+        "crypto.ed25519_scheme",               // Cryptography
+        "runtime.effect_receipt",              // TNR effect receipts + label propagation
+        "policy.runtime_sentinel",             // TNR conformal scoring into Sentinel
+        "policy.bayesian_diagnostics",         // TNR e-process update path
+        "verifier_sdk.long_term_verification", // TNR LTV re-attestation
     ];
 
     for area in critical_areas {

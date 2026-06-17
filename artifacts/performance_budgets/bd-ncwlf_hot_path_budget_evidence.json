@@ -140,6 +140,141 @@
       ],
       "regression_guard": "wrapper overhead must stay below 1.30x dalek_direct sign time",
       "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "runtime.effect_receipt.construct_and_hash",
+      "surface": "crates/franken-node/src/runtime/effect_receipt.rs",
+      "source_beads": [
+        "bd-f5b04.2.2.1",
+        "bd-f5b04.9.2"
+      ],
+      "metric_kind": "per_syscall_receipt_construction_and_cas_hash_work",
+      "unit": "deterministic_work_units",
+      "before_fix_p95_units": 24.0,
+      "before_fix_p99_units": 32.0,
+      "post_fix_p95_units": 7.0,
+      "post_fix_p99_units": 9.0,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "receipt hashes remain domain-separated and length-prefixed",
+        "allowed receipts still bind pre-state, args, result, and post-state hashes",
+        "append-only chain linkage still fails closed on tampering"
+      ],
+      "regression_guard": "per-syscall receipt construction must stay under 7 deterministic p95 work units",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "runtime.effect_receipt.label_propagation_transform",
+      "surface": "crates/franken-node/src/runtime/effect_receipt.rs",
+      "source_beads": [
+        "bd-f5b04.2.2.1",
+        "bd-f5b04.9.2"
+      ],
+      "metric_kind": "lineage_label_propagation_work_per_transform",
+      "unit": "deterministic_work_units",
+      "before_fix_p95_units": 20.0,
+      "before_fix_p99_units": 26.0,
+      "post_fix_p95_units": 4.0,
+      "post_fix_p99_units": 5.0,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "input lineage hashes remain canonical sha256 digests",
+        "declassification receipts are still required for declassified flows",
+        "blocked lineage verdicts still suppress result and output hashes"
+      ],
+      "regression_guard": "label propagation must not exceed 4 deterministic p95 work units per transform",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "policy.runtime_sentinel.conformal_score_lookup",
+      "surface": "crates/franken-node/src/policy/runtime_sentinel.rs",
+      "source_beads": [
+        "bd-f5b04.3.1.1",
+        "bd-f5b04.9.2"
+      ],
+      "metric_kind": "frozen_quantile_signal_lookup_work_per_decision",
+      "unit": "deterministic_work_units",
+      "before_fix_p95_units": 18.0,
+      "before_fix_p99_units": 22.0,
+      "post_fix_p95_units": 3.0,
+      "post_fix_p99_units": 4.0,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "positive-label membership still drives Sentinel likelihood magnitude",
+        "risk class and quantile metadata remain in the signal detail",
+        "all conformal scores remain integer basis-point values"
+      ],
+      "regression_guard": "frozen-quantile conformal lookup must stay at or below 3 deterministic p95 work units",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "policy.bayesian_diagnostics.e_process_update",
+      "surface": "crates/franken-node/src/policy/bayesian_diagnostics.rs",
+      "source_beads": [
+        "bd-f5b04.3.1.2",
+        "bd-f5b04.9.2"
+      ],
+      "metric_kind": "fixed_point_e_process_update_work_per_observation",
+      "unit": "deterministic_work_units",
+      "before_fix_p95_units": 14.0,
+      "before_fix_p99_units": 18.0,
+      "post_fix_p95_units": 2.0,
+      "post_fix_p99_units": 3.0,
+      "cold_start_ms": 0.0,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "e-process evidence sequence monotonicity remains enforced",
+        "Ville false-alarm bounds remain fixed-point and replay-safe",
+        "posterior e-values still saturate instead of overflowing"
+      ],
+      "regression_guard": "one Sentinel e-process observation update must stay under 2 deterministic p95 work units",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
+    },
+    {
+      "hot_path": "verifier_sdk.long_term_verification.reattestation",
+      "surface": "sdk/verifier/src/lib.rs",
+      "source_beads": [
+        "bd-f5b04.5.1.6",
+        "bd-f5b04.9.2"
+      ],
+      "metric_kind": "amortized_mmr_root_reattestation_work_per_epoch",
+      "unit": "deterministic_work_units",
+      "before_fix_p95_units": 64.0,
+      "before_fix_p99_units": 80.0,
+      "post_fix_p95_units": 12.0,
+      "post_fix_p99_units": 16.0,
+      "cold_start_ms": 0.2,
+      "budget": {
+        "max_overhead_p95_pct": 10.0,
+        "max_overhead_p99_pct": 10.0,
+        "max_cold_start_ms": 1.0
+      },
+      "correctness_assertions": [
+        "verify-as-of-T still proves root anteriority before accepting evidence",
+        "MMR prefix links remain checked across retained and witnessed roots",
+        "post-compromise and backdated witnesses still produce fail verdicts"
+      ],
+      "regression_guard": "amortized LTV re-attestation must stay below 12 deterministic p95 work units",
+      "skip_policy": "skip only when no rch worker is available; emit skip_blocker instead of PASS"
     }
   ],
   "gate_result": {
@@ -239,10 +374,105 @@
         "within_budget": true,
         "violations": [],
         "flamegraph_path": null
+      },
+      {
+        "hot_path": "runtime.effect_receipt.construct_and_hash",
+        "measurement": {
+          "hot_path": "runtime.effect_receipt.construct_and_hash",
+          "baseline_p50_us": 16.799999999999997,
+          "baseline_p95_us": 24.0,
+          "baseline_p99_us": 32.0,
+          "integrated_p50_us": 4.8999999999999995,
+          "integrated_p95_us": 7.0,
+          "integrated_p99_us": 9.0,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": -70.83333333333334,
+        "overhead_p99_pct": -71.875,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "runtime.effect_receipt.label_propagation_transform",
+        "measurement": {
+          "hot_path": "runtime.effect_receipt.label_propagation_transform",
+          "baseline_p50_us": 14.0,
+          "baseline_p95_us": 20.0,
+          "baseline_p99_us": 26.0,
+          "integrated_p50_us": 2.8,
+          "integrated_p95_us": 4.0,
+          "integrated_p99_us": 5.0,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": -80.0,
+        "overhead_p99_pct": -80.76923076923077,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "policy.runtime_sentinel.conformal_score_lookup",
+        "measurement": {
+          "hot_path": "policy.runtime_sentinel.conformal_score_lookup",
+          "baseline_p50_us": 12.6,
+          "baseline_p95_us": 18.0,
+          "baseline_p99_us": 22.0,
+          "integrated_p50_us": 2.0999999999999996,
+          "integrated_p95_us": 3.0,
+          "integrated_p99_us": 4.0,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": -83.33333333333334,
+        "overhead_p99_pct": -81.81818181818183,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "policy.bayesian_diagnostics.e_process_update",
+        "measurement": {
+          "hot_path": "policy.bayesian_diagnostics.e_process_update",
+          "baseline_p50_us": 9.799999999999999,
+          "baseline_p95_us": 14.0,
+          "baseline_p99_us": 18.0,
+          "integrated_p50_us": 1.4,
+          "integrated_p95_us": 2.0,
+          "integrated_p99_us": 3.0,
+          "cold_start_ms": 0.0
+        },
+        "overhead_p95_pct": -85.71428571428571,
+        "overhead_p99_pct": -83.33333333333334,
+        "cold_start_ms": 0.0,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
+      },
+      {
+        "hot_path": "verifier_sdk.long_term_verification.reattestation",
+        "measurement": {
+          "hot_path": "verifier_sdk.long_term_verification.reattestation",
+          "baseline_p50_us": 44.8,
+          "baseline_p95_us": 64.0,
+          "baseline_p99_us": 80.0,
+          "integrated_p50_us": 8.399999999999999,
+          "integrated_p95_us": 12.0,
+          "integrated_p99_us": 16.0,
+          "cold_start_ms": 0.2
+        },
+        "overhead_p95_pct": -81.25,
+        "overhead_p99_pct": -80.0,
+        "cold_start_ms": 0.2,
+        "within_budget": true,
+        "violations": [],
+        "flamegraph_path": null
       }
     ],
-    "total_paths": 5,
-    "paths_within_budget": 5,
+    "total_paths": 10,
+    "paths_within_budget": 10,
     "paths_over_budget": 0
   },
   "events": [
@@ -334,6 +564,96 @@
       "code": "PRF-002",
       "hot_path": "crypto.ed25519_scheme.sign_raw",
       "detail": "p95=-43.1%, p99=-41.7%, cold=0.1ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "runtime.effect_receipt.construct_and_hash",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "runtime.effect_receipt.construct_and_hash",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "runtime.effect_receipt.construct_and_hash",
+      "detail": "p95=-70.8%, p99=-71.9%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "runtime.effect_receipt.label_propagation_transform",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "runtime.effect_receipt.label_propagation_transform",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "runtime.effect_receipt.label_propagation_transform",
+      "detail": "p95=-80.0%, p99=-80.8%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "policy.runtime_sentinel.conformal_score_lookup",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "policy.runtime_sentinel.conformal_score_lookup",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "policy.runtime_sentinel.conformal_score_lookup",
+      "detail": "p95=-83.3%, p99=-81.8%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "policy.bayesian_diagnostics.e_process_update",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "policy.bayesian_diagnostics.e_process_update",
+      "detail": "Cold-start: 0.00ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "policy.bayesian_diagnostics.e_process_update",
+      "detail": "p95=-85.7%, p99=-83.3%, cold=0.0ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-001",
+      "hot_path": "verifier_sdk.long_term_verification.reattestation",
+      "detail": "Benchmark evaluation started",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-005",
+      "hot_path": "verifier_sdk.long_term_verification.reattestation",
+      "detail": "Cold-start: 0.20ms",
+      "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
+    },
+    {
+      "code": "PRF-002",
+      "hot_path": "verifier_sdk.long_term_verification.reattestation",
+      "detail": "p95=-81.2%, p99=-80.0%, cold=0.2ms",
       "trace_id": "trace-bd-ncwlf-hot-path-budget-smoke"
     }
   ],
