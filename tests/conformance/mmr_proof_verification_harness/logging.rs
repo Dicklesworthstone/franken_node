@@ -180,12 +180,16 @@ pub enum TestPhase {
 #[macro_export]
 macro_rules! log_test_start {
     ($logger:expr, $test_id:expr, $run_id:expr) => {
-        $logger.log(&$crate::logging::TestEvent::new(
-            $crate::logging::LogLevel::Info,
-            $crate::logging::EventCode::TestStart,
-            format!("Starting test: {}", $test_id),
-            $run_id,
-        ).with_test_id($test_id).with_phase($crate::logging::TestPhase::Setup));
+        $logger.log(
+            &$crate::logging::TestEvent::new(
+                $crate::logging::LogLevel::Info,
+                $crate::logging::EventCode::TestStart,
+                format!("Starting test: {}", $test_id),
+                $run_id,
+            )
+            .with_test_id($test_id)
+            .with_phase($crate::logging::TestPhase::Setup),
+        );
     };
 }
 
@@ -193,17 +197,26 @@ macro_rules! log_test_start {
 macro_rules! log_test_result {
     ($logger:expr, $test_id:expr, $result:expr, $duration:expr, $run_id:expr) => {
         let (level, code) = match $result.is_passing() {
-            true => ($crate::logging::LogLevel::Info, $crate::logging::EventCode::TestPass),
-            false => ($crate::logging::LogLevel::Error, $crate::logging::EventCode::TestFail),
+            true => (
+                $crate::logging::LogLevel::Info,
+                $crate::logging::EventCode::TestPass,
+            ),
+            false => (
+                $crate::logging::LogLevel::Error,
+                $crate::logging::EventCode::TestFail,
+            ),
         };
 
-        $logger.log(&$crate::logging::TestEvent::new(
-            level,
-            code,
-            format!("Test result: {}", $result),
-            $run_id,
-        ).with_test_id($test_id)
-         .with_duration($duration)
-         .with_phase($crate::logging::TestPhase::Summary));
+        $logger.log(
+            &$crate::logging::TestEvent::new(
+                level,
+                code,
+                format!("Test result: {}", $result),
+                $run_id,
+            )
+            .with_test_id($test_id)
+            .with_duration($duration)
+            .with_phase($crate::logging::TestPhase::Summary),
+        );
     };
 }

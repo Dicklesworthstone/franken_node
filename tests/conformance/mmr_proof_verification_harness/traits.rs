@@ -139,7 +139,9 @@ impl TestResult {
 
     /// Create a skipped result
     pub fn skipped(reason: impl Into<String>) -> Self {
-        Self::Skipped { reason: reason.into() }
+        Self::Skipped {
+            reason: reason.into(),
+        }
     }
 
     /// Create an expected failure result
@@ -152,7 +154,9 @@ impl TestResult {
 
     /// Create an error result
     pub fn error(reason: impl Into<String>) -> Self {
-        Self::Error { reason: reason.into() }
+        Self::Error {
+            reason: reason.into(),
+        }
     }
 
     /// Check if this result represents a passing test
@@ -177,7 +181,10 @@ impl fmt::Display for TestResult {
             Self::Pass => write!(f, "PASS"),
             Self::Fail { reason, .. } => write!(f, "FAIL: {}", reason),
             Self::Skipped { reason } => write!(f, "SKIP: {}", reason),
-            Self::ExpectedFailure { reason, discrepancy_id } => {
+            Self::ExpectedFailure {
+                reason,
+                discrepancy_id,
+            } => {
                 write!(f, "XFAIL ({}): {}", discrepancy_id, reason)
             }
             Self::Error { reason } => write!(f, "ERROR: {}", reason),

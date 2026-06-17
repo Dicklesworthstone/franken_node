@@ -57,6 +57,10 @@ use hex;
 use sha2::{Digest, Sha256};
 use std::convert::TryInto;
 
+use crate::control_plane::mmr_proofs::{
+    MmrRootWitnessReceipt, MmrRootWitnessVerification, verify_root_witness_anteriority,
+};
+
 // ── Profiling instrumentation (bd-98xo5.12.4) ───────────────────────────
 //
 // Gated by `#[cfg(feature = "profiling")]` so production builds pay zero cost.
@@ -142,6 +146,8 @@ const SHA256_DIGEST_BYTES: usize = 32;
 const REPLAY_TIMESTAMP_BYTES: usize = 8;
 const REPLAY_KEY_BYTES: usize = REPLAY_TIMESTAMP_BYTES + ED25519_SIGNATURE_BYTES;
 const SPILL_FILE_BUFFER_BYTES: usize = 64 * 1024;
+pub const MMR_ROOT_WITNESS_EVIDENCE_SCHEMA_VERSION: &str = "mmr-root-witness-evidence-v1";
+pub const MMR_ROOT_WITNESS_EVIDENCE_DECISION_PREFIX: &str = "MMR-ROOT-WITNESS";
 type ReplaySignature = [u8; ED25519_SIGNATURE_BYTES];
 type ReplayKey = [u8; REPLAY_KEY_BYTES];
 type EntryHash = [u8; SHA256_DIGEST_BYTES];
@@ -730,6 +736,73 @@ pub fn verify_evidence_entry(
     verify_evidence_entry_bytes(entry, verifying_key).map(|_| ())
 }
 
+/// Build a ledger entry that records an independently witnessed MMR root.
+///
+/// The receipt is verified against `as_of_unix_seconds` before the entry is
+/// produced, so appending this entry records proof that the root was observed
+/// no later than the supplied cutoff.
+pub fn mmr_root_witness_evidence_entry(
+    receipt: &MmrRootWitnessReceipt,
+    as_of_unix_seconds: u64,
+) -> Result<EvidenceEntry, LedgerError> {
+    build_mmr_root_witness_evidence_entry(receipt, as_of_unix_seconds).map(|(entry, _)| entry)
+}
+
+fn build_mmr_root_witness_evidence_entry(
+    receipt: &MmrRootWitnessReceipt,
+    as_of_unix_seconds: u64,
+) -> Result<(EvidenceEntry, MmrRootWitnessVerification), LedgerError> {
+    let verification =
+        verify_root_witness_anteriority(receipt, as_of_unix_seconds).map_err(|source| {
+            LedgerError::InvalidEvidence {
+                reason: format!("root witness proof invalid: {source}"),
+            }
+        })?;
+    let timestamp_ms = receipt
+        .statement
+        .observed_at_unix_seconds
+        .checked_mul(1000)
+        .ok_or_else(|| LedgerError::InvalidEvidence {
+            reason: "root witness observed_at_unix_seconds overflows milliseconds".to_string(),
+        })?;
+    let root_hash_prefix =
+        receipt
+            .statement
+            .root
+            .root_hash
+            .get(..16)
+            .ok_or_else(|| LedgerError::InvalidEvidence {
+                reason: "root witness root_hash is shorter than 16 bytes".to_string(),
+            })?;
+    let root_hash_prefix_hex = hex::encode(root_hash_prefix);
+    let payload = serde_json::json!({
+        "schema_version": MMR_ROOT_WITNESS_EVIDENCE_SCHEMA_VERSION,
+        "as_of_unix_seconds": as_of_unix_seconds,
+        "receipt": receipt,
+        "verification": verification,
+    });
+
+    Ok((
+        EvidenceEntry {
+            schema_version: MMR_ROOT_WITNESS_EVIDENCE_SCHEMA_VERSION.to_string(),
+            entry_id: None,
+            decision_id: format!(
+                "{MMR_ROOT_WITNESS_EVIDENCE_DECISION_PREFIX}-{root_hash_prefix_hex}"
+            ),
+            decision_kind: DecisionKind::Admit,
+            decision_time: receipt.timestamp.clone(),
+            timestamp_ms,
+            trace_id: receipt.trace_id.clone(),
+            epoch_id: receipt.statement.root.tree_size,
+            payload,
+            size_bytes: 0,
+            signature: String::new(),
+            prev_entry_hash: String::new(),
+        },
+        verification,
+    ))
+}
+
 fn verify_evidence_entry_bytes(
     entry: &EvidenceEntry,
     verifying_key: &VerifyingKey,
@@ -845,6 +918,8 @@ pub enum LedgerError {
     LockPoisoned,
     /// Entry contains control characters in metadata fields - prevents log injection.
     InvalidControlCharacters { field: String, reason: String },
+    /// Evidence payload failed domain-specific validation before append.
+    InvalidEvidence { reason: String },
 }
 
 impl fmt::Display for LedgerError {
@@ -888,6 +963,7 @@ impl fmt::Display for LedgerError {
             Self::InvalidControlCharacters { field, reason } => {
                 write!(f, "control characters in {}: {}", field, reason)
             }
+            Self::InvalidEvidence { reason } => write!(f, "invalid evidence: {reason}"),
         }
     }
 }
@@ -1614,6 +1690,18 @@ impl EvidenceLedger {
         record_append_elapsed_us(start.elapsed().as_micros() as u64);
 
         Ok(result)
+    }
+
+    /// Verify and append an MMR root witness receipt as proof-of-anteriority evidence.
+    pub fn append_mmr_root_witness_receipt(
+        &mut self,
+        receipt: &MmrRootWitnessReceipt,
+        as_of_unix_seconds: u64,
+    ) -> Result<(EntryId, MmrRootWitnessVerification), LedgerError> {
+        let (entry, verification) =
+            build_mmr_root_witness_evidence_entry(receipt, as_of_unix_seconds)?;
+        let entry_id = self.append(entry)?;
+        Ok((entry_id, verification))
     }
 
     /// Evict the oldest entry from the ring buffer.
@@ -2565,6 +2653,128 @@ mod tests {
         let mut entry = test_entry(id, epoch);
         sign_evidence_entry(&mut entry, signing_key);
         entry
+    }
+
+    fn make_mmr_root_witness_receipt(observed_at_unix_seconds: u64) -> MmrRootWitnessReceipt {
+        use crate::control_plane::mmr_proofs::{
+            MMR_ROOT_WITNESS_ARTIFACT_ID, MMR_ROOT_WITNESS_CONNECTOR_ID, MmrRoot, marker_leaf_hash,
+            mmr_root_witness_artifact, mmr_root_witness_statement,
+        };
+        use crate::security::threshold_sig::{SignerKey, ThresholdConfig, sign};
+
+        let signing_keys = [
+            SigningKey::from_bytes(&[17_u8; 32]),
+            SigningKey::from_bytes(&[23_u8; 32]),
+            SigningKey::from_bytes(&[42_u8; 32]),
+        ];
+        let signer_keys = signing_keys
+            .iter()
+            .enumerate()
+            .map(|(idx, signing_key)| SignerKey {
+                key_id: format!("witness-{}", idx + 1),
+                public_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
+            })
+            .collect::<Vec<_>>();
+        let threshold_config = ThresholdConfig {
+            threshold: 2,
+            total_signers: 3,
+            signer_keys,
+        };
+        let root = MmrRoot {
+            tree_size: 7,
+            root_hash: marker_leaf_hash("ledger-witness-root"),
+        };
+        let statement = mmr_root_witness_statement(
+            &root,
+            observed_at_unix_seconds,
+            "ledger-witnesses",
+            "policy-a",
+        )
+        .expect("witness statement");
+        let signatures = signing_keys
+            .iter()
+            .zip(threshold_config.signer_keys.iter())
+            .take(2)
+            .map(|(signing_key, signer_key)| {
+                sign(
+                    signing_key,
+                    &signer_key.key_id,
+                    MMR_ROOT_WITNESS_ARTIFACT_ID,
+                    MMR_ROOT_WITNESS_CONNECTOR_ID,
+                    &statement.content_hash,
+                )
+            })
+            .collect::<Vec<_>>();
+        let witness_artifact =
+            mmr_root_witness_artifact(&statement, signatures).expect("witness artifact");
+
+        MmrRootWitnessReceipt {
+            statement,
+            threshold_config,
+            witness_artifact,
+            trace_id: "trace-ledger-witness".to_string(),
+            timestamp: "2026-02-20T12:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn mmr_root_witness_receipt_appends_proof_of_anteriority_entry() {
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 100_000));
+        let receipt = make_mmr_root_witness_receipt(1_700_000_000);
+
+        let (entry_id, verification) = ledger
+            .append_mmr_root_witness_receipt(&receipt, 1_700_000_100)
+            .expect("root witness receipt should append");
+
+        assert_eq!(entry_id, EntryId(1));
+        assert_eq!(verification.valid_signatures, 2);
+        assert_eq!(verification.threshold, 2);
+        assert_eq!(ledger.total_appended(), 1);
+
+        let snapshot = ledger.snapshot();
+        let (_, entry) = &snapshot.entries[0];
+        assert_eq!(
+            entry.schema_version,
+            MMR_ROOT_WITNESS_EVIDENCE_SCHEMA_VERSION
+        );
+        assert!(
+            entry
+                .decision_id
+                .starts_with(MMR_ROOT_WITNESS_EVIDENCE_DECISION_PREFIX)
+        );
+        assert_eq!(entry.decision_kind, DecisionKind::Admit);
+        assert_eq!(entry.epoch_id, receipt.statement.root.tree_size);
+        assert_eq!(entry.timestamp_ms, 1_700_000_000_000);
+        assert_eq!(
+            entry.payload["schema_version"].as_str(),
+            Some(MMR_ROOT_WITNESS_EVIDENCE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            entry.payload["verification"]["content_hash"].as_str(),
+            Some(receipt.statement.content_hash.as_str())
+        );
+        assert_eq!(
+            entry.payload["verification"]["event_codes"]
+                .as_array()
+                .expect("event codes")
+                .last()
+                .and_then(serde_json::Value::as_str),
+            Some("FN-MMR-ROOT-WITNESS-ANTERIORITY-VERIFIED")
+        );
+    }
+
+    #[test]
+    fn mmr_root_witness_receipt_rejects_postdated_anteriority() {
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 100_000));
+        let receipt = make_mmr_root_witness_receipt(1_700_000_100);
+
+        let result = ledger.append_mmr_root_witness_receipt(&receipt, 1_700_000_000);
+
+        assert!(
+            matches!(result, Err(LedgerError::InvalidEvidence { .. })),
+            "expected invalid evidence, got {result:?}"
+        );
+        assert!(ledger.is_empty());
     }
 
     fn make_entry_with_payload(id: &str, epoch: u64, payload_size: usize) -> EvidenceEntry {

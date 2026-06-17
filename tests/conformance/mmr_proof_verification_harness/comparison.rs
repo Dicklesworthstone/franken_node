@@ -51,23 +51,19 @@ fn compare_structural(expected: &JsonValue, actual: &JsonValue) -> TestResult {
     }
 }
 
-fn compare_structural_recursive(
-    expected: &JsonValue,
-    actual: &JsonValue,
-) -> Result<(), JsonValue> {
+fn compare_structural_recursive(expected: &JsonValue, actual: &JsonValue) -> Result<(), JsonValue> {
     match (expected, actual) {
         (JsonValue::Object(exp_obj), JsonValue::Object(act_obj)) => {
             // Check all expected keys are present
             for (key, exp_val) in exp_obj {
                 match act_obj.get(key) {
                     Some(act_val) => {
-                        compare_structural_recursive(exp_val, act_val)
-                            .map_err(|diff| {
-                                serde_json::json!({
-                                    "path": format!(".{}", key),
-                                    "difference": diff
-                                })
-                            })?;
+                        compare_structural_recursive(exp_val, act_val).map_err(|diff| {
+                            serde_json::json!({
+                                "path": format!(".{}", key),
+                                "difference": diff
+                            })
+                        })?;
                     }
                     None => {
                         return Err(serde_json::json!({
@@ -102,13 +98,12 @@ fn compare_structural_recursive(
             }
 
             for (i, (exp_item, act_item)) in exp_arr.iter().zip(act_arr.iter()).enumerate() {
-                compare_structural_recursive(exp_item, act_item)
-                    .map_err(|diff| {
-                        serde_json::json!({
-                            "path": format!("[{}]", i),
-                            "difference": diff
-                        })
-                    })?;
+                compare_structural_recursive(exp_item, act_item).map_err(|diff| {
+                    serde_json::json!({
+                        "path": format!("[{}]", i),
+                        "difference": diff
+                    })
+                })?;
             }
 
             Ok(())
@@ -172,13 +167,12 @@ fn compare_fuzzy_recursive(
             for (key, exp_val) in exp_obj {
                 match act_obj.get(key) {
                     Some(act_val) => {
-                        compare_fuzzy_recursive(exp_val, act_val, tolerance)
-                            .map_err(|diff| {
-                                serde_json::json!({
-                                    "path": format!(".{}", key),
-                                    "difference": diff
-                                })
-                            })?;
+                        compare_fuzzy_recursive(exp_val, act_val, tolerance).map_err(|diff| {
+                            serde_json::json!({
+                                "path": format!(".{}", key),
+                                "difference": diff
+                            })
+                        })?;
                     }
                     None => {
                         return Err(serde_json::json!({
@@ -200,13 +194,12 @@ fn compare_fuzzy_recursive(
             }
 
             for (i, (exp_item, act_item)) in exp_arr.iter().zip(act_arr.iter()).enumerate() {
-                compare_fuzzy_recursive(exp_item, act_item, tolerance)
-                    .map_err(|diff| {
-                        serde_json::json!({
-                            "path": format!("[{}]", i),
-                            "difference": diff
-                        })
-                    })?;
+                compare_fuzzy_recursive(exp_item, act_item, tolerance).map_err(|diff| {
+                    serde_json::json!({
+                        "path": format!("[{}]", i),
+                        "difference": diff
+                    })
+                })?;
             }
 
             Ok(())

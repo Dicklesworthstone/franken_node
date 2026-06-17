@@ -1,9 +1,9 @@
 //! Test context and environment for MMR conformance testing.
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use super::logging::StructuredLogger;
 use super::fixtures::FixtureLoader;
+use super::logging::StructuredLogger;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Test execution context carrying shared state and utilities
 #[derive(Clone)]

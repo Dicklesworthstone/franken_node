@@ -3,6 +3,8 @@
 //! This integrates all MMR conformance tests and generates comprehensive reports
 //! following the testing-conformance-harnesses pattern.
 
+#![allow(dead_code, unused_imports)]
+
 mod mmr_proof_verification_harness;
 
 use mmr_proof_verification_harness::*;
@@ -42,22 +44,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Requirement level breakdown
     println!("📋 Requirement Level Coverage");
     println!("------------------------------");
-    println!("MUST:   {}/{} ({:.1}%)",
+    println!(
+        "MUST:   {}/{} ({:.1}%)",
         report.stats.must_passed,
         report.stats.must_total,
-        report.stats.must_pass_rate() * 100.0);
-    println!("SHOULD: {}/{} ({:.1}%)",
+        report.stats.must_pass_rate() * 100.0
+    );
+    println!(
+        "SHOULD: {}/{} ({:.1}%)",
         report.stats.should_passed,
         report.stats.should_total,
         if report.stats.should_total > 0 {
             report.stats.should_passed as f64 / report.stats.should_total as f64 * 100.0
-        } else { 100.0 });
-    println!("MAY:    {}/{} ({:.1}%)",
+        } else {
+            100.0
+        }
+    );
+    println!(
+        "MAY:    {}/{} ({:.1}%)",
         report.stats.may_passed,
         report.stats.may_total,
         if report.stats.may_total > 0 {
             report.stats.may_passed as f64 / report.stats.may_total as f64 * 100.0
-        } else { 100.0 });
+        } else {
+            100.0
+        }
+    );
     println!();
 
     // Conformance verdict

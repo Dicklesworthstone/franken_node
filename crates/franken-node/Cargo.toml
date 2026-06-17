@@ -1181,6 +1181,11 @@ name = "e2e_mmr_proofs_lifecycle"
 path = "tests/e2e_mmr_proofs_lifecycle.rs"
 
 [[test]]
+name = "mmr_proof_verification_conformance"
+path = "../../tests/conformance/mmr_proof_verification_conformance.rs"
+harness = false
+
+[[test]]
 name = "e2e_evidence_replay_gate_lifecycle"
 path = "tests/e2e_evidence_replay_gate_lifecycle.rs"
 

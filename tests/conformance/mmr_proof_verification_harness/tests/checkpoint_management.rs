@@ -6,11 +6,21 @@ use super::super::*;
 pub struct CheckpointEnabledDisabledTest;
 
 impl ConformanceTest for CheckpointEnabledDisabledTest {
-    fn id(&self) -> &str { "R1.1" }
-    fn name(&self) -> &str { "Checkpoint enabled/disabled state management" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "1" }
+    fn id(&self) -> &str {
+        "R1.1"
+    }
+    fn name(&self) -> &str {
+        "Checkpoint enabled/disabled state management"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "1"
+    }
     fn description(&self) -> &str {
         "Checkpoint MUST correctly maintain and report enabled/disabled state"
     }
@@ -48,11 +58,21 @@ impl ConformanceTest for CheckpointEnabledDisabledTest {
 pub struct CheckpointFailClosedTest;
 
 impl ConformanceTest for CheckpointFailClosedTest {
-    fn id(&self) -> &str { "R1.2" }
-    fn name(&self) -> &str { "Checkpoint fail-closed when disabled" }
-    fn category(&self) -> TestCategory { TestCategory::Security }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "1" }
+    fn id(&self) -> &str {
+        "R1.2"
+    }
+    fn name(&self) -> &str {
+        "Checkpoint fail-closed when disabled"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Security
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "1"
+    }
     fn description(&self) -> &str {
         "Disabled checkpoint MUST fail closed and reject all operations"
     }
@@ -66,9 +86,7 @@ impl ConformanceTest for CheckpointFailClosedTest {
         match disabled_cp.append_marker_hash(&first_marker.marker_hash) {
             Err(err) => {
                 if err.code() != "MMR_DISABLED" {
-                    return TestResult::fail(format!(
-                        "Expected MMR_DISABLED, got: {}", err.code()
-                    ));
+                    return TestResult::fail(format!("Expected MMR_DISABLED, got: {}", err.code()));
                 }
             }
             Ok(_) => return TestResult::fail("append_marker_hash should fail when disabled"),
@@ -78,9 +96,7 @@ impl ConformanceTest for CheckpointFailClosedTest {
         match disabled_cp.rebuild_from_stream(&stream) {
             Err(err) => {
                 if err.code() != "MMR_DISABLED" {
-                    return TestResult::fail(format!(
-                        "Expected MMR_DISABLED, got: {}", err.code()
-                    ));
+                    return TestResult::fail(format!("Expected MMR_DISABLED, got: {}", err.code()));
                 }
             }
             Ok(_) => return TestResult::fail("rebuild_from_stream should fail when disabled"),
@@ -90,9 +106,7 @@ impl ConformanceTest for CheckpointFailClosedTest {
         match disabled_cp.sync_from_stream(&stream) {
             Err(err) => {
                 if err.code() != "MMR_DISABLED" {
-                    return TestResult::fail(format!(
-                        "Expected MMR_DISABLED, got: {}", err.code()
-                    ));
+                    return TestResult::fail(format!("Expected MMR_DISABLED, got: {}", err.code()));
                 }
             }
             Ok(_) => return TestResult::fail("sync_from_stream should fail when disabled"),
@@ -102,9 +116,7 @@ impl ConformanceTest for CheckpointFailClosedTest {
         match mmr_inclusion_proof(&stream, &disabled_cp, 0) {
             Err(err) => {
                 if err.code() != "MMR_DISABLED" {
-                    return TestResult::fail(format!(
-                        "Expected MMR_DISABLED, got: {}", err.code()
-                    ));
+                    return TestResult::fail(format!("Expected MMR_DISABLED, got: {}", err.code()));
                 }
             }
             Ok(_) => return TestResult::fail("inclusion proof should fail when disabled"),
@@ -115,9 +127,7 @@ impl ConformanceTest for CheckpointFailClosedTest {
         match mmr_prefix_proof(&disabled_cp, &enabled_cp) {
             Err(err) => {
                 if err.code() != "MMR_DISABLED" {
-                    return TestResult::fail(format!(
-                        "Expected MMR_DISABLED, got: {}", err.code()
-                    ));
+                    return TestResult::fail(format!("Expected MMR_DISABLED, got: {}", err.code()));
                 }
             }
             Ok(_) => return TestResult::fail("prefix proof should fail when disabled"),
@@ -139,11 +149,21 @@ impl ConformanceTest for CheckpointFailClosedTest {
 pub struct CheckpointDeterministicRebuildTest;
 
 impl ConformanceTest for CheckpointDeterministicRebuildTest {
-    fn id(&self) -> &str { "R1.3" }
-    fn name(&self) -> &str { "Deterministic checkpoint rebuild" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "1" }
+    fn id(&self) -> &str {
+        "R1.3"
+    }
+    fn name(&self) -> &str {
+        "Deterministic checkpoint rebuild"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "1"
+    }
     fn description(&self) -> &str {
         "Checkpoint rebuild MUST be deterministic for identical marker streams"
     }
@@ -196,11 +216,21 @@ impl ConformanceTest for CheckpointDeterministicRebuildTest {
 pub struct CheckpointCapacityLimitTest;
 
 impl ConformanceTest for CheckpointCapacityLimitTest {
-    fn id(&self) -> &str { "R1.4" }
-    fn name(&self) -> &str { "Checkpoint capacity limit enforcement" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "1" }
+    fn id(&self) -> &str {
+        "R1.4"
+    }
+    fn name(&self) -> &str {
+        "Checkpoint capacity limit enforcement"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "1"
+    }
     fn description(&self) -> &str {
         "Checkpoint MUST enforce maximum capacity of 4096 leaf hashes"
     }
@@ -211,10 +241,7 @@ impl ConformanceTest for CheckpointCapacityLimitTest {
         let cp = ctx.create_checkpoint(&capacity_stream);
 
         if cp.tree_size() != 4096 {
-            return TestResult::fail(format!(
-                "Tree size should be 4096, got: {}",
-                cp.tree_size()
-            ));
+            return TestResult::fail(format!("Tree size should be 4096, got: {}", cp.tree_size()));
         }
 
         if cp.leaf_hashes().len() != 4096 {
@@ -232,11 +259,21 @@ impl ConformanceTest for CheckpointCapacityLimitTest {
 pub struct CheckpointEvictionTest;
 
 impl ConformanceTest for CheckpointEvictionTest {
-    fn id(&self) -> &str { "R1.5" }
-    fn name(&self) -> &str { "Checkpoint eviction policy" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "1" }
+    fn id(&self) -> &str {
+        "R1.5"
+    }
+    fn name(&self) -> &str {
+        "Checkpoint eviction policy"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "1"
+    }
     fn description(&self) -> &str {
         "Checkpoint MUST evict oldest entries when capacity is exceeded"
     }
@@ -287,11 +324,21 @@ impl ConformanceTest for CheckpointEvictionTest {
 pub struct CheckpointTreeSizePreservationTest;
 
 impl ConformanceTest for CheckpointTreeSizePreservationTest {
-    fn id(&self) -> &str { "R1.6" }
-    fn name(&self) -> &str { "Tree size preservation across rebuilds" }
-    fn category(&self) -> TestCategory { TestCategory::Unit }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "1" }
+    fn id(&self) -> &str {
+        "R1.6"
+    }
+    fn name(&self) -> &str {
+        "Tree size preservation across rebuilds"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Unit
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "1"
+    }
     fn description(&self) -> &str {
         "Checkpoint MUST preserve tree_size consistently across rebuilds"
     }
@@ -306,7 +353,8 @@ impl ConformanceTest for CheckpointTreeSizePreservationTest {
 
         if initial_size != 50 {
             return TestResult::fail(format!(
-                "Initial tree size should be 50, got: {}", initial_size
+                "Initial tree size should be 50, got: {}",
+                initial_size
             ));
         }
 
@@ -318,7 +366,9 @@ impl ConformanceTest for CheckpointTreeSizePreservationTest {
             if cp.tree_size() != initial_size {
                 return TestResult::fail(format!(
                     "Tree size changed during rebuild {}: {} -> {}",
-                    i, initial_size, cp.tree_size()
+                    i,
+                    initial_size,
+                    cp.tree_size()
                 ));
             }
         }
@@ -328,7 +378,8 @@ impl ConformanceTest for CheckpointTreeSizePreservationTest {
         if cp.tree_size() != initial_size {
             return TestResult::fail(format!(
                 "Tree size changed during sync: {} -> {}",
-                initial_size, cp.tree_size()
+                initial_size,
+                cp.tree_size()
             ));
         }
 

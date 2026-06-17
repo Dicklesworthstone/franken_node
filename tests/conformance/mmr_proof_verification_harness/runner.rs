@@ -1,8 +1,8 @@
 //! Test runner for MMR conformance testing.
 
-use super::traits::{ConformanceTest, RequirementLevel, TestResult, TestStats};
 use super::context::TestContext;
 use super::logging::{EventCode, LogLevel, TestEvent, TestPhase};
+use super::traits::{ConformanceTest, RequirementLevel, TestResult, TestStats};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -40,7 +40,10 @@ impl ConformanceRunner {
         self.context.log(&TestEvent::new(
             LogLevel::Info,
             EventCode::HarnessInit,
-            format!("Starting conformance test run with {} tests", self.tests.len()),
+            format!(
+                "Starting conformance test run with {} tests",
+                self.tests.len()
+            ),
             &self.context.run_id,
         ));
 
@@ -79,19 +82,23 @@ impl ConformanceRunner {
         let total_duration = start_time.elapsed();
 
         // Log harness shutdown
-        self.context.log(&TestEvent::new(
-            LogLevel::Info,
-            EventCode::HarnessShutdown,
-            format!("Completed conformance test run in {:?}", total_duration),
-            &self.context.run_id,
-        ).with_duration(total_duration.as_millis() as u64));
+        self.context.log(
+            &TestEvent::new(
+                LogLevel::Info,
+                EventCode::HarnessShutdown,
+                format!("Completed conformance test run in {:?}", total_duration),
+                &self.context.run_id,
+            )
+            .with_duration(total_duration.as_millis() as u64),
+        );
 
+        let is_conformant = stats.is_conformant();
         ConformanceReport {
             run_id: self.context.run_id.clone(),
             stats,
             results,
             total_duration,
-            is_conformant: stats.is_conformant(),
+            is_conformant,
         }
     }
 
@@ -100,12 +107,16 @@ impl ConformanceRunner {
         let start_time = Instant::now();
 
         // Log test start
-        self.context.log(&TestEvent::new(
-            LogLevel::Info,
-            EventCode::TestStart,
-            format!("Starting test: {} - {}", test.id(), test.name()),
-            &self.context.run_id,
-        ).with_test_id(test.id()).with_phase(TestPhase::Setup));
+        self.context.log(
+            &TestEvent::new(
+                LogLevel::Info,
+                EventCode::TestStart,
+                format!("Starting test: {} - {}", test.id(), test.name()),
+                &self.context.run_id,
+            )
+            .with_test_id(test.id())
+            .with_phase(TestPhase::Setup),
+        );
 
         // Create a mutable copy of context for test setup
         let mut test_context = self.context.clone();
@@ -118,23 +129,31 @@ impl ConformanceRunner {
         }
 
         // Execute the actual test
-        self.context.log(&TestEvent::new(
-            LogLevel::Debug,
-            EventCode::TestCase,
-            format!("Executing test logic: {}", test.id()),
-            &self.context.run_id,
-        ).with_test_id(test.id()).with_phase(TestPhase::Execute));
+        self.context.log(
+            &TestEvent::new(
+                LogLevel::Debug,
+                EventCode::TestCase,
+                format!("Executing test logic: {}", test.id()),
+                &self.context.run_id,
+            )
+            .with_test_id(test.id())
+            .with_phase(TestPhase::Execute),
+        );
 
         let result = test.run(&test_context);
 
         // Run cleanup
         if let Err(e) = test.cleanup(&mut test_context) {
-            self.context.log(&TestEvent::new(
-                LogLevel::Warn,
-                EventCode::TestError,
-                format!("Cleanup failed for {}: {}", test.id(), e),
-                &self.context.run_id,
-            ).with_test_id(test.id()).with_phase(TestPhase::Cleanup));
+            self.context.log(
+                &TestEvent::new(
+                    LogLevel::Warn,
+                    EventCode::TestError,
+                    format!("Cleanup failed for {}: {}", test.id(), e),
+                    &self.context.run_id,
+                )
+                .with_test_id(test.id())
+                .with_phase(TestPhase::Cleanup),
+            );
         }
 
         let duration = start_time.elapsed();
@@ -143,12 +162,7 @@ impl ConformanceRunner {
     }
 
     /// Log test result
-    fn log_test_result(
-        &self,
-        test: &dyn ConformanceTest,
-        result: &TestResult,
-        duration: Duration,
-    ) {
+    fn log_test_result(&self, test: &dyn ConformanceTest, result: &TestResult, duration: Duration) {
         let (level, event_code) = match result {
             TestResult::Pass => (LogLevel::Info, EventCode::TestPass),
             TestResult::Fail { .. } => (LogLevel::Error, EventCode::TestFail),
@@ -157,20 +171,22 @@ impl ConformanceRunner {
             TestResult::Error { .. } => (LogLevel::Error, EventCode::TestError),
         };
 
-        self.context.log(&TestEvent::new(
-            level,
-            event_code,
-            format!("Test {}: {}", test.id(), result),
-            &self.context.run_id,
-        )
-        .with_test_id(test.id())
-        .with_duration(duration.as_millis() as u64)
-        .with_phase(TestPhase::Summary)
-        .with_details(serde_json::json!({
-            "requirement_level": test.requirement_level(),
-            "category": test.category(),
-            "spec_section": test.spec_section()
-        })));
+        self.context.log(
+            &TestEvent::new(
+                level,
+                event_code,
+                format!("Test {}: {}", test.id(), result),
+                &self.context.run_id,
+            )
+            .with_test_id(test.id())
+            .with_duration(duration.as_millis() as u64)
+            .with_phase(TestPhase::Summary)
+            .with_details(serde_json::json!({
+                "requirement_level": test.requirement_level(),
+                "category": test.category(),
+                "spec_section": test.spec_section()
+            })),
+        );
     }
 
     /// Update test statistics
@@ -230,7 +246,11 @@ impl ConformanceReport {
              **Conformant:** {}  \n\n",
             self.run_id,
             self.total_duration,
-            if self.is_conformant { "✅ YES" } else { "❌ NO" }
+            if self.is_conformant {
+                "✅ YES"
+            } else {
+                "❌ NO"
+            }
         ));
 
         // Overall statistics
@@ -305,21 +325,19 @@ impl ConformanceReport {
                     TestResult::Error { .. } => "💥",
                     TestResult::Skipped { .. } => "⏭️",
                 };
+                let status_text = match &test.result {
+                    TestResult::Pass => "PASS".to_string(),
+                    TestResult::ExpectedFailure { discrepancy_id, .. } => {
+                        format!("XFAIL ({discrepancy_id})")
+                    }
+                    TestResult::Fail { reason, .. }
+                    | TestResult::Error { reason }
+                    | TestResult::Skipped { reason } => reason.clone(),
+                };
 
                 report.push_str(&format!(
                     "| {} | {} | {} | {} {} |\n",
-                    test.test_id,
-                    test.test_name,
-                    test.requirement_level,
-                    status_icon,
-                    match &test.result {
-                        TestResult::Pass => "PASS",
-                        TestResult::ExpectedFailure { discrepancy_id, .. } =>
-                            &format!("XFAIL ({})", discrepancy_id),
-                        TestResult::Fail { reason, .. } => reason,
-                        TestResult::Error { reason } => reason,
-                        TestResult::Skipped { reason } => reason,
-                    }
+                    test.test_id, test.test_name, test.requirement_level, status_icon, status_text
                 ));
             }
             report.push('\n');

@@ -40,11 +40,7 @@ impl FixtureLoader {
     }
 
     /// Save or update a golden file
-    pub fn save_golden(
-        &self,
-        name: &str,
-        content: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_golden(&self, name: &str, content: &str) -> Result<(), Box<dyn std::error::Error>> {
         let path = self.base_dir.join(format!("{}.golden", name));
 
         // Ensure parent directory exists
