@@ -143,6 +143,14 @@ def _validate_verification_plan(plan: dict) -> dict:
         raise AssertionError("unexpected verification plan schema")
     if plan.get("rch_prefix") != "rch exec --":
         raise AssertionError("unexpected verification plan rch prefix")
+    if not plan.get("plan_path", "").endswith("_plan.json"):
+        raise AssertionError("verification plan path must end with _plan.json")
+    if not plan.get("plan_sha256_path", "").endswith("_plan.sha256"):
+        raise AssertionError("verification plan digest path must end with _plan.sha256")
+    if not plan["plan_path"].startswith(f"{plan['artifact_dir']}/"):
+        raise AssertionError("verification plan path must live under artifact_dir")
+    if not plan["plan_sha256_path"].startswith(f"{plan['artifact_dir']}/"):
+        raise AssertionError("verification plan digest path must live under artifact_dir")
 
     steps = {step["id"]: step for step in plan["steps"]}
     missing = _REQUIRED_PLAN_STEP_IDS - set(steps)
@@ -364,6 +372,24 @@ class TestVerificationHarnessContract(unittest.TestCase):
         self.assertEqual(steps["cargo_clippy"]["command"], "rch exec -- cargo clippy --all-targets -- -D warnings")
         self.assertEqual(steps["cargo_clippy"]["log_path"], "artifacts/verification/cargo_clippy.log")
         self.assertEqual(steps["cargo_clippy"]["report_json"], "artifacts/verification/cargo_clippy_lockfile_drift.json")
+
+    def test_full_run_links_plan_artifact_and_digest_in_report(self) -> None:
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "scripts"
+            / "verify_all_verification_targets.sh"
+        ).read_text(encoding="utf-8")
+        for marker in (
+            'PLAN_JSON="$OUT/${RUN_STEM}_plan.json"',
+            'PLAN_DIGEST="$OUT/${RUN_STEM}_plan.sha256"',
+            'PLAN_SHA="$(write_plan_artifact)"',
+            "append_plan_summary",
+            'echo "plan: $PLAN_JSON"',
+            'echo "sha256_file: $PLAN_DIGEST"',
+            'echo "sha256: $PLAN_SHA"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, script)
 
     def test_plan_validation_rejects_missing_required_steps(self) -> None:
         plan = self._load_plan()

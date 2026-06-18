@@ -18,8 +18,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)"
 OUT="artifacts/verification"
-JSONL="$OUT/verify_run_$(echo "$TS" | tr -d ':-').jsonl"
-REPORT="$OUT/verify_run_$(echo "$TS" | tr -d ':-').md"
+RUN_STEM="verify_run_$(echo "$TS" | tr -d ':-')"
+JSONL="$OUT/$RUN_STEM.jsonl"
+REPORT="$OUT/$RUN_STEM.md"
+PLAN_JSON="$OUT/${RUN_STEM}_plan.json"
+PLAN_DIGEST="$OUT/${RUN_STEM}_plan.sha256"
 RCH="${VERIF_GATE_CARGO_PREFIX:-rch exec --}"
 LOCK_GUARD="$SCRIPT_DIR/lockfile_drift_guard.py"
 GATES_RC=0
@@ -47,11 +50,11 @@ run_guarded_gate() {
 }
 
 emit_plan_json() {
-  python3 - "$TS" "$RCH" "$OUT" "$JSONL" "$REPORT" <<'PY'
+  python3 - "$TS" "$RCH" "$OUT" "$JSONL" "$REPORT" "$PLAN_JSON" "$PLAN_DIGEST" <<'PY'
 import json
 import sys
 
-ts, rch, out, jsonl, report = sys.argv[1:]
+ts, rch, out, jsonl, report, plan_json, plan_digest = sys.argv[1:]
 
 
 def with_rch(command: str) -> str:
@@ -138,6 +141,8 @@ payload = {
     "generated_at": ts,
     "artifact_dir": out,
     "jsonl_path": jsonl,
+    "plan_path": plan_json,
+    "plan_sha256_path": plan_digest,
     "report_path": report,
     "rch_prefix": rch,
     "steps": steps,
@@ -145,6 +150,31 @@ payload = {
 json.dump(payload, sys.stdout, indent=2, sort_keys=True)
 sys.stdout.write("\n")
 PY
+}
+
+write_plan_artifact() {
+  emit_plan_json > "$PLAN_JSON"
+  python3 - "$PLAN_JSON" "$PLAN_DIGEST" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+plan_path = pathlib.Path(sys.argv[1])
+digest_path = pathlib.Path(sys.argv[2])
+digest = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+digest_path.write_text(f"{digest}  {plan_path}\n", encoding="utf-8")
+print(digest)
+PY
+}
+
+append_plan_summary() {
+  {
+    echo
+    echo "## Verification plan"
+    echo "plan: $PLAN_JSON"
+    echo "sha256_file: $PLAN_DIGEST"
+    echo "sha256: $PLAN_SHA"
+  } >> "$REPORT"
 }
 
 validate_plan_json() {
@@ -196,8 +226,10 @@ if [ "${1:-}" = "--plan-json" ]; then
 fi
 
 mkdir -p "$OUT"
+PLAN_SHA="$(write_plan_artifact)"
 : > "$JSONL"
 log "verify run $TS -> $JSONL"
+log "plan -> $PLAN_JSON (sha256 $PLAN_SHA)"
 
 # 0) compile census MUST be clean first (delegates to the .G1 gate, blocking).
 log "step 0: compile census (no broken targets allowed)"
@@ -251,6 +283,7 @@ run_guarded_gate \
 log "step 5: summary"
 python3 "$SCRIPT_DIR/remediation_log.py" "$JSONL" > "$REPORT"
 RC=$?
+append_plan_summary
 cat "$OUT/gates.txt" >> "$REPORT"
 log "report -> $REPORT (exit $RC)"
 # Overall RED if census broke, gates failed, or any target was not green.
