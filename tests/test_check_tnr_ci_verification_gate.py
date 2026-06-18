@@ -328,6 +328,15 @@ class TestVerificationHarnessContract(unittest.TestCase):
                 self.assertTrue(steps[step_id]["heavy"])
                 self.assertTrue(steps[step_id]["rch_required"])
 
+        rch_prefix = f"{plan['rch_prefix']} "
+        for step in plan["steps"]:
+            command = step["command"]
+            with self.subTest(rch_prefix_step=step["id"]):
+                if step["rch_required"] and "cargo " in command:
+                    self.assertTrue(command.startswith(rch_prefix))
+                if not step["rch_required"]:
+                    self.assertFalse(command.startswith(rch_prefix))
+
         self.assertIn(
             "cargo test -p frankenengine-node --locked --features extended-surfaces,test-support",
             steps["full_conformance"]["command"],
