@@ -300,7 +300,9 @@ const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
 const TRUST_SCAN_OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const TRUST_SCAN_DEPS_DEV_BASE_URL: &str = "https://api.deps.dev/v3alpha";
 const TRUST_SCAN_REMOTECAP_TOKEN_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN";
+#[cfg(feature = "http-client")]
 const TRUST_SCAN_HTTP_TIMEOUT_MS_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_HTTP_TIMEOUT_MS";
+#[cfg(feature = "http-client")]
 const TRUST_SCAN_HTTP_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const OPS_HEALTH_LEDGER_FILE_CANDIDATES: &[&str] = &[
     "evidence_spill.jsonl",
@@ -22970,6 +22972,7 @@ fn generate_test_scenario(
         rch_workers: vec![],
         proof_lane_readiness: vec![],
         swarm_scheduler_decisions: vec![],
+        swarm_admission_decisions: vec![],
         resource_governor: None,
         max_receipt_age_secs: 3600,
     })

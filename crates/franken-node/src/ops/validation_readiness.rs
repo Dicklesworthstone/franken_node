@@ -4,6 +4,10 @@
 //! state, worker observations, and resource-governor hints into a stable report
 //! that explains whether validation evidence is trustworthy right now.
 
+use crate::ops::swarm_validation_admission::{
+    SwarmValidationAdmissionDecision, SwarmValidationAdmissionDecisionRecord,
+    SwarmValidationTargetDirStrategy, SwarmValidationWorkerRequirement,
+};
 use crate::ops::validation_broker::{
     DigestRef, FlightRecorderAdapterOutcomeClass, ProofEvidenceSource, ProofStatusKind, RchMode,
     SourceOnlyReason, TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind,
@@ -28,6 +32,8 @@ pub const VALIDATION_HANDOFF_SUMMARY_SCHEMA_VERSION: &str =
     "franken-node/validation-handoff-summary/report/v1";
 pub const VALIDATION_SWARM_PERFORMANCE_EVIDENCE_SCHEMA_VERSION: &str =
     "franken-node/validation-swarm-performance/evidence/v1";
+pub const VALIDATION_SWARM_ADMISSION_READINESS_SCHEMA_VERSION: &str =
+    "franken-node/validation-swarm-admission/readiness/v1";
 pub const VALIDATION_READINESS_FIXTURE_SCHEMA_VERSION: &str =
     "franken-node/validation-readiness/fixtures/v1";
 pub const PROOF_LANE_READINESS_CAPSULE_SCHEMA_VERSION: &str =
@@ -160,7 +166,7 @@ pub struct RchWorkerReadiness {
     pub failure: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationReadinessInput {
     #[serde(default = "default_input_schema_version")]
     pub schema_version: String,
@@ -177,6 +183,8 @@ pub struct ValidationReadinessInput {
     #[serde(default)]
     pub swarm_scheduler_decisions: Vec<ValidationSwarmSchedulerDecision>,
     #[serde(default)]
+    pub swarm_admission_decisions: Vec<SwarmValidationAdmissionDecisionRecord>,
+    #[serde(default)]
     pub resource_governor: Option<ResourceContentionSnapshot>,
     #[serde(default = "default_max_receipt_age_secs")]
     pub max_receipt_age_secs: u64,
@@ -192,6 +200,7 @@ impl Default for ValidationReadinessInput {
             rch_workers: Vec::new(),
             proof_lane_readiness: Vec::new(),
             swarm_scheduler_decisions: Vec::new(),
+            swarm_admission_decisions: Vec::new(),
             resource_governor: None,
             max_receipt_age_secs: DEFAULT_MAX_RECEIPT_AGE_SECS,
         }
@@ -643,6 +652,68 @@ pub struct SwarmSchedulerDecisionSummary {
     pub fail_closed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdmissionDecisionSummary {
+    pub trace_id: String,
+    pub bead_id: String,
+    pub thread_id: String,
+    pub agent: String,
+    pub decision: String,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub next_action: String,
+    pub input_fresh: bool,
+    pub proof_work_key: Option<String>,
+    pub command_digest: Option<String>,
+    pub owner_agent: Option<String>,
+    pub safe_command_shape: Option<String>,
+    pub target_dir_strategy: String,
+    pub target_dir: Option<String>,
+    pub worker_requirement: String,
+    pub max_parallel_rch_jobs: u16,
+    pub retry_after_ms: Option<u64>,
+    pub green_proof_eligible: bool,
+    pub retryable: bool,
+    pub fail_closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdmissionReadinessSummary {
+    pub schema_version: String,
+    pub decisions: usize,
+    pub run: usize,
+    pub coalesce: usize,
+    pub defer: usize,
+    pub handoff: usize,
+    pub blocked: usize,
+    pub stale_inputs: usize,
+    pub fail_closed: usize,
+    pub green_proof_eligible: usize,
+    pub rch_jobs_budgeted: u16,
+    #[serde(default)]
+    pub decision_details: Vec<SwarmAdmissionDecisionSummary>,
+}
+
+impl Default for SwarmAdmissionReadinessSummary {
+    fn default() -> Self {
+        Self {
+            schema_version: VALIDATION_SWARM_ADMISSION_READINESS_SCHEMA_VERSION.to_string(),
+            decisions: 0,
+            run: 0,
+            coalesce: 0,
+            defer: 0,
+            handoff: 0,
+            blocked: 0,
+            stale_inputs: 0,
+            fail_closed: 0,
+            green_proof_eligible: 0,
+            rch_jobs_budgeted: 0,
+            decision_details: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationControlTowerSummary {
     pub rows: usize,
@@ -707,6 +778,8 @@ pub struct ValidationReadinessSummary {
     pub proof_lane_readiness: Vec<ProofLaneReadinessSummary>,
     #[serde(default)]
     pub swarm_scheduler: SwarmSchedulerReadinessSummary,
+    #[serde(default)]
+    pub swarm_admission: SwarmAdmissionReadinessSummary,
     #[serde(default)]
     pub control_tower: ValidationControlTowerSummary,
     #[serde(default)]
@@ -934,6 +1007,7 @@ pub fn build_validation_readiness_report(
         evaluate_proof_status_check(input, &summary),
         evaluate_proof_coalescer_check(&summary),
         evaluate_swarm_scheduler_slo_check(&summary),
+        evaluate_swarm_admission_check(&summary),
         evaluate_rch_worker_check(input, &summary),
         evaluate_proof_lane_readiness_check(&summary),
         evaluate_resource_contention_check(input),
@@ -1409,6 +1483,18 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
             report.summary.swarm_scheduler.breached_decisions
         ),
         format!(
+            "  swarm_admission=decisions:{} run:{} coalesce:{} defer:{} handoff:{} blocked:{} stale_inputs:{} fail_closed:{} rch_jobs_budgeted:{}",
+            report.summary.swarm_admission.decisions,
+            report.summary.swarm_admission.run,
+            report.summary.swarm_admission.coalesce,
+            report.summary.swarm_admission.defer,
+            report.summary.swarm_admission.handoff,
+            report.summary.swarm_admission.blocked,
+            report.summary.swarm_admission.stale_inputs,
+            report.summary.swarm_admission.fail_closed,
+            report.summary.swarm_admission.rch_jobs_budgeted
+        ),
+        format!(
             "  stale_receipts={} missing_required_receipts={} malformed_receipts={}",
             report.summary.stale_receipt_count,
             report.summary.missing_required_receipts,
@@ -1521,6 +1607,35 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
                 decision.coalescer_state,
                 decision.recorder_path.as_deref().unwrap_or("none"),
                 decision.slo_breached
+            ));
+        }
+    }
+
+    for decision in &report.summary.swarm_admission.decision_details {
+        if matches!(
+            decision.decision.as_str(),
+            "coalesce" | "defer" | "handoff" | "blocked"
+        ) || decision.fail_closed
+            || !decision.input_fresh
+        {
+            lines.push(format!(
+                "    swarm_admission bead={} agent={} decision={} reason_code={} event_code={} action={} input_fresh={} proof_work_key={} owner={} target_dir_strategy={} worker_requirement={} max_parallel_rch_jobs={} retry_after_ms={} safe_command={}",
+                decision.bead_id,
+                decision.agent,
+                decision.decision,
+                decision.reason_code,
+                decision.event_code,
+                decision.next_action,
+                decision.input_fresh,
+                decision.proof_work_key.as_deref().unwrap_or("none"),
+                decision.owner_agent.as_deref().unwrap_or("none"),
+                decision.target_dir_strategy,
+                decision.worker_requirement,
+                decision.max_parallel_rch_jobs,
+                decision
+                    .retry_after_ms
+                    .map_or_else(|| "none".to_string(), |retry| retry.to_string()),
+                decision.safe_command_shape.as_deref().unwrap_or("none")
             ));
         }
     }
@@ -1931,6 +2046,7 @@ fn summarize_validation_readiness(
     let mut proof_cache_hits = 0usize;
     let mut proof_coalescer = ProofCoalescerCounts::default();
     let swarm_scheduler = summarize_swarm_scheduler_decisions(&input.swarm_scheduler_decisions);
+    let swarm_admission = summarize_swarm_admission_decisions(&input.swarm_admission_decisions);
     let control_tower = build_validation_control_tower(input, now);
 
     for status in &input.proof_statuses {
@@ -2143,6 +2259,7 @@ fn summarize_validation_readiness(
             .map(summarize_proof_lane_capsule)
             .collect(),
         swarm_scheduler,
+        swarm_admission,
         control_tower,
         flight_recorder_refs: flight_recorder_refs_count,
         failed_attempt_details,
@@ -2907,6 +3024,116 @@ fn evaluate_proof_coalescer_check(
 }
 
 #[must_use]
+pub fn summarize_swarm_admission_decisions(
+    decisions: &[SwarmValidationAdmissionDecisionRecord],
+) -> SwarmAdmissionReadinessSummary {
+    let mut summary = SwarmAdmissionReadinessSummary {
+        decisions: decisions.len(),
+        decision_details: decisions
+            .iter()
+            .map(summarize_swarm_admission_decision)
+            .collect::<Vec<_>>(),
+        ..SwarmAdmissionReadinessSummary::default()
+    };
+
+    for decision in decisions {
+        match decision.decision {
+            SwarmValidationAdmissionDecision::Run => {
+                summary.run = summary.run.saturating_add(1);
+            }
+            SwarmValidationAdmissionDecision::Coalesce => {
+                summary.coalesce = summary.coalesce.saturating_add(1);
+            }
+            SwarmValidationAdmissionDecision::Defer => {
+                summary.defer = summary.defer.saturating_add(1);
+            }
+            SwarmValidationAdmissionDecision::Handoff => {
+                summary.handoff = summary.handoff.saturating_add(1);
+            }
+            SwarmValidationAdmissionDecision::Blocked => {
+                summary.blocked = summary.blocked.saturating_add(1);
+            }
+        }
+        if !decision.diagnostics.input_freshness.fresh {
+            summary.stale_inputs = summary.stale_inputs.saturating_add(1);
+        }
+        if decision.fail_closed {
+            summary.fail_closed = summary.fail_closed.saturating_add(1);
+        }
+        if decision.green_proof_eligible {
+            summary.green_proof_eligible = summary.green_proof_eligible.saturating_add(1);
+        }
+        summary.rch_jobs_budgeted = summary
+            .rch_jobs_budgeted
+            .saturating_add(decision.execution_hints.lane_budget.max_parallel_rch_jobs);
+    }
+
+    summary
+}
+
+fn summarize_swarm_admission_decision(
+    decision: &SwarmValidationAdmissionDecisionRecord,
+) -> SwarmAdmissionDecisionSummary {
+    SwarmAdmissionDecisionSummary {
+        trace_id: decision.trace_id.clone(),
+        bead_id: decision.bead_id.clone(),
+        thread_id: decision.thread_id.clone(),
+        agent: decision.agent_name.clone(),
+        decision: decision.decision.as_str().to_string(),
+        reason_code: decision.reason_code.clone(),
+        event_code: decision.event_code.clone(),
+        required_action: decision.required_action.clone(),
+        next_action: decision.required_action.clone(),
+        input_fresh: decision.diagnostics.input_freshness.fresh,
+        proof_work_key: decision.execution_hints.coalescing_key.clone(),
+        command_digest: decision
+            .coalescing_target
+            .as_ref()
+            .and_then(|target| target.command_digest.clone()),
+        owner_agent: decision
+            .coalescing_target
+            .as_ref()
+            .and_then(|target| target.owner_agent.clone()),
+        safe_command_shape: decision.safe_command_shape.clone(),
+        target_dir_strategy: target_dir_strategy_as_str(
+            decision.execution_hints.target_dir_strategy,
+        )
+        .to_string(),
+        target_dir: decision.execution_hints.target_dir.clone(),
+        worker_requirement: worker_requirement_as_str(decision.execution_hints.worker_requirement)
+            .to_string(),
+        max_parallel_rch_jobs: decision.execution_hints.lane_budget.max_parallel_rch_jobs,
+        retry_after_ms: decision
+            .retry_after_ms
+            .or(decision.execution_hints.lane_budget.retry_after_ms),
+        green_proof_eligible: decision.green_proof_eligible,
+        retryable: decision.retryable,
+        fail_closed: decision.fail_closed,
+    }
+}
+
+const fn target_dir_strategy_as_str(strategy: SwarmValidationTargetDirStrategy) -> &'static str {
+    match strategy {
+        SwarmValidationTargetDirStrategy::NoTargetDirRequired => "no_target_dir_required",
+        SwarmValidationTargetDirStrategy::ReuseIsolated => "reuse_isolated",
+        SwarmValidationTargetDirStrategy::CreateUniqueTemp => "create_unique_temp",
+        SwarmValidationTargetDirStrategy::JoinExistingProofLease => "join_existing_proof_lease",
+        SwarmValidationTargetDirStrategy::DeferForTargetDirLease => "defer_for_target_dir_lease",
+        SwarmValidationTargetDirStrategy::DeferForDiskPressure => "defer_for_disk_pressure",
+    }
+}
+
+const fn worker_requirement_as_str(requirement: SwarmValidationWorkerRequirement) -> &'static str {
+    match requirement {
+        SwarmValidationWorkerRequirement::SourceOnlyLocal => "source_only_local",
+        SwarmValidationWorkerRequirement::RequireHealthyRemote => "require_healthy_remote",
+        SwarmValidationWorkerRequirement::PreferHighMemoryRemote => "prefer_high_memory_remote",
+        SwarmValidationWorkerRequirement::WaitForRchCapacity => "wait_for_rch_capacity",
+        SwarmValidationWorkerRequirement::RestoreRchBeforeCargo => "restore_rch_before_cargo",
+    }
+}
+
+#[must_use]
 pub fn summarize_swarm_scheduler_decisions(
     decisions: &[ValidationSwarmSchedulerDecision],
 ) -> SwarmSchedulerReadinessSummary {
@@ -3143,6 +3370,85 @@ fn evaluate_swarm_scheduler_slo_check(
             "Do not count breached scheduler decisions as green proof; surface product/source-only failures or refresh capacity evidence.",
         ),
     }
+}
+
+fn evaluate_swarm_admission_check(
+    summary: &ValidationReadinessSummary,
+) -> ValidationReadinessCheck {
+    let admission = &summary.swarm_admission;
+    if admission.decisions == 0 {
+        return check(
+            "VR-SWARM-ADMISSION-011",
+            "SVA-000",
+            "validation_swarm_admission.decisions",
+            ValidationReadinessStatus::Pass,
+            "No swarm-admission decisions were supplied.",
+            "No action required.",
+        );
+    }
+
+    let failing = admission
+        .decision_details
+        .iter()
+        .filter(|decision| {
+            decision.fail_closed || !decision.input_fresh || decision.decision == "blocked"
+        })
+        .collect::<Vec<_>>();
+    if let Some(first_failing) = failing.first() {
+        let labels = failing
+            .iter()
+            .map(|decision| swarm_admission_decision_label(decision))
+            .collect::<Vec<_>>()
+            .join(",");
+        return check(
+            "VR-SWARM-ADMISSION-011",
+            first_failing.event_code.clone(),
+            "validation_swarm_admission.decisions",
+            ValidationReadinessStatus::Fail,
+            format!("Swarm admission refuses or cannot trust validation launch for {labels}."),
+            "Follow each admission required_action; refresh stale inputs before launching or counting proof evidence.",
+        );
+    }
+
+    let waiting = admission
+        .decision_details
+        .iter()
+        .filter(|decision| matches!(decision.decision.as_str(), "defer" | "handoff"))
+        .collect::<Vec<_>>();
+    if let Some(first_waiting) = waiting.first() {
+        let labels = waiting
+            .iter()
+            .map(|decision| swarm_admission_decision_label(decision))
+            .collect::<Vec<_>>()
+            .join(",");
+        return check(
+            "VR-SWARM-ADMISSION-011",
+            first_waiting.event_code.clone(),
+            "validation_swarm_admission.decisions",
+            ValidationReadinessStatus::Warn,
+            format!("Swarm admission is deferring or handing off validation work for {labels}."),
+            "Wait, request handoff, reuse target-dir evidence, or join existing proof according to each next_action.",
+        );
+    }
+
+    check(
+        "VR-SWARM-ADMISSION-011",
+        "SVA-001",
+        "validation_swarm_admission.decisions",
+        ValidationReadinessStatus::Pass,
+        format!(
+            "Swarm admission permits validation progress (run={}, coalesce={}, rch_jobs_budgeted={}).",
+            admission.run, admission.coalesce, admission.rch_jobs_budgeted
+        ),
+        "No action required.",
+    )
+}
+
+fn swarm_admission_decision_label(decision: &SwarmAdmissionDecisionSummary) -> String {
+    format!(
+        "{}:{}:{}",
+        decision.bead_id, decision.reason_code, decision.next_action
+    )
 }
 
 fn evaluate_rch_worker_check(
@@ -4108,13 +4414,13 @@ const fn default_max_receipt_age_secs() -> u64 {
     DEFAULT_MAX_RECEIPT_AGE_SECS
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationReadinessFixtureCatalog {
     pub schema_version: String,
     pub fixtures: Vec<ValidationReadinessFixture>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationReadinessFixture {
     pub name: String,
     pub input: ValidationReadinessInput,
