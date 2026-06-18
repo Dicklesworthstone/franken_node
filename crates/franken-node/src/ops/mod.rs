@@ -11,6 +11,7 @@ pub mod proof_pipeline;
 pub mod rch_adapter;
 pub mod swarm_bead_templates;
 pub mod swarm_handoff;
+pub mod swarm_validation_admission;
 pub mod telemetry_bridge;
 pub mod tokio_drift_checker;
 pub mod validation_broker;
