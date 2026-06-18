@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_ARTIFACTS_DIR = ROOT / "artifacts" / "oracle"
+L1_PROOF_EVIDENCE_SCHEMA = "franken-node/l1-proof-carrying-effects/v1"
+REQUIRED_L1_PROOF_SUBJECTS = ("fs.read", "fs.write", "http.request")
 
 REQUIRED_DIMENSIONS = [
     {
@@ -45,6 +47,47 @@ REQUIRED_DIMENSIONS = [
         "artifact": "release_policy_verdict.json",
     },
 ]
+
+
+def validate_l1_proof_carrying_evidence(data: dict) -> list[str]:
+    """L1 is GREEN only when parity evidence is also proof-carrying."""
+    evidence = data.get("evidence")
+    if not isinstance(evidence, dict):
+        return ["L1 evidence object missing"]
+
+    proof = evidence.get("proof_carrying_effects")
+    if not isinstance(proof, dict):
+        return ["L1 proof_carrying_effects evidence missing"]
+
+    errors = []
+    if proof.get("schema_version") != L1_PROOF_EVIDENCE_SCHEMA:
+        errors.append("L1 proof_carrying_effects schema_version missing or unsupported")
+
+    verified_subjects = proof.get("verified_subjects")
+    if not isinstance(verified_subjects, list):
+        verified_subjects = []
+    verified_subjects = {subject for subject in verified_subjects if isinstance(subject, str)}
+    for subject in REQUIRED_L1_PROOF_SUBJECTS:
+        if subject not in verified_subjects:
+            errors.append(f"L1 proof_carrying_effects missing subject {subject}")
+
+    receipts_verified = proof.get("effect_receipts_verified")
+    if not isinstance(receipts_verified, int) or receipts_verified < len(REQUIRED_L1_PROOF_SUBJECTS):
+        errors.append(
+            "L1 proof_carrying_effects effect_receipts_verified below required "
+            f"{len(REQUIRED_L1_PROOF_SUBJECTS)}"
+        )
+
+    invalid_receipts = proof.get("invalid_receipts")
+    if not isinstance(invalid_receipts, int):
+        errors.append("L1 proof_carrying_effects invalid_receipts missing or invalid")
+    elif invalid_receipts != 0:
+        errors.append(f"L1 proof_carrying_effects reports {invalid_receipts} invalid receipt(s)")
+
+    if proof.get("receipt_chain_verified") is not True:
+        errors.append("L1 proof_carrying_effects receipt_chain_verified is not true")
+
+    return errors
 
 
 def check_dimension(artifacts_dir: Path, dim: dict) -> dict:
@@ -78,8 +121,13 @@ def check_dimension(artifacts_dir: Path, dim: dict) -> dict:
         return result
 
     result["verdict"] = verdict
+    errors = []
     if verdict != "GREEN":
-        result["error"] = f"Verdict is {verdict}, expected GREEN"
+        errors.append(f"Verdict is {verdict}, expected GREEN")
+    if dim["id"] == "l1_product":
+        errors.extend(validate_l1_proof_carrying_evidence(data))
+    if errors:
+        result["error"] = "; ".join(errors)
 
     return result
 

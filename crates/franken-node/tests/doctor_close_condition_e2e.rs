@@ -81,6 +81,14 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
     "overall_pass_rate_pct": 98.0
+  },
+  "proof_carrying_effects": {
+    "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+    "required_subjects": ["fs.read", "fs.write", "http.request"],
+    "verified_subjects": ["fs.read", "fs.write", "http.request"],
+    "effect_receipts_verified": 3,
+    "invalid_receipts": 0,
+    "receipt_chain_verified": true
   }
 }"#,
     );
@@ -106,6 +114,28 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
 
 fn fixture_root() -> TempDir {
     fixture_root_with_ci_gate(true)
+}
+
+fn write_parity_only_compatibility_fixture(root: &Path) {
+    write_fixture(
+        &root.join("artifacts/13/compatibility_corpus_results.json"),
+        r#"{
+  "corpus": {
+    "corpus_version": "compat-corpus-test"
+  },
+  "thresholds": {
+    "overall_pass_rate_min_pct": 95.0
+  },
+  "totals": {
+    "total_test_cases": 100,
+    "passed_test_cases": 100,
+    "failed_test_cases": 0,
+    "errored_test_cases": 0,
+    "skipped_test_cases": 0,
+    "overall_pass_rate_pct": 100.0
+  }
+}"#,
+    );
 }
 
 fn canonical_json_value(value: &Value) -> String {
@@ -247,18 +277,22 @@ fn doctor_close_condition_writes_dual_oracle_receipt() {
         .to_string()
     );
 
-    let public_key_bytes: [u8; 32] = hex::decode(
+    let mut public_key_bytes = [0_u8; 32];
+    hex::decode_to_slice(
         signature["public_key_hex"]
             .as_str()
             .expect("public key hex"),
+        &mut public_key_bytes,
     )
-    .expect("decode public key")
-    .try_into()
-    .expect("public key length");
+    .expect("decode public key");
     let verifying_key =
         ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes).expect("verifying key");
-    let signature_bytes = hex::decode(signature["signature_hex"].as_str().expect("signature hex"))
-        .expect("decode signature");
+    let mut signature_bytes = [0_u8; 64];
+    hex::decode_to_slice(
+        signature["signature_hex"].as_str().expect("signature hex"),
+        &mut signature_bytes,
+    )
+    .expect("decode signature");
     frankenengine_verifier_sdk::bundle::verify_ed25519_signature(
         &verifying_key,
         &signed_preimage,
@@ -362,6 +396,62 @@ fn doctor_close_condition_reports_red_when_cargo_scan_exceeds_cap() {
             .expect("blocking findings")
             .iter()
             .any(|finding| finding.as_str() == Some("SPLIT-PATH-DEPS failed"))
+    );
+}
+
+#[test]
+fn doctor_close_condition_fails_l1_without_proof_carrying_effect_evidence() {
+    let root = fixture_root();
+    write_parity_only_compatibility_fixture(root.path());
+    let (signing_key_path, _) =
+        write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 62);
+    let signing_key_path = signing_key_path.display().to_string();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .env(
+            "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
+            "2026-02-21T00:00:00Z",
+        )
+        .args([
+            "doctor",
+            "close-condition",
+            "--json",
+            "--receipt-signing-key",
+            signing_key_path.as_str(),
+        ])
+        .output()
+        .expect("doctor close-condition should run");
+
+    assert!(
+        output.status.success(),
+        "doctor close-condition should emit a red receipt instead of aborting: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value =
+        serde_json::from_slice(&output.stdout).expect("stdout receipt must be JSON");
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
+    assert!(
+        receipt["failing_dimensions"]
+            .as_array()
+            .expect("failing dimensions")
+            .iter()
+            .any(|dimension| dimension.as_str() == Some("L1_product_oracle"))
+    );
+    assert!(
+        receipt["L1_product_oracle"]["blocking_findings"]
+            .as_array()
+            .expect("L1 blocking findings")
+            .iter()
+            .any(|finding| finding
+                .as_str()
+                .is_some_and(|text| text.contains("proof-carrying host-effect evidence missing"))),
+        "L1 should fail closed on parity-only evidence: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"])
+            .expect("L1 receipt should render")
     );
 }
 

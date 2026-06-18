@@ -313,6 +313,13 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
         &root.join("crates/franken-node/src/lib.rs"),
         "pub fn fixture() -> bool { true }\n",
     )?;
+    let engine_crates_root = root
+        .parent()
+        .unwrap_or(root)
+        .join("franken_engine")
+        .join("crates");
+    fs::create_dir_all(engine_crates_root.join("franken-engine"))?;
+    fs::create_dir_all(engine_crates_root.join("franken-extension-host"))?;
     write_fixture(
         &root.join("docs/ENGINE_SPLIT_CONTRACT.md"),
         "franken_engine path dependencies MUST NOT be replaced by local engine crates.\n",
@@ -337,6 +344,14 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
     "overall_pass_rate_pct": 98.0
+  },
+  "proof_carrying_effects": {
+    "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+    "required_subjects": ["fs.read", "fs.write", "http.request"],
+    "verified_subjects": ["fs.read", "fs.write", "http.request"],
+    "effect_receipts_verified": 3,
+    "invalid_receipts": 0,
+    "receipt_chain_verified": true
   }
 }"#,
     )?;
@@ -839,13 +854,14 @@ fn cli_json_golden_fleet_reconcile_output() -> Result<(), Box<dyn Error>> {
 #[test]
 fn cli_json_golden_doctor_close_condition_output() -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
-    write_close_condition_fixture(temp.path())?;
+    let fixture_root = temp.path().join("workspace/franken_node");
+    write_close_condition_fixture(&fixture_root)?;
     let signing_key_path =
-        write_seed_signing_key(temp.path(), ".franken-node/keys/oracle-close.key", 41)?;
+        write_seed_signing_key(&fixture_root, ".franken-node/keys/oracle-close.key", 41)?;
 
     let mut cmd = Command::cargo_bin("franken-node")?;
     let assertion = cmd
-        .current_dir(temp.path())
+        .current_dir(&fixture_root)
         .env(
             "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
             "2026-02-21T00:00:00Z",

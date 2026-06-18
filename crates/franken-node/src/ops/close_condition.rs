@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 
 pub const CLOSE_CONDITION_RECEIPT_PATH: &str = "artifacts/oracle/close_condition_receipt.json";
 const COMPATIBILITY_CORPUS_RESULTS_PATH: &str = "artifacts/13/compatibility_corpus_results.json";
+const L1_PROOF_CARRYING_EFFECTS_PATH: &str = "proof_carrying_effects";
+const REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS: &[&str] =
+    &["fs.read", "fs.write", "http.request"];
+const REQUIRED_L1_PROOF_CARRYING_EFFECT_RECEIPT_COUNT: u64 = 3;
 const SECTION_10N_GATE_VERDICT_PATH: &str =
     "artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json";
 const CLOSE_CONDITION_TIMESTAMP_ENV: &str = "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC";
@@ -359,6 +363,7 @@ fn evaluate_l1_product_oracle(root: &Path) -> L1ProductOracle {
             "compatibility corpus has {errored_test_cases} errored test cases"
         ));
     }
+    blocking_findings.extend(validate_l1_proof_carrying_effects(&data));
 
     L1ProductOracle {
         verdict: if blocking_findings.is_empty() {
@@ -377,6 +382,63 @@ fn evaluate_l1_product_oracle(root: &Path) -> L1ProductOracle {
         required_pass_rate_pct,
         blocking_findings,
     }
+}
+
+fn validate_l1_proof_carrying_effects(data: &Value) -> Vec<String> {
+    let Some(summary) = get_value(data, &[L1_PROOF_CARRYING_EFFECTS_PATH]) else {
+        return vec![format!(
+            "proof-carrying host-effect evidence missing at {L1_PROOF_CARRYING_EFFECTS_PATH}"
+        )];
+    };
+    if !summary.is_object() {
+        return vec![format!(
+            "proof-carrying host-effect evidence at {L1_PROOF_CARRYING_EFFECTS_PATH} must be an object"
+        )];
+    }
+
+    let mut findings = Vec::new();
+    let schema_version = get_str(data, &[L1_PROOF_CARRYING_EFFECTS_PATH, "schema_version"]);
+    if schema_version != Some("franken-node/l1-proof-carrying-effects/v1") {
+        findings.push("proof-carrying evidence schema_version missing or unsupported".to_string());
+    }
+
+    let verified_subjects =
+        get_str_array(data, &[L1_PROOF_CARRYING_EFFECTS_PATH, "verified_subjects"])
+            .unwrap_or_default();
+    for subject in REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS {
+        if !verified_subjects.contains(subject) {
+            findings.push(format!("proof-carrying evidence missing subject {subject}"));
+        }
+    }
+
+    match get_u64(
+        data,
+        &[L1_PROOF_CARRYING_EFFECTS_PATH, "effect_receipts_verified"],
+    ) {
+        Some(count) if count >= REQUIRED_L1_PROOF_CARRYING_EFFECT_RECEIPT_COUNT => {}
+        Some(count) => findings.push(format!(
+            "proof-carrying effect receipt count {count} below required {REQUIRED_L1_PROOF_CARRYING_EFFECT_RECEIPT_COUNT}",
+        )),
+        None => findings.push("proof-carrying effect receipt count missing or invalid".to_string()),
+    }
+
+    match get_u64(data, &[L1_PROOF_CARRYING_EFFECTS_PATH, "invalid_receipts"]) {
+        Some(0) => {}
+        Some(count) => findings.push(format!(
+            "proof-carrying evidence reports {count} invalid receipt(s)"
+        )),
+        None => findings.push("proof-carrying invalid receipt count missing".to_string()),
+    }
+
+    if get_bool(
+        data,
+        &[L1_PROOF_CARRYING_EFFECTS_PATH, "receipt_chain_verified"],
+    ) != Some(true)
+    {
+        findings.push("proof-carrying receipt chain did not verify".to_string());
+    }
+
+    findings
 }
 
 fn evaluate_l2_engine_boundary_oracle(root: &Path) -> Result<L2EngineBoundaryOracle> {
@@ -680,8 +742,20 @@ fn get_f64(value: &Value, path: &[&str]) -> Option<f64> {
     get_value(value, path).and_then(Value::as_f64)
 }
 
+fn get_bool(value: &Value, path: &[&str]) -> Option<bool> {
+    get_value(value, path).and_then(Value::as_bool)
+}
+
 fn get_str<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
     get_value(value, path).and_then(Value::as_str)
+}
+
+fn get_str_array<'a>(value: &'a Value, path: &[&str]) -> Option<Vec<&'a str>> {
+    get_value(value, path).and_then(|nested| {
+        nested
+            .as_array()
+            .map(|items| items.iter().filter_map(Value::as_str).collect())
+    })
 }
 
 fn collect_files_named(
@@ -862,8 +936,8 @@ fn validate_engine_dependency_path(cargo_file: &Path, path_str: &str) -> bool {
     // Define the allowed canonical paths for engine dependencies
     // These should be absolute paths to the expected engine crate locations
     let allowed_paths = [
-        "franken_engine/crates/frankenengine-engine",
-        "franken_engine/crates/frankenengine-extension-host",
+        "franken_engine/crates/franken-engine",
+        "franken_engine/crates/franken-extension-host",
     ];
 
     // Check if the canonical path equals one of our allowed paths (strict equality, not suffix)
@@ -960,23 +1034,20 @@ mod tests {
         // Test that we properly parse TOML instead of using string scanning
         let content = r#"
 [dependencies]
-frankenengine-engine = { path = "../franken_engine/crates/frankenengine-engine", version = "0.1.0" }
+frankenengine-engine = { path = "../franken_engine/crates/franken-engine", version = "0.1.0" }
 some-other-crate = "1.0.0"
 
 [dev-dependencies]
-frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-extension-host" }
+frankenengine-extension-host = { path = "../franken_engine/crates/franken-extension-host" }
 "#;
 
         let paths = engine_dependency_paths(content, "frankenengine-engine");
         assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0], "../franken_engine/crates/frankenengine-engine");
+        assert_eq!(paths[0], "../franken_engine/crates/franken-engine");
 
         let paths = engine_dependency_paths(content, "frankenengine-extension-host");
         assert_eq!(paths.len(), 1);
-        assert_eq!(
-            paths[0],
-            "../franken_engine/crates/frankenengine-extension-host"
-        );
+        assert_eq!(paths[0], "../franken_engine/crates/franken-extension-host");
 
         // Should not find non-existent crates
         let paths = engine_dependency_paths(content, "non-existent-crate");
@@ -1016,7 +1087,7 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
         );
 
         // Attack 4: Absolute paths should be rejected
-        let malicious_path = "/franken_engine/crates/frankenengine-engine";
+        let malicious_path = "/franken_engine/crates/franken-engine";
         assert!(
             !validate_engine_dependency_path(&cargo_file, malicious_path),
             "Should reject absolute path: {}",
@@ -1024,7 +1095,7 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
         );
 
         // Attack 5: Windows absolute paths should be rejected
-        let malicious_path = "C:\\franken_engine\\crates\\frankenengine-engine";
+        let malicious_path = "C:\\franken_engine\\crates\\franken-engine";
         assert!(
             !validate_engine_dependency_path(&cargo_file, malicious_path),
             "Should reject Windows absolute path: {}",
@@ -1041,7 +1112,7 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
         // BD-3K70D regression tests: substring look-alikes that should be rejected
 
         // Attack 6: "/not_franken_engine/crates_imposter/" - contains target substrings but wrong location
-        let malicious_path = "../not_franken_engine/crates_imposter/frankenengine-engine";
+        let malicious_path = "../not_franken_engine/crates_imposter/franken-engine";
         assert!(
             !validate_engine_dependency_path(&cargo_file, malicious_path),
             "Should reject substring look-alike: {}",
@@ -1049,7 +1120,7 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
         );
 
         // Attack 7: "franken_engine_crates" - looks similar but missing separator
-        let malicious_path = "../franken_engine_crates/frankenengine-engine";
+        let malicious_path = "../franken_engine_crates/franken-engine";
         assert!(
             !validate_engine_dependency_path(&cargo_file, malicious_path),
             "Should reject substring look-alike: {}",
@@ -1057,7 +1128,7 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
         );
 
         // Attack 8: "some_franken_engine/crates/" - contains target but with prefix
-        let malicious_path = "../some_franken_engine/crates/frankenengine-engine";
+        let malicious_path = "../some_franken_engine/crates/franken-engine";
         assert!(
             !validate_engine_dependency_path(&cargo_file, malicious_path),
             "Should reject substring look-alike with prefix: {}",
@@ -1065,7 +1136,7 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
         );
 
         // Attack 9: "franken_engine/crates_but_not_really/" - starts right but ends wrong
-        let malicious_path = "../franken_engine/crates_but_not_really/frankenengine-engine";
+        let malicious_path = "../franken_engine/crates_but_not_really/franken-engine";
         assert!(
             !validate_engine_dependency_path(&cargo_file, malicious_path),
             "Should reject substring look-alike with suffix: {}",
@@ -1083,13 +1154,13 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
 
         // Create the expected franken_engine directory structure
         let franken_engine_dir = temp_dir.path().join("franken_engine").join("crates");
-        std::fs::create_dir_all(&franken_engine_dir.join("frankenengine-engine")).unwrap();
-        std::fs::create_dir_all(&franken_engine_dir.join("frankenengine-extension-host")).unwrap();
+        std::fs::create_dir_all(&franken_engine_dir.join("franken-engine")).unwrap();
+        std::fs::create_dir_all(&franken_engine_dir.join("franken-extension-host")).unwrap();
 
         // These legitimate paths should be allowed
         let legitimate_paths = [
-            "../franken_engine/crates/frankenengine-engine",
-            "../franken_engine/crates/frankenengine-extension-host",
+            "../franken_engine/crates/franken-engine",
+            "../franken_engine/crates/franken-extension-host",
         ];
 
         for legitimate_path in &legitimate_paths {
@@ -1135,38 +1206,35 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
 
         // Create legitimate engine directories
         let franken_engine_dir = temp_dir.path().join("franken_engine").join("crates");
-        std::fs::create_dir_all(&franken_engine_dir.join("frankenengine-engine")).unwrap();
-        std::fs::create_dir_all(&franken_engine_dir.join("frankenengine-extension-host")).unwrap();
+        std::fs::create_dir_all(&franken_engine_dir.join("franken-engine")).unwrap();
+        std::fs::create_dir_all(&franken_engine_dir.join("franken-extension-host")).unwrap();
 
         // Create malicious directories that contain the allowed path as a suffix
-        std::fs::create_dir_all(&franken_engine_dir.join("frankenengine-engine_evil")).unwrap();
-        std::fs::create_dir_all(&franken_engine_dir.join("prefix_frankenengine-engine")).unwrap();
+        std::fs::create_dir_all(&franken_engine_dir.join("franken-engine_evil")).unwrap();
+        std::fs::create_dir_all(&franken_engine_dir.join("prefix_franken-engine")).unwrap();
 
         // Test 1: Legitimate path should pass
         assert!(
-            validate_engine_dependency_path(
-                &cargo_file,
-                "../franken_engine/crates/frankenengine-engine"
-            ),
+            validate_engine_dependency_path(&cargo_file, "../franken_engine/crates/franken-engine"),
             "Legitimate path should be allowed"
         );
 
-        // Test 2: frankenengine-engine_evil should be rejected (suffix bypass attack)
+        // Test 2: franken-engine_evil should be rejected (suffix bypass attack)
         assert!(
             !validate_engine_dependency_path(
                 &cargo_file,
-                "../franken_engine/crates/frankenengine-engine_evil"
+                "../franken_engine/crates/franken-engine_evil"
             ),
-            "Should reject suffix bypass attack: frankenengine-engine_evil"
+            "Should reject suffix bypass attack: franken-engine_evil"
         );
 
-        // Test 3: prefix_frankenengine-engine should be rejected (suffix bypass attack)
+        // Test 3: prefix_franken-engine should be rejected (suffix bypass attack)
         assert!(
             !validate_engine_dependency_path(
                 &cargo_file,
-                "../franken_engine/crates/prefix_frankenengine-engine"
+                "../franken_engine/crates/prefix_franken-engine"
             ),
-            "Should reject suffix bypass attack: prefix_frankenengine-engine"
+            "Should reject suffix bypass attack: prefix_franken-engine"
         );
 
         // Test 4: Create traversal path that canonicalizes to legitimate location but has traversal
@@ -1178,12 +1246,12 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
             .join("dummy");
         std::fs::create_dir_all(&traversal_dir).unwrap();
 
-        // This path: "../franken_engine/crates/dummy/../frankenengine-engine"
+        // This path: "../franken_engine/crates/dummy/../franken-engine"
         // Would canonicalize to the legitimate path but should be rejected due to traversal
         assert!(
             !validate_engine_dependency_path(
                 &cargo_file,
-                "../franken_engine/crates/dummy/../frankenengine-engine"
+                "../franken_engine/crates/dummy/../franken-engine"
             ),
             "Should reject path with traversal components even if it canonicalizes correctly"
         );
@@ -1199,7 +1267,7 @@ frankenengine-extension-host = { path = "../franken_engine/crates/frankenengine-
         assert!(
             validate_engine_dependency_path(
                 &cargo_file,
-                "../franken_engine/crates/frankenengine-extension-host"
+                "../franken_engine/crates/franken-extension-host"
             ),
             "Legitimate extension host path should be allowed"
         );

@@ -8,7 +8,15 @@
     "tests_failed": 0,
     "tests_skipped": 0,
     "coverage_pct": 95.2,
-    "details_ref": "artifacts/oracle/l1_product_detail.json"
+    "details_ref": "artifacts/oracle/l1_product_detail.json",
+    "proof_carrying_effects": {
+      "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+      "required_subjects": ["fs.read", "fs.write", "http.request"],
+      "verified_subjects": ["fs.read", "fs.write", "http.request"],
+      "effect_receipts_verified": 3,
+      "invalid_receipts": 0,
+      "receipt_chain_verified": true
+    }
   },
   "blocking_findings": []
 }

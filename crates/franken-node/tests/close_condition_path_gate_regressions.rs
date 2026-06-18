@@ -4,8 +4,19 @@ use frankenengine_node::ops::close_condition::{
     generate_close_condition_receipt,
 };
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+
+struct FixtureRoot {
+    _temp_dir: TempDir,
+    root: PathBuf,
+}
+
+impl FixtureRoot {
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
 
 fn write_fixture(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -14,17 +25,23 @@ fn write_fixture(path: &Path, contents: &str) {
     fs::write(path, contents).expect("fixture file");
 }
 
-fn fixture_root_with_engine_paths(engine_path: &str, extension_host_path: &str) -> TempDir {
-    let root = TempDir::new().expect("fixture root");
+fn fixture_root_with_engine_paths(engine_path: &str, extension_host_path: &str) -> FixtureRoot {
+    let temp_dir = TempDir::new().expect("fixture root");
+    let root = temp_dir.path().join("workspace/franken_node");
+    let engine_crates = temp_dir.path().join("workspace/franken_engine/crates");
+    fs::create_dir_all(engine_crates.join("franken-engine")).expect("fixture engine crate");
+    fs::create_dir_all(engine_crates.join("franken-extension-host"))
+        .expect("fixture extension-host crate");
+
     write_fixture(
-        &root.path().join("Cargo.toml"),
+        &root.join("Cargo.toml"),
         r#"
 [workspace]
 members = ["crates/franken-node"]
 "#,
     );
     write_fixture(
-        &root.path().join("crates/franken-node/Cargo.toml"),
+        &root.join("crates/franken-node/Cargo.toml"),
         &format!(
             r#"
 [package]
@@ -39,24 +56,29 @@ frankenengine-extension-host = {{ path = "{extension_host_path}" }}
         ),
     );
     write_fixture(
-        &root.path().join("crates/franken-node/src/lib.rs"),
+        &root.join("crates/franken-node/src/lib.rs"),
         "pub fn fixture() -> bool { true }\n",
     );
     write_fixture(
-        &root.path().join("docs/ENGINE_SPLIT_CONTRACT.md"),
+        &root.join("docs/ENGINE_SPLIT_CONTRACT.md"),
         "franken_engine path dependencies MUST NOT be replaced by local engine crates.\n",
     );
     write_fixture(
-        &root.path().join("docs/PRODUCT_CHARTER.md"),
+        &root.join("docs/PRODUCT_CHARTER.md"),
         "Dual-oracle close condition requires all dimensions to be green.\n",
     );
     write_fixture(
-        &root
-            .path()
-            .join("artifacts/13/compatibility_corpus_results.json"),
+        &root.join("artifacts/13/compatibility_corpus_results.json"),
         r#"{
   "corpus": {
     "corpus_version": "compat-corpus-test"
+  },
+  "proof_carrying_effects": {
+    "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+    "verified_subjects": ["fs.read", "fs.write", "http.request"],
+    "effect_receipts_verified": 3,
+    "invalid_receipts": 0,
+    "receipt_chain_verified": true
   },
   "thresholds": {
     "overall_pass_rate_min_pct": 95.0
@@ -72,9 +94,7 @@ frankenengine-extension-host = {{ path = "{extension_host_path}" }}
 }"#,
     );
     write_fixture(
-        &root
-            .path()
-            .join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),
+        &root.join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),
         r#"{
   "gate": "section_10n_verification",
   "checks": [
@@ -86,7 +106,10 @@ frankenengine-extension-host = {{ path = "{extension_host_path}" }}
   ]
 }"#,
     );
-    root
+    FixtureRoot {
+        _temp_dir: temp_dir,
+        root,
+    }
 }
 
 fn generate_fixture_receipt(root: &Path) -> CloseConditionReceipt {
@@ -130,7 +153,7 @@ mod ops {
         use super::super::*;
 
         #[test]
-        fn valid_engine_path_dependencies_are_accepted_lexically() {
+        fn valid_engine_path_dependencies_are_accepted_with_canonical_sibling_crates() {
             let root = fixture_root_with_engine_paths(
                 "../../../franken_engine/crates/franken-engine",
                 "../../../franken_engine/crates/franken-extension-host",
