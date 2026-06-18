@@ -732,6 +732,117 @@ def _render_action_preview(
     }
 
 
+def _active_agent_names(input_payload: dict[str, Any]) -> list[str]:
+    active_agents = input_payload.get("active_agents")
+    names: list[str] = []
+    if isinstance(active_agents, list):
+        for agent in active_agents:
+            if isinstance(agent, str):
+                names.append(agent)
+            elif isinstance(agent, dict) and isinstance(agent.get("name"), str):
+                names.append(agent["name"])
+    return names
+
+
+def _reservation_scope(input_payload: dict[str, Any], action_preview: dict[str, Any]) -> list[str]:
+    handoff = input_payload.get("handoff_context") if isinstance(input_payload.get("handoff_context"), dict) else {}
+    scope = handoff.get("reservation_scope")
+    if isinstance(scope, list):
+        return [str(item) for item in scope]
+    create_preview = action_preview.get("br_create_preview")
+    if isinstance(create_preview, dict) and isinstance(create_preview.get("reserved_paths_hint"), list):
+        return [str(item) for item in create_preview["reserved_paths_hint"]]
+    return []
+
+
+def _validation_commands(decision: dict[str, Any], action_preview: dict[str, Any]) -> list[str]:
+    commands: list[str] = []
+    create_preview = action_preview.get("br_create_preview")
+    if isinstance(create_preview, dict) and isinstance(create_preview.get("validation_plan"), list):
+        commands.extend(str(command) for command in create_preview["validation_plan"])
+    retry_preview = action_preview.get("retry_preview")
+    if isinstance(retry_preview, dict):
+        command = retry_preview.get("recommended_rch_command")
+        if isinstance(command, dict) and isinstance(command.get("command_text"), str):
+            commands.append(command["command_text"])
+    recommended = decision.get("recommended_rch_command")
+    if isinstance(recommended, list):
+        text = _command_text([str(item) for item in recommended])
+        if text and text not in commands:
+            commands.append(text)
+    return commands
+
+
+def _exact_blockers(decision: dict[str, Any]) -> list[str]:
+    first = decision.get("first_blocker")
+    return [first] if isinstance(first, str) and first else []
+
+
+def _proposed_next_action(decision: dict[str, Any], action_preview: dict[str, Any]) -> str:
+    if action_preview.get("br_create_preview"):
+        return "Review the dry-run br create preview, dedupe by overlap terms, then create a narrow follow-up if still valid."
+    if action_preview.get("br_comment_preview"):
+        return "Review the dry-run br comment preview and refresh blocker evidence if still current."
+    if action_preview.get("coordination_preview"):
+        return "Send the coordination handoff to the owner or reservation holder; do not mutate tracker state."
+    if action_preview.get("retry_preview"):
+        return "Run only the rch-prefixed retry command if the retry budget and worker policy still allow it."
+    if decision["decision"] == "claim_ready":
+        return "Claim the selected ready Bead after confirming reservations."
+    return "No safe mutation is available; hand off the evidence."
+
+
+def _render_handoff_markdown(
+    input_payload: dict[str, Any],
+    decision: dict[str, Any],
+    action_preview: dict[str, Any],
+) -> str:
+    ready_count = len(_as_issue_list(input_payload.get("br_ready", [])))
+    active_agents = _active_agent_names(input_payload)
+    blockers = _exact_blockers(decision)
+    reservations = _reservation_scope(input_payload, action_preview)
+    commands = _validation_commands(decision, action_preview)
+    lines = [
+        "# Validation Autopilot Handoff",
+        "",
+        f"- ready_count: {ready_count}",
+        f"- decision: {decision['decision']}",
+        f"- reason_code: {decision['reason_code']}",
+        f"- selected_bead_id: {decision.get('selected_bead_id') or 'none'}",
+        f"- retry_allowed: {str(decision.get('retry_allowed')).lower()}",
+        f"- retry_budget_remaining: {decision.get('retry_budget_remaining')}",
+        f"- proposed_next_action: {_proposed_next_action(decision, action_preview)}",
+        "",
+        "## Active Agents",
+    ]
+    lines.extend(f"- {name}" for name in active_agents) if active_agents else lines.append("- none supplied")
+    lines.extend(["", "## Exact Blockers"])
+    lines.extend(f"- {blocker}" for blocker in blockers) if blockers else lines.append("- none")
+    lines.extend(["", "## Reservation Scope"])
+    lines.extend(f"- {path}" for path in reservations) if reservations else lines.append("- none supplied")
+    lines.extend(["", "## Validation Commands"])
+    lines.extend(f"- `{command}`" for command in commands) if commands else lines.append("- none")
+    lines.extend(["", "## Dry-Run Artifact"])
+    lines.append(f"- action_kind: {action_preview['action_kind']}")
+    lines.append(f"- mutation_allowed: {str(action_preview['mutation_allowed']).lower()}")
+    if action_preview.get("br_create_preview"):
+        lines.append("- br_create_preview: present")
+    if action_preview.get("br_comment_preview"):
+        lines.append("- br_comment_preview: present")
+    if action_preview.get("coordination_preview"):
+        lines.append("- coordination_preview: present")
+    return "\n".join(lines)
+
+
+def _human_summary(decision: dict[str, Any]) -> str:
+    selected = decision.get("selected_bead_id") or "none"
+    return (
+        f"{decision['decision']} ({decision['reason_code']}), selected={selected}, "
+        f"retry_allowed={str(decision['retry_allowed']).lower()}, "
+        f"summary={decision['operator_summary']}"
+    )
+
+
 def _choose_followup_or_handoff(
     input_payload: dict[str, Any],
     tracker_result: dict[str, Any],
@@ -890,6 +1001,8 @@ def _result(
     ready_count = len(_as_issue_list(input_payload.get("br_ready", [])))
     rch_records = _records_from_payload(input_payload.get("rch_evidence", []))
     action_preview = _render_action_preview(decision, blocked_result=blocked_result)
+    human_summary = _human_summary(decision)
+    handoff_markdown = _render_handoff_markdown(input_payload, decision, action_preview)
     return {
         "schema_version": SCHEMA_VERSION,
         "bead_id": CHECK_BEAD_ID,
@@ -907,6 +1020,12 @@ def _result(
         },
         "decision": decision,
         "action_preview": action_preview,
+        "human_summary": human_summary,
+        "handoff_markdown": handoff_markdown,
+        "agent_mail_handoff": {
+            "subject": f"[{decision.get('selected_bead_id') or 'validation-autopilot'}] Validation autopilot handoff",
+            "body_md": handoff_markdown,
+        },
         "policy": policy,
         "tracker_actionability": tracker_result,
         "blocked_freshness": blocked_result,
@@ -1169,7 +1288,8 @@ def _self_test_payloads() -> dict[str, dict[str, Any]]:
 
 def _run_self_test(now: datetime) -> dict[str, Any]:
     cases = _self_test_payloads()
-    decisions = {name: plan_decision(payload, now=now)["decision"] for name, payload in cases.items()}
+    planned = {name: plan_decision(payload, now=now) for name, payload in cases.items()}
+    decisions = {name: result["decision"] for name, result in planned.items()}
     expected = {
         "ready": "claim_ready",
         "followup": "create_followup_bead",
@@ -1199,6 +1319,7 @@ def _run_self_test(now: datetime) -> dict[str, Any]:
             decisions["unsafe"]["reason_code"],
         )
     )
+    handoff_case = planned["stale"]
     return {
         "schema_version": SCHEMA_VERSION,
         "bead_id": CHECK_BEAD_ID,
@@ -1209,6 +1330,10 @@ def _run_self_test(now: datetime) -> dict[str, Any]:
             "decisions": {name: decision["decision"] for name, decision in decisions.items()},
         },
         "decisions": decisions,
+        "human_summary": handoff_case["human_summary"],
+        "handoff_markdown": handoff_case["handoff_markdown"],
+        "agent_mail_handoff": handoff_case["agent_mail_handoff"],
+        "action_preview": handoff_case["action_preview"],
         "checks": checks,
     }
 
@@ -1230,6 +1355,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--trace-id", default="valauto-cli")
     parser.add_argument("--generated-at", default=None)
     parser.add_argument("--now", help="Override current UTC time for deterministic tests")
+    parser.add_argument("--dry-run", action="store_true", default=True, help="Read-only mode; default and only supported mode")
+    parser.add_argument("--apply", action="store_true", help="Reserved for future apply mode; currently fail-closed")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
@@ -1238,6 +1365,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     configure_test_logging("check_validation_autopilot")
+    if args.apply:
+        print("--apply is intentionally unimplemented; use --dry-run output and choose recipients/actions manually", file=sys.stderr)
+        return 2
     now = _parse_instant(args.now) if args.now else datetime.now(timezone.utc)
     if args.now and now is None:
         print(f"invalid --now timestamp: {args.now}", file=sys.stderr)
@@ -1257,7 +1387,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         print(f"{TITLE}: {result['verdict']}")
-        print(json.dumps(result["summary"], indent=2, sort_keys=True))
+        print(result["human_summary"])
+        print()
+        print(result["handoff_markdown"])
     return 0 if result["verdict"] == "PASS" else 1
 
 

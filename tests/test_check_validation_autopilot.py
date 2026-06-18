@@ -75,6 +75,13 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertIn("--dry-run", preview["br_create_preview"]["argv"])
         self.assertIn("## What", preview["br_create_preview"]["body_md"])
         self.assertIn("bd-blocked", preview["dedupe"]["overlap_search_terms"])
+        handoff = result["handoff_markdown"]
+        self.assertIn("ready_count: 0", handoff)
+        self.assertIn("## Active Agents", handoff)
+        self.assertIn("## Exact Blockers", handoff)
+        self.assertIn("## Reservation Scope", handoff)
+        self.assertIn("## Validation Commands", handoff)
+        self.assertIn("proposed_next_action:", handoff)
 
     def test_stale_blocker_refresh_preserves_first_blocker_and_comment_command(self) -> None:
         payload = mod._self_test_payloads()["stale"]
@@ -91,6 +98,7 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(preview["br_comment_preview"]["argv"], ["br", "comment", "bd-stale", "--stdin"])
         self.assertIn("Validation-autopilot dry-run blocker refresh", preview["br_comment_preview"]["body_md"])
         self.assertIn("first_blocker", preview["br_comment_preview"]["body_md"])
+        self.assertIn("current first blocker: timeout", result["handoff_markdown"])
 
     def test_rch_timeout_retry_requires_remote_prefix(self) -> None:
         payload = mod._self_test_payloads()["rch"]
@@ -111,6 +119,7 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(preview["retry_preview"]["recommended_rch_command"]["argv"][:3], ["rch", "exec", "--"])
         self.assertEqual(preview["retry_preview"]["worker_action"], "retry_different_worker")
         self.assertIn("recommended_rch_command", preview["br_comment_preview"]["body_md"])
+        self.assertIn("rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_valauto", result["handoff_markdown"])
 
     def test_stale_progress_after_cancellation_retries_with_stale_progress_reason(self) -> None:
         payload = mod._self_test_payloads()["stale_progress"]
@@ -196,6 +205,7 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertIsNone(preview["br_comment_preview"])
         self.assertIn("Coordination required", preview["coordination_preview"]["subject"])
         self.assertIn("franken_engine", preview["coordination_preview"]["body_md"])
+        self.assertIn("franken_engine", result["agent_mail_handoff"]["body_md"])
 
     def test_parent_epic_never_becomes_claim_ready(self) -> None:
         payload = mod._self_test_payloads()["parent"]
@@ -219,6 +229,7 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertIsNone(preview["br_create_preview"])
         self.assertIsNone(preview["br_comment_preview"])
         self.assertIsNone(preview["coordination_preview"])
+        self.assertIn("Claim the selected ready Bead", result["handoff_markdown"])
 
     def test_stale_input_fails_closed_before_planning(self) -> None:
         payload = mod._self_test_payloads()["ready"]
@@ -339,6 +350,45 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         result = JSON_DECODER.decode(proc.stdout)
         self.assertEqual(result["decision"]["decision"], "claim_ready")
+
+    def test_cli_non_json_output_renders_handoff_markdown(self) -> None:
+        payload = mod._self_test_payloads()["stale"]
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "valauto-input.json"
+            input_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            proc = subprocess.run(  # nosec B603
+                [
+                    sys.executable,
+                    str(SCRIPT_PATH),
+                    "--input",
+                    str(input_path),
+                    "--now",
+                    "2026-06-18T15:45:00+00:00",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=20,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Validation autopilot source-only planner: PASS", proc.stdout)
+        self.assertIn("# Validation Autopilot Handoff", proc.stdout)
+        self.assertIn("current first blocker: timeout", proc.stdout)
+
+    def test_cli_apply_guard_fails_closed(self) -> None:
+        proc = subprocess.run(  # nosec B603
+            [sys.executable, str(SCRIPT_PATH), "--apply"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("intentionally unimplemented", proc.stderr)
 
     def test_cli_missing_required_inputs_returns_usage_error(self) -> None:
         proc = subprocess.run(  # nosec B603
