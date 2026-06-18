@@ -996,7 +996,22 @@ struct SwarmValidationDecisionParts {
 fn decide_swarm_validation_admission(
     input: &SwarmValidationAdmissionInputFixture,
 ) -> SwarmValidationDecisionParts {
-    if !input_schema_valid(input) {
+    let missing_fields = missing_required_input_fields(input);
+    if !missing_fields.is_empty() {
+        return decision_parts(
+            SwarmValidationAdmissionDecision::Blocked,
+            "SVA_BLOCKED_MISSING_INPUT",
+            "SVA-011",
+            "repair_admission_input",
+        )
+        .fail_closed()
+        .with_blocker(format!(
+            "missing required admission input fields: {}",
+            missing_fields.join(",")
+        ));
+    }
+
+    if !input_schema_versions_valid(input) {
         return decision_parts(
             SwarmValidationAdmissionDecision::Blocked,
             "SVA_BLOCKED_MALFORMED_INPUT",
@@ -1004,7 +1019,7 @@ fn decide_swarm_validation_admission(
             "repair_admission_input",
         )
         .fail_closed()
-        .with_blocker("admission input or policy schema is invalid");
+        .with_blocker("admission input or policy schema version is invalid");
     }
 
     if input.freshness_expires_at <= input.observed_at {
@@ -1381,15 +1396,34 @@ fn decision_record(
     }
 }
 
-fn input_schema_valid(input: &SwarmValidationAdmissionInputFixture) -> bool {
+fn missing_required_input_fields(
+    input: &SwarmValidationAdmissionInputFixture,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if input.input_id.trim().is_empty() {
+        missing.push("input_id");
+    }
+    if input.trace_id.trim().is_empty() {
+        missing.push("trace_id");
+    }
+    if input.bead.bead_id.trim().is_empty() {
+        missing.push("bead.bead_id");
+    }
+    if input.bead.thread_id.trim().is_empty() {
+        missing.push("bead.thread_id");
+    }
+    if input.agent_name.trim().is_empty() {
+        missing.push("agent_name");
+    }
+    if input.policy.profile_id.trim().is_empty() {
+        missing.push("policy.profile_id");
+    }
+    missing
+}
+
+fn input_schema_versions_valid(input: &SwarmValidationAdmissionInputFixture) -> bool {
     input.schema_version == SWARM_VALIDATION_ADMISSION_INPUT_SCHEMA_VERSION
         && input.policy.schema_version == SWARM_VALIDATION_ADMISSION_POLICY_PROFILE_SCHEMA_VERSION
-        && !input.input_id.trim().is_empty()
-        && !input.trace_id.trim().is_empty()
-        && !input.bead.bead_id.trim().is_empty()
-        && !input.bead.thread_id.trim().is_empty()
-        && !input.agent_name.trim().is_empty()
-        && !input.policy.profile_id.trim().is_empty()
 }
 
 fn requested_action_requires_cargo(action: SwarmValidationRequestedAction) -> bool {

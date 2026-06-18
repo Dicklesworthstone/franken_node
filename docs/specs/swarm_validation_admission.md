@@ -149,22 +149,29 @@ Decision states:
 | `run` | `SVA_RUN_SOURCE_ONLY_READY` | `SVA-001` | `run_source_only_checks` | No |
 | `run` | `SVA_RUN_RCH_READY` | `SVA-002` | `start_rch_validation` | Yes |
 | `run` | `SVA_RUN_PYTHON_GATE_READY` | `SVA-003` | `run_python_gate` | No |
-| `coalesce` | `SVA_COALESCE_PROOF_IN_FLIGHT` | `SVA-004` | `join_existing_proof` | Yes |
-| `coalesce` | `SVA_COALESCE_PROOF_CACHE_HIT` | `SVA-005` | `reuse_fresh_receipt` | Yes |
+| `coalesce` | `SWARM-COALESCE-IN-FLIGHT` | `SVA-004` | `join_existing_proof` | Yes |
+| `coalesce` | `SWARM-CACHE-HIT` | `SVA-005` | `reuse_fresh_receipt` | Yes |
 | `defer` | `SVA_DEFER_WORKSPACE_PRESSURE` | `SVA-006` | `refresh_pressure_after_backoff` | No |
 | `defer` | `SVA_DEFER_RCH_QUEUE` | `SVA-007` | `wait_for_rch_capacity` | No |
 | `defer` | `SVA_DEFER_TARGET_DIR_SERIALIZED` | `SVA-008` | `wait_for_target_dir_lease` | No |
-| `handoff` | `SVA_HANDOFF_STALE_OWNER` | `SVA-009` | `request_agent_handoff` | No |
+| `defer` | `SVA_DEFER_TARGET_DIR_DISK_PRESSURE` | `SVA-020` | `free_target_dir_space_or_reuse_existing_proof` | No |
+| `handoff` | `SWARM-STALE-LEASE` | `SVA-009` | `request_agent_handoff` | No |
 | `handoff` | `SVA_HANDOFF_READY_TO_REOPEN` | `SVA-010` | `claim_after_handoff_window` | No |
+| `blocked` | `SVA_BLOCKED_MISSING_INPUT` | `SVA-011` | `repair_admission_input` | No |
 | `blocked` | `SVA_BLOCKED_MALFORMED_INPUT` | `SVA-011` | `repair_admission_input` | No |
 | `blocked` | `SVA_BLOCKED_PRODUCT_FAILURE` | `SVA-012` | `surface_product_failure` | No |
 | `blocked` | `SVA_BLOCKED_LOCAL_FALLBACK` | `SVA-013` | `restore_remote_execution_or_record_blocker` | No |
 | `blocked` | `SVA_BLOCKED_ACTIVE_RESERVATION` | `SVA-014` | `coordinate_with_reservation_holder` | No |
 | `blocked` | `SVA_BLOCKED_STALE_OR_INVALID_ARTIFACT` | `SVA-015` | `regenerate_evidence` | No |
 | `blocked` | `SVA_BLOCKED_TELEMETRY_GAP` | `SVA-016` | `refresh_required_telemetry` | No |
+| `blocked` | `SWARM-INCOMPATIBLE-PROOF` | `SVA-017` | `start_distinct_proof_or_rebuild_key` | No |
+| `blocked` | `SWARM-STALE-CACHE` | `SVA-018` | `refresh_validation_evidence` | No |
+| `blocked` | `SWARM-CORRUPTED-PROOF-STATE` | `SVA-019` | `repair_proof_coalescer_state` | No |
 
-Reason codes are exhaustive for version 1. Follow-on work may add reason codes
-only by bumping the policy and decision schema version.
+The planner test suite asserts that every emitted version 1 reason code appears
+in this matrix. Reserved rows may be used by higher-level admission wrappers,
+but adding new pure-planner reason codes requires updating this table and the
+focused invariant tests.
 
 ## Human Summary Rules
 

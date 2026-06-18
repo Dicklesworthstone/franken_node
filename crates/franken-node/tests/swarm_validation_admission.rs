@@ -1,7 +1,14 @@
+use chrono::TimeDelta;
 use frankenengine_node::ops::swarm_validation_admission::{
-    SwarmValidationAdmissionDecision, SwarmValidationAdmissionFixtureKind,
-    SwarmValidationAdmissionInputFixture, SwarmValidationAdmissionPriority,
-    SwarmValidationRequestedAction, SwarmValidationTargetDirStrategy,
+    MAX_SWARM_ADMISSION_AGENTS, MAX_SWARM_ADMISSION_BUILD_SLOTS,
+    MAX_SWARM_ADMISSION_COMPATIBILITY_BLOCKERS, MAX_SWARM_ADMISSION_RESERVATIONS,
+    MAX_SWARM_ADMISSION_WAITERS, SwarmValidationAdmissionDecision,
+    SwarmValidationAdmissionFixtureKind, SwarmValidationAdmissionInputFixture,
+    SwarmValidationAdmissionPriority, SwarmValidationAgentSnapshot,
+    SwarmValidationBuildSlotSnapshot, SwarmValidationBuildSlotState,
+    SwarmValidationProofCompatibility, SwarmValidationRequestedAction,
+    SwarmValidationReservationMode, SwarmValidationReservationSnapshot,
+    SwarmValidationTargetDirStrategy, SwarmValidationUnavailableSignal,
     SwarmValidationWorkerRequirement, deterministic_swarm_validation_admission_fixtures,
     plan_swarm_validation_admission,
 };
@@ -11,6 +18,7 @@ use frankenengine_node::ops::validation_readiness::{
     ValidationReadinessStatus, build_validation_readiness_report,
     render_validation_readiness_human, render_validation_readiness_json,
 };
+use proptest::prelude::*;
 use serde_json::Value;
 
 const DEFAULT_RETRY_AFTER_MS: u64 = 30_000;
@@ -193,6 +201,346 @@ fn coalesced_proof_hints_include_key_and_zero_new_rch_jobs() {
 }
 
 #[test]
+fn missing_required_input_fields_fail_closed_with_explicit_reason() {
+    let mut input = fixture_input(SwarmValidationAdmissionFixtureKind::SingleAgent);
+    input.input_id.clear();
+    input.trace_id.clear();
+    input.bead.bead_id.clear();
+    input.bead.thread_id.clear();
+    input.agent_name.clear();
+    input.policy.profile_id.clear();
+
+    let decision = plan_swarm_validation_admission(&input);
+
+    eprintln!(
+        "fixture=missing_required_input decision={} reason_code={} coalescing_key={} action={}",
+        decision.decision.as_str(),
+        decision.reason_code,
+        decision
+            .execution_hints
+            .coalescing_key
+            .as_deref()
+            .unwrap_or("none"),
+        decision.required_action
+    );
+    assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Blocked);
+    assert_eq!(decision.reason_code, "SVA_BLOCKED_MISSING_INPUT");
+    assert_eq!(decision.event_code, "SVA-011");
+    assert_eq!(decision.required_action, "repair_admission_input");
+    assert!(decision.fail_closed);
+    assert!(
+        decision.diagnostics.blocked_by.iter().any(|blocker| {
+            blocker.contains("input_id") && blocker.contains("policy.profile_id")
+        }),
+        "missing field list should name empty fields: {:?}",
+        decision.diagnostics.blocked_by
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn proof_key_or_command_digest_mismatch_never_coalesces(
+        proof_suffix in "[a-z0-9]{1,16}",
+        command_suffix in "[a-z0-9]{1,16}",
+    ) {
+        let mut proof_key_input =
+            fixture_input(SwarmValidationAdmissionFixtureKind::DuplicateProofRequest);
+        proof_key_input
+            .proof
+            .coalescing
+            .as_mut()
+            .expect("duplicate fixture has coalescing state")
+            .proof_work_key = Some(format!("sha256:other-proof-{proof_suffix}"));
+
+        let proof_key_decision = plan_swarm_validation_admission(&proof_key_input);
+
+        prop_assert_eq!(
+            proof_key_decision.decision,
+            SwarmValidationAdmissionDecision::Blocked
+        );
+        prop_assert_eq!(
+            proof_key_decision.reason_code.as_str(),
+            "SWARM-INCOMPATIBLE-PROOF"
+        );
+        prop_assert!(proof_key_decision.fail_closed);
+        prop_assert!(proof_key_decision
+            .diagnostics
+            .blocked_by
+            .iter()
+            .any(|blocker| blocker.contains("proof work key mismatch")));
+
+        let mut command_digest_input =
+            fixture_input(SwarmValidationAdmissionFixtureKind::DuplicateProofRequest);
+        command_digest_input
+            .proof
+            .coalescing
+            .as_mut()
+            .expect("duplicate fixture has coalescing state")
+            .command_digest = Some(format!("sha256:other-command-{command_suffix}"));
+
+        let command_digest_decision = plan_swarm_validation_admission(&command_digest_input);
+
+        prop_assert_eq!(
+            command_digest_decision.decision,
+            SwarmValidationAdmissionDecision::Blocked
+        );
+        prop_assert_eq!(
+            command_digest_decision.reason_code.as_str(),
+            "SWARM-INCOMPATIBLE-PROOF"
+        );
+        prop_assert!(command_digest_decision.fail_closed);
+        prop_assert!(command_digest_decision
+            .diagnostics
+            .blocked_by
+            .iter()
+            .any(|blocker| blocker.contains("command digest mismatch")));
+    }
+}
+
+#[test]
+fn profile_incompatibility_blocks_instead_of_reusing_equivalent_hashes() {
+    let mut input = fixture_input(SwarmValidationAdmissionFixtureKind::DuplicateProofRequest);
+    let coalescing = input
+        .proof
+        .coalescing
+        .as_mut()
+        .expect("duplicate fixture has coalescing state");
+    coalescing.compatibility = SwarmValidationProofCompatibility::DifferentProfile;
+    coalescing
+        .compatibility_blockers
+        .push("feature/profile hash changed".to_string());
+
+    let decision = plan_swarm_validation_admission(&input);
+
+    assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Blocked);
+    assert_eq!(decision.reason_code, "SWARM-INCOMPATIBLE-PROOF");
+    assert!(decision.fail_closed);
+    assert!(
+        decision
+            .diagnostics
+            .blocked_by
+            .iter()
+            .any(|blocker| blocker.contains("different_profile"))
+    );
+    assert!(
+        decision
+            .diagnostics
+            .blocked_by
+            .iter()
+            .any(|blocker| blocker.contains("feature/profile hash changed"))
+    );
+}
+
+#[test]
+fn stale_lease_handoff_preserves_owner_and_slot_evidence() {
+    let input = fixture_input(SwarmValidationAdmissionFixtureKind::StaleLease);
+
+    let decision = plan_swarm_validation_admission(&input);
+
+    assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Handoff);
+    assert_eq!(decision.reason_code, "SWARM-STALE-LEASE");
+    assert_eq!(decision.required_action, "request_agent_handoff");
+    assert!(
+        decision
+            .diagnostics
+            .blocked_by
+            .iter()
+            .any(|blocker| blocker.contains("stale owner RainyFrog"))
+    );
+    assert!(
+        decision
+            .evidence_refs
+            .iter()
+            .any(|evidence| { evidence == "rch-build-slot:RainyFrog:rch-proof-bd-0x4fy-2" })
+    );
+}
+
+#[test]
+fn agent_mail_reservation_conflict_blocks_with_holder_details() {
+    let mut input = fixture_input(SwarmValidationAdmissionFixtureKind::SingleAgent);
+    input
+        .coordination
+        .reservations
+        .push(SwarmValidationReservationSnapshot {
+            holder_agent: "ScarletSeal".to_string(),
+            path_pattern: "crates/franken-node/src/ops/swarm_validation_admission.rs".to_string(),
+            mode: SwarmValidationReservationMode::Exclusive,
+            reason: Some("bd-other".to_string()),
+            expires_at: input.observed_at + TimeDelta::minutes(30),
+        });
+
+    let decision = plan_swarm_validation_admission(&input);
+
+    assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Blocked);
+    assert_eq!(decision.reason_code, "SVA_BLOCKED_ACTIVE_RESERVATION");
+    assert_eq!(
+        decision.required_action,
+        "coordinate_with_reservation_holder"
+    );
+    assert!(decision.fail_closed);
+    assert!(
+        decision
+            .diagnostics
+            .blocked_by
+            .iter()
+            .any(|blocker| blocker.contains("ScarletSeal"))
+    );
+    assert!(decision.evidence_refs.iter().any(|evidence| {
+        evidence
+            == "agent-mail-reservation:ScarletSeal:crates/franken-node/src/ops/swarm_validation_admission.rs"
+    }));
+}
+
+#[test]
+fn normalization_caps_and_orders_large_coordination_inputs_deterministically() {
+    let mut input = fixture_input(SwarmValidationAdmissionFixtureKind::SingleAgent);
+    input.coordination.active_agents = (0..(MAX_SWARM_ADMISSION_AGENTS + 8))
+        .rev()
+        .map(|index| SwarmValidationAgentSnapshot {
+            agent_name: format!("Agent{index:04}"),
+            project_key: "/data/projects/franken_node".to_string(),
+            last_active_age_secs: u64::try_from(index).expect("test index fits u64"),
+            ack_required_count: 0,
+        })
+        .collect();
+    input.coordination.reservations = (0..(MAX_SWARM_ADMISSION_RESERVATIONS + 8))
+        .rev()
+        .map(|index| SwarmValidationReservationSnapshot {
+            holder_agent: format!("Holder{index:04}"),
+            path_pattern: format!("crates/franken-node/src/path_{index:04}.rs"),
+            mode: SwarmValidationReservationMode::Exclusive,
+            reason: Some(format!("bd-cap-{index:04}")),
+            expires_at: input.observed_at + TimeDelta::minutes(30),
+        })
+        .collect();
+    input.coordination.build_slots = (0..(MAX_SWARM_ADMISSION_BUILD_SLOTS + 8))
+        .rev()
+        .map(|index| SwarmValidationBuildSlotSnapshot {
+            slot: format!("rch-slot-{index:04}"),
+            holder_agent: format!("Holder{index:04}"),
+            state: SwarmValidationBuildSlotState::Running,
+            command_digest: Some(format!("sha256:command-{index:04}")),
+            last_progress_age_secs: u64::try_from(index).expect("test index fits u64"),
+        })
+        .collect();
+    input.missing_signals = vec![
+        SwarmValidationUnavailableSignal::Rch,
+        SwarmValidationUnavailableSignal::AgentMail,
+        SwarmValidationUnavailableSignal::Rch,
+        SwarmValidationUnavailableSignal::Beads,
+        SwarmValidationUnavailableSignal::AgentMail,
+    ];
+
+    let normalized = input.normalize();
+    let agent_names = normalized
+        .coordination
+        .active_agents
+        .iter()
+        .map(|agent| agent.agent_name.clone())
+        .collect::<Vec<_>>();
+    let reservation_paths = normalized
+        .coordination
+        .reservations
+        .iter()
+        .map(|reservation| reservation.path_pattern.clone())
+        .collect::<Vec<_>>();
+    let build_slots = normalized
+        .coordination
+        .build_slots
+        .iter()
+        .map(|slot| slot.slot.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(agent_names.len(), MAX_SWARM_ADMISSION_AGENTS);
+    assert_eq!(reservation_paths.len(), MAX_SWARM_ADMISSION_RESERVATIONS);
+    assert_eq!(build_slots.len(), MAX_SWARM_ADMISSION_BUILD_SLOTS);
+    assert_sorted(&agent_names);
+    assert_sorted(&reservation_paths);
+    assert_sorted(&build_slots);
+    assert_eq!(
+        normalized.missing_signals,
+        vec![
+            SwarmValidationUnavailableSignal::AgentMail,
+            SwarmValidationUnavailableSignal::Beads,
+            SwarmValidationUnavailableSignal::Rch,
+        ]
+    );
+}
+
+#[test]
+fn proof_coalescing_waiters_and_blockers_are_capped_and_sorted() {
+    let mut input = fixture_input(SwarmValidationAdmissionFixtureKind::DuplicateProofRequest);
+    let coalescing = input
+        .proof
+        .coalescing
+        .as_mut()
+        .expect("duplicate fixture has coalescing state");
+    coalescing.waiter_agents = (0..(MAX_SWARM_ADMISSION_WAITERS + 8))
+        .rev()
+        .map(|index| format!("Waiter{index:04}"))
+        .collect();
+    coalescing.compatibility_blockers = (0..(MAX_SWARM_ADMISSION_COMPATIBILITY_BLOCKERS + 8))
+        .rev()
+        .map(|index| format!("blocker-{index:04}"))
+        .collect();
+
+    let normalized = input.normalize();
+    let coalescing = normalized
+        .proof
+        .coalescing
+        .as_ref()
+        .expect("coalescing state survives normalization");
+
+    assert_eq!(coalescing.waiter_agents.len(), MAX_SWARM_ADMISSION_WAITERS);
+    assert_eq!(
+        coalescing.compatibility_blockers.len(),
+        MAX_SWARM_ADMISSION_COMPATIBILITY_BLOCKERS
+    );
+    assert_sorted(&coalescing.waiter_agents);
+    assert_sorted(&coalescing.compatibility_blockers);
+}
+
+#[test]
+fn fixture_matrix_logs_decision_reason_key_and_action_for_nocapture() {
+    let catalog = deterministic_swarm_validation_admission_fixtures();
+
+    for fixture in catalog.fixtures {
+        let decision = plan_swarm_validation_admission(&fixture.input);
+        let coalescing_key = decision
+            .execution_hints
+            .coalescing_key
+            .as_deref()
+            .unwrap_or("none");
+
+        eprintln!(
+            "fixture={} decision={} reason_code={} coalescing_key={} action={}",
+            fixture.fixture_kind.as_str(),
+            decision.decision.as_str(),
+            decision.reason_code,
+            coalescing_key,
+            decision.required_action
+        );
+        assert_eq!(decision.decision, fixture.expectation.decision);
+        assert_eq!(decision.reason_code, fixture.expectation.reason_code);
+        assert_eq!(
+            decision.required_action,
+            fixture.expectation.required_action
+        );
+        assert!(
+            !decision
+                .safe_command_shape
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("cargo "),
+            "fixture {} must not recommend local cargo",
+            fixture.fixture_kind.as_str()
+        );
+    }
+}
+
+#[test]
 fn readiness_summary_surfaces_swarm_admission_states_in_json_and_human_output()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut stale_input = fixture_input(SwarmValidationAdmissionFixtureKind::SingleAgent);
@@ -292,6 +640,13 @@ fn readiness_summary_surfaces_swarm_admission_states_in_json_and_human_output()
     assert!(!human.contains("safe_command=cargo "));
 
     Ok(())
+}
+
+fn assert_sorted(values: &[String]) {
+    assert!(
+        values.windows(2).all(|pair| pair[0] <= pair[1]),
+        "values should be sorted deterministically: {values:?}"
+    );
 }
 
 #[test]
