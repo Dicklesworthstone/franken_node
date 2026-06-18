@@ -1,0 +1,87 @@
+{
+  "schema_version": "franken-node/validation-autopilot/transcript-golden/v1",
+  "fixture_bundle": "tests/fixtures/validation_autopilot/transcript_cases.json",
+  "cases": {
+    "ready_claim": {
+      "decision": "claim_ready",
+      "reason_code": "VALAUTO_READY_CLAIMABLE",
+      "selected_bead_id": "bd-ready",
+      "action_kind": "claim_ready",
+      "agent_mail_subject": "[bd-ready] Validation autopilot handoff",
+      "exact_blockers": [],
+      "validation_commands": [],
+      "proposed_labels": [],
+      "required_handoff_fragments": ["ready_count: 1", "Claim the selected ready Bead", "NavyTurtle", "SilentGrove"]
+    },
+    "no_ready_blocked_epic": {
+      "decision": "create_followup_bead",
+      "reason_code": "VALAUTO_NO_READY_CREATE_CHILD",
+      "selected_bead_id": null,
+      "action_kind": "create_followup_bead",
+      "agent_mail_subject": "[validation-autopilot] Validation autopilot handoff",
+      "exact_blockers": [],
+      "validation_commands": [
+        "python3 -m py_compile scripts/check_validation_autopilot.py",
+        "python3 -m unittest tests.test_check_validation_autopilot",
+        "git diff --check"
+      ],
+      "proposed_labels": ["validation-autopilot", "no-ready", "blocked-refresh"],
+      "required_handoff_fragments": ["ready_count: 0", "br_create_preview: present", "Review the dry-run br create preview"]
+    },
+    "stale_blocker": {
+      "decision": "refresh_blocker",
+      "reason_code": "VALAUTO_BLOCKER_STALE",
+      "selected_bead_id": "bd-stale",
+      "action_kind": "refresh_blocker",
+      "agent_mail_subject": "[bd-stale] Validation autopilot handoff",
+      "exact_blockers": ["exact command: rch exec -- cargo test -p frankenengine-node. current first blocker: timeout."],
+      "validation_commands": [],
+      "proposed_labels": [],
+      "required_handoff_fragments": ["current first blocker: timeout", "br_comment_preview: present"]
+    },
+    "rch_timeout_retry": {
+      "decision": "retry_rch_bounded",
+      "reason_code": "VALAUTO_RCH_TIMEOUT_RETRY",
+      "selected_bead_id": null,
+      "action_kind": "retry_rch_bounded",
+      "agent_mail_subject": "[validation-autopilot] Validation autopilot handoff",
+      "exact_blockers": ["[RCH-E104] SSH command timed out"],
+      "validation_commands": ["rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_valauto cargo test -p frankenengine-node validation_autopilot"],
+      "proposed_labels": [],
+      "required_handoff_fragments": ["retry_allowed: true", "retry_budget_remaining: 1", "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_valauto"]
+    },
+    "external_blocker": {
+      "decision": "coordinate_owner",
+      "reason_code": "VALAUTO_EXTERNAL_BLOCKER",
+      "selected_bead_id": "bd-engine",
+      "action_kind": "coordinate_owner",
+      "agent_mail_subject": "[bd-engine] Validation autopilot handoff",
+      "exact_blockers": ["blocked on sibling /data/projects/franken_engine quickjslane wiring."],
+      "validation_commands": [],
+      "proposed_labels": [],
+      "required_handoff_fragments": ["franken_engine", "coordination_preview: present", "Send the coordination handoff"]
+    },
+    "clean_success": {
+      "decision": "handoff_only",
+      "reason_code": "VALAUTO_NO_SAFE_MUTATION",
+      "selected_bead_id": null,
+      "action_kind": "handoff_only",
+      "agent_mail_subject": "[validation-autopilot] Validation autopilot handoff",
+      "exact_blockers": [],
+      "validation_commands": [],
+      "proposed_labels": [],
+      "required_handoff_fragments": ["No safe mutation is available", "retry_allowed: false"]
+    },
+    "parent_epic_no_claim": {
+      "decision": "handoff_only",
+      "reason_code": "VALAUTO_NO_SAFE_MUTATION",
+      "selected_bead_id": "bd-epic",
+      "action_kind": "handoff_only",
+      "agent_mail_subject": "[bd-epic] Validation autopilot handoff",
+      "exact_blockers": ["Candidate is a parent epic and cannot be claimed as implementation work"],
+      "validation_commands": [],
+      "proposed_labels": [],
+      "required_handoff_fragments": ["parent epic", "No safe mutation is available"]
+    }
+  }
+}

@@ -1,0 +1,257 @@
+{
+  "schema_version": "franken-node/validation-autopilot/transcript-fixtures/v1",
+  "generated_at": "2026-06-18T15:45:00+00:00",
+  "cases": [
+    {
+      "case_id": "ready_claim",
+      "input": {
+        "schema_version": "franken-node/validation-autopilot/input/v1",
+        "trace_id": "fixture-ready-claim",
+        "agent_name": "NavyTurtle",
+        "generated_at": "2026-06-18T15:45:00+00:00",
+        "active_agents": [{"name": "NavyTurtle"}, {"name": "SilentGrove"}],
+        "br_ready": [{"id": "bd-ready", "title": "Ready validation bead", "status": "open"}],
+        "br_active": [{"id": "bd-ready", "title": "Ready validation bead", "status": "open", "issue_type": "task"}],
+        "bv_plan": {"plan": {"tracks": [{"track_id": "track-A", "items": [{"id": "bd-ready"}]}]}},
+        "blocked_freshness": {"schema_version": "fixture", "verdict": "PASS", "audits": []},
+        "rch_evidence": [],
+        "handoff_context": {"reservation_scope": ["scripts/check_validation_autopilot.py"]},
+        "policy": {
+          "schema_version": "franken-node/validation-autopilot/policy/v1",
+          "input_freshness_seconds": 3600,
+          "blocked_freshness_hours": 168,
+          "require_rch_for_cargo": true,
+          "max_rch_retries_per_blocker": 1,
+          "worker_quarantine_failure_threshold": 2,
+          "allow_bead_creation": true,
+          "allow_tracker_mutation": false,
+          "fail_closed_on_mail_gap": true,
+          "fail_closed_on_reservation_conflict": true
+        }
+      }
+    },
+    {
+      "case_id": "no_ready_blocked_epic",
+      "input": {
+        "schema_version": "franken-node/validation-autopilot/input/v1",
+        "trace_id": "fixture-no-ready-blocked-epic",
+        "agent_name": "NavyTurtle",
+        "generated_at": "2026-06-18T15:45:00+00:00",
+        "active_agents": [{"name": "NavyTurtle"}, {"name": "RainyFrog"}],
+        "br_ready": [],
+        "br_active": [
+          {"id": "bd-blocked", "title": "Blocked validation support", "status": "blocked", "notes": "Current first blocker: rch exec -- cargo test -p frankenengine-node timed out."},
+          {"id": "bd-epic", "title": "Parent epic", "status": "open", "issue_type": "epic"}
+        ],
+        "bv_plan": {"plan": {"tracks": [{"track_id": "track-A", "items": []}]}},
+        "tracker_actionability": {
+          "schema_version": "franken-node/tracker-actionability/v1",
+          "verdict": "PASS",
+          "summary": {"ready_count": 0, "no_ready_recovery": true},
+          "classifications": [
+            {"id": "bd-blocked", "title": "Blocked validation support", "classification": "blocked", "recommended_action": "refresh-blocker"},
+            {"id": "bd-epic", "title": "Parent epic", "classification": "parent_epic", "recommended_action": "create-new-bead"}
+          ]
+        },
+        "blocked_freshness": {"schema_version": "franken-node/blocked-bead-freshness/v1", "verdict": "PASS", "audits": []},
+        "rch_evidence": [],
+        "handoff_context": {"reservation_scope": ["tests/fixtures/validation_autopilot/**", "tests/golden/validation_autopilot/**"]},
+        "policy": {
+          "schema_version": "franken-node/validation-autopilot/policy/v1",
+          "input_freshness_seconds": 3600,
+          "blocked_freshness_hours": 168,
+          "require_rch_for_cargo": true,
+          "max_rch_retries_per_blocker": 1,
+          "worker_quarantine_failure_threshold": 2,
+          "allow_bead_creation": true,
+          "allow_tracker_mutation": false,
+          "fail_closed_on_mail_gap": true,
+          "fail_closed_on_reservation_conflict": true
+        }
+      }
+    },
+    {
+      "case_id": "stale_blocker",
+      "input": {
+        "schema_version": "franken-node/validation-autopilot/input/v1",
+        "trace_id": "fixture-stale-blocker",
+        "agent_name": "NavyTurtle",
+        "generated_at": "2026-06-18T15:45:00+00:00",
+        "br_ready": [],
+        "br_active": [
+          {
+            "id": "bd-stale",
+            "title": "Stale blocker",
+            "status": "blocked",
+            "notes": "Exact command: rch exec -- cargo test -p frankenengine-node. Current first blocker: timeout.",
+            "updated_at": "2026-06-01T00:00:00Z"
+          }
+        ],
+        "bv_plan": {"plan": {"tracks": [{"track_id": "track-A", "items": []}]}},
+        "blocked_freshness": {
+          "schema_version": "franken-node/blocked-bead-freshness/v1",
+          "verdict": "FAIL",
+          "audits": [{"id": "bd-stale", "classification": "stale", "missing": [], "evidence_age_hours": 999}]
+        },
+        "rch_evidence": [],
+        "handoff_context": {},
+        "policy": {
+          "schema_version": "franken-node/validation-autopilot/policy/v1",
+          "input_freshness_seconds": 3600,
+          "blocked_freshness_hours": 168,
+          "require_rch_for_cargo": true,
+          "max_rch_retries_per_blocker": 1,
+          "worker_quarantine_failure_threshold": 2,
+          "allow_bead_creation": true,
+          "allow_tracker_mutation": false,
+          "fail_closed_on_mail_gap": true,
+          "fail_closed_on_reservation_conflict": true
+        }
+      }
+    },
+    {
+      "case_id": "rch_timeout_retry",
+      "input": {
+        "schema_version": "franken-node/validation-autopilot/input/v1",
+        "trace_id": "fixture-rch-timeout-retry",
+        "agent_name": "NavyTurtle",
+        "generated_at": "2026-06-18T15:45:00+00:00",
+        "br_ready": [],
+        "br_active": [],
+        "bv_plan": {"plan": {"tracks": [{"track_id": "track-A", "items": []}]}},
+        "blocked_freshness": {"schema_version": "fixture", "verdict": "PASS", "audits": []},
+        "rch_evidence": [
+          {
+            "schema_version": "franken-node/rch-evidence-normalizer/v1",
+            "sample_id": "ssh-timeout",
+            "classification": "ssh_timeout",
+            "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_valauto cargo test -p frankenengine-node validation_autopilot",
+            "worker_id": "vmi1156319",
+            "worker_failure_count": 1,
+            "first_blocker": "[RCH-E104] SSH command timed out",
+            "product_diagnostics_reached": false,
+            "retry_recommended": true
+          }
+        ],
+        "handoff_context": {},
+        "policy": {
+          "schema_version": "franken-node/validation-autopilot/policy/v1",
+          "input_freshness_seconds": 3600,
+          "blocked_freshness_hours": 168,
+          "require_rch_for_cargo": true,
+          "max_rch_retries_per_blocker": 1,
+          "worker_quarantine_failure_threshold": 2,
+          "allow_bead_creation": true,
+          "allow_tracker_mutation": false,
+          "fail_closed_on_mail_gap": true,
+          "fail_closed_on_reservation_conflict": true
+        }
+      }
+    },
+    {
+      "case_id": "external_blocker",
+      "input": {
+        "schema_version": "franken-node/validation-autopilot/input/v1",
+        "trace_id": "fixture-external-blocker",
+        "agent_name": "NavyTurtle",
+        "generated_at": "2026-06-18T15:45:00+00:00",
+        "br_ready": [],
+        "br_active": [
+          {"id": "bd-engine", "title": "Engine blocker", "status": "blocked", "notes": "Blocked on sibling /data/projects/franken_engine QuickJsLane wiring."}
+        ],
+        "bv_plan": {"plan": {"tracks": [{"track_id": "track-A", "items": []}]}},
+        "tracker_actionability": {
+          "schema_version": "franken-node/tracker-actionability/v1",
+          "verdict": "PASS",
+          "summary": {"ready_count": 0, "no_ready_recovery": false},
+          "classifications": [{"id": "bd-engine", "classification": "external_blocker", "recommended_action": "refresh-blocker"}]
+        },
+        "blocked_freshness": {"schema_version": "fixture", "verdict": "PASS", "audits": []},
+        "rch_evidence": [],
+        "handoff_context": {},
+        "policy": {
+          "schema_version": "franken-node/validation-autopilot/policy/v1",
+          "input_freshness_seconds": 3600,
+          "blocked_freshness_hours": 168,
+          "require_rch_for_cargo": true,
+          "max_rch_retries_per_blocker": 1,
+          "worker_quarantine_failure_threshold": 2,
+          "allow_bead_creation": true,
+          "allow_tracker_mutation": false,
+          "fail_closed_on_mail_gap": true,
+          "fail_closed_on_reservation_conflict": true
+        }
+      }
+    },
+    {
+      "case_id": "clean_success",
+      "input": {
+        "schema_version": "franken-node/validation-autopilot/input/v1",
+        "trace_id": "fixture-clean-success",
+        "agent_name": "NavyTurtle",
+        "generated_at": "2026-06-18T15:45:00+00:00",
+        "br_ready": [],
+        "br_active": [],
+        "bv_plan": {"plan": {"tracks": [{"track_id": "track-A", "items": []}]}},
+        "blocked_freshness": {"schema_version": "fixture", "verdict": "PASS", "audits": []},
+        "rch_evidence": [
+          {
+            "schema_version": "franken-node/rch-evidence-normalizer/v1",
+            "sample_id": "clean-success",
+            "classification": "success",
+            "command": "rch exec -- cargo test -p frankenengine-node doctor_policy_activation_e2e",
+            "first_blocker": null,
+            "product_diagnostics_reached": false,
+            "retry_recommended": false
+          }
+        ],
+        "handoff_context": {},
+        "policy": {
+          "schema_version": "franken-node/validation-autopilot/policy/v1",
+          "input_freshness_seconds": 3600,
+          "blocked_freshness_hours": 168,
+          "require_rch_for_cargo": true,
+          "max_rch_retries_per_blocker": 1,
+          "worker_quarantine_failure_threshold": 2,
+          "allow_bead_creation": true,
+          "allow_tracker_mutation": false,
+          "fail_closed_on_mail_gap": true,
+          "fail_closed_on_reservation_conflict": true
+        }
+      }
+    },
+    {
+      "case_id": "parent_epic_no_claim",
+      "input": {
+        "schema_version": "franken-node/validation-autopilot/input/v1",
+        "trace_id": "fixture-parent-epic-no-claim",
+        "agent_name": "NavyTurtle",
+        "generated_at": "2026-06-18T15:45:00+00:00",
+        "br_ready": [],
+        "br_active": [{"id": "bd-epic", "title": "Validation parent epic", "status": "open", "issue_type": "epic"}],
+        "bv_plan": {"plan": {"tracks": [{"track_id": "track-A", "items": []}]}},
+        "tracker_actionability": {
+          "schema_version": "franken-node/tracker-actionability/v1",
+          "verdict": "PASS",
+          "summary": {"ready_count": 0, "no_ready_recovery": true},
+          "classifications": [{"id": "bd-epic", "classification": "parent_epic", "recommended_action": "create-new-bead"}]
+        },
+        "blocked_freshness": {"schema_version": "fixture", "verdict": "PASS", "audits": []},
+        "rch_evidence": [],
+        "handoff_context": {},
+        "policy": {
+          "schema_version": "franken-node/validation-autopilot/policy/v1",
+          "input_freshness_seconds": 3600,
+          "blocked_freshness_hours": 168,
+          "require_rch_for_cargo": true,
+          "max_rch_retries_per_blocker": 1,
+          "worker_quarantine_failure_threshold": 2,
+          "allow_bead_creation": true,
+          "allow_tracker_mutation": false,
+          "fail_closed_on_mail_gap": true,
+          "fail_closed_on_reservation_conflict": true
+        }
+      }
+    }
+  ]
+}

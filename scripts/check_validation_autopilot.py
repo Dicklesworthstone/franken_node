@@ -26,6 +26,7 @@ SCHEMA_VERSION = "franken-node/validation-autopilot/planner/v1"
 INPUT_SCHEMA_VERSION = "franken-node/validation-autopilot/input/v1"
 DECISION_SCHEMA_VERSION = "franken-node/validation-autopilot/decision/v1"
 ACTION_PREVIEW_SCHEMA_VERSION = "franken-node/validation-autopilot/action-preview/v1"
+TRANSCRIPT_SCHEMA_VERSION = "franken-node/validation-autopilot/transcript/v1"
 POLICY_SCHEMA_VERSION = "franken-node/validation-autopilot/policy/v1"
 DEFAULT_INPUT_FRESHNESS_SECONDS = 3600
 DEFAULT_BLOCKED_FRESHNESS_HOURS = 168
@@ -841,6 +842,72 @@ def _human_summary(decision: dict[str, Any]) -> str:
         f"retry_allowed={str(decision['retry_allowed']).lower()}, "
         f"summary={decision['operator_summary']}"
     )
+
+
+def render_transcript_case(
+    case_id: str,
+    input_payload: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    result = plan_decision(input_payload, now=now)
+    decision = result["decision"]
+    action_preview = result["action_preview"]
+    proposed = decision.get("proposed_bead") if isinstance(decision.get("proposed_bead"), dict) else {}
+    return {
+        "schema_version": TRANSCRIPT_SCHEMA_VERSION,
+        "case_id": case_id,
+        "trace_id": input_payload.get("trace_id") if isinstance(input_payload.get("trace_id"), str) else "valauto-trace",
+        "input_generated_at": input_payload.get("generated_at"),
+        "verdict": result["verdict"],
+        "summary": result["summary"],
+        "decision": {
+            "decision_id": "<redacted:decision_id>",
+            "decided_at": "<redacted:timestamp>",
+            "event_code": decision["event_code"],
+            "decision": decision["decision"],
+            "reason_code": decision["reason_code"],
+            "selected_bead_id": decision["selected_bead_id"],
+            "mutation_allowed": decision["mutation_allowed"],
+            "retry_allowed": decision["retry_allowed"],
+            "retry_budget_remaining": decision["retry_budget_remaining"],
+            "requires_rch": decision["requires_rch"],
+            "recommended_command": _command_text(decision.get("recommended_command")),
+            "recommended_rch_command": _command_text(decision.get("recommended_rch_command")),
+            "worker_action": decision.get("worker_action"),
+            "stop_reason": decision.get("stop_reason"),
+            "first_blocker": decision.get("first_blocker"),
+            "operator_summary": decision["operator_summary"],
+            "proposed_labels": proposed.get("labels", []),
+        },
+        "action_preview": {
+            "action_kind": action_preview["action_kind"],
+            "mode": action_preview["mode"],
+            "mutation_allowed": action_preview["mutation_allowed"],
+            "has_br_create_preview": action_preview.get("br_create_preview") is not None,
+            "has_br_comment_preview": action_preview.get("br_comment_preview") is not None,
+            "has_coordination_preview": action_preview.get("coordination_preview") is not None,
+            "has_retry_preview": action_preview.get("retry_preview") is not None,
+            "dedupe_terms": action_preview["dedupe"]["overlap_search_terms"],
+        },
+        "exact_blockers": _exact_blockers(decision),
+        "validation_commands": _validation_commands(decision, action_preview),
+        "agent_mail": result["agent_mail_handoff"],
+        "handoff_markdown": result["handoff_markdown"],
+    }
+
+
+def render_transcript_matrix(fixture_bundle: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    cases = fixture_bundle.get("cases") if isinstance(fixture_bundle.get("cases"), list) else []
+    return {
+        "schema_version": TRANSCRIPT_SCHEMA_VERSION,
+        "case_count": len(cases),
+        "cases": [
+            render_transcript_case(str(case["case_id"]), case["input"], now=now)
+            for case in cases
+            if isinstance(case, dict) and isinstance(case.get("input"), dict)
+        ],
+    }
 
 
 def _choose_followup_or_handoff(

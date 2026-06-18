@@ -14,6 +14,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = ROOT / "scripts" / "check_validation_autopilot.py"
+TRANSCRIPT_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "validation_autopilot" / "transcript_cases.json"
+TRANSCRIPT_GOLDEN_PATH = ROOT / "tests" / "golden" / "validation_autopilot" / "transcript_golden.json"
+TRANSCRIPT_PROVENANCE_PATH = ROOT / "artifacts" / "validation_autopilot" / "bd-dy7vu" / "provenance.json"
 
 spec = importlib.util.spec_from_file_location("check_validation_autopilot", SCRIPT_PATH)
 mod = importlib.util.module_from_spec(spec)
@@ -43,6 +46,57 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(result["summary"]["decisions"]["external"], "coordinate_owner")
         self.assertEqual(result["summary"]["decisions"]["parent"], "handoff_only")
         self.assertEqual(result["summary"]["decisions"]["unsafe"], "blocked")
+
+    def test_transcript_fixture_bundle_matches_semantic_golden(self) -> None:
+        fixture = self._load_json(TRANSCRIPT_FIXTURE_PATH)
+        golden = self._load_json(TRANSCRIPT_GOLDEN_PATH)
+
+        transcript_matrix = mod.render_transcript_matrix(fixture, now=NOW)
+
+        self.assertEqual(transcript_matrix["schema_version"], mod.TRANSCRIPT_SCHEMA_VERSION)
+        self.assertEqual(transcript_matrix["case_count"], len(golden["cases"]))
+        cases_by_id = {str(item["case_id"]): item for item in transcript_matrix["cases"]}
+        seen_cases: set[str] = set()
+        for transcript in transcript_matrix["cases"]:
+            case_id = transcript["case_id"]
+            seen_cases.add(case_id)
+            expected = golden["cases"][case_id]
+            decision = transcript["decision"]
+            action_preview = transcript["action_preview"]
+
+            self.assertEqual(transcript["verdict"], "PASS", case_id)
+            self.assertEqual(decision["decision"], expected["decision"], case_id)
+            self.assertEqual(decision["reason_code"], expected["reason_code"], case_id)
+            self.assertEqual(decision["selected_bead_id"], expected["selected_bead_id"], case_id)
+            self.assertEqual(action_preview["action_kind"], expected["action_kind"], case_id)
+            self.assertEqual(transcript["agent_mail"]["subject"], expected["agent_mail_subject"], case_id)
+            self.assertEqual(transcript["exact_blockers"], expected["exact_blockers"], case_id)
+            self.assertEqual(transcript["validation_commands"], expected["validation_commands"], case_id)
+            self.assertEqual(decision["proposed_labels"], expected["proposed_labels"], case_id)
+            self.assertEqual(decision["decision_id"], "<redacted:decision_id>", case_id)
+            self.assertEqual(decision["decided_at"], "<redacted:timestamp>", case_id)
+            self.assertFalse(decision["mutation_allowed"], case_id)
+            self.assertFalse(action_preview["mutation_allowed"], case_id)
+            self.assertEqual(action_preview["mode"], "dry_run", case_id)
+            for fragment in expected["required_handoff_fragments"]:
+                self.assertIn(fragment, transcript["handoff_markdown"], case_id)
+                self.assertIn(fragment, transcript["agent_mail"]["body_md"], case_id)
+            for command in transcript["validation_commands"]:
+                if "cargo " in command:
+                    self.assertTrue(command.startswith("rch exec --"), f"{case_id}: {command}")
+
+        self.assertEqual(seen_cases, set(golden["cases"]))
+        self.assertNotEqual(cases_by_id["parent_epic_no_claim"]["decision"]["decision"], "claim_ready")
+        self.assertNotEqual(cases_by_id["no_ready_blocked_epic"]["decision"]["decision"], "claim_ready")
+
+    def test_transcript_provenance_documents_regeneration(self) -> None:
+        provenance = self._load_json(TRANSCRIPT_PROVENANCE_PATH)
+
+        self.assertEqual(provenance["bead_id"], "bd-dy7vu")
+        self.assertEqual(provenance["fixture_bundle"], "tests/fixtures/validation_autopilot/transcript_cases.json")
+        self.assertEqual(provenance["semantic_golden"], "tests/golden/validation_autopilot/transcript_golden.json")
+        commands = provenance["regeneration"]["validation_commands"]
+        self.assertIn("python3 -m unittest tests.test_check_validation_autopilot", commands)
 
     def test_ready_claim_wins_with_claimable_ready_bead(self) -> None:
         payload = mod._self_test_payloads()["ready"]
@@ -407,6 +461,13 @@ class ValidationAutopilotTests(unittest.TestCase):
     def _write_json(path: Path, payload: object) -> Path:
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         return path
+
+    @staticmethod
+    def _load_json(path: Path) -> dict[str, object]:
+        payload = JSON_DECODER.decode(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise AssertionError(f"{path} did not contain a JSON object")
+        return payload
 
     @staticmethod
     def _failures(result: dict[str, object]) -> str:
