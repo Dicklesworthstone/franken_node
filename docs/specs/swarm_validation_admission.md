@@ -319,6 +319,26 @@ expired freshness, coalescer work-key mismatch, source-only green proof,
 missing command digest for cargo work, and local cargo execution without
 `rch exec -- ...`.
 
+## Mock-Free Transcript Harness
+
+The focused Rust test
+`mock_free_e2e_swarm_validation_transcript_emits_stable_jsonl` exercises the
+version 1 multi-agent transcript shape without shell-script success mocks. It
+builds deterministic admission inputs from the live planner fixture catalog and
+emits one JSONL row per agent intent:
+
+- producer starts an RCH validation lane;
+- waiter joins the same proof key through coalescing;
+- conflicting reservation blocks with holder evidence;
+- stale proof lease requests handoff with build-slot evidence;
+- saturated RCH queue defers without a local cargo fallback.
+
+Each row carries `command`, `bead_id`, `thread_id`, `trace_id`, `agent_name`,
+`decision`, `reason_code`, `event_code`, `required_action`, `proof_key`,
+reservation/build-slot evidence, an RCH status class, and a closeout
+recommendation. Commands are explicit `null` when no command is safe to run,
+and cargo rows must start with `rch exec --`.
+
 ## Consumer Rules
 
 ### Agent Mail

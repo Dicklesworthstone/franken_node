@@ -3,9 +3,9 @@ use frankenengine_node::ops::swarm_validation_admission::{
     MAX_SWARM_ADMISSION_AGENTS, MAX_SWARM_ADMISSION_BUILD_SLOTS,
     MAX_SWARM_ADMISSION_COMPATIBILITY_BLOCKERS, MAX_SWARM_ADMISSION_RESERVATIONS,
     MAX_SWARM_ADMISSION_WAITERS, SwarmValidationAdmissionDecision,
-    SwarmValidationAdmissionFixtureKind, SwarmValidationAdmissionInputFixture,
-    SwarmValidationAdmissionPriority, SwarmValidationAgentSnapshot,
-    SwarmValidationBuildSlotSnapshot, SwarmValidationBuildSlotState,
+    SwarmValidationAdmissionDecisionRecord, SwarmValidationAdmissionFixtureKind,
+    SwarmValidationAdmissionInputFixture, SwarmValidationAdmissionPriority,
+    SwarmValidationAgentSnapshot, SwarmValidationBuildSlotSnapshot, SwarmValidationBuildSlotState,
     SwarmValidationProofCompatibility, SwarmValidationRequestedAction,
     SwarmValidationReservationMode, SwarmValidationReservationSnapshot,
     SwarmValidationTargetDirStrategy, SwarmValidationUnavailableSignal,
@@ -19,9 +19,10 @@ use frankenengine_node::ops::validation_readiness::{
     render_validation_readiness_human, render_validation_readiness_json,
 };
 use proptest::prelude::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const DEFAULT_RETRY_AFTER_MS: u64 = 30_000;
+const TRANSCRIPT_SCHEMA_VERSION: &str = "franken-node/swarm-validation-admission/transcript/v1";
 
 fn fixture_input(
     kind: SwarmValidationAdmissionFixtureKind,
@@ -198,6 +199,161 @@ fn coalesced_proof_hints_include_key_and_zero_new_rch_jobs() {
             .iter()
             .any(|note| note.contains("join by coalescing key"))
     );
+}
+
+#[test]
+fn mock_free_e2e_swarm_validation_transcript_emits_stable_jsonl()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut producer = fixture_input(SwarmValidationAdmissionFixtureKind::SingleAgent);
+    set_scenario_identity(&mut producer, "producer-run", "NavyTurtle");
+    producer.proof.proof_work_key = Some("sha256:proof-work-key-e2e".to_string());
+    producer.proof.command_digest = Some("sha256:command-digest-e2e".to_string());
+
+    let mut waiter = fixture_input(SwarmValidationAdmissionFixtureKind::DuplicateProofRequest);
+    set_scenario_identity(&mut waiter, "coalesce-waiter", "SilentGrove");
+    waiter.proof.proof_work_key = Some("sha256:proof-work-key-e2e".to_string());
+    waiter.proof.command_digest = Some("sha256:command-digest-e2e".to_string());
+    waiter.proof.owner_agent = Some("NavyTurtle".to_string());
+    let waiter_coalescing = waiter
+        .proof
+        .coalescing
+        .as_mut()
+        .expect("waiter fixture has coalescing state");
+    waiter_coalescing.proof_work_key = Some("sha256:proof-work-key-e2e".to_string());
+    waiter_coalescing.command_digest = Some("sha256:command-digest-e2e".to_string());
+    waiter_coalescing.owner_agent = Some("NavyTurtle".to_string());
+    waiter_coalescing.owner_bead_id = Some("bd-0x4fy.9".to_string());
+    waiter_coalescing.lease_id = Some("vpco-lease-bd-0x4fy-9".to_string());
+
+    let mut reservation_block = fixture_input(SwarmValidationAdmissionFixtureKind::SingleAgent);
+    set_scenario_identity(&mut reservation_block, "reservation-block", "CrimsonOrchid");
+    reservation_block
+        .coordination
+        .reservations
+        .push(SwarmValidationReservationSnapshot {
+            holder_agent: "ScarletSeal".to_string(),
+            path_pattern: "crates/franken-node/src/ops/swarm_validation_admission.rs".to_string(),
+            mode: SwarmValidationReservationMode::Exclusive,
+            reason: Some("bd-0x4fy.9-peer".to_string()),
+            expires_at: reservation_block.observed_at + TimeDelta::minutes(30),
+        });
+
+    let mut stale_handoff = fixture_input(SwarmValidationAdmissionFixtureKind::StaleLease);
+    set_scenario_identity(&mut stale_handoff, "stale-handoff", "YellowSparrow");
+
+    let mut saturated_queue = fixture_input(SwarmValidationAdmissionFixtureKind::SaturatedRchQueue);
+    set_scenario_identity(&mut saturated_queue, "rch-saturated", "SunnyIvy");
+
+    let decisions = [
+        (
+            "agent_a_start_rch_lane",
+            plan_swarm_validation_admission(&producer),
+        ),
+        (
+            "agent_b_join_same_proof",
+            plan_swarm_validation_admission(&waiter),
+        ),
+        (
+            "agent_c_reservation_conflict",
+            plan_swarm_validation_admission(&reservation_block),
+        ),
+        (
+            "agent_d_stale_lease_handoff",
+            plan_swarm_validation_admission(&stale_handoff),
+        ),
+        (
+            "agent_e_rch_saturated_defer",
+            plan_swarm_validation_admission(&saturated_queue),
+        ),
+    ];
+    let transcript = decisions
+        .iter()
+        .map(|(step, decision)| transcript_entry(step, decision))
+        .collect::<Vec<_>>();
+    let jsonl = render_transcript_jsonl(&transcript)?;
+
+    eprintln!("{jsonl}");
+    assert_eq!(jsonl, render_transcript_jsonl(&transcript)?);
+    assert_eq!(jsonl.lines().count(), 5);
+    assert!(!jsonl.contains("\"command\":\"cargo "));
+
+    let rows = jsonl
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert!(rows.iter().all(|row| {
+        row["schema_version"] == TRANSCRIPT_SCHEMA_VERSION
+            && row["bead_id"] == "bd-0x4fy.9"
+            && row["thread_id"] == "bd-0x4fy.9"
+            && row["trace_id"]
+                .as_str()
+                .is_some_and(|trace| trace.starts_with("trace-sva-bd-0x4fy-9-"))
+            && row["closeout_recommendation"].as_str().is_some()
+    }));
+    let [
+        producer_row,
+        waiter_row,
+        reservation_row,
+        handoff_row,
+        saturated_row,
+    ] = rows.as_slice()
+    else {
+        return Err(format!("expected five transcript rows, got {}", rows.len()).into());
+    };
+
+    assert_eq!(producer_row["decision"], "run");
+    assert_eq!(producer_row["reason_code"], "SVA_RUN_RCH_READY");
+    assert_eq!(producer_row["proof_key"], "sha256:proof-work-key-e2e");
+    assert_eq!(producer_row["rch_status_class"], "rch_ready");
+    assert!(
+        producer_row["command"]
+            .as_str()
+            .is_some_and(|command| command.starts_with("rch exec --"))
+    );
+
+    assert_eq!(waiter_row["decision"], "coalesce");
+    assert_eq!(waiter_row["proof_key"], "sha256:proof-work-key-e2e");
+    assert_eq!(waiter_row["coalescing_owner_agent"], "NavyTurtle");
+    assert_eq!(waiter_row["max_parallel_rch_jobs"], 0);
+
+    assert_eq!(reservation_row["decision"], "blocked");
+    assert_eq!(
+        reservation_row["reason_code"],
+        "SVA_BLOCKED_ACTIVE_RESERVATION"
+    );
+    assert!(
+        reservation_row["reservation_evidence"]
+            .as_array()
+            .expect("reservation evidence array")
+            .iter()
+            .any(|evidence| evidence
+                .as_str()
+                .is_some_and(|value| value.contains("ScarletSeal")))
+    );
+
+    assert_eq!(handoff_row["decision"], "handoff");
+    assert_eq!(handoff_row["reason_code"], "SWARM-STALE-LEASE");
+    assert!(
+        handoff_row["build_slot_evidence"]
+            .as_array()
+            .expect("build slot evidence array")
+            .iter()
+            .any(|evidence| evidence
+                .as_str()
+                .is_some_and(|value| value.contains("rch-proof-bd-0x4fy-2")))
+    );
+
+    assert_eq!(saturated_row["decision"], "defer");
+    assert_eq!(saturated_row["reason_code"], "SVA_DEFER_RCH_QUEUE");
+    assert_eq!(saturated_row["rch_status_class"], "rch_saturated");
+    assert_eq!(saturated_row["command"], Value::Null);
+    assert_eq!(
+        saturated_row["closeout_recommendation"],
+        "refresh_admission_after_retry_no_local_cargo"
+    );
+
+    Ok(())
 }
 
 #[test]
@@ -647,6 +803,119 @@ fn assert_sorted(values: &[String]) {
         values.windows(2).all(|pair| pair[0] <= pair[1]),
         "values should be sorted deterministically: {values:?}"
     );
+}
+
+fn set_scenario_identity(
+    input: &mut SwarmValidationAdmissionInputFixture,
+    step_suffix: &str,
+    agent_name: &str,
+) {
+    input.input_id = format!("sva-input-bd-0x4fy-9-{step_suffix}");
+    input.trace_id = format!("trace-sva-bd-0x4fy-9-{step_suffix}");
+    input.bead.bead_id = "bd-0x4fy.9".to_string();
+    input.bead.thread_id = "bd-0x4fy.9".to_string();
+    input.bead.assignee = Some(agent_name.to_string());
+    input.agent_name = agent_name.to_string();
+}
+
+fn transcript_entry(step: &str, decision: &SwarmValidationAdmissionDecisionRecord) -> Value {
+    let reservation_evidence = prefixed_evidence(decision, "agent-mail-reservation:");
+    let build_slot_evidence = prefixed_evidence(decision, "rch-build-slot:");
+    let coalescing_owner_agent = decision
+        .coalescing_target
+        .as_ref()
+        .and_then(|target| target.owner_agent.clone());
+
+    json!({
+        "schema_version": TRANSCRIPT_SCHEMA_VERSION,
+        "step": step,
+        "command": decision.safe_command_shape.as_deref(),
+        "bead_id": &decision.bead_id,
+        "thread_id": &decision.thread_id,
+        "trace_id": &decision.trace_id,
+        "agent_name": &decision.agent_name,
+        "decision": decision.decision.as_str(),
+        "reason_code": &decision.reason_code,
+        "event_code": &decision.event_code,
+        "required_action": &decision.required_action,
+        "proof_key": decision.execution_hints.coalescing_key.as_deref(),
+        "proof_source": decision.proof_source.as_str(),
+        "coalescing_owner_agent": coalescing_owner_agent,
+        "reservation_evidence": reservation_evidence,
+        "build_slot_evidence": build_slot_evidence,
+        "rch_status_class": rch_status_class(decision),
+        "target_dir_strategy": decision.execution_hints.target_dir_strategy,
+        "worker_requirement": decision.execution_hints.worker_requirement,
+        "max_parallel_rch_jobs": decision.execution_hints.lane_budget.max_parallel_rch_jobs,
+        "retry_after_ms": decision.retry_after_ms,
+        "closeout_recommendation": closeout_recommendation(decision),
+    })
+}
+
+fn prefixed_evidence(
+    decision: &SwarmValidationAdmissionDecisionRecord,
+    prefix: &str,
+) -> Vec<String> {
+    decision
+        .evidence_refs
+        .iter()
+        .filter(|evidence| evidence.starts_with(prefix))
+        .cloned()
+        .collect()
+}
+
+fn rch_status_class(decision: &SwarmValidationAdmissionDecisionRecord) -> &'static str {
+    if !decision.diagnostics.rch_available {
+        return "rch_unavailable";
+    }
+
+    if decision.execution_hints.worker_requirement
+        == SwarmValidationWorkerRequirement::WaitForRchCapacity
+    {
+        return "rch_saturated";
+    }
+
+    match decision.decision {
+        SwarmValidationAdmissionDecision::Run => {
+            if decision
+                .safe_command_shape
+                .as_deref()
+                .is_some_and(|command| command.starts_with("rch exec --"))
+            {
+                "rch_ready"
+            } else {
+                "source_only"
+            }
+        }
+        SwarmValidationAdmissionDecision::Coalesce => "proof_reuse",
+        SwarmValidationAdmissionDecision::Defer => "defer",
+        SwarmValidationAdmissionDecision::Handoff => "handoff_required",
+        SwarmValidationAdmissionDecision::Blocked => "blocked",
+    }
+}
+
+fn closeout_recommendation(decision: &SwarmValidationAdmissionDecisionRecord) -> &'static str {
+    match decision.decision {
+        SwarmValidationAdmissionDecision::Run if decision.green_proof_eligible => {
+            "run_rch_command_then_attach_receipt"
+        }
+        SwarmValidationAdmissionDecision::Run => "run_source_checks_then_close",
+        SwarmValidationAdmissionDecision::Coalesce if decision.green_proof_eligible => {
+            "wait_for_or_reuse_receipt_before_closeout"
+        }
+        SwarmValidationAdmissionDecision::Coalesce => "wait_for_matching_proof_state",
+        SwarmValidationAdmissionDecision::Defer => "refresh_admission_after_retry_no_local_cargo",
+        SwarmValidationAdmissionDecision::Handoff => "request_handoff_before_claiming",
+        SwarmValidationAdmissionDecision::Blocked => "record_blocker_and_do_not_close",
+    }
+}
+
+fn render_transcript_jsonl(entries: &[Value]) -> Result<String, serde_json::Error> {
+    entries
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map(|lines| format!("{}\n", lines.join("\n")))
 }
 
 #[test]
