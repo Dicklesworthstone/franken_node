@@ -12,11 +12,20 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from typing import Iterable, List, Optional
 
 SCHEMA_VERSION = "remediation-log-v1"
+COMMAND_RECEIPT_SCHEMA_VERSION = "verification-command-receipt-v1"
 LAYERS = ("conformance", "fuzz", "sdk")
+COMMAND_PARSED_STATUSES = (
+    "passed",
+    "parsed_failure",
+    "cargo_abort",
+    "command_failed",
+    "not_parsed",
+    "unknown",
+)
 
 
 @dataclass
@@ -75,6 +84,51 @@ class RemediationRecord:
         return json.dumps(asdict(self), sort_keys=True)
 
 
+@dataclass
+class CommandReceipt:
+    """One top-level verification command execution receipt."""
+
+    step_id: str
+    command_digest: str
+    exit_code: int
+    duration_ms: int
+    log_path: str
+    parsed_status: str
+    ts_rfc3339: str
+    label: str = ""
+    command: str = ""
+    schema_version: str = COMMAND_RECEIPT_SCHEMA_VERSION
+
+    def validate(self) -> List[str]:
+        errs: List[str] = []
+        if not self.step_id:
+            errs.append("step_id must be non-empty")
+        digest = self.command_digest.removeprefix("sha256:")
+        if (
+            not self.command_digest.startswith("sha256:")
+            or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+        ):
+            errs.append("command_digest must be sha256:<64 hex chars>")
+        if self.exit_code < 0:
+            errs.append("exit_code must be non-negative")
+        if self.duration_ms < 0:
+            errs.append("duration_ms must be non-negative")
+        if not self.log_path:
+            errs.append("log_path must be non-empty")
+        if self.parsed_status not in COMMAND_PARSED_STATUSES:
+            errs.append(f"parsed_status must be one of {COMMAND_PARSED_STATUSES}, got {self.parsed_status!r}")
+        if not self.ts_rfc3339:
+            errs.append("ts_rfc3339 must be non-empty")
+        return errs
+
+    def command_succeeded(self) -> bool:
+        return self.exit_code == 0
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), sort_keys=True)
+
+
 def write_jsonl(records: Iterable[RemediationRecord], path: str) -> int:
     """Write records as JSONL; returns count. Validates each first (raises on invalid)."""
     n = 0
@@ -99,6 +153,45 @@ def read_jsonl(path: str) -> List[RemediationRecord]:
             d.pop("schema_version", None)
             out.append(RemediationRecord(**d))
     return out
+
+
+def write_command_receipts(records: Iterable[CommandReceipt], path: str) -> int:
+    n = 0
+    with open(path, "w", encoding="utf-8") as fh:
+        for r in records:
+            errs = r.validate()
+            if errs:
+                raise ValueError(f"invalid command receipt for {r.step_id!r}: {errs}")
+            fh.write(r.to_json() + "\n")
+            n += 1
+    return n
+
+
+def read_command_receipts(path: str) -> List[CommandReceipt]:
+    out: List[CommandReceipt] = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            d.pop("schema_version", None)
+            receipt = CommandReceipt(**d)
+            errs = receipt.validate()
+            if errs:
+                raise ValueError(f"invalid command receipt for {receipt.step_id!r}: {errs}")
+            out.append(receipt)
+    return out
+
+
+def parsed_status_for_records(records: List[RemediationRecord], exit_code: Optional[int] = None) -> str:
+    if any(r.target.endswith("_cargo_test_abort") for r in records):
+        return "cargo_abort"
+    if records:
+        return "passed" if all(r.is_green() for r in records) else "parsed_failure"
+    if exit_code is not None and exit_code != 0:
+        return "command_failed"
+    return "not_parsed"
 
 
 def render_summary(records: List[RemediationRecord]) -> str:
@@ -130,6 +223,44 @@ def render_summary(records: List[RemediationRecord]) -> str:
                 f"| {r.target} | {r.layer} | {r.compiles} | {r.ran} | {r.errors_after} "
                 f"| {r.tests_passed}/{r.tests_run} | {r.crashed} | {r.assertions_preserved} |"
             )
+    return "\n".join(lines) + "\n"
+
+
+def render_command_summary(records: List[CommandReceipt]) -> str:
+    """Human-readable command receipt summary for the final verification report."""
+    total = len(records)
+    succeeded = sum(1 for r in records if r.command_succeeded())
+    lines = [
+        f"## Command receipts ({COMMAND_RECEIPT_SCHEMA_VERSION})",
+        f"EXIT-0: {succeeded}/{total} commands",
+        "",
+        "| step | parsed_status | exit_code | duration_ms | log_path | command_digest |",
+        "|---|---|---|---:|---|---|",
+    ]
+    for r in records:
+        lines.append(
+            f"| {r.step_id} | {r.parsed_status} | {r.exit_code} | {r.duration_ms} "
+            f"| {r.log_path} | {r.command_digest} |"
+        )
+
+    command_failures = [
+        r for r in records if r.exit_code != 0 and r.parsed_status not in ("parsed_failure", "cargo_abort")
+    ]
+    parsed_failures = [r for r in records if r.parsed_status == "parsed_failure"]
+    cargo_aborts = [r for r in records if r.parsed_status == "cargo_abort"]
+
+    if command_failures:
+        lines += ["", "### Command failures", "| step | exit_code | parsed_status | log_path |", "|---|---:|---|---|"]
+        for r in command_failures:
+            lines.append(f"| {r.step_id} | {r.exit_code} | {r.parsed_status} | {r.log_path} |")
+    if parsed_failures:
+        lines += ["", "### Parsed verification failures", "| step | exit_code | log_path |", "|---|---:|---|"]
+        for r in parsed_failures:
+            lines.append(f"| {r.step_id} | {r.exit_code} | {r.log_path} |")
+    if cargo_aborts:
+        lines += ["", "### Cargo aborts", "| step | exit_code | log_path |", "|---|---:|---|"]
+        for r in cargo_aborts:
+            lines.append(f"| {r.step_id} | {r.exit_code} | {r.log_path} |")
     return "\n".join(lines) + "\n"
 
 

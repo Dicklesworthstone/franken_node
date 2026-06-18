@@ -151,6 +151,10 @@ def _validate_verification_plan(plan: dict) -> dict:
         raise AssertionError("verification plan path must live under artifact_dir")
     if not plan["plan_sha256_path"].startswith(f"{plan['artifact_dir']}/"):
         raise AssertionError("verification plan digest path must live under artifact_dir")
+    if not plan.get("command_receipts_path", "").endswith("_commands.jsonl"):
+        raise AssertionError("verification command receipts path must end with _commands.jsonl")
+    if not plan["command_receipts_path"].startswith(f"{plan['artifact_dir']}/"):
+        raise AssertionError("verification command receipts path must live under artifact_dir")
 
     steps = {step["id"]: step for step in plan["steps"]}
     missing = _REQUIRED_PLAN_STEP_IDS - set(steps)
@@ -166,6 +170,10 @@ def _validate_verification_plan(plan: dict) -> dict:
     rch_prefix = f"{plan['rch_prefix']} "
     for step in plan["steps"]:
         command = step["command"]
+        if not step.get("receipt_required"):
+            raise AssertionError(f"{step['id']} must require a command receipt")
+        if not step.get("log_path"):
+            raise AssertionError(f"{step['id']} must declare a command log path")
         if step["rch_required"] and "cargo " in command and not command.startswith(rch_prefix):
             raise AssertionError(f"{step['id']} cargo command must use rch prefix")
         if not step["rch_required"] and command.startswith(rch_prefix):
@@ -372,6 +380,9 @@ class TestVerificationHarnessContract(unittest.TestCase):
         self.assertEqual(steps["cargo_clippy"]["command"], "rch exec -- cargo clippy --all-targets -- -D warnings")
         self.assertEqual(steps["cargo_clippy"]["log_path"], "artifacts/verification/cargo_clippy.log")
         self.assertEqual(steps["cargo_clippy"]["report_json"], "artifacts/verification/cargo_clippy_lockfile_drift.json")
+        self.assertTrue(plan["command_receipts_path"].endswith("_commands.jsonl"))
+        self.assertEqual(steps["compile_census"]["log_path"], "artifacts/verification/compile_census.log")
+        self.assertEqual(steps["summary"]["log_path"], plan["report_path"])
 
     def test_full_run_links_plan_artifact_and_digest_in_report(self) -> None:
         script = (
@@ -382,8 +393,10 @@ class TestVerificationHarnessContract(unittest.TestCase):
         for marker in (
             'PLAN_JSON="$OUT/${RUN_STEM}_plan.json"',
             'PLAN_DIGEST="$OUT/${RUN_STEM}_plan.sha256"',
+            'COMMANDS_JSONL="$OUT/${RUN_STEM}_commands.jsonl"',
             'PLAN_SHA="$(write_plan_artifact)"',
             "append_plan_summary",
+            "append_command_summary",
             'echo "plan: $PLAN_JSON"',
             'echo "sha256_file: $PLAN_DIGEST"',
             'echo "sha256: $PLAN_SHA"',
@@ -417,6 +430,7 @@ class TestVerificationHarnessContract(unittest.TestCase):
             '"$OUT/cargo_clippy_lockfile_drift.json"',
             '"$OUT/cargo_clippy.log"',
             "$RCH cargo clippy --all-targets -- -D warnings",
+            '"cargo_clippy" \\',
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, script)
