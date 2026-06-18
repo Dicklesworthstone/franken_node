@@ -37,6 +37,13 @@ const MAX_AGENT_MAIL_RESERVATION_FILE_BYTES: u64 = 64 * 1024;
 /// Schema version for operator what-if simulation reports.
 pub const OPERATOR_WHAT_IF_SCHEMA_VERSION: &str = "franken-node/operator-what-if/v1";
 
+/// Schema version for deterministic no-ready Beads autopilot receipts.
+pub const NO_READY_AUTOPILOT_SCHEMA_VERSION: &str = "franken-node/no-ready-autopilot/v1";
+
+/// Schema version for cross-repo blocker handoff envelopes.
+pub const CROSS_REPO_BLOCKER_ENVELOPE_SCHEMA_VERSION: &str =
+    "franken-node/cross-repo-blocker-envelope/v1";
+
 /// Schema version for workspace-pressure to hardware-planner bridge decisions.
 pub const WORKSPACE_HARDWARE_ADMISSION_SCHEMA_VERSION: &str =
     "franken-node/workspace-hardware-admission/v1";
@@ -46,6 +53,15 @@ pub const TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION: &str = "franken-node/target-dir-
 
 /// Maximum structured log entries emitted by one what-if simulation.
 const MAX_OPERATOR_WHAT_IF_LOGS: usize = 32;
+
+/// Maximum RCH build states carried in one operator what-if report.
+const MAX_OPERATOR_RCH_BUILD_STATES: usize = 16;
+
+/// Maximum stale/blocked Beads evidence rows carried in one no-ready receipt.
+const MAX_NO_READY_AUTOPILOT_ITEMS: usize = 32;
+
+/// Age threshold after which an in-progress bead needs explicit refresh.
+const STALE_IN_PROGRESS_AFTER_SECS: u64 = 60 * 60;
 
 /// Maximum cleanup actions returned by one what-if simulation.
 const MAX_OPERATOR_WHAT_IF_CLEANUP_ACTIONS: usize = 64;
@@ -369,6 +385,17 @@ pub struct TargetDirLeasePlan {
     pub human_summary: String,
 }
 
+/// RCH build state visible to an operator simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorWhatIfRchBuildState {
+    pub build_id: String,
+    pub worker_id: String,
+    pub command: String,
+    pub heartbeat_fresh: bool,
+    pub progress_stale: bool,
+    pub progress_age_secs: Option<u64>,
+}
+
 /// RCH queue state visible to an operator simulation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperatorWhatIfRchQueueState {
@@ -376,10 +403,12 @@ pub struct OperatorWhatIfRchQueueState {
     pub queued_jobs: u32,
     pub degraded_workers: u32,
     pub local_fallback_allowed: bool,
+    #[serde(default)]
+    pub active_builds: Vec<OperatorWhatIfRchBuildState>,
 }
 
 /// Cleanup safety class attached to an observed artifact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperatorWhatIfArtifactSafetyClass {
     CleanupEligible,
@@ -461,6 +490,13 @@ pub struct OperatorWhatIfLog {
     pub message: String,
 }
 
+/// RCH stale-progress evidence surfaced in operator what-if output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorWhatIfRchStaleProgress {
+    pub active_builds: Vec<OperatorWhatIfRchBuildState>,
+    pub safe_next_action: String,
+}
+
 /// Deterministic what-if report. This never mutates bead state or deletes files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorWhatIfReport {
@@ -475,8 +511,157 @@ pub struct OperatorWhatIfReport {
     pub pinned_artifact_count: usize,
     pub protected_artifact_count: usize,
     pub command_ledger_summary: Option<AgentCommandLedgerSummary>,
+    pub rch_stale_progress: Option<OperatorWhatIfRchStaleProgress>,
     pub policy_decision: PolicyDecision,
     pub logs: Vec<OperatorWhatIfLog>,
+    pub human_summary: String,
+}
+
+/// Origin class for a blocked bead when ready work is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoReadyBlockerOrigin {
+    Local,
+    SiblingRepository,
+    BuildInfrastructure,
+}
+
+/// In-progress bead evidence used by no-ready autopilot receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoReadyInProgressBead {
+    pub bead_id: String,
+    pub assignee: String,
+    pub updated_age_secs: u64,
+    pub status_summary: String,
+    pub reserved_paths: Vec<String>,
+}
+
+/// Blocked bead evidence used by no-ready autopilot receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoReadyBlockedBeadEvidence {
+    pub bead_id: String,
+    pub origin: NoReadyBlockerOrigin,
+    pub owner: Option<String>,
+    pub sibling_project: Option<String>,
+    pub blocker_command: String,
+    pub first_blocker_line: String,
+    pub notes: String,
+}
+
+/// Input for a deterministic cross-repo blocker handoff envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossRepoBlockerEnvelopeInput {
+    pub envelope_id: String,
+    pub franken_node_bead_id: String,
+    pub blocker_origin: NoReadyBlockerOrigin,
+    pub next_owner: String,
+    pub sibling_project: Option<String>,
+    pub sibling_bead_id: Option<String>,
+    pub agent_mail_thread_id: Option<String>,
+    pub agent_mail_message_id: Option<String>,
+    pub rch_build_id: Option<String>,
+    pub required_committed_revision: String,
+    pub observed_revision: Option<String>,
+    pub observed_revision_committed: bool,
+    pub validation_command: String,
+    pub first_blocker_line: String,
+}
+
+/// Stable envelope that can be pasted into Beads and Agent Mail without mutating status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossRepoBlockerEnvelope {
+    pub schema_version: String,
+    pub envelope_id: String,
+    pub franken_node_bead_id: String,
+    pub blocker_origin: NoReadyBlockerOrigin,
+    pub next_owner: String,
+    pub sibling_project: Option<String>,
+    pub sibling_bead_id: Option<String>,
+    pub agent_mail_thread_id: Option<String>,
+    pub agent_mail_message_id: Option<String>,
+    pub rch_build_id: Option<String>,
+    pub required_committed_revision: String,
+    pub observed_revision: Option<String>,
+    pub observed_revision_committed: bool,
+    pub validation_command: String,
+    pub first_blocker_line: String,
+    pub retry_validation_allowed: bool,
+    pub sufficient_to_unblock: bool,
+    pub beads_status_change_allowed: bool,
+    pub reason_code: String,
+    pub safe_next_action: String,
+    pub pasteable_beads_note: String,
+    pub agent_mail_handoff_body: String,
+    pub human_summary: String,
+}
+
+/// Operator-facing input for a ready-empty Beads decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoReadyAutopilotInput {
+    pub receipt_id: String,
+    pub workspace_root: String,
+    pub ready_issue_count: u32,
+    pub open_issue_count: u32,
+    pub blocked_issue_count: u32,
+    pub in_progress_beads: Vec<NoReadyInProgressBead>,
+    pub blocked_beads: Vec<NoReadyBlockedBeadEvidence>,
+    pub rch_queue: OperatorWhatIfRchQueueState,
+    pub last_ready_command: Option<String>,
+    pub idea_wizard_allowed: bool,
+}
+
+/// Stable decision selected by the no-ready autopilot planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoReadyAutopilotAction {
+    UseReadyWork,
+    DeferForRchPressure,
+    RefreshStaleInProgress,
+    HandoffCrossRepoBlocker,
+    RefreshBlockedEvidence,
+    CreatePlanningBead,
+    ReportNoAction,
+}
+
+impl NoReadyAutopilotAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UseReadyWork => "use_ready_work",
+            Self::DeferForRchPressure => "defer_for_rch_pressure",
+            Self::RefreshStaleInProgress => "refresh_stale_in_progress",
+            Self::HandoffCrossRepoBlocker => "handoff_cross_repo_blocker",
+            Self::RefreshBlockedEvidence => "refresh_blocked_evidence",
+            Self::CreatePlanningBead => "create_planning_bead",
+            Self::ReportNoAction => "report_no_action",
+        }
+    }
+}
+
+/// Alternative considered and rejected by the no-ready autopilot planner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoReadyAutopilotRejectedAlternative {
+    pub action: NoReadyAutopilotAction,
+    pub reason_code: String,
+    pub rationale: String,
+}
+
+/// Deterministic receipt for the state where ready work is empty.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoReadyAutopilotReceipt {
+    pub schema_version: String,
+    pub receipt_id: String,
+    pub workspace_root: String,
+    pub selected_action: NoReadyAutopilotAction,
+    pub reason_code: String,
+    pub safe_next_action: String,
+    pub ready_issue_count: u32,
+    pub open_issue_count: u32,
+    pub blocked_issue_count: u32,
+    pub stale_in_progress_beads: Vec<NoReadyInProgressBead>,
+    pub blocked_evidence: Vec<NoReadyBlockedBeadEvidence>,
+    pub rch_stale_progress: Option<OperatorWhatIfRchStaleProgress>,
+    pub rejected_alternatives: Vec<NoReadyAutopilotRejectedAlternative>,
+    pub pasteable_beads_note: String,
     pub human_summary: String,
 }
 
@@ -1257,6 +1442,7 @@ impl WorkspacePressurePolicy {
         let mut action = OperatorWhatIfAction::from_admission(&policy_decision.admission);
         let mut retry_after_ms = admission_retry_after_ms(&policy_decision.admission);
         let mut reason_code = operator_reason_code_for_action(action).to_string();
+        let rch_stale_progress = build_rch_stale_progress(&input.rch_queue);
 
         if command_summary_has_unsafe_delete(input.requested_command.as_deref().unwrap_or_default())
         {
@@ -1281,6 +1467,21 @@ impl WorkspacePressurePolicy {
                 "OP-WHATIF-006",
                 "stale sibling blocker requires a fresh proof before launch".to_string(),
             );
+        } else if input.work_class.prefers_rch() && rch_stale_progress.is_some() {
+            action = OperatorWhatIfAction::Wait;
+            retry_after_ms = Some(60_000);
+            reason_code = "VAL_DEFER_RCH_STALE".to_string();
+            if let Some(progress) = &rch_stale_progress {
+                push_operator_log(
+                    &mut logs,
+                    "OP-WHATIF-010",
+                    format!(
+                        "RCH stale-progress active builds observed: {}; safe_next_action={}",
+                        render_rch_stale_build_refs(progress),
+                        progress.safe_next_action
+                    ),
+                );
+            }
         } else if input.rch_queue.available_slots == Some(0) && input.work_class.prefers_rch() {
             action = OperatorWhatIfAction::Queue;
             retry_after_ms = Some(60_000);
@@ -1375,6 +1576,7 @@ impl WorkspacePressurePolicy {
             cleanup_actions.len(),
             pinned_artifact_count,
             protected_artifact_count,
+            rch_stale_progress.as_ref(),
         );
 
         OperatorWhatIfReport {
@@ -1389,8 +1591,144 @@ impl WorkspacePressurePolicy {
             pinned_artifact_count,
             protected_artifact_count,
             command_ledger_summary,
+            rch_stale_progress,
             policy_decision,
             logs: limit_operator_logs(logs),
+            human_summary,
+        }
+    }
+
+    /// Build a deterministic decision receipt when Beads reports no ready work.
+    pub fn plan_no_ready_autopilot(&self, input: NoReadyAutopilotInput) -> NoReadyAutopilotReceipt {
+        let rch_stale_progress = build_rch_stale_progress(&input.rch_queue);
+        let stale_in_progress_beads = collect_stale_in_progress_beads(&input.in_progress_beads);
+        let blocked_evidence = limit_no_ready_blocked_evidence(&input.blocked_beads);
+
+        let selected_action = select_no_ready_autopilot_action(
+            &input,
+            &stale_in_progress_beads,
+            &blocked_evidence,
+            rch_stale_progress.as_ref(),
+        );
+        let reason_code = no_ready_reason_code(selected_action).to_string();
+        let safe_next_action = no_ready_safe_next_action(
+            selected_action,
+            &stale_in_progress_beads,
+            &blocked_evidence,
+            rch_stale_progress.as_ref(),
+        );
+        let rejected_alternatives = build_no_ready_rejected_alternatives(
+            selected_action,
+            &input,
+            &stale_in_progress_beads,
+            &blocked_evidence,
+            rch_stale_progress.as_ref(),
+        );
+        let pasteable_beads_note = render_no_ready_pasteable_note(
+            &input,
+            selected_action,
+            &reason_code,
+            &safe_next_action,
+            &stale_in_progress_beads,
+            &blocked_evidence,
+            rch_stale_progress.as_ref(),
+        );
+        let human_summary = render_no_ready_human_summary(
+            &input,
+            selected_action,
+            &reason_code,
+            &safe_next_action,
+            stale_in_progress_beads.len(),
+            blocked_evidence.len(),
+            rch_stale_progress.as_ref(),
+        );
+
+        NoReadyAutopilotReceipt {
+            schema_version: NO_READY_AUTOPILOT_SCHEMA_VERSION.to_string(),
+            receipt_id: input.receipt_id,
+            workspace_root: input.workspace_root,
+            selected_action,
+            reason_code,
+            safe_next_action,
+            ready_issue_count: input.ready_issue_count,
+            open_issue_count: input.open_issue_count,
+            blocked_issue_count: input.blocked_issue_count,
+            stale_in_progress_beads,
+            blocked_evidence,
+            rch_stale_progress,
+            rejected_alternatives,
+            pasteable_beads_note,
+            human_summary,
+        }
+    }
+
+    /// Build a deterministic handoff envelope for sibling-repo or build-infrastructure blockers.
+    pub fn build_cross_repo_blocker_envelope(
+        &self,
+        input: CrossRepoBlockerEnvelopeInput,
+    ) -> CrossRepoBlockerEnvelope {
+        let observed_matches_required =
+            input.observed_revision.as_deref() == Some(input.required_committed_revision.as_str());
+        let retry_validation_allowed =
+            input.observed_revision_committed && observed_matches_required;
+        let sufficient_to_unblock = retry_validation_allowed;
+        let beads_status_change_allowed = false;
+        let reason_code = cross_repo_blocker_reason_code(
+            input.blocker_origin,
+            input.observed_revision_committed,
+            observed_matches_required,
+        )
+        .to_string();
+        let safe_next_action = cross_repo_blocker_safe_next_action(
+            &input,
+            retry_validation_allowed,
+            observed_matches_required,
+        );
+        let pasteable_beads_note = render_cross_repo_blocker_beads_note(
+            &input,
+            &reason_code,
+            retry_validation_allowed,
+            sufficient_to_unblock,
+            beads_status_change_allowed,
+            &safe_next_action,
+        );
+        let agent_mail_handoff_body = render_cross_repo_blocker_agent_mail_body(
+            &input,
+            &reason_code,
+            retry_validation_allowed,
+            &safe_next_action,
+        );
+        let human_summary = render_cross_repo_blocker_human_summary(
+            &input,
+            &reason_code,
+            retry_validation_allowed,
+            sufficient_to_unblock,
+            &safe_next_action,
+        );
+
+        CrossRepoBlockerEnvelope {
+            schema_version: CROSS_REPO_BLOCKER_ENVELOPE_SCHEMA_VERSION.to_string(),
+            envelope_id: input.envelope_id,
+            franken_node_bead_id: input.franken_node_bead_id,
+            blocker_origin: input.blocker_origin,
+            next_owner: input.next_owner,
+            sibling_project: input.sibling_project,
+            sibling_bead_id: input.sibling_bead_id,
+            agent_mail_thread_id: input.agent_mail_thread_id,
+            agent_mail_message_id: input.agent_mail_message_id,
+            rch_build_id: input.rch_build_id,
+            required_committed_revision: input.required_committed_revision,
+            observed_revision: input.observed_revision,
+            observed_revision_committed: input.observed_revision_committed,
+            validation_command: input.validation_command,
+            first_blocker_line: input.first_blocker_line,
+            retry_validation_allowed,
+            sufficient_to_unblock,
+            beads_status_change_allowed,
+            reason_code,
+            safe_next_action,
+            pasteable_beads_note,
+            agent_mail_handoff_body,
             human_summary,
         }
     }
@@ -1712,6 +2050,51 @@ fn limit_operator_logs(mut logs: Vec<OperatorWhatIfLog>) -> Vec<OperatorWhatIfLo
     logs
 }
 
+fn build_rch_stale_progress(
+    rch_queue: &OperatorWhatIfRchQueueState,
+) -> Option<OperatorWhatIfRchStaleProgress> {
+    let mut active_builds = Vec::new();
+    for build in &rch_queue.active_builds {
+        if build.heartbeat_fresh && build.progress_stale {
+            push_bounded(
+                &mut active_builds,
+                build.clone(),
+                MAX_OPERATOR_RCH_BUILD_STATES,
+            );
+        }
+    }
+
+    if active_builds.is_empty() {
+        return None;
+    }
+
+    Some(OperatorWhatIfRchStaleProgress {
+        active_builds,
+        safe_next_action: "Do not enqueue additional heavy cargo work; preserve the exact blocker command/output and wait for RCH progress or cancel only a build you own after confirming stale progress.".to_string(),
+    })
+}
+
+fn render_rch_stale_build_refs(progress: &OperatorWhatIfRchStaleProgress) -> String {
+    progress
+        .active_builds
+        .iter()
+        .map(|build| {
+            format!(
+                "{}@{}:fresh_heartbeat={}:stale_progress={}:progress_age_secs={}",
+                build.build_id,
+                build.worker_id,
+                build.heartbeat_fresh,
+                build.progress_stale,
+                build
+                    .progress_age_secs
+                    .map(|age| age.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn build_operator_cleanup_actions(
     artifacts: &[OperatorWhatIfArtifact],
     logs: &mut Vec<OperatorWhatIfLog>,
@@ -1803,9 +2186,17 @@ fn render_operator_what_if_human_summary(
     cleanup_action_count: usize,
     pinned_artifact_count: usize,
     protected_artifact_count: usize,
+    rch_stale_progress: Option<&OperatorWhatIfRchStaleProgress>,
 ) -> String {
+    let rch_stale_builds = rch_stale_progress
+        .map(render_rch_stale_build_refs)
+        .unwrap_or_else(|| "none".to_string());
+    let rch_safe_next_action = rch_stale_progress
+        .map(|progress| progress.safe_next_action.as_str())
+        .unwrap_or("none");
+
     format!(
-        "operator what-if: scenario={} bead={} action={} reason={} retry_after_ms={} command={} cleanup_actions={} pinned_artifacts={} protected_artifacts={} rch_slots={:?} queued_jobs={}",
+        "operator what-if: scenario={} bead={} action={} reason={} retry_after_ms={} command={} cleanup_actions={} pinned_artifacts={} protected_artifacts={} rch_slots={:?} queued_jobs={} rch_stale_builds={} rch_safe_next_action={}",
         input.scenario_id,
         input.bead_id.as_deref().unwrap_or("none"),
         action.as_str(),
@@ -1819,6 +2210,458 @@ fn render_operator_what_if_human_summary(
         protected_artifact_count,
         input.rch_queue.available_slots,
         input.rch_queue.queued_jobs,
+        rch_stale_builds,
+        rch_safe_next_action,
+    )
+}
+
+fn collect_stale_in_progress_beads(
+    in_progress_beads: &[NoReadyInProgressBead],
+) -> Vec<NoReadyInProgressBead> {
+    let mut stale = Vec::new();
+    for bead in in_progress_beads {
+        if bead.updated_age_secs >= STALE_IN_PROGRESS_AFTER_SECS {
+            push_bounded(&mut stale, bead.clone(), MAX_NO_READY_AUTOPILOT_ITEMS);
+        }
+    }
+    stale.sort_by(|left, right| {
+        right
+            .updated_age_secs
+            .cmp(&left.updated_age_secs)
+            .then_with(|| left.bead_id.cmp(&right.bead_id))
+    });
+    stale
+}
+
+fn limit_no_ready_blocked_evidence(
+    blocked_beads: &[NoReadyBlockedBeadEvidence],
+) -> Vec<NoReadyBlockedBeadEvidence> {
+    let mut evidence = Vec::new();
+    for bead in blocked_beads {
+        push_bounded(&mut evidence, bead.clone(), MAX_NO_READY_AUTOPILOT_ITEMS);
+    }
+    evidence.sort_by(|left, right| {
+        left.origin
+            .cmp(&right.origin)
+            .then_with(|| left.bead_id.cmp(&right.bead_id))
+    });
+    evidence
+}
+
+fn select_no_ready_autopilot_action(
+    input: &NoReadyAutopilotInput,
+    stale_in_progress_beads: &[NoReadyInProgressBead],
+    blocked_evidence: &[NoReadyBlockedBeadEvidence],
+    rch_stale_progress: Option<&OperatorWhatIfRchStaleProgress>,
+) -> NoReadyAutopilotAction {
+    if input.ready_issue_count > 0 {
+        return NoReadyAutopilotAction::UseReadyWork;
+    }
+    if rch_stale_progress.is_some() {
+        return NoReadyAutopilotAction::DeferForRchPressure;
+    }
+    if !stale_in_progress_beads.is_empty() {
+        return NoReadyAutopilotAction::RefreshStaleInProgress;
+    }
+    if blocked_evidence
+        .iter()
+        .any(|evidence| evidence.origin == NoReadyBlockerOrigin::SiblingRepository)
+    {
+        return NoReadyAutopilotAction::HandoffCrossRepoBlocker;
+    }
+    if !blocked_evidence.is_empty() || input.blocked_issue_count > 0 {
+        return NoReadyAutopilotAction::RefreshBlockedEvidence;
+    }
+    if input.idea_wizard_allowed {
+        return NoReadyAutopilotAction::CreatePlanningBead;
+    }
+    NoReadyAutopilotAction::ReportNoAction
+}
+
+fn no_ready_reason_code(action: NoReadyAutopilotAction) -> &'static str {
+    match action {
+        NoReadyAutopilotAction::UseReadyWork => "NO_READY_READY_WORK_AVAILABLE",
+        NoReadyAutopilotAction::DeferForRchPressure => "NO_READY_DEFER_RCH_STALE",
+        NoReadyAutopilotAction::RefreshStaleInProgress => "NO_READY_REFRESH_STALE_IN_PROGRESS",
+        NoReadyAutopilotAction::HandoffCrossRepoBlocker => "NO_READY_HANDOFF_CROSS_REPO",
+        NoReadyAutopilotAction::RefreshBlockedEvidence => "NO_READY_REFRESH_BLOCKED_EVIDENCE",
+        NoReadyAutopilotAction::CreatePlanningBead => "NO_READY_CREATE_PLANNING_BEAD",
+        NoReadyAutopilotAction::ReportNoAction => "NO_READY_REPORT_NO_ACTION",
+    }
+}
+
+fn cross_repo_blocker_reason_code(
+    origin: NoReadyBlockerOrigin,
+    observed_revision_committed: bool,
+    observed_matches_required: bool,
+) -> &'static str {
+    if !observed_revision_committed {
+        return "XREPO_BLOCKER_UNCOMMITTED_EVIDENCE";
+    }
+    if !observed_matches_required {
+        return "XREPO_BLOCKER_REVISION_MISMATCH";
+    }
+    match origin {
+        NoReadyBlockerOrigin::SiblingRepository => "XREPO_BLOCKER_COMMITTED_READY",
+        NoReadyBlockerOrigin::BuildInfrastructure => "XREPO_BLOCKER_BUILD_READY",
+        NoReadyBlockerOrigin::Local => "XREPO_BLOCKER_LOCAL_READY",
+    }
+}
+
+fn cross_repo_blocker_safe_next_action(
+    input: &CrossRepoBlockerEnvelopeInput,
+    retry_validation_allowed: bool,
+    observed_matches_required: bool,
+) -> String {
+    if retry_validation_allowed {
+        return format!(
+            "Record the committed revision `{}` in Beads/Agent Mail, then retry `{}` through `rch exec` for `{}`; do not close or unblock until validation passes.",
+            input.required_committed_revision, input.validation_command, input.franken_node_bead_id
+        );
+    }
+
+    if !input.observed_revision_committed {
+        return format!(
+            "Ask `{}` to commit the required evidence revision `{}` for `{}` before retrying `{}`.",
+            input.next_owner,
+            input.required_committed_revision,
+            input
+                .sibling_project
+                .as_deref()
+                .unwrap_or("the external blocker"),
+            input.validation_command
+        );
+    }
+
+    if !observed_matches_required {
+        return format!(
+            "Ask `{}` to align the observed revision `{}` with required committed revision `{}` before retrying `{}`.",
+            input.next_owner,
+            input.observed_revision.as_deref().unwrap_or("none"),
+            input.required_committed_revision,
+            input.validation_command
+        );
+    }
+
+    format!(
+        "Preserve blocker evidence for `{}` and contact `{}` before changing Beads status.",
+        input.franken_node_bead_id, input.next_owner
+    )
+}
+
+fn render_cross_repo_blocker_beads_note(
+    input: &CrossRepoBlockerEnvelopeInput,
+    reason_code: &str,
+    retry_validation_allowed: bool,
+    sufficient_to_unblock: bool,
+    beads_status_change_allowed: bool,
+    safe_next_action: &str,
+) -> String {
+    let mut lines = vec![
+        format!("Cross-repo blocker envelope `{}`", input.envelope_id),
+        format!("franken_node_bead={}", input.franken_node_bead_id),
+        format!("origin={:?}", input.blocker_origin),
+        format!("reason_code={reason_code}"),
+        format!("next_owner={}", input.next_owner),
+        format!(
+            "required_committed_revision={}",
+            input.required_committed_revision
+        ),
+        format!(
+            "observed_revision={}",
+            input.observed_revision.as_deref().unwrap_or("none")
+        ),
+        format!(
+            "observed_revision_committed={}",
+            input.observed_revision_committed
+        ),
+        format!("validation_command={}", input.validation_command),
+        format!("first_blocker_line={}", input.first_blocker_line),
+        format!("retry_validation_allowed={retry_validation_allowed}"),
+        format!("sufficient_to_unblock={sufficient_to_unblock}"),
+        format!("beads_status_change_allowed={beads_status_change_allowed}"),
+        format!("safe_next_action={safe_next_action}"),
+    ];
+
+    if let Some(project) = &input.sibling_project {
+        lines.push(format!("sibling_project={project}"));
+    }
+    if let Some(bead_id) = &input.sibling_bead_id {
+        lines.push(format!("sibling_bead_id={bead_id}"));
+    }
+    if let Some(thread_id) = &input.agent_mail_thread_id {
+        lines.push(format!("agent_mail_thread_id={thread_id}"));
+    }
+    if let Some(message_id) = &input.agent_mail_message_id {
+        lines.push(format!("agent_mail_message_id={message_id}"));
+    }
+    if let Some(build_id) = &input.rch_build_id {
+        lines.push(format!("rch_build_id={build_id}"));
+    }
+
+    lines.join("\n")
+}
+
+fn render_cross_repo_blocker_agent_mail_body(
+    input: &CrossRepoBlockerEnvelopeInput,
+    reason_code: &str,
+    retry_validation_allowed: bool,
+    safe_next_action: &str,
+) -> String {
+    format!(
+        "Blocked franken_node bead `{}` needs `{}` action.\n\norigin={:?}\nsibling_project={}\nsibling_bead_id={}\nagent_mail_thread_id={}\nagent_mail_message_id={}\nrch_build_id={}\nrequired_committed_revision={}\nobserved_revision={}\nobserved_revision_committed={}\nvalidation_command={}\nfirst_blocker_line={}\nreason_code={}\nretry_validation_allowed={}\nsafe_next_action={}",
+        input.franken_node_bead_id,
+        input.next_owner,
+        input.blocker_origin,
+        input.sibling_project.as_deref().unwrap_or("none"),
+        input.sibling_bead_id.as_deref().unwrap_or("none"),
+        input.agent_mail_thread_id.as_deref().unwrap_or("none"),
+        input.agent_mail_message_id.as_deref().unwrap_or("none"),
+        input.rch_build_id.as_deref().unwrap_or("none"),
+        input.required_committed_revision,
+        input.observed_revision.as_deref().unwrap_or("none"),
+        input.observed_revision_committed,
+        input.validation_command,
+        input.first_blocker_line,
+        reason_code,
+        retry_validation_allowed,
+        safe_next_action
+    )
+}
+
+fn render_cross_repo_blocker_human_summary(
+    input: &CrossRepoBlockerEnvelopeInput,
+    reason_code: &str,
+    retry_validation_allowed: bool,
+    sufficient_to_unblock: bool,
+    safe_next_action: &str,
+) -> String {
+    format!(
+        "cross-repo blocker: bead={} origin={:?} owner={} sibling_project={} sibling_bead={} required_revision={} observed_revision={} committed={} retry_validation_allowed={} sufficient_to_unblock={} beads_status_change_allowed=false reason={} first_blocker_line={} safe_next_action={}",
+        input.franken_node_bead_id,
+        input.blocker_origin,
+        input.next_owner,
+        input.sibling_project.as_deref().unwrap_or("none"),
+        input.sibling_bead_id.as_deref().unwrap_or("none"),
+        input.required_committed_revision,
+        input.observed_revision.as_deref().unwrap_or("none"),
+        input.observed_revision_committed,
+        retry_validation_allowed,
+        sufficient_to_unblock,
+        reason_code,
+        input.first_blocker_line,
+        safe_next_action
+    )
+}
+
+fn no_ready_safe_next_action(
+    action: NoReadyAutopilotAction,
+    stale_in_progress_beads: &[NoReadyInProgressBead],
+    blocked_evidence: &[NoReadyBlockedBeadEvidence],
+    rch_stale_progress: Option<&OperatorWhatIfRchStaleProgress>,
+) -> String {
+    match action {
+        NoReadyAutopilotAction::UseReadyWork => {
+            "Run `br ready --json`, claim the ready bead, reserve files, and announce start in Agent Mail.".to_string()
+        }
+        NoReadyAutopilotAction::DeferForRchPressure => rch_stale_progress
+            .map(|progress| progress.safe_next_action.clone())
+            .unwrap_or_else(|| "Wait for RCH pressure to clear before enqueueing validation work.".to_string()),
+        NoReadyAutopilotAction::RefreshStaleInProgress => {
+            let bead = stale_in_progress_beads
+                .first()
+                .map(|bead| bead.bead_id.as_str())
+                .unwrap_or("the stale in-progress bead");
+            format!(
+                "Inspect `{bead}` with `br show`, contact the assignee, and update or unblock the bead before creating new work."
+            )
+        }
+        NoReadyAutopilotAction::HandoffCrossRepoBlocker => {
+            let evidence = blocked_evidence
+                .iter()
+                .find(|evidence| evidence.origin == NoReadyBlockerOrigin::SiblingRepository);
+            match evidence {
+                Some(evidence) => format!(
+                    "Send a handoff for `{}` to `{}` with the exact command and first blocker line.",
+                    evidence.bead_id,
+                    evidence.sibling_project.as_deref().unwrap_or("the sibling repository")
+                ),
+                None => "Send a cross-repo blocker handoff with the exact command and first blocker line.".to_string(),
+            }
+        }
+        NoReadyAutopilotAction::RefreshBlockedEvidence => {
+            "Refresh blocked-bead evidence; preserve the exact command and first failure line in Beads and Agent Mail.".to_string()
+        }
+        NoReadyAutopilotAction::CreatePlanningBead => {
+            "Create an idea-wizard or planning bead only after recording that `br ready --json` returned no actionable work.".to_string()
+        }
+        NoReadyAutopilotAction::ReportNoAction => {
+            "Report that no ready, refreshable, or safely creatable work was found.".to_string()
+        }
+    }
+}
+
+fn build_no_ready_rejected_alternatives(
+    selected_action: NoReadyAutopilotAction,
+    input: &NoReadyAutopilotInput,
+    stale_in_progress_beads: &[NoReadyInProgressBead],
+    blocked_evidence: &[NoReadyBlockedBeadEvidence],
+    rch_stale_progress: Option<&OperatorWhatIfRchStaleProgress>,
+) -> Vec<NoReadyAutopilotRejectedAlternative> {
+    let candidates = [
+        (
+            NoReadyAutopilotAction::UseReadyWork,
+            if input.ready_issue_count == 0 {
+                "rejected because `br ready --json` returned zero ready beads"
+            } else {
+                "rejected because a higher-priority safety action was selected"
+            },
+        ),
+        (
+            NoReadyAutopilotAction::DeferForRchPressure,
+            if rch_stale_progress.is_none() {
+                "rejected because no heartbeat-fresh/progress-stale RCH build was observed"
+            } else {
+                "rejected because a higher-priority no-ready action was selected"
+            },
+        ),
+        (
+            NoReadyAutopilotAction::RefreshStaleInProgress,
+            if stale_in_progress_beads.is_empty() {
+                "rejected because no stale in-progress bead exceeded the refresh threshold"
+            } else {
+                "rejected because validation infrastructure pressure takes precedence"
+            },
+        ),
+        (
+            NoReadyAutopilotAction::HandoffCrossRepoBlocker,
+            if blocked_evidence
+                .iter()
+                .any(|evidence| evidence.origin == NoReadyBlockerOrigin::SiblingRepository)
+            {
+                "rejected because a higher-priority no-ready action was selected"
+            } else {
+                "rejected because no sibling-repository blocker evidence was present"
+            },
+        ),
+        (
+            NoReadyAutopilotAction::RefreshBlockedEvidence,
+            if blocked_evidence.is_empty() && input.blocked_issue_count == 0 {
+                "rejected because no blocked-bead evidence was present"
+            } else {
+                "rejected because a more specific blocked-work action was selected"
+            },
+        ),
+        (
+            NoReadyAutopilotAction::CreatePlanningBead,
+            if input.idea_wizard_allowed {
+                "rejected because existing work needs refresh before creating a new bead"
+            } else {
+                "rejected because idea-wizard or new-bead creation is disabled"
+            },
+        ),
+    ];
+
+    let mut rejected = Vec::new();
+    for (action, rationale) in candidates {
+        if action != selected_action {
+            push_bounded(
+                &mut rejected,
+                NoReadyAutopilotRejectedAlternative {
+                    action,
+                    reason_code: format!("{}_REJECTED", no_ready_reason_code(action)),
+                    rationale: rationale.to_string(),
+                },
+                MAX_NO_READY_AUTOPILOT_ITEMS,
+            );
+        }
+    }
+    rejected
+}
+
+fn render_no_ready_pasteable_note(
+    input: &NoReadyAutopilotInput,
+    selected_action: NoReadyAutopilotAction,
+    reason_code: &str,
+    safe_next_action: &str,
+    stale_in_progress_beads: &[NoReadyInProgressBead],
+    blocked_evidence: &[NoReadyBlockedBeadEvidence],
+    rch_stale_progress: Option<&OperatorWhatIfRchStaleProgress>,
+) -> String {
+    let mut lines = vec![
+        format!("No-ready autopilot receipt `{}`", input.receipt_id),
+        format!(
+            "selected_action={} reason_code={}",
+            selected_action.as_str(),
+            reason_code
+        ),
+        format!(
+            "counts: ready={} open={} blocked={}",
+            input.ready_issue_count, input.open_issue_count, input.blocked_issue_count
+        ),
+        format!(
+            "last_ready_command={}",
+            input
+                .last_ready_command
+                .as_deref()
+                .unwrap_or("br ready --json")
+        ),
+        format!("safe_next_action={safe_next_action}"),
+    ];
+
+    if let Some(progress) = rch_stale_progress {
+        lines.push(format!(
+            "rch_stale_builds={}",
+            render_rch_stale_build_refs(progress)
+        ));
+    }
+    if let Some(bead) = stale_in_progress_beads.first() {
+        lines.push(format!(
+            "stale_in_progress={} assignee={} age_secs={} status={}",
+            bead.bead_id, bead.assignee, bead.updated_age_secs, bead.status_summary
+        ));
+    }
+    if let Some(evidence) = blocked_evidence.first() {
+        lines.push(format!("blocked_bead={}", evidence.bead_id));
+        if let Some(project) = &evidence.sibling_project {
+            lines.push(format!("sibling_project={project}"));
+        }
+        lines.push(format!("blocker_command={}", evidence.blocker_command));
+        lines.push(format!(
+            "first_blocker_line={}",
+            evidence.first_blocker_line
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn render_no_ready_human_summary(
+    input: &NoReadyAutopilotInput,
+    selected_action: NoReadyAutopilotAction,
+    reason_code: &str,
+    safe_next_action: &str,
+    stale_in_progress_count: usize,
+    blocked_evidence_count: usize,
+    rch_stale_progress: Option<&OperatorWhatIfRchStaleProgress>,
+) -> String {
+    let rch_stale_builds = rch_stale_progress
+        .map(render_rch_stale_build_refs)
+        .unwrap_or_else(|| "none".to_string());
+
+    format!(
+        "no-ready autopilot: receipt={} workspace={} ready={} open={} blocked={} action={} reason={} stale_in_progress={} blocked_evidence={} rch_stale_builds={} safe_next_action={}",
+        input.receipt_id,
+        input.workspace_root,
+        input.ready_issue_count,
+        input.open_issue_count,
+        input.blocked_issue_count,
+        selected_action.as_str(),
+        reason_code,
+        stale_in_progress_count,
+        blocked_evidence_count,
+        rch_stale_builds,
+        safe_next_action,
     )
 }
 
