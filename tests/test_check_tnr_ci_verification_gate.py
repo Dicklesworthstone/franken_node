@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import check_tnr_ci_verification_gate as gate
+
+_JSON_DECODER = json.JSONDecoder()
 
 
 def _executed_pass_report() -> dict:
@@ -96,25 +99,23 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _load_json(path: Path) -> dict:
+def _loads_json_object(text: str, source: str) -> dict:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = _JSON_DECODER.decode(text)
     except json.JSONDecodeError as exc:  # pragma: no cover - assertion helper
-        raise AssertionError(f"invalid JSON fixture {path}: {exc}") from exc
+        raise AssertionError(f"invalid JSON fixture {source}: {exc}") from exc
     if not isinstance(payload, dict):
-        raise AssertionError(f"JSON fixture must be an object: {path}")
+        raise AssertionError(f"JSON fixture must be an object: {source}")
     return payload
+
+
+def _load_json(path: Path) -> dict:
+    return _loads_json_object(path.read_text(encoding="utf-8"), str(path))
 
 
 def _load_first_jsonl_row(path: Path) -> dict:
     line = path.read_text(encoding="utf-8").splitlines()[0]
-    try:
-        payload = json.loads(line)
-    except json.JSONDecodeError as exc:  # pragma: no cover - assertion helper
-        raise AssertionError(f"invalid JSONL fixture {path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise AssertionError(f"JSONL row must be an object: {path}")
-    return payload
+    return _loads_json_object(line, f"{path}:1")
 
 
 def _write_valid_artifacts(root: Path, report: dict) -> None:
@@ -286,6 +287,57 @@ class TestWorkflowValidation(unittest.TestCase):
 
 
 class TestVerificationHarnessContract(unittest.TestCase):
+    def _load_plan(self) -> dict:
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "scripts"
+            / "verify_all_verification_targets.sh"
+        )
+        result = subprocess.run(
+            ["/usr/bin/bash", str(script), "--plan-json"],
+            cwd=script.parent.parent,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=10,
+        )
+        return _loads_json_object(result.stdout, "verify_all_verification_targets.sh --plan-json")
+
+    def test_plan_json_lists_required_verification_steps(self) -> None:
+        plan = self._load_plan()
+        self.assertEqual(plan["schema_version"], "verification-plan-v1")
+        self.assertEqual(plan["rch_prefix"], "rch exec --")
+
+        steps = {step["id"]: step for step in plan["steps"]}
+        self.assertEqual(
+            set(steps),
+            {
+                "compile_census",
+                "full_conformance",
+                "fuzz_smokes",
+                "verifier_sdk",
+                "cargo_deny",
+                "cargo_fmt",
+                "cargo_clippy",
+                "summary",
+            },
+        )
+
+        for step_id in ("compile_census", "full_conformance", "fuzz_smokes", "verifier_sdk", "cargo_clippy"):
+            with self.subTest(step_id=step_id):
+                self.assertTrue(steps[step_id]["heavy"])
+                self.assertTrue(steps[step_id]["rch_required"])
+
+        self.assertIn(
+            "cargo test -p frankenengine-node --locked --features extended-surfaces,test-support",
+            steps["full_conformance"]["command"],
+        )
+        self.assertIn("cargo +nightly fuzz run <target>", steps["fuzz_smokes"]["command"])
+        self.assertIn("cargo test -p frankenengine-verifier-sdk --locked", steps["verifier_sdk"]["command"])
+        self.assertEqual(steps["cargo_clippy"]["command"], "rch exec -- cargo clippy --all-targets -- -D warnings")
+        self.assertEqual(steps["cargo_clippy"]["log_path"], "artifacts/verification/cargo_clippy.log")
+        self.assertEqual(steps["cargo_clippy"]["report_json"], "artifacts/verification/cargo_clippy_lockfile_drift.json")
+
     def test_full_run_keeps_guarded_deny_fmt_and_clippy_gates(self) -> None:
         script = (
             Path(__file__).resolve().parent.parent

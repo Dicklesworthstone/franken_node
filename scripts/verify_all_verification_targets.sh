@@ -12,6 +12,7 @@
 # Usage:
 #   verify_all_verification_targets.sh            # full run (needs rch/cargo/nightly)
 #   verify_all_verification_targets.sh --selftest # validate the script's own parsers offline
+#   verify_all_verification_targets.sh --plan-json # print the non-executing command plan
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -45,6 +46,107 @@ run_guarded_gate() {
   } >> "$OUT/gates.txt"
 }
 
+emit_plan_json() {
+  python3 - "$TS" "$RCH" "$OUT" "$JSONL" "$REPORT" <<'PY'
+import json
+import sys
+
+ts, rch, out, jsonl, report = sys.argv[1:]
+
+
+def with_rch(command: str) -> str:
+    return f"{rch} {command}".strip()
+
+
+steps = [
+    {
+        "id": "compile_census",
+        "label": "compile census (no broken targets allowed)",
+        "heavy": True,
+        "rch_required": True,
+        "command": 'GATE_TS="$TS" python3 "$SCRIPT_DIR/check_verification_targets_compile.py" --run --out "$OUT" --ts "$TS"',
+        "log_path": None,
+        "report_json": None,
+    },
+    {
+        "id": "full_conformance",
+        "label": "full conformance suite",
+        "heavy": True,
+        "rch_required": True,
+        "command": with_rch("cargo test -p frankenengine-node --locked --features extended-surfaces,test-support"),
+        "log_path": f"{out}/full_test.log",
+        "report_json": None,
+    },
+    {
+        "id": "fuzz_smokes",
+        "label": "fuzz smokes (bounded 30s each)",
+        "heavy": True,
+        "rch_required": True,
+        "command": with_rch("cargo +nightly fuzz run <target> -- -max_total_time=30 -rss_limit_mb=4096"),
+        "log_path": f"{out}/fuzz_<target>.log",
+        "report_json": None,
+    },
+    {
+        "id": "verifier_sdk",
+        "label": "verifier SDK tests",
+        "heavy": True,
+        "rch_required": True,
+        "command": with_rch("cargo test -p frankenengine-verifier-sdk --locked"),
+        "log_path": f"{out}/sdk_test.log",
+        "report_json": None,
+    },
+    {
+        "id": "cargo_deny",
+        "label": "cargo deny check advisories bans sources",
+        "heavy": False,
+        "rch_required": False,
+        "command": "cargo deny check advisories bans sources",
+        "log_path": f"{out}/cargo_deny.log",
+        "report_json": f"{out}/cargo_deny_lockfile_drift.json",
+    },
+    {
+        "id": "cargo_fmt",
+        "label": "cargo fmt --check -p frankenengine-node",
+        "heavy": False,
+        "rch_required": False,
+        "command": "cargo fmt --check -p frankenengine-node",
+        "log_path": f"{out}/cargo_fmt.log",
+        "report_json": f"{out}/cargo_fmt_lockfile_drift.json",
+    },
+    {
+        "id": "cargo_clippy",
+        "label": "cargo clippy --all-targets -- -D warnings",
+        "heavy": True,
+        "rch_required": True,
+        "command": with_rch("cargo clippy --all-targets -- -D warnings"),
+        "log_path": f"{out}/cargo_clippy.log",
+        "report_json": f"{out}/cargo_clippy_lockfile_drift.json",
+    },
+    {
+        "id": "summary",
+        "label": "render summary report",
+        "heavy": False,
+        "rch_required": False,
+        "command": 'python3 "$SCRIPT_DIR/remediation_log.py" "$JSONL" > "$REPORT"; cat "$OUT/gates.txt" >> "$REPORT"',
+        "log_path": None,
+        "report_json": None,
+    },
+]
+
+payload = {
+    "schema_version": "verification-plan-v1",
+    "generated_at": ts,
+    "artifact_dir": out,
+    "jsonl_path": jsonl,
+    "report_path": report,
+    "rch_prefix": rch,
+    "steps": steps,
+}
+json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+sys.stdout.write("\n")
+PY
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   log "selftest: running parser unit tests"
   python3 "$SCRIPT_DIR/test_remediation_log.py" || exit 1
@@ -52,6 +154,11 @@ if [ "${1:-}" = "--selftest" ]; then
   python3 "$SCRIPT_DIR/test_parse_cargo_test_results.py" || exit 1
   python3 "$SCRIPT_DIR/test_lockfile_drift_guard.py" || exit 1
   log "selftest OK"
+  exit 0
+fi
+
+if [ "${1:-}" = "--plan-json" ]; then
+  emit_plan_json
   exit 0
 fi
 
