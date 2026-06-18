@@ -69,6 +69,12 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertIn("overlap_search_terms", proposed)
         self.assertIn("dedupe_rationale", proposed)
         self.assertIn("validation_plan", proposed)
+        preview = result["action_preview"]
+        self.assertEqual(preview["mode"], "dry_run")
+        self.assertEqual(preview["br_create_preview"]["argv"][:3], ["br", "create", "--title"])
+        self.assertIn("--dry-run", preview["br_create_preview"]["argv"])
+        self.assertIn("## What", preview["br_create_preview"]["body_md"])
+        self.assertIn("bd-blocked", preview["dedupe"]["overlap_search_terms"])
 
     def test_stale_blocker_refresh_preserves_first_blocker_and_comment_command(self) -> None:
         payload = mod._self_test_payloads()["stale"]
@@ -81,6 +87,10 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(decision["selected_bead_id"], "bd-stale")
         self.assertEqual(decision["recommended_command"], ["br", "comment", "bd-stale", "--stdin"])
         self.assertIn("first blocker", decision["first_blocker"])
+        preview = result["action_preview"]
+        self.assertEqual(preview["br_comment_preview"]["argv"], ["br", "comment", "bd-stale", "--stdin"])
+        self.assertIn("Validation-autopilot dry-run blocker refresh", preview["br_comment_preview"]["body_md"])
+        self.assertIn("first_blocker", preview["br_comment_preview"]["body_md"])
 
     def test_rch_timeout_retry_requires_remote_prefix(self) -> None:
         payload = mod._self_test_payloads()["rch"]
@@ -97,6 +107,10 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertIsNone(decision["stop_reason"])
         self.assertTrue(decision["retry_allowed"])
         self.assertEqual(decision["retry_budget_remaining"], 1)
+        preview = result["action_preview"]
+        self.assertEqual(preview["retry_preview"]["recommended_rch_command"]["argv"][:3], ["rch", "exec", "--"])
+        self.assertEqual(preview["retry_preview"]["worker_action"], "retry_different_worker")
+        self.assertIn("recommended_rch_command", preview["br_comment_preview"]["body_md"])
 
     def test_stale_progress_after_cancellation_retries_with_stale_progress_reason(self) -> None:
         payload = mod._self_test_payloads()["stale_progress"]
@@ -177,6 +191,11 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(decision["reason_code"], "VALAUTO_EXTERNAL_BLOCKER")
         self.assertEqual(decision["selected_bead_id"], "bd-engine")
         self.assertIn("franken_engine", decision["first_blocker"])
+        preview = result["action_preview"]
+        self.assertIsNone(preview["br_create_preview"])
+        self.assertIsNone(preview["br_comment_preview"])
+        self.assertIn("Coordination required", preview["coordination_preview"]["subject"])
+        self.assertIn("franken_engine", preview["coordination_preview"]["body_md"])
 
     def test_parent_epic_never_becomes_claim_ready(self) -> None:
         payload = mod._self_test_payloads()["parent"]
@@ -188,6 +207,18 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(decision["reason_code"], "VALAUTO_NO_SAFE_MUTATION")
         self.assertEqual(decision["selected_bead_id"], "bd-epic")
         self.assertNotEqual(decision["decision"], "claim_ready")
+
+    def test_ready_claim_preview_does_not_generate_mutation_commands(self) -> None:
+        payload = mod._self_test_payloads()["ready"]
+
+        result = mod.plan_decision(payload, now=NOW)
+
+        preview = result["action_preview"]
+        self.assertEqual(preview["action_kind"], "claim_ready")
+        self.assertFalse(preview["mutation_allowed"])
+        self.assertIsNone(preview["br_create_preview"])
+        self.assertIsNone(preview["br_comment_preview"])
+        self.assertIsNone(preview["coordination_preview"])
 
     def test_stale_input_fails_closed_before_planning(self) -> None:
         payload = mod._self_test_payloads()["ready"]

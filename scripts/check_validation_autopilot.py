@@ -25,6 +25,7 @@ TITLE = "Validation autopilot source-only planner"
 SCHEMA_VERSION = "franken-node/validation-autopilot/planner/v1"
 INPUT_SCHEMA_VERSION = "franken-node/validation-autopilot/input/v1"
 DECISION_SCHEMA_VERSION = "franken-node/validation-autopilot/decision/v1"
+ACTION_PREVIEW_SCHEMA_VERSION = "franken-node/validation-autopilot/action-preview/v1"
 POLICY_SCHEMA_VERSION = "franken-node/validation-autopilot/policy/v1"
 DEFAULT_INPUT_FRESHNESS_SECONDS = 3600
 DEFAULT_BLOCKED_FRESHNESS_HOURS = 168
@@ -170,6 +171,12 @@ def _has_rch_prefix(argv: list[str] | None) -> bool:
 
 def _command_text(argv: list[str] | None) -> str:
     return " ".join(argv or [])
+
+
+def _preview_command(argv: list[str] | None) -> dict[str, Any] | None:
+    if argv is None:
+        return None
+    return {"argv": argv, "command_text": _command_text(argv)}
 
 
 def _int_field(record: dict[str, Any], *names: str) -> int:
@@ -593,6 +600,138 @@ def _proposed_bead(classifications: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _br_create_preview(proposed_bead: dict[str, Any]) -> dict[str, Any]:
+    labels = proposed_bead.get("labels") if isinstance(proposed_bead.get("labels"), list) else []
+    label_text = ",".join(str(label) for label in labels)
+    argv = [
+        "br",
+        "create",
+        "--title",
+        str(proposed_bead.get("title") or "Untitled validation-autopilot follow-up"),
+        "--type",
+        str(proposed_bead.get("issue_type") or "task"),
+        "--priority",
+        str(proposed_bead.get("priority") or 2),
+        "--description",
+        str(proposed_bead.get("description") or ""),
+        "--dry-run",
+    ]
+    if label_text:
+        argv.extend(["--labels", label_text])
+    return {
+        "argv": argv,
+        "command_text": _command_text(argv),
+        "body_md": str(proposed_bead.get("description") or ""),
+        "dependency_suggestions": proposed_bead.get("dependency_suggestions") or [],
+        "reserved_paths_hint": proposed_bead.get("reserved_paths_hint") or [],
+        "validation_plan": proposed_bead.get("validation_plan") or [],
+    }
+
+
+def _audit_for_decision(blocked_result: dict[str, Any] | None, selected_bead_id: str | None) -> dict[str, Any]:
+    if not blocked_result or not selected_bead_id:
+        return {}
+    audits = blocked_result.get("audits") if isinstance(blocked_result.get("audits"), list) else []
+    for audit in audits:
+        if isinstance(audit, dict) and audit.get("id") == selected_bead_id:
+            return audit
+    return {}
+
+
+def _br_comment_preview(decision: dict[str, Any], audit: dict[str, Any]) -> dict[str, Any]:
+    bead_id = str(decision.get("selected_bead_id") or "<bead>")
+    lines = [
+        "Validation-autopilot dry-run blocker refresh:",
+        f"- decision: {decision['decision']}",
+        f"- reason_code: {decision['reason_code']}",
+        f"- first_blocker: {decision.get('first_blocker') or 'unknown'}",
+    ]
+    if audit:
+        lines.extend(
+            [
+                f"- blocked_freshness_classification: {audit.get('classification', 'unknown')}",
+                f"- latest_evidence_at: {audit.get('latest_evidence_at') or 'unknown'}",
+                f"- evidence_age_hours: {audit.get('evidence_age_hours')}",
+            ]
+        )
+    if decision.get("recommended_rch_command"):
+        lines.append(f"- recommended_rch_command: {_command_text(decision['recommended_rch_command'])}")
+    if decision.get("worker_action"):
+        lines.append(f"- worker_action: {decision['worker_action']}")
+    if decision.get("stop_reason"):
+        lines.append(f"- stop_reason: {decision['stop_reason']}")
+    return {
+        "argv": ["br", "comment", bead_id, "--stdin"],
+        "command_text": f"br comment {bead_id} --stdin",
+        "body_md": "\n".join(lines),
+    }
+
+
+def _coordination_preview(decision: dict[str, Any]) -> dict[str, Any]:
+    bead_id = decision.get("selected_bead_id") or "validation-autopilot"
+    subject = f"[{bead_id}] Coordination required: {decision['reason_code']}"
+    body = "\n".join(
+        [
+            "Validation-autopilot dry-run coordination handoff:",
+            f"- decision: {decision['decision']}",
+            f"- reason_code: {decision['reason_code']}",
+            f"- selected_bead_id: {decision.get('selected_bead_id') or 'none'}",
+            f"- first_blocker: {decision.get('first_blocker') or 'unknown'}",
+            f"- proposed_next_action: {decision.get('operator_summary')}",
+        ]
+    )
+    return {"subject": subject, "body_md": body}
+
+
+def _render_action_preview(
+    decision: dict[str, Any],
+    *,
+    blocked_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    audit = _audit_for_decision(blocked_result, decision.get("selected_bead_id"))
+    br_create = None
+    br_comment = None
+    coordination = None
+    retry = None
+    proposed = decision.get("proposed_bead")
+
+    if decision["decision"] == "create_followup_bead" and isinstance(proposed, dict):
+        br_create = _br_create_preview(proposed)
+    if decision["decision"] == "refresh_blocker":
+        br_comment = _br_comment_preview(decision, audit)
+    if decision["decision"] == "retry_rch_bounded":
+        retry = {
+            "recommended_rch_command": _preview_command(decision.get("recommended_rch_command")),
+            "retry_allowed": decision["retry_allowed"],
+            "retry_budget_remaining": decision["retry_budget_remaining"],
+            "worker_action": decision["worker_action"],
+            "stop_reason": decision["stop_reason"],
+            "first_blocker": decision["first_blocker"],
+        }
+        br_comment = _br_comment_preview(decision, audit)
+    if decision["decision"] == "coordinate_owner":
+        coordination = _coordination_preview(decision)
+
+    dedupe_terms: list[str] = []
+    if isinstance(proposed, dict) and isinstance(proposed.get("overlap_search_terms"), list):
+        dedupe_terms = [str(term) for term in proposed["overlap_search_terms"]]
+
+    return {
+        "schema_version": ACTION_PREVIEW_SCHEMA_VERSION,
+        "mode": "dry_run",
+        "action_kind": decision["decision"],
+        "mutation_allowed": False,
+        "br_create_preview": br_create,
+        "br_comment_preview": br_comment,
+        "coordination_preview": coordination,
+        "retry_preview": retry,
+        "dedupe": {
+            "overlap_search_terms": dedupe_terms,
+            "dedupe_rationale": proposed.get("dedupe_rationale") if isinstance(proposed, dict) else None,
+        },
+    }
+
+
 def _choose_followup_or_handoff(
     input_payload: dict[str, Any],
     tracker_result: dict[str, Any],
@@ -750,6 +889,7 @@ def _result(
     verdict = "PASS" if all(check["passed"] for check in checks) else "FAIL"
     ready_count = len(_as_issue_list(input_payload.get("br_ready", [])))
     rch_records = _records_from_payload(input_payload.get("rch_evidence", []))
+    action_preview = _render_action_preview(decision, blocked_result=blocked_result)
     return {
         "schema_version": SCHEMA_VERSION,
         "bead_id": CHECK_BEAD_ID,
@@ -763,8 +903,10 @@ def _result(
             "retry_allowed": decision["retry_allowed"],
             "rch_record_count": len(rch_records),
             "operator_summary": decision["operator_summary"],
+            "preview_action_kind": action_preview["action_kind"],
         },
         "decision": decision,
+        "action_preview": action_preview,
         "policy": policy,
         "tracker_actionability": tracker_result,
         "blocked_freshness": blocked_result,
