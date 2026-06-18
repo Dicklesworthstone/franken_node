@@ -13,6 +13,10 @@ use super::{
     validation_planner::{
         ValidationShardProofEvidence, ValidationShardRchQueueState, ValidationShardStatus,
     },
+    validation_proof_cache::{ValidationProofCacheDecision, ValidationProofCacheDecisionKind},
+    validation_proof_coalescer::{
+        ValidationProofCoalescerDecision, ValidationProofCoalescerDecisionKind,
+    },
     workspace_pressure_policy::WorkspacePressureInputs,
 };
 
@@ -33,6 +37,8 @@ pub const MAX_SWARM_ADMISSION_UNAVAILABLE_SIGNALS: usize = 32;
 pub const MAX_SWARM_ADMISSION_FIXTURES: usize = 64;
 pub const MAX_SWARM_ADMISSION_EVIDENCE_REFS: usize = 32;
 pub const MAX_SWARM_ADMISSION_BLOCKERS: usize = 32;
+pub const MAX_SWARM_ADMISSION_WAITERS: usize = 32;
+pub const MAX_SWARM_ADMISSION_COMPATIBILITY_BLOCKERS: usize = 16;
 
 const DEFAULT_OBSERVED_AT: &str = "2026-06-18T00:00:00Z";
 const DEFAULT_RETRY_AFTER_MS: u64 = 30_000;
@@ -46,6 +52,9 @@ pub enum SwarmValidationAdmissionFixtureKind {
     SingleAgent,
     SaturatedRchQueue,
     DuplicateProofRequest,
+    IncompatibleProofRequest,
+    ExpiredProofCacheEntry,
+    OwnerDeadStaleLease,
     ProofCacheHit,
     StaleLease,
     HighMemoryPressure,
@@ -60,6 +69,9 @@ impl SwarmValidationAdmissionFixtureKind {
             Self::SingleAgent => "single_agent",
             Self::SaturatedRchQueue => "saturated_rch_queue",
             Self::DuplicateProofRequest => "duplicate_proof_request",
+            Self::IncompatibleProofRequest => "incompatible_proof_request",
+            Self::ExpiredProofCacheEntry => "expired_proof_cache_entry",
+            Self::OwnerDeadStaleLease => "owner_dead_stale_lease",
             Self::ProofCacheHit => "proof_cache_hit",
             Self::StaleLease => "stale_lease",
             Self::HighMemoryPressure => "high_memory_pressure",
@@ -156,6 +168,18 @@ pub enum SwarmValidationProofLeaseState {
     Stale,
 }
 
+impl SwarmValidationProofLeaseState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::InFlightFresh => "in_flight_fresh",
+            Self::CompletedFresh => "completed_fresh",
+            Self::Stale => "stale",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SwarmValidationUnavailableSignal {
@@ -202,6 +226,67 @@ impl SwarmValidationProofSource {
             Self::FreshExecution => "fresh_execution",
             Self::CoalescerWaiter => "coalescer_waiter",
             Self::ProofCacheHit => "proof_cache_hit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmValidationProofCoalescingStatus {
+    None,
+    InFlight,
+    Joined,
+    CompletedCacheHit,
+    CacheMiss,
+    StaleLease,
+    ExpiredProof,
+    OwnerDead,
+    Incompatible,
+    Corrupted,
+}
+
+impl SwarmValidationProofCoalescingStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::InFlight => "in_flight",
+            Self::Joined => "joined",
+            Self::CompletedCacheHit => "completed_cache_hit",
+            Self::CacheMiss => "cache_miss",
+            Self::StaleLease => "stale_lease",
+            Self::ExpiredProof => "expired_proof",
+            Self::OwnerDead => "owner_dead",
+            Self::Incompatible => "incompatible",
+            Self::Corrupted => "corrupted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmValidationProofCompatibility {
+    Equivalent,
+    DifferentProfile,
+    DifferentInputs,
+    DifferentCommand,
+    Unknown,
+}
+
+impl SwarmValidationProofCompatibility {
+    #[must_use]
+    pub const fn is_equivalent(self) -> bool {
+        matches!(self, Self::Equivalent)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Equivalent => "equivalent",
+            Self::DifferentProfile => "different_profile",
+            Self::DifferentInputs => "different_inputs",
+            Self::DifferentCommand => "different_command",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -299,12 +384,233 @@ pub struct SwarmValidationRchSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmValidationProofCoalescingSnapshot {
+    pub status: SwarmValidationProofCoalescingStatus,
+    pub compatibility: SwarmValidationProofCompatibility,
+    pub proof_work_key: Option<String>,
+    pub proof_cache_key: Option<String>,
+    pub command_digest: Option<String>,
+    pub owner_agent: Option<String>,
+    pub owner_bead_id: Option<String>,
+    pub waiter_agents: Vec<String>,
+    pub lease_id: Option<String>,
+    pub lease_state: Option<String>,
+    pub cache_entry_id: Option<String>,
+    pub cache_entry_path: Option<String>,
+    pub receipt_id: Option<String>,
+    pub receipt_path: Option<String>,
+    pub reason_code: Option<String>,
+    pub event_code: Option<String>,
+    pub required_action: Option<String>,
+    pub freshness_expires_at: Option<DateTime<Utc>>,
+    pub expected_wait_ms: Option<u64>,
+    pub compatibility_blockers: Vec<String>,
+}
+
+impl SwarmValidationProofCoalescingSnapshot {
+    #[must_use]
+    pub fn normalize(mut self) -> Self {
+        self.waiter_agents.sort();
+        self.waiter_agents.dedup();
+        self.waiter_agents.truncate(MAX_SWARM_ADMISSION_WAITERS);
+        self.compatibility_blockers.sort();
+        self.compatibility_blockers.dedup();
+        self.compatibility_blockers
+            .truncate(MAX_SWARM_ADMISSION_COMPATIBILITY_BLOCKERS);
+        self
+    }
+
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            status: SwarmValidationProofCoalescingStatus::None,
+            compatibility: SwarmValidationProofCompatibility::Unknown,
+            proof_work_key: None,
+            proof_cache_key: None,
+            command_digest: None,
+            owner_agent: None,
+            owner_bead_id: None,
+            waiter_agents: Vec::new(),
+            lease_id: None,
+            lease_state: None,
+            cache_entry_id: None,
+            cache_entry_path: None,
+            receipt_id: None,
+            receipt_path: None,
+            reason_code: None,
+            event_code: None,
+            required_action: None,
+            freshness_expires_at: None,
+            expected_wait_ms: None,
+            compatibility_blockers: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_coalescer_decision(
+        decision: &ValidationProofCoalescerDecision,
+        expected_wait_ms: Option<u64>,
+    ) -> Self {
+        let lease_ref = decision.lease_ref.as_ref();
+        let status = match decision.decision {
+            ValidationProofCoalescerDecisionKind::JoinExistingProof => {
+                SwarmValidationProofCoalescingStatus::InFlight
+            }
+            ValidationProofCoalescerDecisionKind::WaitForReceipt => {
+                SwarmValidationProofCoalescingStatus::CompletedCacheHit
+            }
+            ValidationProofCoalescerDecisionKind::RetryAfterStaleLease => {
+                SwarmValidationProofCoalescingStatus::StaleLease
+            }
+            ValidationProofCoalescerDecisionKind::RejectDirtyPolicy => {
+                SwarmValidationProofCoalescingStatus::Incompatible
+            }
+            ValidationProofCoalescerDecisionKind::RepairState => {
+                SwarmValidationProofCoalescingStatus::Corrupted
+            }
+            ValidationProofCoalescerDecisionKind::QueuedByPolicy => {
+                SwarmValidationProofCoalescingStatus::CacheMiss
+            }
+            ValidationProofCoalescerDecisionKind::RejectCapacity
+            | ValidationProofCoalescerDecisionKind::RunLocallyViaRch => {
+                SwarmValidationProofCoalescingStatus::None
+            }
+        };
+        let compatibility = match decision.decision {
+            ValidationProofCoalescerDecisionKind::RejectDirtyPolicy => {
+                SwarmValidationProofCompatibility::DifferentProfile
+            }
+            ValidationProofCoalescerDecisionKind::RepairState => {
+                SwarmValidationProofCompatibility::Unknown
+            }
+            _ => SwarmValidationProofCompatibility::Equivalent,
+        };
+        let mut compatibility_blockers = Vec::new();
+        if !compatibility.is_equivalent() {
+            compatibility_blockers.push(decision.diagnostics.message.clone());
+        }
+
+        Self {
+            status,
+            compatibility,
+            proof_work_key: Some(decision.proof_work_key.hex.clone()),
+            proof_cache_key: Some(decision.proof_work_key.proof_cache_key.hex.clone()),
+            command_digest: Some(decision.proof_work_key.command_digest.hex.clone()),
+            owner_agent: lease_ref.map(|lease| lease.owner_agent.clone()),
+            owner_bead_id: lease_ref.map(|lease| lease.owner_bead_id.clone()),
+            waiter_agents: Vec::new(),
+            lease_id: lease_ref.map(|lease| lease.lease_id.clone()),
+            lease_state: lease_ref.map(|lease| lease.state.as_str().to_string()),
+            cache_entry_id: None,
+            cache_entry_path: None,
+            receipt_id: None,
+            receipt_path: None,
+            reason_code: Some(decision.reason_code.clone()),
+            event_code: Some(decision.diagnostics.event_code.clone()),
+            required_action: Some(decision.required_action.as_str().to_string()),
+            freshness_expires_at: None,
+            expected_wait_ms,
+            compatibility_blockers,
+        }
+        .normalize()
+    }
+
+    #[must_use]
+    pub fn from_cache_decision(decision: &ValidationProofCacheDecision) -> Self {
+        let status = match decision.decision {
+            ValidationProofCacheDecisionKind::Hit => {
+                SwarmValidationProofCoalescingStatus::CompletedCacheHit
+            }
+            ValidationProofCacheDecisionKind::Miss
+            | ValidationProofCacheDecisionKind::QuotaBlocked => {
+                SwarmValidationProofCoalescingStatus::CacheMiss
+            }
+            ValidationProofCacheDecisionKind::Stale => {
+                SwarmValidationProofCoalescingStatus::ExpiredProof
+            }
+            ValidationProofCacheDecisionKind::DigestMismatch
+            | ValidationProofCacheDecisionKind::PolicyMismatch
+            | ValidationProofCacheDecisionKind::DirtyStateMismatch => {
+                SwarmValidationProofCoalescingStatus::Incompatible
+            }
+            ValidationProofCacheDecisionKind::CorruptedEntry => {
+                SwarmValidationProofCoalescingStatus::Corrupted
+            }
+        };
+        let compatibility = match decision.decision {
+            ValidationProofCacheDecisionKind::Hit
+            | ValidationProofCacheDecisionKind::Miss
+            | ValidationProofCacheDecisionKind::Stale
+            | ValidationProofCacheDecisionKind::QuotaBlocked => {
+                SwarmValidationProofCompatibility::Equivalent
+            }
+            ValidationProofCacheDecisionKind::DigestMismatch => {
+                SwarmValidationProofCompatibility::DifferentCommand
+            }
+            ValidationProofCacheDecisionKind::PolicyMismatch
+            | ValidationProofCacheDecisionKind::DirtyStateMismatch => {
+                SwarmValidationProofCompatibility::DifferentProfile
+            }
+            ValidationProofCacheDecisionKind::CorruptedEntry => {
+                SwarmValidationProofCompatibility::Unknown
+            }
+        };
+        let mut compatibility_blockers = Vec::new();
+        if !compatibility.is_equivalent() {
+            compatibility_blockers.push(decision.diagnostics.message.clone());
+        }
+
+        Self {
+            status,
+            compatibility,
+            proof_work_key: None,
+            proof_cache_key: Some(decision.cache_key.hex.clone()),
+            command_digest: Some(decision.cache_key.command_digest.hex.clone()),
+            owner_agent: None,
+            owner_bead_id: Some(decision.bead_id.clone()),
+            waiter_agents: Vec::new(),
+            lease_id: None,
+            lease_state: None,
+            cache_entry_id: decision
+                .entry_ref
+                .as_ref()
+                .map(|entry| entry.entry_id.clone()),
+            cache_entry_path: decision.entry_ref.as_ref().map(|entry| entry.path.clone()),
+            receipt_id: decision
+                .receipt_ref
+                .as_ref()
+                .map(|receipt| receipt.receipt_id.clone()),
+            receipt_path: decision
+                .receipt_ref
+                .as_ref()
+                .map(|receipt| receipt.path.clone()),
+            reason_code: Some(decision.reason_code.clone()),
+            event_code: Some(decision.diagnostics.event_code.clone()),
+            required_action: Some(decision.required_action.as_str().to_string()),
+            freshness_expires_at: None,
+            expected_wait_ms: None,
+            compatibility_blockers,
+        }
+        .normalize()
+    }
+
+    #[must_use]
+    pub fn freshness_is_valid_at(&self, observed_at: DateTime<Utc>) -> bool {
+        match self.freshness_expires_at {
+            Some(expires_at) => expires_at > observed_at,
+            None => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmValidationProofSnapshot {
     pub lease_state: SwarmValidationProofLeaseState,
     pub proof_work_key: Option<String>,
     pub command_digest: Option<String>,
     pub owner_agent: Option<String>,
     pub proof_evidence: Vec<ValidationShardProofEvidence>,
+    pub coalescing: Option<SwarmValidationProofCoalescingSnapshot>,
 }
 
 impl SwarmValidationProofSnapshot {
@@ -317,6 +623,9 @@ impl SwarmValidationProofSnapshot {
         });
         self.proof_evidence
             .truncate(MAX_SWARM_ADMISSION_PROOF_EVIDENCE);
+        self.coalescing = self
+            .coalescing
+            .map(SwarmValidationProofCoalescingSnapshot::normalize);
         self
     }
 
@@ -328,6 +637,7 @@ impl SwarmValidationProofSnapshot {
             command_digest: None,
             owner_agent: None,
             proof_evidence: Vec::new(),
+            coalescing: None,
         }
     }
 }
@@ -420,6 +730,13 @@ impl SwarmValidationAdmissionInputFixture {
                 super::validation_planner::ValidationShardProofState::CacheHit
                     | super::validation_planner::ValidationShardProofState::CoalescerInFlight
             )
+        }) || self.proof.coalescing.as_ref().is_some_and(|coalescing| {
+            matches!(
+                coalescing.status,
+                SwarmValidationProofCoalescingStatus::InFlight
+                    | SwarmValidationProofCoalescingStatus::Joined
+                    | SwarmValidationProofCoalescingStatus::CompletedCacheHit
+            )
         }) {
             return ValidationShardStatus::Reused;
         }
@@ -455,15 +772,26 @@ pub struct SwarmValidationAdmissionInputFreshness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmValidationAdmissionCoalescingTarget {
     pub proof_work_key: Option<String>,
+    pub proof_cache_key: Option<String>,
     pub command_digest: Option<String>,
     pub owner_agent: Option<String>,
+    pub owner_bead_id: Option<String>,
+    pub lease_id: Option<String>,
+    pub lease_state: Option<String>,
+    pub receipt_id: Option<String>,
+    pub receipt_path: Option<String>,
     pub evidence_ref: Option<String>,
+    pub reason_code: Option<String>,
+    pub required_action: Option<String>,
+    pub freshness_expires_at: Option<DateTime<Utc>>,
+    pub expected_wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmValidationAdmissionDiagnostics {
     pub input_freshness: SwarmValidationAdmissionInputFreshness,
     pub validation_shard_status: ValidationShardStatus,
+    pub proof_coalescing_status: SwarmValidationProofCoalescingStatus,
     pub rch_available: bool,
     pub rch_workers_available: u16,
     pub rch_queued_builds: u16,
@@ -559,6 +887,9 @@ pub fn deterministic_swarm_validation_admission_fixtures() -> SwarmValidationAdm
         single_agent_fixture(observed_at),
         saturated_rch_queue_fixture(observed_at),
         duplicate_proof_request_fixture(observed_at),
+        incompatible_proof_request_fixture(observed_at),
+        expired_proof_cache_entry_fixture(observed_at),
+        owner_dead_stale_lease_fixture(observed_at),
         proof_cache_hit_fixture(observed_at),
         stale_lease_fixture(observed_at),
         high_memory_pressure_fixture(observed_at),
@@ -650,19 +981,8 @@ fn decide_swarm_validation_admission(
         ));
     }
 
-    if requested_action_requires_cargo(input.requested_action)
-        && input.policy.require_rch_for_cargo
-        && !input.rch.queue.rch_available
-    {
-        return decision_parts(
-            SwarmValidationAdmissionDecision::Blocked,
-            "SVA_BLOCKED_LOCAL_FALLBACK",
-            "SVA-013",
-            "restore_remote_execution_or_record_blocker",
-        )
-        .fail_closed()
-        .retryable()
-        .with_blocker("RCH unavailable and local cargo fallback is forbidden");
+    if let Some(decision) = proof_coalescing_decision(input) {
+        return decision;
     }
 
     if let Some(reservation) = active_conflicting_reservation(input) {
@@ -680,10 +1000,25 @@ fn decide_swarm_validation_admission(
         ));
     }
 
+    if requested_action_requires_cargo(input.requested_action)
+        && input.policy.require_rch_for_cargo
+        && !input.rch.queue.rch_available
+    {
+        return decision_parts(
+            SwarmValidationAdmissionDecision::Blocked,
+            "SVA_BLOCKED_LOCAL_FALLBACK",
+            "SVA-013",
+            "restore_remote_execution_or_record_blocker",
+        )
+        .fail_closed()
+        .retryable()
+        .with_blocker("RCH unavailable and local cargo fallback is forbidden");
+    }
+
     if stale_handoff_ready(input) {
         return decision_parts(
             SwarmValidationAdmissionDecision::Handoff,
-            "SVA_HANDOFF_STALE_OWNER",
+            "SWARM-STALE-LEASE",
             "SVA-009",
             "request_agent_handoff",
         )
@@ -697,7 +1032,7 @@ fn decide_swarm_validation_admission(
     if input.proof.lease_state == SwarmValidationProofLeaseState::InFlightFresh {
         return decision_parts(
             SwarmValidationAdmissionDecision::Coalesce,
-            "SVA_COALESCE_PROOF_IN_FLIGHT",
+            "SWARM-COALESCE-IN-FLIGHT",
             "SVA-004",
             "join_existing_proof",
         )
@@ -710,7 +1045,7 @@ fn decide_swarm_validation_admission(
     if input.proof.lease_state == SwarmValidationProofLeaseState::CompletedFresh {
         return decision_parts(
             SwarmValidationAdmissionDecision::Coalesce,
-            "SVA_COALESCE_PROOF_CACHE_HIT",
+            "SWARM-CACHE-HIT",
             "SVA-005",
             "reuse_fresh_receipt",
         )
@@ -935,6 +1270,12 @@ fn decision_record(
                 fresh: input.freshness_expires_at > input.observed_at,
             },
             validation_shard_status: input.expected_validation_shard_status(),
+            proof_coalescing_status: input
+                .proof
+                .coalescing
+                .as_ref()
+                .map(|coalescing| coalescing.status)
+                .unwrap_or(SwarmValidationProofCoalescingStatus::None),
             rch_available: input.rch.queue.rch_available,
             rch_workers_available: input.rch.queue.workers_available,
             rch_queued_builds: input.rch.queue.queued_builds,
@@ -978,6 +1319,170 @@ fn active_conflicting_reservation(
     })
 }
 
+fn proof_coalescing_decision(
+    input: &SwarmValidationAdmissionInputFixture,
+) -> Option<SwarmValidationDecisionParts> {
+    let coalescing = input.proof.coalescing.as_ref()?;
+
+    if let Some(blocker) = proof_signal_mismatch(input, coalescing) {
+        return Some(
+            decision_parts(
+                SwarmValidationAdmissionDecision::Blocked,
+                "SWARM-INCOMPATIBLE-PROOF",
+                "SVA-017",
+                "start_distinct_proof_or_rebuild_key",
+            )
+            .fail_closed()
+            .retryable()
+            .with_coalescing_target(coalescing_target(input))
+            .with_blocker(blocker),
+        );
+    }
+
+    if !coalescing.compatibility.is_equivalent() {
+        let mut parts = decision_parts(
+            SwarmValidationAdmissionDecision::Blocked,
+            "SWARM-INCOMPATIBLE-PROOF",
+            "SVA-017",
+            "start_distinct_proof_or_rebuild_key",
+        )
+        .fail_closed()
+        .retryable()
+        .with_blocker(format!(
+            "proof compatibility is {}",
+            coalescing.compatibility.as_str()
+        ));
+        for blocker in &coalescing.compatibility_blockers {
+            parts = parts.with_blocker(blocker.clone());
+        }
+        return Some(parts.with_coalescing_target(coalescing_target(input)));
+    }
+
+    if !coalescing.freshness_is_valid_at(input.observed_at) {
+        return Some(
+            decision_parts(
+                SwarmValidationAdmissionDecision::Blocked,
+                "SWARM-STALE-CACHE",
+                "SVA-018",
+                "refresh_validation_evidence",
+            )
+            .fail_closed()
+            .retryable()
+            .with_coalescing_target(coalescing_target(input))
+            .with_blocker("proof cache freshness has expired"),
+        );
+    }
+
+    match coalescing.status {
+        SwarmValidationProofCoalescingStatus::InFlight
+        | SwarmValidationProofCoalescingStatus::Joined => Some(
+            decision_parts(
+                SwarmValidationAdmissionDecision::Coalesce,
+                "SWARM-COALESCE-IN-FLIGHT",
+                "SVA-004",
+                "join_existing_proof",
+            )
+            .green_proof_eligible()
+            .retryable()
+            .with_proof_source(SwarmValidationProofSource::CoalescerWaiter)
+            .with_coalescing_target(coalescing_target(input)),
+        ),
+        SwarmValidationProofCoalescingStatus::CompletedCacheHit => Some(
+            decision_parts(
+                SwarmValidationAdmissionDecision::Coalesce,
+                "SWARM-CACHE-HIT",
+                "SVA-005",
+                "reuse_fresh_receipt",
+            )
+            .green_proof_eligible()
+            .with_proof_source(SwarmValidationProofSource::ProofCacheHit)
+            .with_coalescing_target(coalescing_target(input)),
+        ),
+        SwarmValidationProofCoalescingStatus::StaleLease
+        | SwarmValidationProofCoalescingStatus::OwnerDead => Some(
+            decision_parts(
+                SwarmValidationAdmissionDecision::Handoff,
+                "SWARM-STALE-LEASE",
+                "SVA-009",
+                "request_agent_handoff",
+            )
+            .retryable()
+            .with_coalescing_target(coalescing_target(input))
+            .with_blocker(format!(
+                "stale proof owner {} requires handoff",
+                coalescing
+                    .owner_agent
+                    .as_deref()
+                    .or(input.proof.owner_agent.as_deref())
+                    .unwrap_or("unknown")
+            )),
+        ),
+        SwarmValidationProofCoalescingStatus::ExpiredProof => Some(
+            decision_parts(
+                SwarmValidationAdmissionDecision::Blocked,
+                "SWARM-STALE-CACHE",
+                "SVA-018",
+                "refresh_validation_evidence",
+            )
+            .fail_closed()
+            .retryable()
+            .with_coalescing_target(coalescing_target(input))
+            .with_blocker("proof cache entry is stale or expired"),
+        ),
+        SwarmValidationProofCoalescingStatus::Incompatible => Some(
+            decision_parts(
+                SwarmValidationAdmissionDecision::Blocked,
+                "SWARM-INCOMPATIBLE-PROOF",
+                "SVA-017",
+                "start_distinct_proof_or_rebuild_key",
+            )
+            .fail_closed()
+            .retryable()
+            .with_coalescing_target(coalescing_target(input))
+            .with_blocker("proof signal is incompatible with requested validation profile"),
+        ),
+        SwarmValidationProofCoalescingStatus::Corrupted => Some(
+            decision_parts(
+                SwarmValidationAdmissionDecision::Blocked,
+                "SWARM-CORRUPTED-PROOF-STATE",
+                "SVA-019",
+                "repair_proof_coalescer_state",
+            )
+            .fail_closed()
+            .retryable()
+            .with_coalescing_target(coalescing_target(input))
+            .with_blocker("proof coalescer or cache state is corrupted"),
+        ),
+        SwarmValidationProofCoalescingStatus::None
+        | SwarmValidationProofCoalescingStatus::CacheMiss => None,
+    }
+}
+
+fn proof_signal_mismatch(
+    input: &SwarmValidationAdmissionInputFixture,
+    coalescing: &SwarmValidationProofCoalescingSnapshot,
+) -> Option<String> {
+    if let (Some(expected), Some(observed)) = (
+        input.proof.proof_work_key.as_deref(),
+        coalescing.proof_work_key.as_deref(),
+    ) && expected != observed
+    {
+        return Some(format!(
+            "proof work key mismatch: expected {expected}, observed {observed}"
+        ));
+    }
+    if let (Some(expected), Some(observed)) = (
+        input.proof.command_digest.as_deref(),
+        coalescing.command_digest.as_deref(),
+    ) && expected != observed
+    {
+        return Some(format!(
+            "command digest mismatch: expected {expected}, observed {observed}"
+        ));
+    }
+    None
+}
+
 fn stale_handoff_ready(input: &SwarmValidationAdmissionInputFixture) -> bool {
     let stale_after_secs = input.policy.stale_handoff_after_ms / 1_000;
     let stale_owner = input
@@ -1014,15 +1519,59 @@ fn rch_queue_saturated(input: &SwarmValidationAdmissionInputFixture) -> bool {
 fn coalescing_target(
     input: &SwarmValidationAdmissionInputFixture,
 ) -> SwarmValidationAdmissionCoalescingTarget {
+    if let Some(coalescing) = &input.proof.coalescing {
+        return SwarmValidationAdmissionCoalescingTarget {
+            proof_work_key: coalescing
+                .proof_work_key
+                .clone()
+                .or_else(|| input.proof.proof_work_key.clone()),
+            proof_cache_key: coalescing.proof_cache_key.clone(),
+            command_digest: coalescing
+                .command_digest
+                .clone()
+                .or_else(|| input.proof.command_digest.clone()),
+            owner_agent: coalescing
+                .owner_agent
+                .clone()
+                .or_else(|| input.proof.owner_agent.clone()),
+            owner_bead_id: coalescing.owner_bead_id.clone(),
+            lease_id: coalescing.lease_id.clone(),
+            lease_state: coalescing.lease_state.clone(),
+            receipt_id: coalescing.receipt_id.clone(),
+            receipt_path: coalescing.receipt_path.clone(),
+            evidence_ref: input
+                .proof
+                .proof_evidence
+                .first()
+                .map(|evidence| evidence.evidence_ref.clone())
+                .or_else(|| coalescing.cache_entry_path.clone())
+                .or_else(|| coalescing.receipt_path.clone()),
+            reason_code: coalescing.reason_code.clone(),
+            required_action: coalescing.required_action.clone(),
+            freshness_expires_at: coalescing.freshness_expires_at,
+            expected_wait_ms: coalescing.expected_wait_ms,
+        };
+    }
+
     SwarmValidationAdmissionCoalescingTarget {
         proof_work_key: input.proof.proof_work_key.clone(),
+        proof_cache_key: None,
         command_digest: input.proof.command_digest.clone(),
         owner_agent: input.proof.owner_agent.clone(),
+        owner_bead_id: None,
+        lease_id: None,
+        lease_state: Some(input.proof.lease_state.as_str().to_string()),
+        receipt_id: None,
+        receipt_path: None,
         evidence_ref: input
             .proof
             .proof_evidence
             .first()
             .map(|evidence| evidence.evidence_ref.clone()),
+        reason_code: None,
+        required_action: None,
+        freshness_expires_at: None,
+        expected_wait_ms: None,
     }
 }
 
@@ -1059,6 +1608,29 @@ fn evidence_refs(input: &SwarmValidationAdmissionInputFixture) -> Vec<String> {
             evidence.evidence_ref.clone(),
             MAX_SWARM_ADMISSION_EVIDENCE_REFS,
         );
+    }
+    if let Some(coalescing) = &input.proof.coalescing {
+        if let Some(lease_id) = &coalescing.lease_id {
+            push_bounded(
+                &mut refs,
+                format!("validation-proof-coalescer:lease:{lease_id}"),
+                MAX_SWARM_ADMISSION_EVIDENCE_REFS,
+            );
+        }
+        if let Some(cache_entry_path) = &coalescing.cache_entry_path {
+            push_bounded(
+                &mut refs,
+                cache_entry_path.clone(),
+                MAX_SWARM_ADMISSION_EVIDENCE_REFS,
+            );
+        }
+        if let Some(receipt_path) = &coalescing.receipt_path {
+            push_bounded(
+                &mut refs,
+                receipt_path.clone(),
+                MAX_SWARM_ADMISSION_EVIDENCE_REFS,
+            );
+        }
     }
     for reservation in &input.coordination.reservations {
         push_bounded(
@@ -1219,15 +1791,142 @@ fn duplicate_proof_request_fixture(observed_at: DateTime<Utc>) -> SwarmValidatio
             "cargo-test-frankenengine-node",
             "validation-proof-coalescer/leases/lease-duplicate",
         )],
+        coalescing: Some(coalescing_in_flight(InFlightProofCoalescingArgs {
+            proof_work_key: "sha256:proof-work-key-duplicate",
+            proof_cache_key: "sha256:proof-cache-key-duplicate",
+            command_digest: "sha256:command-digest-duplicate",
+            owner_agent: "ScarletSeal",
+            owner_bead_id: "bd-0x4fy.4",
+            lease_id: "vpco-lease-duplicate",
+            freshness_expires_at: observed_at + TimeDelta::minutes(7),
+            expected_wait_ms: 45_000,
+        })),
     };
 
     fixture(
         SwarmValidationAdmissionFixtureKind::DuplicateProofRequest,
         input,
         SwarmValidationAdmissionDecision::Coalesce,
-        "SVA_COALESCE_PROOF_IN_FLIGHT",
+        "SWARM-COALESCE-IN-FLIGHT",
         "join_existing_proof",
         true,
+        None,
+    )
+}
+
+fn incompatible_proof_request_fixture(
+    observed_at: DateTime<Utc>,
+) -> SwarmValidationAdmissionFixture {
+    let mut input = base_input(
+        "incompatible-proof-request",
+        observed_at,
+        SwarmValidationRequestedAction::CargoTest,
+    );
+    input.proof = SwarmValidationProofSnapshot {
+        lease_state: SwarmValidationProofLeaseState::InFlightFresh,
+        proof_work_key: Some("sha256:proof-work-key-incompatible".to_string()),
+        command_digest: Some("sha256:command-digest-incompatible".to_string()),
+        owner_agent: Some("ScarletSeal".to_string()),
+        proof_evidence: vec![ValidationShardProofEvidence::coalescer_in_flight(
+            "cargo-test-frankenengine-node",
+            "validation-proof-coalescer/leases/lease-incompatible",
+        )],
+        coalescing: Some(coalescing_incompatible_profile(
+            "sha256:proof-work-key-incompatible",
+            "sha256:proof-cache-key-incompatible",
+            "sha256:command-digest-incompatible",
+            "ScarletSeal",
+            "bd-0x4fy.4",
+            "vpco-lease-incompatible",
+        )),
+    };
+
+    fixture(
+        SwarmValidationAdmissionFixtureKind::IncompatibleProofRequest,
+        input,
+        SwarmValidationAdmissionDecision::Blocked,
+        "SWARM-INCOMPATIBLE-PROOF",
+        "start_distinct_proof_or_rebuild_key",
+        false,
+        None,
+    )
+}
+
+fn expired_proof_cache_entry_fixture(
+    observed_at: DateTime<Utc>,
+) -> SwarmValidationAdmissionFixture {
+    let mut input = base_input(
+        "expired-proof-cache-entry",
+        observed_at,
+        SwarmValidationRequestedAction::Closeout,
+    );
+    input.proof = SwarmValidationProofSnapshot {
+        lease_state: SwarmValidationProofLeaseState::CompletedFresh,
+        proof_work_key: Some("sha256:proof-work-key-expired".to_string()),
+        command_digest: Some("sha256:command-digest-expired".to_string()),
+        owner_agent: Some("SunnyIvy".to_string()),
+        proof_evidence: vec![ValidationShardProofEvidence::cache_hit(
+            "cargo-test-frankenengine-node",
+            "validation-proof-cache/entries/entry-expired.json",
+        )],
+        coalescing: Some(coalescing_expired_cache(
+            "sha256:proof-work-key-expired",
+            "sha256:proof-cache-key-expired",
+            "sha256:command-digest-expired",
+            "vpc-entry-expired",
+            "validation-proof-cache/entries/entry-expired.json",
+            "validation-proof-cache/receipts/receipt-expired.json",
+            observed_at - TimeDelta::seconds(1),
+        )),
+    };
+
+    fixture(
+        SwarmValidationAdmissionFixtureKind::ExpiredProofCacheEntry,
+        input,
+        SwarmValidationAdmissionDecision::Blocked,
+        "SWARM-STALE-CACHE",
+        "refresh_validation_evidence",
+        false,
+        None,
+    )
+}
+
+fn owner_dead_stale_lease_fixture(observed_at: DateTime<Utc>) -> SwarmValidationAdmissionFixture {
+    let mut input = base_input(
+        "owner-dead-stale-lease",
+        observed_at,
+        SwarmValidationRequestedAction::CargoTest,
+    );
+    input
+        .coordination
+        .active_agents
+        .push(active_agent("ScarletSeal", 9_000));
+    input.proof = SwarmValidationProofSnapshot {
+        lease_state: SwarmValidationProofLeaseState::InFlightFresh,
+        proof_work_key: Some("sha256:proof-work-key-owner-dead".to_string()),
+        command_digest: Some("sha256:command-digest-owner-dead".to_string()),
+        owner_agent: Some("ScarletSeal".to_string()),
+        proof_evidence: vec![ValidationShardProofEvidence::coalescer_in_flight(
+            "cargo-test-frankenengine-node",
+            "validation-proof-coalescer/leases/lease-owner-dead",
+        )],
+        coalescing: Some(coalescing_owner_dead(
+            "sha256:proof-work-key-owner-dead",
+            "sha256:proof-cache-key-owner-dead",
+            "sha256:command-digest-owner-dead",
+            "ScarletSeal",
+            "bd-0x4fy.4",
+            "vpco-lease-owner-dead",
+        )),
+    };
+
+    fixture(
+        SwarmValidationAdmissionFixtureKind::OwnerDeadStaleLease,
+        input,
+        SwarmValidationAdmissionDecision::Handoff,
+        "SWARM-STALE-LEASE",
+        "request_agent_handoff",
+        false,
         None,
     )
 }
@@ -1247,13 +1946,23 @@ fn proof_cache_hit_fixture(observed_at: DateTime<Utc>) -> SwarmValidationAdmissi
             "cargo-test-frankenengine-node",
             "validation-proof-cache/receipts/receipt-cache-hit.json",
         )],
+        coalescing: Some(coalescing_cache_hit(CacheHitProofCoalescingArgs {
+            proof_work_key: "sha256:proof-work-key-cache-hit",
+            proof_cache_key: "sha256:proof-cache-key-cache-hit",
+            command_digest: "sha256:command-digest-cache-hit",
+            cache_entry_id: "vpc-entry-cache-hit",
+            cache_entry_path: "validation-proof-cache/entries/entry-cache-hit.json",
+            receipt_id: "vbrcpt-cache-hit",
+            receipt_path: "validation-proof-cache/receipts/receipt-cache-hit.json",
+            freshness_expires_at: observed_at + TimeDelta::minutes(5),
+        })),
     };
 
     fixture(
         SwarmValidationAdmissionFixtureKind::ProofCacheHit,
         input,
         SwarmValidationAdmissionDecision::Coalesce,
-        "SVA_COALESCE_PROOF_CACHE_HIT",
+        "SWARM-CACHE-HIT",
         "reuse_fresh_receipt",
         true,
         None,
@@ -1280,13 +1989,14 @@ fn stale_lease_fixture(observed_at: DateTime<Utc>) -> SwarmValidationAdmissionFi
         command_digest: Some("sha256:command-digest-stale".to_string()),
         owner_agent: Some("RainyFrog".to_string()),
         proof_evidence: Vec::new(),
+        coalescing: None,
     };
 
     fixture(
         SwarmValidationAdmissionFixtureKind::StaleLease,
         input,
         SwarmValidationAdmissionDecision::Handoff,
-        "SVA_HANDOFF_STALE_OWNER",
+        "SWARM-STALE-LEASE",
         "request_agent_handoff",
         false,
         None,
@@ -1368,7 +2078,7 @@ fn base_input(
     observed_at: DateTime<Utc>,
     requested_action: SwarmValidationRequestedAction,
 ) -> SwarmValidationAdmissionInputFixture {
-    let bead_id = "bd-0x4fy.3".to_string();
+    let bead_id = "bd-0x4fy.4".to_string();
     let mut proof = SwarmValidationProofSnapshot::none();
     if requested_action_requires_cargo(requested_action) {
         proof.proof_work_key = Some(format!("sha256:proof-work-key-{fixture_suffix}"));
@@ -1388,13 +2098,8 @@ fn base_input(
             priority: SwarmValidationAdmissionPriority::P1,
             assignee: Some("NavyTurtle".to_string()),
             updated_at: observed_at,
-            dependency_ids: vec!["bd-0x4fy.1".to_string(), "bd-0x4fy.2".to_string()],
-            dependent_ids: vec![
-                "bd-0x4fy.4".to_string(),
-                "bd-0x4fy.6".to_string(),
-                "bd-0x4fy.7".to_string(),
-                "bd-0x4fy.8".to_string(),
-            ],
+            dependency_ids: vec!["bd-0x4fy.2".to_string(), "bd-0x4fy.3".to_string()],
+            dependent_ids: vec!["bd-0x4fy.7".to_string(), "bd-0x4fy.8".to_string()],
         },
         agent_name: "NavyTurtle".to_string(),
         requested_action,
@@ -1451,6 +2156,181 @@ fn stale_build_slot(slot: &str, holder_agent: &str) -> SwarmValidationBuildSlotS
     }
 }
 
+struct InFlightProofCoalescingArgs<'a> {
+    proof_work_key: &'a str,
+    proof_cache_key: &'a str,
+    command_digest: &'a str,
+    owner_agent: &'a str,
+    owner_bead_id: &'a str,
+    lease_id: &'a str,
+    freshness_expires_at: DateTime<Utc>,
+    expected_wait_ms: u64,
+}
+
+fn coalescing_in_flight(
+    args: InFlightProofCoalescingArgs<'_>,
+) -> SwarmValidationProofCoalescingSnapshot {
+    SwarmValidationProofCoalescingSnapshot {
+        status: SwarmValidationProofCoalescingStatus::InFlight,
+        compatibility: SwarmValidationProofCompatibility::Equivalent,
+        proof_work_key: Some(args.proof_work_key.to_string()),
+        proof_cache_key: Some(args.proof_cache_key.to_string()),
+        command_digest: Some(args.command_digest.to_string()),
+        owner_agent: Some(args.owner_agent.to_string()),
+        owner_bead_id: Some(args.owner_bead_id.to_string()),
+        waiter_agents: vec!["NavyTurtle".to_string()],
+        lease_id: Some(args.lease_id.to_string()),
+        lease_state: Some("running".to_string()),
+        cache_entry_id: None,
+        cache_entry_path: None,
+        receipt_id: None,
+        receipt_path: None,
+        reason_code: Some("SWARM-COALESCE-IN-FLIGHT".to_string()),
+        event_code: Some("SVA-004".to_string()),
+        required_action: Some("join_existing_lease".to_string()),
+        freshness_expires_at: Some(args.freshness_expires_at),
+        expected_wait_ms: Some(args.expected_wait_ms),
+        compatibility_blockers: Vec::new(),
+    }
+}
+
+fn coalescing_incompatible_profile(
+    proof_work_key: &str,
+    proof_cache_key: &str,
+    command_digest: &str,
+    owner_agent: &str,
+    owner_bead_id: &str,
+    lease_id: &str,
+) -> SwarmValidationProofCoalescingSnapshot {
+    SwarmValidationProofCoalescingSnapshot {
+        status: SwarmValidationProofCoalescingStatus::Incompatible,
+        compatibility: SwarmValidationProofCompatibility::DifferentProfile,
+        proof_work_key: Some(proof_work_key.to_string()),
+        proof_cache_key: Some(proof_cache_key.to_string()),
+        command_digest: Some(command_digest.to_string()),
+        owner_agent: Some(owner_agent.to_string()),
+        owner_bead_id: Some(owner_bead_id.to_string()),
+        waiter_agents: Vec::new(),
+        lease_id: Some(lease_id.to_string()),
+        lease_state: Some("running".to_string()),
+        cache_entry_id: None,
+        cache_entry_path: None,
+        receipt_id: None,
+        receipt_path: None,
+        reason_code: Some("SWARM-INCOMPATIBLE-PROOF".to_string()),
+        event_code: Some("SVA-017".to_string()),
+        required_action: Some("start_distinct_proof_or_rebuild_key".to_string()),
+        freshness_expires_at: None,
+        expected_wait_ms: None,
+        compatibility_blockers: vec![
+            "feature/profile input differs from running proof".to_string(),
+        ],
+    }
+}
+
+fn coalescing_expired_cache(
+    proof_work_key: &str,
+    proof_cache_key: &str,
+    command_digest: &str,
+    cache_entry_id: &str,
+    cache_entry_path: &str,
+    receipt_path: &str,
+    freshness_expires_at: DateTime<Utc>,
+) -> SwarmValidationProofCoalescingSnapshot {
+    SwarmValidationProofCoalescingSnapshot {
+        status: SwarmValidationProofCoalescingStatus::ExpiredProof,
+        compatibility: SwarmValidationProofCompatibility::Equivalent,
+        proof_work_key: Some(proof_work_key.to_string()),
+        proof_cache_key: Some(proof_cache_key.to_string()),
+        command_digest: Some(command_digest.to_string()),
+        owner_agent: None,
+        owner_bead_id: None,
+        waiter_agents: Vec::new(),
+        lease_id: None,
+        lease_state: None,
+        cache_entry_id: Some(cache_entry_id.to_string()),
+        cache_entry_path: Some(cache_entry_path.to_string()),
+        receipt_id: Some("vbrcpt-expired".to_string()),
+        receipt_path: Some(receipt_path.to_string()),
+        reason_code: Some("SWARM-STALE-CACHE".to_string()),
+        event_code: Some("SVA-018".to_string()),
+        required_action: Some("refresh_validation_evidence".to_string()),
+        freshness_expires_at: Some(freshness_expires_at),
+        expected_wait_ms: None,
+        compatibility_blockers: Vec::new(),
+    }
+}
+
+fn coalescing_owner_dead(
+    proof_work_key: &str,
+    proof_cache_key: &str,
+    command_digest: &str,
+    owner_agent: &str,
+    owner_bead_id: &str,
+    lease_id: &str,
+) -> SwarmValidationProofCoalescingSnapshot {
+    SwarmValidationProofCoalescingSnapshot {
+        status: SwarmValidationProofCoalescingStatus::OwnerDead,
+        compatibility: SwarmValidationProofCompatibility::Equivalent,
+        proof_work_key: Some(proof_work_key.to_string()),
+        proof_cache_key: Some(proof_cache_key.to_string()),
+        command_digest: Some(command_digest.to_string()),
+        owner_agent: Some(owner_agent.to_string()),
+        owner_bead_id: Some(owner_bead_id.to_string()),
+        waiter_agents: Vec::new(),
+        lease_id: Some(lease_id.to_string()),
+        lease_state: Some("running".to_string()),
+        cache_entry_id: None,
+        cache_entry_path: None,
+        receipt_id: None,
+        receipt_path: None,
+        reason_code: Some("SWARM-STALE-LEASE".to_string()),
+        event_code: Some("SVA-009".to_string()),
+        required_action: Some("request_agent_handoff".to_string()),
+        freshness_expires_at: None,
+        expected_wait_ms: None,
+        compatibility_blockers: Vec::new(),
+    }
+}
+
+struct CacheHitProofCoalescingArgs<'a> {
+    proof_work_key: &'a str,
+    proof_cache_key: &'a str,
+    command_digest: &'a str,
+    cache_entry_id: &'a str,
+    cache_entry_path: &'a str,
+    receipt_id: &'a str,
+    receipt_path: &'a str,
+    freshness_expires_at: DateTime<Utc>,
+}
+
+fn coalescing_cache_hit(
+    args: CacheHitProofCoalescingArgs<'_>,
+) -> SwarmValidationProofCoalescingSnapshot {
+    SwarmValidationProofCoalescingSnapshot {
+        status: SwarmValidationProofCoalescingStatus::CompletedCacheHit,
+        compatibility: SwarmValidationProofCompatibility::Equivalent,
+        proof_work_key: Some(args.proof_work_key.to_string()),
+        proof_cache_key: Some(args.proof_cache_key.to_string()),
+        command_digest: Some(args.command_digest.to_string()),
+        owner_agent: None,
+        owner_bead_id: None,
+        waiter_agents: Vec::new(),
+        lease_id: None,
+        lease_state: Some("completed".to_string()),
+        cache_entry_id: Some(args.cache_entry_id.to_string()),
+        cache_entry_path: Some(args.cache_entry_path.to_string()),
+        receipt_id: Some(args.receipt_id.to_string()),
+        receipt_path: Some(args.receipt_path.to_string()),
+        reason_code: Some("SWARM-CACHE-HIT".to_string()),
+        event_code: Some("SVA-005".to_string()),
+        required_action: Some("reuse_receipt".to_string()),
+        freshness_expires_at: Some(args.freshness_expires_at),
+        expected_wait_ms: Some(0),
+        compatibility_blockers: Vec::new(),
+    }
+}
+
 fn fixture_observed_at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(DEFAULT_OBSERVED_AT)
         .map(|timestamp| timestamp.with_timezone(&Utc))
@@ -1471,13 +2351,16 @@ mod tests {
             catalog.schema_version,
             SWARM_VALIDATION_ADMISSION_FIXTURE_CATALOG_SCHEMA_VERSION
         );
-        assert_eq!(catalog.fixtures.len(), 8);
+        assert_eq!(catalog.fixtures.len(), 11);
 
         for kind in [
             SwarmValidationAdmissionFixtureKind::EmptySwarm,
             SwarmValidationAdmissionFixtureKind::SingleAgent,
             SwarmValidationAdmissionFixtureKind::SaturatedRchQueue,
             SwarmValidationAdmissionFixtureKind::DuplicateProofRequest,
+            SwarmValidationAdmissionFixtureKind::IncompatibleProofRequest,
+            SwarmValidationAdmissionFixtureKind::ExpiredProofCacheEntry,
+            SwarmValidationAdmissionFixtureKind::OwnerDeadStaleLease,
             SwarmValidationAdmissionFixtureKind::ProofCacheHit,
             SwarmValidationAdmissionFixtureKind::StaleLease,
             SwarmValidationAdmissionFixtureKind::HighMemoryPressure,
@@ -1544,6 +2427,106 @@ mod tests {
                 .proof_evidence
                 .iter()
                 .any(|evidence| { evidence.state == ValidationShardProofState::CoalescerInFlight })
+        );
+    }
+
+    #[test]
+    fn same_hash_in_flight_proof_returns_owner_wait_and_action() {
+        let catalog = deterministic_swarm_validation_admission_fixtures();
+        let fixture = catalog
+            .fixture(SwarmValidationAdmissionFixtureKind::DuplicateProofRequest)
+            .expect("duplicate proof fixture exists");
+
+        let decision = plan_swarm_validation_admission(&fixture.input);
+        let target = decision
+            .coalescing_target
+            .as_ref()
+            .expect("coalescing target");
+
+        assert_eq!(decision.reason_code, "SWARM-COALESCE-IN-FLIGHT");
+        assert_eq!(target.owner_agent.as_deref(), Some("ScarletSeal"));
+        assert_eq!(target.owner_bead_id.as_deref(), Some("bd-0x4fy.4"));
+        assert_eq!(target.lease_id.as_deref(), Some("vpco-lease-duplicate"));
+        assert_eq!(target.expected_wait_ms, Some(45_000));
+        assert_eq!(
+            target.required_action.as_deref(),
+            Some("join_existing_lease")
+        );
+        assert!(target.freshness_expires_at.is_some());
+        assert_eq!(
+            decision.diagnostics.proof_coalescing_status,
+            SwarmValidationProofCoalescingStatus::InFlight
+        );
+    }
+
+    #[test]
+    fn incompatible_profile_proof_fails_closed_instead_of_reusing() {
+        let catalog = deterministic_swarm_validation_admission_fixtures();
+        let fixture = catalog
+            .fixture(SwarmValidationAdmissionFixtureKind::IncompatibleProofRequest)
+            .expect("incompatible proof fixture exists");
+
+        let decision = plan_swarm_validation_admission(&fixture.input);
+
+        assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Blocked);
+        assert_eq!(decision.reason_code, "SWARM-INCOMPATIBLE-PROOF");
+        assert!(decision.fail_closed);
+        assert_eq!(
+            decision.diagnostics.proof_coalescing_status,
+            SwarmValidationProofCoalescingStatus::Incompatible
+        );
+        assert!(
+            decision
+                .diagnostics
+                .blocked_by
+                .iter()
+                .any(|blocker| blocker.contains("different_profile"))
+        );
+    }
+
+    #[test]
+    fn expired_cache_entry_fails_closed_with_refresh_action() {
+        let catalog = deterministic_swarm_validation_admission_fixtures();
+        let fixture = catalog
+            .fixture(SwarmValidationAdmissionFixtureKind::ExpiredProofCacheEntry)
+            .expect("expired cache fixture exists");
+
+        let decision = plan_swarm_validation_admission(&fixture.input);
+        let target = decision
+            .coalescing_target
+            .as_ref()
+            .expect("expired cache target");
+
+        assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Blocked);
+        assert_eq!(decision.reason_code, "SWARM-STALE-CACHE");
+        assert_eq!(
+            target.required_action.as_deref(),
+            Some("refresh_validation_evidence")
+        );
+        assert_eq!(
+            target.evidence_ref.as_deref(),
+            Some("validation-proof-cache/entries/entry-expired.json")
+        );
+        assert!(decision.fail_closed);
+    }
+
+    #[test]
+    fn owner_dead_in_flight_proof_returns_handoff() {
+        let catalog = deterministic_swarm_validation_admission_fixtures();
+        let fixture = catalog
+            .fixture(SwarmValidationAdmissionFixtureKind::OwnerDeadStaleLease)
+            .expect("owner dead fixture exists");
+
+        let decision = plan_swarm_validation_admission(&fixture.input);
+
+        assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Handoff);
+        assert_eq!(decision.reason_code, "SWARM-STALE-LEASE");
+        assert_eq!(
+            decision
+                .coalescing_target
+                .as_ref()
+                .and_then(|target| target.owner_agent.as_deref()),
+            Some("ScarletSeal")
         );
     }
 
