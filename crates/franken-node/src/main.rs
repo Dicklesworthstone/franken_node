@@ -6414,7 +6414,15 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
     use crate::ops::workspace_pressure_policy::PolicyThresholds;
     use std::fs;
 
-    let inputs = collect_workspace_pressure_inputs()?;
+    let coordination_report = collect_coordination_health();
+    if !coordination_report.is_healthy() {
+        eprintln!(
+            "Warning: Agent coordination degraded: {}",
+            coordination_report.reason
+        );
+    }
+    let inputs =
+        collect_workspace_pressure_inputs_with_coordination(coordination_report.is_healthy())?;
 
     // Determine thresholds based on CLI flags
     let doctor = if args.conservative {
@@ -6425,7 +6433,10 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
         WorkspacePressureDoctor::new() // Uses balanced defaults
     };
 
-    let report = doctor.generate_report(&inputs);
+    let report = doctor.generate_report_with_agent_mail_coordination(
+        &inputs,
+        coordination_report.agent_mail_coordination,
+    );
 
     // Output JSON report
     if args.json || args.output.is_some() {
@@ -6457,6 +6468,19 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
 }
 
 fn collect_workspace_pressure_inputs() -> Result<WorkspacePressureInputs> {
+    let coordination_report = collect_coordination_health();
+    if !coordination_report.is_healthy() {
+        eprintln!(
+            "Warning: Agent coordination degraded: {}",
+            coordination_report.reason
+        );
+    }
+    collect_workspace_pressure_inputs_with_coordination(coordination_report.is_healthy())
+}
+
+fn collect_workspace_pressure_inputs_with_coordination(
+    coordination_healthy: bool,
+) -> Result<WorkspacePressureInputs> {
     use crate::ops::workspace_pressure_policy::{
         get_workspace_disk_space, get_workspace_file_reservations,
     };
@@ -6471,7 +6495,7 @@ fn collect_workspace_pressure_inputs() -> Result<WorkspacePressureInputs> {
         active_reservations: get_workspace_file_reservations().map_err(|err| {
             anyhow::anyhow!("failed collecting workspace file reservations: {err}")
         })?,
-        coordination_healthy: get_coordination_health()?,
+        coordination_healthy,
     })
 }
 
@@ -6589,20 +6613,13 @@ impl CoordinationHealth {
 struct CoordinationHealthReport {
     status: CoordinationHealth,
     reason: String,
+    agent_mail_coordination: crate::ops::doctor::AgentMailCoordinationSummary,
 }
 
 impl CoordinationHealthReport {
     fn is_healthy(&self) -> bool {
         self.status.is_healthy()
     }
-}
-
-fn get_coordination_health() -> Result<bool> {
-    let report = collect_coordination_health();
-    if !report.is_healthy() {
-        eprintln!("Warning: Agent coordination degraded: {}", report.reason);
-    }
-    Ok(report.is_healthy())
 }
 
 fn collect_coordination_health() -> CoordinationHealthReport {
@@ -6618,8 +6635,12 @@ fn assess_coordination_health(
     active_reservations: Option<u32>,
     latest_message_age_secs: Option<u64>,
 ) -> CoordinationHealthReport {
-    let mut status = mail_health.status;
-    let mut reasons = vec![mail_health.reason];
+    let CoordinationHealthReport {
+        mut status,
+        reason,
+        agent_mail_coordination,
+    } = mail_health;
+    let mut reasons = vec![reason];
 
     match active_reservations {
         Some(count) => {
@@ -6652,6 +6673,7 @@ fn assess_coordination_health(
     CoordinationHealthReport {
         status,
         reason: reasons.join("; "),
+        agent_mail_coordination,
     }
 }
 
@@ -6697,30 +6719,46 @@ fn probe_agent_mail_health() -> CoordinationHealthReport {
                 Err(err) => CoordinationHealthReport {
                     status: CoordinationHealth::Degraded,
                     reason: format!("agent_mail_health_unparseable={err}"),
+                    agent_mail_coordination:
+                        crate::ops::doctor::AgentMailCoordinationSummary::degraded(
+                            crate::ops::doctor::AgentMailHealthState::Unknown,
+                            format!("agent_mail_health_unparseable={err}"),
+                            "Use Beads-visible coordination and retry Agent Mail health with parseable JSON.",
+                        ),
                 },
             }
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let reason = format!(
+                "agent_mail_health_probe_failed=status:{} stderr:{}",
+                output.status,
+                stderr.trim()
+            );
             CoordinationHealthReport {
                 status: CoordinationHealth::Unhealthy,
-                reason: format!(
-                    "agent_mail_health_probe_failed=status:{} stderr:{}",
-                    output.status,
-                    stderr.trim()
-                ),
+                reason: reason.clone(),
+                agent_mail_coordination:
+                    crate::ops::doctor::AgentMailCoordinationSummary::unavailable(reason),
             }
         }
-        Err(err) => CoordinationHealthReport {
-            status: CoordinationHealth::Unhealthy,
-            reason: format!("agent_mail_health_probe_unavailable={err}"),
-        },
+        Err(err) => {
+            let reason = format!("agent_mail_health_probe_unavailable={err}");
+            CoordinationHealthReport {
+                status: CoordinationHealth::Unhealthy,
+                reason: reason.clone(),
+                agent_mail_coordination:
+                    crate::ops::doctor::AgentMailCoordinationSummary::unavailable(reason),
+            }
+        }
     }
 }
 
 fn coordination_health_from_agent_mail_payload(
     payload: &serde_json::Value,
 ) -> CoordinationHealthReport {
+    let agent_mail_coordination =
+        crate::ops::doctor::AgentMailCoordinationSummary::from_health_payload(payload);
     let mut status = CoordinationHealth::Healthy;
     let mut reasons = Vec::new();
 
@@ -6754,10 +6792,30 @@ fn coordination_health_from_agent_mail_payload(
     {
         reasons.push(format!("agent_mail_message_count={count}"));
     }
+    status = worst_coordination_health(
+        status,
+        coordination_health_from_agent_mail_summary(&agent_mail_coordination),
+    );
+    reasons.push(agent_mail_coordination.diagnostic_reason());
 
     CoordinationHealthReport {
         status,
         reason: reasons.join("; "),
+        agent_mail_coordination,
+    }
+}
+
+fn coordination_health_from_agent_mail_summary(
+    summary: &crate::ops::doctor::AgentMailCoordinationSummary,
+) -> CoordinationHealth {
+    match summary.health_state {
+        crate::ops::doctor::AgentMailHealthState::Healthy => CoordinationHealth::Healthy,
+        crate::ops::doctor::AgentMailHealthState::LockOwnerActive
+        | crate::ops::doctor::AgentMailHealthState::Unavailable => CoordinationHealth::Unhealthy,
+        crate::ops::doctor::AgentMailHealthState::DegradedReadOnly
+        | crate::ops::doctor::AgentMailHealthState::ArchiveAheadIndex
+        | crate::ops::doctor::AgentMailHealthState::RepairRecommended
+        | crate::ops::doctor::AgentMailHealthState::Unknown => CoordinationHealth::Degraded,
     }
 }
 
