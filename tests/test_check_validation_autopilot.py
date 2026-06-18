@@ -35,6 +35,11 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(result["summary"]["decisions"]["followup"], "create_followup_bead")
         self.assertEqual(result["summary"]["decisions"]["stale"], "refresh_blocker")
         self.assertEqual(result["summary"]["decisions"]["rch"], "retry_rch_bounded")
+        self.assertEqual(result["summary"]["decisions"]["repeated"], "handoff_only")
+        self.assertEqual(result["summary"]["decisions"]["stale_progress"], "retry_rch_bounded")
+        self.assertEqual(result["summary"]["decisions"]["dependency"], "create_followup_bead")
+        self.assertEqual(result["summary"]["decisions"]["product"], "handoff_only")
+        self.assertEqual(result["summary"]["decisions"]["success"], "handoff_only")
         self.assertEqual(result["summary"]["decisions"]["external"], "coordinate_owner")
         self.assertEqual(result["summary"]["decisions"]["parent"], "handoff_only")
         self.assertEqual(result["summary"]["decisions"]["unsafe"], "blocked")
@@ -87,8 +92,69 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(decision["reason_code"], "VALAUTO_RCH_TIMEOUT_RETRY")
         self.assertTrue(decision["requires_rch"])
         self.assertEqual(decision["recommended_command"][:3], ["rch", "exec", "--"])
+        self.assertEqual(decision["recommended_rch_command"][:3], ["rch", "exec", "--"])
+        self.assertEqual(decision["worker_action"], "retry_different_worker")
+        self.assertIsNone(decision["stop_reason"])
         self.assertTrue(decision["retry_allowed"])
         self.assertEqual(decision["retry_budget_remaining"], 1)
+
+    def test_stale_progress_after_cancellation_retries_with_stale_progress_reason(self) -> None:
+        payload = mod._self_test_payloads()["stale_progress"]
+
+        result = mod.plan_decision(payload, now=NOW)
+
+        decision = result["decision"]
+        self.assertEqual(decision["decision"], "retry_rch_bounded")
+        self.assertEqual(decision["reason_code"], "VALAUTO_RCH_STALE_PROGRESS_RETRY")
+        self.assertEqual(decision["worker_action"], "retry_after_clean_cancellation")
+        self.assertTrue(decision["retry_allowed"])
+
+    def test_repeated_worker_timeout_recommends_quarantine_without_retry(self) -> None:
+        payload = mod._self_test_payloads()["repeated"]
+
+        result = mod.plan_decision(payload, now=NOW)
+
+        decision = result["decision"]
+        self.assertEqual(decision["decision"], "handoff_only")
+        self.assertEqual(decision["worker_action"], "quarantine_or_drain_worker")
+        self.assertEqual(decision["stop_reason"], "worker_quarantine_recommended")
+        self.assertFalse(decision["retry_allowed"])
+        self.assertEqual(decision["diagnostics"]["worker_failure_count"], 2)
+
+    def test_dependency_resolver_creates_dependency_convergence_followup(self) -> None:
+        payload = mod._self_test_payloads()["dependency"]
+
+        result = mod.plan_decision(payload, now=NOW)
+
+        decision = result["decision"]
+        self.assertEqual(decision["decision"], "create_followup_bead")
+        self.assertEqual(decision["stop_reason"], "dependency_convergence_required")
+        self.assertEqual(decision["worker_action"], "none")
+        self.assertFalse(decision["retry_allowed"])
+        self.assertIn("dependency-convergence", decision["proposed_bead"]["labels"])
+
+    def test_product_diagnostic_stops_retry_and_preserves_blocker(self) -> None:
+        payload = mod._self_test_payloads()["product"]
+
+        result = mod.plan_decision(payload, now=NOW)
+
+        decision = result["decision"]
+        self.assertEqual(decision["decision"], "handoff_only")
+        self.assertEqual(decision["stop_reason"], "product_diagnostic_reached")
+        self.assertEqual(decision["worker_action"], "none")
+        self.assertFalse(decision["retry_allowed"])
+        self.assertIn("emit_receipt", decision["first_blocker"])
+
+    def test_clean_rch_success_has_no_retry(self) -> None:
+        payload = mod._self_test_payloads()["success"]
+
+        result = mod.plan_decision(payload, now=NOW)
+
+        decision = result["decision"]
+        self.assertEqual(decision["decision"], "handoff_only")
+        self.assertEqual(decision["stop_reason"], "clean_success")
+        self.assertEqual(decision["worker_action"], "none")
+        self.assertFalse(decision["retry_allowed"])
 
     def test_local_cargo_retry_fails_closed(self) -> None:
         payload = mod._self_test_payloads()["unsafe"]
@@ -152,7 +218,7 @@ class ValidationAutopilotTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         payload = JSON_DECODER.decode(proc.stdout)
         self.assertEqual(payload["verdict"], "PASS", self._failures(payload))
-        self.assertEqual(payload["summary"]["case_count"], 7)
+        self.assertEqual(payload["summary"]["case_count"], 12)
 
     def test_cli_fixture_input_passes(self) -> None:
         payload = mod._self_test_payloads()["ready"]

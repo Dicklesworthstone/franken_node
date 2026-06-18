@@ -29,6 +29,7 @@ POLICY_SCHEMA_VERSION = "franken-node/validation-autopilot/policy/v1"
 DEFAULT_INPUT_FRESHNESS_SECONDS = 3600
 DEFAULT_BLOCKED_FRESHNESS_HOURS = 168
 DEFAULT_MAX_RCH_RETRIES = 1
+DEFAULT_WORKER_QUARANTINE_FAILURE_THRESHOLD = 2
 JSON_DECODER = json.JSONDecoder()
 
 REASON_EVENTS: dict[str, tuple[str, str]] = {
@@ -124,6 +125,9 @@ def _policy(input_payload: dict[str, Any]) -> dict[str, Any]:
         "blocked_freshness_hours": int(policy.get("blocked_freshness_hours", DEFAULT_BLOCKED_FRESHNESS_HOURS)),
         "require_rch_for_cargo": bool(policy.get("require_rch_for_cargo", True)),
         "max_rch_retries_per_blocker": int(policy.get("max_rch_retries_per_blocker", DEFAULT_MAX_RCH_RETRIES)),
+        "worker_quarantine_failure_threshold": int(
+            policy.get("worker_quarantine_failure_threshold", DEFAULT_WORKER_QUARANTINE_FAILURE_THRESHOLD)
+        ),
         "allow_bead_creation": bool(policy.get("allow_bead_creation", True)),
         "allow_tracker_mutation": bool(policy.get("allow_tracker_mutation", False)),
         "fail_closed_on_mail_gap": bool(policy.get("fail_closed_on_mail_gap", True)),
@@ -166,6 +170,42 @@ def _has_rch_prefix(argv: list[str] | None) -> bool:
 
 def _command_text(argv: list[str] | None) -> str:
     return " ".join(argv or [])
+
+
+def _int_field(record: dict[str, Any], *names: str) -> int:
+    for name in names:
+        value = record.get(name)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return 0
+
+
+def _retry_budget_remaining(record: dict[str, Any], policy: dict[str, Any]) -> int:
+    max_retries = int(policy["max_rch_retries_per_blocker"])
+    attempts = _int_field(record, "retry_attempts", "attempt_count", "attempts")
+    return max(0, max_retries - attempts)
+
+
+def _worker_failure_count(record: dict[str, Any]) -> int:
+    explicit = _int_field(record, "worker_failure_count", "same_worker_failure_count")
+    if explicit:
+        return explicit
+    history = record.get("worker_failure_history")
+    worker_id = record.get("worker_id")
+    if isinstance(history, dict) and isinstance(worker_id, str):
+        value = history.get(worker_id)
+        if isinstance(value, int):
+            return value
+    return 0
+
+
+def _worker_action_for_retry(record: dict[str, Any]) -> str:
+    classification = record.get("classification")
+    if classification == "stale_progress" and record.get("cancellation_observed"):
+        return "retry_after_clean_cancellation"
+    return "retry_different_worker"
 
 
 def _classification_issue(
@@ -227,8 +267,11 @@ def _decision(
     selected_bead_id: str | None = None,
     proposed_bead: dict[str, Any] | None = None,
     recommended_command: list[str] | None = None,
+    recommended_rch_command: list[str] | None = None,
     retry_allowed: bool = False,
     retry_budget_remaining: int = 0,
+    worker_action: str | None = None,
+    stop_reason: str | None = None,
     first_blocker: str | None = None,
     evidence_refs: list[str] | None = None,
     diagnostics: dict[str, Any] | None = None,
@@ -248,10 +291,13 @@ def _decision(
         "selected_bead_id": selected_bead_id,
         "proposed_bead": proposed_bead,
         "recommended_command": recommended_command,
+        "recommended_rch_command": recommended_rch_command,
         "requires_rch": requires_rch,
         "mutation_allowed": mutation_allowed,
         "retry_allowed": retry_allowed,
         "retry_budget_remaining": retry_budget_remaining,
+        "worker_action": worker_action,
+        "stop_reason": stop_reason,
         "operator_summary": operator_summary,
         "first_blocker": first_blocker,
         "evidence_refs": evidence_refs or [],
@@ -394,12 +440,57 @@ def _choose_rch_retry(
     policy: dict[str, Any],
 ) -> dict[str, Any] | None:
     for record in records:
+        classification = record.get("classification")
+        if classification == "success":
+            return _decision(
+                trace_id=trace_id,
+                now=now,
+                reason_code="VALAUTO_NO_SAFE_MUTATION",
+                operator_summary="RCH evidence is already clean; use the success receipt instead of retrying.",
+                retry_budget_remaining=0,
+                worker_action="none",
+                stop_reason="clean_success",
+                evidence_refs=["scripts/normalize_rch_evidence.py"],
+                diagnostics={"rch_record": record},
+            )
+        if classification == "dependency_resolver_error":
+            proposed = _proposed_bead(
+                [
+                    {
+                        "id": record.get("sample_id") or "rch-dependency-resolver",
+                        "classification": "dependency_resolver_error",
+                        "recommended_action": "create-dependency-convergence-bead",
+                    }
+                ]
+            )
+            proposed["title"] = "Create dependency-convergence follow-up for RCH resolver failure"
+            proposed["labels"] = ["validation-autopilot", "rch", "dependency-convergence"]
+            proposed["overlap_search_terms"] = [
+                "dependency_resolver_error",
+                str(record.get("first_blocker") or "failed to select a version"),
+            ]
+            return _decision(
+                trace_id=trace_id,
+                now=now,
+                reason_code="VALAUTO_NO_READY_CREATE_CHILD",
+                proposed_bead=proposed,
+                operator_summary="RCH reached a dependency resolver error; create or refresh dependency-convergence work.",
+                retry_budget_remaining=0,
+                worker_action="none",
+                stop_reason="dependency_convergence_required",
+                first_blocker=record.get("first_blocker") if isinstance(record.get("first_blocker"), str) else None,
+                evidence_refs=["scripts/normalize_rch_evidence.py"],
+                diagnostics={"rch_record": record},
+            )
         if record.get("product_diagnostics_reached"):
             return _decision(
                 trace_id=trace_id,
                 now=now,
                 reason_code="VALAUTO_NO_SAFE_MUTATION",
                 operator_summary="RCH reached a product diagnostic; stop retrying and preserve the blocker.",
+                retry_budget_remaining=0,
+                worker_action="none",
+                stop_reason="product_diagnostic_reached",
                 first_blocker=record.get("first_blocker") if isinstance(record.get("first_blocker"), str) else None,
                 evidence_refs=["scripts/normalize_rch_evidence.py"],
                 diagnostics={"rch_record": record},
@@ -410,8 +501,25 @@ def _choose_rch_retry(
         reason = RCH_RETRY_REASONS.get(classification if isinstance(classification, str) else "")
         if not reason or not record.get("retry_recommended"):
             continue
-        budget = int(policy["max_rch_retries_per_blocker"])
+        budget = _retry_budget_remaining(record, policy)
         command = _argv_from_command(record.get("command"))
+        failure_count = _worker_failure_count(record)
+        if failure_count >= int(policy["worker_quarantine_failure_threshold"]):
+            return _decision(
+                trace_id=trace_id,
+                now=now,
+                reason_code="VALAUTO_NO_SAFE_MUTATION",
+                recommended_command=command,
+                recommended_rch_command=command if _has_rch_prefix(command) else None,
+                retry_allowed=False,
+                retry_budget_remaining=0,
+                worker_action="quarantine_or_drain_worker",
+                stop_reason="worker_quarantine_recommended",
+                operator_summary="Repeated failures on the same worker require quarantine/drain coordination before retry.",
+                first_blocker=record.get("first_blocker") if isinstance(record.get("first_blocker"), str) else None,
+                evidence_refs=["scripts/normalize_rch_evidence.py"],
+                diagnostics={"rch_record": record, "worker_failure_count": failure_count},
+            )
         if policy["require_rch_for_cargo"] and _requires_rch(command) and not _has_rch_prefix(command):
             return _blocked_decision(
                 trace_id=trace_id,
@@ -427,6 +535,9 @@ def _choose_rch_retry(
                 now=now,
                 reason_code="VALAUTO_NO_SAFE_MUTATION",
                 operator_summary="RCH retry budget is exhausted; preserve the blocker and hand off.",
+                retry_budget_remaining=0,
+                worker_action="none",
+                stop_reason="retry_budget_exhausted",
                 first_blocker=record.get("first_blocker") if isinstance(record.get("first_blocker"), str) else None,
                 evidence_refs=["scripts/normalize_rch_evidence.py"],
                 diagnostics={"rch_record": record},
@@ -436,8 +547,11 @@ def _choose_rch_retry(
             now=now,
             reason_code=reason,
             recommended_command=command,
+            recommended_rch_command=command if _has_rch_prefix(command) else None,
             retry_allowed=True,
             retry_budget_remaining=budget,
+            worker_action=_worker_action_for_retry(record),
+            stop_reason=None,
             operator_summary="RCH evidence is retryable infrastructure failure; one bounded remote retry is allowed.",
             first_blocker=record.get("first_blocker") if isinstance(record.get("first_blocker"), str) else None,
             evidence_refs=["scripts/normalize_rch_evidence.py"],
@@ -702,6 +816,7 @@ def _self_test_payloads() -> dict[str, dict[str, Any]]:
         "blocked_freshness_hours": 168,
         "require_rch_for_cargo": True,
         "max_rch_retries_per_blocker": 1,
+        "worker_quarantine_failure_threshold": 2,
         "allow_bead_creation": True,
         "allow_tracker_mutation": False,
         "fail_closed_on_mail_gap": True,
@@ -767,9 +882,81 @@ def _self_test_payloads() -> dict[str, dict[str, Any]]:
             "sample_id": "ssh-timeout",
             "classification": "ssh_timeout",
             "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_valauto cargo test -p frankenengine-node validation_autopilot",
+            "worker_id": "vmi1156319",
+            "worker_failure_count": 1,
             "first_blocker": "[RCH-E104] SSH command timed out",
             "product_diagnostics_reached": False,
             "retry_recommended": True,
+        }
+    ]
+
+    repeated = base("repeated-timeout")
+    repeated["rch_evidence"] = [
+        {
+            "schema_version": "franken-node/rch-evidence-normalizer/v1",
+            "sample_id": "repeated-timeout",
+            "classification": "ssh_timeout",
+            "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+            "worker_id": "vmi1156319",
+            "worker_failure_count": 2,
+            "first_blocker": "[RCH-E104] SSH command timed out twice on vmi1156319",
+            "product_diagnostics_reached": False,
+            "retry_recommended": True,
+        }
+    ]
+
+    stale_progress = base("stale-progress")
+    stale_progress["rch_evidence"] = [
+        {
+            "schema_version": "franken-node/rch-evidence-normalizer/v1",
+            "sample_id": "stale-progress",
+            "classification": "stale_progress",
+            "command": "rch exec -- cargo test -p frankenengine-node validation_proof_cache",
+            "worker_id": "vmi1167313",
+            "worker_failure_count": 1,
+            "first_blocker": "fresh heartbeat but progress stale before wall timeout",
+            "product_diagnostics_reached": False,
+            "retry_recommended": True,
+            "cancellation_observed": True,
+        }
+    ]
+
+    dependency = base("dependency")
+    dependency["rch_evidence"] = [
+        {
+            "schema_version": "franken-node/rch-evidence-normalizer/v1",
+            "sample_id": "dependency-resolver",
+            "classification": "dependency_resolver_error",
+            "command": "rch exec -- cargo test -p frankenengine-node",
+            "first_blocker": "error: failed to select a version for `getrandom`.",
+            "product_diagnostics_reached": True,
+            "retry_recommended": False,
+        }
+    ]
+
+    product = base("product")
+    product["rch_evidence"] = [
+        {
+            "schema_version": "franken-node/rch-evidence-normalizer/v1",
+            "sample_id": "product-compile",
+            "classification": "product_failure",
+            "command": "rch exec -- cargo check --all-targets",
+            "first_blocker": "error[E0599]: no method named `emit_receipt` found",
+            "product_diagnostics_reached": True,
+            "retry_recommended": False,
+        }
+    ]
+
+    success = base("success")
+    success["rch_evidence"] = [
+        {
+            "schema_version": "franken-node/rch-evidence-normalizer/v1",
+            "sample_id": "clean-success",
+            "classification": "success",
+            "command": "rch exec -- cargo test -p frankenengine-node doctor_policy_activation_e2e",
+            "first_blocker": None,
+            "product_diagnostics_reached": False,
+            "retry_recommended": False,
         }
     ]
 
@@ -827,6 +1014,11 @@ def _self_test_payloads() -> dict[str, dict[str, Any]]:
         "followup": followup,
         "stale": stale,
         "rch": rch,
+        "repeated": repeated,
+        "stale_progress": stale_progress,
+        "dependency": dependency,
+        "product": product,
+        "success": success,
         "external": external,
         "parent": parent,
         "unsafe": unsafe,
@@ -841,6 +1033,11 @@ def _run_self_test(now: datetime) -> dict[str, Any]:
         "followup": "create_followup_bead",
         "stale": "refresh_blocker",
         "rch": "retry_rch_bounded",
+        "repeated": "handoff_only",
+        "stale_progress": "retry_rch_bounded",
+        "dependency": "create_followup_bead",
+        "product": "handoff_only",
+        "success": "handoff_only",
         "external": "coordinate_owner",
         "parent": "handoff_only",
         "unsafe": "blocked",

@@ -88,6 +88,7 @@ omitted. Inputs are stale after `policy.input_freshness_seconds`.
 | `blocked_freshness_hours` | Integer | Yes | Maximum age before blocker refresh is recommended |
 | `require_rch_for_cargo` | Boolean | Yes | Cargo build/test/check/clippy/fmt commands require `rch exec -- ...` |
 | `max_rch_retries_per_blocker` | Integer | Yes | Bounded retries before handoff or blocker preservation |
+| `worker_quarantine_failure_threshold` | Integer | Yes | Same-worker infrastructure failures before quarantine/drain advice |
 | `allow_bead_creation` | Boolean | Yes | Planner may propose a new Bead body |
 | `allow_tracker_mutation` | Boolean | Yes | Must default false for agent dry-runs |
 | `fail_closed_on_mail_gap` | Boolean | Yes | Missing Agent Mail state blocks ownership-changing actions |
@@ -114,10 +115,13 @@ mode.
 | `selected_bead_id` | String or null | Yes | Existing Bead selected by the decision |
 | `proposed_bead` | Object or null | Yes | New Bead proposal when `decision=create_followup_bead` |
 | `recommended_command` | Array or null | Yes | Exact command argv when a command is recommended |
+| `recommended_rch_command` | Array or null | Yes | Exact `rch exec -- ...` argv when bounded RCH retry is recommended |
 | `requires_rch` | Boolean | Yes | True for cargo-heavy recommended commands |
 | `mutation_allowed` | Boolean | Yes | False unless policy explicitly allows mutation |
 | `retry_allowed` | Boolean | Yes | Whether a later retry may proceed |
 | `retry_budget_remaining` | Integer | Yes | Remaining retries for the normalized blocker |
+| `worker_action` | String or null | Yes | Deterministic worker advice such as `retry_different_worker`, `retry_after_clean_cancellation`, `quarantine_or_drain_worker`, or `none` |
+| `stop_reason` | String or null | Yes | Deterministic stop label such as `retry_budget_exhausted`, `worker_quarantine_recommended`, `dependency_convergence_required`, `product_diagnostic_reached`, or `clean_success` |
 | `operator_summary` | String | Yes | Bounded human summary for Agent Mail and Beads |
 | `first_blocker` | String or null | Yes | Exact first blocker string when one exists |
 | `evidence_refs` | Array | Yes | Repo-relative files, commands, or stable external refs |
@@ -210,13 +214,15 @@ commands when the proposal derives from blocker evidence.
 
 `retry_rch_bounded` is only valid for infrastructure-classified RCH outcomes:
 
-| Normalized condition | Retry allowed | Notes |
-|----------------------|---------------|-------|
-| `[RCH-E104] SSH command timed out` | Yes, within budget | Use fresh `CARGO_TARGET_DIR`, low priority, and preserve worker id |
-| Stale progress with fresh heartbeat and clean cancellation | Yes, within budget | Retry after cancellation evidence is recorded |
-| Dependency resolver mismatch | No direct retry | Create or refresh dependency-convergence Bead |
-| Product compile/test/clippy/fmt diagnostic | No | Preserve diagnostic as product blocker |
-| Clean success | No | Use as validation evidence, not retry input |
+| Normalized condition | Retry allowed | Worker action | Stop reason | Notes |
+|----------------------|---------------|---------------|-------------|-------|
+| `[RCH-E104] SSH command timed out` | Yes, within budget | `retry_different_worker` | null | Use fresh `CARGO_TARGET_DIR`, low priority, and preserve worker id |
+| Stale progress with fresh heartbeat and clean cancellation | Yes, within budget | `retry_after_clean_cancellation` | null | Retry after cancellation evidence is recorded |
+| Repeated same-worker infrastructure failure | No direct retry | `quarantine_or_drain_worker` | `worker_quarantine_recommended` | Coordinate worker quarantine/drain before more proof traffic |
+| Retry budget exhausted | No | `none` | `retry_budget_exhausted` | Preserve first blocker and hand off |
+| Dependency resolver mismatch | No direct retry | `none` | `dependency_convergence_required` | Create or refresh dependency-convergence Bead |
+| Product compile/test/clippy/fmt diagnostic | No | `none` | `product_diagnostic_reached` | Preserve diagnostic as product blocker |
+| Clean success | No | `none` | `clean_success` | Use as validation evidence, not retry input |
 
 Retries must remain remote-only. The planner may recommend a command but must
 not launch it.
@@ -252,10 +258,14 @@ needed for audit.
   "event_code": "VALAUTO-001",
   "selected_bead_id": "bd-k599n",
   "proposed_bead": null,
+  "recommended_command": null,
+  "recommended_rch_command": null,
   "requires_rch": false,
   "mutation_allowed": false,
   "retry_allowed": false,
   "retry_budget_remaining": 0,
+  "worker_action": null,
+  "stop_reason": null,
   "first_blocker": null
 }
 ```
@@ -276,10 +286,14 @@ needed for audit.
     "labels": ["rch", "validation", "blocked-refresh"],
     "overlap_search_terms": ["validation_proof_cache", "RCH-E104"]
   },
+  "recommended_command": null,
+  "recommended_rch_command": null,
   "requires_rch": false,
   "mutation_allowed": false,
   "retry_allowed": false,
   "retry_budget_remaining": 0,
+  "worker_action": null,
+  "stop_reason": null,
   "first_blocker": "[RCH] remote vmi1149989 failed [RCH-E104] SSH command timed out (no local fallback)"
 }
 ```
@@ -295,10 +309,13 @@ needed for audit.
   "selected_bead_id": "bd-famte",
   "proposed_bead": null,
   "recommended_command": ["br", "comment", "bd-famte", "--stdin"],
+  "recommended_rch_command": null,
   "requires_rch": false,
   "mutation_allowed": false,
   "retry_allowed": false,
   "retry_budget_remaining": 0,
+  "worker_action": null,
+  "stop_reason": null,
   "first_blocker": "RCH proof timed out before a product diagnostic was reached"
 }
 ```
@@ -325,10 +342,24 @@ needed for audit.
     "frankenengine-node",
     "validation_autopilot"
   ],
+  "recommended_rch_command": [
+    "rch",
+    "exec",
+    "--",
+    "env",
+    "CARGO_TARGET_DIR=/tmp/rch_target_valauto_retry",
+    "cargo",
+    "test",
+    "-p",
+    "frankenengine-node",
+    "validation_autopilot"
+  ],
   "requires_rch": true,
   "mutation_allowed": false,
   "retry_allowed": true,
   "retry_budget_remaining": 1,
+  "worker_action": "retry_different_worker",
+  "stop_reason": null,
   "first_blocker": "[RCH-E104] SSH command timed out"
 }
 ```
@@ -344,10 +375,13 @@ needed for audit.
   "selected_bead_id": "bd-f5b04.2.6",
   "proposed_bead": null,
   "recommended_command": null,
+  "recommended_rch_command": null,
   "requires_rch": false,
   "mutation_allowed": false,
   "retry_allowed": false,
   "retry_budget_remaining": 0,
+  "worker_action": "none",
+  "stop_reason": null,
   "first_blocker": "Blocked on sibling franken_engine backend wiring for QuickJsLane"
 }
 ```
@@ -363,10 +397,13 @@ needed for audit.
   "selected_bead_id": "bd-rjs89",
   "proposed_bead": null,
   "recommended_command": null,
+  "recommended_rch_command": null,
   "requires_rch": false,
   "mutation_allowed": false,
   "retry_allowed": false,
   "retry_budget_remaining": 0,
+  "worker_action": "none",
+  "stop_reason": "parent_epic_not_claimable",
   "first_blocker": "Candidate is a parent epic and cannot be claimed as implementation work"
 }
 ```
