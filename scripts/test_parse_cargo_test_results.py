@@ -31,6 +31,19 @@ test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 FUZZ_CLEAN = "#479941\tREDUCE cov: 1675 ft: 4115 corp: 785\n#488638\tDONE   cov: 1675\nDone 488638 runs in 241 second(s)\n"
 FUZZ_CRASH = "==1234== ERROR: libFuzzer: deadly signal\nSUMMARY: AddressSanitizer: ...\n"
 FUZZ_BUILD_FAIL = "error[E0599]: no method named `issue`\nerror: could not compile `franken-node-fuzz` (bin \"x\") due to 2 previous errors\n"
+COMPILE_ABORT_LOG = r"""
+   Compiling frankenengine-node v0.1.0 (/repo/crates/franken-node)
+error[E0433]: failed to resolve: could not find `policy` in `frankenengine_node`
+error: could not compile `frankenengine-node` (bench "perf_wins") due to 1 previous error
+"""
+TEST_BINARY_ABORT_LOG = r"""
+     Running tests/conformance/remote_capability.rs (target/debug/deps/remote_capability-112233445566)
+error: test failed, to rerun pass `-p frankenengine-node --test remote_capability`
+"""
+NO_RESULT_OK_LOG = r"""
+   Compiling frankenengine-node v0.1.0 (/repo/crates/franken-node)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+"""
 
 
 class TestCargoTestParse(unittest.TestCase):
@@ -61,6 +74,34 @@ class TestCargoTestParse(unittest.TestCase):
         # 3 passed + 0 failed (1 ignored not counted) -> green
         self.assertTrue(ig.is_green())
         self.assertEqual((ig.tests_run, ig.tests_passed), (3, 3))
+
+    def test_compile_abort_without_target_result_emits_red_record(self):
+        recs = parse_cargo_test_output(COMPILE_ABORT_LOG, TS)
+        self.assertEqual(len(recs), 1)
+        r = recs[0]
+        self.assertEqual(r.target, "conformance_cargo_test_abort")
+        self.assertFalse(r.compiles)
+        self.assertFalse(r.ran)
+        self.assertEqual((r.errors_after, r.tests_run, r.tests_passed), (1, 0, 0))
+        self.assertFalse(r.is_green())
+        self.assertIn("could not compile", r.notes)
+
+    def test_test_binary_abort_without_result_emits_layer_specific_red_record(self):
+        recs = parse_cargo_test_output(TEST_BINARY_ABORT_LOG, TS, layer="sdk")
+        self.assertEqual(len(recs), 1)
+        r = recs[0]
+        self.assertEqual(r.target, "sdk_cargo_test_abort")
+        self.assertEqual(r.layer, "sdk")
+        self.assertFalse(r.is_green())
+        self.assertIn("error: test failed", r.notes)
+
+    def test_benign_no_result_output_does_not_fabricate_record(self):
+        self.assertEqual(parse_cargo_test_output(NO_RESULT_OK_LOG, TS), [])
+
+    def test_abort_marker_after_normal_records_does_not_duplicate_red_record(self):
+        recs = parse_cargo_test_output(TEST_LOG + "\nerror: test failed, to rerun pass `cargo test`\n", TS)
+        self.assertEqual(len(recs), 3)
+        self.assertNotIn("conformance_cargo_test_abort", {r.target for r in recs})
 
 
 class TestFuzzSmoke(unittest.TestCase):

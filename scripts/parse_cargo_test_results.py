@@ -27,6 +27,25 @@ _RESULT_RE = re.compile(
 )
 # libfuzzer crash marker
 _FUZZ_CRASH_RE = re.compile(r"(SUMMARY: |ERROR: libFuzzer|deadly signal|panicked at)")
+_CARGO_ABORT_RE = re.compile(
+    r"(?i)("
+    r"could not compile|"
+    r"error: test failed|"
+    r"error: linking with|"
+    r"error: failed to run custom build command|"
+    r"error: aborting due to|"
+    r"collect2: error: ld returned|"
+    r"ld: error:"
+    r")"
+)
+
+
+def _first_cargo_abort_line(text: str) -> str | None:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and _CARGO_ABORT_RE.search(stripped):
+            return stripped
+    return None
 
 
 def parse_cargo_test_output(text: str, ts: str, layer: str = "conformance") -> List[RemediationRecord]:
@@ -53,6 +72,24 @@ def parse_cargo_test_output(text: str, ts: str, layer: str = "conformance") -> L
                 )
             )
             current = None
+    if not recs:
+        abort_line = _first_cargo_abort_line(text)
+        if abort_line:
+            recs.append(
+                RemediationRecord(
+                    target=f"{layer}_cargo_test_abort",
+                    layer=layer,
+                    ts_rfc3339=ts,
+                    compiles=False,
+                    ran=False,
+                    errors_after=1,
+                    tests_run=0,
+                    tests_passed=0,
+                    crashed=False,
+                    assertions_preserved=True,
+                    notes=f"cargo test aborted before per-target result: {abort_line}",
+                )
+            )
     return recs
 
 
