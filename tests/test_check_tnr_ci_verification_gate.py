@@ -118,6 +118,54 @@ def _load_first_jsonl_row(path: Path) -> dict:
     return _loads_json_object(line, f"{path}:1")
 
 
+_REQUIRED_PLAN_STEP_IDS = {
+    "compile_census",
+    "full_conformance",
+    "fuzz_smokes",
+    "verifier_sdk",
+    "cargo_deny",
+    "cargo_fmt",
+    "cargo_clippy",
+    "summary",
+}
+
+_RCH_REQUIRED_PLAN_STEP_IDS = (
+    "compile_census",
+    "full_conformance",
+    "fuzz_smokes",
+    "verifier_sdk",
+    "cargo_clippy",
+)
+
+
+def _validate_verification_plan(plan: dict) -> dict:
+    if plan.get("schema_version") != "verification-plan-v1":
+        raise AssertionError("unexpected verification plan schema")
+    if plan.get("rch_prefix") != "rch exec --":
+        raise AssertionError("unexpected verification plan rch prefix")
+
+    steps = {step["id"]: step for step in plan["steps"]}
+    missing = _REQUIRED_PLAN_STEP_IDS - set(steps)
+    if missing:
+        raise AssertionError(f"missing verification plan steps: {sorted(missing)}")
+
+    for step_id in _RCH_REQUIRED_PLAN_STEP_IDS:
+        if not steps[step_id]["heavy"]:
+            raise AssertionError(f"{step_id} must be marked heavy")
+        if not steps[step_id]["rch_required"]:
+            raise AssertionError(f"{step_id} must require rch")
+
+    rch_prefix = f"{plan['rch_prefix']} "
+    for step in plan["steps"]:
+        command = step["command"]
+        if step["rch_required"] and "cargo " in command and not command.startswith(rch_prefix):
+            raise AssertionError(f"{step['id']} cargo command must use rch prefix")
+        if not step["rch_required"] and command.startswith(rch_prefix):
+            raise AssertionError(f"{step['id']} local command must not use rch prefix")
+
+    return steps
+
+
 def _write_valid_artifacts(root: Path, report: dict) -> None:
     transcript_rel = "artifacts/tnr/reproduction_transcript.jsonl"
     metrics_rel = "artifacts/tnr/reproduction_metrics_snapshot.json"
@@ -305,37 +353,7 @@ class TestVerificationHarnessContract(unittest.TestCase):
 
     def test_plan_json_lists_required_verification_steps(self) -> None:
         plan = self._load_plan()
-        self.assertEqual(plan["schema_version"], "verification-plan-v1")
-        self.assertEqual(plan["rch_prefix"], "rch exec --")
-
-        steps = {step["id"]: step for step in plan["steps"]}
-        self.assertEqual(
-            set(steps),
-            {
-                "compile_census",
-                "full_conformance",
-                "fuzz_smokes",
-                "verifier_sdk",
-                "cargo_deny",
-                "cargo_fmt",
-                "cargo_clippy",
-                "summary",
-            },
-        )
-
-        for step_id in ("compile_census", "full_conformance", "fuzz_smokes", "verifier_sdk", "cargo_clippy"):
-            with self.subTest(step_id=step_id):
-                self.assertTrue(steps[step_id]["heavy"])
-                self.assertTrue(steps[step_id]["rch_required"])
-
-        rch_prefix = f"{plan['rch_prefix']} "
-        for step in plan["steps"]:
-            command = step["command"]
-            with self.subTest(rch_prefix_step=step["id"]):
-                if step["rch_required"] and "cargo " in command:
-                    self.assertTrue(command.startswith(rch_prefix))
-                if not step["rch_required"]:
-                    self.assertFalse(command.startswith(rch_prefix))
+        steps = _validate_verification_plan(plan)
 
         self.assertIn(
             "cargo test -p frankenengine-node --locked --features extended-surfaces,test-support",
@@ -346,6 +364,17 @@ class TestVerificationHarnessContract(unittest.TestCase):
         self.assertEqual(steps["cargo_clippy"]["command"], "rch exec -- cargo clippy --all-targets -- -D warnings")
         self.assertEqual(steps["cargo_clippy"]["log_path"], "artifacts/verification/cargo_clippy.log")
         self.assertEqual(steps["cargo_clippy"]["report_json"], "artifacts/verification/cargo_clippy_lockfile_drift.json")
+
+    def test_plan_validation_rejects_missing_required_steps(self) -> None:
+        plan = self._load_plan()
+        for missing_step in ("cargo_clippy", "full_conformance"):
+            with self.subTest(missing_step=missing_step):
+                mutated = {
+                    **plan,
+                    "steps": [step for step in plan["steps"] if step["id"] != missing_step],
+                }
+                with self.assertRaisesRegex(AssertionError, missing_step):
+                    _validate_verification_plan(mutated)
 
     def test_full_run_keeps_guarded_deny_fmt_and_clippy_gates(self) -> None:
         script = (

@@ -147,12 +147,45 @@ sys.stdout.write("\n")
 PY
 }
 
+validate_plan_json() {
+  PLAN_JSON="$("$0" --plan-json)" python3 - <<'PY'
+import json
+import os
+
+plan = json.loads(os.environ["PLAN_JSON"])
+required = {
+    "compile_census",
+    "full_conformance",
+    "fuzz_smokes",
+    "verifier_sdk",
+    "cargo_deny",
+    "cargo_fmt",
+    "cargo_clippy",
+    "summary",
+}
+steps = {step["id"]: step for step in plan.get("steps", [])}
+missing = sorted(required - set(steps))
+if missing:
+    raise SystemExit(f"verification plan missing steps: {', '.join(missing)}")
+
+rch_prefix = f"{plan['rch_prefix']} "
+for step_id, step in steps.items():
+    command = step["command"]
+    if step["rch_required"] and "cargo " in command and not command.startswith(rch_prefix):
+        raise SystemExit(f"verification plan step {step_id} requires rch but command is unprefixed")
+    if not step["rch_required"] and command.startswith(rch_prefix):
+        raise SystemExit(f"verification plan step {step_id} is local-only but command is rch-prefixed")
+PY
+}
+
 if [ "${1:-}" = "--selftest" ]; then
   log "selftest: running parser unit tests"
   python3 "$SCRIPT_DIR/test_remediation_log.py" || exit 1
   python3 "$SCRIPT_DIR/test_check_verification_targets_compile.py" || exit 1
   python3 "$SCRIPT_DIR/test_parse_cargo_test_results.py" || exit 1
   python3 "$SCRIPT_DIR/test_lockfile_drift_guard.py" || exit 1
+  log "selftest: validating verification plan"
+  validate_plan_json || exit 1
   log "selftest OK"
   exit 0
 fi
