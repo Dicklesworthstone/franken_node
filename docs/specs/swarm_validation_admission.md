@@ -339,6 +339,43 @@ reservation/build-slot evidence, an RCH status class, and a closeout
 recommendation. Commands are explicit `null` when no command is safe to run,
 and cargo rows must start with `rch exec --`.
 
+## Evidence-Pack Checker
+
+`scripts/check_swarm_validation_evidence_pack.py` is the source-only checker for
+the transcript closeout contract:
+
+```bash
+python3 scripts/check_swarm_validation_evidence_pack.py \
+  --transcript artifacts/validation_broker/swarm_validation_admission/swarm_validation_transcript.v1.jsonl \
+  --expected-bead-id bd-0x4fy.9 \
+  --json
+```
+
+The checker does not run Cargo and does not require RCH for its own execution.
+Any Rust-side companion test, benchmark, or proof that a transcript row cites
+still has to use the exact captured `rch exec -- ...` command.
+
+It fails closed when:
+
+- the transcript path resolves outside the project root;
+- JSONL is missing, empty, malformed, or contains non-object rows;
+- required fields are absent;
+- `bead_id` or `thread_id` is missing, inconsistent, or does not match the
+  expected Beads issue / Agent Mail thread when those expectations are passed;
+- a cargo proof command is absent or does not start with `rch exec --`;
+- a `run` or `coalesce` row is missing the proof key;
+- a `coalesce` row lacks the owning agent or attempts to launch another
+  command;
+- `defer`, `handoff`, or `blocked` rows try to run a command or omit the first
+  actionable blocker evidence / retry guidance;
+- the closeout recommendation does not match the decision state.
+
+Closeout text may cite a transcript only after this checker passes for the
+matching Beads issue and Agent Mail thread. A passing checker result is not a
+green proof by itself for `defer`, `handoff`, or `blocked`; those states still
+require follow-up coordination, evidence refresh, or blocker recording before a
+Bead can close.
+
 ## Consumer Rules
 
 ### Agent Mail
