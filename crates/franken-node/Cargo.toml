@@ -456,6 +456,11 @@ path = "../../tests/conformance/idempotency_key_derivation.rs"
 required-features = ["extended-surfaces"]
 
 [[test]]
+name = "remote_idempotency_store_conformance"
+path = "tests/remote_idempotency_store_conformance.rs"
+required-features = ["remote-ops"]
+
+[[test]]
 name = "isolation_rail_router_conformance"
 path = "../../tests/conformance/isolation_rail_router_conformance.rs"
 required-features = ["advanced-features"]

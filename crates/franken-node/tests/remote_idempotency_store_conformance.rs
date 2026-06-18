@@ -17,17 +17,12 @@
 //! Test methodology: /testing-conformance-harnesses with real assertions,
 //! golden artifacts for canonical behavior, and comprehensive state machine testing.
 
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use frankenengine_node::remote::idempotency::{IdempotencyKey, IdempotencyKeyType};
-use frankenengine_node::remote::idempotency_store::{
-    CachedOutcome, DedupeEntry, DedupeResult, EntryStatus, IdempotencyStore, IdsAuditRecord,
-    event_codes, invariants, ERR_IDEMPOTENCY_CONFLICT, SCHEMA_VERSION,
-};
 use frankenengine_node::config::{RemoteConfig, timeouts};
-
-use serde_json::json;
+use frankenengine_node::remote::idempotency::{IdempotencyKey, IdempotencyKeyDeriver};
+use frankenengine_node::remote::idempotency_store::{
+    DedupeResult, ERR_IDEMPOTENCY_CONFLICT, IdempotencyDedupeStore, IdsAuditRecord, SCHEMA_VERSION,
+    event_codes, hash_payload, invariants,
+};
 
 // Test constants aligned with distributed systems hardening
 const TEST_TTL_SECS: u64 = 300; // 5 minutes for testing
@@ -54,8 +49,13 @@ struct IdempotencyVector {
 #[derive(Debug, Clone, PartialEq)]
 enum ExpectedDedupeResult {
     New,
-    Duplicate { expected_result_hash: String },
-    Conflict { expected_hash: String, actual_hash: String },
+    Duplicate {
+        expected_result_hash: String,
+    },
+    Conflict {
+        expected_hash: String,
+        actual_hash: String,
+    },
     InFlight,
 }
 
@@ -89,7 +89,8 @@ impl IdempotencyVector {
     fn with_completion(mut self, should_complete: bool) -> Self {
         self.should_complete = should_complete;
         if should_complete {
-            self.expected_audit_codes.push("ID_INFLIGHT_RESOLVED".to_string());
+            self.expected_audit_codes
+                .push("ID_INFLIGHT_RESOLVED".to_string());
         }
         self
     }
@@ -100,22 +101,62 @@ impl IdempotencyVector {
     }
 
     fn to_idempotency_key(&self) -> IdempotencyKey {
-        IdempotencyKey::new(
-            IdempotencyKeyType::OperationId,
-            &self.key_namespace,
-            &self.key_value,
-            "test-trace-id",
-        )
+        test_key(&self.key_namespace, &self.key_value)
     }
+}
+
+fn test_config(ttl_secs: u64) -> RemoteConfig {
+    RemoteConfig {
+        idempotency_ttl_secs: ttl_secs,
+    }
+}
+
+fn test_store(ttl_secs: u64) -> IdempotencyDedupeStore {
+    IdempotencyDedupeStore::from_remote_config(&test_config(ttl_secs))
+}
+
+fn test_key(namespace: &str, value: &str) -> IdempotencyKey {
+    IdempotencyKeyDeriver::default()
+        .derive_key(namespace, BASE_EPOCH, value.as_bytes())
+        .expect("test idempotency key should derive")
+}
+
+fn expected_result_label(result: &ExpectedDedupeResult) -> &'static str {
+    match result {
+        ExpectedDedupeResult::New => "new",
+        ExpectedDedupeResult::Duplicate { .. } => "duplicate",
+        ExpectedDedupeResult::Conflict { .. } => "conflict",
+        ExpectedDedupeResult::InFlight => "in-flight",
+    }
+}
+
+fn dedupe_result_label(result: &DedupeResult) -> &'static str {
+    match result {
+        DedupeResult::New => "new",
+        DedupeResult::Duplicate(_) => "duplicate",
+        DedupeResult::Conflict { .. } => "conflict",
+        DedupeResult::InFlight => "in-flight",
+    }
+}
+
+fn audit_event<'a>(
+    audit_events: &'a [IdsAuditRecord],
+    event_code: &str,
+) -> Option<&'a IdsAuditRecord> {
+    audit_events
+        .iter()
+        .find(|event| event.event_code.as_str().cmp(event_code).is_eq())
+}
+
+fn has_audit_event(audit_events: &[IdsAuditRecord], event_code: &str) -> bool {
+    audit_event(audit_events, event_code).is_some()
 }
 
 /// Generate comprehensive test vectors for all idempotency scenarios
 fn generate_idempotency_vectors() -> Vec<IdempotencyVector> {
-    use sha2::{Digest, Sha256};
-
     // Compute payload hashes for conflict testing
-    let payload1_hash = format!("{:x}", Sha256::digest(TEST_PAYLOAD_1));
-    let payload2_hash = format!("{:x}", Sha256::digest(TEST_PAYLOAD_2));
+    let payload1_hash = hash_payload(TEST_PAYLOAD_1);
+    let payload2_hash = hash_payload(TEST_PAYLOAD_2);
 
     vec![
         // ============================================================
@@ -130,22 +171,22 @@ fn generate_idempotency_vectors() -> Vec<IdempotencyVector> {
             "operation-001",
             TEST_PAYLOAD_1,
             ExpectedDedupeResult::New,
-        ).with_completion(true)
-         .with_result_data(TEST_RESULT_1)
-         .with_audit_codes(vec!["ID_ENTRY_NEW", "ID_INFLIGHT_RESOLVED"]),
-
+        )
+        .with_completion(true)
+        .with_result_data(TEST_RESULT_1)
+        .with_audit_codes(vec!["ID_ENTRY_NEW", "ID_INFLIGHT_RESOLVED"]),
         // Exact duplicate - should get cached result
         IdempotencyVector::new(
             "at_most_once_exact_duplicate",
             "Exact duplicate execution should return cached outcome",
             "test-namespace",
             "operation-001", // Same key as above
-            TEST_PAYLOAD_1, // Same payload as above
+            TEST_PAYLOAD_1,  // Same payload as above
             ExpectedDedupeResult::Duplicate {
-                expected_result_hash: format!("{:x}", Sha256::digest(TEST_RESULT_1)),
+                expected_result_hash: hash_payload(TEST_RESULT_1),
             },
-        ).with_audit_codes(vec!["ID_ENTRY_DUPLICATE"]),
-
+        )
+        .with_audit_codes(vec!["ID_ENTRY_DUPLICATE"]),
         // ============================================================
         // PAYLOAD CONFLICT DETECTION TESTS
         // ============================================================
@@ -158,22 +199,22 @@ fn generate_idempotency_vectors() -> Vec<IdempotencyVector> {
             "operation-002",
             TEST_PAYLOAD_1,
             ExpectedDedupeResult::New,
-        ).with_completion(true)
-         .with_result_data(TEST_RESULT_1),
-
+        )
+        .with_completion(true)
+        .with_result_data(TEST_RESULT_1),
         // Follow-up with different payload for the same key
         IdempotencyVector::new(
             "conflict_follow_up_different_payload",
             "Follow-up request with different payload should trigger conflict",
             "test-namespace",
             "operation-002", // Same key as above
-            TEST_PAYLOAD_2, // Different payload
+            TEST_PAYLOAD_2,  // Different payload
             ExpectedDedupeResult::Conflict {
                 expected_hash: payload1_hash.clone(),
                 actual_hash: payload2_hash.clone(),
             },
-        ).with_audit_codes(vec!["ID_ENTRY_CONFLICT"]),
-
+        )
+        .with_audit_codes(vec!["ID_ENTRY_CONFLICT"]),
         // ============================================================
         // IN-FLIGHT REQUEST HANDLING TESTS
         // ============================================================
@@ -186,18 +227,18 @@ fn generate_idempotency_vectors() -> Vec<IdempotencyVector> {
             "operation-003",
             TEST_PAYLOAD_1,
             ExpectedDedupeResult::New,
-        ).with_completion(false), // Don't complete, leave in-flight
-
+        )
+        .with_completion(false), // Don't complete, leave in-flight
         // Second request for same in-flight operation
         IdempotencyVector::new(
             "in_flight_duplicate_request",
             "Second request for in-flight operation should return InFlight",
             "test-namespace",
             "operation-003", // Same key as above
-            TEST_PAYLOAD_1, // Same payload as above
+            TEST_PAYLOAD_1,  // Same payload as above
             ExpectedDedupeResult::InFlight,
-        ).with_audit_codes(vec!["ID_ENTRY_DUPLICATE"]),
-
+        )
+        .with_audit_codes(vec!["ID_ENTRY_DUPLICATE"]),
         // ============================================================
         // NAMESPACE ISOLATION TESTS
         // ============================================================
@@ -207,13 +248,13 @@ fn generate_idempotency_vectors() -> Vec<IdempotencyVector> {
             "namespace_isolation_different_namespace",
             "Same key in different namespace should be treated as new",
             "different-namespace", // Different namespace
-            "operation-001", // Same key value as earlier test
-            TEST_PAYLOAD_1, // Same payload as earlier test
+            "operation-001",       // Same key value as earlier test
+            TEST_PAYLOAD_1,        // Same payload as earlier test
             ExpectedDedupeResult::New,
-        ).with_completion(true)
-         .with_result_data(TEST_RESULT_2)
-         .with_audit_codes(vec!["ID_ENTRY_NEW", "ID_INFLIGHT_RESOLVED"]),
-
+        )
+        .with_completion(true)
+        .with_result_data(TEST_RESULT_2)
+        .with_audit_codes(vec!["ID_ENTRY_NEW", "ID_INFLIGHT_RESOLVED"]),
         // ============================================================
         // BOUNDARY CONDITION TESTS
         // ============================================================
@@ -226,9 +267,9 @@ fn generate_idempotency_vectors() -> Vec<IdempotencyVector> {
             "operation-empty",
             &[], // Empty payload
             ExpectedDedupeResult::New,
-        ).with_completion(true)
-         .with_result_data(b"empty-result"),
-
+        )
+        .with_completion(true)
+        .with_result_data(b"empty-result"),
         // Large payload handling
         IdempotencyVector::new(
             "boundary_large_payload",
@@ -237,9 +278,9 @@ fn generate_idempotency_vectors() -> Vec<IdempotencyVector> {
             "operation-large",
             &vec![b'x'; 8192], // 8KB payload
             ExpectedDedupeResult::New,
-        ).with_completion(true)
-         .with_result_data(b"large-result"),
-
+        )
+        .with_completion(true)
+        .with_result_data(b"large-result"),
         // Unicode key values
         IdempotencyVector::new(
             "boundary_unicode_key",
@@ -248,34 +289,36 @@ fn generate_idempotency_vectors() -> Vec<IdempotencyVector> {
             "操作-🔑-测试", // Unicode operation ID
             TEST_PAYLOAD_1,
             ExpectedDedupeResult::New,
-        ).with_completion(true)
-         .with_result_data(b"unicode-result"),
+        )
+        .with_completion(true)
+        .with_result_data(b"unicode-result"),
     ]
 }
 
 /// Test basic at-most-once execution guarantee
 #[test]
 fn test_at_most_once_execution_guarantee() {
-    let config = RemoteConfig::default();
-    let mut store = IdempotencyStore::new(config);
+    let mut store = test_store(TEST_TTL_SECS);
 
     let vectors = generate_idempotency_vectors();
-    let at_most_once_vectors: Vec<_> = vectors.into_iter()
+    let at_most_once_vectors: Vec<_> = vectors
+        .into_iter()
         .filter(|v| v.name.starts_with("at_most_once_"))
         .collect();
 
     for vector in at_most_once_vectors {
-        println!("Testing at-most-once vector: {} - {}", vector.name, vector.description);
+        println!(
+            "Testing at-most-once vector: {} - {}",
+            vector.name, vector.description
+        );
 
         let key = vector.to_idempotency_key();
-        let payload_hash = format!("{:x}", sha2::Sha256::digest(&vector.payload));
 
         // Execute the check_or_insert operation
         let result = store.check_or_insert(
-            &key,
-            &payload_hash,
+            key,
+            &vector.payload,
             BASE_EPOCH,
-            TEST_TTL_SECS,
             &format!("trace-{}", vector.name),
         );
 
@@ -283,52 +326,68 @@ fn test_at_most_once_execution_guarantee() {
         match (&vector.expected_result, &result) {
             (ExpectedDedupeResult::New, DedupeResult::New) => {
                 // Success case - complete if requested
-                if vector.should_complete {
-                    if let Some(ref result_data) = vector.result_data {
-                        let outcome = CachedOutcome {
-                            result_hash: format!("{:x}", sha2::Sha256::digest(result_data)),
-                            result_data: result_data.clone(),
-                            completed_at_secs: BASE_EPOCH + 10,
-                        };
+                if vector.should_complete
+                    && let Some(ref result_data) = vector.result_data
+                {
+                    let complete_result = store.complete(
+                        key,
+                        result_data.clone(),
+                        BASE_EPOCH + 10,
+                        &format!("trace-complete-{}", vector.name),
+                    );
 
-                        let complete_result = store.mark_complete(
-                            &key,
-                            outcome.clone(),
-                            &format!("trace-complete-{}", vector.name),
-                        );
-
-                        // REAL ASSERTION: Completion must succeed for valid operations
-                        assert!(complete_result.is_ok(),
-                            "mark_complete should succeed for vector {}: {:?}",
-                            vector.name, complete_result.err());
-                    }
+                    // REAL ASSERTION: Completion must succeed for valid operations
+                    assert!(
+                        complete_result.is_ok(),
+                        "complete should succeed for vector {}: {:?}",
+                        vector.name,
+                        complete_result.err()
+                    );
                 }
-            },
-            (ExpectedDedupeResult::Duplicate { expected_result_hash }, DedupeResult::Duplicate(outcome)) => {
+            }
+            (
+                ExpectedDedupeResult::Duplicate {
+                    expected_result_hash,
+                },
+                DedupeResult::Duplicate(outcome),
+            ) => {
                 // REAL ASSERTION: Duplicate detection must return exact cached outcome
-                assert_eq!(expected_result_hash, &outcome.result_hash,
-                    "Duplicate result hash mismatch for vector {}", vector.name);
+                assert_eq!(
+                    expected_result_hash, &outcome.result_hash,
+                    "Duplicate result hash mismatch for vector {}",
+                    vector.name
+                );
 
                 // REAL ASSERTION: Cached data must be preserved exactly
                 if let Some(ref expected_data) = vector.result_data {
-                    assert_eq!(expected_data, &outcome.result_data,
-                        "Duplicate result data mismatch for vector {}", vector.name);
+                    assert_eq!(
+                        expected_data, &outcome.result_data,
+                        "Duplicate result data mismatch for vector {}",
+                        vector.name
+                    );
                 }
-            },
+            }
             (expected, actual) => {
-                panic!("Vector {} failed at-most-once guarantee:\nExpected: {:?}\nActual: {:?}",
-                    vector.name, expected, actual);
+                assert_eq!(
+                    dedupe_result_label(actual),
+                    expected_result_label(expected),
+                    "Vector {} failed at-most-once guarantee:\nExpected: {:?}\nActual: {:?}",
+                    vector.name,
+                    expected,
+                    actual
+                );
             }
         }
 
         // Validate audit trail completeness
-        let audit_events = store.audit_events();
+        let audit_events = store.audit_log();
         for expected_code in &vector.expected_audit_codes {
             // REAL ASSERTION: All expected audit events must be present
             assert!(
-                audit_events.iter().any(|e| e.event_code == *expected_code),
+                has_audit_event(audit_events, expected_code),
                 "Missing expected audit event '{}' for vector {}",
-                expected_code, vector.name
+                expected_code,
+                vector.name
             );
         }
     }
@@ -337,71 +396,100 @@ fn test_at_most_once_execution_guarantee() {
 /// Test payload conflict detection with real assertions
 #[test]
 fn test_payload_conflict_detection() {
-    let config = RemoteConfig::default();
-    let mut store = IdempotencyStore::new(config);
+    let mut store = test_store(TEST_TTL_SECS);
 
     let vectors = generate_idempotency_vectors();
-    let conflict_vectors: Vec<_> = vectors.into_iter()
+    let conflict_vectors: Vec<_> = vectors
+        .into_iter()
         .filter(|v| v.name.starts_with("conflict_"))
         .collect();
 
     let mut processed_keys = std::collections::HashSet::new();
 
     for vector in conflict_vectors {
-        println!("Testing conflict vector: {} - {}", vector.name, vector.description);
+        println!(
+            "Testing conflict vector: {} - {}",
+            vector.name, vector.description
+        );
 
         let key = vector.to_idempotency_key();
-        let payload_hash = format!("{:x}", sha2::Sha256::digest(&vector.payload));
 
         let result = store.check_or_insert(
-            &key,
-            &payload_hash,
+            key,
+            &vector.payload,
             BASE_EPOCH,
-            TEST_TTL_SECS,
             &format!("trace-{}", vector.name),
         );
 
         match (&vector.expected_result, &result) {
             (ExpectedDedupeResult::New, DedupeResult::New) => {
                 // First time - complete the operation
-                if vector.should_complete && vector.result_data.is_some() {
-                    let result_data = vector.result_data.as_ref().unwrap();
-                    let outcome = CachedOutcome {
-                        result_hash: format!("{:x}", sha2::Sha256::digest(result_data)),
-                        result_data: result_data.clone(),
-                        completed_at_secs: BASE_EPOCH + 10,
-                    };
-
-                    let complete_result = store.mark_complete(
-                        &key,
-                        outcome,
+                if vector.should_complete
+                    && let Some(ref result_data) = vector.result_data
+                {
+                    let complete_result = store.complete(
+                        key,
+                        result_data.clone(),
+                        BASE_EPOCH + 10,
                         &format!("trace-complete-{}", vector.name),
                     );
 
                     // REAL ASSERTION: Completion must succeed
-                    assert!(complete_result.is_ok(),
-                        "mark_complete should succeed for vector {}: {:?}",
-                        vector.name, complete_result.err());
+                    assert!(
+                        complete_result.is_ok(),
+                        "complete should succeed for vector {}: {:?}",
+                        vector.name,
+                        complete_result.err()
+                    );
                 }
                 processed_keys.insert(key.to_string());
-            },
-            (ExpectedDedupeResult::Conflict { expected_hash, actual_hash }, DedupeResult::Conflict { expected_hash: actual_expected, actual_hash: actual_actual, .. }) => {
+            }
+            (
+                ExpectedDedupeResult::Conflict {
+                    expected_hash,
+                    actual_hash,
+                },
+                DedupeResult::Conflict {
+                    expected_hash: actual_expected,
+                    actual_hash: actual_actual,
+                    ..
+                },
+            ) => {
                 // REAL ASSERTION: Conflict detection must provide correct hash details
-                assert_eq!(expected_hash, actual_expected,
-                    "Conflict expected hash mismatch for vector {}", vector.name);
-                assert_eq!(actual_hash, actual_actual,
-                    "Conflict actual hash mismatch for vector {}", vector.name);
+                assert_eq!(
+                    expected_hash, actual_expected,
+                    "Conflict expected hash mismatch for vector {}",
+                    vector.name
+                );
+                assert_eq!(
+                    actual_hash, actual_actual,
+                    "Conflict actual hash mismatch for vector {}",
+                    vector.name
+                );
 
                 // REAL ASSERTION: Conflict event must be audited
-                let audit_events = store.audit_events();
-                assert!(
-                    audit_events.iter().any(|e| e.event_code == event_codes::ID_ENTRY_CONFLICT),
-                    "Conflict event not properly audited for vector {}", vector.name
+                let audit_events = store.audit_log();
+                let conflict_event = audit_event(audit_events, event_codes::ID_ENTRY_CONFLICT)
+                    .expect("conflict event should be audited");
+                assert_eq!(
+                    conflict_event
+                        .detail
+                        .get("error_code")
+                        .and_then(|v| v.as_str()),
+                    Some(ERR_IDEMPOTENCY_CONFLICT),
+                    "Conflict event should carry the stable error code for {}",
+                    vector.name
                 );
-            },
+            }
             (expected, actual) => {
-                panic!("Vector {} failed conflict detection:\nExpected: {:?}\nActual: {:?}",
-                    vector.name, expected, actual);
+                assert_eq!(
+                    dedupe_result_label(actual),
+                    expected_result_label(expected),
+                    "Vector {} failed conflict detection:\nExpected: {:?}\nActual: {:?}",
+                    vector.name,
+                    expected,
+                    actual
+                );
             }
         }
     }
@@ -410,47 +498,51 @@ fn test_payload_conflict_detection() {
 /// Test in-flight request handling
 #[test]
 fn test_in_flight_request_handling() {
-    let config = RemoteConfig::default();
-    let mut store = IdempotencyStore::new(config);
+    let mut store = test_store(TEST_TTL_SECS);
 
     let vectors = generate_idempotency_vectors();
-    let inflight_vectors: Vec<_> = vectors.into_iter()
+    let inflight_vectors: Vec<_> = vectors
+        .into_iter()
         .filter(|v| v.name.starts_with("in_flight_"))
         .collect();
 
     for vector in inflight_vectors {
-        println!("Testing in-flight vector: {} - {}", vector.name, vector.description);
+        println!(
+            "Testing in-flight vector: {} - {}",
+            vector.name, vector.description
+        );
 
         let key = vector.to_idempotency_key();
-        let payload_hash = format!("{:x}", sha2::Sha256::digest(&vector.payload));
 
         let result = store.check_or_insert(
-            &key,
-            &payload_hash,
+            key,
+            &vector.payload,
             BASE_EPOCH,
-            TEST_TTL_SECS,
             &format!("trace-{}", vector.name),
         );
 
         match (&vector.expected_result, &result) {
             (ExpectedDedupeResult::New, DedupeResult::New) => {
                 // First request - leave in-flight as specified
-                assert!(!vector.should_complete, "In-flight test should not auto-complete");
-
-                // REAL ASSERTION: Entry should be in Processing status
-                let entries = store.debug_entries();
-                let entry = entries.iter().find(|e| e.key.to_string() == key.to_string());
-                assert!(entry.is_some(), "Entry should exist after insertion");
-                assert_eq!(entry.unwrap().status, EntryStatus::Processing,
-                    "Entry should be in Processing status for vector {}", vector.name);
-            },
+                assert!(
+                    !vector.should_complete,
+                    "In-flight test should not auto-complete"
+                );
+                assert_eq!(store.entry_count(), 1, "in-flight entry should be retained");
+            }
             (ExpectedDedupeResult::InFlight, DedupeResult::InFlight) => {
                 // REAL ASSERTION: Subsequent requests should get InFlight
                 // This is the correct behavior for concurrent access
-            },
+            }
             (expected, actual) => {
-                panic!("Vector {} failed in-flight handling:\nExpected: {:?}\nActual: {:?}",
-                    vector.name, expected, actual);
+                assert_eq!(
+                    dedupe_result_label(actual),
+                    expected_result_label(expected),
+                    "Vector {} failed in-flight handling:\nExpected: {:?}\nActual: {:?}",
+                    vector.name,
+                    expected,
+                    actual
+                );
             }
         }
     }
@@ -459,220 +551,217 @@ fn test_in_flight_request_handling() {
 /// Test namespace isolation guarantees
 #[test]
 fn test_namespace_isolation() {
-    let config = RemoteConfig::default();
-    let mut store = IdempotencyStore::new(config);
+    let mut store = test_store(TEST_TTL_SECS);
+    let shared_operation = "operation-001";
+    let payload = TEST_PAYLOAD_1;
+    let key_a = test_key("namespace-a", shared_operation);
+    let key_b = test_key("namespace-b", shared_operation);
 
-    let vectors = generate_idempotency_vectors();
-    let namespace_vectors: Vec<_> = vectors.into_iter()
-        .filter(|v| v.name.starts_with("namespace_"))
-        .collect();
+    assert_ne!(key_a, key_b, "namespace must participate in key derivation");
+    assert_eq!(
+        store.check_or_insert(key_a, payload, BASE_EPOCH, "trace-ns-a"),
+        DedupeResult::New
+    );
+    assert_eq!(
+        store.check_or_insert(key_b, payload, BASE_EPOCH, "trace-ns-b"),
+        DedupeResult::New
+    );
 
-    for vector in namespace_vectors {
-        println!("Testing namespace vector: {} - {}", vector.name, vector.description);
+    store
+        .complete(
+            key_a,
+            b"namespace-a-result".to_vec(),
+            BASE_EPOCH + 1,
+            "trace-ns-a-complete",
+        )
+        .expect("namespace A completion should succeed");
+    store
+        .complete(
+            key_b,
+            b"namespace-b-result".to_vec(),
+            BASE_EPOCH + 1,
+            "trace-ns-b-complete",
+        )
+        .expect("namespace B completion should succeed");
 
-        let key = vector.to_idempotency_key();
-        let payload_hash = format!("{:x}", sha2::Sha256::digest(&vector.payload));
-
-        let result = store.check_or_insert(
-            &key,
-            &payload_hash,
-            BASE_EPOCH,
-            TEST_TTL_SECS,
-            &format!("trace-{}", vector.name),
-        );
-
-        // REAL ASSERTION: Different namespaces should be completely isolated
-        match result {
-            DedupeResult::New => {
-                // Complete the operation if requested
-                if vector.should_complete && vector.result_data.is_some() {
-                    let result_data = vector.result_data.as_ref().unwrap();
-                    let outcome = CachedOutcome {
-                        result_hash: format!("{:x}", sha2::Sha256::digest(result_data)),
-                        result_data: result_data.clone(),
-                        completed_at_secs: BASE_EPOCH + 10,
-                    };
-
-                    let complete_result = store.mark_complete(
-                        &key,
-                        outcome,
-                        &format!("trace-complete-{}", vector.name),
-                    );
-
-                    assert!(complete_result.is_ok(),
-                        "mark_complete should succeed for namespace isolation test");
-                }
-            },
-            other => {
-                panic!("Namespace isolation failed for vector {}: expected New, got {:?}",
-                    vector.name, other);
-            }
-        }
+    let ns_a_duplicate = store.check_or_insert(key_a, payload, BASE_EPOCH + 2, "trace-ns-a-dup");
+    assert!(
+        matches!(ns_a_duplicate, DedupeResult::Duplicate(_)),
+        "namespace A duplicate should return cached outcome, got {ns_a_duplicate:?}"
+    );
+    if let DedupeResult::Duplicate(outcome) = ns_a_duplicate {
+        assert_eq!(outcome.result_data, b"namespace-a-result");
     }
 
-    // REAL ASSERTION: Verify entries exist in different namespaces
-    let entries = store.debug_entries();
-    let mut namespaces = std::collections::HashSet::new();
-    for entry in &entries {
-        namespaces.insert(&entry.key.namespace);
+    let ns_b_duplicate = store.check_or_insert(key_b, payload, BASE_EPOCH + 2, "trace-ns-b-dup");
+    assert!(
+        matches!(ns_b_duplicate, DedupeResult::Duplicate(_)),
+        "namespace B duplicate should return cached outcome, got {ns_b_duplicate:?}"
+    );
+    if let DedupeResult::Duplicate(outcome) = ns_b_duplicate {
+        assert_eq!(outcome.result_data, b"namespace-b-result");
     }
 
-    // Should have multiple namespaces if isolation is working
-    assert!(namespaces.len() >= 2,
-        "Should have entries in multiple namespaces, found: {:?}", namespaces);
+    assert_eq!(store.entry_count(), 2);
 }
 
 /// Test TTL management and expiry handling
 #[test]
 fn test_ttl_management_and_expiry() {
-    let config = RemoteConfig::default();
-    let mut store = IdempotencyStore::new(config);
-
-    let key = IdempotencyKey::new(
-        IdempotencyKeyType::OperationId,
-        "ttl-test",
-        "expiry-operation",
-        "ttl-trace",
-    );
-    let payload_hash = format!("{:x}", sha2::Sha256::digest(b"ttl-test-payload"));
-
-    // Insert entry with short TTL
     let short_ttl = 10; // 10 seconds
-    let result = store.check_or_insert(
-        &key,
-        &payload_hash,
-        BASE_EPOCH,
-        short_ttl,
-        "trace-ttl-insert",
-    );
+    let mut store = IdempotencyDedupeStore::new(short_ttl);
+    let key = test_key("ttl-test", "expiry-operation");
+    let payload = b"ttl-test-payload";
+
+    let result = store.check_or_insert(key, payload, BASE_EPOCH, "trace-ttl-insert");
 
     // REAL ASSERTION: First insert should succeed
-    assert!(matches!(result, DedupeResult::New),
-        "TTL test insert should return New, got: {:?}", result);
+    assert!(
+        matches!(result, DedupeResult::New),
+        "TTL test insert should return New, got: {:?}",
+        result
+    );
 
     // Complete the operation
-    let outcome = CachedOutcome {
-        result_hash: format!("{:x}", sha2::Sha256::digest(b"ttl-result")),
-        result_data: b"ttl-result".to_vec(),
-        completed_at_secs: BASE_EPOCH + 5,
-    };
-
-    let complete_result = store.mark_complete(&key, outcome.clone(), "trace-ttl-complete");
-    assert!(complete_result.is_ok(), "TTL test completion should succeed");
+    let complete_result = store.complete(
+        key,
+        b"ttl-result".to_vec(),
+        BASE_EPOCH + 5,
+        "trace-ttl-complete",
+    );
+    assert!(
+        complete_result.is_ok(),
+        "TTL test completion should succeed"
+    );
 
     // Check before expiry - should get duplicate
     let before_expiry = store.check_or_insert(
-        &key,
-        &payload_hash,
+        key,
+        payload,
         BASE_EPOCH + 8, // Before expiry (BASE_EPOCH + 10)
-        short_ttl,
         "trace-ttl-before-expiry",
     );
 
     // REAL ASSERTION: Before expiry should return cached outcome
-    match before_expiry {
-        DedupeResult::Duplicate(cached) => {
-            assert_eq!(cached.result_hash, outcome.result_hash,
-                "Cached result hash should match before expiry");
-            assert_eq!(cached.result_data, outcome.result_data,
-                "Cached result data should match before expiry");
-        },
-        other => panic!("Before expiry should return Duplicate, got: {:?}", other),
+    assert!(
+        matches!(before_expiry, DedupeResult::Duplicate(_)),
+        "Before expiry should return Duplicate, got: {before_expiry:?}"
+    );
+    if let DedupeResult::Duplicate(cached) = before_expiry {
+        assert_eq!(
+            cached.result_hash,
+            hash_payload(b"ttl-result"),
+            "Cached result hash should match before expiry"
+        );
+        assert_eq!(
+            cached.result_data, b"ttl-result",
+            "Cached result data should match before expiry"
+        );
     }
-
-    // Perform expiry sweep at expiry time
-    let expired_count = store.sweep_expired_entries(BASE_EPOCH + short_ttl + 1);
-
-    // REAL ASSERTION: Sweep should remove expired entry
-    assert_eq!(expired_count, 1, "Should sweep exactly one expired entry");
 
     // Check after expiry - should get new
     let after_expiry = store.check_or_insert(
-        &key,
-        &payload_hash,
+        key,
+        payload,
         BASE_EPOCH + short_ttl + 10, // Well after expiry
-        short_ttl,
         "trace-ttl-after-expiry",
     );
 
     // REAL ASSERTION: After expiry sweep should treat as new operation
-    assert!(matches!(after_expiry, DedupeResult::New),
-        "After expiry should return New, got: {:?}", after_expiry);
+    assert!(
+        matches!(after_expiry, DedupeResult::New),
+        "After expiry should return New, got: {:?}",
+        after_expiry
+    );
 
     // REAL ASSERTION: Expiry audit event should be recorded
-    let audit_events = store.audit_events();
+    let audit_events = store.audit_log();
     assert!(
-        audit_events.iter().any(|e| e.event_code == event_codes::ID_ENTRY_EXPIRED),
+        has_audit_event(audit_events, event_codes::ID_ENTRY_EXPIRED),
         "Expiry audit event should be recorded"
+    );
+
+    let mut sweep_store = IdempotencyDedupeStore::new(short_ttl);
+    let sweep_key = test_key("ttl-test", "sweep-operation");
+    assert_eq!(
+        sweep_store.check_or_insert(sweep_key, payload, BASE_EPOCH, "trace-sweep-insert"),
+        DedupeResult::New
+    );
+    assert_eq!(
+        sweep_store.sweep_expired(BASE_EPOCH + short_ttl + 1, "trace-sweep"),
+        1
+    );
+    assert!(
+        has_audit_event(sweep_store.audit_log(), event_codes::ID_SWEEP_COMPLETE),
+        "sweep completion event should be recorded"
     );
 }
 
 /// Test capacity management and bounded growth
 #[test]
 fn test_capacity_management() {
-    let config = RemoteConfig::default();
-    let mut store = IdempotencyStore::new(config);
+    let mut store = IdempotencyDedupeStore::with_audit_log_capacity(TEST_TTL_SECS, 128);
 
     // Insert multiple entries approaching capacity limits
     let batch_size = 100;
     let mut inserted_keys = Vec::new();
 
     for i in 0..batch_size {
-        let key = IdempotencyKey::new(
-            IdempotencyKeyType::OperationId,
-            "capacity-test",
-            &format!("operation-{:04}", i),
-            "capacity-trace",
-        );
-        let payload_hash = format!("{:x}", sha2::Sha256::digest(format!("payload-{}", i).as_bytes()));
+        let key = test_key("capacity-test", &format!("operation-{i:04}"));
+        let payload = format!("payload-{i}");
 
         let result = store.check_or_insert(
-            &key,
-            &payload_hash,
+            key,
+            payload.as_bytes(),
             BASE_EPOCH + i as u64,
-            TEST_TTL_SECS,
             &format!("trace-capacity-{}", i),
         );
 
         // REAL ASSERTION: All inserts within reasonable limits should succeed
-        assert!(matches!(result, DedupeResult::New),
-            "Capacity test insert {} should succeed, got: {:?}", i, result);
+        assert!(
+            matches!(result, DedupeResult::New),
+            "Capacity test insert {} should succeed, got: {:?}",
+            i,
+            result
+        );
 
         inserted_keys.push(key);
     }
 
     // REAL ASSERTION: All entries should be retained within capacity
-    let entries = store.debug_entries();
-    assert!(entries.len() >= batch_size,
-        "Should retain at least {} entries, found {}", batch_size, entries.len());
+    assert_eq!(store.entry_count(), batch_size);
 
     // Test duplicate detection still works with many entries
-    let test_key = &inserted_keys[batch_size / 2]; // Pick a middle key
-    let test_payload_hash = format!("{:x}", sha2::Sha256::digest(format!("payload-{}", batch_size / 2).as_bytes()));
+    let test_key = inserted_keys[batch_size / 2]; // Pick a middle key
+    let test_payload = format!("payload-{}", batch_size / 2);
 
     let duplicate_result = store.check_or_insert(
         test_key,
-        &test_payload_hash,
+        test_payload.as_bytes(),
         BASE_EPOCH + batch_size as u64 + 100,
-        TEST_TTL_SECS,
         "trace-capacity-duplicate-check",
     );
 
     // REAL ASSERTION: Duplicate detection should still work with many entries
-    assert!(matches!(duplicate_result, DedupeResult::InFlight),
-        "Duplicate detection should work with many entries, got: {:?}", duplicate_result);
+    assert!(
+        matches!(duplicate_result, DedupeResult::InFlight),
+        "Duplicate detection should work with many entries, got: {:?}",
+        duplicate_result
+    );
 
     // Verify audit log is bounded and doesn't grow unbounded
-    let audit_events = store.audit_events();
-    assert!(audit_events.len() < 10000,  // Reasonable upper bound
-        "Audit log should be bounded, found {} events", audit_events.len());
+    assert!(
+        store.audit_log_len() <= store.audit_log_capacity(),
+        "Audit log should be bounded, found {} events with capacity {}",
+        store.audit_log_len(),
+        store.audit_log_capacity()
+    );
 }
 
 /// Test crash recovery and abandoned entry handling
 #[test]
 fn test_crash_recovery_abandoned_entries() {
-    let config = RemoteConfig::default();
-    let mut store = IdempotencyStore::new(config);
+    let mut store = test_store(TEST_TTL_SECS);
 
     // Create several in-flight entries
     let inflight_keys = vec![
@@ -682,118 +771,96 @@ fn test_crash_recovery_abandoned_entries() {
     ];
 
     for (namespace, operation) in &inflight_keys {
-        let key = IdempotencyKey::new(
-            IdempotencyKeyType::OperationId,
-            namespace,
-            operation,
-            "recovery-trace",
-        );
-        let payload_hash = format!("{:x}", sha2::Sha256::digest(format!("payload-{}", operation).as_bytes()));
+        let key = test_key(namespace, operation);
+        let payload = format!("payload-{}", operation);
 
         let result = store.check_or_insert(
-            &key,
-            &payload_hash,
+            key,
+            payload.as_bytes(),
             BASE_EPOCH,
-            TEST_TTL_SECS,
             &format!("trace-recovery-{}", operation),
         );
 
         // REAL ASSERTION: Initial inserts should succeed
-        assert!(matches!(result, DedupeResult::New),
-            "Recovery test insert for {} should succeed", operation);
+        assert!(
+            matches!(result, DedupeResult::New),
+            "Recovery test insert for {} should succeed",
+            operation
+        );
     }
 
     // Simulate crash recovery by marking all in-flight entries as abandoned
-    let recovery_count = store.recover_abandoned_entries("trace-recovery-simulation");
+    let recovery_count = store.recover_inflight("trace-recovery-simulation");
 
     // REAL ASSERTION: Recovery should handle all in-flight entries
-    assert_eq!(recovery_count, inflight_keys.len(),
-        "Should recover exactly {} abandoned entries", inflight_keys.len());
-
-    // Verify entries are marked as abandoned
-    let entries = store.debug_entries();
-    let abandoned_count = entries.iter()
-        .filter(|e| e.status == EntryStatus::Abandoned)
-        .count();
-
-    // REAL ASSERTION: All recovered entries should be marked abandoned
-    assert_eq!(abandoned_count, inflight_keys.len(),
-        "Should have {} abandoned entries after recovery", inflight_keys.len());
+    assert_eq!(
+        recovery_count,
+        inflight_keys.len(),
+        "Should recover exactly {} abandoned entries",
+        inflight_keys.len()
+    );
 
     // Verify recovery audit event is recorded
-    let audit_events = store.audit_events();
+    let audit_events = store.audit_log();
     assert!(
-        audit_events.iter().any(|e| e.event_code == event_codes::ID_STORE_RECOVERY),
+        has_audit_event(audit_events, event_codes::ID_STORE_RECOVERY),
         "Recovery audit event should be recorded"
     );
 
     // Test that abandoned entries can be retried
-    let retry_key = IdempotencyKey::new(
-        IdempotencyKeyType::OperationId,
-        "recovery-test",
-        "operation-001",
-        "retry-trace",
-    );
-    let retry_payload_hash = format!("{:x}", sha2::Sha256::digest(b"payload-operation-001"));
+    let retry_key = test_key("recovery-test", "operation-001");
+    let retry_payload = b"payload-operation-001";
 
     let retry_result = store.check_or_insert(
-        &retry_key,
-        &retry_payload_hash,
+        retry_key,
+        retry_payload,
         BASE_EPOCH + 100,
-        TEST_TTL_SECS,
         "trace-abandoned-retry",
     );
 
     // REAL ASSERTION: Abandoned entries should be retryable
-    assert!(matches!(retry_result, DedupeResult::New),
-        "Abandoned entry should be retryable, got: {:?}", retry_result);
+    assert!(
+        matches!(retry_result, DedupeResult::New),
+        "Abandoned entry should be retryable, got: {:?}",
+        retry_result
+    );
 }
 
 /// Test complete audit trail validation
 #[test]
 fn test_complete_audit_trail() {
-    let config = RemoteConfig::default();
-    let mut store = IdempotencyStore::new(config);
+    let mut store = test_store(timeouts::REMOTE_IDEMPOTENCY_TTL_SECS);
 
-    let key = IdempotencyKey::new(
-        IdempotencyKeyType::OperationId,
-        "audit-test",
-        "complete-operation",
-        "audit-trace-123",
+    let key = test_key("audit-test", "complete-operation");
+    let payload = b"audit-test-payload";
+
+    assert_eq!(SCHEMA_VERSION, "ids-v1.0");
+    assert_eq!(
+        store.ttl_secs(),
+        timeouts::REMOTE_IDEMPOTENCY_TTL_SECS,
+        "store should honor RemoteConfig TTL"
     );
-    let payload_hash = format!("{:x}", sha2::Sha256::digest(b"audit-test-payload"));
 
     // Step 1: Initial insert (should generate ID_ENTRY_NEW)
-    let result = store.check_or_insert(
-        &key,
-        &payload_hash,
-        BASE_EPOCH,
-        TEST_TTL_SECS,
-        "trace-audit-insert",
-    );
+    let result = store.check_or_insert(key, payload, BASE_EPOCH, "trace-audit-insert");
     assert!(matches!(result, DedupeResult::New));
 
     // Step 2: Mark complete (should generate ID_INFLIGHT_RESOLVED)
-    let outcome = CachedOutcome {
-        result_hash: format!("{:x}", sha2::Sha256::digest(b"audit-result")),
-        result_data: b"audit-result".to_vec(),
-        completed_at_secs: BASE_EPOCH + 10,
-    };
-    let complete_result = store.mark_complete(&key, outcome.clone(), "trace-audit-complete");
+    let complete_result = store.complete(
+        key,
+        b"audit-result".to_vec(),
+        BASE_EPOCH + 10,
+        "trace-audit-complete",
+    );
     assert!(complete_result.is_ok());
 
     // Step 3: Duplicate request (should generate ID_ENTRY_DUPLICATE)
-    let duplicate_result = store.check_or_insert(
-        &key,
-        &payload_hash,
-        BASE_EPOCH + 20,
-        TEST_TTL_SECS,
-        "trace-audit-duplicate",
-    );
+    let duplicate_result =
+        store.check_or_insert(key, payload, BASE_EPOCH + 20, "trace-audit-duplicate");
     assert!(matches!(duplicate_result, DedupeResult::Duplicate(_)));
 
     // Step 4: Validate complete audit trail
-    let audit_events = store.audit_events();
+    let audit_events = store.audit_log();
     let expected_events = vec![
         event_codes::ID_ENTRY_NEW,
         event_codes::ID_INFLIGHT_RESOLVED,
@@ -803,41 +870,42 @@ fn test_complete_audit_trail() {
     for expected_event in expected_events {
         // REAL ASSERTION: Every expected audit event must be present
         assert!(
-            audit_events.iter().any(|e| e.event_code == expected_event),
-            "Missing required audit event: {}", expected_event
+            has_audit_event(audit_events, expected_event),
+            "Missing required audit event: {}",
+            expected_event
         );
     }
 
     // REAL ASSERTION: Audit events should have proper trace context
-    for event in &audit_events {
-        assert!(!event.trace_id.is_empty(),
-            "Audit event should have non-empty trace_id: {:?}", event);
-        assert!(!event.detail.is_null(),
-            "Audit event should have non-null detail: {:?}", event);
-    }
-
-    // REAL ASSERTION: Audit events should be in chronological order
-    let mut last_timestamp = 0u64;
-    for event in &audit_events {
-        if let Some(timestamp) = event.detail.get("timestamp_secs").and_then(|v| v.as_u64()) {
-            assert!(timestamp >= last_timestamp,
-                "Audit events should be chronologically ordered");
-            last_timestamp = timestamp;
-        }
+    for event in audit_events {
+        assert!(
+            !event.trace_id.is_empty(),
+            "Audit event should have non-empty trace_id: {:?}",
+            event
+        );
+        assert!(
+            !event.detail.is_null(),
+            "Audit event should have non-null detail: {:?}",
+            event
+        );
     }
 
     // Test audit log structure and content
-    let first_event = audit_events.iter()
-        .find(|e| e.event_code == event_codes::ID_ENTRY_NEW)
+    let first_event = audit_event(audit_events, event_codes::ID_ENTRY_NEW)
         .expect("Should have ID_ENTRY_NEW event");
 
     // REAL ASSERTION: Audit events should contain structured detail information
-    assert!(first_event.detail.get("key_namespace").is_some(),
-        "Audit event should contain key_namespace");
-    assert!(first_event.detail.get("key_value").is_some(),
-        "Audit event should contain key_value");
-    assert!(first_event.detail.get("payload_hash").is_some(),
-        "Audit event should contain payload_hash");
+    assert!(
+        first_event.detail.get("key_hex").is_some(),
+        "Audit event should contain key_hex"
+    );
+    assert_eq!(
+        first_event.detail.get("invariant").and_then(|v| v.as_str()),
+        Some(invariants::INV_IDS_AUDITABLE)
+    );
 
-    println!("Complete audit trail validated with {} events", audit_events.len());
+    println!(
+        "Complete audit trail validated with {} events",
+        audit_events.len()
+    );
 }
