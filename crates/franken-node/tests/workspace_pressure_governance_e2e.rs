@@ -1,17 +1,23 @@
 use assert_cmd::Command;
+use frankenengine_node::ops::doctor::{
+    AgentMailCoordinationSummary, AgentMailHealthState, WorkspacePressureDoctor,
+};
 use frankenengine_node::ops::workspace_pressure_policy::{
     AGENT_COMMAND_LEDGER_SCHEMA_VERSION, AdmissionDecision, AgentCommandBudgetEntry,
     AgentCommandBudgetLedger, AgentCommandCostClass, AgentCommandExecutionPolicy,
     AgentCommandFamily, AgentCommandLedgerError, AgentCommandPolicyViolation,
-    AgentCommandValidationOutcome, MAX_AGENT_COMMAND_LEDGER_ENTRIES,
-    OPERATOR_WHAT_IF_SCHEMA_VERSION, OperatorWhatIfAction, OperatorWhatIfArtifact,
-    OperatorWhatIfArtifactSafetyClass, OperatorWhatIfInput, OperatorWhatIfRchQueueState,
-    PolicyDecision, TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION, TargetDirLeaseArtifactClass,
-    TargetDirLeaseCommandFamily, TargetDirLeasePlanInput, TargetDirLeaseRoot,
-    TargetDirLeaseRootKind, WorkCostClass, WorkspaceHardwareTopologySnapshot,
-    WorkspacePressureInputs, WorkspacePressurePolicy, count_active_reservations_in_dir,
-    render_agent_command_ledger_human, render_target_dir_lease_plan_human,
-    target_dir_lease_reason_codes,
+    AgentCommandValidationOutcome, CROSS_REPO_BLOCKER_ENVELOPE_SCHEMA_VERSION,
+    CrossRepoBlockerEnvelopeInput, MAX_AGENT_COMMAND_LEDGER_ENTRIES,
+    NO_READY_AUTOPILOT_SCHEMA_VERSION, NoReadyAutopilotAction, NoReadyAutopilotInput,
+    NoReadyAutopilotRejectedAlternative, NoReadyBlockedBeadEvidence, NoReadyBlockerOrigin,
+    NoReadyInProgressBead, OPERATOR_WHAT_IF_SCHEMA_VERSION, OperatorWhatIfAction,
+    OperatorWhatIfArtifact, OperatorWhatIfArtifactSafetyClass, OperatorWhatIfInput,
+    OperatorWhatIfRchBuildState, OperatorWhatIfRchQueueState, PolicyDecision,
+    TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION, TargetDirLeaseArtifactClass, TargetDirLeaseCommandFamily,
+    TargetDirLeasePlanInput, TargetDirLeaseRoot, TargetDirLeaseRootKind, WorkCostClass,
+    WorkspaceHardwareTopologySnapshot, WorkspacePressureInputs, WorkspacePressurePolicy,
+    count_active_reservations_in_dir, render_agent_command_ledger_human,
+    render_target_dir_lease_plan_human, target_dir_lease_reason_codes,
 };
 use frankenengine_node::runtime::resource_governor::{
     ResourceArtifactInventory, ResourceArtifactInventoryEntry, ResourceArtifactKind,
@@ -68,6 +74,98 @@ fn agent_mail_reservation_counter_uses_active_unreleased_unexpired_leases() {
         count_active_reservations_in_dir(&dir.path().join("missing")),
         None
     );
+}
+
+#[test]
+fn agent_mail_coordination_summary_reports_archive_ahead_and_lock_owner() {
+    let payload = json!({
+        "status": "error",
+        "recovery_mode": "degraded_read_only",
+        "next_action": "am doctor repair",
+        "archive_inventory": {
+            "messages": 17_017_u64,
+            "agents": 1_760_u64
+        },
+        "database_inventory": {
+            "messages": 0_u64,
+            "agents": 0_u64
+        },
+        "lock_owner": {
+            "pid": 4_134_220_u64,
+            "command": "am"
+        }
+    });
+
+    let summary = AgentMailCoordinationSummary::from_health_payload(&payload);
+
+    assert_eq!(summary.health_state, AgentMailHealthState::LockOwnerActive);
+    assert!(!summary.healthy);
+    assert!(
+        summary
+            .signals
+            .iter()
+            .any(|signal| signal == "archive_ahead_index")
+    );
+    assert!(
+        summary
+            .signals
+            .iter()
+            .any(|signal| signal == "lock_owner_active")
+    );
+    assert_eq!(summary.archive_message_count, Some(17_017));
+    assert_eq!(summary.index_message_count, Some(0));
+    assert_eq!(summary.lock_owner_pid, Some(4_134_220));
+    assert_eq!(summary.lock_owner_command.as_deref(), Some("am"));
+    assert!(
+        summary
+            .safe_next_action
+            .contains("am doctor repair --dry-run")
+    );
+}
+
+#[test]
+fn workspace_pressure_doctor_exposes_agent_mail_coordination_json_and_human() {
+    let inputs = WorkspacePressureInputs {
+        free_disk_bytes: 2_000_000_000,
+        target_dir_bytes: 3_000_000_000,
+        active_build_count: 2,
+        rch_available_slots: Some(4),
+        memory_pressure: 0.4,
+        active_reservations: 2,
+        coordination_healthy: false,
+    };
+    let coordination = AgentMailCoordinationSummary::from_health_payload(&json!({
+        "status": "error",
+        "recovery_mode": "degraded_read_only",
+        "archive_inventory": {"messages": 9_u64, "agents": 3_u64},
+        "database_inventory": {"messages": 1_u64, "agents": 1_u64},
+        "next_action": "am doctor repair"
+    }));
+
+    let doctor = WorkspacePressureDoctor::new();
+    let report = doctor.generate_report_with_agent_mail_coordination(&inputs, coordination);
+    let rendered = serde_json::to_value(&report).expect("workspace pressure report serializes");
+    let human = doctor.format_human_report(&report);
+
+    assert_eq!(
+        rendered["resources"]["agent_mail_coordination"]["health_state"],
+        "archive_ahead_index"
+    );
+    assert_eq!(
+        rendered["resources"]["agent_mail_coordination"]["archive_message_count"],
+        9
+    );
+    assert_eq!(
+        rendered["resources"]["agent_mail_coordination"]["index_message_count"],
+        1
+    );
+    assert!(
+        rendered["resources"]["agent_mail_coordination"]["safe_next_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("am doctor repair"))
+    );
+    assert!(human.contains("Coordination: Degraded (archive_ahead_index)"));
+    assert!(human.contains("Coordination Action:"));
 }
 
 #[derive(Debug, Deserialize)]
@@ -702,7 +800,7 @@ fn operator_what_if_fixture_replay_is_deterministic_and_safe() -> Result<(), Str
         fixture.schema_version,
         "franken-node/operator-what-if-fixtures/v1"
     );
-    assert_eq!(fixture.scenarios.len(), 6);
+    assert_eq!(fixture.scenarios.len(), 9);
 
     let policy = WorkspacePressurePolicy::with_balanced_defaults();
     let mut names = BTreeSet::new();
@@ -794,11 +892,386 @@ fn operator_what_if_fixture_replay_is_deterministic_and_safe() -> Result<(), Str
             scenario.expected_log_event
         );
         assert!(report.human_summary.contains(&scenario.name));
+        if scenario.expected_reason_code == "VAL_DEFER_RCH_STALE" {
+            let stale_progress = report
+                .rch_stale_progress
+                .as_ref()
+                .expect("stale-progress scenario should carry RCH build evidence");
+            assert_eq!(stale_progress.active_builds.len(), 1);
+            let build = &stale_progress.active_builds[0];
+            assert_eq!(build.build_id, "29893806476230668");
+            assert_eq!(build.worker_id, "vmi1152480");
+            assert!(build.heartbeat_fresh);
+            assert!(build.progress_stale);
+            assert!(
+                report
+                    .human_summary
+                    .contains("29893806476230668@vmi1152480")
+            );
+            assert!(
+                report
+                    .human_summary
+                    .contains("Do not enqueue additional heavy cargo work")
+            );
+            assert!(
+                stale_progress
+                    .safe_next_action
+                    .contains("cancel only a build you own")
+            );
+        } else {
+            assert!(
+                report.rch_stale_progress.is_none(),
+                "{} unexpectedly carried stale RCH progress",
+                scenario.name
+            );
+        }
         serde_json::to_string_pretty(&report)
             .map_err(|err| format!("what-if report should serialize: {err}"))?;
     }
 
     Ok(())
+}
+
+#[test]
+fn no_ready_autopilot_creates_planning_bead_when_ready_empty_clean() {
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let receipt = policy.plan_no_ready_autopilot(no_ready_base_input("no-ready-clean"));
+
+    assert_eq!(receipt.schema_version, NO_READY_AUTOPILOT_SCHEMA_VERSION);
+    assert_eq!(
+        receipt.selected_action,
+        NoReadyAutopilotAction::CreatePlanningBead
+    );
+    assert_eq!(receipt.reason_code, "NO_READY_CREATE_PLANNING_BEAD");
+    assert_eq!(receipt.ready_issue_count, 0);
+    assert!(receipt.human_summary.contains("ready=0"));
+    assert!(
+        receipt
+            .pasteable_beads_note
+            .contains("last_ready_command=br ready --json")
+    );
+    assert!(no_ready_rejected_contains(
+        &receipt.rejected_alternatives,
+        NoReadyAutopilotAction::UseReadyWork
+    ));
+
+    let encoded = serde_json::to_value(&receipt).expect("no-ready receipt serializes");
+    assert_eq!(
+        encoded["selected_action"],
+        json!(NoReadyAutopilotAction::CreatePlanningBead)
+    );
+}
+
+#[test]
+fn no_ready_autopilot_refreshes_stale_in_progress_before_new_work() {
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let mut input = no_ready_base_input("no-ready-stale-in-progress");
+    input.in_progress_beads.push(NoReadyInProgressBead {
+        bead_id: "bd-stale.1".to_string(),
+        assignee: "NavyTurtle".to_string(),
+        updated_age_secs: 7_200,
+        status_summary: "claimed without validation update".to_string(),
+        reserved_paths: vec!["crates/franken-node/src/lib.rs".to_string()],
+    });
+
+    let receipt = policy.plan_no_ready_autopilot(input);
+
+    assert_eq!(
+        receipt.selected_action,
+        NoReadyAutopilotAction::RefreshStaleInProgress
+    );
+    assert_eq!(receipt.reason_code, "NO_READY_REFRESH_STALE_IN_PROGRESS");
+    assert_eq!(receipt.stale_in_progress_beads.len(), 1);
+    assert!(receipt.safe_next_action.contains("br show"));
+    assert!(receipt.pasteable_beads_note.contains("bd-stale.1"));
+    assert!(receipt.pasteable_beads_note.contains("NavyTurtle"));
+    assert!(no_ready_rejected_contains(
+        &receipt.rejected_alternatives,
+        NoReadyAutopilotAction::CreatePlanningBead
+    ));
+}
+
+#[test]
+fn no_ready_autopilot_defers_for_rch_pressure_and_preserves_blocker_text() {
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let mut input = no_ready_base_input("no-ready-rch-pressure");
+    input
+        .rch_queue
+        .active_builds
+        .push(OperatorWhatIfRchBuildState {
+            build_id: "29893806476230671".to_string(),
+            worker_id: "vmi1152480".to_string(),
+            command: "cargo test -p frankenengine-node workspace_pressure_governance_e2e"
+                .to_string(),
+            heartbeat_fresh: true,
+            progress_stale: true,
+            progress_age_secs: Some(172),
+        });
+    input.blocked_beads.push(NoReadyBlockedBeadEvidence {
+        bead_id: "bd-bf06i.2".to_string(),
+        origin: NoReadyBlockerOrigin::BuildInfrastructure,
+        owner: Some("LavenderTower".to_string()),
+        sibling_project: None,
+        blocker_command:
+            "rch exec -- cargo test -p frankenengine-node workspace_pressure_governance_e2e"
+                .to_string(),
+        first_blocker_line: "detector_progress_stale=true progress_age_secs=172".to_string(),
+        notes: "RCH heartbeat remained fresh while progress stayed stale".to_string(),
+    });
+
+    let receipt = policy.plan_no_ready_autopilot(input);
+
+    assert_eq!(
+        receipt.selected_action,
+        NoReadyAutopilotAction::DeferForRchPressure
+    );
+    assert_eq!(receipt.reason_code, "NO_READY_DEFER_RCH_STALE");
+    assert!(
+        receipt
+            .rch_stale_progress
+            .as_ref()
+            .is_some_and(|progress| progress.active_builds.len() == 1)
+    );
+    assert!(
+        receipt
+            .human_summary
+            .contains("29893806476230671@vmi1152480")
+    );
+    assert!(
+        receipt
+            .pasteable_beads_note
+            .contains("rch exec -- cargo test -p frankenengine-node")
+    );
+    assert!(
+        receipt
+            .pasteable_beads_note
+            .contains("detector_progress_stale=true progress_age_secs=172")
+    );
+    assert!(no_ready_rejected_contains(
+        &receipt.rejected_alternatives,
+        NoReadyAutopilotAction::RefreshBlockedEvidence
+    ));
+}
+
+#[test]
+fn no_ready_autopilot_handoffs_cross_repo_blockers_without_optimism() {
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let mut input = no_ready_base_input("no-ready-cross-repo");
+    input.blocked_beads.push(NoReadyBlockedBeadEvidence {
+        bead_id: "bd-f5b04.2.6".to_string(),
+        origin: NoReadyBlockerOrigin::SiblingRepository,
+        owner: Some("NavyTurtle".to_string()),
+        sibling_project: Some("/data/projects/franken_engine".to_string()),
+        blocker_command: "rch exec -- cargo test -p frankenengine-engine data_contract".to_string(),
+        first_blocker_line: "HostIoProvider proof missing from committed franken_engine head"
+            .to_string(),
+        notes: "franken_node must wait for a committed sibling revision".to_string(),
+    });
+
+    let receipt = policy.plan_no_ready_autopilot(input);
+
+    assert_eq!(
+        receipt.selected_action,
+        NoReadyAutopilotAction::HandoffCrossRepoBlocker
+    );
+    assert_eq!(receipt.reason_code, "NO_READY_HANDOFF_CROSS_REPO");
+    assert!(
+        receipt
+            .safe_next_action
+            .contains("/data/projects/franken_engine")
+    );
+    assert!(receipt.pasteable_beads_note.contains("bd-f5b04.2.6"));
+    assert!(
+        receipt
+            .pasteable_beads_note
+            .contains("HostIoProvider proof missing")
+    );
+    assert!(no_ready_rejected_contains(
+        &receipt.rejected_alternatives,
+        NoReadyAutopilotAction::CreatePlanningBead
+    ));
+}
+
+#[test]
+fn cross_repo_blocker_envelope_allows_retry_only_after_required_commit() {
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let input = host_io_provider_blocker_input(true, Some("fe-hostio-2026-06-18T21-commit-a1"));
+
+    let envelope = policy.build_cross_repo_blocker_envelope(input);
+    let rendered = serde_json::to_value(&envelope).expect("envelope serializes");
+
+    assert_eq!(
+        envelope.schema_version,
+        CROSS_REPO_BLOCKER_ENVELOPE_SCHEMA_VERSION
+    );
+    assert_eq!(envelope.reason_code, "XREPO_BLOCKER_COMMITTED_READY");
+    assert!(envelope.retry_validation_allowed);
+    assert!(envelope.sufficient_to_unblock);
+    assert!(!envelope.beads_status_change_allowed);
+    assert_eq!(rendered["sibling_project"], "/data/projects/franken_engine");
+    assert_eq!(rendered["sibling_bead_id"], "bd-f5b04.2.6");
+    assert_eq!(rendered["agent_mail_thread_id"], "bd-f5b04.2.6");
+    assert_eq!(rendered["agent_mail_message_id"], "37");
+    assert_eq!(rendered["rch_build_id"], "29893806476230674");
+    assert_eq!(
+        rendered["required_committed_revision"],
+        "fe-hostio-2026-06-18T21-commit-a1"
+    );
+    assert!(
+        envelope
+            .safe_next_action
+            .contains("do not close or unblock until validation passes")
+    );
+    assert!(
+        envelope
+            .pasteable_beads_note
+            .contains("beads_status_change_allowed=false")
+    );
+    assert!(
+        envelope
+            .agent_mail_handoff_body
+            .contains("HostIoProvider proof missing")
+    );
+    assert!(envelope.human_summary.contains("NavyTurtle"));
+    assert!(
+        envelope
+            .human_summary
+            .contains("/data/projects/franken_engine")
+    );
+}
+
+#[test]
+fn cross_repo_blocker_envelope_rejects_uncommitted_evidence_as_unblock_proof() {
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let input = host_io_provider_blocker_input(false, Some("working-tree-hostio-proof"));
+
+    let envelope = policy.build_cross_repo_blocker_envelope(input);
+
+    assert_eq!(envelope.reason_code, "XREPO_BLOCKER_UNCOMMITTED_EVIDENCE");
+    assert!(!envelope.retry_validation_allowed);
+    assert!(!envelope.sufficient_to_unblock);
+    assert!(!envelope.beads_status_change_allowed);
+    assert!(
+        envelope
+            .safe_next_action
+            .contains("commit the required evidence revision")
+    );
+    assert!(
+        envelope
+            .pasteable_beads_note
+            .contains("observed_revision_committed=false")
+    );
+    assert!(
+        envelope
+            .pasteable_beads_note
+            .contains("sufficient_to_unblock=false")
+    );
+    assert!(
+        envelope
+            .agent_mail_handoff_body
+            .contains("retry_validation_allowed=false")
+    );
+    assert!(
+        envelope
+            .human_summary
+            .contains("beads_status_change_allowed=false")
+    );
+}
+
+#[test]
+fn cross_repo_blocker_envelope_preserves_external_rch_blocker_metadata() {
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let input = CrossRepoBlockerEnvelopeInput {
+        envelope_id: "xrepo-rch-stale-29893806476230674".to_string(),
+        franken_node_bead_id: "bd-bf06i.3".to_string(),
+        blocker_origin: NoReadyBlockerOrigin::BuildInfrastructure,
+        next_owner: "LavenderTower".to_string(),
+        sibling_project: None,
+        sibling_bead_id: None,
+        agent_mail_thread_id: Some("bd-bf06i.3".to_string()),
+        agent_mail_message_id: None,
+        rch_build_id: Some("29893806476230674".to_string()),
+        required_committed_revision: "rch-worker-progress-fresh".to_string(),
+        observed_revision: Some("rch-worker-progress-fresh".to_string()),
+        observed_revision_committed: true,
+        validation_command:
+            "rch exec -- cargo test -p frankenengine-node --test workspace_pressure_governance_e2e no_ready_autopilot"
+                .to_string(),
+        first_blocker_line:
+            "detector_progress_stale=true progress_age_secs=209 heartbeat_age_secs=4"
+                .to_string(),
+    };
+
+    let envelope = policy.build_cross_repo_blocker_envelope(input);
+
+    assert_eq!(envelope.reason_code, "XREPO_BLOCKER_BUILD_READY");
+    assert!(envelope.retry_validation_allowed);
+    assert_eq!(envelope.rch_build_id.as_deref(), Some("29893806476230674"));
+    assert!(
+        envelope
+            .pasteable_beads_note
+            .contains("rch_build_id=29893806476230674")
+    );
+    assert!(
+        envelope
+            .agent_mail_handoff_body
+            .contains("detector_progress_stale=true")
+    );
+}
+
+fn host_io_provider_blocker_input(
+    observed_revision_committed: bool,
+    observed_revision: Option<&str>,
+) -> CrossRepoBlockerEnvelopeInput {
+    CrossRepoBlockerEnvelopeInput {
+        envelope_id: "xrepo-bd-f5b04-2-6-hostio-provider".to_string(),
+        franken_node_bead_id: "bd-bf06i.4".to_string(),
+        blocker_origin: NoReadyBlockerOrigin::SiblingRepository,
+        next_owner: "NavyTurtle".to_string(),
+        sibling_project: Some("/data/projects/franken_engine".to_string()),
+        sibling_bead_id: Some("bd-f5b04.2.6".to_string()),
+        agent_mail_thread_id: Some("bd-f5b04.2.6".to_string()),
+        agent_mail_message_id: Some("37".to_string()),
+        rch_build_id: Some("29893806476230674".to_string()),
+        required_committed_revision: "fe-hostio-2026-06-18T21-commit-a1".to_string(),
+        observed_revision: observed_revision.map(str::to_string),
+        observed_revision_committed,
+        validation_command:
+            "rch exec -- cargo test -p frankenengine-node --test workspace_pressure_governance_e2e cross_repo_blocker"
+                .to_string(),
+        first_blocker_line:
+            "HostIoProvider proof missing from committed franken_engine head".to_string(),
+    }
+}
+
+fn no_ready_base_input(receipt_id: &str) -> NoReadyAutopilotInput {
+    NoReadyAutopilotInput {
+        receipt_id: receipt_id.to_string(),
+        workspace_root: REPO_KEY.to_string(),
+        ready_issue_count: 0,
+        open_issue_count: 5,
+        blocked_issue_count: 2,
+        in_progress_beads: Vec::new(),
+        blocked_beads: Vec::new(),
+        rch_queue: OperatorWhatIfRchQueueState {
+            available_slots: Some(8),
+            queued_jobs: 0,
+            degraded_workers: 0,
+            local_fallback_allowed: false,
+            active_builds: Vec::new(),
+        },
+        last_ready_command: Some("br ready --json".to_string()),
+        idea_wizard_allowed: true,
+    }
+}
+
+fn no_ready_rejected_contains(
+    alternatives: &[NoReadyAutopilotRejectedAlternative],
+    action: NoReadyAutopilotAction,
+) -> bool {
+    alternatives
+        .iter()
+        .any(|alternative| alternative.action == action)
 }
 
 fn operator_what_if_fixture_ledger(kind: &str) -> Result<AgentCommandBudgetLedger, String> {
