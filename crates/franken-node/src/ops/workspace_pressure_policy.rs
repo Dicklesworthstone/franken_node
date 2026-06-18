@@ -44,6 +44,10 @@ pub const NO_READY_AUTOPILOT_SCHEMA_VERSION: &str = "franken-node/no-ready-autop
 pub const CROSS_REPO_BLOCKER_ENVELOPE_SCHEMA_VERSION: &str =
     "franken-node/cross-repo-blocker-envelope/v1";
 
+/// Schema version for mock-free swarm coordination drill reports.
+pub const SWARM_COORDINATION_DRILL_SCHEMA_VERSION: &str =
+    "franken-node/swarm-coordination-drill/v1";
+
 /// Schema version for workspace-pressure to hardware-planner bridge decisions.
 pub const WORKSPACE_HARDWARE_ADMISSION_SCHEMA_VERSION: &str =
     "franken-node/workspace-hardware-admission/v1";
@@ -662,6 +666,33 @@ pub struct NoReadyAutopilotReceipt {
     pub rch_stale_progress: Option<OperatorWhatIfRchStaleProgress>,
     pub rejected_alternatives: Vec<NoReadyAutopilotRejectedAlternative>,
     pub pasteable_beads_note: String,
+    pub human_summary: String,
+}
+
+/// Inputs for a read-only coordination drill across mail, Beads, RCH, and blocker handoff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmCoordinationDrillInput {
+    pub drill_id: String,
+    pub agent_mail_health_state: String,
+    pub agent_mail_backend_degraded: bool,
+    pub operator_input: OperatorWhatIfInput,
+    pub no_ready_input: NoReadyAutopilotInput,
+    pub blocker_envelope_input: CrossRepoBlockerEnvelopeInput,
+}
+
+/// Deterministic drill report. It never mutates Beads, starts cargo, or releases reservations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmCoordinationDrillReport {
+    pub schema_version: String,
+    pub drill_id: String,
+    pub selected_action: NoReadyAutopilotAction,
+    pub reason_code: String,
+    pub safe_next_action: String,
+    pub cargo_heavy_dispatch_allowed: bool,
+    pub operator_report: OperatorWhatIfReport,
+    pub no_ready_receipt: NoReadyAutopilotReceipt,
+    pub blocker_envelope: CrossRepoBlockerEnvelope,
+    pub logs: Vec<OperatorWhatIfLog>,
     pub human_summary: String,
 }
 
@@ -1662,6 +1693,86 @@ impl WorkspacePressurePolicy {
         }
     }
 
+    /// Compose the live operator safety contracts into one read-only coordination drill.
+    pub fn run_swarm_coordination_drill(
+        &self,
+        input: SwarmCoordinationDrillInput,
+    ) -> SwarmCoordinationDrillReport {
+        let operator_report = self.simulate_operator_what_if(input.operator_input);
+        let no_ready_receipt = self.plan_no_ready_autopilot(input.no_ready_input);
+        let blocker_envelope = self.build_cross_repo_blocker_envelope(input.blocker_envelope_input);
+
+        let cargo_heavy_dispatch_allowed = !input.agent_mail_backend_degraded
+            && !matches!(
+                no_ready_receipt.selected_action,
+                NoReadyAutopilotAction::DeferForRchPressure
+            )
+            && !(operator_report.action == OperatorWhatIfAction::Wait
+                && operator_report.reason_code == "VAL_DEFER_RCH_STALE");
+
+        let mut logs = Vec::new();
+        push_operator_log(
+            &mut logs,
+            "SWARM-DRILL-MAIL-DEGRADED",
+            format!(
+                "agent_mail_health_state={} backend_degraded={}",
+                input.agent_mail_health_state, input.agent_mail_backend_degraded
+            ),
+        );
+        push_operator_log(
+            &mut logs,
+            "SWARM-DRILL-READY-EMPTY",
+            format!(
+                "ready={} open={} blocked={} selected_action={}",
+                no_ready_receipt.ready_issue_count,
+                no_ready_receipt.open_issue_count,
+                no_ready_receipt.blocked_issue_count,
+                no_ready_receipt.selected_action.as_str()
+            ),
+        );
+        if no_ready_receipt.rch_stale_progress.is_some() {
+            push_operator_log(
+                &mut logs,
+                "SWARM-DRILL-RCH-DEFER",
+                no_ready_receipt.safe_next_action.clone(),
+            );
+        }
+        push_operator_log(
+            &mut logs,
+            "SWARM-DRILL-BLOCKER-ENVELOPE",
+            format!(
+                "envelope={} reason={} retry_validation_allowed={} beads_status_change_allowed={}",
+                blocker_envelope.envelope_id,
+                blocker_envelope.reason_code,
+                blocker_envelope.retry_validation_allowed,
+                blocker_envelope.beads_status_change_allowed
+            ),
+        );
+        logs.extend(operator_report.logs.iter().cloned());
+        let logs = limit_operator_logs(logs);
+        let human_summary = render_swarm_coordination_drill_human_summary(
+            &input.drill_id,
+            &no_ready_receipt,
+            &operator_report,
+            &blocker_envelope,
+            cargo_heavy_dispatch_allowed,
+        );
+
+        SwarmCoordinationDrillReport {
+            schema_version: SWARM_COORDINATION_DRILL_SCHEMA_VERSION.to_string(),
+            drill_id: input.drill_id,
+            selected_action: no_ready_receipt.selected_action,
+            reason_code: no_ready_receipt.reason_code.clone(),
+            safe_next_action: no_ready_receipt.safe_next_action.clone(),
+            cargo_heavy_dispatch_allowed,
+            operator_report,
+            no_ready_receipt,
+            blocker_envelope,
+            logs,
+            human_summary,
+        }
+    }
+
     /// Build a deterministic handoff envelope for sibling-repo or build-infrastructure blockers.
     pub fn build_cross_repo_blocker_envelope(
         &self,
@@ -2269,7 +2380,7 @@ fn select_no_ready_autopilot_action(
     {
         return NoReadyAutopilotAction::HandoffCrossRepoBlocker;
     }
-    if !blocked_evidence.is_empty() || input.blocked_issue_count > 0 {
+    if !blocked_evidence.is_empty() {
         return NoReadyAutopilotAction::RefreshBlockedEvidence;
     }
     if input.idea_wizard_allowed {
@@ -2546,10 +2657,12 @@ fn build_no_ready_rejected_alternatives(
         ),
         (
             NoReadyAutopilotAction::RefreshBlockedEvidence,
-            if blocked_evidence.is_empty() && input.blocked_issue_count == 0 {
-                "rejected because no blocked-bead evidence was present"
-            } else {
+            if !blocked_evidence.is_empty() {
                 "rejected because a more specific blocked-work action was selected"
+            } else if input.blocked_issue_count > 0 {
+                "rejected because blocked beads were counted but no blocker evidence rows were present"
+            } else {
+                "rejected because no blocked-bead evidence was present"
             },
         ),
         (
@@ -2662,6 +2775,25 @@ fn render_no_ready_human_summary(
         blocked_evidence_count,
         rch_stale_builds,
         safe_next_action,
+    )
+}
+
+fn render_swarm_coordination_drill_human_summary(
+    drill_id: &str,
+    no_ready_receipt: &NoReadyAutopilotReceipt,
+    operator_report: &OperatorWhatIfReport,
+    blocker_envelope: &CrossRepoBlockerEnvelope,
+    cargo_heavy_dispatch_allowed: bool,
+) -> String {
+    format!(
+        "swarm coordination drill: drill={} action={} reason={} cargo_heavy_dispatch_allowed={} operator_reason={} blocker_reason={} safe_next_action={}",
+        drill_id,
+        no_ready_receipt.selected_action.as_str(),
+        no_ready_receipt.reason_code,
+        cargo_heavy_dispatch_allowed,
+        operator_report.reason_code,
+        blocker_envelope.reason_code,
+        no_ready_receipt.safe_next_action,
     )
 }
 

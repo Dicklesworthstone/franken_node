@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use frankenengine_node::ops::doctor::{
-    AgentMailCoordinationSummary, AgentMailHealthState, WorkspacePressureDoctor,
+    AgentMailCoordinationSummary, AgentMailHealthState, ReservationHygieneState,
+    WorkspacePressureDoctor,
 };
 use frankenengine_node::ops::workspace_pressure_policy::{
     AGENT_COMMAND_LEDGER_SCHEMA_VERSION, AdmissionDecision, AgentCommandBudgetEntry,
@@ -13,6 +14,7 @@ use frankenengine_node::ops::workspace_pressure_policy::{
     NoReadyInProgressBead, OPERATOR_WHAT_IF_SCHEMA_VERSION, OperatorWhatIfAction,
     OperatorWhatIfArtifact, OperatorWhatIfArtifactSafetyClass, OperatorWhatIfInput,
     OperatorWhatIfRchBuildState, OperatorWhatIfRchQueueState, PolicyDecision,
+    SWARM_COORDINATION_DRILL_SCHEMA_VERSION, SwarmCoordinationDrillInput,
     TARGET_DIR_LEASE_PLAN_SCHEMA_VERSION, TargetDirLeaseArtifactClass, TargetDirLeaseCommandFamily,
     TargetDirLeasePlanInput, TargetDirLeaseRoot, TargetDirLeaseRootKind, WorkCostClass,
     WorkspaceHardwareTopologySnapshot, WorkspacePressureInputs, WorkspacePressurePolicy,
@@ -166,6 +168,226 @@ fn workspace_pressure_doctor_exposes_agent_mail_coordination_json_and_human() {
     );
     assert!(human.contains("Coordination: Degraded (archive_ahead_index)"));
     assert!(human.contains("Coordination Action:"));
+}
+
+#[test]
+fn reservation_hygiene_lists_healthy_active_reservation_owner_path_and_expiry() {
+    let expires_ts = (chrono::Utc::now() + chrono::Duration::minutes(45)).to_rfc3339();
+    let coordination = AgentMailCoordinationSummary::from_health_payload(&json!({
+        "status": "healthy",
+        "file_reservations": {
+            "active": [{
+                "id": 57_u64,
+                "agent_name": "LavenderTower",
+                "path_pattern": "crates/franken-node/src/ops/doctor.rs",
+                "expires_ts": expires_ts
+            }]
+        }
+    }));
+
+    assert!(coordination.healthy);
+    assert_eq!(
+        coordination.reservation_hygiene.state,
+        ReservationHygieneState::Healthy
+    );
+    assert_eq!(coordination.reservation_hygiene.active_count, 1);
+    assert_eq!(coordination.reservation_hygiene.stale_count, 0);
+    assert_eq!(coordination.reservation_hygiene.expired_count, 0);
+    assert!(!coordination.reservation_hygiene.backend_degraded);
+    assert!(
+        coordination
+            .reservation_hygiene
+            .safe_next_action
+            .contains("contact the owner")
+    );
+
+    let inputs = WorkspacePressureInputs {
+        free_disk_bytes: 2_000_000_000,
+        target_dir_bytes: 3_000_000_000,
+        active_build_count: 1,
+        rch_available_slots: Some(4),
+        memory_pressure: 0.3,
+        active_reservations: 1,
+        coordination_healthy: true,
+    };
+    let doctor = WorkspacePressureDoctor::new();
+    let report = doctor.generate_report_with_agent_mail_coordination(&inputs, coordination);
+    let rendered = serde_json::to_value(&report).expect("workspace pressure report serializes");
+    let human = doctor.format_human_report(&report);
+
+    assert_eq!(
+        rendered["resources"]["agent_mail_coordination"]["reservation_hygiene"]["state"],
+        "healthy"
+    );
+    assert_eq!(
+        rendered["resources"]["agent_mail_coordination"]["reservation_hygiene"]["reservations"][0]
+            ["owner"],
+        "LavenderTower"
+    );
+    assert_eq!(
+        rendered["resources"]["agent_mail_coordination"]["reservation_hygiene"]["reservations"][0]
+            ["path_pattern"],
+        "crates/franken-node/src/ops/doctor.rs"
+    );
+    assert!(
+        rendered["resources"]["agent_mail_coordination"]["reservation_hygiene"]["beads_comment"]
+            .as_str()
+            .is_some_and(|comment| comment.contains("owner=LavenderTower")
+                && comment.contains("path=crates/franken-node/src/ops/doctor.rs"))
+    );
+    assert!(human.contains("Reservation Hygiene: healthy"));
+    assert!(human.contains("owner=LavenderTower"));
+    assert!(human.contains("path=crates/franken-node/src/ops/doctor.rs"));
+}
+
+#[test]
+fn reservation_hygiene_recommends_owner_contact_for_expired_stale_reservation() {
+    let expires_ts = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    let coordination = AgentMailCoordinationSummary::from_health_payload(&json!({
+        "status": "healthy",
+        "file_reservations": {
+            "active": [{
+                "reservation_id": "agent-mail-reservation-17314",
+                "owner": "NavyTurtle",
+                "path": ".beads/issues.jsonl",
+                "expires_ts": expires_ts,
+                "stale": true
+            }]
+        }
+    }));
+
+    assert_eq!(
+        coordination.reservation_hygiene.state,
+        ReservationHygieneState::StaleReservations
+    );
+    assert_eq!(coordination.reservation_hygiene.active_count, 1);
+    assert_eq!(coordination.reservation_hygiene.stale_count, 1);
+    assert_eq!(coordination.reservation_hygiene.expired_count, 1);
+    assert!(
+        coordination
+            .reservation_hygiene
+            .force_release_requires_human
+    );
+    assert!(
+        coordination
+            .reservation_hygiene
+            .safe_next_action
+            .contains("force-release only after explicit human approval")
+    );
+    assert!(
+        coordination
+            .reservation_hygiene
+            .agent_mail_status_body
+            .contains("agent-mail-reservation-17314")
+    );
+
+    let inputs = WorkspacePressureInputs {
+        free_disk_bytes: 2_000_000_000,
+        target_dir_bytes: 3_000_000_000,
+        active_build_count: 1,
+        rch_available_slots: Some(4),
+        memory_pressure: 0.3,
+        active_reservations: 1,
+        coordination_healthy: true,
+    };
+    let doctor = WorkspacePressureDoctor::new();
+    let report = doctor.generate_report_with_agent_mail_coordination(&inputs, coordination);
+    let rendered = serde_json::to_value(&report).expect("workspace pressure report serializes");
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("reservation_hygiene=stale_reservations"))
+    );
+    assert!(
+        report
+            .recommended_actions
+            .iter()
+            .any(|action| action.action == "Review Agent Mail reservations"
+                && action.command.is_none()
+                && action.explanation.contains("release or renewal"))
+    );
+    assert_eq!(
+        rendered["resources"]["agent_mail_coordination"]["reservation_hygiene"]["reservations"][0]
+            ["expired"],
+        true
+    );
+}
+
+#[test]
+fn reservation_hygiene_marks_degraded_mail_release_as_retry_only() {
+    let expires_ts = (chrono::Utc::now() + chrono::Duration::minutes(45)).to_rfc3339();
+    let coordination = AgentMailCoordinationSummary::from_health_payload(&json!({
+        "status": "error",
+        "recovery_mode": "degraded_read_only",
+        "next_action": "am doctor repair",
+        "file_reservations": {
+            "active": [{
+                "id": 59_u64,
+                "agent_name": "RainyRidge",
+                "path_pattern": "crates/franken-node/tests/workspace_pressure_governance_e2e.rs",
+                "expires_ts": expires_ts
+            }]
+        }
+    }));
+
+    assert_eq!(
+        coordination.health_state,
+        AgentMailHealthState::DegradedReadOnly
+    );
+    assert_eq!(
+        coordination.reservation_hygiene.state,
+        ReservationHygieneState::DegradedMail
+    );
+    assert!(coordination.reservation_hygiene.backend_degraded);
+    assert_eq!(coordination.reservation_hygiene.active_count, 1);
+    assert_eq!(coordination.reservation_hygiene.stale_count, 0);
+    assert_eq!(coordination.reservation_hygiene.expired_count, 0);
+    assert!(
+        coordination
+            .reservation_hygiene
+            .safe_next_action
+            .contains("retry normal Agent Mail release after repair")
+    );
+    assert!(
+        coordination
+            .reservation_hygiene
+            .safe_next_action
+            .contains("explicit human approval")
+    );
+
+    let inputs = WorkspacePressureInputs {
+        free_disk_bytes: 2_000_000_000,
+        target_dir_bytes: 3_000_000_000,
+        active_build_count: 1,
+        rch_available_slots: Some(4),
+        memory_pressure: 0.3,
+        active_reservations: 1,
+        coordination_healthy: false,
+    };
+    let doctor = WorkspacePressureDoctor::new();
+    let report = doctor.generate_report_with_agent_mail_coordination(&inputs, coordination);
+    let rendered = serde_json::to_value(&report).expect("workspace pressure report serializes");
+    let human = doctor.format_human_report(&report);
+
+    assert_eq!(
+        rendered["resources"]["agent_mail_coordination"]["reservation_hygiene"]["state"],
+        "degraded_mail"
+    );
+    assert_eq!(
+        rendered["resources"]["agent_mail_coordination"]["reservation_hygiene"]["backend_degraded"],
+        true
+    );
+    assert!(
+        rendered["resources"]["agent_mail_coordination"]["reservation_hygiene"]["beads_comment"]
+            .as_str()
+            .is_some_and(|comment| comment.contains("backend_degraded=true")
+                && comment.contains("force_release_requires_human=true"))
+    );
+    assert!(human.contains("Reservation Hygiene: degraded_mail"));
+    assert!(human.contains("mail_degraded=true"));
+    assert!(human.contains("Reservation Action:"));
 }
 
 #[derive(Debug, Deserialize)]
@@ -1217,6 +1439,186 @@ fn cross_repo_blocker_envelope_preserves_external_rch_blocker_metadata() {
             .agent_mail_handoff_body
             .contains("detector_progress_stale=true")
     );
+}
+
+#[test]
+fn mock_free_swarm_coordination_drill_defers_cargo_with_structured_logs() {
+    let policy = WorkspacePressurePolicy::with_balanced_defaults();
+    let coordination = AgentMailCoordinationSummary::from_health_payload(&json!({
+        "status": "error",
+        "recovery_mode": "degraded_read_only",
+        "archive_inventory": {"messages": 51_u64, "agents": 7_u64},
+        "database_inventory": {"messages": 51_u64, "agents": 7_u64},
+        "next_action": "am doctor repair --dry-run",
+        "file_reservations": {
+            "active": [{
+                "id": 146_u64,
+                "agent_name": "LavenderTower",
+                "path_pattern": "crates/franken-node/tests/workspace_pressure_governance_e2e.rs",
+                "expires_ts": (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339()
+            }]
+        }
+    }));
+    assert_eq!(
+        coordination.health_state,
+        AgentMailHealthState::DegradedReadOnly
+    );
+    assert!(!coordination.healthy);
+
+    let rch_queue = OperatorWhatIfRchQueueState {
+        available_slots: Some(8),
+        queued_jobs: 0,
+        degraded_workers: 0,
+        local_fallback_allowed: false,
+        active_builds: vec![OperatorWhatIfRchBuildState {
+            build_id: "29893986646753286".to_string(),
+            worker_id: "vmi1149989".to_string(),
+            command: "cargo test -p frankenengine-node --test workspace_pressure_governance_e2e"
+                .to_string(),
+            heartbeat_fresh: true,
+            progress_stale: true,
+            progress_age_secs: Some(367),
+        }],
+    };
+    let workspace = WorkspacePressureInputs {
+        free_disk_bytes: 2_000_000_000,
+        target_dir_bytes: 3_000_000_000,
+        active_build_count: 1,
+        rch_available_slots: Some(8),
+        memory_pressure: 0.4,
+        active_reservations: coordination.reservation_hygiene.active_count,
+        coordination_healthy: coordination.healthy,
+    };
+    let operator_input = OperatorWhatIfInput {
+        scenario_id: "bd-bf06i.6-swarm-drill".to_string(),
+        bead_id: Some("bd-bf06i.6".to_string()),
+        work_class: WorkCostClass::Validation,
+        bead_priority: 2,
+        requested_command: Some(
+            "cargo test -p frankenengine-node --test workspace_pressure_governance_e2e"
+                .to_string(),
+        ),
+        workspace,
+        rch_queue: rch_queue.clone(),
+        artifacts: vec![OperatorWhatIfArtifact {
+            path: "/data/projects/franken_node/target/debug".to_string(),
+            size_bytes: 2_048,
+            safety_class: OperatorWhatIfArtifactSafetyClass::Protected,
+            reason: "active validation target must not be cleaned during drill".to_string(),
+            pinned_by: Some("bd-bf06i.6".to_string()),
+        }],
+        command_ledger: Some(
+            AgentCommandBudgetLedger::try_new(
+                "session-bd-bf06i-6",
+                "LavenderTower",
+                Some("bd-bf06i.6".to_string()),
+                vec![
+                    AgentCommandBudgetEntry::new(
+                        "cmd-rch-drill",
+                        AgentCommandFamily::Cargo,
+                        AgentCommandCostClass::RchRemote,
+                        AgentCommandExecutionPolicy::RchRequired,
+                        "rch exec -- cargo test -p frankenengine-node --test workspace_pressure_governance_e2e",
+                    )
+                    .with_touched_paths([
+                        "crates/franken-node/src/ops/workspace_pressure_policy.rs",
+                        "crates/franken-node/tests/workspace_pressure_governance_e2e.rs",
+                    ])
+                    .with_reservation_refs(["agent-mail-reservation-146"])
+                    .with_validation_outcome(AgentCommandValidationOutcome::Blocked),
+                ],
+            )
+            .expect("drill command ledger should validate"),
+        ),
+        stale_sibling_blocker: None,
+    };
+    let mut no_ready_input = no_ready_base_input("bd-bf06i.6-no-ready-drill");
+    no_ready_input.open_issue_count = 1;
+    no_ready_input.blocked_issue_count = 1;
+    no_ready_input.rch_queue = rch_queue;
+    no_ready_input
+        .blocked_beads
+        .push(NoReadyBlockedBeadEvidence {
+            bead_id: "bd-f5b04.2.6".to_string(),
+            origin: NoReadyBlockerOrigin::SiblingRepository,
+            owner: Some("NavyTurtle".to_string()),
+            sibling_project: Some("/data/projects/franken_engine".to_string()),
+            blocker_command: "rch exec -- cargo test -p frankenengine-engine data_contract"
+                .to_string(),
+            first_blocker_line: "HostIoProvider proof missing from committed franken_engine head"
+                .to_string(),
+            notes: "cross-repo blocker still needs evidence refresh".to_string(),
+        });
+
+    let report = policy.run_swarm_coordination_drill(SwarmCoordinationDrillInput {
+        drill_id: "bd-bf06i.6".to_string(),
+        agent_mail_health_state: "degraded_read_only".to_string(),
+        agent_mail_backend_degraded: !coordination.healthy,
+        operator_input,
+        no_ready_input,
+        blocker_envelope_input: host_io_provider_blocker_input(
+            false,
+            Some("working-tree-hostio-proof"),
+        ),
+    });
+
+    assert_eq!(
+        report.schema_version,
+        SWARM_COORDINATION_DRILL_SCHEMA_VERSION
+    );
+    assert_eq!(
+        report.selected_action,
+        NoReadyAutopilotAction::DeferForRchPressure
+    );
+    assert_eq!(report.reason_code, "NO_READY_DEFER_RCH_STALE");
+    assert!(!report.cargo_heavy_dispatch_allowed);
+    assert_eq!(report.operator_report.action, OperatorWhatIfAction::Wait);
+    assert_eq!(report.operator_report.reason_code, "VAL_DEFER_RCH_STALE");
+    assert!(
+        report
+            .operator_report
+            .simulated_command
+            .as_deref()
+            .is_some_and(|command| command.starts_with("rch exec -- cargo test"))
+    );
+    assert_eq!(
+        report.blocker_envelope.reason_code,
+        "XREPO_BLOCKER_UNCOMMITTED_EVIDENCE"
+    );
+    assert!(!report.blocker_envelope.retry_validation_allowed);
+    assert!(
+        report.no_ready_receipt.rejected_alternatives.iter().any(
+            |alternative| alternative.action == NoReadyAutopilotAction::HandoffCrossRepoBlocker
+        )
+    );
+    assert!(
+        report
+            .safe_next_action
+            .contains("Do not enqueue additional heavy cargo work")
+    );
+    assert!(
+        report
+            .human_summary
+            .contains("cargo_heavy_dispatch_allowed=false")
+    );
+
+    let event_codes = report
+        .logs
+        .iter()
+        .map(|log| log.event_code.as_str())
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        "SWARM-DRILL-MAIL-DEGRADED",
+        "SWARM-DRILL-READY-EMPTY",
+        "SWARM-DRILL-RCH-DEFER",
+        "SWARM-DRILL-BLOCKER-ENVELOPE",
+        "OP-WHATIF-010",
+    ] {
+        assert!(event_codes.contains(expected), "missing event {expected}");
+    }
+    let rendered = serde_json::to_value(&report).expect("drill report serializes");
+    assert_eq!(rendered["selected_action"], "defer_for_rch_pressure");
+    assert_eq!(rendered["cargo_heavy_dispatch_allowed"], false);
 }
 
 fn host_io_provider_blocker_input(
