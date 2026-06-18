@@ -22,7 +22,13 @@ readiness records as green cargo proof.
 | Runbook ID | Scenario | Markdown | Related Spec | Last Reviewed | Cadence |
 |---|---|---|---|---|---|
 | VAL-001 | Proof-lane readiness blockers | `docs/runbooks/proof_lane_readiness_blockers.md` | `docs/specs/proof_lane_readiness.md` | 2026-05-07 | per_release_cycle |
-| VAL-002 | No-ready swarm recovery | `docs/runbooks/no_ready_swarm_recovery.md` | `docs/specs/validation_flight_recorder.md` | 2026-06-18 | per_release_cycle |
+| VAL-002 | No-ready swarm recovery | `docs/runbooks/no_ready_swarm_recovery.md` | `docs/specs/validation_autopilot.md` | 2026-06-18 | per_release_cycle |
+
+VAL-002 uses `scripts/check_validation_autopilot.py` as a dry-run planner and
+keeps fixture-backed transcript coverage in
+`tests/fixtures/validation_autopilot/transcript_cases.json`,
+`tests/golden/validation_autopilot/transcript_golden.json`, and
+`artifacts/validation_autopilot/bd-dy7vu/provenance.json`.
 
 ## Required Category Coverage
 

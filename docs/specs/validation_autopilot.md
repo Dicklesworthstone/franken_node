@@ -2,7 +2,7 @@
 
 **Bead:** `bd-k599n`
 **Schema catalog:** `franken-node/validation-autopilot/schema-catalog/v1`
-**Status:** Draft contract for follow-on implementation beads
+**Status:** Implemented dry-run planner, handoff renderer, and fixture contract
 
 ## Purpose
 
@@ -35,9 +35,14 @@ surfaces:
 | `scripts/check_tracker_actionability.py` | `br`/`bv` claimability reconciliation |
 | `scripts/check_blocked_bead_freshness.py` | Blocked-Bead first-blocker freshness audit |
 | `scripts/normalize_rch_evidence.py` | RCH timeout, stale-progress, dependency, product, and success normalization |
+| `scripts/check_validation_autopilot.py` | Source-only dry-run planner, action preview, and handoff renderer |
+| `tests/test_check_validation_autopilot.py` | Unit and CLI coverage for planner decisions, fail-closed behavior, and transcript goldens |
+| `tests/fixtures/validation_autopilot/transcript_cases.json` | Mock-free transcript fixture inputs for no-ready scenarios |
+| `tests/golden/validation_autopilot/transcript_golden.json` | Semantic golden output for transcript fixtures |
+| `artifacts/validation_autopilot/bd-dy7vu/provenance.json` | Provenance and regeneration policy for transcript fixtures |
 
-Follow-on implementation must compose those surfaces. It must not duplicate
-their parsers in a separate unchecked path.
+The checked-in implementation composes those surfaces in a source-only planner.
+It must not duplicate their parsers in a separate unchecked path.
 
 ## Non-Goals
 
@@ -246,6 +251,45 @@ The handoff text must be bounded and must not include terminal scrollback
 dumps. It may include command snippets only when they are the exact command
 needed for audit.
 
+## Operator Usage and Evidence Pack
+
+Use validation autopilot from the no-ready runbook after collecting current
+tracker, graph, Agent Mail, reservation, blocker, and RCH evidence. The
+preferred path is a complete input file:
+
+```bash
+python3 scripts/check_validation_autopilot.py --input <validation-autopilot-input.json> --json --now <utc-rfc3339>
+python3 scripts/check_validation_autopilot.py --input <validation-autopilot-input.json> --now <utc-rfc3339>
+```
+
+For split inputs, use the CLI flags for `--ready`, `--items`, `--bv-plan`,
+`--bv-priority`, `--bv-insights`, `--tracker-actionability`,
+`--blocked-freshness`, `--rch-evidence`, `--handoff`, and `--policy`.
+`--dry-run` is the default and only supported mode. `--apply` must fail closed
+until a later explicitly approved implementation adds mutation support.
+
+The closeout evidence pack for VALAUTO implementation or audit Beads is:
+
+| Evidence | Required path or command |
+|---|---|
+| Contract | `docs/specs/validation_autopilot.md` |
+| Runbook | `docs/runbooks/no_ready_swarm_recovery.md` |
+| Planner | `scripts/check_validation_autopilot.py` |
+| Focused tests | `tests/test_check_validation_autopilot.py` |
+| Transcript fixture | `tests/fixtures/validation_autopilot/transcript_cases.json` |
+| Semantic golden | `tests/golden/validation_autopilot/transcript_golden.json` |
+| Fixture provenance | `artifacts/validation_autopilot/bd-dy7vu/provenance.json` |
+| Syntax check | `python3 -m py_compile scripts/check_validation_autopilot.py tests/test_check_validation_autopilot.py` |
+| Focused unit gate | `python3 -m unittest tests.test_check_validation_autopilot` |
+| Planner self-test | `python3 scripts/check_validation_autopilot.py --self-test --json --now 2026-06-18T15:45:00+00:00` |
+| JSON fixture checks | `python3 -m json.tool tests/fixtures/validation_autopilot/transcript_cases.json` and matching golden/provenance files |
+| Diff hygiene | `git diff --check` |
+
+The final epic close reason must cite the implementation commits or file lines
+and at least one passing source-only gate from this pack. Any Cargo-heavy proof
+added later must use `rch exec -- ...` and must preserve the exact product
+diagnostic or first infrastructure blocker.
+
 ## Example Decisions
 
 ### Ready Claim
@@ -427,7 +471,7 @@ needed for audit.
 
 ## Required Fixture Coverage
 
-Follow-on implementation must include fixture coverage for:
+Implementation coverage includes fixtures for:
 
 1. ready Bead selected over all other planning actions;
 2. `br ready` empty with only blocked parent/epic `bv` candidates;
@@ -457,6 +501,12 @@ A Bead implementing this contract may close only after:
 
 - the contract examples remain valid JSON;
 - source-only tests cover the decision matrix and invariants;
+- transcript fixtures and semantic goldens cover the no-ready, stale-blocker,
+  RCH, external-blocker, malformed-input, and dry-run handoff scenarios;
+- the runbook explains input collection, output interpretation, Agent Mail
+  handoff, Beads status rules, and known failure modes;
+- `--apply` remains fail-closed unless a later Bead explicitly implements and
+  validates mutation support;
 - any cargo-heavy validation used for implementation runs through
   `rch exec -- ...`;
 - Agent Mail receives a start and completion or blocker note;
