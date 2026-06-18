@@ -11,7 +11,7 @@
 //! - 33b5cc4c: frankensqlite String key allocation elimination
 //! - 752cbf6a: trace digest hex encoding defer to boundary
 
-use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 /// Benchmark SignaturePreimage hash throughput (b238c0ee win)
 fn signature_preimage_hash_throughput(c: &mut Criterion) {
@@ -251,6 +251,7 @@ fn tnr_label_propagation_transform(c: &mut Criterion) {
 }
 
 /// Benchmark frozen-quantile conformal scoring feeding a Sentinel likelihood signal.
+#[cfg(feature = "policy-engine")]
 fn tnr_conformal_score_lookup(c: &mut Criterion) {
     use frankenengine_node::policy::runtime_sentinel::{
         SentinelSignalKind, sentinel_signal_from_conformal_risk_set,
@@ -305,6 +306,7 @@ fn tnr_conformal_score_lookup(c: &mut Criterion) {
 }
 
 /// Benchmark one fixed-point Sentinel e-process update per observation.
+#[cfg(feature = "policy-engine")]
 fn tnr_sentinel_e_process_update(c: &mut Criterion) {
     use frankenengine_node::policy::bayesian_diagnostics::{
         LikelihoodRatioEvidence, RuntimeSentinelEProcess,
@@ -316,7 +318,7 @@ fn tnr_sentinel_e_process_update(c: &mut Criterion) {
         b.iter_batched(
             RuntimeSentinelEProcess::new,
             |mut process| black_box(process.observe(black_box(&evidence))),
-            BatchSize::SmallInput,
+            criterion::BatchSize::SmallInput,
         )
     });
 }
@@ -446,6 +448,7 @@ fn tnr_ltv_reattestation_verification(c: &mut Criterion) {
     });
 }
 
+#[cfg(feature = "policy-engine")]
 criterion_group!(
     perf_wins,
     signature_preimage_hash_throughput,
@@ -457,6 +460,19 @@ criterion_group!(
     tnr_label_propagation_transform,
     tnr_conformal_score_lookup,
     tnr_sentinel_e_process_update,
+    tnr_ltv_reattestation_verification
+);
+
+#[cfg(not(feature = "policy-engine"))]
+criterion_group!(
+    perf_wins,
+    signature_preimage_hash_throughput,
+    transparency_verify_inclusion_path64,
+    lane_scheduler_assign_throughput,
+    frankensqlite_read_throughput,
+    trace_digest_throughput,
+    tnr_effect_receipt_construct_and_hash,
+    tnr_label_propagation_transform,
     tnr_ltv_reattestation_verification
 );
 criterion_main!(perf_wins);
