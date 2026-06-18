@@ -54,6 +54,28 @@
             "blocker_summary": null
           },
           {
+            "bead_id": "bd-proof-wait",
+            "title": "Live proof lease",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
+            "bead_id": "bd-proof-ready",
+            "title": "Stale proof lease handoff",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
             "bead_id": "bd-contested",
             "title": "Self reservation still active",
             "status": "in_progress",
@@ -157,6 +179,34 @@
             "blocker_bead_id": "bd-rch-wait"
           }
         ],
+        "validation_proof_leases": [
+          {
+            "lease_id": "lease-bd-proof-wait",
+            "project_key": "/data/projects/franken_node",
+            "owner_agent": "StaleAgent",
+            "owner_bead_id": "bd-proof-wait",
+            "state": "running",
+            "proof_work_key": "proof-work-key-bd-proof-wait",
+            "command_digest": "sha256:bd-proof-wait",
+            "lease_path": "artifacts/validation-proof-leases/bd-proof-wait.json",
+            "updated_at": "1970-01-01T00:01:39Z",
+            "expires_at": "1970-01-01T00:02:40Z",
+            "waiter_agents": []
+          },
+          {
+            "lease_id": "lease-bd-proof-ready",
+            "project_key": "/data/projects/franken_node",
+            "owner_agent": "StaleAgent",
+            "owner_bead_id": "bd-proof-ready",
+            "state": "stale",
+            "proof_work_key": "proof-work-key-bd-proof-ready",
+            "command_digest": "sha256:bd-proof-ready",
+            "lease_path": "artifacts/validation-proof-leases/bd-proof-ready.json",
+            "updated_at": "1970-01-01T00:00:20Z",
+            "expires_at": "1970-01-01T00:01:20Z",
+            "waiter_agents": []
+          }
+        ],
         "git_activity_summary": [
           {
             "project_key": "/data/projects/franken_node",
@@ -211,6 +261,18 @@
             "reopen_allowed": false
           },
           {
+            "bead_id": "bd-proof-wait",
+            "decision": "waiting_on_proof_lease",
+            "blocker_class": "proof_lease",
+            "reopen_allowed": false
+          },
+          {
+            "bead_id": "bd-proof-ready",
+            "decision": "ready_to_reopen",
+            "blocker_class": "proof_lease_stale",
+            "reopen_allowed": true
+          },
+          {
             "bead_id": "bd-contested",
             "decision": "stale_but_contested",
             "blocker_class": "reservation",
@@ -229,11 +291,14 @@
             "reopen_allowed": true
           }
         ],
-        "safe_reopen_commands": ["bd-ready"],
+        "safe_reopen_commands": ["bd-proof-ready", "bd-ready"],
         "human_contains": [
           "trace=`fixture-replay-all-decisions`",
           "Decision logs:",
           "bead=`bd-cross-blocked` decision=`blocked_on_known_dependency`",
+          "Active proof leases:",
+          "Stale proof leases:",
+          "bead=`bd-proof-ready` command=`br update bd-proof-ready --status open --assignee \"\" --actor <agent>`",
           "bead=`bd-ready` command=`br update bd-ready --status open --assignee \"\" --actor <agent>`",
           "Cross-repo blockers:",
           "command_family=`cargo_check`"
@@ -262,6 +327,14 @@
             "blocker_class": "reservation",
             "evidence_freshness_age_secs": 40,
             "required_action_contains": "Evidence supports an explicit reopen"
+          },
+          {
+            "bead_id": "bd-proof-ready",
+            "current_owner": "StaleAgent",
+            "reservation_holder": null,
+            "blocker_class": "proof_lease_stale",
+            "evidence_freshness_age_secs": 20,
+            "required_action_contains": "validation proof lease is stale or expired"
           }
         ]
       }

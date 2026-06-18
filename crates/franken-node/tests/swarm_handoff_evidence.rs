@@ -5,12 +5,13 @@ use frankenengine_node::ops::swarm_handoff::{
     SwarmHandoffAgentEvidence, SwarmHandoffBlockerKind, SwarmHandoffCrossRepoBlockerEvidence,
     SwarmHandoffEvidenceError, SwarmHandoffEvidenceInput, SwarmHandoffGitActivityEvidence,
     SwarmHandoffIssueEvidence, SwarmHandoffIssueStatus, SwarmHandoffPolicyConfig,
-    SwarmHandoffPolicyDecision, SwarmHandoffRchBuildEvidence, SwarmHandoffRchBuildState,
-    SwarmHandoffReservationEvidence, SwarmHandoffVerificationCommandFamily,
-    SwarmOverlapCandidateWork, SwarmOverlapGitActivityEvidence, SwarmOverlapRiskLevel,
-    SwarmOverlapSuggestedAction, build_swarm_handoff_readiness_report, handoff_reason_codes,
-    overlap_reason_codes, render_cross_agent_overlap_risk_human,
-    render_swarm_handoff_readiness_json, score_cross_agent_overlap_risk,
+    SwarmHandoffPolicyDecision, SwarmHandoffProofLeaseEvidence, SwarmHandoffProofLeaseState,
+    SwarmHandoffRchBuildEvidence, SwarmHandoffRchBuildState, SwarmHandoffReservationEvidence,
+    SwarmHandoffVerificationCommandFamily, SwarmOverlapCandidateWork,
+    SwarmOverlapGitActivityEvidence, SwarmOverlapRiskLevel, SwarmOverlapSuggestedAction,
+    build_swarm_handoff_readiness_report, handoff_reason_codes, overlap_reason_codes,
+    render_cross_agent_overlap_risk_human, render_swarm_handoff_readiness_json,
+    score_cross_agent_overlap_risk,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -74,6 +75,7 @@ fn valid_input() -> SwarmHandoffEvidenceInput {
             detector_heartbeat_stale: false,
             blocker_bead_id: Some("bd-v2bb1".to_string()),
         }],
+        proof_leases: Vec::new(),
         git_activity: vec![SwarmHandoffGitActivityEvidence {
             project_key: "/data/projects/franken_node".to_string(),
             agent_name: Some("PurpleLeopard".to_string()),
@@ -117,6 +119,7 @@ fn empty_handoff_input() -> SwarmHandoffEvidenceInput {
         agents: Vec::new(),
         reservations: Vec::new(),
         rch_builds: Vec::new(),
+        proof_leases: Vec::new(),
         git_activity: Vec::new(),
         cross_repo_blockers: Vec::new(),
     }
@@ -137,6 +140,7 @@ fn policy_input() -> SwarmHandoffEvidenceInput {
     issue.last_comment_at = Some(ts(60));
     input.cross_repo_blockers.clear();
     input.rch_builds.clear();
+    input.proof_leases.clear();
     input.git_activity.clear();
     input
 }
@@ -202,6 +206,27 @@ fn cross_repo_blocker(
     }
 }
 
+fn proof_lease(
+    bead_id: &str,
+    state: SwarmHandoffProofLeaseState,
+    updated_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
+) -> SwarmHandoffProofLeaseEvidence {
+    SwarmHandoffProofLeaseEvidence {
+        lease_id: format!("lease-{bead_id}"),
+        project_key: "/data/projects/franken_node".to_string(),
+        owner_agent: "StaleAgent".to_string(),
+        owner_bead_id: bead_id.to_string(),
+        state,
+        proof_work_key: Some(format!("proof-work-key-{bead_id}")),
+        command_digest: Some(format!("sha256:{bead_id}")),
+        lease_path: Some(format!("artifacts/validation-proof-leases/{bead_id}.json")),
+        updated_at,
+        expires_at,
+        waiter_agents: Vec::new(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SwarmHandoffReplayFixtureCatalog {
     schema_version: String,
@@ -225,6 +250,8 @@ struct SwarmHandoffReplayFixtureEvidence {
     agent_mail_profiles: Vec<SwarmHandoffAgentEvidence>,
     agent_mail_reservations: Vec<SwarmHandoffReservationEvidence>,
     rch_queue_snapshot: Vec<SwarmHandoffRchBuildEvidence>,
+    #[serde(default)]
+    validation_proof_leases: Vec<SwarmHandoffProofLeaseEvidence>,
     git_activity_summary: Vec<SwarmHandoffGitActivityEvidence>,
     sibling_blocker_mirrors: Vec<SwarmHandoffCrossRepoBlockerEvidence>,
 }
@@ -238,6 +265,7 @@ impl SwarmHandoffReplayFixtureEvidence {
             agents: self.agent_mail_profiles,
             reservations: self.agent_mail_reservations,
             rch_builds: self.rch_queue_snapshot,
+            proof_leases: self.validation_proof_leases,
             git_activity: self.git_activity_summary,
             cross_repo_blockers: self.sibling_blocker_mirrors,
         }
@@ -350,6 +378,9 @@ fn valid_fixture_summarizes_active_handoff_evidence() {
     assert_eq!(summary.agent_count, 1);
     assert_eq!(summary.exclusive_reservation_count, 1);
     assert_eq!(summary.active_rch_build_count, 1);
+    assert_eq!(summary.proof_lease_count, 0);
+    assert_eq!(summary.active_proof_lease_count, 0);
+    assert_eq!(summary.stale_proof_lease_count, 0);
     assert_eq!(summary.uncleared_cross_repo_blocker_count, 1);
     assert_eq!(summary.unknown_signal_count, 0);
 }
@@ -754,6 +785,96 @@ fn policy_waits_on_stale_owner_with_active_rch_build() {
 }
 
 #[test]
+fn policy_waits_on_stale_owner_with_active_validation_proof_lease() {
+    let mut input = policy_input();
+    input.reservations.clear();
+    input.agents.clear();
+    input.proof_leases = vec![proof_lease(
+        "bd-yd91l.1",
+        SwarmHandoffProofLeaseState::Running,
+        Some(ts(99)),
+        Some(ts(160)),
+    )];
+
+    let outcome = input.classify_handoff_policy("bd-yd91l.1", &policy_config());
+
+    assert_eq!(
+        outcome.decision,
+        SwarmHandoffPolicyDecision::WaitingOnProofLease
+    );
+    assert!(
+        outcome
+            .reason_codes
+            .contains(&handoff_reason_codes::HANDOFF_WAITING_PROOF_LEASE_ACTIVE.to_string())
+    );
+    assert!(
+        outcome
+            .required_action
+            .contains("live validation proof lease")
+    );
+}
+
+#[test]
+fn policy_reopens_after_stale_validation_proof_lease_without_recent_activity() {
+    let mut input = policy_input();
+    input.reservations.clear();
+    input.agents.clear();
+    input.proof_leases = vec![proof_lease(
+        "bd-yd91l.1",
+        SwarmHandoffProofLeaseState::Stale,
+        Some(ts(20)),
+        Some(ts(80)),
+    )];
+
+    let outcome = input.classify_handoff_policy("bd-yd91l.1", &policy_config());
+
+    assert_eq!(outcome.decision, SwarmHandoffPolicyDecision::ReadyToReopen);
+    assert!(outcome.reopen_allowed);
+    assert!(
+        outcome
+            .reason_codes
+            .contains(&handoff_reason_codes::HANDOFF_READY_STALE_PROOF_LEASE.to_string())
+    );
+    assert!(
+        outcome
+            .evidence_pointers
+            .iter()
+            .any(|pointer| pointer.contains("proof_lease:StaleAgent:bd-yd91l.1"))
+    );
+    assert_eq!(
+        outcome.required_br_command.as_deref(),
+        Some("br update bd-yd91l.1 --status open --assignee \"\" --actor <agent>")
+    );
+}
+
+#[test]
+fn policy_prioritizes_recent_owner_over_stale_proof_lease_conflict() {
+    let mut input = policy_input();
+    input.reservations.clear();
+    let agent = input
+        .agents
+        .first_mut()
+        .expect("fixture includes one agent");
+    agent.last_active_at = Some(ts(99));
+    input.proof_leases = vec![proof_lease(
+        "bd-yd91l.1",
+        SwarmHandoffProofLeaseState::Stale,
+        Some(ts(20)),
+        Some(ts(80)),
+    )];
+
+    let outcome = input.classify_handoff_policy("bd-yd91l.1", &policy_config());
+
+    assert_eq!(outcome.decision, SwarmHandoffPolicyDecision::Active);
+    assert!(
+        outcome
+            .reason_codes
+            .contains(&handoff_reason_codes::HANDOFF_ACTIVE_RECENT_AGENT.to_string())
+    );
+    assert!(!outcome.reopen_allowed);
+}
+
+#[test]
 fn policy_blocks_on_open_dependency_status() {
     let mut input = policy_input();
     let issue = input
@@ -1126,6 +1247,13 @@ fn readiness_report_renders_json_and_human_for_all_policy_decisions()
                 Some(ts(60)),
             ),
             issue(
+                "bd-proof-wait",
+                "Live proof lease",
+                SwarmHandoffIssueStatus::InProgress,
+                Some("StaleAgent"),
+                Some(ts(60)),
+            ),
+            issue(
                 "bd-contested",
                 "Self reservation still active",
                 SwarmHandoffIssueStatus::InProgress,
@@ -1213,6 +1341,12 @@ fn readiness_report_renders_json_and_human_for_all_policy_decisions()
             detector_heartbeat_stale: false,
             blocker_bead_id: Some("bd-rch-wait".to_string()),
         }],
+        proof_leases: vec![proof_lease(
+            "bd-proof-wait",
+            SwarmHandoffProofLeaseState::Running,
+            Some(ts(99)),
+            Some(ts(160)),
+        )],
         git_activity: Vec::new(),
         cross_repo_blockers: vec![SwarmHandoffCrossRepoBlockerEvidence {
             local_bead_id: "bd-cross-blocked".to_string(),
@@ -1243,12 +1377,13 @@ fn readiness_report_renders_json_and_human_for_all_policy_decisions()
         SWARM_HANDOFF_READINESS_SCHEMA_VERSION
     );
     assert_eq!(report.command, "ops swarm-handoff-readiness");
-    assert_eq!(report.decisions.len(), 8);
+    assert_eq!(report.decisions.len(), 9);
     for decision in [
         SwarmHandoffPolicyDecision::Active,
         SwarmHandoffPolicyDecision::BlockedOnKnownDependency,
         SwarmHandoffPolicyDecision::BlockedOnReservation,
         SwarmHandoffPolicyDecision::WaitingOnRch,
+        SwarmHandoffPolicyDecision::WaitingOnProofLease,
         SwarmHandoffPolicyDecision::StaleButContested,
         SwarmHandoffPolicyDecision::Abandoned,
         SwarmHandoffPolicyDecision::ReadyToReopen,
@@ -1309,6 +1444,10 @@ fn readiness_report_renders_json_and_human_for_all_policy_decisions()
     assert_eq!(json["active_agents"][0]["claimed_issue_count"], 1);
     assert_eq!(json["active_reservations"][0]["holder_agent"], "OtherAgent");
     assert_eq!(json["active_rch_builds"][0]["worker_id"], "ts2");
+    assert_eq!(
+        json["active_proof_leases"][0]["owner_bead_id"],
+        "bd-proof-wait"
+    );
 
     Ok(())
 }
