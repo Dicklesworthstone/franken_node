@@ -8,6 +8,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::push_bounded;
+use crate::security::constant_time;
 
 use super::{
     validation_planner::{
@@ -28,6 +29,8 @@ pub const SWARM_VALIDATION_ADMISSION_FIXTURE_CATALOG_SCHEMA_VERSION: &str =
     "franken-node/swarm-validation-admission/fixture-catalog/v1";
 pub const SWARM_VALIDATION_ADMISSION_DECISION_SCHEMA_VERSION: &str =
     "franken-node/swarm-validation-admission/decision/v1";
+pub const SWARM_VALIDATION_ADMISSION_EXECUTION_HINT_SCHEMA_VERSION: &str =
+    "franken-node/swarm-validation-admission/execution-hints/v1";
 
 pub const MAX_SWARM_ADMISSION_AGENTS: usize = 256;
 pub const MAX_SWARM_ADMISSION_RESERVATIONS: usize = 512;
@@ -39,11 +42,18 @@ pub const MAX_SWARM_ADMISSION_EVIDENCE_REFS: usize = 32;
 pub const MAX_SWARM_ADMISSION_BLOCKERS: usize = 32;
 pub const MAX_SWARM_ADMISSION_WAITERS: usize = 32;
 pub const MAX_SWARM_ADMISSION_COMPATIBILITY_BLOCKERS: usize = 16;
+pub const MAX_SWARM_ADMISSION_ADVISORY_NOTES: usize = 12;
 
 const DEFAULT_OBSERVED_AT: &str = "2026-06-18T00:00:00Z";
 const DEFAULT_RETRY_AFTER_MS: u64 = 30_000;
 const OPERATOR_SUMMARY_MAX_BYTES: usize = 512;
 const WORKSPACE_PRESSURE_DEFER_THRESHOLD: f32 = 0.90;
+const HIGH_MEMORY_HEADROOM_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+const HIGH_MEMORY_HEADROOM_PRESSURE_THRESHOLD: f32 = 0.50;
+const DISK_PRESSURE_TARGET_DIR_MULTIPLIER: u64 = 2;
+const HIGH_HEADROOM_PARALLEL_RCH_JOBS: u16 = 4;
+const DEFAULT_PARALLEL_RCH_JOBS: u16 = 1;
+const DEFAULT_CARGO_BUILD_JOBS: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -124,6 +134,22 @@ pub enum SwarmValidationRequestedAction {
     PythonGate,
     EvidenceGate,
     Closeout,
+}
+
+impl SwarmValidationRequestedAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceCheck => "source-check",
+            Self::CargoCheck => "cargo-check",
+            Self::CargoTest => "cargo-test",
+            Self::CargoClippy => "cargo-clippy",
+            Self::CargoFmt => "cargo-fmt",
+            Self::PythonGate => "python-gate",
+            Self::EvidenceGate => "evidence-gate",
+            Self::Closeout => "closeout",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -787,6 +813,51 @@ pub struct SwarmValidationAdmissionCoalescingTarget {
     pub expected_wait_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmValidationTargetDirStrategy {
+    NoTargetDirRequired,
+    ReuseIsolated,
+    CreateUniqueTemp,
+    JoinExistingProofLease,
+    DeferForTargetDirLease,
+    DeferForDiskPressure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmValidationWorkerRequirement {
+    SourceOnlyLocal,
+    RequireHealthyRemote,
+    PreferHighMemoryRemote,
+    WaitForRchCapacity,
+    RestoreRchBeforeCargo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmValidationLaneBudgetHint {
+    pub max_parallel_rch_jobs: u16,
+    pub cargo_build_jobs: u16,
+    pub expected_build_slots: u16,
+    pub retry_after_ms: Option<u64>,
+}
+
+/// Advisory execution hints for agents. Cargo hints preserve the repository
+/// rule that heavy validation must use `rch exec -- ...`; they never authorize
+/// bare local `cargo` commands on the shared host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmValidationExecutionHints {
+    pub schema_version: String,
+    pub target_dir_strategy: SwarmValidationTargetDirStrategy,
+    pub target_dir: Option<String>,
+    pub build_slot_name: Option<String>,
+    pub rch_priority: Option<SwarmValidationAdmissionPriority>,
+    pub worker_requirement: SwarmValidationWorkerRequirement,
+    pub coalescing_key: Option<String>,
+    pub lane_budget: SwarmValidationLaneBudgetHint,
+    pub advisory_notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmValidationAdmissionDiagnostics {
     pub input_freshness: SwarmValidationAdmissionInputFreshness,
@@ -826,6 +897,7 @@ pub struct SwarmValidationAdmissionDecisionRecord {
     pub safe_command_shape: Option<String>,
     pub coalescing_target: Option<SwarmValidationAdmissionCoalescingTarget>,
     pub proof_source: SwarmValidationProofSource,
+    pub execution_hints: SwarmValidationExecutionHints,
     pub retry_after_ms: Option<u64>,
     pub evidence_refs: Vec<String>,
     pub diagnostics: SwarmValidationAdmissionDiagnostics,
@@ -1072,6 +1144,25 @@ fn decide_swarm_validation_admission(
         ));
     }
 
+    if requested_action_uses_target_dir(input.requested_action) && target_dir_disk_pressure(input) {
+        return decision_parts(
+            SwarmValidationAdmissionDecision::Defer,
+            "SVA_DEFER_TARGET_DIR_DISK_PRESSURE",
+            "SVA-020",
+            "free_target_dir_space_or_reuse_existing_proof",
+        )
+        .retryable()
+        .with_retry_after(DEFAULT_RETRY_AFTER_MS)
+        .with_blocker(format!(
+            "free_disk_bytes={} target_dir_bytes={}",
+            input.workspace.free_disk_bytes,
+            input
+                .target_dir
+                .target_dir_bytes
+                .max(input.workspace.target_dir_bytes)
+        ));
+    }
+
     if requested_action_requires_cargo(input.requested_action) && rch_queue_saturated(input) {
         return decision_parts(
             SwarmValidationAdmissionDecision::Defer,
@@ -1234,6 +1325,7 @@ fn decision_record(
 ) -> SwarmValidationAdmissionDecisionRecord {
     let evidence_refs = evidence_refs(input);
     let operator_summary = operator_summary(input, &parts, evidence_refs.first());
+    let execution_hints = execution_hints(input, &parts);
     SwarmValidationAdmissionDecisionRecord {
         schema_version: SWARM_VALIDATION_ADMISSION_DECISION_SCHEMA_VERSION.to_string(),
         decision_id: format!(
@@ -1261,6 +1353,7 @@ fn decision_record(
         safe_command_shape: parts.safe_command_shape,
         coalescing_target: parts.coalescing_target,
         proof_source: parts.proof_source,
+        execution_hints,
         retry_after_ms: parts.retry_after_ms,
         evidence_refs,
         diagnostics: SwarmValidationAdmissionDiagnostics {
@@ -1516,6 +1609,325 @@ fn rch_queue_saturated(input: &SwarmValidationAdmissionInputFixture) -> bool {
             || input.rch.queue.queued_builds > input.rch.queue.workers_available)
 }
 
+fn execution_hints(
+    input: &SwarmValidationAdmissionInputFixture,
+    parts: &SwarmValidationDecisionParts,
+) -> SwarmValidationExecutionHints {
+    let requires_rch = requested_action_requires_cargo(input.requested_action);
+    let target_dir_strategy = target_dir_strategy(input);
+    let coalescing_key = coalescing_key_hint(input, parts);
+    let worker_requirement = worker_requirement_hint(input, requires_rch);
+
+    SwarmValidationExecutionHints {
+        schema_version: SWARM_VALIDATION_ADMISSION_EXECUTION_HINT_SCHEMA_VERSION.to_string(),
+        target_dir_strategy,
+        target_dir: target_dir_for_strategy(input, target_dir_strategy),
+        build_slot_name: build_slot_name_hint(input, requires_rch),
+        rch_priority: requires_rch.then_some(input.bead.priority),
+        worker_requirement,
+        coalescing_key: coalescing_key.clone(),
+        lane_budget: lane_budget_hint(input, parts, requires_rch),
+        advisory_notes: advisory_notes(
+            input,
+            parts,
+            target_dir_strategy,
+            worker_requirement,
+            coalescing_key.as_deref(),
+            requires_rch,
+        ),
+    }
+}
+
+fn target_dir_strategy(
+    input: &SwarmValidationAdmissionInputFixture,
+) -> SwarmValidationTargetDirStrategy {
+    if !requested_action_uses_target_dir(input.requested_action) {
+        return SwarmValidationTargetDirStrategy::NoTargetDirRequired;
+    }
+
+    if target_dir_disk_pressure(input) {
+        return SwarmValidationTargetDirStrategy::DeferForDiskPressure;
+    }
+
+    if input.target_dir.active_target_dir_leases > 0 {
+        return SwarmValidationTargetDirStrategy::DeferForTargetDirLease;
+    }
+
+    if input.proof.coalescing.is_some()
+        || matches!(
+            input.proof.lease_state,
+            SwarmValidationProofLeaseState::InFlightFresh
+                | SwarmValidationProofLeaseState::CompletedFresh
+        )
+    {
+        return SwarmValidationTargetDirStrategy::JoinExistingProofLease;
+    }
+
+    if input.target_dir.isolated_target_dir.is_some() {
+        SwarmValidationTargetDirStrategy::ReuseIsolated
+    } else {
+        SwarmValidationTargetDirStrategy::CreateUniqueTemp
+    }
+}
+
+fn target_dir_for_strategy(
+    input: &SwarmValidationAdmissionInputFixture,
+    strategy: SwarmValidationTargetDirStrategy,
+) -> Option<String> {
+    if strategy == SwarmValidationTargetDirStrategy::NoTargetDirRequired {
+        return None;
+    }
+    Some(target_dir_hint(input))
+}
+
+fn target_dir_hint(input: &SwarmValidationAdmissionInputFixture) -> String {
+    input
+        .target_dir
+        .isolated_target_dir
+        .clone()
+        .unwrap_or_else(|| {
+            format!(
+                "/tmp/rch_target_franken_node_{}_{}",
+                stable_token(&input.bead.bead_id),
+                stable_token(input.requested_action.as_str())
+            )
+        })
+}
+
+fn build_slot_name_hint(
+    input: &SwarmValidationAdmissionInputFixture,
+    requires_rch: bool,
+) -> Option<String> {
+    if !requires_rch {
+        return None;
+    }
+
+    if let Some(lease_id) = input
+        .proof
+        .coalescing
+        .as_ref()
+        .and_then(|coalescing| coalescing.lease_id.as_deref())
+    {
+        return Some(format!("rch-proof-{}", stable_token(lease_id)));
+    }
+
+    if let Some(slot) = input.coordination.build_slots.iter().find(|slot| {
+        optional_command_digest_eq(
+            slot.command_digest.as_deref(),
+            input.proof.command_digest.as_deref(),
+        )
+    }) {
+        return Some(slot.slot.clone());
+    }
+
+    Some(format!(
+        "rch-sva-{}-{}",
+        stable_token(&input.bead.bead_id),
+        stable_token(input.requested_action.as_str())
+    ))
+}
+
+fn optional_command_digest_eq(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => constant_time::ct_eq(left, right),
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+fn coalescing_key_hint(
+    input: &SwarmValidationAdmissionInputFixture,
+    parts: &SwarmValidationDecisionParts,
+) -> Option<String> {
+    parts
+        .coalescing_target
+        .as_ref()
+        .and_then(|target| {
+            target
+                .proof_work_key
+                .clone()
+                .or_else(|| target.proof_cache_key.clone())
+                .or_else(|| target.command_digest.clone())
+        })
+        .or_else(|| input.proof.proof_work_key.clone())
+        .or_else(|| input.proof.command_digest.clone())
+}
+
+fn worker_requirement_hint(
+    input: &SwarmValidationAdmissionInputFixture,
+    requires_rch: bool,
+) -> SwarmValidationWorkerRequirement {
+    if !requires_rch {
+        return SwarmValidationWorkerRequirement::SourceOnlyLocal;
+    }
+
+    if !input.rch.queue.rch_available || input.rch.workers_total == 0 {
+        return SwarmValidationWorkerRequirement::RestoreRchBeforeCargo;
+    }
+
+    if rch_queue_saturated(input) || input.rch.workers_healthy == 0 {
+        return SwarmValidationWorkerRequirement::WaitForRchCapacity;
+    }
+
+    if high_memory_headroom(input) {
+        SwarmValidationWorkerRequirement::PreferHighMemoryRemote
+    } else {
+        SwarmValidationWorkerRequirement::RequireHealthyRemote
+    }
+}
+
+fn lane_budget_hint(
+    input: &SwarmValidationAdmissionInputFixture,
+    parts: &SwarmValidationDecisionParts,
+    requires_rch: bool,
+) -> SwarmValidationLaneBudgetHint {
+    if !requires_rch {
+        return SwarmValidationLaneBudgetHint {
+            max_parallel_rch_jobs: 0,
+            cargo_build_jobs: 0,
+            expected_build_slots: 0,
+            retry_after_ms: parts.retry_after_ms,
+        };
+    }
+
+    let max_parallel_rch_jobs = if parts.decision == SwarmValidationAdmissionDecision::Run {
+        runnable_parallel_rch_jobs(input)
+    } else {
+        0
+    };
+
+    SwarmValidationLaneBudgetHint {
+        max_parallel_rch_jobs,
+        cargo_build_jobs: DEFAULT_CARGO_BUILD_JOBS,
+        expected_build_slots: 1,
+        retry_after_ms: parts.retry_after_ms,
+    }
+}
+
+fn runnable_parallel_rch_jobs(input: &SwarmValidationAdmissionInputFixture) -> u16 {
+    if high_memory_headroom(input) {
+        HIGH_HEADROOM_PARALLEL_RCH_JOBS.min(input.rch.queue.workers_available.max(1))
+    } else {
+        DEFAULT_PARALLEL_RCH_JOBS
+    }
+}
+
+fn advisory_notes(
+    input: &SwarmValidationAdmissionInputFixture,
+    parts: &SwarmValidationDecisionParts,
+    target_dir_strategy: SwarmValidationTargetDirStrategy,
+    worker_requirement: SwarmValidationWorkerRequirement,
+    coalescing_key: Option<&str>,
+    requires_rch: bool,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+
+    if requires_rch {
+        push_bounded(
+            &mut notes,
+            "cargo validation must use rch exec --; bare cargo is not allowed on the shared host"
+                .to_string(),
+            MAX_SWARM_ADMISSION_ADVISORY_NOTES,
+        );
+    } else {
+        push_bounded(
+            &mut notes,
+            "source-only action does not require RCH or CARGO_TARGET_DIR".to_string(),
+            MAX_SWARM_ADMISSION_ADVISORY_NOTES,
+        );
+    }
+
+    if target_dir_strategy == SwarmValidationTargetDirStrategy::CreateUniqueTemp {
+        push_bounded(
+            &mut notes,
+            "narrow diagnostic probe should use a bead/action-specific CARGO_TARGET_DIR"
+                .to_string(),
+            MAX_SWARM_ADMISSION_ADVISORY_NOTES,
+        );
+    }
+
+    if target_dir_disk_pressure(input) {
+        push_bounded(
+            &mut notes,
+            "free disk is below two target-dir footprints; avoid creating another target dir"
+                .to_string(),
+            MAX_SWARM_ADMISSION_ADVISORY_NOTES,
+        );
+    }
+
+    if rch_queue_saturated(input)
+        || worker_requirement == SwarmValidationWorkerRequirement::WaitForRchCapacity
+    {
+        push_bounded(
+            &mut notes,
+            "RCH queue is saturated; wait for remote worker capacity before starting cargo"
+                .to_string(),
+            MAX_SWARM_ADMISSION_ADVISORY_NOTES,
+        );
+    }
+
+    if high_memory_headroom(input)
+        && worker_requirement == SwarmValidationWorkerRequirement::PreferHighMemoryRemote
+    {
+        push_bounded(
+            &mut notes,
+            "host headroom supports limited parallel RCH lanes; keep CARGO_BUILD_JOBS=1 per lane"
+                .to_string(),
+            MAX_SWARM_ADMISSION_ADVISORY_NOTES,
+        );
+    }
+
+    if coalescing_key.is_some()
+        && matches!(
+            parts.decision,
+            SwarmValidationAdmissionDecision::Coalesce | SwarmValidationAdmissionDecision::Handoff
+        )
+    {
+        push_bounded(
+            &mut notes,
+            "matching proof work exists; join by coalescing key instead of starting duplicate cargo"
+                .to_string(),
+            MAX_SWARM_ADMISSION_ADVISORY_NOTES,
+        );
+    }
+
+    if requires_rch && parts.decision != SwarmValidationAdmissionDecision::Run {
+        push_bounded(
+            &mut notes,
+            "lane budget blocks new RCH jobs until the admission decision changes".to_string(),
+            MAX_SWARM_ADMISSION_ADVISORY_NOTES,
+        );
+    }
+
+    notes
+}
+
+fn requested_action_uses_target_dir(action: SwarmValidationRequestedAction) -> bool {
+    matches!(
+        action,
+        SwarmValidationRequestedAction::CargoCheck
+            | SwarmValidationRequestedAction::CargoTest
+            | SwarmValidationRequestedAction::CargoClippy
+    )
+}
+
+fn high_memory_headroom(input: &SwarmValidationAdmissionInputFixture) -> bool {
+    input.host.memory_bytes >= HIGH_MEMORY_HEADROOM_BYTES
+        && input.host.cpu_cores >= 32
+        && input.workspace.memory_pressure < HIGH_MEMORY_HEADROOM_PRESSURE_THRESHOLD
+        && input.host.memory_pressure < HIGH_MEMORY_HEADROOM_PRESSURE_THRESHOLD
+}
+
+fn target_dir_disk_pressure(input: &SwarmValidationAdmissionInputFixture) -> bool {
+    let target_dir_bytes = input
+        .target_dir
+        .target_dir_bytes
+        .max(input.workspace.target_dir_bytes);
+    target_dir_bytes > 0
+        && input.workspace.free_disk_bytes
+            <= target_dir_bytes.saturating_mul(DISK_PRESSURE_TARGET_DIR_MULTIPLIER)
+}
+
 fn coalescing_target(
     input: &SwarmValidationAdmissionInputFixture,
 ) -> SwarmValidationAdmissionCoalescingTarget {
@@ -1576,22 +1988,25 @@ fn coalescing_target(
 }
 
 fn safe_rch_command_shape(input: &SwarmValidationAdmissionInputFixture) -> String {
-    let target_dir = input
-        .target_dir
-        .isolated_target_dir
-        .as_deref()
-        .unwrap_or("/tmp/rch_target_franken_node_validation");
-
     match input.requested_action {
-        SwarmValidationRequestedAction::CargoCheck => format!(
-            "rch exec -- env CARGO_TARGET_DIR={target_dir} cargo check -p frankenengine-node --lib --no-default-features"
-        ),
-        SwarmValidationRequestedAction::CargoTest => format!(
-            "rch exec -- env CARGO_TARGET_DIR={target_dir} cargo test -p frankenengine-node --lib --no-default-features swarm_validation_admission"
-        ),
-        SwarmValidationRequestedAction::CargoClippy => format!(
-            "rch exec -- env CARGO_TARGET_DIR={target_dir} cargo clippy -p frankenengine-node --lib --no-default-features -- -D warnings"
-        ),
+        SwarmValidationRequestedAction::CargoCheck => {
+            let target_dir = target_dir_hint(input);
+            format!(
+                "rch exec -- env CARGO_TARGET_DIR={target_dir} cargo check -p frankenengine-node --lib --no-default-features"
+            )
+        }
+        SwarmValidationRequestedAction::CargoTest => {
+            let target_dir = target_dir_hint(input);
+            format!(
+                "rch exec -- env CARGO_TARGET_DIR={target_dir} cargo test -p frankenengine-node --lib --no-default-features swarm_validation_admission"
+            )
+        }
+        SwarmValidationRequestedAction::CargoClippy => {
+            let target_dir = target_dir_hint(input);
+            format!(
+                "rch exec -- env CARGO_TARGET_DIR={target_dir} cargo clippy -p frankenengine-node --lib --no-default-features -- -D warnings"
+            )
+        }
         SwarmValidationRequestedAction::CargoFmt => "rch exec -- cargo fmt --check".to_string(),
         SwarmValidationRequestedAction::SourceCheck
         | SwarmValidationRequestedAction::PythonGate
@@ -2641,6 +3056,162 @@ mod tests {
     }
 
     #[test]
+    fn high_memory_headroom_emits_worker_priority_and_lane_budget_hints() {
+        let catalog = deterministic_swarm_validation_admission_fixtures();
+        let mut input = catalog
+            .fixture(SwarmValidationAdmissionFixtureKind::SingleAgent)
+            .expect("single agent fixture exists")
+            .input
+            .clone();
+        input.rch.queue.workers_available = 4;
+
+        let decision = plan_swarm_validation_admission(&input);
+        let hints = &decision.execution_hints;
+
+        assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Run);
+        assert_eq!(
+            hints.worker_requirement,
+            SwarmValidationWorkerRequirement::PreferHighMemoryRemote
+        );
+        assert_eq!(
+            hints.target_dir_strategy,
+            SwarmValidationTargetDirStrategy::ReuseIsolated
+        );
+        assert_eq!(
+            hints.target_dir.as_deref(),
+            Some("/tmp/rch_target_navyturtle_sva")
+        );
+        assert_eq!(
+            hints.build_slot_name.as_deref(),
+            Some("rch-sva-bd-0x4fy-4-cargo-test")
+        );
+        assert_eq!(
+            hints.rch_priority,
+            Some(SwarmValidationAdmissionPriority::P1)
+        );
+        assert_eq!(hints.lane_budget.max_parallel_rch_jobs, 4);
+        assert_eq!(hints.lane_budget.cargo_build_jobs, 1);
+        assert_eq!(hints.lane_budget.expected_build_slots, 1);
+        assert!(
+            hints
+                .advisory_notes
+                .iter()
+                .any(|note| note.contains("rch exec --"))
+        );
+        assert!(
+            hints
+                .advisory_notes
+                .iter()
+                .any(|note| note.contains("CARGO_BUILD_JOBS=1"))
+        );
+    }
+
+    #[test]
+    fn disk_pressure_defers_target_dir_churn() {
+        let catalog = deterministic_swarm_validation_admission_fixtures();
+        let mut input = catalog
+            .fixture(SwarmValidationAdmissionFixtureKind::SingleAgent)
+            .expect("single agent fixture exists")
+            .input
+            .clone();
+        input.workspace.free_disk_bytes = 16 * 1024 * 1024 * 1024;
+        input.target_dir.target_dir_bytes = 24 * 1024 * 1024 * 1024;
+
+        let decision = plan_swarm_validation_admission(&input);
+        let hints = &decision.execution_hints;
+
+        assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Defer);
+        assert_eq!(decision.reason_code, "SVA_DEFER_TARGET_DIR_DISK_PRESSURE");
+        assert_eq!(
+            hints.target_dir_strategy,
+            SwarmValidationTargetDirStrategy::DeferForDiskPressure
+        );
+        assert_eq!(
+            hints.worker_requirement,
+            SwarmValidationWorkerRequirement::PreferHighMemoryRemote
+        );
+        assert_eq!(hints.lane_budget.max_parallel_rch_jobs, 0);
+        assert_eq!(
+            hints.lane_budget.retry_after_ms,
+            Some(DEFAULT_RETRY_AFTER_MS)
+        );
+        assert!(
+            hints
+                .advisory_notes
+                .iter()
+                .any(|note| note.contains("free disk"))
+        );
+    }
+
+    #[test]
+    fn saturated_rch_queue_hints_wait_without_new_jobs() {
+        let catalog = deterministic_swarm_validation_admission_fixtures();
+        let fixture = catalog
+            .fixture(SwarmValidationAdmissionFixtureKind::SaturatedRchQueue)
+            .expect("saturated rch fixture exists");
+
+        let decision = plan_swarm_validation_admission(&fixture.input);
+        let hints = &decision.execution_hints;
+
+        assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Defer);
+        assert_eq!(
+            hints.worker_requirement,
+            SwarmValidationWorkerRequirement::WaitForRchCapacity
+        );
+        assert_eq!(hints.lane_budget.max_parallel_rch_jobs, 0);
+        assert_eq!(
+            hints.lane_budget.retry_after_ms,
+            Some(DEFAULT_RETRY_AFTER_MS)
+        );
+        assert!(
+            hints
+                .advisory_notes
+                .iter()
+                .any(|note| note.contains("RCH queue is saturated"))
+        );
+    }
+
+    #[test]
+    fn narrow_diagnostic_probe_uses_unique_target_dir_hint() {
+        let catalog = deterministic_swarm_validation_admission_fixtures();
+        let mut input = catalog
+            .fixture(SwarmValidationAdmissionFixtureKind::SingleAgent)
+            .expect("single agent fixture exists")
+            .input
+            .clone();
+        input.requested_action = SwarmValidationRequestedAction::CargoCheck;
+        input.target_dir.isolated_target_dir = None;
+        input.host.memory_bytes = 64 * 1024 * 1024 * 1024;
+
+        let decision = plan_swarm_validation_admission(&input);
+        let hints = &decision.execution_hints;
+        let expected_target_dir = "/tmp/rch_target_franken_node_bd-0x4fy-4_cargo-check";
+
+        assert_eq!(decision.decision, SwarmValidationAdmissionDecision::Run);
+        assert_eq!(
+            hints.target_dir_strategy,
+            SwarmValidationTargetDirStrategy::CreateUniqueTemp
+        );
+        assert_eq!(hints.target_dir.as_deref(), Some(expected_target_dir));
+        assert_eq!(
+            hints.build_slot_name.as_deref(),
+            Some("rch-sva-bd-0x4fy-4-cargo-check")
+        );
+        assert_eq!(
+            decision.safe_command_shape.as_deref(),
+            Some(
+                "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node_bd-0x4fy-4_cargo-check cargo check -p frankenengine-node --lib --no-default-features"
+            )
+        );
+        assert!(
+            hints
+                .advisory_notes
+                .iter()
+                .any(|note| note.contains("narrow diagnostic probe"))
+        );
+    }
+
+    #[test]
     fn coalesce_decisions_include_target_and_proof_source() {
         let catalog = deterministic_swarm_validation_admission_fixtures();
         let duplicate = catalog
@@ -2661,6 +3232,21 @@ mod tests {
                 .as_ref()
                 .and_then(|target| target.owner_agent.as_deref()),
             Some("ScarletSeal")
+        );
+        assert_eq!(
+            duplicate_decision.execution_hints.coalescing_key.as_deref(),
+            Some("sha256:proof-work-key-duplicate")
+        );
+        assert_eq!(
+            duplicate_decision.execution_hints.target_dir_strategy,
+            SwarmValidationTargetDirStrategy::JoinExistingProofLease
+        );
+        assert_eq!(
+            duplicate_decision
+                .execution_hints
+                .lane_budget
+                .max_parallel_rch_jobs,
+            0
         );
 
         let cache_decision = plan_swarm_validation_admission(&cache_hit.input);

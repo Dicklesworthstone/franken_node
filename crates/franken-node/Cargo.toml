@@ -243,6 +243,10 @@ name = "swarm_bead_templates"
 path = "tests/swarm_bead_templates.rs"
 
 [[test]]
+name = "swarm_validation_admission"
+path = "tests/swarm_validation_admission.rs"
+
+[[test]]
 name = "validation_planner"
 path = "tests/validation_planner.rs"
 
