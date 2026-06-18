@@ -101,6 +101,11 @@ run_guarded_gate \
   "$OUT/cargo_fmt_lockfile_drift.json" \
   "$OUT/cargo_fmt.log" \
   cargo fmt --check -p frankenengine-node
+run_guarded_gate \
+  "cargo clippy --all-targets -- -D warnings" \
+  "$OUT/cargo_clippy_lockfile_drift.json" \
+  "$OUT/cargo_clippy.log" \
+  $RCH cargo clippy --all-targets -- -D warnings
 
 # 5) render summary + exit code
 log "step 5: summary"

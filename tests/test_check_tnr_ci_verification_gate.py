@@ -285,5 +285,26 @@ class TestWorkflowValidation(unittest.TestCase):
         self.assertGreater(len(errors), 0)
 
 
+class TestVerificationHarnessContract(unittest.TestCase):
+    def test_full_run_keeps_guarded_deny_fmt_and_clippy_gates(self) -> None:
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "scripts"
+            / "verify_all_verification_targets.sh"
+        ).read_text(encoding="utf-8")
+        for marker in (
+            '"cargo deny check advisories bans sources"',
+            '"cargo fmt --check -p frankenengine-node"',
+            '"cargo clippy --all-targets -- -D warnings"',
+            '"$OUT/cargo_deny_lockfile_drift.json"',
+            '"$OUT/cargo_fmt_lockfile_drift.json"',
+            '"$OUT/cargo_clippy_lockfile_drift.json"',
+            '"$OUT/cargo_clippy.log"',
+            "$RCH cargo clippy --all-targets -- -D warnings",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, script)
+
+
 if __name__ == "__main__":
     unittest.main()
