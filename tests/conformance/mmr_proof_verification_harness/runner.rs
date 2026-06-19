@@ -52,10 +52,11 @@ impl ConformanceRunner {
 
         for test in &self.tests {
             // Check if test should be filtered
-            if let Some(ref filter) = self.context.config.filter {
-                if !test.id().contains(filter) && !test.name().contains(filter) {
-                    continue;
-                }
+            if let Some(ref filter) = self.context.config.filter
+                && !test.id().contains(filter)
+                && !test.name().contains(filter)
+            {
+                continue;
             }
 
             // Run individual test

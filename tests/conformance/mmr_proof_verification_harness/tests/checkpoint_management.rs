@@ -360,8 +360,9 @@ impl ConformanceTest for CheckpointTreeSizePreservationTest {
 
         // Rebuild multiple times
         for i in 0..5 {
-            cp.rebuild_from_stream(&stream)
-                .expect(&format!("rebuild {}", i));
+            if let Err(err) = cp.rebuild_from_stream(&stream) {
+                return TestResult::fail(format!("Rebuild {} failed: {}", i, err));
+            }
 
             if cp.tree_size() != initial_size {
                 return TestResult::fail(format!(
