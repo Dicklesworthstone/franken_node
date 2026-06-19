@@ -301,6 +301,46 @@ pub struct ConfidenceInterval {
     pub upper: f64,
 }
 
+/// Where a scenario's metric actually comes from.
+///
+/// bd-5r99w.8: even in `Measured` evidence mode, a few sub-scenarios score
+/// pass-rates over a handful of hardcoded input payloads rather than driving the
+/// live security/migration pipelines. That is honest-by-construction, but a
+/// reader of a signed `Measured` report could mistake those metrics for
+/// full-pipeline measurements. This discriminator is carried in the signed
+/// report so the distinction is explicit and verifier-visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScenarioDataSource {
+    /// Metric measured by driving the real pipeline / workload.
+    #[default]
+    MeasuredPipeline,
+    /// Metric scored against a fixed set of hardcoded fixture inputs.
+    FixtureInputs,
+}
+
+impl ScenarioDataSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScenarioDataSource::MeasuredPipeline => "measured-pipeline",
+            ScenarioDataSource::FixtureInputs => "fixture-inputs",
+        }
+    }
+}
+
+/// Classify a scenario by how its metric is produced. The named scenarios score
+/// over hardcoded fixture payloads (see `measured_adversarial_pass_rate`,
+/// `measured_migration_success_rate`, `measured_fixture_identity_replay_rate`)
+/// rather than driving the live pipelines, so they are flagged `fixture-inputs`.
+pub fn scenario_data_source(scenario_name: &str) -> ScenarioDataSource {
+    match scenario_name {
+        "adversarial_pass_rate" | "migration_success_rate" | "replay_bit_identity_rate" => {
+            ScenarioDataSource::FixtureInputs
+        }
+        _ => ScenarioDataSource::MeasuredPipeline,
+    }
+}
+
 /// Result of executing one benchmark scenario.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioResult {
@@ -313,6 +353,11 @@ pub struct ScenarioResult {
     pub score: u32,
     pub iterations: u32,
     pub variance_pct: f64,
+    /// Whether this metric was measured from the live pipeline or scored over
+    /// fixture inputs (bd-5r99w.8). Defaults to `measured-pipeline` for
+    /// backward-compatible deserialization of older reports.
+    #[serde(default)]
+    pub data_source: ScenarioDataSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1296,6 +1341,7 @@ impl BenchmarkSuite {
             score,
             iterations: u32::try_from(raw_measurements.len()).unwrap_or(u32::MAX),
             variance_pct: cv,
+            data_source: scenario_data_source(&scenario.name),
         })
     }
 
@@ -1974,6 +2020,72 @@ mod tests {
         vec![RawMeasurement::fixture(0, value, "2026-02-21T00:00:00Z")]
     }
 
+    #[test]
+    fn fixture_scored_scenarios_are_labeled_fixture_inputs() {
+        // bd-5r99w.8: scenarios that score over hardcoded payloads must be
+        // labeled fixture-inputs even in Measured mode, so a signed report can
+        // never present them as full-pipeline measurements.
+        for fixture_scored in [
+            "adversarial_pass_rate",
+            "migration_success_rate",
+            "replay_bit_identity_rate",
+        ] {
+            assert_eq!(
+                scenario_data_source(fixture_scored),
+                ScenarioDataSource::FixtureInputs,
+                "{fixture_scored} must be flagged fixture-inputs"
+            );
+        }
+        // Real pipeline scenarios stay measured-pipeline.
+        for measured in ["secure-extension-heavy", "migration_scanner_throughput"] {
+            assert_eq!(
+                scenario_data_source(measured),
+                ScenarioDataSource::MeasuredPipeline
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_data_source_round_trips_via_signed_report_json() {
+        // The discriminator must survive the canonical-JSON round trip the
+        // verifier consumes, with the stable kebab-case wire form.
+        assert_eq!(ScenarioDataSource::FixtureInputs.as_str(), "fixture-inputs");
+        assert_eq!(
+            ScenarioDataSource::MeasuredPipeline.as_str(),
+            "measured-pipeline"
+        );
+        let json = serde_json::to_string(&ScenarioDataSource::FixtureInputs).expect("serialize");
+        assert_eq!(json, "\"fixture-inputs\"");
+        let back: ScenarioDataSource = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, ScenarioDataSource::FixtureInputs);
+        // Older reports without the field default to measured-pipeline. Build a
+        // real result, drop the discriminator from its JSON, and confirm it
+        // still deserializes (backward compatibility).
+        let result = ScenarioResult {
+            dimension: BenchmarkDimension::PerformanceUnderHardening,
+            name: "legacy_scenario".to_string(),
+            raw_value: 1.0,
+            unit: "ms".to_string(),
+            raw_samples: vec![],
+            confidence_interval: ConfidenceInterval {
+                lower: 0.0,
+                upper: 2.0,
+            },
+            score: 50,
+            iterations: 1,
+            variance_pct: 0.0,
+            data_source: ScenarioDataSource::FixtureInputs,
+        };
+        let mut value = serde_json::to_value(&result).expect("serialize result");
+        // Fresh reports carry the discriminator...
+        assert_eq!(value["data_source"], serde_json::json!("fixture-inputs"));
+        // ...and stripping it (legacy report) deserializes to the default.
+        value.as_object_mut().expect("object").remove("data_source");
+        let legacy: ScenarioResult =
+            serde_json::from_value(value).expect("legacy report without data_source deserializes");
+        assert_eq!(legacy.data_source, ScenarioDataSource::MeasuredPipeline);
+    }
+
     fn fixture_sample_policy(total_sample_count: usize) -> BenchmarkSamplePolicy {
         BenchmarkSamplePolicy {
             min_measured_samples: MIN_MEASURED_SAMPLES,
@@ -2179,6 +2291,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 150.0,
@@ -2228,6 +2341,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 200.0,
@@ -2247,6 +2361,7 @@ mod tests {
 
         let current = BenchmarkReport {
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 raw_value: 190.0,
                 ..baseline.scenarios[0].clone()
             }],
@@ -2282,6 +2397,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 200.0,
@@ -2301,6 +2417,7 @@ mod tests {
 
         let current = BenchmarkReport {
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 raw_value: 350.0, // 75% increase in latency
                 ..baseline.scenarios[0].clone()
             }],
@@ -2343,6 +2460,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 200.0,
@@ -2362,6 +2480,7 @@ mod tests {
 
         let current = BenchmarkReport {
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 raw_value: 350.0,
                 ..baseline.scenarios[0].clone()
             }],
@@ -2397,6 +2516,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 200.0,
@@ -2416,6 +2536,7 @@ mod tests {
 
         let current = BenchmarkReport {
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 raw_value: 350.0,
                 ..baseline.scenarios[0].clone()
             }],
@@ -2742,6 +2863,7 @@ mod tests {
             },
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 125.0,
@@ -2801,6 +2923,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: f64::INFINITY,
@@ -3049,6 +3172,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 125.0,

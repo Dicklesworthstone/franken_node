@@ -1605,6 +1605,14 @@ pub struct IncidentCounterfactualArgs {
     #[arg(long)]
     pub policy: String,
 
+    /// Decision model used to evaluate the recorded timeline: `synthetic` (a
+    /// sandboxed risk-score stand-in, the current default) or `production` (the
+    /// runtime's real policy decision engine). The chosen model is labeled in the
+    /// report and bound into the counterfactual digest. `production` is gated on
+    /// the engine-split runtime decision kernel and is not yet available.
+    #[arg(long, default_value = "synthetic")]
+    pub model: String,
+
     /// Emit the structured counterfactual report as canonical JSON on stdout.
     #[arg(long)]
     pub json: bool,

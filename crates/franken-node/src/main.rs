@@ -14739,6 +14739,9 @@ mod incident_list_tests {
 
         assert_eq!(summary.total_decisions, 3);
         assert!(summary.changed_decisions > 0);
+        // bd-5r99w.4: the default executor is the sandboxed synthetic model, and
+        // it must be labeled so it is never silently read as a production decision.
+        assert_eq!(summary.executor, "synthetic");
         assert_eq!(canonical["mode"], "single");
         assert_eq!(
             canonical["summary_statistics"]["changed_decisions"],
@@ -16865,6 +16868,8 @@ struct IncidentCounterfactualCliSummary {
     changed_decisions: usize,
     severity_delta: i64,
     canonical_json: String,
+    /// bd-5r99w.4: which decision model produced the diff (`synthetic`|`production`).
+    executor: String,
 }
 
 impl std::fmt::Debug for IncidentCounterfactualCliSummary {
@@ -16880,12 +16885,17 @@ impl std::fmt::Debug for IncidentCounterfactualCliSummary {
             .field("changed_decisions", &self.changed_decisions)
             .field("severity_delta", &self.severity_delta)
             .field("canonical_json_length", &self.canonical_json.len())
+            .field("executor", &self.executor)
             .finish_non_exhaustive()
     }
 }
 
+// bd-5r99w.4: bumped v1 -> v2 to add the `executor` discriminator and bind it
+// into the counterfactual digest preimage. The diff machinery is real, but the
+// default executor is a synthetic risk-score stand-in; v2 makes that explicit so
+// a synthetic re-evaluation is never silently read as a production decision.
 const INCIDENT_COUNTERFACTUAL_REPORT_SCHEMA: &str =
-    "franken-node/incident-counterfactual-report/v1";
+    "franken-node/incident-counterfactual-report/v2";
 const COUNTERFACTUAL_PROMOTION_VALIDITY_MS: i64 = 24 * 60 * 60 * 1_000;
 
 fn incident_counterfactual_cli_summary(
@@ -16899,6 +16909,7 @@ fn incident_counterfactual_cli_summary(
     let mode = PolicyConfig::from_cli_spec(policy, &baseline_policy)
         .with_context(|| format!("invalid policy override spec `{policy}`"))?;
     let engine = CounterfactualReplayEngine::default();
+    let executor = engine.executor_kind().to_string();
     let output = engine
         .simulate(&bundle, &baseline_policy, mode)
         .with_context(|| {
@@ -16923,6 +16934,7 @@ fn incident_counterfactual_cli_summary(
         changed_decisions,
         severity_delta,
         canonical_json,
+        executor,
     })
 }
 
@@ -16935,7 +16947,17 @@ fn incident_counterfactual_report_json(
     let timestamp = Utc::now().to_rfc3339();
     let counterfactual_value: serde_json::Value = serde_json::from_str(&summary.canonical_json)
         .context("failed parsing canonical counterfactual output for structured report")?;
-    let counterfactual_digest = incident_counterfactual_sha256(summary.canonical_json.as_bytes());
+    // bd-5r99w.4: bind the executor discriminator into the digest preimage so the
+    // digest commits to *which* decision model produced the diff. A synthetic
+    // re-evaluation and a (future) production one over identical inputs therefore
+    // yield different digests and can never be conflated.
+    let counterfactual_digest = incident_counterfactual_sha256(
+        format!(
+            "incident-counterfactual-report/v2\nexecutor={}\n{}",
+            summary.executor, summary.canonical_json
+        )
+        .as_bytes(),
+    );
     let (promotion_contract, promotion_contract_digest, promotion_signature) =
         if let Some(signing_material) = promotion_signing_material {
             let (contract, contract_digest, signature) = build_incident_counterfactual_promotion(
@@ -16960,6 +16982,7 @@ fn incident_counterfactual_report_json(
         "bundle_created_at": &summary.bundle_created_at,
         "bundle_integrity_hash": &summary.bundle_integrity_hash,
         "policy": policy,
+        "executor": &summary.executor,
         "evidence_refs": &summary.evidence_refs,
         "total_decisions": summary.total_decisions,
         "changed_decisions": summary.changed_decisions,
@@ -17175,10 +17198,32 @@ fn incident_counterfactual_sha256(bytes: &[u8]) -> String {
 }
 
 fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs) -> Result<()> {
+    // bd-5r99w.4: the synthetic, sandboxed risk-score model is the only executor
+    // available today; the production decision engine is gated on the engine-split
+    // runtime decision kernel (bd-f5b04.2). Make the model explicit so a synthetic
+    // re-evaluation is never the silent default, and refuse `production` honestly
+    // rather than quietly falling back to synthetic.
+    match args.model.as_str() {
+        tools::counterfactual_replay::EXECUTOR_KIND_SYNTHETIC => {}
+        tools::counterfactual_replay::EXECUTOR_KIND_PRODUCTION => {
+            anyhow::bail!(
+                "counterfactual --model production requires the runtime's real policy decision \
+                 engine, which is gated on the engine-split decision kernel (bd-f5b04.2) and is \
+                 not available in this build; re-run with --model synthetic for the sandboxed \
+                 risk-score model (labeled `executor: synthetic` in the report)"
+            );
+        }
+        other => {
+            anyhow::bail!(
+                "invalid counterfactual --model `{other}`; expected `synthetic` or `production`"
+            );
+        }
+    }
     eprintln!(
-        "franken-node incident counterfactual: bundle={} policy={}",
+        "franken-node incident counterfactual: bundle={} policy={} model={}",
         args.bundle.display(),
-        args.policy
+        args.policy,
+        args.model
     );
     let trusted_key_ids = replay_trusted_key_ids(
         args.trusted_public_key.as_deref(),

@@ -856,18 +856,82 @@ fn captured_output_from(output: Output) -> CapturedProcessOutput {
     }
 }
 
+/// Construct a process `ExitStatus` carrying the given exit code.
+///
+/// Native franken-engine execution runs in-process and never forks a child OS
+/// process, so there is no kernel-provided wait status to forward. We synthesize
+/// one from a *real*, derived exit code (see [`exit_code_for_containment_severity`])
+/// rather than always reporting success. On Unix an exit code is encoded in the
+/// high byte of the wait status; on Windows the raw value is the code itself.
 #[cfg(all(unix, any(feature = "engine", test)))]
-fn synthetic_success_status() -> std::process::ExitStatus {
+fn exit_status_from_code(code: i32) -> std::process::ExitStatus {
     use std::os::unix::process::ExitStatusExt;
 
-    std::process::ExitStatus::from_raw(0)
+    std::process::ExitStatus::from_raw((code & 0xff) << 8)
 }
 
 #[cfg(all(windows, any(feature = "engine", test)))]
-fn synthetic_success_status() -> std::process::ExitStatus {
+fn exit_status_from_code(code: i32) -> std::process::ExitStatus {
     use std::os::windows::process::ExitStatusExt;
 
-    std::process::ExitStatus::from_raw(0)
+    std::process::ExitStatus::from_raw(u32::try_from(code).unwrap_or(u32::MAX))
+}
+
+/// Containment-class exit codes start here so they never collide with the `0`
+/// success code or with ordinary low program exit codes (`1`..`5`).
+#[cfg(any(feature = "engine", test))]
+const CONTAINED_EXIT_CODE_BASE: i32 = 90;
+
+/// Exit-code contract for native franken-engine execution (`franken-node run`).
+///
+/// The exit code is derived from the runtime's real containment verdict
+/// (`ContainmentAction`) on the executed extension, by severity rank:
+///
+/// | `ContainmentAction` | severity | exit code | meaning                              |
+/// |---------------------|----------|-----------|--------------------------------------|
+/// | `Allow`             | 0        | `0`       | permitted; ran to completion         |
+/// | `Challenge`         | 1        | `91`      | runtime required a challenge         |
+/// | `Sandbox`           | 2        | `92`      | execution sandboxed / contained      |
+/// | `Suspend`           | 3        | `93`      | execution suspended                  |
+/// | `Terminate`         | 4        | `94`      | execution terminated by the runtime  |
+/// | `Quarantine`        | 5        | `95`      | extension quarantined                |
+///
+/// `Allow` is the only success; every more-severe verdict yields a distinct,
+/// non-zero containment-class code so operators and the signed run receipt can
+/// tell that the program did not run to unconstrained completion.
+#[cfg(any(feature = "engine", test))]
+fn exit_code_for_containment_severity(severity: u32) -> i32 {
+    if severity == 0 {
+        0
+    } else {
+        CONTAINED_EXIT_CODE_BASE.saturating_add(i32::try_from(severity).unwrap_or(i32::MAX))
+    }
+}
+
+/// Render captured console output into separated stdout/stderr byte streams.
+///
+/// Mirrors Node/Bun console semantics: `console.log`/`console.info` go to
+/// stdout, `console.warn`/`console.error` go to stderr. Emission order is
+/// preserved *within* each stream (entries are captured in execution order), and
+/// each entry is newline-terminated. This replaces the previous Rust `{:?}`
+/// debug dump so `franken-node run` surfaces the program's real output.
+#[cfg(any(feature = "engine", test))]
+fn render_console_streams(
+    entries: &[frankenengine_engine::baseline_interpreter::ConsoleEntry],
+) -> (Vec<u8>, Vec<u8>) {
+    use frankenengine_engine::baseline_interpreter::ConsoleLevel;
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    for entry in entries {
+        let sink = match entry.level {
+            ConsoleLevel::Log | ConsoleLevel::Info => &mut stdout,
+            ConsoleLevel::Warn | ConsoleLevel::Error => &mut stderr,
+        };
+        sink.extend_from_slice(entry.message.as_bytes());
+        sink.push(b'\n');
+    }
+    (stdout, stderr)
 }
 
 #[cfg(unix)]
@@ -2119,18 +2183,36 @@ impl EngineDispatcher {
             "Native engine execution completed"
         );
 
-        // Convert native execution result to Output format for compatibility
-        let stdout = format!("Native execution completed: {:?}", execution_result);
+        // Convert native execution result to Output format for compatibility.
+        // bd-5r99w.1: surface the program's REAL console output (split into
+        // stdout/stderr) instead of a Rust `{:?}` debug dump of the result.
+        let (stdout, stderr) = render_console_streams(&execution_result.console_output);
+
+        // bd-5r99w.2: derive the REAL exit code from the runtime's containment
+        // verdict instead of always stamping synthetic success.
+        let exit_code =
+            exit_code_for_containment_severity(execution_result.containment_action.severity());
+
+        tracing::info!(
+            execution_mode = "native",
+            phase = "execution",
+            containment_action = %execution_result.containment_action,
+            exit_code,
+            console_entries = execution_result.console_output.len(),
+            "Native engine execution result converted to run output"
+        );
 
         let output = Output {
-            status: synthetic_success_status(),
-            stdout: stdout.into_bytes(),
-            stderr: Vec::new(),
+            status: exit_status_from_code(exit_code),
+            stdout,
+            stderr,
         };
 
         // Stop telemetry and return
         let telemetry_report = telemetry_handle
-            .stop_and_join(ShutdownReason::EngineExit { exit_code: Some(0) })
+            .stop_and_join(ShutdownReason::EngineExit {
+                exit_code: Some(exit_code),
+            })
             .map_err(|err| EngineProcessError::TelemetryDrain(format!("{err}")))?;
 
         Ok((output, telemetry_report))
@@ -2398,10 +2480,75 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_success_status_does_not_spawn_a_helper_process() {
-        let status = synthetic_success_status();
-        assert!(status.success());
-        assert_eq!(status.code(), Some(0));
+    fn exit_status_from_code_round_trips_without_spawning_a_helper_process() {
+        let ok = exit_status_from_code(0);
+        assert!(ok.success());
+        assert_eq!(ok.code(), Some(0));
+
+        let contained = exit_status_from_code(92);
+        assert!(!contained.success());
+        assert_eq!(contained.code(), Some(92));
+    }
+
+    #[test]
+    fn exit_code_for_containment_severity_maps_allow_to_zero_and_contained_to_distinct_codes() {
+        // Allow (severity 0) is the only success.
+        assert_eq!(exit_code_for_containment_severity(0), 0);
+        // Every more-severe verdict gets a distinct, non-zero containment-class code.
+        assert_eq!(exit_code_for_containment_severity(1), 91); // Challenge
+        assert_eq!(exit_code_for_containment_severity(2), 92); // Sandbox
+        assert_eq!(exit_code_for_containment_severity(3), 93); // Suspend
+        assert_eq!(exit_code_for_containment_severity(4), 94); // Terminate
+        assert_eq!(exit_code_for_containment_severity(5), 95); // Quarantine
+        // Distinct per severity, never colliding with the success code.
+        let codes: std::collections::BTreeSet<i32> =
+            (0..=5).map(exit_code_for_containment_severity).collect();
+        assert_eq!(codes.len(), 6);
+        assert!(codes.iter().filter(|&&c| c == 0).count() == 1);
+    }
+
+    #[test]
+    fn render_console_streams_splits_stdout_stderr_in_order_without_debug_dump() {
+        use frankenengine_engine::baseline_interpreter::{ConsoleEntry, ConsoleLevel};
+
+        let entries = vec![
+            ConsoleEntry {
+                level: ConsoleLevel::Log,
+                message: "hello".to_string(),
+                instruction_index: 0,
+            },
+            ConsoleEntry {
+                level: ConsoleLevel::Error,
+                message: "boom".to_string(),
+                instruction_index: 1,
+            },
+            ConsoleEntry {
+                level: ConsoleLevel::Info,
+                message: "world".to_string(),
+                instruction_index: 2,
+            },
+            ConsoleEntry {
+                level: ConsoleLevel::Warn,
+                message: "careful".to_string(),
+                instruction_index: 3,
+            },
+        ];
+
+        let (stdout, stderr) = render_console_streams(&entries);
+        let stdout = String::from_utf8(stdout).expect("utf8 stdout");
+        let stderr = String::from_utf8(stderr).expect("utf8 stderr");
+
+        // log/info -> stdout, preserving order; warn/error -> stderr, preserving order.
+        assert_eq!(stdout, "hello\nworld\n");
+        assert_eq!(stderr, "boom\ncareful\n");
+        // The old Rust debug dump must never appear.
+        assert!(!stdout.contains("Native execution completed"));
+        assert!(!stdout.contains("OrchestratorResult"));
+
+        // Empty input yields empty streams (no spurious newline).
+        let (empty_out, empty_err) = render_console_streams(&[]);
+        assert!(empty_out.is_empty());
+        assert!(empty_err.is_empty());
     }
 
     #[test]

@@ -794,8 +794,11 @@ fn incident_counterfactual_json_promotes_signed_contracts() {
 
     assert_eq!(
         report["schema_version"],
-        json!("franken-node/incident-counterfactual-report/v1")
+        json!("franken-node/incident-counterfactual-report/v2")
     );
+    // bd-5r99w.4: the report must label which decision model produced the diff;
+    // the CLI default is the sandboxed synthetic risk-score model.
+    assert_eq!(report["executor"], json!("synthetic"));
     assert_eq!(report["incident_id"], json!("INC-E2E-CF-PROMOTE-001"));
     assert!(
         report["timestamp"]

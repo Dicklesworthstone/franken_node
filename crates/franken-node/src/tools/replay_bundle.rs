@@ -1269,28 +1269,31 @@ pub fn replay_bundle_with_trusted_keys(
 fn replay_bundle_after_signature_verification(
     bundle: &ReplayBundle,
 ) -> Result<ReplayOutcome, ReplayBundleError> {
-    #[cfg(debug_assertions)]
-    {
-        let replayed_sequence_hash = compute_decision_sequence_hash(
-            &bundle.timeline,
-            &bundle.initial_state_snapshot,
-            &bundle.policy_version,
-        )?;
-        debug_assert_eq!(
-            replayed_sequence_hash,
-            bundle.manifest.decision_sequence_hash
-        );
-    }
+    // bd-5r99w.3: re-derive the decision-sequence hash from the RECORDED timeline,
+    // initial-state snapshot, and policy version on *every* build profile, then
+    // compare it against the manifest's recorded hash. Previously this recompute
+    // lived only behind `#[cfg(debug_assertions)]` and release builds set
+    // `replayed_sequence_hash = manifest.decision_sequence_hash.clone()`, so the
+    // `matched` comparison compared the manifest hash to a clone of itself — a
+    // tautological PASS that could never detect a tampered or inconsistent
+    // timeline. The recompute is now load-bearing: any divergence between the
+    // recorded timeline and its recorded decision-sequence hash flips `matched`
+    // to false, and the caller (`handle_incident_replay_command`) fails closed.
+    let replayed_sequence_hash = compute_decision_sequence_hash(
+        &bundle.timeline,
+        &bundle.initial_state_snapshot,
+        &bundle.policy_version,
+    )?;
 
-    let replayed_sequence_hash = bundle.manifest.decision_sequence_hash.clone();
+    let matched = constant_time::ct_eq(
+        &replayed_sequence_hash,
+        &bundle.manifest.decision_sequence_hash,
+    );
 
     Ok(ReplayOutcome {
         incident_id: bundle.incident_id.clone(),
         expected_sequence_hash: bundle.manifest.decision_sequence_hash.clone(),
-        matched: constant_time::ct_eq(
-            &replayed_sequence_hash,
-            &bundle.manifest.decision_sequence_hash,
-        ),
+        matched,
         replayed_sequence_hash,
         event_count: bundle.timeline.len(),
     })
@@ -1810,7 +1813,13 @@ fn uuid_v7_from_seed(timestamp_ms: u64, entropy: &[u8; 32]) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-#[cfg(debug_assertions)]
+/// Re-derive the decision-sequence hash from a recorded timeline.
+///
+/// This is an independent recomputation: it canonicalizes the recorded timeline,
+/// initial-state snapshot, and policy version and hashes them, with no reference
+/// to the manifest's stored `decision_sequence_hash`. It is load-bearing in
+/// release builds (see [`replay_bundle_after_signature_verification`]) so the
+/// replay verdict reflects a real recompute rather than a self-comparison.
 fn compute_decision_sequence_hash(
     timeline: &[TimelineEvent],
     initial_state_snapshot: &Value,
@@ -3015,6 +3024,41 @@ mod tests {
 
         let err = validate_bundle_integrity(&bundle).expect_err("must reject manifest drift");
         assert!(matches!(err, ReplayBundleError::ManifestMismatch));
+    }
+
+    #[test]
+    fn replay_recompute_is_load_bearing_not_a_self_compare() {
+        // bd-5r99w.3 regression: a faithfully generated bundle replays as matched
+        // because the recomputed decision-sequence hash equals the manifest hash.
+        let bundle =
+            generate_replay_bundle("INC-RPL-LOADBEARING", &fixture_events()).expect("bundle");
+        let outcome = replay_bundle_after_signature_verification(&bundle).expect("replay");
+        assert!(outcome.matched, "faithful bundle must replay as matched");
+        assert_eq!(
+            outcome.replayed_sequence_hash, bundle.manifest.decision_sequence_hash,
+            "recomputed hash must equal the faithfully recorded manifest hash"
+        );
+
+        // Mutating a recorded decision while leaving the manifest's recorded hash
+        // stale MUST flip the verdict to diverged. Before bd-5r99w.3 the recompute
+        // lived only behind `#[cfg(debug_assertions)]` and release builds set
+        // `replayed_sequence_hash = manifest.decision_sequence_hash.clone()`, so
+        // this comparison was the manifest hash against a clone of itself and could
+        // never detect tampering.
+        let mut tampered = bundle.clone();
+        assert!(!tampered.timeline.is_empty(), "fixture must record events");
+        tampered.timeline[0].payload = serde_json::json!({"tampered": true});
+
+        let tampered_outcome =
+            replay_bundle_after_signature_verification(&tampered).expect("replay tampered");
+        assert!(
+            !tampered_outcome.matched,
+            "mutated timeline must diverge: the recompute is load-bearing, not a self-compare"
+        );
+        assert_ne!(
+            tampered_outcome.replayed_sequence_hash, tampered.manifest.decision_sequence_hash,
+            "recomputed hash must reflect the mutated timeline, not the stale manifest field"
+        );
     }
 
     #[test]

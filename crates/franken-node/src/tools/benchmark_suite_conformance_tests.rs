@@ -606,6 +606,7 @@ mod benchmark_suite_edge_cases {
                 score: 50,
                 iterations: 5,
                 variance_pct: 2.0,
+                data_source: ScenarioDataSource::MeasuredPipeline,
             })
             .collect();
         let total_sample_count = scenario_results

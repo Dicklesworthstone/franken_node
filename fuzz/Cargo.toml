@@ -823,3 +823,105 @@ name = "fuzz_metrics_exporter_statistics"
 path = "fuzz_targets/fuzz_metrics_exporter_statistics.rs"
 test = false
 doc = false
+
+# bd-5r99w.7: previously-orphaned fuzz targets that exist on disk with a
+# `fuzz_target!` entrypoint but were never registered, so `cargo fuzz` and the
+# fuzz CI gate never built or ran them. Registered here so they are first-class
+# harnesses again and counted honestly in the README. (The three *_parity
+# targets were already registered under `fuzz_*`-prefixed bin names, so they are
+# not repeated here.)
+[[bin]]
+name = "fuzz_blocked_proof_rehydration_plan"
+path = "fuzz_targets/fuzz_blocked_proof_rehydration_plan.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_cmdline_parse"
+path = "fuzz_targets/fuzz_cmdline_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_cookie_parse"
+path = "fuzz_targets/fuzz_cookie_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_crypto_base64_decode"
+path = "fuzz_targets/fuzz_crypto_base64_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_crypto_hex_decode"
+path = "fuzz_targets/fuzz_crypto_hex_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_email_validate"
+path = "fuzz_targets/fuzz_email_validate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_env_var_parse"
+path = "fuzz_targets/fuzz_env_var_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_http_header_parse"
+path = "fuzz_targets/fuzz_http_header_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ip_address_parse"
+path = "fuzz_targets/fuzz_ip_address_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_json_parse_value"
+path = "fuzz_targets/fuzz_json_parse_value.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_path_validation"
+path = "fuzz_targets/fuzz_path_validation.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_regex_parse"
+path = "fuzz_targets/fuzz_regex_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_timestamp_parse"
+path = "fuzz_targets/fuzz_timestamp_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_toml_parse_value"
+path = "fuzz_targets/fuzz_toml_parse_value.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_url_parse"
+path = "fuzz_targets/fuzz_url_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_version_parse"
+path = "fuzz_targets/fuzz_version_parse.rs"
+test = false
+doc = false

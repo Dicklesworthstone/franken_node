@@ -1,0 +1,40 @@
+# Recurrence-prevention gate (bd-5r99w.11): forbid the self-compare / unexecuted-PASS
+# bug CLASS that the 2026-06 reality check found.
+#
+# Root cause this prevents: a value compared to a clone of itself to manufacture a
+# PASS (e.g. `incident replay` self-comparing the manifest hash in release builds,
+# fixed in bd-5r99w.3), and "recomputes" that only run under #[cfg(debug_assertions)]
+# while the release path short-circuits to a clone.
+#
+# The lint is scoped to PRODUCTION code (tests/, fuzz/, benches/, and inline
+# #[cfg(test)] regions are skipped) because reflexivity and snapshot-then-assert
+# patterns are legitimate in tests. Test honesty is owned by bd-rjc2m.21.
+name: no-self-compare-gate
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**/*.rs'
+      - 'sdk/**/*.rs'
+      - 'scripts/check_no_self_compare.py'
+  workflow_dispatch: {}
+
+jobs:
+  no-self-compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Lint self-test (the linter must be correct first)
+        run: python3 scripts/check_no_self_compare.py --self-test
+      - name: Scan production code for self-compare / unexecuted-PASS
+        run: python3 scripts/check_no_self_compare.py --ci --json | tee no_self_compare.json
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: no-self-compare-findings
+          path: no_self_compare.json

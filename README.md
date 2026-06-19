@@ -11,7 +11,7 @@
 ![Security](https://img.shields.io/badge/security-trust--native-1f6feb)
 ![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success)
 ![Compatibility](https://img.shields.io/badge/compatibility-node%20%2B%20bun-5b3cc4)
-![Tests](https://img.shields.io/badge/tests-23k%2B-blue)
+![Tests](https://img.shields.io/badge/tests-3.8k%2B%20e2e%20%2B%2021k%20inline-blue)
 ![License](https://img.shields.io/badge/license-MIT%20%2B%20OpenAI%2FAnthropic%20Rider-lightgrey)
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
 
@@ -127,8 +127,8 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 |---|---|
 | Trust cards | Per-extension provenance, risk score, audit history, camouflage assessment, revocation state |
 | Revocation freshness gates | Risky and dangerous actions fail closed when trust state is stale |
-| Deterministic incident replay | Signed bundles with timeline, evidence, policy decisions; replay is exact |
-| Counterfactual simulator | Re-execute incidents under a different policy mode and inspect the diff |
+| Deterministic incident replay | Signed bundles with timeline, evidence, policy decisions; replay re-derives the recorded decision sequence and verifies it against the bundle's signed hash, fail-closed on mismatch |
+| Counterfactual simulator | Re-evaluate the recorded incident decision trace under a different policy mode and inspect the diff |
 | Migration autopilot | Audit, rewrite, validate, and rollout transforms with rollback bundles |
 | Compatibility oracle | Lockstep checks across Bun and franken-engine by default, with real Node.js as an explicit third leg when available |
 | Fleet quarantine plane | Quarantine, reconcile, release across zones; signed decision receipts |
@@ -940,7 +940,7 @@ flowchart TB
 | `sdk/verifier/src/lib.rs` | Public verifier-facing SDK (`frankenengine-verifier-sdk`) |
 | `docs/specs/**` | Product contracts (gates, schemas, runbooks) |
 | `tests/**`, `crates/franken-node/tests/**` | Integration, conformance, contract, e2e, golden, security, perf tests |
-| `scripts/check_*.py` | 460+ Python validators wired into CI gates |
+| `scripts/check_*.py` | 430+ Python validators wired into CI gates |
 | `.github/workflows/` | Gate-oriented CI: claim gates, conformance gates, closer-discipline, mutants, coverage, security-golden-artifacts, etc. |
 | `packaging/profiles.toml` | Packaging profile metadata (`local`, `dev`, `enterprise`) |
 
@@ -2365,17 +2365,20 @@ and across the test surface:
   downgrade helpers for every serialized artifact.
 - **CI gates** at `.github/workflows/` enforce closer discipline, golden
   artifact integrity, no-contract-no-merge, claim gates (ATC, BPET, DGIS,
-  VEF), and execution-normalization; ~460 `scripts/check_*.py` validators
+  VEF), and execution-normalization; ~436 `scripts/check_*.py` validators
   back individual contracts.
 
 ---
 
 ## Testing and Verification
 
-- ~23,000 `#[test]` cases across inline `#[cfg(test)]` modules and the
-  workspace test trees (`tests/integration`, `tests/conformance`,
-  `tests/contract`, `tests/e2e`, `tests/golden`, `tests/security`,
-  `tests/perf`).
+- ~3,800 `#[test]` cases in the workspace test trees (`tests/integration`,
+  `tests/conformance`, `tests/contract`, `tests/e2e`, `tests/golden`,
+  `tests/security`, `tests/perf`) run by a default `cargo test
+  -p frankenengine-node`, plus ~21,000 inline `#[cfg(test)]` unit tests that
+  are **compiled out of a default `cargo test`** by the crate-level
+  `#![cfg(any(not(test), franken_node_inline_tests))]` gate and only run on
+  the dedicated inline lane (see below).
   The inline library-test portion is guarded by
   `.github/workflows/inline-lib-tests-gate.yml`. Pull requests run a
   cheap preflight that asserts the dedicated inline-test override remains
@@ -2408,7 +2411,7 @@ and across the test surface:
 Run focused suites:
 
 ```bash
-cargo test -p frankenengine-node                       # full suite
+cargo test -p frankenengine-node                       # ~3.8k integration tests (inline unit tests need the inline lane)
 cargo test -p frankenengine-node fleet_cli_e2e         # CLI/integration
 cargo test -p frankenengine-node verify_release_cli_e2e
 cargo test -p frankenengine-node doctor_policy_activation_e2e
@@ -2586,10 +2589,12 @@ into the corresponding section above.
 
 ## Fuzzing and Differential Testing
 
-`fuzz/fuzz_targets/` ships 43 cargo-fuzz harnesses targeting the
+`fuzz/fuzz_targets/` ships 146 registered cargo-fuzz harnesses targeting the
 adversarially-exposed surfaces: parsers, deserializers, signature
-verifiers, lifecycle inputs, canonical encoders, transcript readers.
-Representative harnesses:
+verifiers, lifecycle inputs, canonical encoders, transcript readers. A subset
+is undergoing API-drift remediation; the verification-target compile census
+(`.github/workflows/verification-target-compile-gate.yml`) builds them with
+`--keep-going` and tracks the compiling ratio. Representative harnesses:
 
 - `fuzz_canonical_serializer_roundtrip`: every canonical encoder must
   satisfy `decode(encode(x)) == x` for arbitrary inputs.
@@ -2915,7 +2920,23 @@ one pass.
   requires the asupersync transport or a configured external transport.
 - **Counterfactual simulations** depend on the completeness of the
   telemetry captured during the incident window. Sparse evidence produces
-  sparse counterfactuals.
+  sparse counterfactuals. The default counterfactual executor is a
+  policy-threshold model that re-evaluates the *recorded* decision trace; the
+  report labels which executor produced the diff so a synthetic re-evaluation
+  is never mistaken for a live re-run.
+- **`franken-node run` executes through the in-process franken-engine** and
+  surfaces the program's real console output (stdout/stderr) plus an exit code
+  derived from the runtime's containment verdict. The broader host-effect
+  "runtime-of-record" — the full Node/Bun host-API surface with
+  capability-metered effects — is still in active development under the
+  engine-split program; do not yet rely on it as a complete drop-in for
+  arbitrary host-effect workloads.
+- **`incident replay` is an integrity-verified replay of the recorded
+  incident**, not a live re-execution of the original program. It
+  deterministically re-derives the recorded decision sequence from the bundle
+  and verifies it against the bundle's signed hash, failing closed on any
+  mismatch. Live re-execution under the engine is part of the runtime-of-record
+  work above.
 - **Source builds require the sibling `franken_engine` repository** to be
   checked out next to this one (engine-split contract). The one-line
   installer side-steps this by shipping prebuilt binaries.
