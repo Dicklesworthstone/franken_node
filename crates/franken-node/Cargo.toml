@@ -970,6 +970,7 @@ path = "../../tests/security/dgis_adversarial_suite.rs"
 [[test]]
 name = "bayesian_risk_quarantine"
 path = "tests/bayesian_risk_quarantine.rs"
+required-features = ["policy-engine"]
 
 [[test]]
 name = "fleet_quarantine_metamorphic"
