@@ -1,0 +1,42 @@
+# Recurrence-prevention gate (bd-5r99w.6): README headline claims cannot silently drift.
+#
+# Recomputes each headline claim (tests-run / inline-test / fuzz-target / validator
+# counts, unsafe-block count, license string, replay-load-bearing flag) from the
+# committed tree and fails when it drifts from docs/claims_manifest.json beyond
+# tolerance. When tests/validators grow past tolerance, regenerate the manifest
+# with `python scripts/check_claims_manifest.py --update` and reconcile the README.
+#
+# This is the recompute foundation the signed Honesty Manifest (bd-5r99w.9) builds on.
+name: claims-manifest-gate
+
+on:
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'docs/claims_manifest.json'
+      - 'fuzz/Cargo.toml'
+      - 'Cargo.toml'
+      - 'scripts/check_*.py'
+      - 'crates/franken-node/src/tools/replay_bundle.rs'
+      - '.github/workflows/claims-manifest-gate.yml'
+  workflow_dispatch: {}
+
+jobs:
+  claims-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Self-test (recompute/tolerance logic must be correct first)
+        run: python3 scripts/check_claims_manifest.py --self-test
+      - name: Recompute claims and fail on drift
+        run: python3 scripts/check_claims_manifest.py --ci --json | tee claims_manifest_report.json
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claims-manifest-report
+          path: claims_manifest_report.json
