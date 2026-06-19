@@ -223,6 +223,10 @@ name = "counterfactual_policy_matrix"
 path = "tests/counterfactual_policy_matrix.rs"
 
 [[test]]
+name = "counterfactual_soundness"
+path = "tests/counterfactual_soundness.rs"
+
+[[test]]
 name = "rch_adapter_classification"
 path = "tests/rch_adapter_classification.rs"
 
