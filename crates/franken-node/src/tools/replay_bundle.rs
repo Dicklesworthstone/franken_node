@@ -1266,6 +1266,28 @@ pub fn replay_bundle_with_trusted_keys(
     replay_bundle_after_signature_verification(bundle)
 }
 
+/// Recompute the replay verdict directly from the recorded timeline, **without**
+/// verifying transport integrity or the bundle signature.
+///
+/// This exposes the load-bearing decision-sequence recompute (bd-5r99w.3): the
+/// returned [`ReplayOutcome::matched`] is `true` iff the hash re-derived from the
+/// recorded `timeline` / `initial_state_snapshot` / `policy_version` equals the
+/// manifest's recorded `decision_sequence_hash`. A fidelity oracle uses this to
+/// prove the recompute is genuinely re-derived — mutating any recorded decision
+/// flips `matched` to `false` — rather than the historical self-compare that
+/// cloned the manifest hash into the verdict and could never diverge.
+///
+/// This intentionally **skips** the integrity-hash and Ed25519 checks that
+/// [`replay_bundle`] performs first, so it must only be used for fidelity
+/// analysis of an already-trusted (or deliberately mutated) in-memory bundle.
+/// For trusted replay of an on-the-wire bundle, use [`replay_bundle`],
+/// [`replay_bundle_with_trusted_key`], or [`replay_bundle_with_trusted_keys`].
+pub fn recompute_replay_verdict(
+    bundle: &ReplayBundle,
+) -> Result<ReplayOutcome, ReplayBundleError> {
+    replay_bundle_after_signature_verification(bundle)
+}
+
 fn replay_bundle_after_signature_verification(
     bundle: &ReplayBundle,
 ) -> Result<ReplayOutcome, ReplayBundleError> {

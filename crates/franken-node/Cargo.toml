@@ -211,6 +211,14 @@ name = "incident_cli_e2e"
 path = "tests/incident_cli_e2e.rs"
 
 [[test]]
+name = "run_console_exit_e2e"
+path = "tests/run_console_exit_e2e.rs"
+
+[[test]]
+name = "replay_fidelity_oracle"
+path = "tests/replay_fidelity_oracle.rs"
+
+[[test]]
 name = "counterfactual_policy_matrix"
 path = "tests/counterfactual_policy_matrix.rs"
 
