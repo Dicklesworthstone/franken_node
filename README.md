@@ -2675,7 +2675,33 @@ becomes a regression case forever. Coverage data lives in
 `fuzz/coverage/`; fuzz artifacts live in `fuzz/artifacts/`. The
 `mutants-gate.yml` workflow runs `cargo-mutants` against the test
 surface as a separate proof-of-effective-coverage signal: a mutant that
-survives indicates a gap in the test surface, not a bug per se.
+survives indicates a gap in the test surface, not a bug per se. The gate
+enforces a **registered mutation-adequacy floor** (`MUTATION_SCORE_FLOOR_BP`),
+so a change that guts the focused suites' detection power fails CI.
+
+### Effective coverage, not a raw count
+
+A raw test *count* is Goodhart-bait, so the honest "tests" signal is
+**effective coverage**, expressed as three recomputable parts rather than a
+single token count:
+
+1. **Tests actually run** by a default `cargo test -p frankenengine-node`
+   (~3,800; the ~21k inline unit tests run only on the dedicated inline lane).
+   This count is recomputed from the committed tree by the Honesty Manifest
+   ([Honesty Manifest](#honesty-manifest)).
+2. **Mutation adequacy** — the fraction of seeded mutants the suite catches,
+   measured live by `mutants-gate.yml` and held above the registered floor.
+   Mutation score measures whether the tests would *catch a regression*, which a
+   count cannot.
+3. **A pass-rate confidence interval** — the verifier SDK exposes the Wilson
+   score interval (`honesty_manifest::wilson_score_interval_bp`) so an auditor
+   can bound the executed-test pass rate from a measured `(passed, trials)`
+   pair (e.g. 95/100 → a 95% lower bound of ~88.8%), rather than trusting a bare
+   "all green."
+
+The mutation score is enforced live by the gate (it is not baked into the
+committed manifest, which would defeat the point); the run-count and the
+interval method are independently recomputable.
 
 ---
 

@@ -376,6 +376,63 @@ pub fn harness_public_key_hex() -> String {
     hex::encode(harness_verifying_key().to_bytes())
 }
 
+// --------------------------------------------------------------------------- //
+// Effective test coverage (bd-5r99w.14)
+//
+// A raw test *count* is Goodhart-bait, so the honest "tests" signal is
+// effective coverage: how much behavior is actually pinned (mutation adequacy,
+// enforced by the mutants-gate against a registered floor) plus a statistical
+// confidence interval on the executed-test pass set. This module provides the
+// interval half — the Wilson score interval — as a deterministic, auditor-
+// recomputable function over a measured (successes, trials) pair, in integer
+// basis points (no floats survive into any canonical artifact).
+// --------------------------------------------------------------------------- //
+
+/// The standard normal quantile z for a 95% two-sided interval (1.96), in
+/// milli-units, for use with [`wilson_score_interval_bp`].
+pub const WILSON_Z_95_MILLI: u64 = 1_960;
+
+/// Compute the Wilson score interval for a binomial proportion, returned as
+/// `(lower_bp, upper_bp)` in basis points (0..=10000).
+///
+/// The Wilson interval is preferred over the naive normal interval for pass-rate
+/// estimation because it stays within `[0, 1]`, behaves well at the extremes
+/// (e.g. all tests passing does NOT yield a degenerate `[1, 1]`), and is well
+/// defined for small samples. `z_milli` is the standard-normal quantile times
+/// 1000 (use [`WILSON_Z_95_MILLI`] for a 95% interval).
+///
+/// `trials == 0` yields the non-informative `(0, 10000)`.
+#[must_use]
+pub fn wilson_score_interval_bp(successes: u64, trials: u64, z_milli: u64) -> (u64, u64) {
+    if trials == 0 {
+        return (0, 10_000);
+    }
+    let successes = successes.min(trials);
+    let n = trials as f64;
+    let p_hat = successes as f64 / n;
+    let z = z_milli as f64 / 1_000.0;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let center = (p_hat + z2 / (2.0 * n)) / denom;
+    let margin = (z / denom) * ((p_hat * (1.0 - p_hat) / n) + (z2 / (4.0 * n * n))).sqrt();
+    let lower = (center - margin).clamp(0.0, 1.0);
+    let upper = (center + margin).clamp(0.0, 1.0);
+    (to_basis_points(lower), to_basis_points(upper))
+}
+
+/// The Wilson lower confidence bound on a pass rate, in basis points — the
+/// honest "at least this much of the executed-test behavior holds" figure.
+#[must_use]
+pub fn wilson_lower_bound_bp(successes: u64, trials: u64, z_milli: u64) -> u64 {
+    wilson_score_interval_bp(successes, trials, z_milli).0
+}
+
+/// Round a probability in `[0, 1]` to the nearest basis point.
+fn to_basis_points(probability: f64) -> u64 {
+    let scaled = (probability.clamp(0.0, 1.0) * 10_000.0).round();
+    if scaled.is_finite() { scaled as u64 } else { 0 }
+}
+
 /// Build the Ed25519 signature preimage for a canonical unsigned payload.
 #[must_use]
 pub fn honesty_signature_message(canonical_unsigned: &[u8]) -> Vec<u8> {
@@ -1014,6 +1071,57 @@ mod tests {
         assert_eq!(drift_bp(90, 100), 1000); // -10%
         assert_eq!(drift_bp(0, 0), 0);
         assert_eq!(drift_bp(1, 0), u64::MAX);
+    }
+
+    /// Assert a basis-point value is within `tol` of `expected`.
+    fn assert_near_bp(got: u64, expected: u64, tol: u64, label: &str) {
+        let diff = got.max(expected) - got.min(expected);
+        assert!(
+            diff <= tol,
+            "{label}: got {got}bp, expected ~{expected}bp (±{tol})"
+        );
+    }
+
+    #[test]
+    fn wilson_interval_matches_textbook_values() {
+        // 95/100 at 95%: Wilson CI ~ [0.8882, 0.9784].
+        let (lo, hi) = wilson_score_interval_bp(95, 100, WILSON_Z_95_MILLI);
+        assert_near_bp(lo, 8882, 2, "wilson lower 95/100");
+        assert_near_bp(hi, 9784, 2, "wilson upper 95/100");
+
+        // 50/100 at 95%: symmetric ~ [0.4038, 0.5962].
+        let (lo, hi) = wilson_score_interval_bp(50, 100, WILSON_Z_95_MILLI);
+        assert_near_bp(lo, 4038, 2, "wilson lower 50/100");
+        assert_near_bp(hi, 5962, 2, "wilson upper 50/100");
+
+        // All-pass is NOT degenerate [1,1]: 100/100 has a lower bound < 1.
+        let (lo, hi) = wilson_score_interval_bp(100, 100, WILSON_Z_95_MILLI);
+        assert_near_bp(lo, 9630, 3, "wilson lower 100/100");
+        assert!(lo < 10_000, "all-pass lower bound must stay below 1.0");
+        assert_eq!(hi, 10_000, "all-pass upper bound clamps at 1.0");
+
+        // No observations -> non-informative full interval.
+        assert_eq!(
+            wilson_score_interval_bp(0, 0, WILSON_Z_95_MILLI),
+            (0, 10_000)
+        );
+    }
+
+    #[test]
+    fn wilson_lower_bound_is_monotone_in_successes() {
+        // More passing tests at the same sample size can only raise the floor.
+        let weak = wilson_lower_bound_bp(90, 100, WILSON_Z_95_MILLI);
+        let strong = wilson_lower_bound_bp(95, 100, WILSON_Z_95_MILLI);
+        assert!(
+            weak < strong,
+            "lower bound must increase with more successes: {weak} !< {strong}"
+        );
+        // Saturating: successes capped at trials.
+        assert_eq!(
+            wilson_lower_bound_bp(200, 100, WILSON_Z_95_MILLI),
+            wilson_lower_bound_bp(100, 100, WILSON_Z_95_MILLI),
+            "successes are clamped to trials"
+        );
     }
 
     #[test]
