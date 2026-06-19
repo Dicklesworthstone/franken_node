@@ -67,6 +67,7 @@ pub mod bundle;
 pub mod calibration;
 pub mod capsule;
 pub mod counterfactual;
+pub mod honesty_manifest;
 pub mod resolution;
 
 /// SDK version string for compatibility checks.

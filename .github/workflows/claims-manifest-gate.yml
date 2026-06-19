@@ -6,7 +6,12 @@
 # tolerance. When tests/validators grow past tolerance, regenerate the manifest
 # with `python scripts/check_claims_manifest.py --update` and reconcile the README.
 #
-# This is the recompute foundation the signed Honesty Manifest (bd-5r99w.9) builds on.
+# This is the recompute foundation the signed Honesty Manifest (bd-5r99w.9) builds on:
+# the honesty-manifest step below additionally verifies the SIGNED, granular
+# census artifact (docs/honesty_manifest{,_evidence}.json) against the live tree.
+# The load-bearing Ed25519 + recompute verification is the verifier-SDK
+# conformance test (sdk/verifier/tests/honesty_manifest_recompute.rs), which runs
+# under the normal cargo test lanes with zero trust in the producing runtime.
 name: claims-manifest-gate
 
 on:
@@ -14,10 +19,13 @@ on:
     paths:
       - 'README.md'
       - 'docs/claims_manifest.json'
+      - 'docs/honesty_manifest.json'
+      - 'docs/honesty_manifest_evidence.json'
       - 'fuzz/Cargo.toml'
       - 'Cargo.toml'
       - 'scripts/check_*.py'
       - 'crates/franken-node/src/tools/replay_bundle.rs'
+      - 'sdk/verifier/src/honesty_manifest.rs'
       - '.github/workflows/claims-manifest-gate.yml'
   workflow_dispatch: {}
 
@@ -34,9 +42,13 @@ jobs:
         run: python3 scripts/check_claims_manifest.py --self-test
       - name: Recompute claims and fail on drift
         run: python3 scripts/check_claims_manifest.py --ci --json | tee claims_manifest_report.json
-      - name: Upload report
+      - name: Verify signed Honesty Manifest against the live tree (bd-5r99w.9)
+        run: python3 scripts/check_claims_manifest.py --check-honesty --ci --json | tee honesty_manifest_report.json
+      - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: claims-manifest-report
-          path: claims_manifest_report.json
+          path: |
+            claims_manifest_report.json
+            honesty_manifest_report.json

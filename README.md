@@ -2425,6 +2425,62 @@ cargo test -p frankenengine-verifier-sdk
 
 ---
 
+## Honesty Manifest
+
+The headline claims in this README obey the same rule as decision receipts
+and benchmark reports: **claims require evidence, and the evidence is
+re-verifiable outside the producing runtime.** Two committed artifacts back
+them:
+
+- [`docs/honesty_manifest_evidence.json`](docs/honesty_manifest_evidence.json)
+  — the **census**: a per-source snapshot of the committed tree from which each
+  claim is derived (one `{source, count}` entry per `.rs` file that contributes
+  `#[test]` attributes, one per registered fuzz target, one per validator
+  script, etc.). This is the "committed tree snapshot" any third party can
+  regenerate from source.
+- [`docs/honesty_manifest.json`](docs/honesty_manifest.json) — the **signed
+  manifest**: for each claim it binds the recomputed value, the README's pinned
+  value, a drift tolerance, and a `sha256` `evidence_digest` over the matching
+  census entry, plus a single `corpus_digest` over all claims and a detached
+  Ed25519 signature over the canonical unsigned payload.
+
+The verifier SDK recomputes the whole chain with zero trust in the producer:
+
+```rust
+use frankenengine_verifier_sdk::honesty_manifest::{
+    verify_honesty_manifest, HonestyTrustAnchor,
+};
+
+let manifest = std::fs::read("docs/honesty_manifest.json")?;
+let evidence = std::fs::read("docs/honesty_manifest_evidence.json")?;
+let verified = verify_honesty_manifest(
+    &manifest, &evidence, &HonestyTrustAnchor::HarnessDefault,
+)?;
+println!("verified {} headline claims", verified.claim_count);
+```
+
+`verify_honesty_manifest` (1) verifies the Ed25519 signature against the pinned
+reproducible harness key — or an operator-supplied trust anchor for a
+re-signed production manifest; (2) recomputes every claim value from the
+census and checks each `evidence_digest`; (3) enforces the README-claim
+tolerance band; and (4) checks the `corpus_digest` commits to exactly the claim
+set presented. Flipping a single census count, recorded value, or signature
+byte makes it fail closed.
+
+Two CI layers keep the manifest honest. `scripts/check_claims_manifest.py
+--check-honesty` continuously checks the committed census against the *live*
+tree (no crypto required), so headline numbers cannot silently drift; the
+verifier-SDK conformance test
+(`sdk/verifier/tests/honesty_manifest_recompute.rs`) performs the load-bearing
+Ed25519 + recompute verification on every cargo test run. Regenerate after a
+deliberate change with:
+
+```bash
+python scripts/check_claims_manifest.py --update-honesty
+```
+
+---
+
 ## Conformance Harnesses
 
 Conformance harnesses are stronger than tests: they encode protocol
@@ -2844,6 +2900,13 @@ What it exposes:
   and side-effect declaration matching.
 - `counterfactual`: re-run an incident bundle under an alternative
   policy and emit a structured diff.
+- `honesty_manifest`: independently re-verify the README's headline
+  claims. `verify_honesty_manifest` recomputes every claim from the
+  committed per-source census, checks each `evidence_digest` and the
+  `corpus_digest`, and verifies the manifest's Ed25519 signature against
+  the pinned harness key (or an operator-supplied trust anchor) — failing
+  closed on any tampered count, value, or signature byte. See
+  [Honesty Manifest](#honesty-manifest).
 - A top-level `VerifierSdk` plus the `create_verifier_sdk(identity)`
   helper. `VerifierSdk` exposes `verify_claim`, `verify_migration_artifact`,
   `verify_trust_state`, `verify_signed_migration_artifact`,
