@@ -219,6 +219,95 @@ fn test_native_engine_execution_with_telemetry() {
     );
 }
 
+/// bd-5r99w.12 (mock-free e2e, product apex): a real, idiomatic JS program that
+/// performs fs effects, run through the PUBLIC `dispatch_run` path, surfaces a
+/// signed, SDK-verifiable host-effect ledger in `run --json` — and the bytes
+/// really hit the sandbox. No mocks: real parser/lowering, real `SandboxedHostIo`
+/// performing genuine fs I/O, real `EffectReceipt` hash chain, real verifier SDK
+/// re-deriving the chain offline. This is the operator-facing payoff of the whole
+/// trust-native effect pipeline: `franken-node run` showing WHAT the program did
+/// to the host under policy.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_host_effect_ledger_bd_5r99w_12() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app_path = create_test_app(
+        temp_dir.path(),
+        "app.js",
+        "require('fs').writeFileSync('out.txt', 'real effect bytes');\n\
+         require('fs').readFileSync('out.txt');\n",
+    );
+
+    // legacy-risky grants both fs_read and fs_write so both effects execute.
+    let config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+
+    // A dummy engine binary in a separate directory only satisfies dispatch-plan
+    // resolution (the path must exist). With the `engine` feature, execution runs
+    // IN-PROCESS via the native path and never executes this binary, so the
+    // sandbox (the app dir) stays clean and the run is hermetic.
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with host effects should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The write really hit the sandbox root (the app's directory).
+    assert_eq!(
+        std::fs::read(temp_dir.path().join("out.txt")).expect("written file on disk"),
+        b"real effect bytes",
+        "writeFileSync must have produced a real file in the sandbox root"
+    );
+
+    // The signed host-effect ledger is surfaced honestly.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native run must surface a host-effect ledger");
+    assert_eq!(ledger.schema_version, "host-effect-ledger-v1.0");
+    assert_eq!(
+        ledger.effect_count, 2,
+        "expected fs_write + fs_read, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 2);
+    assert_eq!(ledger.denied_count, 0);
+    let kinds: Vec<&str> = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.receipt.effect_kind.label())
+        .collect();
+    assert_eq!(kinds, vec!["fs_write", "fs_read"]);
+
+    // It auto-surfaces in `run --json` (the report is the run --json payload's
+    // `dispatch` field).
+    let json = serde_json::to_string(&report).expect("serialize run report as run --json");
+    assert!(
+        json.contains("\"host_effect_ledger\""),
+        "run --json must include the host_effect_ledger"
+    );
+    assert!(json.contains("\"fs_write\"") && json.contains("\"fs_read\""));
+
+    // An external auditor re-derives the chain offline from the run --json ledger
+    // entries alone, with the public verifier SDK — no trust in this runtime.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-5r99w-12-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the effect chain offline");
+    assert_eq!(verdict.effect_count, 2);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
 #[test]
 #[cfg(not(feature = "engine"))]
 fn test_strict_profile_rejects_fixture_fallback_without_native_engine() {

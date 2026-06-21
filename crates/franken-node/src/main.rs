@@ -9130,7 +9130,39 @@ fn emit_run_completion_output(
         "{}",
         render_run_execution_receipt_summary(receipt, receipt_path)
     );
+    // bd-5r99w.12: surface the trust-native host-effect ledger in human output.
+    if let Some(ledger) = dispatch.host_effect_ledger.as_ref()
+        && ledger.effect_count > 0
+    {
+        println!("{}", render_host_effect_ledger_human(ledger));
+    }
     Ok(())
+}
+
+/// bd-5r99w.12: render the capability-metered host-effect ledger for human
+/// `run` output — one line per effect with its kind, allow/deny verdict, and the
+/// authorizing capability or refusal reason, plus the tamper-evident chain head.
+fn render_host_effect_ledger_human(ledger: &ops::engine_dispatcher::HostEffectLedger) -> String {
+    use runtime::effect_receipt::PolicyOutcome;
+    let mut out = format!(
+        "host-effect ledger: {} effect(s) ({} allowed, {} denied) chain_head={}",
+        ledger.effect_count, ledger.allowed_count, ledger.denied_count, ledger.chain_head_hash,
+    );
+    for entry in &ledger.entries {
+        let receipt = &entry.receipt;
+        let (verdict, detail) = match &receipt.policy_outcome {
+            PolicyOutcome::Allowed { capability_ref } => ("allowed", capability_ref.as_str()),
+            PolicyOutcome::Denied { reason } => ("denied", reason.as_str()),
+        };
+        out.push_str(&format!(
+            "\n  [{}] {} {} ({})",
+            entry.index,
+            receipt.effect_kind.label(),
+            verdict,
+            detail,
+        ));
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -27807,6 +27839,7 @@ mod run_trust_gate_tests {
                 stdout: String::new(),
                 stderr: String::new(),
             },
+            host_effect_ledger: None,
         }
     }
 

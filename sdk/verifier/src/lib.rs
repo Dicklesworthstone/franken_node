@@ -1317,6 +1317,25 @@ impl VerifierSdk {
         Ok(report)
     }
 
+    /// Re-derive and verify a bare effect-receipt chain offline from its entries
+    /// alone — e.g. the host-effect ledger surfaced in `franken-node run --json`.
+    ///
+    /// Unlike [`verify_effect_chain_bundle`], this needs no surrounding replay
+    /// bundle and no embedded verifier identity: it independently re-derives
+    /// each entry's index, prev/chain-hash linkage, and receipt hash and fails
+    /// closed on any mismatch. CAS byte-bindings are not checked (the bare
+    /// ledger carries only content hashes); export a replay bundle and use
+    /// [`verify_effect_chain_bundle`] when byte-binding proof is required.
+    pub fn verify_effect_chain_entries(
+        &self,
+        entries: &[bundle::EffectReceiptChainEntry],
+    ) -> VerifierSdkResult<bundle::EffectChainVerification> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let report = bundle::verify_effect_chain_entries(entries)?;
+        Ok(report)
+    }
+
     /// Verify a selective-disclosure non-exfiltration claim over a replay bundle.
     pub fn verify_non_exfiltration_claim_bundle(
         &self,

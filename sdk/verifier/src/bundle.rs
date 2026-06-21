@@ -1109,6 +1109,36 @@ pub fn verify_effect_chain_in_bundle(
 ) -> BundleResult<EffectChainVerification> {
     let cas_lookup = cas_artifact_lookup(bundle)?;
     let entries = effect_chain_entries(bundle)?;
+    verify_effect_chain_core(
+        &entries,
+        Some(&cas_lookup),
+        bundle.bundle_id.clone(),
+        bundle.verifier_identity.clone(),
+    )
+}
+
+/// Re-derive and verify a bare effect-receipt chain offline from its entries
+/// alone — the surface a `franken-node run --json` host-effect ledger is verified
+/// against, with no surrounding replay bundle. This proves every entry's index,
+/// prev/chain-hash linkage, and receipt-hash integrity (the tamper-evident
+/// chain) and fails closed on any mismatch.
+///
+/// CAS byte-bindings are intentionally NOT checked here: a bare ledger carries
+/// only content hashes, not the addressed bytes. Use
+/// [`verify_effect_chain_in_bundle`] for full byte-binding verification over an
+/// exported replay bundle.
+pub fn verify_effect_chain_entries(
+    entries: &[EffectReceiptChainEntry],
+) -> BundleResult<EffectChainVerification> {
+    verify_effect_chain_core(entries, None, String::new(), String::new())
+}
+
+fn verify_effect_chain_core(
+    entries: &[EffectReceiptChainEntry],
+    cas_lookup: Option<&BTreeMap<String, CasArtifactBinding>>,
+    bundle_id: String,
+    verifier_identity: String,
+) -> BundleResult<EffectChainVerification> {
     if entries.is_empty() {
         return Err(BundleError::EmptyEffectChain);
     }
@@ -1151,8 +1181,10 @@ pub fn verify_effect_chain_in_bundle(
             });
         }
 
-        let cas_bindings =
-            verify_receipt_cas_bindings(expected_index, &entry.receipt, &cas_lookup)?;
+        let cas_bindings = match cas_lookup {
+            Some(lookup) => verify_receipt_cas_bindings(expected_index, &entry.receipt, lookup)?,
+            None => Vec::new(),
+        };
         verified_effects.push(VerifiedEffect {
             index: entry.index,
             seq: entry.receipt.seq,
@@ -1177,8 +1209,8 @@ pub fn verify_effect_chain_in_bundle(
     }
 
     Ok(EffectChainVerification {
-        bundle_id: bundle.bundle_id.clone(),
-        verifier_identity: bundle.verifier_identity.clone(),
+        bundle_id,
+        verifier_identity,
         effect_count: verified_effects.len(),
         head_chain_hash: expected_prev,
         verified_effects,
@@ -2574,6 +2606,102 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// bd-5r99w.12: the verifier SDK re-derives a bare effect-receipt chain — the
+    /// `franken-node run --json` host-effect ledger surface — offline, with no
+    /// surrounding replay bundle. The entries here are built EXACTLY as
+    /// franken_node's `build_host_effect_ledger` builds them (same canonical
+    /// receipt/chain hashing), so a passing verify proves cross-format
+    /// compatibility; tampering and an empty chain both fail closed.
+    #[test]
+    fn verify_effect_chain_entries_re_derives_run_ledger_offline_bd_5r99w_12() {
+        let empty =
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string();
+        let build_entry = |index: u64, prev: &str, receipt: EffectReceipt| {
+            let receipt_hash = effect_receipt_hash(&receipt);
+            let chain_hash = effect_chain_hash(index, prev, &receipt_hash);
+            EffectReceiptChainEntry {
+                index,
+                prev_chain_hash: prev.to_string(),
+                receipt_hash,
+                chain_hash,
+                receipt,
+            }
+        };
+
+        let read_hash = cas_content_hash(b"hello");
+        let allowed = EffectReceipt {
+            schema_version: EFFECT_RECEIPT_SCHEMA_VERSION.to_string(),
+            seq: 0,
+            trace_id: "trace-bd-5r99w-12".to_string(),
+            effect_kind: EffectKind::FsRead,
+            policy_outcome: EffectPolicyOutcome::Allowed {
+                capability_ref: "host-io:fs_read".to_string(),
+            },
+            pre_state_hash: read_hash.clone(),
+            args_hash: cas_content_hash(b"input.txt"),
+            result_hash: Some(read_hash.clone()),
+            post_state_hash: Some(read_hash.clone()),
+            input_lineage_hash: empty.clone(),
+            output_lineage_hash: Some(empty.clone()),
+            label_set_commitment: empty.clone(),
+            declassification_ref: None,
+            flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+            recorded_at_millis: 1_700_000_000_000,
+        };
+        let denied = EffectReceipt {
+            schema_version: EFFECT_RECEIPT_SCHEMA_VERSION.to_string(),
+            seq: 1,
+            trace_id: "trace-bd-5r99w-12".to_string(),
+            effect_kind: EffectKind::FsWrite,
+            policy_outcome: EffectPolicyOutcome::Denied {
+                reason: "host I/O sandbox violation: absolute path escapes sandbox root"
+                    .to_string(),
+            },
+            pre_state_hash: cas_content_hash(b"nope"),
+            args_hash: cas_content_hash(b"/escape.txt"),
+            result_hash: None,
+            post_state_hash: None,
+            input_lineage_hash: empty.clone(),
+            output_lineage_hash: None,
+            label_set_commitment: empty.clone(),
+            declassification_ref: None,
+            flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+            recorded_at_millis: 1_700_000_000_000,
+        };
+
+        let e0 = build_entry(0, EFFECT_RECEIPT_CHAIN_GENESIS, allowed);
+        let e1 = build_entry(1, &e0.chain_hash, denied);
+        let entries = vec![e0, e1];
+
+        // Offline re-derivation of the bare run --json ledger succeeds.
+        let report = verify_effect_chain_entries(&entries).expect("offline chain verifies");
+        assert_eq!(report.effect_count, 2);
+        assert_eq!(report.head_chain_hash, entries[1].chain_hash);
+        assert_eq!(report.verified_effects[0].effect_kind, "fs_read");
+        assert_eq!(report.verified_effects[0].outcome, "allowed");
+        assert_eq!(
+            report.verified_effects[0].capability_ref.as_deref(),
+            Some("host-io:fs_read")
+        );
+        assert_eq!(report.verified_effects[1].effect_kind, "fs_write");
+        assert_eq!(report.verified_effects[1].outcome, "denied");
+        assert!(report.verified_effects[1].result_hash.is_none());
+
+        // Tamper a receipt field → recomputed receipt hash diverges → fail closed.
+        let mut tampered = entries.clone();
+        tampered[0].receipt.trace_id = "trace-tampered".to_string();
+        assert!(
+            verify_effect_chain_entries(&tampered).is_err(),
+            "tampered chain must fail closed"
+        );
+
+        // Empty ledger → explicit fail-closed error.
+        assert!(matches!(
+            verify_effect_chain_entries(&[]),
+            Err(BundleError::EmptyEffectChain)
+        ));
+    }
 
     fn make_test_bundle(verifier_identity: &str) -> ReplayBundle {
         let artifact_bytes = b"bundle-artifact";

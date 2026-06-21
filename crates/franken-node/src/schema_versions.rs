@@ -24,6 +24,7 @@ pub const INCIDENT_LAB: &str = "incident-lab-v1.0";
 pub const AUTHORITY_AUDIT: &str = "aa-v1.0";
 pub const SPECULATION_PROOF_EXECUTOR: &str = "speculation-proof-v1.0";
 pub const EFFECT_RECEIPT: &str = "effect-receipt-v1.1";
+pub const HOST_EFFECT_LEDGER: &str = "host-effect-ledger-v1.0";
 
 // ── Control Plane ──────────────────────────────────────────────────
 pub const TRANSITION_ABORT: &str = "ta-v1.0";
@@ -197,6 +198,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("authority_audit", AUTHORITY_AUDIT),
         ("speculation_proof_executor", SPECULATION_PROOF_EXECUTOR),
         ("effect_receipt", EFFECT_RECEIPT),
+        ("host_effect_ledger", HOST_EFFECT_LEDGER),
         // Control Plane
         ("transition_abort", TRANSITION_ABORT),
         ("control_lane_policy", CONTROL_LANE_POLICY),

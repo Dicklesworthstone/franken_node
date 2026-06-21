@@ -112,6 +112,46 @@ pub struct RunDispatchReport {
     pub terminated_by_signal: bool,
     pub telemetry: Option<TelemetryRuntimeReport>,
     pub captured_output: CapturedProcessOutput,
+    /// bd-5r99w.12: the capability-metered, hash-chained ledger of host effects
+    /// the program performed or was denied during this run. `None` for runs that
+    /// did not execute through the native effect-producing engine path (e.g.
+    /// external-runtime fallbacks). Auto-surfaced in `run --json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_effect_ledger: Option<HostEffectLedger>,
+}
+
+/// bd-5r99w.12: the trust-native effect ledger surfaced by `franken-node run`.
+///
+/// Each entry is an [`EffectReceiptChainEntry`] binding one host effect (an
+/// `fs`/`net`/`process` operation the program performed or was denied) to a
+/// hash-chained, content-addressed [`EffectReceipt`]. The chain is
+/// tamper-evident: `chain_head_hash` commits to the whole sequence and the
+/// verifier SDK re-derives every link offline from `entries` alone (see
+/// `frankenengine_verifier_sdk::verify_effect_chain_entries`). It carries only
+/// content hashes, not the addressed bytes; full CAS byte-binding verification
+/// requires exporting a replay bundle.
+///
+/// An empty `entries` (with `effect_count == 0`) is the honest representation of
+/// "the program produced no host effects" — never fabricated, never deny-only by
+/// default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostEffectLedger {
+    /// Stable schema tag (`schema_versions::HOST_EFFECT_LEDGER`).
+    pub schema_version: String,
+    /// Workflow trace id the effects were recorded under.
+    pub trace_id: String,
+    /// Hash-chain head committing to the full effect sequence (genesis if empty).
+    pub chain_head_hash: String,
+    /// Total effects recorded (allowed + denied).
+    pub effect_count: usize,
+    /// Effects that were authorized and executed.
+    pub allowed_count: usize,
+    /// Effects refused before execution (fail-closed; no result/post-state).
+    pub denied_count: usize,
+    /// The append-only, hash-chained receipt entries. Wire-identical to the
+    /// verifier SDK's `EffectReceiptChainEntry`, so the SDK re-derives the chain
+    /// directly from this list.
+    pub entries: Vec<crate::runtime::effect_receipt::EffectReceiptChainEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +187,7 @@ struct DispatchReportInputs<'a> {
     duration: std::time::Duration,
     output: Output,
     telemetry: Option<TelemetryRuntimeReport>,
+    host_effect_ledger: Option<HostEffectLedger>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1384,6 +1425,8 @@ impl EngineDispatcher {
                 duration: started.elapsed(),
                 output,
                 telemetry: None,
+                // External-runtime fallback path does not produce host effects.
+                host_effect_ledger: None,
             }));
         }
 
@@ -1478,7 +1521,7 @@ impl EngineDispatcher {
             cmd.env("FRANKEN_ENGINE_NETWORK_ALLOWLIST", allowlist_json);
         }
 
-        let (output, report) = {
+        let (output, report, host_effect_ledger) = {
             #[cfg(feature = "engine")]
             {
                 // Use native execution when engine feature is enabled
@@ -1512,6 +1555,7 @@ impl EngineDispatcher {
                 );
                 Self::run_engine_process(&mut cmd, telemetry_handle)
                     .map_err(|err| anyhow::anyhow!("{err}"))
+                    .map(|(output, report)| (output, report, None::<HostEffectLedger>))
             }
         }?;
         if !report.drain_completed {
@@ -1537,6 +1581,7 @@ impl EngineDispatcher {
             duration: started.elapsed(),
             output,
             telemetry: Some(report),
+            host_effect_ledger,
         }))
     }
 
@@ -1558,18 +1603,20 @@ impl EngineDispatcher {
             terminated_by_signal,
             telemetry: inputs.telemetry,
             captured_output: captured_output_from(inputs.output),
+            host_effect_ledger: inputs.host_effect_ledger,
         }
     }
 
     /// Execute code using native franken_engine API with enhanced error handling.
     /// Wraps run_engine_native with timeout, panic detection, and detailed error context.
     #[cfg(feature = "engine")]
+    #[allow(clippy::type_complexity)]
     fn run_engine_native_with_error_handling(
         app_path: &Path,
         config: &Config,
         policy_mode: &str,
         telemetry_handle: TelemetryRuntimeHandle,
-    ) -> Result<(Output, TelemetryRuntimeReport)> {
+    ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
         use std::panic;
         use std::sync::mpsc;
         use std::thread;
@@ -2090,12 +2137,19 @@ impl EngineDispatcher {
     /// Execute code using native franken_engine API instead of external process.
     /// Returns the same interface as external execution for compatibility.
     #[cfg(feature = "engine")]
+    #[allow(clippy::type_complexity)]
     fn run_engine_native(
         app_path: &Path,
         config: &Config,
         policy_mode: &str,
         telemetry_handle: TelemetryRuntimeHandle,
-    ) -> std::result::Result<(Output, TelemetryRuntimeReport), EngineProcessError> {
+    ) -> std::result::Result<
+        (Output, TelemetryRuntimeReport, Option<HostEffectLedger>),
+        EngineProcessError,
+    > {
+        use frankenengine_extension_host::host_io::{
+            HostIoRecorder, InMemoryHostIoTranscript, SandboxedHostIo,
+        };
         use std::fs;
 
         let _span = tracing::info_span!(
@@ -2149,6 +2203,41 @@ impl EngineDispatcher {
         let mut orchestrator =
             ExecutionOrchestrator::new_with_runtime_config(orchestrator_config, runtime_config);
 
+        // bd-5r99w.12: install a sandboxed real-I/O host provider + recorder so the
+        // run actually PERFORMS the program's authorized host effects (and records
+        // the denied ones), confined to the application directory. The recorder's
+        // transcript is surfaced on `OrchestratorResult::host_effect_transcript`
+        // and harvested below into a signed, SDK-verifiable effect ledger. The
+        // sandbox root is the app's parent directory so relative paths in the
+        // program resolve naturally and stay confined to the app dir. If the root
+        // cannot be established the run proceeds with no provider installed —
+        // host effects then fail closed (the ledger is honestly empty), never
+        // faked.
+        let sandbox_root = app_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        match SandboxedHostIo::with_root(&sandbox_root) {
+            Ok(provider) => {
+                let recorder: Arc<dyn HostIoRecorder> =
+                    Arc::new(InMemoryHostIoTranscript::recording());
+                orchestrator.set_host_io(Arc::new(provider), Some(recorder));
+                tracing::info!(
+                    execution_mode = "native",
+                    sandbox_root = %sandbox_root.display(),
+                    "Installed sandboxed host-I/O provider for effect ledger"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    execution_mode = "native",
+                    sandbox_root = %sandbox_root.display(),
+                    error = %err,
+                    "Could not establish sandboxed host-I/O root; host effects fail closed (empty effect ledger)"
+                );
+            }
+        }
+
         let setup_duration = setup_start.elapsed();
         tracing::info!(
             execution_mode = "native",
@@ -2183,6 +2272,24 @@ impl EngineDispatcher {
             "Native engine execution completed"
         );
 
+        // bd-5r99w.12: harvest the engine's host-effect transcript into a signed,
+        // hash-chained, SDK-verifiable effect ledger. This is the native effect-
+        // producing path, so the ledger is always present (empty when the program
+        // performed no host effects) — never omitted, never fabricated.
+        let host_effect_ledger = Self::build_host_effect_ledger(
+            &execution_result.trace_id,
+            &execution_result.host_effect_transcript,
+        );
+        tracing::info!(
+            execution_mode = "native",
+            phase = "execution",
+            effect_count = host_effect_ledger.effect_count,
+            allowed_count = host_effect_ledger.allowed_count,
+            denied_count = host_effect_ledger.denied_count,
+            chain_head_hash = %host_effect_ledger.chain_head_hash,
+            "Harvested host-effect ledger from run"
+        );
+
         // Convert native execution result to Output format for compatibility.
         // bd-5r99w.1: surface the program's REAL console output (split into
         // stdout/stderr) instead of a Rust `{:?}` debug dump of the result.
@@ -2215,7 +2322,127 @@ impl EngineDispatcher {
             })
             .map_err(|err| EngineProcessError::TelemetryDrain(format!("{err}")))?;
 
-        Ok((output, telemetry_report))
+        Ok((output, telemetry_report, Some(host_effect_ledger)))
+    }
+
+    /// bd-5r99w.12: build a hash-chained, content-addressed effect ledger from the
+    /// engine's host-effect transcript. Each `(request, outcome)` becomes one
+    /// `EffectReceipt` — `allowed` (with content hashes of the bytes the effect
+    /// consumed/produced) or `denied` (fail-closed, no result) — appended to a
+    /// tamper-evident chain whose head commits to the whole sequence. The receipt
+    /// hashes use the same canonical domains as the verifier SDK, so the SDK
+    /// re-derives the chain offline from the surfaced entries.
+    #[cfg(feature = "engine")]
+    fn build_host_effect_ledger(
+        trace_id: &str,
+        transcript: &[(
+            frankenengine_extension_host::host_io::HostIoRequest,
+            frankenengine_extension_host::host_io::HostIoOutcome,
+        )],
+    ) -> HostEffectLedger {
+        use crate::runtime::effect_receipt::{EffectKind, EffectReceipt, EffectReceiptChain};
+        use crate::storage::cas::content_hash;
+        use frankenengine_extension_host::host_io::{HostIoRequest, HostIoResponse};
+
+        // Single monotonic recording timestamp for the whole run; this module
+        // owns the clock read (the receipt layer never reads the wall clock).
+        let recorded_at_millis = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
+
+        let mut chain = EffectReceiptChain::new();
+        let mut allowed_count = 0usize;
+        let mut denied_count = 0usize;
+
+        for (index, (request, outcome)) in transcript.iter().enumerate() {
+            let seq = u64::try_from(index).unwrap_or(u64::MAX);
+            let capability_ref = format!("host-io:{}", request.required_capability().as_str());
+
+            // Effect kind + the operation's target (args) and the bytes it would
+            // consume as input, derived from the real request.
+            let (effect_kind, args_bytes, input_bytes) = match request {
+                HostIoRequest::FsRead { path } => {
+                    (EffectKind::FsRead, path.as_bytes().to_vec(), Vec::new())
+                }
+                HostIoRequest::FsWrite { path, data } => {
+                    (EffectKind::FsWrite, path.as_bytes().to_vec(), data.clone())
+                }
+                HostIoRequest::NetworkSend { endpoint, payload } => (
+                    EffectKind::NetConnect,
+                    endpoint.as_bytes().to_vec(),
+                    payload.clone(),
+                ),
+                HostIoRequest::NetworkRecv { endpoint, .. } => (
+                    EffectKind::NetConnect,
+                    endpoint.as_bytes().to_vec(),
+                    Vec::new(),
+                ),
+            };
+            let args_hash = content_hash(&args_bytes);
+
+            let receipt = match outcome {
+                Ok(response) => {
+                    // Bytes the effect produced/left as state, from the real outcome.
+                    let produced = match response {
+                        HostIoResponse::FsRead { bytes }
+                        | HostIoResponse::NetworkRecv { bytes } => bytes.clone(),
+                        HostIoResponse::FsWrite { .. } | HostIoResponse::NetworkSend { .. } => {
+                            input_bytes.clone()
+                        }
+                    };
+                    // For a read, the bytes read ARE the pre-existing input state;
+                    // for other effects the consumed input is the request payload.
+                    let pre_bytes = match response {
+                        HostIoResponse::FsRead { bytes } => bytes.clone(),
+                        _ => input_bytes.clone(),
+                    };
+                    allowed_count = allowed_count.saturating_add(1);
+                    EffectReceipt::allowed(
+                        seq,
+                        trace_id,
+                        effect_kind,
+                        capability_ref,
+                        content_hash(&pre_bytes),
+                        args_hash,
+                        content_hash(&produced),
+                        content_hash(&produced),
+                        recorded_at_millis,
+                    )
+                }
+                Err(err) => {
+                    denied_count = denied_count.saturating_add(1);
+                    EffectReceipt::denied(
+                        seq,
+                        trace_id,
+                        effect_kind,
+                        err.to_string(),
+                        content_hash(&input_bytes),
+                        args_hash,
+                        recorded_at_millis,
+                    )
+                }
+            };
+
+            if let Err(append_err) = chain.append(receipt) {
+                // Fail-closed: stop extending the ledger rather than emit a
+                // partial/incorrect chain, and surface what was lost.
+                tracing::warn!(
+                    execution_mode = "native",
+                    seq,
+                    error = %append_err,
+                    "Stopped harvesting host-effect ledger after append failure"
+                );
+                break;
+            }
+        }
+
+        HostEffectLedger {
+            schema_version: crate::schema_versions::HOST_EFFECT_LEDGER.to_string(),
+            trace_id: trace_id.to_string(),
+            chain_head_hash: chain.head_hash(),
+            effect_count: chain.len(),
+            allowed_count,
+            denied_count,
+            entries: chain.entries().to_vec(),
+        }
     }
 
     #[cfg(any(not(feature = "engine"), test))]
@@ -3405,6 +3632,7 @@ mod tests {
             duration: Duration::from_millis(250),
             output: captured_output(0, b"ok\n", b""),
             telemetry: None,
+            host_effect_ledger: None,
         });
 
         assert_eq!(report.runtime, "node");
@@ -3436,6 +3664,7 @@ mod tests {
             duration: Duration::from_secs(u64::MAX),
             output: captured_output(9, b"", b"signal"),
             telemetry: None,
+            host_effect_ledger: None,
         });
 
         assert_eq!(report.duration_ms, u64::MAX);
@@ -3460,6 +3689,7 @@ mod tests {
             duration: Duration::from_millis(1),
             output: captured_output(0, &[0xff, b'o', b'k'], &[b'e', 0xfe]),
             telemetry: None,
+            host_effect_ledger: None,
         });
 
         assert_eq!(report.captured_output.stdout, "\u{fffd}ok");
@@ -3987,6 +4217,7 @@ mod tests {
                             stderr: Vec::new(),
                         },
                         telemetry: None,
+                        host_effect_ledger: None,
                     };
 
                     // Verify report field sanitization
@@ -4288,6 +4519,7 @@ mod tests {
                     duration: std::time::Duration::from_millis(100),
                     output: mock_output,
                     telemetry: None,
+                    host_effect_ledger: None,
                 };
 
                 // Build report with malicious output
@@ -4308,6 +4540,7 @@ mod tests {
                     terminated_by_signal: !report_inputs.output.status.success(),
                     telemetry: report_inputs.telemetry.clone(),
                     captured_output: captured,
+                    host_effect_ledger: report_inputs.host_effect_ledger.clone(),
                 };
 
                 // Test report serialization safety
@@ -4916,6 +5149,7 @@ mod tests {
                         stdout: "test stdout".to_string(),
                         stderr: "test stderr".to_string(),
                     },
+                    host_effect_ledger: None,
                 };
 
                 // Test dispatch report serialization with poisoned telemetry
@@ -5997,6 +6231,173 @@ mod tests {
             "Logs should contain native engine lifecycle events: {}",
             logs
         );
+    }
+
+    /// Round-trip a host-effect ledger through the PUBLIC verifier SDK exactly as
+    /// an external auditor would: serialize the ledger's entries (the `run --json`
+    /// surface), deserialize them into the SDK's wire types, and re-derive the
+    /// hash chain offline. This proves the ledger is SDK-verifiable without
+    /// trusting the runtime that produced it.
+    #[cfg(feature = "engine")]
+    fn assert_ledger_sdk_verifiable(ledger: &HostEffectLedger) {
+        let entries_json =
+            serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+        let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+            serde_json::from_str(&entries_json)
+                .expect("verifier SDK accepts the run --json ledger wire shape");
+        let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-5r99w-12-test");
+        let report = sdk
+            .verify_effect_chain_entries(&sdk_entries)
+            .expect("verifier SDK re-derives the effect chain offline");
+        assert_eq!(report.effect_count, ledger.effect_count);
+        assert_eq!(report.head_chain_hash, ledger.chain_head_hash);
+    }
+
+    /// bd-5r99w.12 (mock-free e2e): a real, idiomatic JS program that performs fs
+    /// effects, run through the native engine dispatch path, surfaces a signed,
+    /// SDK-verifiable host-effect ledger — and the bytes really hit the sandbox.
+    /// No mocks: real parser/lowering, real `SandboxedHostIo`, real
+    /// `EffectReceipt` chain, real verifier SDK re-derivation. This is the product
+    /// apex: `franken-node run` showing WHAT the program did to the host.
+    #[test]
+    #[cfg(feature = "engine")]
+    fn run_surfaces_signed_host_effect_ledger_e2e_bd_5r99w_12() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let app = temp_dir.path().join("app.js");
+        std::fs::write(
+            &app,
+            "require('fs').writeFileSync('out.txt', 'real effect bytes');\n\
+             require('fs').readFileSync('out.txt');\n",
+        )
+        .expect("write app source");
+
+        // legacy-risky grants both fs_read and fs_write so both effects execute.
+        let config = Config::for_profile(Profile::LegacyRisky);
+
+        let socket_path = temp_dir.path().join("t.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start telemetry bridge");
+
+        let (_output, _telemetry, ledger) =
+            EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
+                .expect("native run succeeds");
+        let ledger = ledger.expect("native path always surfaces a host-effect ledger");
+
+        // The write really hit the sandbox root (the app's parent directory).
+        assert_eq!(
+            std::fs::read(temp_dir.path().join("out.txt")).expect("written file on disk"),
+            b"real effect bytes",
+            "writeFileSync must produce a real file in the sandbox root"
+        );
+
+        // Two allowed fs effects surfaced honestly, in program order.
+        assert_eq!(
+            ledger.effect_count, 2,
+            "expected fs_write + fs_read, got {:?}",
+            ledger.entries
+        );
+        assert_eq!(ledger.allowed_count, 2);
+        assert_eq!(ledger.denied_count, 0);
+        let kinds: Vec<&str> = ledger
+            .entries
+            .iter()
+            .map(|entry| entry.receipt.effect_kind.label())
+            .collect();
+        assert_eq!(kinds, vec!["fs_write", "fs_read"]);
+        assert_eq!(
+            ledger.schema_version,
+            crate::schema_versions::HOST_EFFECT_LEDGER
+        );
+
+        // The ledger auto-surfaces in `run --json` via the dispatch report.
+        let report = EngineDispatcher::build_dispatch_report(DispatchReportInputs {
+            runtime: "franken_engine",
+            runtime_path: Path::new("/bin/franken-engine"),
+            target: &app,
+            working_dir: temp_dir.path(),
+            used_fallback_runtime: false,
+            started_at: Utc::now(),
+            duration: std::time::Duration::from_millis(1),
+            output: Output {
+                status: exit_status_from_code(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+            telemetry: None,
+            host_effect_ledger: Some(ledger.clone()),
+        });
+        let json = serde_json::to_string(&report).expect("serialize run report");
+        assert!(
+            json.contains("\"host_effect_ledger\""),
+            "run --json must include the host_effect_ledger"
+        );
+        assert!(json.contains("\"fs_write\"") && json.contains("\"fs_read\""));
+
+        // Tamper-evident chain + offline verifier-SDK re-derivation.
+        crate::runtime::effect_receipt::EffectReceiptChain::verify_entries_integrity(
+            &ledger.entries,
+        )
+        .expect("franken_node-side chain integrity");
+        assert_ledger_sdk_verifiable(&ledger);
+    }
+
+    /// bd-5r99w.12: the harvest maps a transcript of BOTH allowed and denied host
+    /// effects into a correct, tamper-evident, SDK-verifiable chain — denied
+    /// effects are fail-closed (no result/post-state), proving nothing ran. Uses
+    /// real `HostIo` types, the real `EffectReceipt` chain, and the real verifier
+    /// SDK (no mocks).
+    #[test]
+    #[cfg(feature = "engine")]
+    fn host_effect_ledger_harvest_maps_allowed_and_denied_bd_5r99w_12() {
+        use frankenengine_extension_host::host_io::{
+            HostIoError, HostIoOutcome, HostIoRequest, HostIoResponse,
+        };
+
+        let transcript: Vec<(HostIoRequest, HostIoOutcome)> = vec![
+            (
+                HostIoRequest::FsRead {
+                    path: "input.txt".to_string(),
+                },
+                Ok(HostIoResponse::FsRead {
+                    bytes: b"hello".to_vec(),
+                }),
+            ),
+            (
+                HostIoRequest::FsWrite {
+                    path: "/escape.txt".to_string(),
+                    data: b"nope".to_vec(),
+                },
+                Err(HostIoError::SandboxViolation {
+                    detail: "absolute path escapes sandbox root".to_string(),
+                }),
+            ),
+        ];
+
+        let ledger = EngineDispatcher::build_host_effect_ledger("trace-bd-5r99w-12", &transcript);
+
+        assert_eq!(ledger.effect_count, 2);
+        assert_eq!(ledger.allowed_count, 1);
+        assert_eq!(ledger.denied_count, 1);
+        assert_eq!(ledger.entries[0].receipt.effect_kind.label(), "fs_read");
+        assert_eq!(ledger.entries[1].receipt.effect_kind.label(), "fs_write");
+        // Allowed read carries result/post-state; denied write is fail-closed.
+        assert!(ledger.entries[0].receipt.result_hash.is_some());
+        assert!(ledger.entries[0].receipt.post_state_hash.is_some());
+        assert!(ledger.entries[1].receipt.result_hash.is_none());
+        assert!(ledger.entries[1].receipt.post_state_hash.is_none());
+        // A populated chain commits to a real (non-genesis) head hash.
+        assert!(ledger.chain_head_hash.starts_with("sha256:"));
+        assert_ne!(
+            ledger.chain_head_hash,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        );
+
+        crate::runtime::effect_receipt::EffectReceiptChain::verify_entries_integrity(
+            &ledger.entries,
+        )
+        .expect("franken_node-side chain integrity");
+        assert_ledger_sdk_verifiable(&ledger);
     }
 
     #[test]
