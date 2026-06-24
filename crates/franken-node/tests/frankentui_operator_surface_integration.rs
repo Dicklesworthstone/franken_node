@@ -44,9 +44,8 @@ fn frankentui_dependency_is_workspace_relative_not_absolute() {
     let crate_manifest = include_str!("../Cargo.toml");
 
     assert!(
-        workspace_manifest.contains(
-            r#"frankentui = { package = "ftui", path = "../../../dp/frankentui/crates/ftui""#
-        ),
+        workspace_manifest
+            .contains(r#"frankentui = { package = "ftui", path = "../frankentui/crates/ftui""#),
         "workspace manifest must own the FrankenTUI dependency through a relative path"
     );
     assert!(
