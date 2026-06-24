@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 // `String` zone/extension identifiers. Every assertion below is preserved against the real
 // API: ZoneId::new(s)/ExtensionId::new(s) -> plain String/&str, request structs -> direct
 // method args, `.code()` -> `.error_code()`, `get_fleet_events()` -> `events()`,
-// `new_test()`/`new()` -> `FleetControlManager::new()` (ships default signing material; safe
-// start = not yet activated).
+// `new_test()`/`new()` -> `FleetControlManager::new()` for read-only safe-start assertions or
+// `signing_manager()` for write-path assertions that must emit signed decision receipts.
 use frankenengine_node::api::fleet_quarantine::{
     FLEET_NOT_ACTIVATED, FLEET_QUARANTINE_INITIATED, FLEET_RECONCILE_COMPLETED, FLEET_RELEASED,
     FLEET_REVOCATION_ISSUED, FLEET_ROLLBACK_UNVERIFIED, FLEET_SCOPE_INVALID, FleetControlManager,
@@ -258,9 +258,9 @@ fn test_case_tg2_inv_2() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        // API-DRIFT REMEDIATION (bd-rjc2m.7): FleetApiService::new_test() -> FleetControlManager::new()
-        // (ships default decision signing material; must be activated for write ops).
-        let mut mgr = FleetControlManager::new();
+        // API-DRIFT REMEDIATION (bd-rjc2m.7): FleetApiService::new_test() -> signing_manager()
+        // so write operations exercise the real decision-receipt signing path.
+        let mut mgr = signing_manager();
         mgr.activate();
 
         // Quarantine operation should produce a signed receipt.
@@ -341,7 +341,7 @@ fn test_case_tg2_inv_3() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let mut mgr = FleetControlManager::new();
+        let mut mgr = signing_manager();
         mgr.activate();
 
         // Test bounded fleet events (MAX_FLEET_EVENTS).
@@ -414,8 +414,8 @@ fn test_case_tg2_inv_4() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        // Fresh manager should start in read-only safe-start mode.
-        let mut mgr = FleetControlManager::new();
+        // Fresh signing-capable manager should still start in read-only safe-start mode.
+        let mut mgr = signing_manager();
 
         let zone_id = "safe-start-zone".to_string();
         let extension_id = "safe-start-ext";
@@ -485,7 +485,7 @@ fn test_case_tg2_evt_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let mut mgr = FleetControlManager::new();
+        let mut mgr = signing_manager();
         mgr.activate();
 
         let scope = QuarantineScope {
@@ -564,7 +564,7 @@ fn test_case_tg2_evt_2() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let mut mgr = FleetControlManager::new();
+        let mut mgr = signing_manager();
         mgr.activate();
 
         let scope = RevocationScope {
@@ -639,7 +639,7 @@ fn test_case_tg2_err_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let mut mgr = FleetControlManager::new();
+        let mut mgr = signing_manager();
         mgr.activate();
 
         // Test with empty zone ID.
@@ -729,7 +729,7 @@ fn test_case_tg2_rollback_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let mut mgr = FleetControlManager::new();
+        let mut mgr = signing_manager();
         mgr.activate();
 
         let zone_id = "rollback-test-zone".to_string();
@@ -822,7 +822,7 @@ fn test_case_tg2_reconcile_1() -> ConformanceRecord {
     };
 
     match std::panic::catch_unwind(|| {
-        let mut mgr = FleetControlManager::new();
+        let mut mgr = signing_manager();
         mgr.activate();
 
         // API-DRIFT REMEDIATION (bd-rjc2m.7): FleetReconcileRequest -> reconcile(&identity, &trace);
