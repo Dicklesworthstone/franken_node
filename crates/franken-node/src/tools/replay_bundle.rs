@@ -1282,9 +1282,7 @@ pub fn replay_bundle_with_trusted_keys(
 /// analysis of an already-trusted (or deliberately mutated) in-memory bundle.
 /// For trusted replay of an on-the-wire bundle, use [`replay_bundle`],
 /// [`replay_bundle_with_trusted_key`], or [`replay_bundle_with_trusted_keys`].
-pub fn recompute_replay_verdict(
-    bundle: &ReplayBundle,
-) -> Result<ReplayOutcome, ReplayBundleError> {
+pub fn recompute_replay_verdict(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundleError> {
     replay_bundle_after_signature_verification(bundle)
 }
 
