@@ -434,6 +434,108 @@ fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
     assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
 }
 
+/// bd-656a2 / bd-3894s (http leg, mock-free e2e — DENIED half): the fail-closed
+/// counterpart of the allowed e2e. A real `require('http').get('http://127.0.0.1:9/')`
+/// program — a loopback endpoint the default-deny SSRF policy blocks, with no
+/// config allowlist — run through the PUBLIC `dispatch_run` path is gated BEFORE
+/// the socket opens. The denial is surfaced as a signed DENIED `http_request`
+/// EffectReceipt in the run --json host-effect ledger (proof that nothing reached
+/// the network), the run still completes (the denial is not a fatal fault), and
+/// the verifier SDK re-derives the chain offline.
+///
+/// Together with the allowed-half test this is the close-out conjunction for the
+/// bd-656a2 http producer: the http.request L1 subject is proof-carrying on BOTH
+/// the authorized and the refused path.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_denied_http_request_effect_ledger_bd_656a2() {
+    use frankenengine_node::runtime::effect_receipt::PolicyOutcome;
+
+    // A loopback endpoint the default-deny policy blocks. The SSRF gate denies it
+    // before any connection is attempted, so this never reaches the network (no
+    // listener is needed and none is bound — the test is hermetic).
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app_path = create_test_app(
+        temp_dir.path(),
+        "app.js",
+        "require('http').get('http://127.0.0.1:9/');\n",
+    );
+
+    // legacy-risky grants network_egress (so the egress hostcall is authorized at
+    // the engine layer), but the run uses the DEFAULT [security.network_policy]
+    // (Block, no allowlist) — so the product-layer SSRF gate denies loopback.
+    let config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    // The denied egress must NOT abort the run: dispatch_run still succeeds and
+    // surfaces the ledger with a fail-closed denied receipt.
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("a policy-denied http egress must not fail the run");
+
+    assert_eq!(report.runtime, "franken_engine");
+
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http run must surface a host-effect ledger even on denial");
+    assert_eq!(
+        ledger.effect_count, 1,
+        "the blocked egress must still produce one (denied) effect, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(
+        ledger.denied_count, 1,
+        "the egress must be recorded as denied"
+    );
+    assert_eq!(
+        ledger.allowed_count, 0,
+        "nothing was authorized to reach the network"
+    );
+
+    let receipt = &ledger.entries[0].receipt;
+    assert_eq!(
+        receipt.effect_kind.label(),
+        "http_request",
+        "the blocked egress is still an http_request subject"
+    );
+    assert!(
+        matches!(receipt.policy_outcome, PolicyOutcome::Denied { .. }),
+        "the receipt must carry a fail-closed Denied outcome, got {:?}",
+        receipt.policy_outcome
+    );
+    // Fail-closed proof: a denied effect has no produced/post state.
+    assert!(
+        receipt.result_hash.is_none() && receipt.post_state_hash.is_none(),
+        "a denied effect must carry no result/post-state (nothing ran)"
+    );
+
+    // run --json surfaces the denied receipt.
+    let json = serde_json::to_string(&report).expect("serialize run report as run --json");
+    assert!(
+        json.contains("\"host_effect_ledger\"") && json.contains("\"denied\""),
+        "run --json must include the denied host-effect ledger entry"
+    );
+
+    // The verifier SDK re-derives the chain offline — denied receipts are part of
+    // the same tamper-evident chain.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-656a2-http-denied-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the denied http effect chain offline");
+    assert_eq!(verdict.effect_count, 1);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
 #[test]
 #[cfg(not(feature = "engine"))]
 fn test_strict_profile_rejects_fixture_fallback_without_native_engine() {
