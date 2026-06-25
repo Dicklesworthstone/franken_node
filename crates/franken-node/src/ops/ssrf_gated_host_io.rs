@@ -34,9 +34,13 @@ use frankenengine_extension_host::host_io::{
 };
 
 #[cfg(feature = "engine")]
+use crate::config::{NetworkPolicyConfig, SsrfEnforcementMode};
+#[cfg(feature = "engine")]
 use crate::security::network_guard::{Action, Protocol};
 #[cfg(feature = "engine")]
-use crate::security::ssrf_policy::{SsrfAuditRecord, SsrfPolicyTemplate};
+use crate::security::ssrf_policy::{
+    AllowlistEntry, PolicyReceipt, SsrfAuditRecord, SsrfPolicyTemplate,
+};
 
 /// Split a `host:port` connect endpoint (as framed by the engine's
 /// `http_request_to_wire`) into its host and port components. Uses the last `:`
@@ -52,6 +56,47 @@ fn split_host_port(endpoint: &str) -> Option<(&str, u16)> {
     }
     let port = port_str.parse::<u16>().ok()?;
     Some((host, port))
+}
+
+/// Build the [`SsrfPolicyTemplate`] that governs a run from its
+/// `[security.network_policy]` config. See [`SsrfGatedHostIo::from_network_policy`]
+/// for the enforcement-mode mapping (fail-safe; only an explicit opt-out empties
+/// the deny-list).
+#[cfg(feature = "engine")]
+fn build_ssrf_template(policy: &NetworkPolicyConfig, trace_id: &str) -> SsrfPolicyTemplate {
+    let connector_id = format!("run:{trace_id}");
+    // Enforcement is ON unless the operator explicitly opts out (mode `None` or
+    // the deprecated `ssrf_protection_enabled = false`). `Monitor` is treated as
+    // `Block` here — fail-safe; we never weaken the gate on an ambiguous config.
+    let enforce = policy.ssrf_protection_enabled
+        && !matches!(policy.ssrf_enforcement, SsrfEnforcementMode::None);
+    let mut template = if enforce {
+        SsrfPolicyTemplate::default_template(connector_id.clone())
+    } else {
+        SsrfPolicyTemplate {
+            connector_id: connector_id.clone(),
+            blocked_cidrs: Vec::new(),
+            allowlist: Vec::new(),
+            audit_log: Vec::new(),
+        }
+    };
+    let issued_at = chrono::Utc::now().to_rfc3339();
+    for entry in &policy.allowlist {
+        template.allowlist.push(AllowlistEntry {
+            host: entry.host.clone(),
+            port: entry.port,
+            reason: entry.reason.clone(),
+            receipt: PolicyReceipt {
+                receipt_id: format!("cfg-allow:{}", entry.host),
+                connector_id: connector_id.clone(),
+                host: entry.host.clone(),
+                issued_at: issued_at.clone(),
+                reason: entry.reason.clone(),
+                trace_id: trace_id.to_string(),
+            },
+        });
+    }
+    template
 }
 
 /// A [`HostIoProvider`] decorator that enforces the franken_node SSRF policy on
@@ -88,6 +133,34 @@ impl<P: HostIoProvider> SsrfGatedHostIo<P> {
             policy: Mutex::new(policy),
             trace_id: trace_id.into(),
         }
+    }
+
+    /// Wrap `inner` with the SSRF policy derived from franken_node's
+    /// `[security.network_policy]` configuration — the constructor the run path
+    /// uses so an operator's `franken-node.toml` actually governs guest egress.
+    ///
+    /// Enforcement mapping (fail-safe): `Block` and `Monitor` both keep the
+    /// standard default-deny CIDR set (loopback / link-local / RFC1918 / CGNAT /
+    /// metadata); `Monitor`'s log-but-allow nuance is a follow-up and is treated
+    /// as `Block` here so we never silently weaken the gate. Only an explicit
+    /// `ssrf_enforcement = "none"` (or the deprecated `ssrf_protection_enabled =
+    /// false`) yields an empty deny-list (operator opt-out — still audited, still
+    /// the load-bearing decision point). `block_cloud_metadata = false` is NOT
+    /// honored in this slice: the metadata range stays blocked (fail-safe);
+    /// un-blocking it is deferred rather than risk an SSRF footgun.
+    ///
+    /// Each config allowlist entry becomes an [`AllowlistEntry`] carrying a
+    /// synthesized [`PolicyReceipt`] (the run is the issuing authority), so an
+    /// allowlisted host bypasses the matched CIDR exactly as a signed exception
+    /// would.
+    pub fn from_network_policy(
+        inner: P,
+        policy: &NetworkPolicyConfig,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        let trace_id = trace_id.into();
+        let template = build_ssrf_template(policy, &trace_id);
+        Self::with_policy(inner, template, trace_id)
     }
 
     /// Snapshot the accumulated SSRF audit records (one per allow/deny decision)

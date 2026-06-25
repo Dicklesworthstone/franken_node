@@ -20,6 +20,9 @@ use frankenengine_extension_host::host_io::{
     HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
     SandboxedHostIo,
 };
+use frankenengine_node::config::{
+    NetworkAllowlistEntry, NetworkPolicyConfig, SsrfEnforcementMode,
+};
 use frankenengine_node::ops::ssrf_gated_host_io::SsrfGatedHostIo;
 use frankenengine_node::security::ssrf_policy::SsrfPolicyTemplate;
 
@@ -190,6 +193,83 @@ fn permitted_egress_reaches_real_loopback_listener() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// bd-3894s (slice 6): the default `[security.network_policy]` (Block mode, no
+/// allowlist) wired through `from_network_policy` denies loopback egress — the
+/// config path is fail-closed by default, matching `new`.
+#[test]
+fn from_network_policy_block_default_denies_loopback() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let policy = NetworkPolicyConfig::default();
+    let gated = SsrfGatedHostIo::from_network_policy(
+        RecordingInner { seen: seen.clone() },
+        &policy,
+        "trace-cfg-block",
+    );
+    let outcome = gated.perform(&net_send("127.0.0.1:8080"), &[HostIoCapability::NetworkSend]);
+    assert!(
+        matches!(outcome, Err(HostIoError::Denied { .. })),
+        "default config (Block) must deny loopback, got {outcome:?}"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "a config-denied egress must never reach the inner mechanism"
+    );
+}
+
+/// bd-3894s (slice 6): a config allowlist entry for the loopback host bypasses
+/// the matched default-deny CIDR (via the synthesized `PolicyReceipt`), so the
+/// egress reaches the inner mechanism. This is the operator-controlled exception
+/// that lets a specific internal endpoint through under an otherwise default-deny
+/// policy.
+#[test]
+fn from_network_policy_allowlist_permits_loopback() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut policy = NetworkPolicyConfig::default();
+    policy.allowlist.push(NetworkAllowlistEntry {
+        host: "127.0.0.1".to_string(),
+        port: None,
+        reason: "test: permit local sink".to_string(),
+    });
+    let gated = SsrfGatedHostIo::from_network_policy(
+        RecordingInner { seen: seen.clone() },
+        &policy,
+        "trace-cfg-allow",
+    );
+    let outcome = gated.perform(&net_send("127.0.0.1:8080"), &[HostIoCapability::NetworkSend]);
+    assert!(
+        matches!(outcome, Ok(HostIoResponse::NetworkSend { .. })),
+        "an allowlisted loopback host must be permitted, got {outcome:?}"
+    );
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "the allowlisted egress must reach the inner mechanism"
+    );
+}
+
+/// bd-3894s (slice 6): explicit operator opt-out (`ssrf_enforcement = "none"`)
+/// empties the deny-list, so even loopback is permitted. Still routed through the
+/// gate (the decision is audited), but the policy authorizes it.
+#[test]
+fn from_network_policy_enforcement_none_permits_loopback() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let policy = NetworkPolicyConfig {
+        ssrf_enforcement: SsrfEnforcementMode::None,
+        ..NetworkPolicyConfig::default()
+    };
+    let gated = SsrfGatedHostIo::from_network_policy(
+        RecordingInner { seen: seen.clone() },
+        &policy,
+        "trace-cfg-none",
+    );
+    let outcome = gated.perform(&net_send("127.0.0.1:8080"), &[HostIoCapability::NetworkSend]);
+    assert!(
+        matches!(outcome, Ok(HostIoResponse::NetworkSend { .. })),
+        "ssrf_enforcement=none must permit loopback, got {outcome:?}"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
 }
 
 /// The default policy denies loopback even when wrapping the real

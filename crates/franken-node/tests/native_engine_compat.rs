@@ -14,7 +14,7 @@
 //! as evidence that a real franken_engine binary executed the application.
 
 use frankenengine_node::{
-    config::{Config, PreferredRuntime, Profile},
+    config::{Config, NetworkAllowlistEntry, PreferredRuntime, Profile},
     ops::{engine_dispatcher::EngineDispatcher, telemetry_bridge::TelemetryBridge},
     storage::frankensqlite_adapter::FrankensqliteAdapter,
 };
@@ -305,6 +305,132 @@ fn run_surfaces_signed_host_effect_ledger_bd_5r99w_12() {
         .verify_effect_chain_entries(&sdk_entries)
         .expect("verifier SDK re-derives the effect chain offline");
     assert_eq!(verdict.effect_count, 2);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
+/// bd-656a2 / bd-3894s (http leg, mock-free e2e close-out): a real, idiomatic JS
+/// program that performs an `http.get` egress, run through the PUBLIC
+/// `dispatch_run` path, surfaces a signed, SDK-verifiable `http_request` effect
+/// in the host-effect ledger — and the framed request really reaches a loopback
+/// listener. No mocks: real parser/lowering of `require('http').get(url)` to the
+/// engine's `net:request` HostCall, the product-layer `SsrfGatedHostIo` policy
+/// gate (config-allowlisted for the loopback sink) authorizing it, the engine's
+/// real `SandboxedHostIo` network mechanism connecting and sending, a real
+/// `EffectReceipt` hash chain, and the verifier SDK re-deriving the chain offline.
+///
+/// This is the third L1 proof-carrying subject (`http.request`) coming online
+/// end to end — the close-out evidence for the http producer (bd-656a2) and the
+/// remaining REQUIRED subject for bd-f5b04.2.4's GREEN acceptance bar.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    // A loopback listener that accepts exactly one connection and reads the
+    // framed request the engine's network mechanism sends. Bound BEFORE the run
+    // so the guest's connect always finds it listening.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut buf = vec![0u8; 512];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        buf.truncate(n);
+        buf
+    });
+
+    // An idiomatic guest program performing a single HTTP GET. The lowering
+    // forwards the URL operand to the engine's `net:request` HostCall (slice 1:
+    // URL only; the JS expression evaluates to `undefined`).
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!(
+        "require('http').get('http://{}/');\n",
+        addr // host:port form, e.g. 127.0.0.1:54321
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // legacy-risky grants network_egress so the egress hostcall is authorized at
+    // the engine layer; the product-layer SSRF gate still governs the endpoint.
+    // The default policy is fail-closed (Block) and would deny loopback, so the
+    // operator allowlists exactly this loopback sink — the config-driven exception
+    // that `SsrfGatedHostIo::from_network_policy` turns into a signed receipt.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with an allowlisted http egress should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The framed request really reached the loopback listener (the mechanism ran).
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("GET / HTTP/1.1\r\n"),
+        "the loopback sink must observe the engine-framed GET request, got {wire:?}"
+    );
+    assert!(
+        wire.contains(&format!("Host: {addr}\r\n")),
+        "the framed request must carry the Host header for {addr}, got {wire:?}"
+    );
+
+    // The signed host-effect ledger surfaces the egress as an `http_request`.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http run must surface a host-effect ledger");
+    assert_eq!(ledger.schema_version, "host-effect-ledger-v1.0");
+    assert_eq!(
+        ledger.effect_count, 1,
+        "expected a single http_request effect, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 1);
+    assert_eq!(ledger.denied_count, 0);
+    assert_eq!(
+        ledger.entries[0].receipt.effect_kind.label(),
+        "http_request",
+        "the egress must be recorded as an http_request effect"
+    );
+
+    // It auto-surfaces in `run --json`.
+    let json = serde_json::to_string(&report).expect("serialize run report as run --json");
+    assert!(
+        json.contains("\"host_effect_ledger\"") && json.contains("\"http_request\""),
+        "run --json must include the http_request host-effect ledger entry"
+    );
+
+    // An external auditor re-derives the chain offline from the ledger entries
+    // alone, with the public verifier SDK — no trust in this runtime.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-656a2-http-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the http effect chain offline");
+    assert_eq!(verdict.effect_count, 1);
     assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
 }
 

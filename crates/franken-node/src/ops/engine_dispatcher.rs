@@ -2228,14 +2228,19 @@ impl EngineDispatcher {
                 // bd-656a2: wrap the engine's network MECHANISM with the product-
                 // layer SSRF POLICY gate before installing it. Guest network egress
                 // (the JS `http.get`/`http.request` -> NetworkSend lowering) is
-                // evaluated against the default-deny SSRF policy (loopback /
-                // link-local / RFC1918 / CGNAT / cloud-metadata) BEFORE the socket
-                // opens; a denied egress fails closed and is recorded as a denied
-                // effect, never reaching the network. Filesystem effects pass
+                // evaluated against the operator's `[security.network_policy]`
+                // (default-deny loopback / link-local / RFC1918 / CGNAT /
+                // cloud-metadata, plus any config allowlist exceptions) BEFORE the
+                // socket opens; a denied egress fails closed and is recorded as a
+                // denied effect, never reaching the network. Filesystem effects pass
                 // through unchanged. This gate is what makes the engine's network
                 // arm safe to activate on the run path, which grants `network_egress`
                 // under the balanced/legacy profiles.
-                let gated = SsrfGatedHostIo::new(provider, run_egress_trace);
+                let gated = SsrfGatedHostIo::from_network_policy(
+                    provider,
+                    &config.security.network_policy,
+                    run_egress_trace,
+                );
                 orchestrator.set_host_io(Arc::new(gated), Some(recorder));
                 tracing::info!(
                     execution_mode = "native",
