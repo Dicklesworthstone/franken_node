@@ -2147,6 +2147,7 @@ impl EngineDispatcher {
         (Output, TelemetryRuntimeReport, Option<HostEffectLedger>),
         EngineProcessError,
     > {
+        use crate::ops::ssrf_gated_host_io::SsrfGatedHostIo;
         use frankenengine_extension_host::host_io::{
             HostIoRecorder, InMemoryHostIoTranscript, SandboxedHostIo,
         };
@@ -2198,6 +2199,9 @@ impl EngineDispatcher {
         let mut orchestrator_config = Self::map_config_to_orchestrator_config(config); // bd-wlkks: Map from franken-node config
         orchestrator_config.policy_id =
             Self::generate_opaque_policy_id(config.profile, Some(policy_mode)); // bd-3rlp8: Opaque policy ID with policy_mode
+        // bd-656a2: capture a stable trace label for the SSRF gate's audit records
+        // before `orchestrator_config` is moved into the orchestrator below.
+        let run_egress_trace = orchestrator_config.policy_id.clone();
         let runtime_config = Self::map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
 
         let mut orchestrator =
@@ -2221,11 +2225,22 @@ impl EngineDispatcher {
             Ok(provider) => {
                 let recorder: Arc<dyn HostIoRecorder> =
                     Arc::new(InMemoryHostIoTranscript::recording());
-                orchestrator.set_host_io(Arc::new(provider), Some(recorder));
+                // bd-656a2: wrap the engine's network MECHANISM with the product-
+                // layer SSRF POLICY gate before installing it. Guest network egress
+                // (the JS `http.get`/`http.request` -> NetworkSend lowering) is
+                // evaluated against the default-deny SSRF policy (loopback /
+                // link-local / RFC1918 / CGNAT / cloud-metadata) BEFORE the socket
+                // opens; a denied egress fails closed and is recorded as a denied
+                // effect, never reaching the network. Filesystem effects pass
+                // through unchanged. This gate is what makes the engine's network
+                // arm safe to activate on the run path, which grants `network_egress`
+                // under the balanced/legacy profiles.
+                let gated = SsrfGatedHostIo::new(provider, run_egress_trace);
+                orchestrator.set_host_io(Arc::new(gated), Some(recorder));
                 tracing::info!(
                     execution_mode = "native",
                     sandbox_root = %sandbox_root.display(),
-                    "Installed sandboxed host-I/O provider for effect ledger"
+                    "Installed SSRF-gated sandboxed host-I/O provider for effect ledger"
                 );
             }
             Err(err) => {
@@ -2365,13 +2380,20 @@ impl EngineDispatcher {
                 HostIoRequest::FsWrite { path, data } => {
                     (EffectKind::FsWrite, path.as_bytes().to_vec(), data.clone())
                 }
+                // bd-656a2: the JS http.get/http.request lowering surfaces guest
+                // egress as a NetworkSend. Map it to EffectKind::HttpRequest (label
+                // "http_request") so the L1 proof-carrying acceptance bar's required
+                // `http.request` subject is satisfied by a real, signed effect
+                // receipt rather than a raw NetConnect. The egress was authorized by
+                // the product-layer SSRF gate (SsrfGatedHostIo) before the socket
+                // opened; a denied egress is recorded below as a denied receipt.
                 HostIoRequest::NetworkSend { endpoint, payload } => (
-                    EffectKind::NetConnect,
+                    EffectKind::HttpRequest,
                     endpoint.as_bytes().to_vec(),
                     payload.clone(),
                 ),
                 HostIoRequest::NetworkRecv { endpoint, .. } => (
-                    EffectKind::NetConnect,
+                    EffectKind::HttpRequest,
                     endpoint.as_bytes().to_vec(),
                     Vec::new(),
                 ),

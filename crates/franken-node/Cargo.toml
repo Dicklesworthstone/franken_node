@@ -1136,6 +1136,11 @@ path = "tests/engine_dispatcher_profile_conformance.rs"
 required-features = ["engine"]
 
 [[test]]
+name = "ssrf_gated_host_io_egress"
+path = "tests/ssrf_gated_host_io_egress.rs"
+required-features = ["engine"]
+
+[[test]]
 name = "replay_bundle_event_reorder_metamorphic"
 path = "tests/replay_bundle_event_reorder_metamorphic.rs"
 
