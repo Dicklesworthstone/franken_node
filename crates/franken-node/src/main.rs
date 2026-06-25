@@ -4993,8 +4993,23 @@ fn resolve_receipt_signing_key_path(
         return Ok(Some((path.to_path_buf(), "cli")));
     }
 
-    let resolved = config::Config::resolve(None, CliOverrides::default())
-        .context("failed resolving configuration for receipt export")?;
+    // We only need the OPTIONAL `security.decision_receipt_signing_key_path`
+    // field here, so resolve through the merge pipeline WITHOUT running full
+    // `Config::validate()`. Full validation enforces unrelated fail-closed
+    // security boundaries (e.g. `trust.registry_signing_key` and
+    // `security.authorized_api_keys` must be explicitly configured); enforcing
+    // them while merely probing for an optional key path would make the command
+    // abort with a misleading "failed resolving configuration" error in any
+    // workspace that has not yet run `franken-node init`. When no key path is
+    // discoverable we fall through to `Ok(None)` so the caller can emit the
+    // specific, fail-closed "no signing key was configured" refusal. A genuinely
+    // unreadable/malformed config file still surfaces its load error here.
+    let resolved = config::Config::resolve_without_validation_with_env(
+        None,
+        CliOverrides::default(),
+        &|key| std::env::var(key).ok(),
+    )
+    .context("failed resolving configuration for receipt export")?;
     if let Some(path) = resolved
         .config
         .security

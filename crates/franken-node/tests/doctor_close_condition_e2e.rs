@@ -38,6 +38,21 @@ fn fixture_root_with_ci_gate(include_ci_gate: bool) -> TempDir {
 members = ["crates/franken-node"]
 "#,
     );
+    // The L2 engine-boundary oracle (`check_engine_path_dependencies` ->
+    // `validate_engine_dependency_path`, hardened under bd-3k70d) canonicalizes
+    // each declared engine path dependency and requires it to (a) exist on disk
+    // and (b) resolve to a directory ending in `franken_engine/crates/<crate>`.
+    // The real workspace satisfies this with `../../../franken_engine/...`
+    // because the sibling `franken_engine` checkout lives beside `franken_node`.
+    // A bare `TempDir` has no such sibling, so we make the fixture self-contained
+    // by materializing the engine crate directories INSIDE the TempDir and
+    // pointing the path deps at them with a two-segment ascent. This keeps the
+    // security check intact (no weakening of the production validator) while
+    // making the GREEN fixture independent of the host's `$TMPDIR` layout.
+    for engine_crate in ["franken-engine", "franken-extension-host"] {
+        fs::create_dir_all(root.path().join("franken_engine/crates").join(engine_crate))
+            .expect("fixture engine crate directory");
+    }
     write_fixture(
         &root.path().join("crates/franken-node/Cargo.toml"),
         r#"
@@ -47,8 +62,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine" }
-frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host" }
+frankenengine-engine = { path = "../../franken_engine/crates/franken-engine" }
+frankenengine-extension-host = { path = "../../franken_engine/crates/franken-extension-host" }
 "#,
     );
     write_fixture(
