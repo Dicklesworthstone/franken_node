@@ -138,6 +138,64 @@ fn write_parity_only_compatibility_fixture(root: &Path) {
     );
 }
 
+/// Proof-carrying host-effect evidence is fully valid, but the compatibility
+/// (lockstep parity) corpus is below the required pass-rate threshold. Exercises
+/// the `proven-but-parity-RED => FAIL` arm of the acceptance-bar conjunction.
+fn write_proof_carrying_but_parity_red_compatibility_fixture(root: &Path) {
+    write_fixture(
+        &root.join("artifacts/13/compatibility_corpus_results.json"),
+        r#"{
+  "corpus": {
+    "corpus_version": "compat-corpus-test"
+  },
+  "thresholds": {
+    "overall_pass_rate_min_pct": 95.0
+  },
+  "totals": {
+    "total_test_cases": 100,
+    "passed_test_cases": 90,
+    "failed_test_cases": 10,
+    "errored_test_cases": 0,
+    "skipped_test_cases": 0,
+    "overall_pass_rate_pct": 90.0
+  },
+  "proof_carrying_effects": {
+    "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+    "required_subjects": ["fs.read", "fs.write", "http.request"],
+    "verified_subjects": ["fs.read", "fs.write", "http.request"],
+    "effect_receipts_verified": 3,
+    "invalid_receipts": 0,
+    "receipt_chain_verified": true
+  }
+}"#,
+    );
+}
+
+/// Neither leg of the conjunction is satisfied: the parity corpus has zero
+/// test cases AND there is no proof-carrying host-effect evidence. Exercises the
+/// `both-missing => FAIL` arm of the acceptance-bar conjunction.
+fn write_unverified_and_unproven_compatibility_fixture(root: &Path) {
+    write_fixture(
+        &root.join("artifacts/13/compatibility_corpus_results.json"),
+        r#"{
+  "corpus": {
+    "corpus_version": "compat-corpus-test"
+  },
+  "thresholds": {
+    "overall_pass_rate_min_pct": 95.0
+  },
+  "totals": {
+    "total_test_cases": 0,
+    "passed_test_cases": 0,
+    "failed_test_cases": 0,
+    "errored_test_cases": 0,
+    "skipped_test_cases": 0,
+    "overall_pass_rate_pct": 0.0
+  }
+}"#,
+    );
+}
+
 fn canonical_json_value(value: &Value) -> String {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
@@ -450,6 +508,125 @@ fn doctor_close_condition_fails_l1_without_proof_carrying_effect_evidence() {
                 .as_str()
                 .is_some_and(|text| text.contains("proof-carrying host-effect evidence missing"))),
         "L1 should fail closed on parity-only evidence: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"])
+            .expect("L1 receipt should render")
+    );
+}
+
+/// Acceptance-bar conjunction, `proven-but-parity-RED => FAIL` arm (bd-f5b04.2.4.1):
+/// even with a fully valid proof-carrying host-effect chain, the L1 product oracle
+/// must fail closed when the lockstep parity corpus is below threshold. The two legs
+/// of the conjunction (parity-GREEN AND proof-carrying) are independently load-bearing.
+#[test]
+fn doctor_close_condition_fails_l1_when_proof_carrying_but_parity_red() {
+    let root = fixture_root();
+    write_proof_carrying_but_parity_red_compatibility_fixture(root.path());
+    let (signing_key_path, _) =
+        write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 63);
+    let signing_key_path = signing_key_path.display().to_string();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .env(
+            "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
+            "2026-02-21T00:00:00Z",
+        )
+        .args([
+            "doctor",
+            "close-condition",
+            "--json",
+            "--receipt-signing-key",
+            signing_key_path.as_str(),
+        ])
+        .output()
+        .expect("doctor close-condition should run");
+
+    assert!(
+        output.status.success(),
+        "doctor close-condition should emit a red receipt instead of aborting: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value =
+        serde_json::from_slice(&output.stdout).expect("stdout receipt must be JSON");
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
+    let findings = receipt["L1_product_oracle"]["blocking_findings"]
+        .as_array()
+        .expect("L1 blocking findings");
+    assert!(
+        findings.iter().any(|finding| finding
+            .as_str()
+            .is_some_and(|text| text.contains("pass rate") && text.contains("below required"))),
+        "L1 must fail closed on parity-RED even with valid proof-carrying evidence: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"])
+            .expect("L1 receipt should render")
+    );
+    assert!(
+        !findings.iter().any(|finding| finding
+            .as_str()
+            .is_some_and(|text| text.contains("proof-carrying"))),
+        "proof-carrying evidence is valid here; only the parity leg should fail: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"])
+            .expect("L1 receipt should render")
+    );
+}
+
+/// Acceptance-bar conjunction, `both-missing => FAIL` arm (bd-f5b04.2.4.1): when the
+/// parity corpus carries zero test cases AND proof-carrying host-effect evidence is
+/// absent, the L1 product oracle must fail closed and report BOTH missing legs.
+#[test]
+fn doctor_close_condition_fails_l1_when_both_parity_and_proof_missing() {
+    let root = fixture_root();
+    write_unverified_and_unproven_compatibility_fixture(root.path());
+    let (signing_key_path, _) =
+        write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 64);
+    let signing_key_path = signing_key_path.display().to_string();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .env(
+            "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
+            "2026-02-21T00:00:00Z",
+        )
+        .args([
+            "doctor",
+            "close-condition",
+            "--json",
+            "--receipt-signing-key",
+            signing_key_path.as_str(),
+        ])
+        .output()
+        .expect("doctor close-condition should run");
+
+    assert!(
+        output.status.success(),
+        "doctor close-condition should emit a red receipt instead of aborting: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value =
+        serde_json::from_slice(&output.stdout).expect("stdout receipt must be JSON");
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
+    let findings = receipt["L1_product_oracle"]["blocking_findings"]
+        .as_array()
+        .expect("L1 blocking findings");
+    assert!(
+        findings.iter().any(|finding| finding
+            .as_str()
+            .is_some_and(|text| text.contains("zero test cases"))),
+        "parity leg must fail closed when the corpus is empty: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"])
+            .expect("L1 receipt should render")
+    );
+    assert!(
+        findings.iter().any(|finding| finding
+            .as_str()
+            .is_some_and(|text| text.contains("proof-carrying host-effect evidence missing"))),
+        "proof-carrying leg must fail closed when evidence is absent: {}",
         serde_json::to_string_pretty(&receipt["L1_product_oracle"])
             .expect("L1 receipt should render")
     );
