@@ -4,7 +4,7 @@
 //! raw, capability-checked, byte/time-bounded TCP I/O but performs **no** endpoint
 //! policy check. Per the engine-split contract the engine is the mechanism and
 //! `franken_node` owns the policy — so this wrapper is that policy. Before any
-//! guest `NetworkSend`/`NetworkRecv` reaches the socket, [`SsrfGatedHostIo`]
+//! guest `NetworkSend`/`NetworkRecv`/`NetworkRequest` reaches the socket, [`SsrfGatedHostIo`]
 //! resolves the endpoint and evaluates it against the franken_node SSRF policy
 //! (default-deny loopback / link-local / RFC1918 / CGNAT / cloud-metadata
 //! ranges). Allowed egress is delegated to the wrapped provider; denied egress
@@ -218,8 +218,13 @@ impl<P: HostIoProvider> HostIoProvider for SsrfGatedHostIo<P> {
 
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
         match request {
+            // bd-3894s slice (4): the single-socket `NetworkRequest` round trip is
+            // an egress and MUST be gated exactly like `NetworkSend`. (This match is
+            // exhaustive on purpose: a new network request variant fails the build
+            // here until it is gated, so there is no silent SSRF-bypass path.)
             HostIoRequest::NetworkSend { endpoint, .. }
-            | HostIoRequest::NetworkRecv { endpoint, .. } => {
+            | HostIoRequest::NetworkRecv { endpoint, .. }
+            | HostIoRequest::NetworkRequest { endpoint, .. } => {
                 self.gate_endpoint(endpoint)?;
                 self.inner.perform(request, granted)
             }

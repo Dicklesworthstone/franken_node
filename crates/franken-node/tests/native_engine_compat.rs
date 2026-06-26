@@ -324,12 +324,15 @@ fn run_surfaces_signed_host_effect_ledger_bd_5r99w_12() {
 #[test]
 #[cfg(feature = "engine")]
 fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
 
     // A loopback listener that accepts exactly one connection and reads the
     // framed request the engine's network mechanism sends. Bound BEFORE the run
-    // so the guest's connect always finds it listening.
+    // so the guest's connect always finds it listening. bd-3894s slice (4): the
+    // engine now does a single-socket request/response round trip, so the sink
+    // reads the (half-closed) request to EOF, then replies and closes so the
+    // guest's response read terminates.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
     let addr = listener.local_addr().expect("listener addr");
     let server = std::thread::spawn(move || {
@@ -337,15 +340,19 @@ fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("read timeout");
-        let mut buf = vec![0u8; 512];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        buf.truncate(n);
-        buf
+        let mut received = Vec::new();
+        let _ = stream.read_to_end(&mut received);
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
+        );
+        let _ = stream.flush();
+        received
     });
 
     // An idiomatic guest program performing a single HTTP GET. The lowering
-    // forwards the URL operand to the engine's `net:request` HostCall (slice 1:
-    // URL only; the JS expression evaluates to `undefined`).
+    // forwards the URL operand to the engine's `net:request` HostCall; bd-3894s
+    // slice (4) makes the call evaluate to the parsed response object, but this
+    // e2e asserts the recorded host-effect ledger, which is the load-bearing proof.
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let source = format!(
         "require('http').get('http://{}/');\n",

@@ -2227,7 +2227,8 @@ impl EngineDispatcher {
                     Arc::new(InMemoryHostIoTranscript::recording());
                 // bd-656a2: wrap the engine's network MECHANISM with the product-
                 // layer SSRF POLICY gate before installing it. Guest network egress
-                // (the JS `http.get`/`http.request` -> NetworkSend lowering) is
+                // (the JS `http.get`/`http.request`/`fetch` -> NetworkRequest
+                // single-socket round-trip lowering) is
                 // evaluated against the operator's `[security.network_policy]`
                 // (default-deny loopback / link-local / RFC1918 / CGNAT /
                 // cloud-metadata, plus any config allowlist exceptions) BEFORE the
@@ -2402,6 +2403,17 @@ impl EngineDispatcher {
                     endpoint.as_bytes().to_vec(),
                     Vec::new(),
                 ),
+                // bd-3894s slice (4): the single-socket round trip carries the
+                // framed request as its input; the response it reads back is
+                // recorded below as the effect's produced/post-state, so the signed
+                // receipt is proof-carrying for the RESPONSE, not just the egress.
+                HostIoRequest::NetworkRequest {
+                    endpoint, payload, ..
+                } => (
+                    EffectKind::HttpRequest,
+                    endpoint.as_bytes().to_vec(),
+                    payload.clone(),
+                ),
             };
             let args_hash = content_hash(&args_bytes);
 
@@ -2410,7 +2422,10 @@ impl EngineDispatcher {
                     // Bytes the effect produced/left as state, from the real outcome.
                     let produced = match response {
                         HostIoResponse::FsRead { bytes }
-                        | HostIoResponse::NetworkRecv { bytes } => bytes.clone(),
+                        | HostIoResponse::NetworkRecv { bytes }
+                        // bd-3894s slice (4): a round trip's produced/post-state IS
+                        // the response the peer sent back.
+                        | HostIoResponse::NetworkRequest { response: bytes } => bytes.clone(),
                         HostIoResponse::FsWrite { .. } | HostIoResponse::NetworkSend { .. } => {
                             input_bytes.clone()
                         }

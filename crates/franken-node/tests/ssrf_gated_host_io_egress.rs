@@ -49,6 +49,9 @@ impl HostIoProvider for RecordingInner {
                 bytes_sent: payload.len() as u64,
             },
             HostIoRequest::NetworkRecv { .. } => HostIoResponse::NetworkRecv { bytes: Vec::new() },
+            HostIoRequest::NetworkRequest { .. } => HostIoResponse::NetworkRequest {
+                response: b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            },
         })
     }
 }
@@ -69,6 +72,62 @@ fn net_send(endpoint: &str) -> HostIoRequest {
         endpoint: endpoint.to_string(),
         payload: b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(),
     }
+}
+
+// bd-3894s slice (4): the single-socket round-trip variant the http leg now uses.
+fn net_request(endpoint: &str) -> HostIoRequest {
+    HostIoRequest::NetworkRequest {
+        endpoint: endpoint.to_string(),
+        payload: b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec(),
+        max_len: 4096,
+    }
+}
+
+/// bd-3894s slice (4): a `NetworkRequest` round trip is an egress and MUST be
+/// SSRF-gated exactly like `NetworkSend` — a loopback target is denied before the
+/// inner mechanism ever sees it. This is the regression guarding against the
+/// round-trip variant slipping past the gate.
+#[test]
+fn default_policy_denies_loopback_round_trip() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let gated = SsrfGatedHostIo::new(RecordingInner { seen: seen.clone() }, "trace-roundtrip");
+    let outcome = gated.perform(
+        &net_request("127.0.0.1:8080"),
+        &[HostIoCapability::NetworkSend],
+    );
+    assert!(
+        matches!(outcome, Err(HostIoError::Denied { .. })),
+        "a loopback round trip must be SSRF-denied, got {outcome:?}"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "a denied round trip must never reach the inner network mechanism"
+    );
+}
+
+/// bd-3894s slice (4): an allowlisted endpoint authorizes the round trip and it
+/// reaches the inner mechanism (mirrors the `NetworkSend` allow path).
+#[test]
+fn permissive_policy_allows_round_trip() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let gated = SsrfGatedHostIo::with_policy(
+        RecordingInner { seen: seen.clone() },
+        permissive_template(),
+        "trace-roundtrip-allow",
+    );
+    let outcome = gated.perform(
+        &net_request("127.0.0.1:8080"),
+        &[HostIoCapability::NetworkSend],
+    );
+    assert!(
+        matches!(outcome, Ok(HostIoResponse::NetworkRequest { .. })),
+        "an allowlisted round trip must reach the inner mechanism, got {outcome:?}"
+    );
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "the authorized round trip must be delegated to the inner provider exactly once"
+    );
 }
 
 #[test]
