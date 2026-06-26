@@ -20,9 +20,7 @@ use frankenengine_extension_host::host_io::{
     HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
     SandboxedHostIo,
 };
-use frankenengine_node::config::{
-    NetworkAllowlistEntry, NetworkPolicyConfig, SsrfEnforcementMode,
-};
+use frankenengine_node::config::{NetworkAllowlistEntry, NetworkPolicyConfig, SsrfEnforcementMode};
 use frankenengine_node::ops::ssrf_gated_host_io::SsrfGatedHostIo;
 use frankenengine_node::security::ssrf_policy::SsrfPolicyTemplate;
 
@@ -266,7 +264,10 @@ fn from_network_policy_block_default_denies_loopback() {
         &policy,
         "trace-cfg-block",
     );
-    let outcome = gated.perform(&net_send("127.0.0.1:8080"), &[HostIoCapability::NetworkSend]);
+    let outcome = gated.perform(
+        &net_send("127.0.0.1:8080"),
+        &[HostIoCapability::NetworkSend],
+    );
     assert!(
         matches!(outcome, Err(HostIoError::Denied { .. })),
         "default config (Block) must deny loopback, got {outcome:?}"
@@ -296,7 +297,10 @@ fn from_network_policy_allowlist_permits_loopback() {
         &policy,
         "trace-cfg-allow",
     );
-    let outcome = gated.perform(&net_send("127.0.0.1:8080"), &[HostIoCapability::NetworkSend]);
+    let outcome = gated.perform(
+        &net_send("127.0.0.1:8080"),
+        &[HostIoCapability::NetworkSend],
+    );
     assert!(
         matches!(outcome, Ok(HostIoResponse::NetworkSend { .. })),
         "an allowlisted loopback host must be permitted, got {outcome:?}"
@@ -323,7 +327,10 @@ fn from_network_policy_enforcement_none_permits_loopback() {
         &policy,
         "trace-cfg-none",
     );
-    let outcome = gated.perform(&net_send("127.0.0.1:8080"), &[HostIoCapability::NetworkSend]);
+    let outcome = gated.perform(
+        &net_send("127.0.0.1:8080"),
+        &[HostIoCapability::NetworkSend],
+    );
     assert!(
         matches!(outcome, Ok(HostIoResponse::NetworkSend { .. })),
         "ssrf_enforcement=none must permit loopback, got {outcome:?}"
