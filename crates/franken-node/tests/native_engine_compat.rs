@@ -441,6 +441,136 @@ fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
     assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
 }
 
+/// bd-3894s slice (2b) (http leg, mock-free e2e — writable ClientRequest body): a
+/// real JS program that builds an HTTP request body INCREMENTALLY via the writable
+/// `ClientRequest` stream —
+/// `const req = http.request(url, { method: 'POST', ... }); req.write(a);
+/// req.write(b); req.end(c);` — run through the PUBLIC `dispatch_run` path. The
+/// `http.request` call lowers to the engine's `net:client_request` HostCall (it
+/// builds the ClientRequest object WITHOUT egressing); the egress fires only on
+/// `req.end()`, carrying the body ACCUMULATED across the `write`/`end` calls. The
+/// framed POST really reaches a loopback listener with the assembled body, and the
+/// signed host-effect ledger surfaces the egress as an allowed `http_request`
+/// effect (the same proof-carrying path as the immediate `http.get` form, so the
+/// body lands in the ledger with identical fidelity — a POST-with-body built via
+/// `req.write` is no longer dropped or recorded as a benign GET).
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A loopback listener that accepts one connection, reads the framed request to
+    // EOF (the half-closed request half), then replies and closes so the guest's
+    // response read terminates (the slice-4 single-socket round trip).
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut received = Vec::new();
+        let _ = stream.read_to_end(&mut received);
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let _ = stream.flush();
+        received
+    });
+
+    // An idiomatic guest program that streams the request body: `http.request`
+    // returns a writable ClientRequest, `req.write` appends each chunk, and
+    // `req.end` sends the assembled body. The lowering routes `http.request` to
+    // `net:client_request` (deferred egress), so nothing is sent until `req.end()`.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!(
+        "const http = require('http');\n\
+         const req = http.request('http://{addr}/submit', {{ method: 'POST', headers: {{ 'Content-Type': 'text/plain' }} }});\n\
+         req.write('Hello, ');\n\
+         req.write('world');\n\
+         req.end('!');\n"
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // legacy-risky grants network_egress (authorizing the `net:client_request`
+    // creation AND the deferred `.end()` egress at the engine capability layer);
+    // the operator allowlists the loopback sink so the product-layer SSRF gate
+    // authorizes this exact endpoint.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with an allowlisted http.request write/end egress should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The framed POST with the ACCUMULATED body really reached the loopback sink —
+    // the load-bearing proof the writable-stream body was assembled and sent.
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("POST /submit HTTP/1.1\r\n"),
+        "the loopback sink must observe the engine-framed POST request, got {wire:?}"
+    );
+    assert!(
+        wire.contains("Content-Type: text/plain\r\n"),
+        "the request headers must be framed onto the wire, got {wire:?}"
+    );
+    assert!(
+        wire.contains("Content-Length: 13\r\n"),
+        "the assembled write/end body length (\"Hello, world!\") must be framed, got {wire:?}"
+    );
+    assert!(
+        wire.ends_with("\r\n\r\nHello, world!"),
+        "the body assembled across req.write/req.end must follow the blank-line terminator, got {wire:?}"
+    );
+
+    // The signed host-effect ledger surfaces the egress as an allowed http_request.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http.request write/end run must surface a host-effect ledger");
+    assert_eq!(
+        ledger.effect_count, 1,
+        "expected a single http_request effect from req.end(), got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 1);
+    assert_eq!(ledger.denied_count, 0);
+    assert_eq!(
+        ledger.entries[0].receipt.effect_kind.label(),
+        "http_request",
+        "the deferred req.end() egress must be recorded as an http_request effect"
+    );
+
+    // An external auditor re-derives the chain offline from the ledger entries.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-clientrequest-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the http effect chain offline");
+    assert_eq!(verdict.effect_count, 1);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
 /// bd-656a2 / bd-3894s (http leg, mock-free e2e — DENIED half): the fail-closed
 /// counterpart of the allowed e2e. A real `require('http').get('http://127.0.0.1:9/')`
 /// program — a loopback endpoint the default-deny SSRF policy blocks, with no
