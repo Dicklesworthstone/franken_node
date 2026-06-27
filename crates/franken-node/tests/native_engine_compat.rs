@@ -571,6 +571,142 @@ fn run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s() {
     assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
 }
 
+/// bd-3894s slice (2c) (http leg, mock-free e2e — response callback delivery): a
+/// real, idiomatic JS program that uses the Node response-callback form —
+/// `http.get(url, (res) => { ... })` — run through the PUBLIC `dispatch_run` path.
+/// The `http.get` egress fires synchronously and the response callback is delivered
+/// `cb(res)` on the next event-loop turn (the engine drains the macrotask queue
+/// after the program's synchronous portion). The callback EXECUTING with the REAL
+/// parsed response is proven mock-free: it gates on `res.status === 200` and writes
+/// `res.body` (the bytes the loopback server actually returned) to the sandbox —
+/// so the file only exists, with the server's body, if the callback ran and saw the
+/// genuine response. The signed host-effect ledger carries BOTH effects: the
+/// `http_request` egress (the program's main turn) AND the `fs_write` the callback
+/// performed (the event-loop turn), proving the callback's own effect is
+/// proof-carrying too. No mocks: real parser/lowering of `http.get(url, cb)`,
+/// real SSRF-gated egress + round trip, real callback execution, real fs write.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_http_get_response_callback_ledger_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A loopback listener that accepts one connection, reads the half-closed request
+    // to EOF, then replies with a distinctive body and closes so the guest's
+    // response read terminates (the slice-4 single-socket round trip). The body the
+    // callback writes back to disk proves it received THIS response.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut received = Vec::new();
+        let _ = stream.read_to_end(&mut received);
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nserved-ok");
+        let _ = stream.flush();
+        received
+    });
+
+    // The guest program registers a response callback. It gates on the parsed
+    // status (`res.status === 200`) and writes the parsed body (`res.body`) to the
+    // sandbox — so the file is the load-bearing proof the callback both RAN and saw
+    // the real response. `http.get(url, cb)` lowers to `net:request` carrying the
+    // trailing closure; the engine delivers `cb(res)` on the next event-loop turn.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!(
+        "const http = require('http');\n\
+         http.get('http://{addr}/', (res) => {{\n\
+         \x20 if (res.status === 200) {{\n\
+         \x20   require('fs').writeFileSync('cb_out.txt', res.body);\n\
+         \x20 }}\n\
+         }});\n"
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // legacy-risky grants network_egress (the http.get egress) AND fs_write (the
+    // callback's writeFileSync); the operator allowlists the loopback sink so the
+    // product-layer SSRF gate authorizes this exact endpoint.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with an http.get response callback should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The egress crossed the socket as a real GET.
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("GET / HTTP/1.1\r\n"),
+        "the loopback sink must observe the engine-framed GET request, got {wire:?}"
+    );
+
+    // THE LOAD-BEARING PROOF: the response callback executed on the event-loop turn
+    // with the REAL parsed response — it only writes when `res.status === 200`, and
+    // it writes `res.body`, so the file holds exactly the server's reply body.
+    assert_eq!(
+        std::fs::read(temp_dir.path().join("cb_out.txt"))
+            .expect("the response callback must have written cb_out.txt"),
+        b"served-ok",
+        "the callback ran with the real response: it gated on res.status === 200 and wrote res.body"
+    );
+
+    // The signed host-effect ledger carries BOTH the egress and the callback's own
+    // fs write — proof the response-callback path is proof-carrying end to end.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http.get callback run must surface a host-effect ledger");
+    assert_eq!(
+        ledger.effect_count, 2,
+        "expected the http_request egress + the callback's fs_write, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 2);
+    assert_eq!(ledger.denied_count, 0);
+    let kinds: Vec<&str> = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.receipt.effect_kind.label())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["http_request", "fs_write"],
+        "the egress (main turn) precedes the callback's fs write (event-loop turn)"
+    );
+
+    // An external auditor re-derives the whole chain offline from the ledger entries.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-http-callback-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the http + fs effect chain offline");
+    assert_eq!(verdict.effect_count, 2);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
 /// bd-656a2 / bd-3894s (http leg, mock-free e2e — DENIED half): the fail-closed
 /// counterpart of the allowed e2e. A real `require('http').get('http://127.0.0.1:9/')`
 /// program — a loopback endpoint the default-deny SSRF policy blocks, with no
