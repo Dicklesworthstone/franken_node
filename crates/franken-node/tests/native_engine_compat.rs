@@ -707,6 +707,150 @@ fn run_surfaces_signed_http_get_response_callback_ledger_bd_3894s() {
     assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
 }
 
+/// bd-3894s slice (2d) (http leg, mock-free e2e — IncomingMessage readable-stream
+/// EVENT model): a real, idiomatic JS program that consumes the response through the
+/// Node readable-stream events — `res.on('data', chunk => …)` then `res.on('end',
+/// () => …)` — registered INSIDE the `http.get(url, (res) => { … })` response
+/// callback, run through the PUBLIC `dispatch_run` path. This is the proof the event
+/// model is real end to end:
+///   - `http.get(url, cb)` lowers to `net:request` carrying the trailing closure; the
+///     engine delivers `cb(res)` on the next event-loop turn (slice 2c);
+///   - inside that callback the program registers `res.on('data', …)` and
+///     `res.on('end', …)` on the `IncomingMessage` (slice 2d `.on` via the `__type`
+///     tag);
+///   - on the FOLLOWING turns the engine emits `'data'` with the whole body as one
+///     chunk (the listener accumulates it) and then `'end'` (the listener writes the
+///     accumulated buffer to the sandbox).
+/// The file therefore exists, with the server's body, ONLY if the listeners were
+/// registered AND fired in data→end order with the real response bytes — no synchronous
+/// `res.body` shortcut is used. The signed host-effect ledger carries BOTH the
+/// `http_request` egress and the `fs_write` the `'end'` listener performed, and the
+/// verifier SDK re-derives the chain offline. No mocks: real parser/lowering, real
+/// SSRF-gated egress + round trip, real event-emitter dispatch, real fs write.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_http_get_response_event_stream_ledger_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A loopback listener that accepts one connection, reads the half-closed request
+    // to EOF, then replies with a distinctive body and closes so the guest's response
+    // read terminates (the slice-4 single-socket round trip). The body the 'end'
+    // listener writes back to disk proves the readable stream delivered THIS response.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut received = Vec::new();
+        let _ = stream.read_to_end(&mut received);
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nserved-ok");
+        let _ = stream.flush();
+        received
+    });
+
+    // The guest program registers readable-stream listeners on the response and only
+    // writes on 'end', from a buffer ACCUMULATED across 'data' events — so the file is
+    // load-bearing proof that 'data' delivered the real body chunk and 'end' fired
+    // after it, with the listeners registered inside the response callback.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!(
+        "const http = require('http');\n\
+         http.get('http://{addr}/', (res) => {{\n\
+         \x20 let body = '';\n\
+         \x20 res.on('data', (chunk) => {{ body += chunk; }});\n\
+         \x20 res.on('end', () => {{\n\
+         \x20   require('fs').writeFileSync('cb_out.txt', body);\n\
+         \x20 }});\n\
+         }});\n"
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // legacy-risky grants network_egress (the http.get egress) AND fs_write (the
+    // 'end' listener's writeFileSync); the operator allowlists the loopback sink so
+    // the product-layer SSRF gate authorizes this exact endpoint.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with http response stream events should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The egress crossed the socket as a real GET.
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("GET / HTTP/1.1\r\n"),
+        "the loopback sink must observe the engine-framed GET request, got {wire:?}"
+    );
+
+    // THE LOAD-BEARING PROOF: the 'end' listener wrote the buffer accumulated from the
+    // 'data' event(s), so the file holds exactly the server's reply body — which is
+    // only true if res.on('data') delivered the real chunk and res.on('end') fired
+    // after it, both registered inside the response callback.
+    assert_eq!(
+        std::fs::read(temp_dir.path().join("cb_out.txt"))
+            .expect("the 'end' listener must have written cb_out.txt"),
+        b"served-ok",
+        "data→end fired in order: 'data' delivered res body, 'end' wrote the accumulated buffer"
+    );
+
+    // The signed host-effect ledger carries BOTH the egress and the 'end' listener's
+    // own fs write — proof the readable-stream event path is proof-carrying end to end.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http stream-event run must surface a host-effect ledger");
+    assert_eq!(
+        ledger.effect_count, 2,
+        "expected the http_request egress + the 'end' listener's fs_write, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 2);
+    assert_eq!(ledger.denied_count, 0);
+    let kinds: Vec<&str> = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.receipt.effect_kind.label())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["http_request", "fs_write"],
+        "the egress (main turn) precedes the 'end' listener's fs write (later event-loop turn)"
+    );
+
+    // An external auditor re-derives the whole chain offline from the ledger entries.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-http-event-stream-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the http + fs effect chain offline");
+    assert_eq!(verdict.effect_count, 2);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
 /// bd-656a2 / bd-3894s (http leg, mock-free e2e — DENIED half): the fail-closed
 /// counterpart of the allowed e2e. A real `require('http').get('http://127.0.0.1:9/')`
 /// program — a loopback endpoint the default-deny SSRF policy blocks, with no
