@@ -1575,8 +1575,10 @@ mod tests {
     fn test_negative_cancellation_id_with_unicode_injection_attacks() {
         use crate::security::constant_time;
 
-        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
+        let mut proto = CancellationProtocol::new(DrainConfig::new(1000, true));
 
+        // Bind the long id so all array elements share the `&str` type.
+        let long_id = "x".repeat(100_000);
         let malicious_cancellation_ids = [
             "cancel\u{202E}fake\u{202C}",        // BiDi override attack
             "cancel\x1b[31mred\x1b[0m",          // ANSI escape injection
@@ -1588,12 +1590,12 @@ mod tests {
             "cancel<script>alert(1)</script>",   // XSS attempt
             "cancel'; DROP TABLE records; --",   // SQL injection attempt
             "cancel||rm -rf /",                  // Shell injection attempt
-            "x".repeat(100_000),                 // Extremely long ID (100KB)
+            long_id.as_str(),                    // Extremely long ID (100KB)
         ];
 
         for malicious_id in malicious_cancellation_ids {
             // Test cancel request with malicious ID
-            let result = proto.request_cancel(malicious_id, "test-reason", "test-trace");
+            let result = proto.request_cancel(malicious_id, 0, 1000, "test-trace");
             assert!(
                 result.is_ok(),
                 "protocol should handle malicious cancellation ID safely"
@@ -1602,7 +1604,7 @@ mod tests {
             // Verify ID is preserved exactly for forensics
             let record = proto.get_record(malicious_id).expect("record should exist");
             assert_eq!(
-                record.cancellation_id, malicious_id,
+                record.workflow_id, malicious_id,
                 "ID should be preserved"
             );
 
@@ -1629,9 +1631,9 @@ mod tests {
             );
 
             // Complete cancellation to clean up for next iteration
-            let _ = proto.start_drain(malicious_id, "test-trace");
-            let _ = proto.complete_drain(malicious_id, "test-trace");
-            let _ = proto.finalize(malicious_id, "test-trace", vec![]);
+            let _ = proto.start_drain(malicious_id, 1100, "test-trace");
+            let _ = proto.complete_drain(malicious_id, 1200, "test-trace");
+            let _ = proto.finalize(malicious_id, &ResourceTracker::empty(), 1300, "test-trace");
         }
 
         // Test with cancellation IDs that might bypass protocol enforcement
@@ -1647,7 +1649,7 @@ mod tests {
         ];
 
         for bypass_id in bypass_ids {
-            let result = proto.request_cancel(bypass_id, "bypass-test", "bypass-trace");
+            let result = proto.request_cancel(bypass_id, 0, 1000, "bypass-trace");
             assert!(
                 result.is_ok(),
                 "protocol should handle bypass attempts safely"
@@ -1656,7 +1658,7 @@ mod tests {
             // Should still follow normal protocol phases
             let record = proto.get_record(bypass_id).expect("record should exist");
             assert_eq!(
-                record.phase,
+                record.current_phase,
                 CancelPhase::CancelRequested,
                 "should be in normal REQUEST phase"
             );
@@ -1665,10 +1667,10 @@ mod tests {
 
     #[test]
     fn test_negative_state_machine_with_illegal_phase_transitions() {
-        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
+        let mut proto = CancellationProtocol::new(DrainConfig::new(1000, true));
 
         let cancel_id = "illegal-transition-test";
-        proto.request_cancel(cancel_id, "test", "trace").unwrap();
+        proto.request_cancel(cancel_id, 0, 1000, "trace").unwrap();
 
         // Test illegal direct transitions from CancelRequested
         let illegal_from_requested = [
@@ -1680,7 +1682,7 @@ mod tests {
 
         for illegal_phase in illegal_from_requested {
             // Try to force illegal transition (this would be internal manipulation)
-            let initial_phase = proto.get_record(cancel_id).unwrap().phase;
+            let initial_phase = proto.get_record(cancel_id).unwrap().current_phase;
             assert_eq!(initial_phase, CancelPhase::CancelRequested);
 
             // Verify legal targets don't include illegal phases
@@ -1693,8 +1695,8 @@ mod tests {
         }
 
         // Test proper transition sequence
-        proto.start_drain(cancel_id, "trace").unwrap();
-        let drain_phase = proto.get_record(cancel_id).unwrap().phase;
+        proto.start_drain(cancel_id, 1100, "trace").unwrap();
+        let drain_phase = proto.get_record(cancel_id).unwrap().current_phase;
         assert_eq!(drain_phase, CancelPhase::Draining);
 
         // Test illegal transitions from Draining
@@ -1715,8 +1717,8 @@ mod tests {
         }
 
         // Complete drain properly
-        proto.complete_drain(cancel_id, "trace").unwrap();
-        let drain_complete_phase = proto.get_record(cancel_id).unwrap().phase;
+        proto.complete_drain(cancel_id, 1200, "trace").unwrap();
+        let drain_complete_phase = proto.get_record(cancel_id).unwrap().current_phase;
         assert_eq!(drain_complete_phase, CancelPhase::DrainComplete);
 
         // Test illegal transitions from DrainComplete
@@ -1737,8 +1739,10 @@ mod tests {
         }
 
         // Test terminal state enforcement
-        proto.finalize(cancel_id, "trace", vec![]).unwrap();
-        let final_phase = proto.get_record(cancel_id).unwrap().phase;
+        proto
+            .finalize(cancel_id, &ResourceTracker::empty(), 1300, "trace")
+            .unwrap();
+        let final_phase = proto.get_record(cancel_id).unwrap().current_phase;
         assert_eq!(final_phase, CancelPhase::Finalized);
 
         // All transitions from Finalized should be illegal
@@ -1749,7 +1753,7 @@ mod tests {
         );
 
         // Verify subsequent operations fail on finalized cancellation
-        let result = proto.start_drain(cancel_id, "trace");
+        let result = proto.start_drain(cancel_id, 1400, "trace");
         assert!(
             result.is_err(),
             "operations on finalized cancellation should fail"
@@ -1766,14 +1770,14 @@ mod tests {
 
     #[test]
     fn test_negative_resource_leak_detection_with_malicious_resource_names() {
-        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
+        let mut proto = CancellationProtocol::new(DrainConfig::new(1000, true));
 
         let cancel_id = "resource-leak-test";
         proto
-            .request_cancel(cancel_id, "leak test", "trace")
+            .request_cancel(cancel_id, 0, 1000, "trace")
             .unwrap();
-        proto.start_drain(cancel_id, "trace").unwrap();
-        proto.complete_drain(cancel_id, "trace").unwrap();
+        proto.start_drain(cancel_id, 1100, "trace").unwrap();
+        proto.complete_drain(cancel_id, 1200, "trace").unwrap();
 
         // Test with malicious resource names that might cause injection
         let malicious_resource_names = vec![
@@ -1792,13 +1796,22 @@ mod tests {
             "system.bypass".to_string(),                // System-like resource
         ];
 
-        let result = proto.finalize(cancel_id, "trace", malicious_resource_names.clone());
+        // Route the malicious resource names through the ResourceTracker's open
+        // handles. finalize fails closed (INV-CANP-FINALIZE-CLEAN) when leaks are
+        // present, recording each leaked handle for forensics.
+        let leak_tracker = ResourceTracker {
+            open_handles: malicious_resource_names.clone(),
+            pending_writes: 0,
+            held_locks: Vec::new(),
+        };
+        let result = proto.finalize(cancel_id, &leak_tracker, 1300, "trace");
         assert!(
-            result.is_ok(),
-            "finalization should handle malicious resource names"
+            result.is_err(),
+            "finalization should fail closed on malicious resource leaks"
         );
 
-        // Verify resource names are preserved exactly for forensics
+        // Verify resource names are preserved exactly for forensics (each open
+        // handle is recorded as `handle:<name>`).
         let record = proto.get_record(cancel_id).unwrap();
         assert_eq!(record.resource_leaks.len(), malicious_resource_names.len());
 
@@ -1807,7 +1820,8 @@ mod tests {
             .zip(record.resource_leaks.iter())
         {
             assert_eq!(
-                original, stored,
+                stored,
+                &format!("handle:{}", original),
                 "resource names should be preserved exactly"
             );
         }
@@ -1850,19 +1864,26 @@ mod tests {
         // Test with extremely large number of resource leaks
         let massive_cancel_id = "massive-leak-test";
         proto
-            .request_cancel(massive_cancel_id, "massive leak test", "trace")
+            .request_cancel(massive_cancel_id, 0, 1000, "trace")
             .unwrap();
-        proto.start_drain(massive_cancel_id, "trace").unwrap();
-        proto.complete_drain(massive_cancel_id, "trace").unwrap();
+        proto.start_drain(massive_cancel_id, 1100, "trace").unwrap();
+        proto
+            .complete_drain(massive_cancel_id, 1200, "trace")
+            .unwrap();
 
         let massive_leaks: Vec<String> = (0..10_000)
             .map(|i| format!("leak_{:05}_{}", i, "Y".repeat(100)))
             .collect();
 
-        let massive_result = proto.finalize(massive_cancel_id, "trace", massive_leaks.clone());
+        let massive_tracker = ResourceTracker {
+            open_handles: massive_leaks.clone(),
+            pending_writes: 0,
+            held_locks: Vec::new(),
+        };
+        let massive_result = proto.finalize(massive_cancel_id, &massive_tracker, 1300, "trace");
         assert!(
-            massive_result.is_ok(),
-            "should handle massive resource leak list"
+            massive_result.is_err(),
+            "should fail closed on massive resource leak list"
         );
 
         let massive_record = proto.get_record(massive_cancel_id).unwrap();
@@ -1871,7 +1892,10 @@ mod tests {
 
     #[test]
     fn test_negative_cancellation_reason_with_injection_patterns() {
-        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
+        // NOTE: the protocol no longer carries a free-form `reason`; the malicious
+        // forensic payload is routed through `trace_id`, which IS preserved on the
+        // record and in the audit log, so the injection-safety intent is retained.
+        let mut proto = CancellationProtocol::new(DrainConfig::new(1000, true));
 
         let malicious_reasons = [
             "reason\u{202E}fake\u{202C}",                 // BiDi override
@@ -1893,7 +1917,7 @@ mod tests {
                     .unwrap()
             );
 
-            let result = proto.request_cancel(&cancel_id, malicious_reason, "test-trace");
+            let result = proto.request_cancel(&cancel_id, 0, 1000, malicious_reason);
             assert!(
                 result.is_ok(),
                 "should handle malicious cancellation reason"
@@ -1902,7 +1926,7 @@ mod tests {
             // Verify reason is preserved exactly for forensics
             let record = proto.get_record(&cancel_id).unwrap();
             assert_eq!(
-                record.cancel_reason, malicious_reason,
+                record.trace_id, malicious_reason,
                 "reason should be preserved"
             );
 
@@ -1922,7 +1946,7 @@ mod tests {
             );
 
             // Verify reason is properly escaped in JSON
-            if let Some(reason) = parsed.get("cancel_reason").and_then(|r| r.as_str()) {
+            if let Some(reason) = parsed.get("trace_id").and_then(|r| r.as_str()) {
                 assert_eq!(
                     reason, malicious_reason,
                     "reason should be preserved in JSON"
@@ -1934,7 +1958,7 @@ mod tests {
             let request_events: Vec<_> = audit_entries
                 .iter()
                 .filter(|entry| {
-                    entry.event_code == event_codes::CAN_001 && entry.cancellation_id == cancel_id
+                    entry.event_code == event_codes::CAN_001 && entry.workflow_id == cancel_id
                 })
                 .collect();
 
@@ -1972,18 +1996,18 @@ mod tests {
                     .unwrap()
             );
 
-            let result = proto.request_cancel(&cancel_id, bypass_reason, "bypass-trace");
+            let result = proto.request_cancel(&cancel_id, 0, 1000, bypass_reason);
             assert!(result.is_ok(), "should handle bypass reason attempts");
 
             // Should still follow normal protocol
             let record = proto.get_record(&cancel_id).unwrap();
             assert_eq!(
-                record.phase,
+                record.current_phase,
                 CancelPhase::CancelRequested,
                 "should be in normal REQUEST phase"
             );
             assert_eq!(
-                record.cancel_reason, bypass_reason,
+                record.trace_id, bypass_reason,
                 "bypass reason should be preserved"
             );
         }
@@ -1993,13 +2017,13 @@ mod tests {
     fn test_negative_trace_id_with_massive_forensic_payloads() {
         use crate::security::constant_time;
 
-        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
+        let mut proto = CancellationProtocol::new(DrainConfig::new(1000, true));
 
         // Test with massive trace IDs for memory stress
         let massive_trace_id = format!("trace_{}", "Z".repeat(5_000_000)); // 5MB trace ID
 
         let cancel_id = "massive-trace-test";
-        let result = proto.request_cancel(cancel_id, "massive trace test", &massive_trace_id);
+        let result = proto.request_cancel(cancel_id, 0, 1000, &massive_trace_id);
         assert!(result.is_ok(), "should handle massive trace ID");
 
         // Verify trace ID is preserved in audit log
@@ -2007,7 +2031,7 @@ mod tests {
         let request_event = audit_entries
             .iter()
             .find(|entry| {
-                entry.event_code == event_codes::CAN_001 && entry.cancellation_id == cancel_id
+                entry.event_code == event_codes::CAN_001 && entry.workflow_id == cancel_id
             })
             .expect("request event should exist");
 
@@ -2023,7 +2047,7 @@ mod tests {
             "serialized JSON should include massive trace ID"
         );
 
-        let parsed: CancellationAuditEntry =
+        let parsed: super::CancelAuditEvent =
             serde_json::from_str(&json).expect("deserialization should work");
         assert_eq!(
             parsed.trace_id, massive_trace_id,
@@ -2050,7 +2074,7 @@ mod tests {
                     .unwrap()
             );
 
-            let result = proto.request_cancel(&cancel_id, "injection test", injection_trace_id);
+            let result = proto.request_cancel(&cancel_id, 0, 1000, injection_trace_id);
             assert!(result.is_ok(), "should handle injection trace ID safely");
 
             // Test constant-time comparison for trace IDs
@@ -2064,7 +2088,7 @@ mod tests {
             let audit_entries = proto.audit_log();
             let injection_event = audit_entries
                 .iter()
-                .find(|entry| entry.cancellation_id == cancel_id)
+                .find(|entry| entry.workflow_id == cancel_id)
                 .expect("injection event should exist");
 
             assert_eq!(
@@ -2090,26 +2114,23 @@ mod tests {
 
     #[test]
     fn test_negative_bounded_storage_with_memory_exhaustion_attacks() {
-        // Create protocol with small capacity for testing
-        let mut proto = CancellationProtocol::new(
-            Duration::from_millis(1000),
-            10, // Small audit log capacity
-            10, // Small records capacity
-        );
+        // Create protocol with a small audit-log capacity for testing.
+        let mut proto =
+            CancellationProtocol::with_audit_log_capacity(DrainConfig::new(1000, true), 10);
 
         // Attempt to exhaust memory with many cancellation records
         for i in 0..1000 {
             let cancel_id = format!("exhaustion-test-{:03}", i);
-            let reason = format!("exhaustion reason {}", i);
             let trace = format!("exhaustion-trace-{:03}", i);
 
-            let result = proto.request_cancel(&cancel_id, &reason, &trace);
+            let result = proto.request_cancel(&cancel_id, 0, 1000, &trace);
             assert!(result.is_ok(), "should handle cancellation {}", i);
 
-            // Complete the cancellation to generate audit events
-            let _ = proto.start_drain(&cancel_id, &trace);
-            let _ = proto.complete_drain(&cancel_id, &trace);
-            let _ = proto.finalize(&cancel_id, &trace, vec![format!("leak_{}", i)]);
+            // Complete the cancellation cleanly to generate audit events and allow
+            // finalized records to be garbage-collected.
+            let _ = proto.start_drain(&cancel_id, 1100, &trace);
+            let _ = proto.complete_drain(&cancel_id, 1200, &trace);
+            let _ = proto.finalize(&cancel_id, &ResourceTracker::empty(), 1300, &trace);
         }
 
         // Verify bounded storage is enforced
@@ -2122,17 +2143,17 @@ mod tests {
 
         let records = proto.records();
         assert!(
-            records.len() <= 10,
+            records.len() <= super::DEFAULT_MAX_RECORDS,
             "records should be bounded to capacity (got {})",
             records.len()
         );
 
         // Test with massive single audit entry
         let massive_cancel_id = "massive-audit-test";
-        let massive_reason = format!("massive_reason_{}", "X".repeat(1_000_000)); // 1MB reason
+        let _massive_reason = format!("massive_reason_{}", "X".repeat(1_000_000)); // 1MB reason
         let massive_trace = format!("massive_trace_{}", "Y".repeat(1_000_000)); // 1MB trace
 
-        let result = proto.request_cancel(&massive_cancel_id, &massive_reason, &massive_trace);
+        let result = proto.request_cancel(&massive_cancel_id, 0, 1000, &massive_trace);
         assert!(result.is_ok(), "should handle massive audit entry");
 
         // Verify massive entry doesn't break bounded storage
@@ -2146,25 +2167,25 @@ mod tests {
         for i in 0..100 {
             let rapid_id = format!("rapid-{:03}", i);
             let result =
-                proto.request_cancel(&rapid_id, "rapid test", &format!("rapid-trace-{:03}", i));
+                proto.request_cancel(&rapid_id, 0, 1000, &format!("rapid-trace-{:03}", i));
             assert!(result.is_ok(), "should handle rapid cancellation {}", i);
         }
 
         // Verify FIFO eviction maintains most recent entries
         let final_records = proto.records();
         assert!(
-            final_records.len() <= 10,
+            final_records.len() <= super::DEFAULT_MAX_RECORDS,
             "records should maintain capacity bound"
         );
 
-        let recent_exists = final_records
+        let _recent_exists = final_records
             .iter()
-            .any(|record| record.cancellation_id.starts_with("rapid-09"));
+            .any(|record| record.workflow_id.starts_with("rapid-09"));
         // Most recent should be preserved (unless capacity is very constrained)
 
         // Verify protocol still functions after stress testing
         let final_test_id = "final-functionality-test";
-        let final_result = proto.request_cancel(final_test_id, "final test", "final-trace");
+        let final_result = proto.request_cancel(final_test_id, 0, 1000, "final-trace");
         assert!(
             final_result.is_ok(),
             "protocol should still function after stress testing"
@@ -2182,11 +2203,9 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::thread;
 
-        let proto = Arc::new(Mutex::new(CancellationProtocol::new(
-            Duration::from_millis(100),
-            1000,
-            1000,
-        )));
+        let proto = Arc::new(Mutex::new(CancellationProtocol::new(DrainConfig::new(
+            100, true,
+        ))));
 
         let mut handles = Vec::new();
 
@@ -2196,7 +2215,6 @@ mod tests {
             let handle = thread::spawn(move || {
                 for i in 0..50 {
                     let cancel_id = format!("concurrent-{}-{:03}", thread_id, i);
-                    let reason = format!("concurrent test from thread {}", thread_id);
                     let trace = format!("concurrent-trace-{}-{:03}", thread_id, i);
 
                     // Request cancellation
@@ -2204,7 +2222,11 @@ mod tests {
                         let mut locked_proto =
                             try_lock(&proto_clone, "cancellation protocol concurrent request")
                                 .expect("protocol mutex should lock for cancellation request");
-                        locked_proto.request_cancel(&cancel_id, &reason, &trace)
+                        // Map to an owned `Result<(), _>` so no borrow of the
+                        // MutexGuard escapes this block.
+                        locked_proto
+                            .request_cancel(&cancel_id, 0, 1000, &trace)
+                            .map(|_| ())
                     };
 
                     match result {
@@ -2216,7 +2238,7 @@ mod tests {
                                     "cancellation protocol concurrent drain start",
                                 )
                                 .expect("protocol mutex should lock for drain start");
-                                locked_proto.start_drain(&cancel_id, &trace)
+                                locked_proto.start_drain(&cancel_id, 1100, &trace).map(|_| ())
                             };
 
                             if drain_result.is_ok() {
@@ -2227,18 +2249,27 @@ mod tests {
                                         "cancellation protocol concurrent drain completion",
                                     )
                                     .expect("protocol mutex should lock for drain completion");
-                                    locked_proto.complete_drain(&cancel_id, &trace)
+                                    locked_proto
+                                        .complete_drain(&cancel_id, 1200, &trace)
+                                        .map(|_| ())
                                 };
 
                                 if complete_result.is_ok() {
                                     // Finalize
-                                    let finalize_result = {
+                                    let _finalize_result = {
                                         let mut locked_proto = try_lock(
                                             &proto_clone,
                                             "cancellation protocol concurrent finalization",
                                         )
                                         .expect("protocol mutex should lock for finalization");
-                                        locked_proto.finalize(&cancel_id, &trace, vec![])
+                                        locked_proto
+                                            .finalize(
+                                                &cancel_id,
+                                                &ResourceTracker::empty(),
+                                                1300,
+                                                &trace,
+                                            )
+                                            .map(|_| ())
                                     };
 
                                     // Finalization may fail due to race conditions, which is acceptable
@@ -2277,12 +2308,12 @@ mod tests {
         // Verify all remaining records are in valid states
         for record in final_records {
             assert!(
-                record.cancellation_id.starts_with("concurrent-"),
+                record.workflow_id.starts_with("concurrent-"),
                 "records should be from concurrent test"
             );
 
             // Phase should be valid
-            match record.phase {
+            match record.current_phase {
                 CancelPhase::Idle => unreachable!("idle phase should not be stored"),
                 CancelPhase::CancelRequested => {
                     // Valid intermediate state
@@ -2290,18 +2321,18 @@ mod tests {
                 CancelPhase::Draining => {
                     // Valid intermediate state
                     assert!(
-                        record.drain_started_at.is_some(),
+                        record.drain_start_ms.is_some(),
                         "draining phase should have start time"
                     );
                 }
                 CancelPhase::DrainComplete => {
                     // Valid intermediate state
                     assert!(
-                        record.drain_started_at.is_some(),
+                        record.drain_start_ms.is_some(),
                         "drain complete should have start time"
                     );
                     assert!(
-                        record.drain_completed_at.is_some(),
+                        record.drain_complete_ms.is_some(),
                         "drain complete should have completion time"
                     );
                 }
@@ -2311,7 +2342,7 @@ mod tests {
                 CancelPhase::Finalized => {
                     // Terminal state - should be complete
                     assert!(
-                        record.finalized_at.is_some(),
+                        record.finalize_ms.is_some(),
                         "finalized phase should have completion time"
                     );
                 }
@@ -2321,7 +2352,9 @@ mod tests {
         // Test protocol still functions after concurrent stress
         let test_result = {
             let mut locked_proto = final_proto;
-            locked_proto.request_cancel("post-concurrent-test", "functionality test", "post-trace")
+            locked_proto
+                .request_cancel("post-concurrent-test", 0, 1000, "post-trace")
+                .map(|_| ())
         };
         assert!(
             test_result.is_ok(),
@@ -2331,7 +2364,7 @@ mod tests {
 
     #[test]
     fn test_negative_audit_log_injection_with_structured_events() {
-        let mut proto = CancellationProtocol::new(Duration::from_millis(1000), 1000, 1000);
+        let mut proto = CancellationProtocol::new(DrainConfig::new(1000, true));
 
         let cancel_id = "audit-injection-test";
 
@@ -2348,31 +2381,33 @@ mod tests {
 
         for (i, pattern) in injection_patterns.iter().enumerate() {
             let phase_cancel_id = format!("{}_{}", cancel_id, i);
+            // Route the injection pattern through `trace_id`, which lands in the
+            // audit log; the auto-generated `detail` stays injection-free.
             let trace_with_pattern = format!("trace_{}", pattern);
-            let reason_with_pattern = format!("reason_{}", pattern);
 
             // Request cancellation
             proto
-                .request_cancel(&phase_cancel_id, &reason_with_pattern, &trace_with_pattern)
+                .request_cancel(&phase_cancel_id, 0, 1000, &trace_with_pattern)
                 .unwrap();
 
             // Start drain
             proto
-                .start_drain(&phase_cancel_id, &trace_with_pattern)
+                .start_drain(&phase_cancel_id, 1100, &trace_with_pattern)
                 .unwrap();
 
             // Complete drain
             proto
-                .complete_drain(&phase_cancel_id, &trace_with_pattern)
+                .complete_drain(&phase_cancel_id, 1200, &trace_with_pattern)
                 .unwrap();
 
-            // Finalize with resource leaks containing injection patterns
-            let leak_with_pattern = format!("leak_{}", pattern);
+            // Finalize cleanly (finalize fails closed on leaks; leak-injection
+            // safety is covered by the resource-leak test).
             proto
                 .finalize(
                     &phase_cancel_id,
+                    &ResourceTracker::empty(),
+                    1300,
                     &trace_with_pattern,
-                    vec![leak_with_pattern],
                 )
                 .unwrap();
         }
@@ -2404,16 +2439,16 @@ mod tests {
                 "audit entry should have event_code"
             );
             assert!(
-                parsed.get("cancellation_id").is_some(),
-                "audit entry should have cancellation_id"
+                parsed.get("workflow_id").is_some(),
+                "audit entry should have workflow_id"
             );
             assert!(
                 parsed.get("trace_id").is_some(),
                 "audit entry should have trace_id"
             );
             assert!(
-                parsed.get("timestamp").is_some(),
-                "audit entry should have timestamp"
+                parsed.get("timestamp_ms").is_some(),
+                "audit entry should have timestamp_ms"
             );
 
             // Verify injection patterns are contained as literal strings
@@ -2440,10 +2475,9 @@ mod tests {
         for i in 0..100 {
             let stress_id = format!("stress_audit_{}", i);
             let massive_trace = format!("trace_{}", "X".repeat(10_000)); // 10KB trace
-            let massive_reason = format!("reason_{}", "Y".repeat(10_000)); // 10KB reason
 
             proto
-                .request_cancel(&stress_id, &massive_reason, &massive_trace)
+                .request_cancel(&stress_id, 0, 1000, &massive_trace)
                 .unwrap();
         }
 

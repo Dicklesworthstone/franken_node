@@ -1127,9 +1127,6 @@ mod tests {
         ];
 
         for (preferred, fallback, scenario_name) in backend_attack_scenarios {
-            // Create selector that should prefer stronger isolation
-            let mut selector = IsolationBackendSelector::new();
-
             // Verify backend strength ordering cannot be circumvented
             assert!(
                 preferred.is_full_isolation() >= fallback.is_full_isolation(),
@@ -1138,10 +1135,10 @@ mod tests {
             );
 
             // Test that policy-equivalent isolation is maintained
-            if preferred.is_policy_equivalent() && !fallback.is_policy_equivalent() {
+            if preferred.is_equivalent() && !fallback.is_equivalent() {
                 // Should not allow downgrade from policy-equivalent to non-equivalent
                 assert!(
-                    preferred.is_policy_equivalent(),
+                    preferred.is_equivalent(),
                     "Policy equivalence downgrade detected in scenario: {}",
                     scenario_name
                 );
@@ -1204,8 +1201,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn extreme_adversarial_sandbox_policy_injection_and_capability_privilege_escalation() {
+    // FIXME(bd-yom8c): Every adversarial/negative test below was written against a
+    // SINCE-REMOVED isolation API and needs a full rewrite, not a mechanical rename.
+    // The current production surface is the free functions `select_backend(caps) ->
+    // Result<BackendSelection>`, `compile_policy(SandboxProfile) -> CompiledPolicy`
+    // (NOT a Result), and `verify_policy_enforcement(&BackendSelection)`. These tests
+    // depend on symbols that no longer exist (with no equivalent):
+    //   * `IsolationBackendSelector` (stateful selector type)
+    //   * `SandboxProfile::new()` + `.allow_capability(name, access)` (builder API)
+    //   * the struct-form `SandboxProfile { name, base_capabilities, capability_grants,
+    //     max_memory_mb, max_cpu_percent, network_access, temp_dir_access }`
+    //   * `execute_with_backend(...)` + `ExecutionResult { stdout, stderr, execution_time }`
+    //     (the sandboxed execution engine)
+    //   * `AccessLevel::{ReadOnly, ReadWrite, Execute, Read}` (now Deny/Scoped/Filtered/Allow,
+    //     enforcement levels rather than file-access modes)
+    //   * `CapabilityGrant { access_level, resource_pattern }` (now `{ capability, access }`)
+    //   * `IsolationError::{InvalidProfile, ExecutionFailed, Timeout, NoPlatformSupport}`
+    //   * `EquivalenceLevel::Fallback` (now `Baseline`)
+    //   * `std::env::set_var` (unsafe in edition 2024; impossible under `#![forbid(unsafe_code)]`
+    //     — see api/compat_conformance.rs:35)
+    // Reconciling them onto the new API would reduce the attack-driving tests to vacuous
+    // passes (no attacker-controlled input survives a fixed-tier `compile_policy`) or simply
+    // not compile (no execution engine). Per bd-yom8c they are disabled via `#[cfg(any())]`
+    // (never compiled) so the file builds; they are tracked for a faithful rewrite.
+    #[cfg(any())]
+    mod removed_api_adversarial_tests {
+        use super::*;
+
+        #[test]
+        fn extreme_adversarial_sandbox_policy_injection_and_capability_privilege_escalation() {
         // Extreme: Test sandbox policy injection and capability-based privilege escalation
 
         let mut selector = IsolationBackendSelector::new();
@@ -3329,4 +3353,5 @@ exit 0
         // but the important thing is that our malicious script didn't execute
         // This test primarily validates that no evidence file was created
     }
+    } // FIXME(bd-yom8c): end of #[cfg(any())] mod removed_api_adversarial_tests
 }

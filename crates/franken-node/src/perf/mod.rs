@@ -591,7 +591,7 @@ mod perf_module_dispatch_boundary_negative_tests {
 
     #[test]
     fn negative_shadow_only_unsafe_metrics_reports_violation_without_apply() {
-        let governor = OptimizationGovernor::with_defaults();
+        let mut governor = OptimizationGovernor::with_defaults();
         let candidate = proposal_for(
             "shadow-unsafe",
             RuntimeKnob::ConcurrencyLimit,
@@ -825,10 +825,10 @@ mod perf_module_extreme_adversarial_negative_tests {
             old_value: u64::MAX - 1,
             new_value: u64::MAX,
             predicted: PredictedMetrics {
-                latency_ms: f64::MAX,
-                throughput_rps: f64::INFINITY,
+                latency_ms: u64::MAX,
+                throughput_rps: u64::MAX,
                 error_rate_pct: f64::NEG_INFINITY,
-                memory_mb: f64::NAN,
+                memory_mb: u64::MAX,
             },
             rationale: "arithmetic boundary test".to_string(),
             trace_id: "trace-overflow".to_string(),
@@ -845,10 +845,10 @@ mod perf_module_extreme_adversarial_negative_tests {
     #[test]
     fn extreme_adversarial_contradictory_safety_envelope_config() {
         let contradictory_envelope = SafetyEnvelope {
-            max_latency_ms: 0,                 // Impossible: must be > 0
-            min_throughput_rps: f64::INFINITY, // Impossible: infinite throughput
-            max_error_rate_pct: -1.0,          // Impossible: negative error rate
-            max_memory_mb: f64::NAN,           // Invalid: NaN memory limit
+            max_latency_ms: 0,            // Impossible: must be > 0
+            min_throughput_rps: u64::MAX, // Impossible: unreachable throughput floor
+            max_error_rate_pct: -1.0,    // Impossible: negative error rate
+            max_memory_mb: 0,            // Invalid: zero memory limit
         };
 
         let governor = OptimizationGovernor::new(contradictory_envelope, BTreeMap::new());
@@ -953,7 +953,7 @@ mod perf_module_extreme_adversarial_negative_tests {
         // Verify audit trail doesn't contain raw control characters
         let audit_entries = gate.audit_trail();
         for entry in audit_entries {
-            assert!(!entry.evidence.as_deref().unwrap_or("").contains('\x00'));
+            assert!(!entry.detail.contains('\x00'));
         }
     }
 
@@ -997,16 +997,16 @@ mod perf_module_extreme_adversarial_negative_tests {
 
         let edge_cases = vec![
             PredictedMetrics {
-                latency_ms: f64::EPSILON,
-                throughput_rps: f64::MIN_POSITIVE,
+                latency_ms: 1,
+                throughput_rps: 1,
                 error_rate_pct: f64::EPSILON,
-                memory_mb: f64::MIN_POSITIVE,
+                memory_mb: 1,
             },
             PredictedMetrics {
-                latency_ms: f64::MAX - 1.0,
-                throughput_rps: f64::MAX - 1.0,
+                latency_ms: u64::MAX,
+                throughput_rps: u64::MAX,
                 error_rate_pct: 100.0 - f64::EPSILON,
-                memory_mb: f64::MAX - 1.0,
+                memory_mb: u64::MAX,
             },
         ];
 
@@ -1105,10 +1105,10 @@ mod perf_module_extreme_adversarial_negative_tests {
                 old_value: 128, // Based on previous change
                 new_value: 128u64.saturating_add(i as u64),
                 predicted: PredictedMetrics {
-                    latency_ms: 200.0 + (i as f64 * 10.0),
-                    throughput_rps: 500.0 - (i as f64 * 5.0),
+                    latency_ms: 200 + (i as u64 * 10),
+                    throughput_rps: 500u64.saturating_sub(i as u64 * 5),
                     error_rate_pct: 0.1 + (i as f64 * 0.01),
-                    memory_mb: 2048.0 + (i as f64 * 100.0),
+                    memory_mb: 2048 + (i as u64 * 100),
                 },
                 rationale: format!("cascade attempt {i}"),
                 trace_id: format!("trace-cascade-{i}"),
@@ -1201,7 +1201,7 @@ mod perf_module_extreme_adversarial_negative_tests {
                 "complex with many unicode chars: 🚀🎯🔥💻⚡🌟🎨🔧🚦🎪".repeat(100),
             ),
             // Different knob types (might have different validation paths)
-            ("concurrency", "batch_size"),
+            ("concurrency", "batch_size".to_string()),
         ];
 
         for (case_name, (short_variant, long_variant)) in timing_test_cases.iter().enumerate() {
@@ -1305,7 +1305,7 @@ mod perf_module_extreme_adversarial_negative_tests {
 
         // Process large batch of proposals under memory pressure
         let batch_size = 1000;
-        let mut successful_submissions = 0;
+        let mut successful_submissions = 0u64;
 
         for i in 0..batch_size {
             let candidate = OptimizationProposal {
@@ -1314,8 +1314,8 @@ mod perf_module_extreme_adversarial_negative_tests {
                 old_value: 64,
                 new_value: 128,
                 predicted: PredictedMetrics {
-                    latency_ms: 200.0 + (i as f64 * 0.1),
-                    throughput_rps: 500.0 - (i as f64 * 0.1),
+                    latency_ms: 200 + (i as u64 / 10),
+                    throughput_rps: 500u64.saturating_sub(i as u64 / 10),
                     error_rate_pct: 0.1,
                     memory_mb: 2048,
                 },
@@ -1341,6 +1341,9 @@ mod perf_module_extreme_adversarial_negative_tests {
                 }
                 GovernorDecision::Rejected(_) => {
                     // Some rejections are expected due to envelope violations
+                }
+                GovernorDecision::Reverted(_) | GovernorDecision::ShadowOnly => {
+                    // submit() never yields these; treat as non-success.
                 }
             }
 
@@ -1399,7 +1402,7 @@ mod perf_module_extreme_adversarial_negative_tests {
             ("chain-3", RuntimeKnob::RetryBudget, 3, 6),
         ];
 
-        for (id, knob, old_val, new_val) in proposals {
+        for (id, knob, old_val, new_val) in proposals.clone() {
             let candidate = OptimizationProposal {
                 proposal_id: id.to_string(),
                 knob,
@@ -1423,16 +1426,16 @@ mod perf_module_extreme_adversarial_negative_tests {
 
         // Test edge cases in live check reversal
         let edge_case_metrics = vec![
-            // NaN in different fields
+            // Out-of-envelope (breaching) value in different fields
             PredictedMetrics {
-                latency_ms: f64::NAN,
+                latency_ms: u64::MAX,
                 throughput_rps: 500,
                 error_rate_pct: 0.1,
                 memory_mb: 2048,
             },
             PredictedMetrics {
                 latency_ms: 200,
-                throughput_rps: f64::NAN,
+                throughput_rps: 0,
                 error_rate_pct: 0.1,
                 memory_mb: 2048,
             },
@@ -1446,27 +1449,27 @@ mod perf_module_extreme_adversarial_negative_tests {
                 latency_ms: 200,
                 throughput_rps: 500,
                 error_rate_pct: 0.1,
-                memory_mb: f64::NAN,
+                memory_mb: u64::MAX,
             },
-            // Infinity in different fields
+            // Extreme out-of-envelope values in different fields
             PredictedMetrics {
-                latency_ms: f64::INFINITY,
+                latency_ms: u64::MAX,
                 throughput_rps: 500,
                 error_rate_pct: 0.1,
                 memory_mb: 2048,
             },
             PredictedMetrics {
                 latency_ms: 200,
-                throughput_rps: f64::NEG_INFINITY,
+                throughput_rps: 0,
                 error_rate_pct: 0.1,
                 memory_mb: 2048,
             },
             // All invalid
             PredictedMetrics {
-                latency_ms: f64::NAN,
-                throughput_rps: f64::INFINITY,
+                latency_ms: u64::MAX,
+                throughput_rps: u64::MAX,
                 error_rate_pct: f64::NEG_INFINITY,
-                memory_mb: f64::NAN,
+                memory_mb: u64::MAX,
             },
         ];
 
@@ -1549,7 +1552,7 @@ mod perf_module_extreme_adversarial_negative_tests {
             assert!(
                 gate.audit_trail().iter().any(|entry| {
                     entry.event_code == error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION
-                        && entry.evidence.as_deref().unwrap_or("").contains(namespace)
+                        && entry.detail.contains(namespace)
                 }),
                 "Should audit log the namespace violation for {}",
                 namespace
@@ -1607,9 +1610,9 @@ mod perf_module_extreme_adversarial_negative_tests {
                 old_value: 128, // Based on previous successful change
                 new_value: 256,
                 predicted: PredictedMetrics {
-                    latency_ms: f64::NAN,
+                    latency_ms: 200,
                     throughput_rps: 500,
-                    error_rate_pct: 0.1,
+                    error_rate_pct: f64::NAN,
                     memory_mb: 2048,
                 },
                 rationale: "cascade NaN error".to_string(),
@@ -1668,6 +1671,9 @@ mod perf_module_extreme_adversarial_negative_tests {
                 GovernorDecision::Approved => {
                     panic!("Error scenario {} should have been rejected", i);
                 }
+                GovernorDecision::Reverted(_) | GovernorDecision::ShadowOnly => {
+                    panic!("Error scenario {} should have been rejected", i);
+                }
             }
         }
 
@@ -1722,17 +1728,17 @@ mod perf_module_extreme_adversarial_negative_tests {
         // Submit massive batch of proposals to test resource protection
         for i in 0..massive_batch_size {
             // Create proposal with varying data sizes
-            let data_multiplier = (i % 100) + 1;
+            let data_multiplier = (i % 100) as usize + 1;
             let candidate = OptimizationProposal {
                 proposal_id: format!("massive_batch_{:06}", i),
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 64,
                 new_value: 64u64.saturating_add(i % 1000),
                 predicted: PredictedMetrics {
-                    latency_ms: 200.0 + (i as f64 * 0.001),
-                    throughput_rps: 500.0 - (i as f64 * 0.001),
+                    latency_ms: 200 + (i / 1000),
+                    throughput_rps: 500u64.saturating_sub(i / 1000),
                     error_rate_pct: 0.1 + (i as f64 * 0.0001),
-                    memory_mb: 2048.0 + (i as f64 * 0.1),
+                    memory_mb: 2048 + (i / 10),
                 },
                 rationale: "x".repeat(data_multiplier), // Variable length rationale
                 trace_id: format!("trace_massive_{:06}", i),
@@ -1785,7 +1791,7 @@ mod perf_module_extreme_adversarial_negative_tests {
             "Overall throughput too low: {:.1} ops/sec",
             total_ops_per_sec
         );
-        assert!(gate.inner().decision_count() == massive_batch_size);
+        assert!(gate.inner().decision_count() as u64 == massive_batch_size);
 
         // System should remain responsive after massive batch
         let post_batch_candidate = OptimizationProposal {
@@ -2187,37 +2193,31 @@ mod perf_module_extreme_adversarial_negative_tests {
 
             // Should safely handle or reject overflow scenarios
             if let Ok(proposal) = result {
-                // If deserialization succeeds, verify values are safe
+                // If deserialization succeeds, verify values are safe.
+                // latency_ms / throughput_rps / memory_mb are all u64, so they
+                // are finite and non-negative by construction; the only metric
+                // that can still carry NaN/Inf corruption from an overflow
+                // payload is the floating-point error_rate_pct.
                 assert!(
-                    proposal.predicted.latency_ms.is_finite()
-                        || proposal.predicted.latency_ms.is_infinite(),
-                    "Latency should be finite or safely infinite for scenario {}",
+                    proposal.predicted.error_rate_pct.is_finite()
+                        || proposal.predicted.error_rate_pct.is_infinite(),
+                    "Error rate should be finite or safely infinite for scenario {}",
                     i
                 );
 
+                // The integer-typed metrics must have deserialized to concrete,
+                // bounded values (a u64 cannot overflow into NaN/Inf); confirm
+                // the latency/throughput stayed within the representable domain.
                 assert!(
-                    proposal.predicted.throughput_rps.is_finite()
-                        || proposal.predicted.throughput_rps.is_infinite(),
-                    "Throughput should be finite or safely infinite for scenario {}",
+                    proposal.predicted.latency_ms <= proposal.new_value.max(u64::MAX),
+                    "Latency should be a bounded integer for scenario {}",
                     i
                 );
-
-                // If values are finite, they should be reasonable
-                if proposal.predicted.latency_ms.is_finite() {
-                    assert!(
-                        proposal.predicted.latency_ms >= 0.0,
-                        "Latency should be non-negative for scenario {}",
-                        i
-                    );
-                }
-
-                if proposal.predicted.throughput_rps.is_finite() {
-                    assert!(
-                        proposal.predicted.throughput_rps >= 0.0,
-                        "Throughput should be non-negative for scenario {}",
-                        i
-                    );
-                }
+                assert!(
+                    proposal.predicted.throughput_rps <= proposal.new_value.max(u64::MAX),
+                    "Throughput should be a bounded integer for scenario {}",
+                    i
+                );
             }
             // Rejection is also acceptable for overflow scenarios
         }
@@ -2243,8 +2243,8 @@ mod perf_module_extreme_adversarial_negative_tests {
         >(safe_boundary_test);
         if let Ok(safe_proposal) = safe_result {
             // Should preserve extreme but valid values
-            assert!(safe_proposal.predicted.latency_ms > 1e300);
-            assert!(safe_proposal.predicted.throughput_rps < 1e-300);
+            assert!(safe_proposal.predicted.latency_ms > 1_000_000_000);
+            assert!(safe_proposal.predicted.throughput_rps < 1);
         }
     }
 
@@ -2266,7 +2266,7 @@ mod perf_module_extreme_adversarial_negative_tests {
         for thread_id in 0..thread_count {
             let gate_clone = Arc::clone(&gate);
             let handle = thread::spawn(move || {
-                let mut local_corruption_count = 0;
+                let mut local_corruption_count = 0u64;
 
                 for iteration in 0..corruption_attempts / thread_count {
                     let operation_type = (thread_id * iteration) % 4;
@@ -2294,8 +2294,8 @@ mod perf_module_extreme_adversarial_negative_tests {
                                 old_value: 64,
                                 new_value: 128u64.saturating_add(iteration as u64),
                                 predicted: PredictedMetrics {
-                                    latency_ms: 200.0 + (iteration as f64 * 0.1),
-                                    throughput_rps: 500.0 - (iteration as f64 * 0.1),
+                                    latency_ms: 200 + (iteration as u64 / 10),
+                                    throughput_rps: 500u64.saturating_sub(iteration as u64 / 10),
                                     error_rate_pct: 0.1,
                                     memory_mb: 2048,
                                 },
@@ -2316,17 +2316,17 @@ mod perf_module_extreme_adversarial_negative_tests {
                             // Perform live checks with extreme values
                             let extreme_metrics = PredictedMetrics {
                                 latency_ms: if iteration % 2 == 0 {
-                                    f64::NAN
+                                    u64::MAX
                                 } else {
-                                    f64::INFINITY
+                                    1_000_000
                                 },
                                 throughput_rps: if iteration % 3 == 0 {
-                                    f64::NEG_INFINITY
+                                    0
                                 } else {
-                                    500.0
+                                    500
                                 },
                                 error_rate_pct: (iteration as f64) * 10.0, // Often invalid
-                                memory_mb: f64::MAX,
+                                memory_mb: u64::MAX,
                             };
 
                             if let Ok(mut g) = gate_clone.lock() {
@@ -2502,14 +2502,14 @@ mod perf_module_extreme_adversarial_negative_tests {
                 // Test in different metric fields
                 let denormal_test_cases = vec![
                     PredictedMetrics {
-                        latency_ms: denormal_value,
+                        latency_ms: denormal_value as u64,
                         throughput_rps: 500,
                         error_rate_pct: 0.1,
                         memory_mb: 2048,
                     },
                     PredictedMetrics {
                         latency_ms: 200,
-                        throughput_rps: denormal_value,
+                        throughput_rps: denormal_value as u64,
                         error_rate_pct: 0.1,
                         memory_mb: 2048,
                     },
@@ -2523,7 +2523,7 @@ mod perf_module_extreme_adversarial_negative_tests {
                         latency_ms: 200,
                         throughput_rps: 500,
                         error_rate_pct: 0.1,
-                        memory_mb: denormal_value,
+                        memory_mb: denormal_value as u64,
                     },
                 ];
 
@@ -2560,6 +2560,10 @@ mod perf_module_extreme_adversarial_negative_tests {
                         super::optimization_governor::GovernorDecision::Rejected(_) => {
                             // Rejection is acceptable for denormal values
                         }
+                        super::optimization_governor::GovernorDecision::Reverted(_)
+                        | super::optimization_governor::GovernorDecision::ShadowOnly => {
+                            // submit() never yields these; handled gracefully.
+                        }
                     }
 
                     // Test live check with denormal values
@@ -2580,10 +2584,10 @@ mod perf_module_extreme_adversarial_negative_tests {
 
         // Test combinations of denormal values
         let combined_denormal = PredictedMetrics {
-            latency_ms: f64::MIN_POSITIVE / 1000.0,
-            throughput_rps: f64::MIN_POSITIVE / 500.0,
+            latency_ms: (f64::MIN_POSITIVE / 1000.0) as u64,
+            throughput_rps: (f64::MIN_POSITIVE / 500.0) as u64,
             error_rate_pct: f64::MIN_POSITIVE / 100.0,
-            memory_mb: f64::MIN_POSITIVE / 10.0,
+            memory_mb: (f64::MIN_POSITIVE / 10.0) as u64,
         };
 
         let combined_proposal = OptimizationProposal {
@@ -2653,7 +2657,7 @@ mod perf_module_extreme_adversarial_negative_tests {
             "\u{0300}".repeat(1000), // Combining accent marks
             "e\u{0301}".repeat(500), // Accented e repeated
             // Pattern that could cause hash collision clustering
-            "hash_collision_attempt_"
+            "hash_collision_attempt_".to_string()
                 + &(0..100)
                     .map(|i| format!("{:02x}", i))
                     .collect::<Vec<_>>()
@@ -2699,19 +2703,35 @@ mod perf_module_extreme_adversarial_negative_tests {
         // Fill with maximum number of knobs to stress enumeration algorithms
         complex_knob_state.insert(
             RuntimeKnob::ConcurrencyLimit,
-            super::optimization_governor::KnobState { value: 64 },
+            super::optimization_governor::KnobState {
+                knob: RuntimeKnob::ConcurrencyLimit,
+                value: 64,
+                locked: false,
+            },
         );
         complex_knob_state.insert(
             RuntimeKnob::BatchSize,
-            super::optimization_governor::KnobState { value: 128 },
+            super::optimization_governor::KnobState {
+                knob: RuntimeKnob::BatchSize,
+                value: 128,
+                locked: false,
+            },
         );
         complex_knob_state.insert(
             RuntimeKnob::CacheCapacity,
-            super::optimization_governor::KnobState { value: 1024 },
+            super::optimization_governor::KnobState {
+                knob: RuntimeKnob::CacheCapacity,
+                value: 1024,
+                locked: false,
+            },
         );
         complex_knob_state.insert(
             RuntimeKnob::RetryBudget,
-            super::optimization_governor::KnobState { value: 3 },
+            super::optimization_governor::KnobState {
+                knob: RuntimeKnob::RetryBudget,
+                value: 3,
+                locked: false,
+            },
         );
 
         let complex_governor =
@@ -2737,8 +2757,8 @@ mod perf_module_extreme_adversarial_negative_tests {
                 },
                 new_value: (i as u64) % 1000 + 1,
                 predicted: PredictedMetrics {
-                    latency_ms: 200.0 + (i as f64 * 0.001),
-                    throughput_rps: 500.0 - (i as f64 * 0.001),
+                    latency_ms: 200 + (i as u64 / 1000),
+                    throughput_rps: 500u64.saturating_sub(i as u64 / 1000),
                     error_rate_pct: 0.1,
                     memory_mb: 2048,
                 },
@@ -2857,8 +2877,9 @@ mod perf_module_extreme_adversarial_negative_tests {
             let _reverted = gate.live_check(&unsafe_metrics);
 
             // Verify state consistency after each cycle
-            if let Some(snapshot) = gate.snapshot() {
-                for (knob, state) in snapshot.current_state {
+            {
+                let snapshot = gate.inner().snapshot();
+                for (knob, state) in snapshot.knob_states.iter().map(|s| (s.knob, s)) {
                     // All values should be within reasonable bounds
                     assert!(
                         state.value <= 10000,
@@ -2986,8 +3007,9 @@ mod perf_module_extreme_adversarial_negative_tests {
             let _reverted = gate.live_check(&mid_metrics);
 
             // Verify all knobs maintain valid states
-            if let Some(snapshot) = gate.snapshot() {
-                for (knob, state) in snapshot.current_state {
+            {
+                let snapshot = gate.inner().snapshot();
+                for (knob, state) in snapshot.knob_states.iter().map(|s| (s.knob, s)) {
                     match knob {
                         RuntimeKnob::ConcurrencyLimit => {
                             assert!(
@@ -3017,6 +3039,14 @@ mod perf_module_extreme_adversarial_negative_tests {
                             assert!(
                                 state.value >= 3 && state.value <= 1000,
                                 "RetryBudget out of bounds: {} at round {}",
+                                state.value,
+                                round
+                            );
+                        }
+                        RuntimeKnob::DrainTimeoutMs => {
+                            assert!(
+                                state.value >= 30_000 && state.value <= 100_000,
+                                "DrainTimeoutMs out of bounds: {} at round {}",
                                 state.value,
                                 round
                             );

@@ -2932,13 +2932,11 @@ mod tests {
         let massive_trace_id = "memory-stress-trace";
         let env = demo_env();
 
-        // Start trace capture
-        engine
-            .start_capture(massive_trace_id, "massive-workflow", env)
-            .expect("start capture");
+        // Start trace capture via the capture-phase builder
+        let mut builder = TraceBuilder::new(massive_trace_id, "massive-workflow", env);
 
         let massive_step_count = MAX_TRACE_STEPS.saturating_add(1000);
-        let mut successful_steps = 0;
+        let mut successful_steps: usize = 0;
 
         // Record steps up to and beyond capacity limit
         for i in 0..massive_step_count {
@@ -2949,25 +2947,13 @@ mod tests {
                 SideEffect::new("metric", format!("metric-{:08}", i).into_bytes()),
             ];
 
-            match engine.record_step(
-                massive_trace_id,
+            builder.record_step(
                 input,
                 output,
                 side_effects,
                 1000000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
-            ) {
-                Ok(()) => {
-                    successful_steps = successful_steps.saturating_add(1);
-                }
-                Err(ReplayEngineError::TraceNotFound { .. }) => {
-                    // Expected if trace gets dropped due to memory pressure
-                    break;
-                }
-                Err(_) => {
-                    // Other capacity-related errors are acceptable
-                    break;
-                }
-            }
+            );
+            successful_steps = successful_steps.saturating_add(1);
 
             // Stop if we've recorded too many steps (capacity enforcement)
             if successful_steps >= MAX_TRACE_STEPS {
@@ -2980,7 +2966,7 @@ mod tests {
         assert!(successful_steps > 0, "Should record at least some steps");
 
         // Complete trace capture
-        let capture_result = engine.complete_capture(massive_trace_id, 2000000);
+        let capture_result = builder.build();
 
         match capture_result {
             Ok((trace, _)) => {
@@ -2991,6 +2977,10 @@ mod tests {
                 // Should handle large traces without corruption
                 assert!(!trace.trace_id.is_empty());
                 assert!(!trace.workflow_name.is_empty());
+
+                engine
+                    .register_trace(trace)
+                    .expect("registering the bounded trace should succeed");
             }
             Err(_) => {
                 // Acceptable to reject massive traces for memory protection
@@ -2998,7 +2988,7 @@ mod tests {
         }
 
         // Engine should remain functional despite stress test
-        let registered_traces = engine.list_traces();
+        let registered_traces = engine.trace_ids();
         assert!(registered_traces.len() <= MAX_REGISTERED_TRACES);
     }
 
@@ -3007,6 +2997,9 @@ mod tests {
         // Test trace identifiers and workflow names with Unicode and control characters
         let mut engine = ReplayEngine::new();
 
+        // Bind the long identifiers so the borrowed strings outlive the vec.
+        let long_trace_id = "x".repeat(10000);
+        let long_workflow_name = "y".repeat(10000);
         let malicious_identifiers = vec![
             // Unicode scripts
             ("trace🚀rocket", "workflow🔥fire"),
@@ -3029,71 +3022,65 @@ mod tests {
             ("trace\u{200B}invisible", "workflow\u{FEFF}bom"),
             ("trace\u{202E}rtl\u{202D}normal", "workflow"),
             // Extremely long identifiers
-            (&"x".repeat(10000), "workflow"),
-            ("trace", &"y".repeat(10000)),
+            (long_trace_id.as_str(), "workflow"),
+            ("trace", long_workflow_name.as_str()),
         ];
 
         for (i, (trace_id, workflow_name)) in malicious_identifiers.iter().enumerate() {
             let env = demo_env();
 
-            // Test trace capture with malicious identifiers
-            let start_result = engine.start_capture(trace_id, workflow_name, env);
+            // Capture phase: building constructs the trace; identifier
+            // validation is enforced at build()/registration time.
+            let mut builder = TraceBuilder::new(trace_id, workflow_name, env);
 
-            match start_result {
-                Ok(()) => {
-                    // Successfully started - test record step with Unicode
-                    let input = format!("unicode-input-{}", i).into_bytes();
-                    let output = format!("unicode-output-{}", i).into_bytes();
-                    let side_effects = vec![SideEffect::new(
-                        "unicode-effect",
-                        format!("effect-{}", i).into_bytes(),
-                    )];
+            let input = format!("unicode-input-{}", i).into_bytes();
+            let output = format!("unicode-output-{}", i).into_bytes();
+            let side_effects = vec![SideEffect::new(
+                "unicode-effect",
+                format!("effect-{}", i).into_bytes(),
+            )];
 
-                    let record_result = engine.record_step(
-                        trace_id,
-                        input,
-                        output,
-                        side_effects,
-                        1000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
-                    );
+            builder.record_step(
+                input,
+                output,
+                side_effects,
+                1000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
+            );
 
-                    if record_result.is_ok() {
-                        // Complete trace
-                        let complete_result = engine.complete_capture(
-                            trace_id,
-                            2000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
-                        );
+            // Complete trace - malformed identifiers are rejected here.
+            let complete_result = builder.build();
 
-                        match complete_result {
-                            Ok((trace, audit)) => {
-                                // Verify Unicode handling didn't corrupt trace
-                                assert_eq!(trace.trace_id, *trace_id);
-                                assert_eq!(trace.workflow_name, *workflow_name);
-                                assert!(trace.steps.len() > 0);
+            match complete_result {
+                Ok((trace, audit)) => {
+                    // Verify Unicode handling didn't corrupt trace
+                    assert_eq!(trace.trace_id, *trace_id);
+                    assert_eq!(trace.workflow_name, *workflow_name);
+                    assert!(trace.steps.len() > 0);
 
-                                // Audit log should handle Unicode safely
-                                for entry in &audit {
-                                    assert!(!entry.event_code.is_empty());
-                                    // Fields should not be corrupted
-                                }
-                            }
-                            Err(_) => {
-                                // Acceptable to reject malformed identifiers
-                            }
-                        }
+                    // Audit log should handle Unicode safely
+                    for entry in &audit {
+                        assert!(!entry.event_code.is_empty());
+                        // Fields should not be corrupted
                     }
+
+                    // Register so the engine listing can be exercised below.
+                    // Duplicate identifiers are expected in the fixture set.
+                    let _ = engine.register_trace(trace);
                 }
                 Err(_) => {
-                    // Expected for malformed identifiers
+                    // Acceptable to reject malformed identifiers
                 }
             }
         }
 
         // Trace listing should handle Unicode identifiers safely
-        let traces = engine.list_traces();
-        for trace_summary in traces {
-            assert!(!trace_summary.trace_id.is_empty());
-            assert!(!trace_summary.workflow_name.is_empty());
+        let traces = engine.trace_ids();
+        for trace_id in &traces {
+            assert!(!trace_id.is_empty());
+            let trace = engine
+                .get_trace(trace_id)
+                .expect("registered trace should be retrievable");
+            assert!(!trace.workflow_name.is_empty());
         }
     }
 
@@ -3104,9 +3091,7 @@ mod tests {
         let extreme_trace_id = "extreme-timestamp-trace";
         let env = demo_env();
 
-        engine
-            .start_capture(extreme_trace_id, "extreme-workflow", env)
-            .expect("start capture");
+        let mut builder = TraceBuilder::new(extreme_trace_id, "extreme-workflow", env);
 
         let extreme_timestamps = vec![
             0,                             // Minimum timestamp
@@ -3124,21 +3109,11 @@ mod tests {
                 format!("timestamp-{}", timestamp).into_bytes(),
             )];
 
-            let record_result =
-                engine.record_step(extreme_trace_id, input, output, side_effects, *timestamp);
-
-            match record_result {
-                Ok(()) => {
-                    // Successfully recorded extreme timestamp
-                }
-                Err(_) => {
-                    // May reject extreme timestamps for safety
-                }
-            }
+            builder.record_step(input, output, side_effects, *timestamp);
         }
 
-        // Complete trace with extreme timestamp
-        let complete_result = engine.complete_capture(extreme_trace_id, u64::MAX);
+        // Complete trace with extreme timestamps
+        let complete_result = builder.build();
 
         match complete_result {
             Ok((trace, audit)) => {
@@ -3148,20 +3123,25 @@ mod tests {
                 }
 
                 for entry in &audit {
-                    assert!(entry.timestamp_ms <= u64::MAX);
+                    assert!(entry.timestamp_ns <= u64::MAX);
                 }
 
                 // Test replay with extreme timestamps
                 if !trace.steps.is_empty() {
-                    let replay_result = engine.replay(extreme_trace_id, |step, _env| {
-                        // Return same output to avoid divergence
-                        Ok((step.output.clone(), step.side_effects.clone()))
-                    });
+                    engine
+                        .register_trace(trace)
+                        .expect("register extreme-timestamp trace");
+
+                    let replay_result =
+                        engine.replay_with_adapter(extreme_trace_id, |step, _env| {
+                            // Return same output to avoid divergence
+                            Ok((step.output.clone(), step.side_effects.clone()))
+                        });
 
                     match replay_result {
                         Ok(result) => {
                             // Should handle extreme timestamps without overflow
-                            assert_eq!(result.verdict, ReplayVerdict::Success);
+                            assert_eq!(result.verdict, ReplayVerdict::Identical);
                         }
                         Err(_) => {
                             // May fail due to extreme timestamp values
@@ -3181,9 +3161,7 @@ mod tests {
         let mut engine = ReplayEngine::new();
         let malicious_trace_id = "malicious-side-effects";
 
-        engine
-            .start_capture(malicious_trace_id, "injection-test", demo_env())
-            .expect("start capture");
+        let mut builder = TraceBuilder::new(malicious_trace_id, "injection-test", demo_env());
 
         let malicious_side_effect_data = vec![
             // Binary data injection
@@ -3220,25 +3198,15 @@ mod tests {
                 SideEffect::new("dangerous-type", malicious_data.clone()),
             ];
 
-            let record_result = engine.record_step(
-                malicious_trace_id,
+            builder.record_step(
                 input,
                 output,
                 malicious_side_effects,
                 1000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
             );
-
-            match record_result {
-                Ok(()) => {
-                    // Successfully recorded malicious side effect
-                }
-                Err(_) => {
-                    // May reject malicious payloads
-                }
-            }
         }
 
-        let complete_result = engine.complete_capture(malicious_trace_id, 5000);
+        let complete_result = builder.build();
 
         match complete_result {
             Ok((trace, _)) => {
@@ -3251,14 +3219,19 @@ mod tests {
                 }
 
                 // Test that replay handles malicious side effects safely
-                let replay_result = engine.replay(malicious_trace_id, |step, _env| {
-                    // Return same side effects to avoid divergence
-                    Ok((step.output.clone(), step.side_effects.clone()))
-                });
+                engine
+                    .register_trace(trace)
+                    .expect("register malicious-side-effect trace");
+
+                let replay_result =
+                    engine.replay_with_adapter(malicious_trace_id, |step, _env| {
+                        // Return same side effects to avoid divergence
+                        Ok((step.output.clone(), step.side_effects.clone()))
+                    });
 
                 match replay_result {
                     Ok(result) => {
-                        assert_eq!(result.verdict, ReplayVerdict::Success);
+                        assert_eq!(result.verdict, ReplayVerdict::Identical);
                     }
                     Err(_) => {
                         // May fail due to malicious data validation
@@ -3278,9 +3251,8 @@ mod tests {
         let divergent_trace_id = "massive-divergence-test";
 
         // Create trace with various output sizes
-        engine
-            .start_capture(divergent_trace_id, "divergence-workflow", demo_env())
-            .expect("start capture");
+        let mut builder =
+            TraceBuilder::new(divergent_trace_id, "divergence-workflow", demo_env());
 
         let original_outputs = vec![
             vec![0x00; 1],                // 1 byte
@@ -3294,26 +3266,22 @@ mod tests {
             let input = format!("input-{}", i).into_bytes();
             let side_effects = vec![SideEffect::new("log", format!("step-{}", i).into_bytes())];
 
-            let record_result = engine.record_step(
-                divergent_trace_id,
+            builder.record_step(
                 input,
                 output.clone(),
                 side_effects,
                 1000_u64.saturating_add(u64::try_from(i).unwrap_or(u64::MAX)),
             );
-
-            if record_result.is_err() {
-                // May reject massive outputs - break early
-                break;
-            }
         }
 
-        let (trace, _) = engine
-            .complete_capture(divergent_trace_id, 5000)
-            .expect("complete capture");
+        let (trace, _) = builder.build().expect("complete capture");
+        let trace_steps_len = trace.steps.len();
+        engine
+            .register_trace(trace)
+            .expect("register divergence trace");
 
         // Replay with intentionally different outputs to trigger divergence detection
-        let replay_result = engine.replay(divergent_trace_id, |step, _env| {
+        let replay_result = engine.replay_with_adapter(divergent_trace_id, |step, _env| {
             // Create outputs that differ massively from originals
             let divergent_outputs = match step.output.len() {
                 1 => vec![0xFF; 1000],                  // Expand small to large
@@ -3339,15 +3307,15 @@ mod tests {
                     for divergence in &result.divergences {
                         assert!(
                             divergence.step_seq
-                                < u64::try_from(trace.steps.len()).unwrap_or(u64::MAX)
+                                < u64::try_from(trace_steps_len).unwrap_or(u64::MAX)
                         );
-                        assert!(!divergence.expected_hash.is_empty());
-                        assert!(!divergence.actual_hash.is_empty());
+                        assert!(!divergence.expected_digest.is_empty());
+                        assert!(!divergence.actual_digest.is_empty());
 
                         // Expected and actual should be different
-                        assert!(!constant_time::ct_eq(
-                            divergence.expected_hash.as_bytes(),
-                            divergence.actual_hash.as_bytes()
+                        assert!(!constant_time::ct_eq_bytes(
+                            divergence.expected_digest.as_bytes(),
+                            divergence.actual_digest.as_bytes()
                         ));
                     }
                 }
@@ -3414,50 +3382,43 @@ mod tests {
             let trace_id = format!("env-corruption-{}", i);
             let mut engine = ReplayEngine::new();
 
-            // Test trace capture with corrupted environment
-            let start_result = engine.start_capture(&trace_id, "env-test", corrupted_env);
+            // Capture phase: build the trace; corrupted environments are
+            // rejected at build()/registration time.
+            let mut builder = TraceBuilder::new(&trace_id, "env-test", corrupted_env);
+            builder.record_step(
+                b"test-input".to_vec(),
+                b"test-output".to_vec(),
+                vec![SideEffect::new("env-test", b"test-effect".to_vec())],
+                1000,
+            );
 
-            match start_result {
-                Ok(()) => {
-                    // Record a simple step
-                    let record_result = engine.record_step(
-                        &trace_id,
-                        b"test-input".to_vec(),
-                        b"test-output".to_vec(),
-                        vec![SideEffect::new("env-test", b"test-effect".to_vec())],
-                        1000,
-                    );
+            let complete_result = builder.build();
 
-                    if record_result.is_ok() {
-                        let complete_result = engine.complete_capture(&trace_id, 2000);
+            match complete_result {
+                Ok((trace, _)) => {
+                    // Verify environment snapshot integrity
+                    assert!(trace.environment.clock_seed_ns <= u64::MAX);
 
-                        match complete_result {
-                            Ok((trace, _)) => {
-                                // Verify environment snapshot integrity
-                                assert!(trace.environment.seed_timestamp_ns <= u64::MAX);
+                    // Test replay with potentially corrupted environment
+                    engine
+                        .register_trace(trace)
+                        .expect("register env-corruption trace");
 
-                                // Test replay with potentially corrupted environment
-                                let replay_result = engine.replay(&trace_id, |step, _env| {
-                                    Ok((step.output.clone(), step.side_effects.clone()))
-                                });
+                    let replay_result = engine.replay_with_adapter(&trace_id, |step, _env| {
+                        Ok((step.output.clone(), step.side_effects.clone()))
+                    });
 
-                                match replay_result {
-                                    Ok(result) => {
-                                        assert_eq!(result.verdict, ReplayVerdict::Success);
-                                    }
-                                    Err(_) => {
-                                        // May fail due to environment corruption
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                // Acceptable to reject corrupted environments
-                            }
+                    match replay_result {
+                        Ok(result) => {
+                            assert_eq!(result.verdict, ReplayVerdict::Identical);
+                        }
+                        Err(_) => {
+                            // May fail due to environment corruption
                         }
                     }
                 }
                 Err(_) => {
-                    // Expected for severely corrupted environments
+                    // Acceptable to reject corrupted environments
                 }
             }
         }
@@ -3469,10 +3430,15 @@ mod tests {
         let mut engine = ReplayEngine::new();
         let concurrent_trace_id = "concurrent-test";
 
-        // Start trace capture
-        engine
-            .start_capture(concurrent_trace_id, "concurrent-workflow", demo_env())
-            .expect("start capture");
+        // Start trace capture via the capture-phase builder. While capture
+        // is in progress the builder is `Some`; `complete_capture` consumes
+        // it (registering the finalized trace), after which recording is no
+        // longer possible.
+        let mut builder = Some(TraceBuilder::new(
+            concurrent_trace_id,
+            "concurrent-workflow",
+            demo_env(),
+        ));
 
         // Simulate concurrent step recording (in reality this would need proper threading)
         let concurrent_operations = vec![
@@ -3488,25 +3454,34 @@ mod tests {
         for (operation, timestamp) in concurrent_operations {
             match operation {
                 "complete_capture" => {
-                    let result = engine.complete_capture(concurrent_trace_id, timestamp);
-                    operation_results.push((operation, result.is_ok()));
+                    let completed = match builder.take() {
+                        Some(b) => match b.build() {
+                            Ok((trace, _)) => engine.register_trace(trace).is_ok(),
+                            Err(_) => false,
+                        },
+                        None => false,
+                    };
+                    operation_results.push((operation, completed));
                 }
                 op if op.starts_with("record_step") => {
-                    let input = format!("{}-input", operation).into_bytes();
-                    let output = format!("{}-output", operation).into_bytes();
-                    let side_effects = vec![SideEffect::new(
-                        "concurrent",
-                        format!("{}-effect", operation).into_bytes(),
-                    )];
-
-                    let result = engine.record_step(
-                        concurrent_trace_id,
-                        input,
-                        output,
-                        side_effects,
-                        timestamp,
-                    );
-                    operation_results.push((operation, result.is_ok()));
+                    // Recording is only possible while the capture is in progress.
+                    let recorded = match builder.as_mut() {
+                        Some(b) => {
+                            b.record_step(
+                                format!("{}-input", operation).into_bytes(),
+                                format!("{}-output", operation).into_bytes(),
+                                vec![SideEffect::new(
+                                    "concurrent",
+                                    format!("{}-effect", operation).into_bytes(),
+                                )],
+                                timestamp,
+                            );
+                            true
+                        }
+                        // Capture already completed -> cannot record.
+                        None => false,
+                    };
+                    operation_results.push((operation, recorded));
                 }
                 _ => {}
             }
@@ -3527,10 +3502,21 @@ mod tests {
             "Record step after complete should fail"
         );
 
-        // Test conflicting trace operations
+        // Test conflicting trace operations: building a second capture for the
+        // same id and attempting to register it must be handled gracefully
+        // (the engine rejects the duplicate; no panic).
+        let mut conflicting_builder =
+            TraceBuilder::new(concurrent_trace_id, "conflicting-workflow", demo_env());
+        conflicting_builder.record_step(
+            b"conflict-input".to_vec(),
+            b"conflict-output".to_vec(),
+            vec![],
+            3000,
+        );
         let conflicting_results = vec![
-            engine.start_capture(concurrent_trace_id, "conflicting-workflow", demo_env()),
-            engine.complete_capture(concurrent_trace_id, 3000),
+            conflicting_builder
+                .build()
+                .and_then(|(trace, _)| engine.register_trace(trace)),
         ];
 
         // Should handle conflicting operations gracefully
@@ -3543,11 +3529,11 @@ mod tests {
         }
 
         // Engine state should remain consistent
-        let traces = engine.list_traces();
+        let traces = engine.trace_ids();
         // Should contain at most one trace with concurrent_trace_id
         let matching_traces: Vec<_> = traces
             .iter()
-            .filter(|t| t.trace_id.as_str().eq(concurrent_trace_id))
+            .filter(|t| t.as_str().eq(concurrent_trace_id))
             .collect();
         assert!(matching_traces.len() <= 1);
     }
@@ -3897,7 +3883,7 @@ mod tests {
 
                 let mut rotated = side_effects.clone();
                 rotated.rotate_left(1);
-                prop_assert_ne!(side_effects, rotated);
+                prop_assert_ne!(side_effects.clone(), rotated.clone());
 
                 let base_step =
                     TraceStep::new(0, b"input".to_vec(), b"output".to_vec(), side_effects, 1000);
@@ -4088,8 +4074,8 @@ mod tests {
                 let env2 = EnvironmentSnapshot::new(1000, env_vars_order2, "linux", "v1.0");
 
                 prop_assert_eq!(
-                    env1.env_vars,
-                    env2.env_vars,
+                    env1.env_vars.clone(),
+                    env2.env_vars.clone(),
                     "duplicate generated environment keys with identical values must converge to the same canonical map"
                 );
                 prop_assert_eq!(
@@ -4180,26 +4166,23 @@ mod tests {
         let mut engine = ReplayEngine::new();
         let exception_trace_id = "exception-test";
 
-        // Create a simple trace
-        engine
-            .start_capture(exception_trace_id, "exception-workflow", demo_env())
-            .expect("start capture");
+        // Create a simple trace via the capture-phase builder
+        let mut builder =
+            TraceBuilder::new(exception_trace_id, "exception-workflow", demo_env());
 
-        for i in 0..5 {
-            engine
-                .record_step(
-                    exception_trace_id,
-                    format!("input-{}", i).into_bytes(),
-                    format!("output-{}", i).into_bytes(),
-                    vec![SideEffect::new("log", format!("step-{}", i).into_bytes())],
-                    1000 + i,
-                )
-                .expect("record step");
+        for i in 0..5u64 {
+            builder.record_step(
+                format!("input-{}", i).into_bytes(),
+                format!("output-{}", i).into_bytes(),
+                vec![SideEffect::new("log", format!("step-{}", i).into_bytes())],
+                1000 + i,
+            );
         }
 
-        let (_trace, _) = engine
-            .complete_capture(exception_trace_id, 2000)
-            .expect("complete capture");
+        let (trace, _) = builder.build().expect("complete capture");
+        engine
+            .register_trace(trace)
+            .expect("register exception trace");
 
         // Test various failure modes in replay function
         let failure_modes = vec![
@@ -4212,9 +4195,12 @@ mod tests {
         ];
 
         for (fail_step, error_type) in failure_modes {
-            let replay_result = engine.replay(exception_trace_id, |step, _env| {
-                if step.sequence_number.eq(&fail_step) {
-                    Err(format!("Simulated {} at step {}", error_type, fail_step))
+            let replay_result = engine.replay_with_adapter(exception_trace_id, |step, _env| {
+                if step.seq.eq(&fail_step) {
+                    Err(TimeTravelError::ReplayFailed {
+                        trace_id: exception_trace_id.to_string(),
+                        reason: format!("Simulated {} at step {}", error_type, fail_step),
+                    })
                 } else {
                     Ok((step.output.clone(), step.side_effects.clone()))
                 }
@@ -4239,10 +4225,11 @@ mod tests {
         }
 
         // Test replay function that returns corrupted data
-        let corrupted_replay_result = engine.replay(exception_trace_id, |_step, _env| {
-            // Return massive corrupted output
-            Ok((vec![0xFF; 10 * 1024 * 1024], vec![]))
-        });
+        let corrupted_replay_result =
+            engine.replay_with_adapter(exception_trace_id, |_step, _env| {
+                // Return massive corrupted output
+                Ok((vec![0xFF; 10 * 1024 * 1024], vec![]))
+            });
 
         match corrupted_replay_result {
             Ok(result) => {
@@ -4261,16 +4248,13 @@ mod tests {
     #[test]
     fn hardening_audit_log_prevents_unbounded_growth() {
         // HARDENING: Audit log accumulation must use push_bounded to prevent memory exhaustion
-        let mut engine = ReplayEngine::new();
         let trace_id = "audit-dos-test".to_string();
 
         // Start a capture to initialize audit logging
-        engine
-            .start_capture(&trace_id, "audit-test-workflow", demo_env())
-            .expect("capture start should succeed");
+        let mut builder = TraceBuilder::new(&trace_id, "audit-test-workflow", demo_env());
 
         // Simulate many audit events to test bounding
-        for i in 0..10000 {
+        for i in 0..10000u64 {
             let input = format!("input-{}", i).into_bytes();
             let output = format!("output-{}", i).into_bytes();
             let effects = vec![SideEffect::new(
@@ -4278,16 +4262,11 @@ mod tests {
                 format!("effect-{}", i).into_bytes(),
             )];
 
-            let _result = engine.record_step(&trace_id, input, output, effects, i);
+            builder.record_step(input, output, effects, i);
         }
 
-        // Complete capture
-        engine
-            .complete_capture(&trace_id, 10000)
-            .expect("capture complete should succeed");
-
-        // Get audit logs and verify they're bounded
-        let audit_logs = engine.audit_logs();
+        // Complete capture and collect the accumulated audit log
+        let (_trace, audit_logs) = builder.build().expect("capture complete should succeed");
 
         // Should be bounded by MAX_AUDIT_LOG_ENTRIES
         assert!(
@@ -4301,12 +4280,9 @@ mod tests {
     #[test]
     fn hardening_side_effects_bounded_accumulation() {
         // HARDENING: Side effects collection must be bounded to prevent DoS
-        let mut engine = ReplayEngine::new();
         let trace_id = "effects-dos-test".to_string();
 
-        engine
-            .start_capture(&trace_id, "effects-test", demo_env())
-            .expect("capture start should succeed");
+        let mut builder = TraceBuilder::new(&trace_id, "effects-test", demo_env());
 
         // Test with excessive side effects in a single step
         let input = b"test-input".to_vec();
@@ -4318,18 +4294,12 @@ mod tests {
             .collect();
 
         // This should either be bounded or fail safely (not panic)
-        let result = engine.record_step(&trace_id, input, output, massive_effects, 1000);
+        builder.record_step(input, output, massive_effects, 1000);
 
-        // Should complete without panic - may succeed with bounded effects or fail with validation error
-        match result {
-            Ok(_) => {
+        // Should complete without panic - effects are bounded by the builder.
+        match builder.build() {
+            Ok((trace, _)) => {
                 // If it succeeds, verify the trace doesn't contain all effects
-                let traces = engine.list_traces();
-                let trace = traces
-                    .iter()
-                    .find(|t| t.trace_id.as_str().eq(trace_id.as_str()))
-                    .expect("trace should exist");
-
                 if !trace.steps.is_empty() {
                     let step = &trace.steps[0];
                     // Side effects should be bounded, not all 100k
@@ -4349,32 +4319,14 @@ mod tests {
     #[test]
     fn hardening_trace_digest_comparison_timing_safe() {
         // HARDENING: Trace digest comparisons must use constant-time comparison
-        let mut engine = ReplayEngine::new();
         let trace_id = "timing-test".to_string();
 
-        // Create a valid trace
-        engine
-            .start_capture(&trace_id, "timing-workflow", demo_env())
-            .expect("capture start should succeed");
-        engine
-            .record_step(
-                &trace_id,
-                b"input".to_vec(),
-                b"output".to_vec(),
-                vec![],
-                1000,
-            )
-            .expect("record step should succeed");
-        engine
-            .complete_capture(&trace_id, 2000)
-            .expect("capture complete should succeed");
+        // Create a valid trace via the capture-phase builder
+        let mut builder = TraceBuilder::new(&trace_id, "timing-workflow", demo_env());
+        builder.record_step(b"input".to_vec(), b"output".to_vec(), vec![], 1000);
+        let (trace, _) = builder.build().expect("capture complete should succeed");
 
-        // Get the trace and its digest
-        let traces = engine.list_traces();
-        let trace = traces
-            .iter()
-            .find(|t| t.trace_id.as_str().eq(trace_id.as_str()))
-            .expect("trace should exist");
+        // Get the trace's digest
         let correct_digest = &trace.trace_digest;
 
         // Create digests that differ by single bits to test timing consistency
@@ -4417,12 +4369,9 @@ mod tests {
     #[test]
     fn hardening_step_sequence_overflow_protection() {
         // HARDENING: Step sequence numbers must use saturating arithmetic to prevent overflow
-        let mut engine = ReplayEngine::new();
         let trace_id = "sequence-overflow-test".to_string();
 
-        engine
-            .start_capture(&trace_id, "sequence-test", demo_env())
-            .expect("capture start should succeed");
+        let mut builder = TraceBuilder::new(&trace_id, "sequence-test", demo_env());
 
         // Test sequence number boundary conditions
         let boundary_sequences = vec![0u64, 1u64, u64::MAX - 1, u64::MAX];
@@ -4435,27 +4384,16 @@ mod tests {
                 format!("effect-{}", seq).into_bytes(),
             )];
 
-            // Record step with explicit sequence (simulated via timestamp)
-            let result = engine.record_step(&trace_id, input, output, effects, seq);
+            // Record step with explicit boundary timestamp; the builder assigns
+            // the actual sequence number via saturating arithmetic.
+            builder.record_step(input, output, effects, seq);
+        }
 
-            // Should handle without panic - may succeed or fail with validation
-            match result {
-                Ok(_) => {
-                    // Verify sequence is handled correctly
-                    let traces = engine.list_traces();
-                    if let Some(trace) = traces
-                        .iter()
-                        .find(|t| t.trace_id.as_str().eq(trace_id.as_str()))
-                    {
-                        if let Some(last_step) = trace.steps.last() {
-                            // Sequence should be reasonable, not overflowed
-                            assert!(last_step.seq <= u64::MAX);
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Validation errors for extreme sequences are acceptable
-                }
+        // Should handle without panic - verify recorded sequences are bounded
+        if let Ok((trace, _)) = builder.build() {
+            if let Some(last_step) = trace.steps.last() {
+                // Sequence should be reasonable, not overflowed
+                assert!(last_step.seq <= u64::MAX);
             }
         }
     }
@@ -4481,42 +4419,39 @@ mod tests {
         .collect();
 
         let malicious_env_snapshot = EnvironmentSnapshot {
-            variables: malicious_env,
-            working_dir: "/tmp".to_string(),
-            timestamp: 1000,
+            schema_version: SCHEMA_VERSION.to_string(),
+            clock_seed_ns: 1000,
+            env_vars: malicious_env,
+            platform: "linux".to_string(),
+            runtime_version: "v1.0".to_string(),
         };
 
-        let mut engine = ReplayEngine::new();
         let trace_id = "env-validation-test".to_string();
 
-        // Try to start capture with malicious environment
-        let result = engine.start_capture(&trace_id, "env-test", malicious_env_snapshot);
+        // Try to capture with a malicious environment; environment validation
+        // occurs at build()/registration time.
+        let mut builder = TraceBuilder::new(&trace_id, "env-test", malicious_env_snapshot);
+        builder.record_step(b"input".to_vec(), b"output".to_vec(), vec![], 1000);
 
         // Should handle without panic - may succeed with bounded data or fail with validation
-        match result {
-            Ok(_) => {
+        match builder.build() {
+            Ok((trace, _)) => {
                 // If it succeeds, verify environment data is handled safely
-                let traces = engine.list_traces();
-                if let Some(trace) = traces
-                    .iter()
-                    .find(|t| t.trace_id.as_str().eq(trace_id.as_str()))
-                {
-                    // Environment variables should be bounded or validated
-                    for (key, value) in &trace.environment.variables {
-                        assert!(key.len() < 100_000, "Environment key should be bounded");
-                        assert!(
-                            value.len() <= 1_000_000,
-                            "Environment value should be handled safely"
-                        );
-                        assert!(
-                            !key.contains('\0'),
-                            "Environment key should not contain null bytes"
-                        );
-                        assert!(
-                            !value.contains('\0'),
-                            "Environment value should not contain null bytes"
-                        );
-                    }
+                // Environment variables should be bounded or validated
+                for (key, value) in &trace.environment.env_vars {
+                    assert!(key.len() < 100_000, "Environment key should be bounded");
+                    assert!(
+                        value.len() <= 1_000_000,
+                        "Environment value should be handled safely"
+                    );
+                    assert!(
+                        !key.contains('\0'),
+                        "Environment key should not contain null bytes"
+                    );
+                    assert!(
+                        !value.contains('\0'),
+                        "Environment value should not contain null bytes"
+                    );
                 }
             }
             Err(_) => {
@@ -4744,11 +4679,13 @@ mod tests {
 
         // Verify domain prefixes are distinct
         assert_ne!(
-            b"replay_step_output_v1:", b"replay_step_effects_v2:",
+            b"replay_step_output_v1:".as_slice(),
+            b"replay_step_effects_v2:".as_slice(),
             "Step domain prefixes must be distinct"
         );
         assert_ne!(
-            b"replay_trace_digest_v1:", b"replay_step_output_v1:",
+            b"replay_trace_digest_v1:".as_slice(),
+            b"replay_step_output_v1:".as_slice(),
             "Trace domain must be distinct from step domains"
         );
 
@@ -5290,15 +5227,22 @@ mod tests {
         let mut engine = ReplayEngine::new();
 
         // Create trace with timestamp near u64::MAX
-        let mut builder =
-            TraceBuilder::new("wraparound-test".to_string(), "test-workflow".to_string());
+        let mut builder = TraceBuilder::new(
+            "wraparound-test",
+            "test-workflow",
+            EnvironmentSnapshot::new(
+                12345,
+                std::collections::BTreeMap::new(),
+                "test-platform",
+                "1.0.0",
+            ),
+        );
 
         let near_max_timestamp = u64::MAX - 100; // 100ns before wraparound
-        let wrapped_timestamp = 50; // Wrapped around to small value
+        let wrapped_timestamp: u64 = 50; // Wrapped around to small value
 
         // Original step with near-max timestamp
-        let original_step = TraceStep::new(
-            0,
+        builder.record_step(
             b"input".to_vec(),
             b"output".to_vec(),
             vec![SideEffect::new(
@@ -5307,14 +5251,8 @@ mod tests {
             )],
             near_max_timestamp,
         );
-        builder.add_step(original_step);
 
-        let trace = builder.build(EnvironmentSnapshot::new(
-            12345,
-            std::collections::BTreeMap::new(),
-            "test-platform",
-            "1.0.0",
-        ));
+        let (trace, _) = builder.build().expect("build wraparound trace");
 
         engine.register_trace(trace).unwrap();
 
@@ -5327,11 +5265,11 @@ mod tests {
                     effect.payload = wrapped_timestamp.to_le_bytes().to_vec();
                 }
             }
-            (step.output.clone(), effects)
+            Ok((step.output.clone(), effects))
         };
 
         let result = engine
-            .replay("wraparound-test", wraparound_replay_fn)
+            .replay_with_adapter("wraparound-test", wraparound_replay_fn)
             .unwrap();
 
         // Verify correct wraparound handling
@@ -5387,12 +5325,11 @@ mod tests {
         };
 
         let environment = EnvironmentSnapshot {
-            franken_node_version: "1.0.0".to_string(),
-            rust_version: "1.70.0".to_string(),
-            os_info: "linux".to_string(),
-            cpu_info: "x64".to_string(),
-            memory_mb: 8192,
-            environment_variables: vec![],
+            schema_version: SCHEMA_VERSION.to_string(),
+            clock_seed_ns: 0,
+            env_vars: BTreeMap::new(),
+            platform: "linux".to_string(),
+            runtime_version: "1.0.0".to_string(),
         };
 
         // Test TraceStep digest methods produce identical results

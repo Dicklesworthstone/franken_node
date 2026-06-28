@@ -216,7 +216,8 @@ mod module_surface_negative_tests {
         let modules = module_surface();
 
         // Count modules by category (rough heuristic)
-        let mut category_counts = std::collections::HashMap::new();
+        let mut category_counts: std::collections::HashMap<&str, i64> =
+            std::collections::HashMap::new();
 
         for &module in modules {
             if module.contains("signal") {
@@ -351,7 +352,8 @@ mod module_surface_negative_tests {
                 assert_eq!(surface.len(), ATC_MODULE_SURFACE.len());
 
                 // Return first module for comparison
-                (thread_id, surface[0], surface.as_ptr())
+                // Cast the pointer to usize so the closure's return type is Send.
+                (thread_id, surface[0], surface.as_ptr() as usize)
             });
 
             push_bounded(&mut handles, handle, 100);
@@ -924,10 +926,12 @@ mod update_field_negative_tests {
     fn update_field_large_domain_large_data() {
         let mut hasher = Sha256::new();
 
-        let large_domain = vec![b'D'; 10_000];
+        // `update_field` requires a `&'static [u8]` domain; leak the large buffer
+        // so the domain has the required lifetime while preserving the intent.
+        let large_domain: &'static [u8] = Box::leak(vec![b'D'; 10_000].into_boxed_slice());
         let large_data = vec![b'd'; 10_000];
 
-        update_field(&mut hasher, &large_domain, &large_data);
+        update_field(&mut hasher, large_domain, &large_data);
 
         let _result = hasher.finalize();
     }
@@ -1005,10 +1009,10 @@ mod update_field_negative_tests {
     #[test]
     fn update_field_unicode_edge_cases() {
         let unicode_test_cases = [
-            (b"\xC0\x80", b"overlong_null"),        // Invalid UTF-8
-            (b"valid_ascii", b"\xF4\x90\x80\x80"),  // Invalid high codepoint
-            (b"\xEF\xBF\xBF", b"max_bmp"),          // Max BMP codepoint
-            (b"emoji_domain", b"\xF0\x9F\x92\xA9"), // Pile of poo emoji
+            (b"\xC0\x80".as_slice(), b"overlong_null".as_slice()), // Invalid UTF-8
+            (b"valid_ascii".as_slice(), b"\xF4\x90\x80\x80".as_slice()), // Invalid high codepoint
+            (b"\xEF\xBF\xBF".as_slice(), b"max_bmp".as_slice()),   // Max BMP codepoint
+            (b"emoji_domain".as_slice(), b"\xF0\x9F\x92\xA9".as_slice()), // Pile of poo emoji
         ];
 
         let mut hashes = Vec::new();
@@ -1036,11 +1040,11 @@ mod update_field_negative_tests {
         for &len in &boundary_lengths {
             if len <= 10000 {
                 // Keep test reasonable
-                let domain = vec![b'F'; len];
+                let domain: &'static [u8] = Box::leak(vec![b'F'; len].into_boxed_slice());
                 let data = vec![b'D'; len];
 
                 let mut hasher = Sha256::new();
-                update_field(&mut hasher, &domain, &data);
+                update_field(&mut hasher, domain, &data);
                 let _result = hasher.finalize();
             }
         }
@@ -1094,9 +1098,10 @@ mod update_field_negative_tests {
         update_field(&mut hasher1, b"domain", b"data");
 
         // Attack: try to embed fake length prefixes
-        let fake_domain = [&6u64.to_le_bytes()[..], b"domain"].concat();
+        let fake_domain: &'static [u8] =
+            Box::leak([&6u64.to_le_bytes()[..], b"domain"].concat().into_boxed_slice());
         let fake_data = [&4u64.to_le_bytes()[..], b"data"].concat();
-        update_field(&mut hasher2, &fake_domain, &fake_data);
+        update_field(&mut hasher2, fake_domain, &fake_data);
 
         let hash1 = hasher1.finalize();
         let hash2 = hasher2.finalize();
@@ -2296,7 +2301,8 @@ mod atc_extreme_adversarial_negative_tests {
 
         // Create surfaces with similar but different content
         let mut similar_surface = reference_surface.to_vec();
-        similar_surface[similar_surface.len() - 1] = "urgent_routinx"; // Last char different
+        let last_idx = similar_surface.len() - 1;
+        similar_surface[last_idx] = "urgent_routinx"; // Last char different
 
         let mut very_different_surface = vec!["zzzzzzzzz"; reference_surface.len()];
 
@@ -3002,23 +3008,24 @@ mod atc_extreme_adversarial_negative_tests {
     #[test]
     fn negative_fingerprint_prefix_suffix_collision_resistance_validation() {
         // Test resistance to prefix and suffix collision attacks
+        // Use `Vec` for each surface so tuples of differing arities share a type.
         let collision_test_cases = [
             // Prefix collision attempts
-            (["abc"], ["abcd"]),
-            (["test"], ["testing"]),
-            (["mod"], ["module"]),
+            (vec!["abc"], vec!["abcd"]),
+            (vec!["test"], vec!["testing"]),
+            (vec!["mod"], vec!["module"]),
             // Suffix collision attempts
-            (["xyz"], ["wxyz"]),
-            (["ing"], ["testing"]),
-            (["ule"], ["module"]),
+            (vec!["xyz"], vec!["wxyz"]),
+            (vec!["ing"], vec!["testing"]),
+            (vec!["ule"], vec!["module"]),
             // Substring collision attempts
-            (["ab", "cd"], ["a", "bcd"]),
-            (["pre", "fix"], ["pref", "ix"]),
-            (["", "test"], ["tes", "t"]),
+            (vec!["ab", "cd"], vec!["a", "bcd"]),
+            (vec!["pre", "fix"], vec!["pref", "ix"]),
+            (vec!["", "test"], vec!["tes", "t"]),
             // Empty/whitespace collision attempts
-            ([""], [" "]),
-            (["", ""], [""]),
-            ([" "], ["  "]),
+            (vec![""], vec![" "]),
+            (vec!["", ""], vec![""]),
+            (vec![" "], vec!["  "]),
         ];
 
         for (surface1, surface2) in collision_test_cases {
@@ -3038,14 +3045,17 @@ mod atc_extreme_adversarial_negative_tests {
         // Test more complex collision scenarios
         let complex_cases = [
             // Length manipulation
-            (vec!["x".repeat(100)], vec!["x".repeat(99), "x"]),
+            (vec!["x".repeat(100)], vec!["x".repeat(99), "x".to_string()]),
             (vec!["a".repeat(50), "b".repeat(50)], vec!["a".repeat(100)]),
             // Boundary confusion
             (
-                vec!["field:module_name", "test"],
-                vec!["field:module_nametest"],
+                vec!["field:module_name".to_string(), "test".to_string()],
+                vec!["field:module_nametest".to_string()],
             ),
-            (vec!["atc_module", "_surface"], vec!["atc_module_surface"]),
+            (
+                vec!["atc_module".to_string(), "_surface".to_string()],
+                vec!["atc_module_surface".to_string()],
+            ),
         ];
 
         for (surface1, surface2) in complex_cases {
@@ -3094,7 +3104,7 @@ mod atc_extreme_adversarial_negative_tests {
         // All should produce different fingerprints despite visual similarity
         let mut seen_fingerprints = std::collections::HashSet::new();
         for (i, surface) in unicode_attack_surfaces.iter().enumerate() {
-            let surface_refs: Vec<&str> = surface.iter().map(String::as_str).collect();
+            let surface_refs: Vec<&str> = surface.iter().copied().collect();
             let fingerprint = surface_fingerprint_hex(&surface_refs);
 
             assert_eq!(
@@ -3345,6 +3355,9 @@ mod atc_extreme_adversarial_negative_tests {
             vec!["module\u{80}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x20"],
         ];
 
+        // Capture the count before the consuming iteration below.
+        let total_attacks = domain_injection_attacks.len();
+
         let mut injection_fingerprints = std::collections::HashSet::new();
 
         for (attack_idx, attack_surface) in domain_injection_attacks.into_iter().enumerate() {
@@ -3374,7 +3387,7 @@ mod atc_extreme_adversarial_negative_tests {
         }
 
         // Verify no collisions occurred
-        assert_eq!(injection_fingerprints.len(), domain_injection_attacks.len());
+        assert_eq!(injection_fingerprints.len(), total_attacks);
 
         // Test that legitimate modules produce different fingerprints from injection attempts
         let legitimate_surface_refs = module_surface();
@@ -3408,7 +3421,7 @@ mod atc_extreme_adversarial_negative_tests {
                 "d".repeat(1_000_000),
             ],
             // Edge case: empty modules with overflow-prone count
-            vec![""; 50_000],
+            vec![String::new(); 50_000],
             // Mixed: many small + few huge
             {
                 let mut mixed = (0..10_000)
@@ -3796,9 +3809,21 @@ mod atc_extreme_adversarial_negative_tests {
         // Test extreme Unicode boundary conditions
         let unicode_boundary_cases = vec![
             // Surrogate pairs and high Unicode
-            vec!["\u{10000}", "\u{10FFFF}", "normal"], // Valid high Unicode
-            vec!["normal", "\u{E000}", "\u{F8FF}"],    // Private use area
-            vec!["\u{FFF0}", "\u{FFFD}", "normal"],    // Specials block
+            vec![
+                "\u{10000}".to_string(),
+                "\u{10FFFF}".to_string(),
+                "normal".to_string(),
+            ], // Valid high Unicode
+            vec![
+                "normal".to_string(),
+                "\u{E000}".to_string(),
+                "\u{F8FF}".to_string(),
+            ], // Private use area
+            vec![
+                "\u{FFF0}".to_string(),
+                "\u{FFFD}".to_string(),
+                "normal".to_string(),
+            ], // Specials block
             // Maximum length Unicode module names
             vec!["🚀".repeat(20)],       // 20 emoji characters
             vec!["控制字符".repeat(10)], // Chinese characters
@@ -4073,7 +4098,7 @@ mod atc_extreme_adversarial_negative_tests {
         ];
 
         for (attack_idx, attack_surface) in injection_attack_surfaces.into_iter().enumerate() {
-            let surface_refs: Vec<&str> = attack_surface.iter().map(String::as_str).collect();
+            let surface_refs: Vec<&str> = attack_surface.iter().copied().collect();
             let fingerprint = surface_fingerprint_hex(&surface_refs);
 
             // Should handle injection attempts safely
@@ -4122,7 +4147,7 @@ mod atc_extreme_adversarial_negative_tests {
 
             // Test that injection doesn't affect subsequent operations
             let clean_surface = vec!["aggregation", "federation", "global_priors"];
-            let clean_refs: Vec<&str> = clean_surface.iter().map(String::as_str).collect();
+            let clean_refs: Vec<&str> = clean_surface.iter().copied().collect();
             let clean_fingerprint = surface_fingerprint_hex(&clean_refs);
 
             assert_eq!(
@@ -4165,7 +4190,11 @@ mod atc_extreme_adversarial_negative_tests {
             "mod__ule",       // Double underscore in middle
             "module__",       // Ends with double underscore
             "__module",       // Starts with double underscore
-            "a".repeat(1000), // Extremely long
+            {
+                // Leak so the long module name shares the `&'static str` element type.
+                let long: &'static str = Box::leak("a".repeat(1000).into_boxed_str());
+                long
+            }, // Extremely long
             "\x00module",     // Null prefix
             "module\x00",     // Null suffix
             "mod\x00ule",     // Null in middle
@@ -4173,7 +4202,7 @@ mod atc_extreme_adversarial_negative_tests {
 
         for (boundary_idx, boundary_module) in boundary_violation_modules.into_iter().enumerate() {
             let boundary_surface = vec!["aggregation", boundary_module, "federation"];
-            let surface_refs: Vec<&str> = boundary_surface.iter().map(String::as_str).collect();
+            let surface_refs: Vec<&str> = boundary_surface.iter().copied().collect();
 
             // Should handle boundary violations gracefully
             let fingerprint = surface_fingerprint_hex(&surface_refs);
@@ -4311,7 +4340,7 @@ mod atc_extreme_adversarial_negative_tests {
 
         let mut pattern_fingerprints = Vec::new();
         for (pattern_idx, pattern) in access_patterns.into_iter().enumerate() {
-            let pattern_refs: Vec<&str> = pattern.iter().map(String::as_str).collect();
+            let pattern_refs: Vec<&str> = pattern.iter().copied().collect();
             let fingerprint = surface_fingerprint_hex(&pattern_refs);
 
             assert_eq!(
@@ -4393,7 +4422,7 @@ mod atc_extreme_adversarial_negative_tests {
         let canonical_fingerprint = surface_fingerprint_hex(&canonical_refs);
 
         for (drift_idx, drift_scenario) in version_drift_scenarios.into_iter().enumerate() {
-            let drift_refs: Vec<&str> = drift_scenario.iter().map(String::as_str).collect();
+            let drift_refs: Vec<&str> = drift_scenario.iter().copied().collect();
             let drift_fingerprint = surface_fingerprint_hex(&drift_refs);
 
             // Drift scenarios should produce different fingerprints (detect drift)
@@ -4473,15 +4502,26 @@ mod atc_extreme_adversarial_negative_tests {
             ],
             // Pathological inputs designed to test hash function
             vec!["", "a", "aa", "aaa"],
-            vec!["x".repeat(1000), "y".repeat(1000)],
-            (0..100).map(|i| format!("module_{:03}", i)).collect(),
+            vec![
+                {
+                    let s: &'static str = Box::leak("x".repeat(1000).into_boxed_str());
+                    s
+                },
+                {
+                    let s: &'static str = Box::leak("y".repeat(1000).into_boxed_str());
+                    s
+                },
+            ],
+            (0..100)
+                .map(|i| -> &'static str { Box::leak(format!("module_{:03}", i).into_boxed_str()) })
+                .collect(),
         ];
 
         let mut all_fingerprints = Vec::new();
         let mut entropy_stats = Vec::new();
 
         for (entropy_idx, entropy_surface) in entropy_test_surfaces.into_iter().enumerate() {
-            let surface_refs: Vec<&str> = entropy_surface.iter().map(String::as_str).collect();
+            let surface_refs: Vec<&str> = entropy_surface.iter().copied().collect();
             let fingerprint = surface_fingerprint_hex(&surface_refs);
 
             assert_eq!(
@@ -4499,7 +4539,8 @@ mod atc_extreme_adversarial_negative_tests {
             push_bounded(&mut all_fingerprints, fingerprint.clone(), 50000);
 
             // Analyze character distribution for entropy
-            let mut char_counts = std::collections::HashMap::new();
+            let mut char_counts: std::collections::HashMap<char, u32> =
+                std::collections::HashMap::new();
             for c in fingerprint.chars() {
                 let count = char_counts.entry(c).or_insert(0);
                 *count = count.saturating_add(1);
@@ -4530,10 +4571,10 @@ mod atc_extreme_adversarial_negative_tests {
                 assert!(false, "Fingerprint hex decode failed: {}", error);
                 Vec::new()
             });
-            let mut bit_counts = [0; 2];
-            for byte in bytes {
+            let mut bit_counts = [0u32; 2];
+            for byte in &bytes {
                 for bit_pos in 0..8 {
-                    let bit = (byte >> bit_pos) & 1;
+                    let bit = (*byte >> bit_pos) & 1;
                     bit_counts[bit as usize] = bit_counts[bit as usize].saturating_add(1);
                 }
             }
@@ -4576,7 +4617,11 @@ mod atc_extreme_adversarial_negative_tests {
             vec!["base"],
             vec!["base", "\u{80}\x00\x00\x00\x00\x00\x00\x00"],
             // Birthday attack patterns
-            (0..256).map(|i| format!("birthday_{:02x}", i)).collect(),
+            (0..256)
+                .map(|i| -> &'static str {
+                    Box::leak(format!("birthday_{:02x}", i).into_boxed_str())
+                })
+                .collect(),
             // Meet-in-the-middle patterns
             vec!["prefix_a", "suffix_x"],
             vec!["prefix_b", "suffix_x"],
@@ -4591,7 +4636,7 @@ mod atc_extreme_adversarial_negative_tests {
 
         let mut crypto_fingerprints = Vec::new();
         for crypto_surface in crypto_attack_surfaces {
-            let surface_refs: Vec<&str> = crypto_surface.iter().map(String::as_str).collect();
+            let surface_refs: Vec<&str> = crypto_surface.iter().copied().collect();
             let fingerprint = surface_fingerprint_hex(&surface_refs);
             crypto_fingerprints.push(fingerprint);
         }
@@ -4655,7 +4700,7 @@ mod atc_extreme_adversarial_negative_tests {
 
         let mut structure_fingerprints = Vec::new();
         for structure_surface in structure_revealing_test {
-            let surface_refs: Vec<&str> = structure_surface.iter().map(String::as_str).collect();
+            let surface_refs: Vec<&str> = structure_surface.iter().copied().collect();
             let fingerprint = surface_fingerprint_hex(&surface_refs);
             structure_fingerprints.push(fingerprint);
         }
@@ -4922,7 +4967,7 @@ mod atc_extreme_adversarial_negative_tests {
 
         // Test deterministic behavior across time
         let temporal_test_surface = vec!["temporal", "consistency", "test"];
-        let surface_refs: Vec<&str> = temporal_test_surface.iter().map(String::as_str).collect();
+        let surface_refs: Vec<&str> = temporal_test_surface.iter().copied().collect();
 
         // Generate fingerprints at different times with delays
         let mut temporal_fingerprints = Vec::new();
@@ -4958,14 +5003,20 @@ mod atc_extreme_adversarial_negative_tests {
         }
 
         // Test deterministic behavior under different system states
-        let system_state_tests = vec![
+        // Each closure has a distinct type, so box them behind a shared trait object.
+        // The closures `move` owned clones of `surface_refs`; since its elements are
+        // `&'static str`, the owned `Vec` is itself `'static` and satisfies the box.
+        let refs_alloc = surface_refs.clone();
+        let refs_stack = surface_refs.clone();
+        let refs_thread = surface_refs.clone();
+        let system_state_tests: Vec<Box<dyn Fn() -> String>> = vec![
             // Different memory allocator states
-            || {
+            Box::new(move || {
                 let _allocations: Vec<Vec<u8>> = (0..1000).map(|i| vec![i as u8; 1000]).collect();
-                surface_fingerprint_hex(&surface_refs)
-            },
+                surface_fingerprint_hex(&refs_alloc)
+            }),
             // Different stack depth
-            || {
+            Box::new(move || {
                 fn deep_call(depth: u32, refs: &[&str]) -> String {
                     if depth == 0 {
                         surface_fingerprint_hex(refs)
@@ -4973,14 +5024,16 @@ mod atc_extreme_adversarial_negative_tests {
                         deep_call(depth - 1, refs)
                     }
                 }
-                deep_call(100, &surface_refs)
-            },
+                deep_call(100, &refs_stack)
+            }),
             // Different thread contexts
-            || {
-                std::thread::spawn(|| surface_fingerprint_hex(&surface_refs))
+            Box::new(move || {
+                // Move an owned clone into the thread so the closure is `'static`.
+                let refs = refs_thread.clone();
+                std::thread::spawn(move || surface_fingerprint_hex(&refs))
                     .join()
                     .unwrap()
-            },
+            }),
         ];
 
         for (state_idx, state_test) in system_state_tests.into_iter().enumerate() {
@@ -5000,7 +5053,7 @@ mod atc_extreme_adversarial_negative_tests {
         ];
 
         for (base_idx, base_order) in order_test_bases.into_iter().enumerate() {
-            let base_refs: Vec<&str> = base_order.iter().map(String::as_str).collect();
+            let base_refs: Vec<&str> = base_order.iter().copied().collect();
             let base_fingerprint = surface_fingerprint_hex(&base_refs);
 
             // Test all permutations for determinism
@@ -5022,17 +5075,21 @@ mod atc_extreme_adversarial_negative_tests {
                 }
                 perms
             } else {
-                // Just test a few permutations for larger sets
+                // Just test a few permutations for larger sets. Use owned `String`s so
+                // this branch matches the `Vec<Vec<String>>` type of the `if` branch.
+                let base_strings: Vec<String> =
+                    base_order.iter().map(|s| s.to_string()).collect();
                 vec![
-                    base_order.clone(),
+                    base_strings.clone(),
                     {
-                        let mut rev = base_order.clone();
+                        let mut rev = base_strings.clone();
                         rev.reverse();
                         rev
                     },
                     {
-                        let mut mid = base_order.clone();
-                        mid.swap(0, mid.len() - 1);
+                        let mut mid = base_strings.clone();
+                        let last = mid.len() - 1;
+                        mid.swap(0, last);
                         mid
                     },
                 ]
@@ -5082,7 +5139,7 @@ mod atc_extreme_adversarial_negative_tests {
 
         let mut content_fingerprints = std::collections::HashMap::new();
         for variation in content_variations {
-            let var_refs: Vec<&str> = variation.iter().map(String::as_str).collect();
+            let var_refs: Vec<&str> = variation.iter().copied().collect();
             let var_fingerprint = surface_fingerprint_hex(&var_refs);
 
             // Each variation should be deterministic
@@ -5123,7 +5180,7 @@ mod atc_extreme_adversarial_negative_tests {
         ];
 
         for extreme_case in extreme_test_cases {
-            let case_refs: Vec<&str> = extreme_case.iter().map(String::as_str).collect();
+            let case_refs: Vec<&str> = extreme_case.iter().copied().collect();
 
             // Test determinism across multiple iterations
             let mut extreme_fingerprints = Vec::new();
@@ -5799,7 +5856,7 @@ mod atc_extreme_adversarial_negative_tests {
                     let format_valid = fingerprint.len() == 64
                         && fingerprint.chars().all(|c| c.is_ascii_hexdigit());
 
-                    thread_results.push((thread_id, iteration, fingerprint, format_valid));
+                    thread_results.push((thread_id, iteration, fingerprint.clone(), format_valid));
 
                     // Test determinism within thread
                     let fingerprint_2 = surface_fingerprint_hex(&modified_refs);
@@ -5835,8 +5892,8 @@ mod atc_extreme_adversarial_negative_tests {
             crate::lock_utils::try_lock(results.as_ref(), "atc concurrent final results")
                 .expect("atc concurrent final results mutex should not be poisoned");
         let mut unique_fingerprints = std::collections::HashSet::new();
-        let mut format_violations = 0;
-        let mut determinism_violations = 0;
+        let mut format_violations = 0u32;
+        let mut determinism_violations = 0u32;
 
         for &(thread_id, iteration, ref fingerprint, format_valid) in final_results.iter() {
             if !format_valid {
@@ -5936,7 +5993,8 @@ mod atc_extreme_adversarial_negative_tests {
         ];
 
         let legitimate_fingerprint = surface_fingerprint_hex(&module_surface());
-        let mut observed_fingerprints = std::collections::HashMap::new();
+        let mut observed_fingerprints: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
 
         for (attack_idx, downgrade_surface) in downgrade_test_surfaces.iter().enumerate() {
             let downgrade_refs: Vec<&str> = downgrade_surface.iter().map(String::as_str).collect();
@@ -6559,10 +6617,7 @@ mod atc_extreme_adversarial_negative_tests {
                 (vec![0x00, 0x00], vec![0x00]),
                 // Large data collision attempts
                 (vec![0x42; 1000], vec![0x42; 1001]),
-                (
-                    b"A".repeat(1000).into_bytes(),
-                    b"B".repeat(1000).into_bytes(),
-                ),
+                (b"A".repeat(1000), b"B".repeat(1000)),
             ];
 
             for (i, (data1, data2)) in collision_test_cases.iter().enumerate() {
@@ -6667,7 +6722,7 @@ mod atc_extreme_adversarial_negative_tests {
                 }
 
                 // Hash concatenated version
-                update_len_prefixed(&mut concat_hasher, concatenated);
+                update_len_prefixed(&mut concat_hasher, &concatenated);
 
                 let parts_hash = parts_hasher.finalize();
                 let concat_hash = concat_hasher.finalize();
@@ -6785,7 +6840,7 @@ mod atc_extreme_adversarial_negative_tests {
 
             // Attack 2: Fingerprint entropy and randomness verification
             let hex_chars: Vec<char> = fingerprint.chars().collect();
-            let mut char_counts = HashMap::new();
+            let mut char_counts: HashMap<char, u32> = HashMap::new();
 
             for &c in &hex_chars {
                 let count = char_counts.entry(c).or_insert(0);
@@ -6887,10 +6942,10 @@ mod atc_extreme_adversarial_negative_tests {
 
             // Attack 6: Fingerprint uniqueness against known weak hashes
             let weak_hash_patterns = vec![
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // SHA256("")
-                "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb", // SHA256("a")
-                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", // SHA256("abc")
-                "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592", // SHA256("The quick brown fox jumps over the lazy dog")
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(), // SHA256("")
+                "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb".to_string(), // SHA256("a")
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(), // SHA256("abc")
+                "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592".to_string(), // SHA256("The quick brown fox jumps over the lazy dog")
                 "0".repeat(64),                                                     // All zeros
                 "f".repeat(64),                                                     // All F's
                 "deadbeef".repeat(8), // Repeated pattern
@@ -6932,7 +6987,7 @@ mod atc_extreme_adversarial_negative_tests {
                 .map(|d| d.as_nanos() as u64)
                 .sum::<u64>()
                 / u64::try_from(access_times.len()).unwrap_or(u64::MAX);
-            let mut outliers = 0;
+            let mut outliers = 0u32;
 
             for (i, &time) in access_times.iter().enumerate() {
                 let time_nanos = time.as_nanos() as u64;

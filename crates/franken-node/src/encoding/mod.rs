@@ -431,7 +431,7 @@ mod encoding_root_negative_tests {
 
                     // Should handle derivation consistently
                     assert!(
-                        seed.bytes().len() == 32,
+                        seed.bytes.len() == 32,
                         "Derived seed should have correct length: {}",
                         attack_name
                     );
@@ -442,7 +442,7 @@ mod encoding_root_negative_tests {
                     );
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -518,13 +518,13 @@ mod encoding_root_negative_tests {
 
                 // Should handle multiple derivations consistently
                 assert_eq!(
-                    seed.bytes().len(),
+                    seed.bytes.len(),
                     32,
                     "Seed should maintain correct size at iteration {}",
                     i
                 );
                 assert!(
-                    seed.domain() == &DomainTag::Encoding,
+                    seed.domain == DomainTag::Encoding,
                     "Seed should maintain domain at iteration {}",
                     i
                 );
@@ -532,7 +532,7 @@ mod encoding_root_negative_tests {
                 // Verify bump tracking doesn't grow unbounded
                 if let Some(bump_record) = bump {
                     assert!(
-                        !bump_record.description().is_empty(),
+                        !bump_record.bump_reason.is_empty(),
                         "Bump description should be present"
                     );
                 }
@@ -572,7 +572,7 @@ mod encoding_root_negative_tests {
                 "Should handle nested JSON"
             );
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -722,7 +722,7 @@ mod encoding_root_negative_tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -749,7 +749,7 @@ mod encoding_root_negative_tests {
 
                 // Should handle extreme version numbers safely
                 assert!(
-                    config.version() == extreme_version,
+                    config.version == extreme_version,
                     "Version should be preserved: {}",
                     extreme_version
                 );
@@ -762,7 +762,7 @@ mod encoding_root_negative_tests {
                         match reparse {
                             Ok(reparsed) => {
                                 assert_eq!(
-                                    reparsed.version(),
+                                    reparsed.version,
                                     extreme_version,
                                     "Version should round-trip correctly: {}",
                                     extreme_version
@@ -797,13 +797,13 @@ mod encoding_root_negative_tests {
 
                 // Should handle large version numbers without overflow
                 assert_eq!(
-                    seed.config_version(),
+                    seed.config_version,
                     large_version,
                     "Config version should be preserved: {}",
                     i
                 );
                 assert_eq!(
-                    seed.bytes().len(),
+                    seed.bytes.len(),
                     32,
                     "Seed length should be consistent: {}",
                     i
@@ -819,7 +819,7 @@ mod encoding_root_negative_tests {
                 // Test bump record handling
                 if let Some(bump_record) = bump {
                     assert!(
-                        !bump_record.description().is_empty(),
+                        !bump_record.bump_reason.is_empty(),
                         "Bump description should be valid: {}",
                         i
                     );
@@ -867,7 +867,7 @@ mod encoding_root_negative_tests {
 
                         // Should derive seeds consistently for edge case patterns
                         assert_eq!(
-                            seed.bytes().len(),
+                            seed.bytes.len(),
                             32,
                             "Derived seed should have correct length: pattern {}",
                             i
@@ -901,7 +901,7 @@ mod encoding_root_negative_tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -1069,7 +1069,7 @@ mod encoding_root_negative_tests {
                     );
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -1090,9 +1090,9 @@ mod encoding_root_negative_tests {
         let boundary_stress_result = std::panic::catch_unwind(|| {
             // Test ContentHash hex string length boundaries
             let hex_length_cases = vec![
-                ("", "empty_hex"),
-                ("a", "single_char"),
-                ("aa", "single_byte"),
+                ("".to_string(), "empty_hex"),
+                ("a".to_string(), "single_char"),
+                ("aa".to_string(), "single_byte"),
                 ("aa".repeat(31), "31_bytes"),
                 ("aa".repeat(32), "32_bytes_valid"),
                 ("aa".repeat(33), "33_bytes"),
@@ -1143,7 +1143,7 @@ mod encoding_root_negative_tests {
 
                 // Should handle all u32 version values
                 assert_eq!(
-                    config.version(),
+                    config.version,
                     version,
                     "Version should be preserved: {}",
                     test_name
@@ -1156,7 +1156,7 @@ mod encoding_root_negative_tests {
                         let reparse: Result<ScheduleConfig, _> = serde_json::from_str(&json_str);
                         if let Ok(reparsed) = reparse {
                             assert_eq!(
-                                reparsed.version(),
+                                reparsed.version,
                                 version,
                                 "Version should round-trip: {}",
                                 test_name
@@ -1228,13 +1228,13 @@ mod encoding_root_negative_tests {
 
                 // Should handle repeated derivations consistently
                 assert_eq!(
-                    seed.bytes().len(),
+                    seed.bytes.len(),
                     32,
                     "Seed length should be consistent: iteration {}",
                     i
                 );
                 assert_eq!(
-                    seed.config_version(),
+                    seed.config_version,
                     i + 1,
                     "Config version should be correct: iteration {}",
                     i
@@ -1262,7 +1262,7 @@ mod encoding_root_negative_tests {
                     i
                 );
                 assert!(
-                    deriver.bump_records().len() <= i + 1,
+                    deriver.bump_records().len() <= (i + 1) as usize,
                     "Bump records should be reasonable: iteration {}",
                     i
                 );
@@ -1312,7 +1312,7 @@ mod encoding_root_negative_tests {
                         );
 
                         assert_eq!(
-                            seed.bytes().len(),
+                            seed.bytes.len(),
                             32,
                             "Derived seed should be correct length: {}",
                             test_name
@@ -1325,7 +1325,7 @@ mod encoding_root_negative_tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -1353,37 +1353,37 @@ mod encoding_root_negative_tests {
             ("0123456789abcdef".repeat(4), "Sequential pattern entropy"),
             // Mathematical sequences that might exploit PRNG weaknesses
             (
-                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".to_string(),
                 "Incrementing sequence",
             ),
             (
-                "2020202020202020202020202020202020202020202020202020202020202020",
+                "2020202020202020202020202020202020202020202020202020202020202020".to_string(),
                 "ASCII space pattern",
             ),
             (
-                "deadbeefcafebabe" + &"0000000000000000".repeat(2),
+                "deadbeefcafebabe".to_string() + &"0000000000000000".repeat(2),
                 "Known constants with padding",
             ),
             // Bit patterns targeting cryptographic edge cases
             (
-                "8000000000000000000000000000000000000000000000000000000000000000",
+                "8000000000000000000000000000000000000000000000000000000000000000".to_string(),
                 "Single bit set",
             ),
             (
-                "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
                 "Max positive",
             ),
             (
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
                 "Alternating bits",
             ),
             // Common cryptographic constants that might reveal implementation
             (
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
                 "SHA256 empty string",
             ),
             (
-                "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f",
+                "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f".to_string(),
                 "SHA224 empty",
             ),
         ];
@@ -1392,7 +1392,7 @@ mod encoding_root_negative_tests {
 
         for (predictable_hex, description) in predictable_patterns {
             let content_hash =
-                ContentHash::from_hex(predictable_hex).expect("predictable content should parse");
+                ContentHash::from_hex(&predictable_hex).expect("predictable content should parse");
 
             let config = ScheduleConfig::new(1).with_param("entropy_test", description);
 
@@ -1400,26 +1400,26 @@ mod encoding_root_negative_tests {
 
             // Verify seed derivation doesn't leak information about input patterns
             assert_eq!(
-                seed.bytes().len(),
+                seed.bytes.len(),
                 32,
                 "Derived seed should have standard length for pattern: {}",
                 description
             );
             assert_eq!(
-                seed.domain(),
-                &DomainTag::Encoding,
+                seed.domain,
+                DomainTag::Encoding,
                 "Derived seed should maintain domain for pattern: {}",
                 description
             );
 
             deterministic_seed::push_bounded(
                 &mut derived_seeds,
-                (seed.bytes().to_vec(), description),
+                (seed.bytes.to_vec(), description),
                 20,
             );
 
             // Verify no obvious information leakage
-            let seed_bytes = seed.bytes();
+            let seed_bytes = seed.bytes;
             let is_all_same = seed_bytes.iter().all(|&b| b == seed_bytes[0]);
             assert!(
                 !is_all_same,
@@ -1528,7 +1528,7 @@ mod encoding_root_negative_tests {
                 Ok(config) => {
                     // If parsing succeeded, verify internal consistency
                     assert!(
-                        config.version() <= u32::MAX,
+                        config.version <= u32::MAX,
                         "Version should remain within bounds for payload {}",
                         i
                     );
@@ -1550,8 +1550,8 @@ mod encoding_root_negative_tests {
                             match round_trip_result {
                                 Ok(round_trip_config) => {
                                     assert_eq!(
-                                        round_trip_config.version(),
-                                        config.version(),
+                                        round_trip_config.version,
+                                        config.version,
                                         "Round-trip version should match for payload {}",
                                         i
                                     );
@@ -1615,13 +1615,13 @@ mod encoding_root_negative_tests {
 
                             // Verify seed integrity during concurrent access
                             assert_eq!(
-                                seed.bytes().len(),
+                                seed.bytes.len(),
                                 32,
                                 "Seed length should be correct during concurrent access"
                             );
                             assert_eq!(
-                                seed.domain(),
-                                domain,
+                                seed.domain,
+                                *domain,
                                 "Seed domain should match request during concurrent access"
                             );
 
@@ -1732,8 +1732,8 @@ mod encoding_root_negative_tests {
                 match deserialize_result {
                     Ok(restored_config) => {
                         assert_eq!(
-                            restored_config.version(),
-                            complex_config.version(),
+                            restored_config.version,
+                            complex_config.version,
                             "Complex config version should be preserved"
                         );
                     }
@@ -1844,8 +1844,8 @@ mod encoding_root_negative_tests {
             // Length boundary attacks
             ("a".repeat(63), "Undersized by 1 char"),
             ("a".repeat(65), "Oversized by 1 char"),
-            ("", "Empty hex string"),
-            ("a", "Single hex character"),
+            ("".to_string(), "Empty hex string"),
+            ("a".to_string(), "Single hex character"),
             // Character boundary attacks
             ("g".repeat(64), "Invalid hex character 'g'"),
             ("G".repeat(64), "Invalid hex character 'G'"),
@@ -1899,6 +1899,12 @@ mod encoding_root_negative_tests {
             match parse_result.unwrap_err() {
                 super::deterministic_seed::SeedError::InvalidContentHash => {
                     // Expected error type for invalid content hashes
+                }
+                super::deterministic_seed::SeedError::ZeroConfigVersion => {
+                    panic!(
+                        "Hex boundary attack should yield InvalidContentHash, not ZeroConfigVersion: {} - '{:?}'",
+                        description, boundary_hex
+                    );
                 }
             }
         }
@@ -2015,7 +2021,7 @@ mod encoding_root_negative_tests {
                 Ok(config) => {
                     // If parsing succeeded, verify resource usage is reasonable
                     assert!(
-                        config.version() <= u32::MAX,
+                        config.version <= u32::MAX,
                         "Version should remain bounded for bomb: {}",
                         description
                     );

@@ -3374,20 +3374,12 @@ mod canonical_perf_test;
 #[cfg(test)]
 mod tests {
     use super::super::certification::EvidenceType;
-    use super::{
-        AuditRecord, BehavioralProfile, CamouflageHintRecord, CapabilityDeclaration,
-        CapabilityRisk, CertificationLevel, DEFAULT_REGISTRY_KEY, DependencyTrustStatus,
-        DerivationMetadata, ExtensionIdentity, MAX_CAMOUFLAGE_HINT_EVIDENCE_KEYS,
-        MAX_CAMOUFLAGE_HINT_SAMPLE_INDICES, MAX_CAMOUFLAGE_HINTS_ON_CARD,
-        MAX_EVIDENCE_RECEIPT_HASH_BYTES, MAX_TRUST_CARD_EVIDENCE_REFS, ProvenanceSummary,
-        PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
-        SnapshotSourceContext, TRUST_CARD_CAMOUFLAGE_SUSPECTED, TRUST_CARD_CREATED,
-        TRUST_CARD_QUERIED, TrustCard, TrustCardComparison, TrustCardDiffEntry, TrustCardError,
-        TrustCardInput, TrustCardListFilter, TrustCardMutation, TrustCardRegistry,
-        VerifiedEvidenceRef, apply_camouflage_assessment, canonicalize_value,
-        compute_trust_card_derivation_hash, render_comparison_human, render_trust_card_human,
-        sign_card_in_place, to_canonical_json, update_card_hash, verify_card_signature,
-    };
+    // bd-yom8c: the inline test suite exercises a large surface of the parent
+    // module (snapshot/bounds/HMAC/push_bounded/timestamp helpers, etc.). The
+    // previously explicit import list had drifted out of sync with what the
+    // tests reference, so bring the whole parent scope in (idiomatic for an
+    // inline `mod tests`).
+    use super::*;
     use crate::security::trajectory_gaming::{CamouflageHint, CamouflageKind};
     use base64::Engine as _;
     use std::collections::BTreeMap;
@@ -5178,20 +5170,14 @@ mod tests {
         ];
 
         for malicious_id in malicious_publisher_ids {
-            let publisher = TrustCardPublisher {
+            let publisher = PublisherIdentity {
                 publisher_id: malicious_id.to_string(),
                 display_name: "Test Publisher".to_string(),
-                domain: Some("example.com".to_string()),
-                contact_email: Some("test@example.com".to_string()),
-                verified_at_epoch: 1234567890,
-                signature_algorithm: "ecdsa-p256".to_string(),
-                public_key_pem: "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----"
-                    .to_string(),
             };
 
             // Verify serialization handles malicious publisher ID safely
             let json = serde_json::to_string(&publisher).expect("serialization should work");
-            let parsed: TrustCardPublisher =
+            let parsed: PublisherIdentity =
                 serde_json::from_str(&json).expect("deserialization should work");
 
             // Verify malicious content is preserved exactly for forensics but contained
@@ -5203,15 +5189,7 @@ mod tests {
             // Verify JSON structure integrity
             let json_value: serde_json::Value =
                 serde_json::from_str(&json).expect("JSON should be valid");
-            let expected_keys = [
-                "publisher_id",
-                "display_name",
-                "domain",
-                "contact_email",
-                "verified_at_epoch",
-                "signature_algorithm",
-                "public_key_pem",
-            ];
+            let expected_keys = ["publisher_id", "display_name"];
 
             if let Some(obj) = json_value.as_object() {
                 for key in obj.keys() {
@@ -5238,7 +5216,7 @@ mod tests {
         let massive_refs: Vec<VerifiedEvidenceRef> = (0..10_000)
             .map(|i| VerifiedEvidenceRef {
                 evidence_id: format!("evidence_{}_with_long_suffix_{}", i, "X".repeat(1000)),
-                evidence_type: EvidenceType::ProvenanceAttestation,
+                evidence_type: EvidenceType::ProvenanceChain,
                 verified_at_epoch: 1234567890_u64.saturating_add(i as u64),
                 verification_receipt_hash: format!(
                     "hash_{}_with_long_suffix_{}",
@@ -5284,13 +5262,13 @@ mod tests {
         let collision_refs = vec![
             VerifiedEvidenceRef {
                 evidence_id: "evidence_1".to_string(),
-                evidence_type: EvidenceType::ProvenanceAttestation,
+                evidence_type: EvidenceType::ProvenanceChain,
                 verified_at_epoch: 123,
                 verification_receipt_hash: "hash1".to_string(),
             },
             VerifiedEvidenceRef {
                 evidence_id: "evidence_2".to_string(),
-                evidence_type: EvidenceType::ProvenanceAttestation,
+                evidence_type: EvidenceType::ProvenanceChain,
                 verified_at_epoch: 123,
                 verification_receipt_hash: "hash1".to_string(),
             },
@@ -5308,45 +5286,39 @@ mod tests {
 
     #[test]
     fn test_negative_capability_declaration_with_malicious_injection_patterns() {
+        // bd-yom8c API drift: CapabilityDeclaration now carries {name, description,
+        // risk}. The former scope/impact/evidence_ref string fields are collapsed
+        // into `description` so every malicious payload is still exercised through
+        // the serde round-trip below.
         let malicious_capabilities = vec![
             CapabilityDeclaration {
                 name: "cap\u{202E}fake\u{202C}".to_string(), // BiDi override
-                scope: "global".to_string(),
-                impact: "critical".to_string(),
-                evidence_ref: "ref\x1b[31m".to_string(), // ANSI escape
+                description: "scope=global|impact=critical|evidence_ref=ref\x1b[31m".to_string(), // ANSI escape
+                risk: CapabilityRisk::Critical,
             },
             CapabilityDeclaration {
                 name: "capability\"}{\"admin\":true,\"bypass".to_string(), // JSON injection
-                scope: "local\0null".to_string(),                          // Null byte injection
-                impact: "high\r\n\t".to_string(),                          // Control chars
-                evidence_ref: "ref/../../etc/passwd".to_string(),          // Path traversal
+                description: "scope=local\0null|impact=high\r\n\t|evidence_ref=ref/../../etc/passwd"
+                    .to_string(), // null byte + control chars + path traversal
+                risk: CapabilityRisk::Critical,
             },
             CapabilityDeclaration {
-                name: "X".repeat(10_000),         // Massive field (10KB)
-                scope: "Y".repeat(5_000),         // Massive field (5KB)
-                impact: "Z".repeat(5_000),        // Massive field (5KB)
-                evidence_ref: "W".repeat(10_000), // Massive field (10KB)
+                name: "X".repeat(10_000), // Massive field (10KB)
+                description: format!(
+                    "{}{}{}",
+                    "Y".repeat(5_000),  // Massive field (5KB)
+                    "Z".repeat(5_000),  // Massive field (5KB)
+                    "W".repeat(10_000), // Massive field (10KB)
+                ),
+                risk: CapabilityRisk::Critical,
             },
         ];
 
-        let trust_card = TrustCard {
-            card_id: "test-card".to_string(),
-            publisher: test_publisher(),
-            extension_id: "test-extension".to_string(),
-            certification_level: CertificationLevel::Verified,
-            capability_declarations: malicious_capabilities.clone(),
-            reputation_score: 0.95,
-            trust_card_schema_version: "1.0.0".to_string(),
-            derived_at_epoch: 1234567890,
-            derivation_evidence_hash: "test-hash".to_string(),
-            revocation_status: RevocationStatus::Valid,
-            cache_metadata: CacheMetadata {
-                cached_at_epoch: 1234567890,
-                ttl_seconds: 60,
-                refresh_count: 0,
-            },
-            audit_history: vec![],
-        };
+        let mut trust_card = fresh_card_for_camouflage_tests();
+        trust_card.extension.extension_id = "test-extension".to_string();
+        trust_card.certification_level = CertificationLevel::Gold;
+        trust_card.capability_declarations = malicious_capabilities.clone();
+        trust_card.audit_history = vec![];
 
         // Verify serialization handles malicious capabilities
         let json = serde_json::to_string(&trust_card)
@@ -5368,16 +5340,12 @@ mod tests {
                 "capability name should be preserved"
             );
             assert_eq!(
-                original.scope, parsed_cap.scope,
-                "capability scope should be preserved"
+                original.description, parsed_cap.description,
+                "capability description (scope/impact/evidence_ref payloads) should be preserved"
             );
             assert_eq!(
-                original.impact, parsed_cap.impact,
-                "capability impact should be preserved"
-            );
-            assert_eq!(
-                original.evidence_ref, parsed_cap.evidence_ref,
-                "capability evidence_ref should be preserved"
+                original.risk, parsed_cap.risk,
+                "capability risk should be preserved"
             );
         }
 
@@ -5407,54 +5375,34 @@ mod tests {
 
     #[test]
     fn test_negative_trust_card_filter_bypass_with_case_sensitivity() {
-        let test_card = TrustCard {
-            card_id: "test-card".to_string(),
-            publisher: TrustCardPublisher {
-                publisher_id: "Publisher-123".to_string(), // Mixed case
-                display_name: "Test Publisher".to_string(),
-                domain: Some("example.com".to_string()),
-                contact_email: Some("test@example.com".to_string()),
-                verified_at_epoch: 1234567890,
-                signature_algorithm: "ecdsa-p256".to_string(),
-                public_key_pem: "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----"
-                    .to_string(),
-            },
-            extension_id: "Test-Extension".to_string(),
-            certification_level: CertificationLevel::Verified,
-            capability_declarations: vec![CapabilityDeclaration {
-                name: "Network-Access".to_string(), // Mixed case capability
-                scope: "global".to_string(),
-                impact: "medium".to_string(),
-                evidence_ref: "ref123".to_string(),
-            }],
-            reputation_score: 0.95,
-            trust_card_schema_version: "1.0.0".to_string(),
-            derived_at_epoch: 1234567890,
-            derivation_evidence_hash: "test-hash".to_string(),
-            revocation_status: RevocationStatus::Valid,
-            cache_metadata: CacheMetadata {
-                cached_at_epoch: 1234567890,
-                ttl_seconds: 60,
-                refresh_count: 0,
-            },
-            audit_history: vec![],
-        };
+        // bd-yom8c API drift: build a current-shape card, then set the
+        // mixed-case publisher/extension/capability the filter test exercises.
+        let mut test_card = fresh_card_for_camouflage_tests();
+        test_card.extension.extension_id = "Test-Extension".to_string();
+        test_card.publisher.publisher_id = "Publisher-123".to_string(); // Mixed case
+        test_card.publisher.display_name = "Test Publisher".to_string();
+        test_card.certification_level = CertificationLevel::Gold;
+        test_card.capability_declarations = vec![CapabilityDeclaration {
+            name: "Network-Access".to_string(), // Mixed case capability
+            description: "global/medium/ref123".to_string(),
+            risk: CapabilityRisk::Medium,
+        }];
 
         // Test filters with different case variations
         let filter_exact_case = TrustCardListFilter {
-            certification_level: Some(CertificationLevel::Verified),
+            certification_level: Some(CertificationLevel::Gold),
             publisher_id: Some("Publisher-123".to_string()), // Exact match
             capability: Some("Network-Access".to_string()),  // Exact match
         };
 
         let filter_wrong_case = TrustCardListFilter {
-            certification_level: Some(CertificationLevel::Verified),
+            certification_level: Some(CertificationLevel::Gold),
             publisher_id: Some("publisher-123".to_string()), // Different case
             capability: Some("network-access".to_string()),  // Different case
         };
 
         let filter_partial_match = TrustCardListFilter {
-            certification_level: Some(CertificationLevel::Verified),
+            certification_level: Some(CertificationLevel::Gold),
             publisher_id: Some("Publisher-123".to_string()),
             capability: Some("Network".to_string()), // Partial match (should work due to contains())
         };
@@ -5478,7 +5426,7 @@ mod tests {
         );
 
         let filter_partial_wrong_case = TrustCardListFilter {
-            certification_level: Some(CertificationLevel::Verified),
+            certification_level: Some(CertificationLevel::Gold),
             publisher_id: Some("Publisher-123".to_string()),
             capability: Some("network".to_string()), // Lowercase partial (should fail)
         };
@@ -5490,7 +5438,7 @@ mod tests {
 
         // Test with unicode normalization bypass attempts
         let filter_unicode_bypass = TrustCardListFilter {
-            certification_level: Some(CertificationLevel::Verified),
+            certification_level: Some(CertificationLevel::Gold),
             publisher_id: Some("Publisher\u{2010}123".to_string()), // Unicode hyphen instead of ASCII hyphen
             capability: None,
         };
@@ -5505,37 +5453,42 @@ mod tests {
     fn test_negative_trust_card_registry_hmac_key_injection() {
         use crate::security::constant_time;
 
+        // Hoisted so the repeated-key Vec outlives the borrow held by the array below.
+        let very_long_key = b"very_long_key_".repeat(100);
         let malicious_keys = [
-            b"key\0null".as_slice(),                  // Null byte injection
-            b"key\r\n\t".as_slice(),                  // Control characters
-            b"key\x1b[31mred\x1b[0m".as_slice(),      // ANSI escape sequences
-            &[0u8; 0],                                // Empty key
-            &[0u8; 1],                                // Single null byte
-            &[255u8; 1000],                           // All-ones key
-            b"very_long_key_".repeat(100).as_slice(), // Extremely long key
+            b"key\0null".as_slice(),             // Null byte injection
+            b"key\r\n\t".as_slice(),             // Control characters
+            b"key\x1b[31mred\x1b[0m".as_slice(), // ANSI escape sequences
+            &[0u8; 0],                           // Empty key
+            &[0u8; 1],                           // Single null byte
+            &[255u8; 1000],                      // All-ones key
+            very_long_key.as_slice(),            // Extremely long key
         ];
 
         for malicious_key in malicious_keys {
-            // Create HMAC with malicious key
-            let mut mac = match Hmac::<Sha256>::new_from_slice(malicious_key) {
-                Ok(mac) => mac,
-                Err(_) => continue, // Some keys might be rejected by HMAC
-            };
+            // Some keys might be rejected by HMAC construction; skip those.
+            if Hmac::<Sha256>::new_from_slice(malicious_key).is_err() {
+                continue;
+            }
 
             // Test HMAC computation with various inputs
-            let test_inputs = [
-                b"normal data",
-                b"data\0with\0nulls",
-                b"data\r\nwith\r\ncontrol\tchars",
-                b"\x1b[31mdata with ansi\x1b[0m",
-                &[0u8; 10000],        // Large zero buffer
-                &b"A".repeat(100000), // Very large input
+            let large_input = b"A".repeat(100000); // Very large input
+            let test_inputs: [&[u8]; 6] = [
+                b"normal data".as_slice(),
+                b"data\0with\0nulls".as_slice(),
+                b"data\r\nwith\r\ncontrol\tchars".as_slice(),
+                b"\x1b[31mdata with ansi\x1b[0m".as_slice(),
+                &[0u8; 10000], // Large zero buffer
+                large_input.as_slice(),
             ];
 
             for input in test_inputs {
+                // Construct a fresh HMAC per input and finalize (consuming) so no
+                // `FixedOutputReset` bound is required (bd-yom8c cascade fix).
+                let mut mac = Hmac::<Sha256>::new_from_slice(malicious_key)
+                    .expect("HMAC key validated above");
                 mac.update(input);
-                let result = mac.finalize_reset();
-                let result_bytes = result.into_bytes();
+                let result_bytes = mac.finalize().into_bytes();
 
                 // Verify HMAC output is always 32 bytes for SHA256
                 assert_eq!(
@@ -5583,44 +5536,32 @@ mod tests {
     fn test_negative_trust_card_audit_history_with_massive_entries() {
         let mut audit_entries = Vec::new();
 
-        // Create 1000 audit entries with large content
+        // Create 1000 audit entries with large content.
+        // bd-yom8c API drift: the audit record is now `AuditRecord {timestamp,
+        // event_code, detail, trace_id}`. audit_type -> event_code;
+        // finding_summary/severity/remediation_status are folded into `detail`
+        // (preserving the massive content this test exercises); auditor_id ->
+        // trace_id; audited_at_epoch -> timestamp.
         for i in 0..1000 {
-            audit_entries.push(TrustCardAuditEntry {
-                audited_at_epoch: 1234567890_u64.saturating_add(i as u64),
-                audit_type: "security_review".to_string(),
-                auditor_id: format!("auditor_{}_with_long_id_{}", i, "X".repeat(500)),
-                finding_summary: format!("finding_{}_with_massive_content_{}", i, "Y".repeat(5000)),
-                severity: if i % 2 == 0 {
-                    "high".to_string()
-                } else {
-                    "medium".to_string()
-                },
-                remediation_status: if i % 3 == 0 {
-                    "resolved".to_string()
-                } else {
-                    "pending".to_string()
-                },
+            audit_entries.push(AuditRecord {
+                timestamp: timestamp_from_secs(1234567890_u64.saturating_add(i as u64)),
+                event_code: "security_review".to_string(),
+                detail: format!(
+                    "finding_{}_with_massive_content_{} severity={} remediation={}",
+                    i,
+                    "Y".repeat(5000),
+                    if i % 2 == 0 { "high" } else { "medium" },
+                    if i % 3 == 0 { "resolved" } else { "pending" },
+                ),
+                trace_id: format!("auditor_{}_with_long_id_{}", i, "X".repeat(500)),
             });
         }
 
-        let mut trust_card = TrustCard {
-            card_id: "audit-test".to_string(),
-            publisher: test_publisher(),
-            extension_id: "audit-extension".to_string(),
-            certification_level: CertificationLevel::Verified,
-            capability_declarations: vec![],
-            reputation_score: 0.85,
-            trust_card_schema_version: "1.0.0".to_string(),
-            derived_at_epoch: 1234567890,
-            derivation_evidence_hash: "test-hash".to_string(),
-            revocation_status: RevocationStatus::Valid,
-            cache_metadata: CacheMetadata {
-                cached_at_epoch: 1234567890,
-                ttl_seconds: 60,
-                refresh_count: 0,
-            },
-            audit_history: audit_entries,
-        };
+        let mut trust_card = fresh_card_for_camouflage_tests();
+        trust_card.extension.extension_id = "audit-extension".to_string();
+        trust_card.certification_level = CertificationLevel::Gold;
+        trust_card.capability_declarations = vec![];
+        trust_card.audit_history = audit_entries;
 
         // Verify bounded storage kicks in
         assert_eq!(
@@ -5631,13 +5572,11 @@ mod tests {
 
         // Add more entries to test push_bounded
         for i in 1000..1500 {
-            let entry = TrustCardAuditEntry {
-                audited_at_epoch: 1234567890_u64.saturating_add(i as u64),
-                audit_type: "additional_review".to_string(),
-                auditor_id: format!("auditor_{}", i),
-                finding_summary: format!("finding_{}", i),
-                severity: "low".to_string(),
-                remediation_status: "resolved".to_string(),
+            let entry = AuditRecord {
+                timestamp: timestamp_from_secs(1234567890_u64.saturating_add(i as u64)),
+                event_code: "additional_review".to_string(),
+                detail: format!("finding_{} severity=low remediation=resolved", i),
+                trace_id: format!("auditor_{}", i),
             };
 
             push_bounded(&mut trust_card.audit_history, entry, MAX_AUDIT_HISTORY);
@@ -5653,7 +5592,7 @@ mod tests {
         // Verify latest entries are preserved
         let latest_entry = &trust_card.audit_history[trust_card.audit_history.len() - 1];
         assert_eq!(
-            latest_entry.audit_type, "additional_review",
+            latest_entry.event_code, "additional_review",
             "latest entry should be preserved"
         );
 
@@ -5683,19 +5622,19 @@ mod tests {
         let collision_candidates = vec![
             VerifiedEvidenceRef {
                 evidence_id: "evidence_1".to_string(),
-                evidence_type: EvidenceType::ProvenanceAttestation,
+                evidence_type: EvidenceType::ProvenanceChain,
                 verified_at_epoch: 1234567890,
                 verification_receipt_hash: "sha256:a".repeat(32), // Fake SHA256
             },
             VerifiedEvidenceRef {
                 evidence_id: "evidence_2".to_string(),
-                evidence_type: EvidenceType::ProvenanceAttestation,
+                evidence_type: EvidenceType::ProvenanceChain,
                 verified_at_epoch: 1234567890,
                 verification_receipt_hash: "sha256:b".repeat(32), // Fake SHA256
             },
             VerifiedEvidenceRef {
                 evidence_id: "evidence_1".to_string(), // Same ID, different hash
-                evidence_type: EvidenceType::ProvenanceAttestation,
+                evidence_type: EvidenceType::ProvenanceChain,
                 verified_at_epoch: 1234567890,
                 verification_receipt_hash: "sha256:c".repeat(32),
             },
@@ -5736,13 +5675,13 @@ mod tests {
         let malicious_refs = vec![
             VerifiedEvidenceRef {
                 evidence_id: "evidence\0null".to_string(),
-                evidence_type: EvidenceType::CertificationEvidence,
+                evidence_type: EvidenceType::AuditReport,
                 verified_at_epoch: 123,
                 verification_receipt_hash: "hash1".to_string(),
             },
             VerifiedEvidenceRef {
                 evidence_id: "evidence".to_string(), // Without null
-                evidence_type: EvidenceType::CertificationEvidence,
+                evidence_type: EvidenceType::AuditReport,
                 verified_at_epoch: 123,
                 verification_receipt_hash: "hash1".to_string(),
             },
@@ -5762,10 +5701,10 @@ mod tests {
     fn test_negative_temp_file_operations_with_malicious_paths() {
         // Test temp file creation with various edge cases
         let test_cases = [
-            ("normal-file.json", true),
-            ("file-with-unicode-\u{1F4A9}.json", true),
-            ("file\0with\0nulls.json", true), // OS might reject, but shouldn't panic
-            ("file\r\nwith\r\ncontrol.json", true),
+            ("normal-file.json".to_string(), true),
+            ("file-with-unicode-\u{1F4A9}.json".to_string(), true),
+            ("file\0with\0nulls.json".to_string(), true), // OS might reject, but shouldn't panic
+            ("file\r\nwith\r\ncontrol.json".to_string(), true),
             ("very_long_filename_".repeat(100), true), // Extremely long name
         ];
 
@@ -5975,7 +5914,7 @@ mod tests {
         };
 
         let final_card1 = registry1
-            .mutate(
+            .update(
                 &card1.extension.extension_id,
                 revoke_mutation,
                 now_secs + 100,
@@ -6044,7 +5983,10 @@ mod tests {
         let mut registry1 = TrustCardRegistry::new(60, b"metamorphic-test-key");
         let mut registry2 = TrustCardRegistry::new(60, b"metamorphic-test-key");
 
-        let extension_id = &input.extension.extension_id;
+        // Own the extension id so the borrow of `input` ends before `input` is
+        // moved into `registry2.create` below (bd-yom8c cascade fix, E0505).
+        let extension_id_owned = input.extension.extension_id.clone();
+        let extension_id = extension_id_owned.as_str();
 
         registry1
             .create(input.clone(), now_secs, "trace1")
@@ -6078,7 +6020,7 @@ mod tests {
 
         // Path 1: reputation then quarantine
         registry1
-            .mutate(
+            .update(
                 extension_id,
                 reputation_mutation.clone(),
                 now_secs + 100,
@@ -6086,7 +6028,7 @@ mod tests {
             )
             .expect("reputation mutation");
         let final1 = registry1
-            .mutate(
+            .update(
                 extension_id,
                 quarantine_mutation.clone(),
                 now_secs + 200,
@@ -6096,10 +6038,10 @@ mod tests {
 
         // Path 2: quarantine then reputation
         registry2
-            .mutate(extension_id, quarantine_mutation, now_secs + 100, "trace2a")
+            .update(extension_id, quarantine_mutation, now_secs + 100, "trace2a")
             .expect("quarantine mutation");
         let final2 = registry2
-            .mutate(extension_id, reputation_mutation, now_secs + 200, "trace2b")
+            .update(extension_id, reputation_mutation, now_secs + 200, "trace2b")
             .expect("reputation mutation");
 
         // Metamorphic relation: Final state should be identical
@@ -6164,7 +6106,7 @@ mod tests {
             },
             VerifiedEvidenceRef {
                 evidence_id: "security-audit-2026-Q1".to_string(),
-                evidence_type: EvidenceType::CertificationEvidence,
+                evidence_type: EvidenceType::AuditReport,
                 verified_at_epoch: 1_735_689_600,
                 verification_receipt_hash: "b4".repeat(32),
             },
@@ -6487,8 +6429,11 @@ mod tests {
         // but different content, simulating what an attacker might try to inject
         let mut poisoned_card = original_card.clone();
         poisoned_card.reputation_score_basis_points = 9999; // Malicious modification
-        poisoned_card.security_advisory_count = 0; // Hide security issues
-        poisoned_card.signature_hex = "deadbeefdeadbeefdeadbeefdeadbeef".to_string(); // Invalid signature
+        // bd-yom8c API drift: `security_advisory_count` was removed; poison the
+        // certification level instead (inflating trust to hide issues) so the
+        // signature re-verification still has a tampered field to reject/repair.
+        poisoned_card.certification_level = CertificationLevel::Platinum;
+        poisoned_card.registry_signature = "deadbeefdeadbeefdeadbeefdeadbeef".to_string(); // Invalid signature
 
         // Insert the poisoned entry directly into cache (bypassing normal validation)
         registry.cache_by_extension.insert(
@@ -6512,11 +6457,14 @@ mod tests {
             original_card.reputation_score_basis_points
         );
         assert_eq!(
-            retrieved_card.security_advisory_count,
-            original_card.security_advisory_count
+            retrieved_card.certification_level,
+            original_card.certification_level
         );
         assert_eq!(retrieved_card.card_hash, original_card.card_hash);
-        assert_eq!(retrieved_card.signature_hex, original_card.signature_hex);
+        assert_eq!(
+            retrieved_card.registry_signature,
+            original_card.registry_signature
+        );
 
         // Verify the cache now contains the repaired legitimate card
         let cached = registry
@@ -6524,9 +6472,9 @@ mod tests {
             .get("npm:@acme/plugin")
             .expect("Cache should contain repaired entry");
         assert_eq!(cached.card.card_hash, original_card.card_hash);
-        assert_eq!(cached.card.signature_hex, original_card.signature_hex);
+        assert_eq!(cached.card.registry_signature, original_card.registry_signature);
         assert_ne!(
-            cached.card.signature_hex,
+            cached.card.registry_signature,
             "deadbeefdeadbeefdeadbeefdeadbeef"
         );
 
@@ -6537,7 +6485,7 @@ mod tests {
                 card: {
                     let mut another_poison = original_card.clone();
                     another_poison.reputation_score_basis_points = 1; // Different poison
-                    another_poison.signature_hex = "cafebabecafebabecafebabecafebabe".to_string();
+                    another_poison.registry_signature = "cafebabecafebabecafebabecafebabe".to_string();
                     another_poison
                 },
                 cached_at_secs: 1_003,
@@ -6565,7 +6513,7 @@ mod tests {
             .expect("Cache should be repaired after sync");
         assert_eq!(final_cached.card.card_hash, original_card.card_hash);
         assert_ne!(
-            final_cached.card.signature_hex,
+            final_cached.card.registry_signature,
             "cafebabecafebabecafebabecafebabe"
         );
     }
@@ -6585,7 +6533,7 @@ mod tests {
             .expect("persist");
 
         // Load using trusted file context - should use lazy validation
-        let restored = TrustCardRegistry::load_authoritative_state(
+        let mut restored = TrustCardRegistry::load_authoritative_state(
             &path,
             60,
             2_000,
@@ -6616,7 +6564,7 @@ mod tests {
             .expect("persist");
 
         // Load using untrusted network context - should use eager validation
-        let restored = TrustCardRegistry::load_authoritative_state(
+        let mut restored = TrustCardRegistry::load_authoritative_state(
             &path,
             60,
             2_000,
@@ -6788,14 +6736,20 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("bounds-test-trust-card-state.json");
 
-        // Create snapshot with too many cards (exceeding limits for untrusted sources)
+        // Create snapshot with too many cards (exceeding limits for untrusted sources).
+        // bd-yom8c API drift: there is no `TrustCard: TryFrom<TrustCardInput>`;
+        // build one signed base card via the registry, then clone it 600 times
+        // with distinct extension IDs to exceed the untrusted card-count bound.
         let mut cards_map = BTreeMap::new();
+        let mut seed_registry = TrustCardRegistry::default();
+        let base_card = seed_registry
+            .create(sample_input(), 1_000, "trace-bounds-seed")
+            .expect("create base card");
         let sample_cards: Vec<TrustCard> = (0..600)
             .map(|i| {
-                let mut card = sample_input().try_into().expect("convert");
-                let card_ref: &mut TrustCard = &mut card;
-                card_ref.extension.extension_id = format!("npm:@test/card-{i}");
-                card_ref.trust_card_version = 1;
+                let mut card = base_card.clone();
+                card.extension.extension_id = format!("npm:@test/card-{i}");
+                card.trust_card_version = 1;
                 card
             })
             .collect();
@@ -6942,7 +6896,7 @@ mod tests {
             .persist_authoritative_state(&path)
             .expect("persist");
 
-        let restored = TrustCardRegistry::load_authoritative_state(
+        let mut restored = TrustCardRegistry::load_authoritative_state(
             &path,
             60,
             2_000,

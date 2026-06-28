@@ -1074,7 +1074,8 @@ mod tests {
             db_path: "/var/lib/franken_node.db".into(),
             ..AdapterConfig::default()
         })
-        .expect_err("invalid adapter config must fail closed");
+        .err()
+        .expect("invalid adapter config must fail closed");
 
         assert!(matches!(
             err,
@@ -1200,7 +1201,7 @@ mod tests {
         adapter
             .write_legacy(PersistenceClass::ControlState, "fence_1", b"token_abc")
             .expect("should succeed");
-        let result = adapter.read_legacy(PersistenceClass::ControlState, "fence_1");
+        let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, "fence_1");
         assert!(result.found);
         assert_eq!(result.value.expect("should succeed"), b"token_abc");
         assert_eq!(result.tier, DurabilityTier::Tier1);
@@ -1212,7 +1213,7 @@ mod tests {
         adapter
             .write_legacy(PersistenceClass::AuditLog, "entry_1", b"audit_data")
             .expect("should succeed");
-        let result = adapter.read_legacy(PersistenceClass::AuditLog, "entry_1");
+        let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::AuditLog, "entry_1");
         assert!(result.found);
     }
 
@@ -1222,7 +1223,7 @@ mod tests {
         adapter
             .write_legacy(PersistenceClass::Snapshot, "snap_1", b"state")
             .expect("should succeed");
-        let result = adapter.read_legacy(PersistenceClass::Snapshot, "snap_1");
+        let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::Snapshot, "snap_1");
         assert!(result.found);
         assert_eq!(result.tier, DurabilityTier::Tier2);
     }
@@ -1233,7 +1234,7 @@ mod tests {
         adapter
             .write_legacy(PersistenceClass::Cache, "cached_1", b"val")
             .expect("should succeed");
-        let result = adapter.read_legacy(PersistenceClass::Cache, "cached_1");
+        let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::Cache, "cached_1");
         assert!(result.found);
         assert!(result.cache_hit);
         assert_eq!(result.tier, DurabilityTier::Tier3);
@@ -1242,7 +1243,7 @@ mod tests {
     #[test]
     fn test_read_missing_key() {
         let mut adapter = FrankensqliteAdapter::default();
-        let result = adapter.read_legacy(PersistenceClass::ControlState, "nonexistent");
+        let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, "nonexistent");
         assert!(!result.found);
         assert!(result.value.is_none());
     }
@@ -1256,7 +1257,7 @@ mod tests {
         adapter
             .write_legacy(PersistenceClass::ControlState, "k", b"v2")
             .expect("should succeed");
-        let result = adapter.read_legacy(PersistenceClass::ControlState, "k");
+        let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, "k");
         assert_eq!(result.value.expect("should succeed"), b"v2");
     }
 
@@ -1272,7 +1273,7 @@ mod tests {
             .expect_err("duplicate audit keys must fail closed");
 
         assert!(matches!(err, AdapterError::WriteFailure { .. }));
-        let result = adapter.read_legacy(PersistenceClass::AuditLog, "entry_1");
+        let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::AuditLog, "entry_1");
         assert_eq!(
             result
                 .value
@@ -1342,7 +1343,7 @@ mod tests {
             .write_legacy(PersistenceClass::Cache, "cache-0", b"updated")
             .expect("overwrite at store capacity should not grow the store");
         assert_eq!(adapter.store.len(), MAX_STORE_ENTRIES);
-        let updated = adapter.read_legacy(PersistenceClass::Cache, "cache-0");
+        let updated = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::Cache, "cache-0");
         assert_eq!(updated.value.as_deref(), Some(b"updated".as_slice()));
     }
 
@@ -1460,7 +1461,7 @@ mod tests {
         adapter
             .write_legacy(PersistenceClass::Cache, "k2", b"v")
             .expect("should succeed");
-        adapter.read_legacy(PersistenceClass::ControlState, "k1");
+        FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, "k1");
         let summary = adapter.summary();
         assert_eq!(summary.total_writes, 2);
         assert_eq!(summary.total_reads, 1);
@@ -1670,7 +1671,7 @@ mod tests {
             assert_eq!(write.persistence_class, *class);
             assert_eq!(write.tier, *expected_tier);
 
-            let read = adapter.read_legacy(*class, &key);
+            let read = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, *class, &key);
             assert!(read.found, "matrix row should round-trip {}", class.label());
             assert_eq!(read.value.as_deref(), Some(value.as_bytes()));
             assert_eq!(read.persistence_class, *class);
@@ -1725,7 +1726,7 @@ mod tests {
                 )
                 .expect("should succeed");
         }
-        let result = adapter.read_legacy(PersistenceClass::ControlState, "shared_key");
+        let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, "shared_key");
         assert!(result.found);
         assert_eq!(result.value.expect("should succeed"), b"value_9");
     }
@@ -1739,7 +1740,7 @@ mod tests {
                 .expect("should succeed");
         }
         for class in PersistenceClass::all() {
-            let result = adapter.read_legacy(*class, "same_key");
+            let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, *class, "same_key");
             assert!(result.found, "Missing data for class {}", class.label());
         }
     }
@@ -1797,11 +1798,11 @@ mod tests {
         let mut a1 = FrankensqliteAdapter::default();
         let mut a2 = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
-            a1.write(*class, "k", b"v").expect("should succeed");
-            a2.write(*class, "k", b"v").expect("should succeed");
+            a1.write_legacy(*class, "k", b"v").expect("should succeed");
+            a2.write_legacy(*class, "k", b"v").expect("should succeed");
         }
-        let r1 = a1.read_legacy(PersistenceClass::ControlState, "k");
-        let r2 = a2.read_legacy(PersistenceClass::ControlState, "k");
+        let r1 = FrankensqliteLegacySystemReadExt::read_legacy(&mut a1, PersistenceClass::ControlState, "k");
+        let r2 = FrankensqliteLegacySystemReadExt::read_legacy(&mut a2, PersistenceClass::ControlState, "k");
         assert_eq!(r1.value, r2.value);
     }
 
@@ -2035,7 +2036,7 @@ mod tests {
     fn missing_read_increments_read_count_without_creating_store_entry() {
         let mut adapter = FrankensqliteAdapter::default();
 
-        let result = adapter.read_legacy(PersistenceClass::Snapshot, "missing");
+        let result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::Snapshot, "missing");
 
         assert!(!result.found);
         assert!(result.value.is_none());
@@ -2090,7 +2091,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         ];
 
         for (i, malicious_key) in sql_injection_keys.iter().enumerate() {
-            let write_result = adapter.write(
+            let write_result = adapter.write_legacy(
                 PersistenceClass::ControlState,
                 malicious_key,
                 format!("test_value_{i}").as_bytes(),
@@ -2104,7 +2105,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             );
 
             // Verify the key is stored and retrievable (escaped/sanitized)
-            let read_result = adapter.read_legacy(PersistenceClass::ControlState, malicious_key);
+            let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, malicious_key);
             assert!(
                 read_result.found,
                 "malicious key should be retrievable: {}",
@@ -2136,7 +2137,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         ];
 
         for (unicode_key, unicode_value) in unicode_attacks {
-            let write_result = adapter.write(
+            let write_result = adapter.write_legacy(
                 PersistenceClass::AuditLog,
                 unicode_key,
                 unicode_value.as_bytes(),
@@ -2149,7 +2150,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             );
 
             // Verify data integrity preserved
-            let read_result = adapter.read_legacy(PersistenceClass::AuditLog, unicode_key);
+            let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::AuditLog, unicode_key);
             assert!(read_result.found);
             assert_eq!(read_result.value.unwrap(), unicode_value.as_bytes());
         }
@@ -2170,7 +2171,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let massive_key = "k".repeat(10_000_000); // 10MB key
         let massive_value = vec![0x42; 50_000_000]; // 50MB value
 
-        let write_result = adapter.write(
+        let write_result = adapter.write_legacy(
             PersistenceClass::Cache, // Use ephemeral tier to avoid persistence overhead
             &massive_key,
             &massive_value,
@@ -2179,7 +2180,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         match write_result {
             Ok(_) => {
                 // If write succeeds, verify data integrity
-                let read_result = adapter.read_legacy(PersistenceClass::Cache, &massive_key);
+                let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::Cache, &massive_key);
                 assert!(read_result.found);
                 assert_eq!(read_result.value.unwrap().len(), 50_000_000);
 
@@ -2210,7 +2211,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             let value = format!("overflow_value_{i}");
 
             let write_result =
-                adapter.write(PersistenceClass::ControlState, &key, value.as_bytes());
+                adapter.write_legacy(PersistenceClass::ControlState, &key, value.as_bytes());
 
             // Should handle overflow gracefully with saturating arithmetic
             assert!(
@@ -2218,7 +2219,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
                 "overflow boundary operation should succeed"
             );
 
-            let read_result = adapter.read_legacy(PersistenceClass::ControlState, &key);
+            let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, &key);
             assert!(read_result.found);
         }
 
@@ -2250,7 +2251,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         // Write all collision candidates rapidly
         for (i, key) in collision_candidates.iter().enumerate() {
             for class in PersistenceClass::all() {
-                let result = adapter.write(*class, key, format!("value_{class}_{i}").as_bytes());
+                let result = adapter.write_legacy(*class, key, format!("value_{class}_{i}").as_bytes());
 
                 assert!(result.is_ok(), "collision attack should not break storage");
             }
@@ -2259,7 +2260,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         // Verify all keys are independently accessible (no collisions)
         for (i, key) in collision_candidates.iter().enumerate() {
             for class in PersistenceClass::all() {
-                let read_result = adapter.read_legacy(*class, key);
+                let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, *class, key);
                 assert!(
                     read_result.found,
                     "collision victim key should still be accessible"
@@ -2288,12 +2289,12 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         for (i, payload) in json_injection_payloads.iter().enumerate() {
             let key = format!("json_injection_{i}");
 
-            let write_result = adapter.write(PersistenceClass::Snapshot, &key, payload);
+            let write_result = adapter.write_legacy(PersistenceClass::Snapshot, &key, payload);
 
             assert!(write_result.is_ok(), "JSON payload should be stored safely");
 
             // Verify data integrity
-            let read_result = adapter.read_legacy(PersistenceClass::Snapshot, &key);
+            let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::Snapshot, &key);
             assert!(read_result.found);
             assert_eq!(read_result.value.unwrap(), *payload);
         }
@@ -2313,16 +2314,16 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         // Create audit entries with varying content sizes to test timing consistency
-        let timing_test_entries = vec![
-            ("short", b"a"),
-            ("medium", &vec![0x42; 1000]),
-            ("large", &vec![0x43; 100_000]),
-            ("massive", &vec![0x44; 1_000_000]),
+        let timing_test_entries: Vec<(&str, Vec<u8>)> = vec![
+            ("short", b"a".to_vec()),
+            ("medium", vec![0x42; 1000]),
+            ("large", vec![0x43; 100_000]),
+            ("massive", vec![0x44; 1_000_000]),
         ];
 
         for (key, value) in &timing_test_entries {
             adapter
-                .write(PersistenceClass::AuditLog, key, value)
+                .write_legacy(PersistenceClass::AuditLog, key, value)
                 .expect("audit write should succeed");
         }
 
@@ -2351,19 +2352,17 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         // Control characters in keys and values that could pollute events
-        let control_char_tests = vec![
+        let key4 = format!("key{}", String::from_utf8_lossy(&[0x7F, 0x80, 0x81]));
+        let control_char_tests: Vec<(&str, &[u8])> = vec![
             ("key\x00\x01\x02", b"value\x03\x04\x05"),
             ("key\r\ninjection", b"value\r\nHTTP/1.1 200 OK"),
             ("key\t\t\t", b"value\x1B[31mred\x1B[0m"), // ANSI escape sequences
-            (
-                &format!("key{}", String::from_utf8_lossy(&[0x7F, 0x80, 0x81])),
-                b"value\xFF\xFE\xFD",
-            ), // High control chars
+            (&key4, b"value\xFF\xFE\xFD"),             // High control chars
         ];
 
         for (key, value) in control_char_tests {
             adapter
-                .write(PersistenceClass::ControlState, key, value)
+                .write_legacy(PersistenceClass::ControlState, key, value)
                 .expect("control character write should succeed");
         }
 
@@ -2428,7 +2427,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
 
         for i in 0..iterations {
             adapter
-                .write(
+                .write_legacy(
                     PersistenceClass::Cache,
                     &format!("overflow_event_{i}"),
                     b"test",
@@ -2463,19 +2462,21 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         // Keys designed to test BTreeMap ordering assumptions
-        let ordering_attack_keys = vec![
-            "\x00\x00\x00",                                // Null prefix
-            "\x00\x00\x01",                                // Minimal increment
-            &String::from_utf8_lossy(&[0xFF, 0xFF, 0xFF]), // Maximum bytes
-            &String::from_utf8_lossy(&[0x80, 0x00, 0x00]), // Sign bit boundary
-            "a\x00z",                                      // Null in middle
-            "z\x00a",                                      // Reverse null pattern
+        let max_bytes = String::from_utf8_lossy(&[0xFF, 0xFF, 0xFF]).into_owned();
+        let sign_bit = String::from_utf8_lossy(&[0x80, 0x00, 0x00]).into_owned();
+        let ordering_attack_keys: Vec<&str> = vec![
+            "\x00\x00\x00", // Null prefix
+            "\x00\x00\x01", // Minimal increment
+            &max_bytes,     // Maximum bytes
+            &sign_bit,      // Sign bit boundary
+            "a\x00z",       // Null in middle
+            "z\x00a",       // Reverse null pattern
         ];
 
         // Write in one order
         for (i, key) in ordering_attack_keys.iter().enumerate() {
             adapter
-                .write(
+                .write_legacy(
                     PersistenceClass::ControlState,
                     key,
                     &format!("value_{i}").as_bytes(),
@@ -2485,7 +2486,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
 
         // Verify all keys are accessible regardless of ordering
         for (i, key) in ordering_attack_keys.iter().enumerate() {
-            let read_result = adapter.read_legacy(PersistenceClass::ControlState, key);
+            let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, key);
             assert!(
                 read_result.found,
                 "ordering attack key should be accessible: {:?}",
@@ -2509,11 +2510,11 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
 
             // Write data to each class
             adapter
-                .write(*class, "test_key", b"test_value")
+                .write_legacy(*class, "test_key", b"test_value")
                 .expect("tier mapping write should succeed");
 
             // Verify read result has correct tier
-            let read_result = adapter.read_legacy(*class, "test_key");
+            let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, *class, "test_key");
             assert_eq!(
                 read_result.tier, expected_tier,
                 "tier mapping mismatch for class {:?}",
@@ -2559,13 +2560,13 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         // Test operations at overflow boundary
         for i in 0..10 {
             let key = format!("overflow_test_{i}");
-            let _ = adapter.write(PersistenceClass::ControlState, &key, b"test");
-            let _ = adapter.read_legacy(PersistenceClass::ControlState, &key);
+            let _ = adapter.write_legacy(PersistenceClass::ControlState, &key, b"test");
+            let _ = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, &key);
         }
 
         // Create write failure to test failure counter saturation
         for _ in 0..5 {
-            let _ = adapter.write(PersistenceClass::AuditLog, "duplicate", b"test");
+            let _ = adapter.write_legacy(PersistenceClass::AuditLog, "duplicate", b"test");
         }
 
         // Test replay counter overflow
@@ -2581,7 +2582,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         assert_eq!(adapter.replay_mismatches, usize::MAX);
 
         // Adapter should remain functional after overflow
-        let result = adapter.write(PersistenceClass::Cache, "post_overflow", b"still_works");
+        let result = adapter.write_legacy(PersistenceClass::Cache, "post_overflow", b"still_works");
         assert!(result.is_ok());
     }
 
@@ -2590,21 +2591,21 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         // Create audit entries with different hash characteristics to test timing
-        let timing_test_entries = vec![
-            ("short_hash", b"a"),                // Short value
-            ("medium_hash", &vec![0xAA; 1000]),  // Medium value
-            ("long_hash", &vec![0xBB; 100_000]), // Long value
-            ("zero_hash", &vec![0x00; 50_000]),  // All zeros
-            ("max_hash", &vec![0xFF; 50_000]),   // All ones
+        let timing_test_entries: Vec<(&str, Vec<u8>)> = vec![
+            ("short_hash", b"a".to_vec()),      // Short value
+            ("medium_hash", vec![0xAA; 1000]),  // Medium value
+            ("long_hash", vec![0xBB; 100_000]), // Long value
+            ("zero_hash", vec![0x00; 50_000]),  // All zeros
+            ("max_hash", vec![0xFF; 50_000]),   // All ones
             (
                 "pattern_hash",
-                &(0..10_000).map(|i| (i % 256) as u8).collect::<Vec<_>>(),
+                (0..10_000).map(|i| (i % 256) as u8).collect::<Vec<u8>>(),
             ), // Pattern
         ];
 
         for (key, value) in &timing_test_entries {
             adapter
-                .write(PersistenceClass::AuditLog, key, value)
+                .write_legacy(PersistenceClass::AuditLog, key, value)
                 .expect("audit write should succeed");
         }
 
@@ -2652,7 +2653,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         // Write operations and verify latency measurement handles overflow gracefully
         for i in 0..100 {
             let key = format!("latency_test_{i}");
-            let result = adapter.write(PersistenceClass::ControlState, &key, b"timing_test");
+            let result = adapter.write_legacy(PersistenceClass::ControlState, &key, b"timing_test");
 
             assert!(result.is_ok());
             let latency = result.unwrap().latency_us;
@@ -2696,11 +2697,11 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
                 "k".repeat(length)
             };
 
-            let result = adapter.write(PersistenceClass::Cache, &key, b"boundary_test");
+            let result = adapter.write_legacy(PersistenceClass::Cache, &key, b"boundary_test");
 
             if result.is_ok() {
                 // If write succeeds, verify read works with same key
-                let read_result = adapter.read_legacy(PersistenceClass::Cache, &key);
+                let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::Cache, &key);
                 assert!(
                     read_result.found,
                     "key length {} should be readable",
@@ -2715,7 +2716,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         }
 
         // Verify adapter remains functional after boundary testing
-        let normal_result = adapter.write(PersistenceClass::ControlState, "normal", b"test");
+        let normal_result = adapter.write_legacy(PersistenceClass::ControlState, "normal", b"test");
         assert!(normal_result.is_ok());
     }
 
@@ -2735,7 +2736,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             let key = format!("timestamp_test_{i}");
 
             // Write with boundary timestamp
-            let result = adapter.write(
+            let result = adapter.write_legacy(
                 PersistenceClass::ControlState,
                 &key,
                 format!("timestamp_{timestamp}").as_bytes(),
@@ -2743,7 +2744,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             assert!(result.is_ok());
 
             // Verify timestamp values don't cause comparison issues
-            let read_result = adapter.read_legacy(PersistenceClass::ControlState, &key);
+            let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, &key);
             assert!(read_result.found);
 
             // Test schema migration with boundary timestamps
@@ -2758,7 +2759,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
 
         // Test edge case: timestamps in edge order
         for class in PersistenceClass::all() {
-            let result = adapter.write(*class, "edge_ordering", b"test");
+            let result = adapter.write_legacy(*class, "edge_ordering", b"test");
             assert!(result.is_ok());
         }
 
@@ -2791,20 +2792,20 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             // Create different event types to test detail handling
             match i % 3 {
                 0 => {
-                    let _ = adapter.write(PersistenceClass::ControlState, &key, b"test");
+                    let _ = adapter.write_legacy(PersistenceClass::ControlState, &key, b"test");
                 }
                 1 => {
-                    let _ = adapter.write(PersistenceClass::AuditLog, &key, b"audit");
+                    let _ = adapter.write_legacy(PersistenceClass::AuditLog, &key, b"audit");
                 }
                 _ => {
-                    let _ = adapter.read_legacy(PersistenceClass::ControlState, &key);
+                    let _ = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, &key);
                 }
             }
         }
 
         // Force error events to test error detail collision resistance
         for i in 0..5 {
-            let _ = adapter.write(PersistenceClass::AuditLog, "duplicate_error", b"error_test");
+            let _ = adapter.write_legacy(PersistenceClass::AuditLog, "duplicate_error", b"error_test");
         }
 
         // Verify event details remain distinct despite potential collisions
@@ -2844,14 +2845,14 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         adapter.replay_mismatches = usize::MAX - 4;
 
         // Operations should use saturating_add to prevent wraparound
-        let _ = adapter.write(PersistenceClass::ControlState, "overflow_test", b"data");
+        let _ = adapter.write_legacy(PersistenceClass::ControlState, "overflow_test", b"data");
         assert_eq!(
             adapter.write_count,
             usize::MAX,
             "write_count should saturate at MAX"
         );
 
-        let _ = adapter.read_legacy(PersistenceClass::ControlState, "overflow_test");
+        let _ = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, "overflow_test");
         assert_eq!(
             adapter.read_count,
             usize::MAX,
@@ -2859,8 +2860,8 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         );
 
         // Force write failure to test failure counter saturation
-        let _ = adapter.write(PersistenceClass::AuditLog, "duplicate", b"test");
-        let _ = adapter.write(PersistenceClass::AuditLog, "duplicate", b"tampered");
+        let _ = adapter.write_legacy(PersistenceClass::AuditLog, "duplicate", b"test");
+        let _ = adapter.write_legacy(PersistenceClass::AuditLog, "duplicate", b"tampered");
         assert_eq!(
             adapter.write_failures,
             usize::MAX,
@@ -2885,7 +2886,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let tampered_data = b"malicious_audit_tamper";
 
         adapter
-            .write(PersistenceClass::AuditLog, "audit_entry", original_data)
+            .write_legacy(PersistenceClass::AuditLog, "audit_entry", original_data)
             .expect("original write should succeed");
 
         // Tamper with stored value to create hash mismatch
@@ -2914,7 +2915,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             let key = format!("timing_test_{size}");
             let data = vec![0x42; size];
             adapter
-                .write(PersistenceClass::AuditLog, &key, &data)
+                .write_legacy(PersistenceClass::AuditLog, &key, &data)
                 .unwrap();
         }
 
@@ -3003,7 +3004,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         ];
 
         for (key, data) in test_data {
-            let write_result = adapter.write(PersistenceClass::Cache, key, &data);
+            let write_result = adapter.write_legacy(PersistenceClass::Cache, key, &data);
 
             match write_result {
                 Ok(result) => {
@@ -3011,7 +3012,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
                     assert!(result.latency_us <= u64::MAX, "latency should not overflow");
 
                     // Verify data length is preserved correctly
-                    let read_result = adapter.read_legacy(PersistenceClass::Cache, key);
+                    let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::Cache, key);
                     assert_eq!(
                         read_result.value.unwrap().len(),
                         data.len(),
@@ -3036,9 +3037,9 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             let small_test_key = format!("boundary_len_{length}");
             let small_test_data = vec![0u8; std::cmp::min(length, 10000)];
 
-            let result = adapter.write(PersistenceClass::Cache, &small_test_key, &small_test_data);
+            let result = adapter.write_legacy(PersistenceClass::Cache, &small_test_key, &small_test_data);
             if result.is_ok() {
-                let read_result = adapter.read_legacy(PersistenceClass::Cache, &small_test_key);
+                let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::Cache, &small_test_key);
                 assert!(
                     read_result.found,
                     "boundary length data should be retrievable"
@@ -3049,7 +3050,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
 
         // Verify adapter remains functional after boundary testing
         let normal_result =
-            adapter.write(PersistenceClass::ControlState, "post_boundary", b"normal");
+            adapter.write_legacy(PersistenceClass::ControlState, "post_boundary", b"normal");
         assert!(normal_result.is_ok(), "adapter should remain functional");
     }
 
@@ -3076,13 +3077,13 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         for (key, value) in &collision_test_cases {
             // Test across different persistence classes to verify separation
             for class in PersistenceClass::all() {
-                let result = adapter.write(*class, key, value.as_bytes());
+                let result = adapter.write_legacy(*class, key, value.as_bytes());
                 assert!(
                     result.is_ok(),
                     "collision test case should be handled safely"
                 );
 
-                let read_result = adapter.read_legacy(*class, key);
+                let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, *class, key);
                 assert_eq!(
                     read_result.value.unwrap(),
                     value.as_bytes(),
@@ -3355,7 +3356,7 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         );
 
         #[allow(deprecated)]
-        let read_result = adapter.read_legacy(PersistenceClass::ControlState, "legacy-test");
+        let read_result = FrankensqliteLegacySystemReadExt::read_legacy(&mut adapter, PersistenceClass::ControlState, "legacy-test");
         assert!(
             read_result.found,
             "legacy read should use system permissions"
@@ -3369,10 +3370,11 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
         let caller = CallerContext::system("storage::tests", "key-string-optimization");
 
         // Test representative namespace.key combinations
-        let test_cases = vec![
+        let long_key = "a".repeat(50);
+        let test_cases: Vec<(&str, &[u8])> = vec![
             ("short-key", b"value1"),
             ("namespace.subsystem.component", b"value2"),
-            ("a".repeat(50).as_str(), b"long-key-value"),
+            (long_key.as_str(), b"long-key-value"),
         ];
 
         for (key, value) in test_cases {

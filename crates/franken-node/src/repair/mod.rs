@@ -6,7 +6,7 @@ mod metamorphic_tests;
 #[cfg(test)]
 mod tests {
     use super::proof_carrying_decode::{
-        AlgorithmId, DecodeResult, Fragment, ProofAuditEvent, ProofCarryingDecodeError,
+        AlgorithmId, Attestation, DecodeResult, Fragment, ProofAuditEvent, ProofCarryingDecodeError,
         ProofCarryingDecoder, ProofMode, ProofVerificationApi, REPAIR_PROOF_INVALID, RepairProof,
         VerificationResult,
     };
@@ -812,7 +812,7 @@ mod tests {
                     // Verify consistency of returned data
                     assert_eq!(decode_result.object_id, object_id);
 
-                    if let Some(proof) = decode_result.proof {
+                    if let Some(proof) = &decode_result.proof {
                         assert_eq!(proof.object_id, object_id);
                         assert_eq!(proof.trace_id, trace_id);
                         assert_eq!(proof.timestamp_epoch_secs, timestamp);
@@ -1277,9 +1277,9 @@ mod tests {
         }
 
         // Analyze results for consistency
-        let mut valid_count = 0;
-        let mut invalid_count = 0;
-        let mut unknown_algo_count = 0;
+        let mut valid_count: u64 = 0;
+        let mut invalid_count: u64 = 0;
+        let mut unknown_algo_count: u64 = 0;
 
         for (verifier_idx, verification) in results {
             match verification {
@@ -1469,12 +1469,12 @@ mod tests {
         use super::proof_carrying_decode::{ProofCarryingDecoder, ProofMode};
 
         // Test all proof mode variants with extreme configurations
-        let modes = [ProofMode::Mandatory, ProofMode::Optional];
+        let modes = [ProofMode::Mandatory, ProofMode::Advisory];
         let extreme_configs = [
-            ("", ""),                                 // Empty signer and secret
+            ("".to_string(), "".to_string()), // Empty signer and secret
             ("x".repeat(100000), "y".repeat(100000)), // Very long signer and secret
-            ("\x00\r\n\t", "\x1b[31m\x00"),           // Control characters
-            ("🚀🔐💀", "🛡️🔥⚠️"),                     // Unicode symbols
+            ("\x00\r\n\t".to_string(), "\x1b[31m\x00".to_string()), // Control characters
+            ("🚀🔐💀".to_string(), "🛡️🔥⚠️".to_string()), // Unicode symbols
         ];
 
         for mode in &modes {
@@ -1545,20 +1545,20 @@ mod tests {
 
         // Test algorithm ID creation with potential security issues
         let security_test_algorithms = [
-            "",                                     // Empty algorithm ID
-            " ",                                    // Whitespace-only
-            "\0",                                   // Null byte
-            "algo\r\ninjection",                    // CRLF injection
-            "algo\x00null",                         // Null byte injection
-            "algo\x1b[31mred\x1b[0m",               // ANSI escape sequences
-            "../../../etc/passwd",                  // Path traversal
-            "CON",                                  // Windows reserved name
-            "simple\tconcatspaced",                 // Tab character
-            "\u{FEFF}algo",                         // Unicode BOM
-            "\u{200B}invisible\u{200B}algo",        // Zero-width spaces
-            "algo\u{202E}reverse",                  // Right-to-left override
+            "".to_string(),                          // Empty algorithm ID
+            " ".to_string(),                         // Whitespace-only
+            "\0".to_string(),                        // Null byte
+            "algo\r\ninjection".to_string(),         // CRLF injection
+            "algo\x00null".to_string(),              // Null byte injection
+            "algo\x1b[31mred\x1b[0m".to_string(),    // ANSI escape sequences
+            "../../../etc/passwd".to_string(),       // Path traversal
+            "CON".to_string(),                       // Windows reserved name
+            "simple\tconcatspaced".to_string(),      // Tab character
+            "\u{FEFF}algo".to_string(),              // Unicode BOM
+            "\u{200B}invisible\u{200B}algo".to_string(), // Zero-width spaces
+            "algo\u{202E}reverse".to_string(),       // Right-to-left override
             format!("long_{}", "x".repeat(100000)), // Very long algorithm ID
-            "simple_concat",                        // Valid reference for comparison
+            "simple_concat".to_string(),             // Valid reference for comparison
         ];
 
         let mut decoder = decoder();
@@ -1778,7 +1778,7 @@ mod tests {
         let unknown_algo_result =
             verifier("repair-secret").verify(&proof, &fragment_digests, &proof.output_hash);
         assert_eq!(unknown_algo_result.event_code(), REPAIR_PROOF_INVALID);
-        match unknown_algo_result {
+        match unknown_algo_result.clone() {
             VerificationResult::UnknownAlgorithm { algorithm_id } => {
                 assert_eq!(algorithm_id.as_str(), "unknown-algorithm");
             }
@@ -1792,7 +1792,7 @@ mod tests {
         let wrong_output_result =
             verifier("repair-secret").verify(&proof, &fragment_digests, "wrong-output-hash");
         assert_eq!(wrong_output_result.event_code(), REPAIR_PROOF_INVALID);
-        match wrong_output_result {
+        match wrong_output_result.clone() {
             VerificationResult::OutputHashMismatch { expected, actual } => {
                 assert_eq!(expected, "wrong-output-hash");
                 assert_eq!(actual, proof.output_hash);
@@ -1806,7 +1806,7 @@ mod tests {
         let invalid_frag_result =
             verifier("repair-secret").verify(&proof, &wrong_fragments, &proof.output_hash);
         assert_eq!(invalid_frag_result.event_code(), REPAIR_PROOF_INVALID);
-        match invalid_frag_result {
+        match invalid_frag_result.clone() {
             VerificationResult::InvalidFragmentHash {
                 index,
                 expected,
@@ -1914,7 +1914,7 @@ mod tests {
             assert!(json_result.is_ok(), "Audit events should serialize to JSON");
 
             if let Ok(json) = json_result {
-                let parsed_result = serde_json::from_str(&json);
+                let parsed_result = serde_json::from_str::<ProofAuditEvent>(&json);
                 assert!(
                     parsed_result.is_ok(),
                     "Audit events should deserialize from JSON"
@@ -1926,8 +1926,8 @@ mod tests {
         let extreme_decoder_result = std::panic::catch_unwind(|| {
             ProofCarryingDecoder::new(
                 ProofMode::Mandatory,
-                "x".repeat(100000), // Very long signer ID
-                "y".repeat(100000), // Very long secret
+                &"x".repeat(100000), // Very long signer ID
+                &"y".repeat(100000), // Very long secret
             )
         });
 
@@ -2172,6 +2172,16 @@ mod tests {
                         } => {
                             assert_eq!(err_obj_id, object_id);
                         }
+                        ProofCarryingDecodeError::InvalidProof {
+                            object_id: err_obj_id,
+                            reason,
+                        } => {
+                            assert_eq!(err_obj_id, object_id);
+                            assert!(!reason.is_empty(), "Error reason should not be empty");
+                        }
+                        ProofCarryingDecodeError::CapacityExceeded { resource, .. } => {
+                            assert!(!resource.is_empty(), "Capacity error should name a resource");
+                        }
                     }
                 }
             }
@@ -2193,13 +2203,16 @@ mod tests {
             "Audit log should only contain successful operations"
         );
 
-        // Test error serialization and deserialization
+        // Test error serialization and deserialization.
+        // ProofCarryingDecodeError is not serde-serializable in the current API, so
+        // round-trip its stable string representation (code + Display message) instead.
         for (_, _, result) in &results {
             if let Err(error) = result {
-                let json_result = serde_json::to_string(error);
+                let serializable = (error.code(), error.to_string());
+                let json_result = serde_json::to_string(&serializable);
                 match json_result {
                     Ok(json) => {
-                        let parsed_result: Result<ProofCarryingDecodeError, _> =
+                        let parsed_result: Result<(String, String), _> =
                             serde_json::from_str(&json);
                         assert!(
                             parsed_result.is_ok(),
@@ -2275,7 +2288,7 @@ mod tests {
         let mut decoder = decoder();
 
         for (test_name, attack_identifier) in unicode_attack_patterns {
-            let attack_result = std::panic::catch_unwind(|| {
+            let attack_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Test with Unicode attack in object ID
                 let fragments = vec![Fragment {
                     fragment_id: attack_identifier.to_string(),
@@ -2345,8 +2358,8 @@ mod tests {
                     }
                 }
 
-                Ok(())
-            });
+                Ok::<(), ()>(())
+            }));
 
             assert!(
                 attack_result.is_ok(),
@@ -2392,7 +2405,7 @@ mod tests {
         ];
 
         for (timestamp, test_name) in overflow_timestamps {
-            let overflow_result = std::panic::catch_unwind(|| {
+            let overflow_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let decode_result = decoder.repair_reconstruct(
                     // ubs:ignore - repair proof decoder API, not JWT parsing.
                     &format!("overflow_obj_{}", test_name),
@@ -2470,8 +2483,8 @@ mod tests {
                     }
                 }
 
-                Ok(())
-            });
+                Ok::<(), ()>(())
+            }));
 
             assert!(
                 overflow_result.is_ok(),
@@ -2515,7 +2528,7 @@ mod tests {
                 (0..10000)
                     .map(|i| Fragment {
                         fragment_id: format!("small_frag_{:05}", i),
-                        data: vec![i as u8 % 256; 10],
+                        data: vec![(i % 256) as u8; 10],
                     })
                     .collect(),
             ),
@@ -2573,7 +2586,7 @@ mod tests {
         ];
 
         for (test_name, fragments) in memory_exhaustion_patterns {
-            let memory_test_result = std::panic::catch_unwind(|| {
+            let memory_test_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let start_time = std::time::Instant::now();
 
                 let decode_result = decoder.repair_reconstruct(
@@ -2662,8 +2675,8 @@ mod tests {
                     test_name
                 );
 
-                Ok(())
-            });
+                Ok::<(), ()>(())
+            }));
 
             assert!(
                 memory_test_result.is_ok(),
@@ -2727,7 +2740,7 @@ mod tests {
         ];
 
         for (test_name, algorithm_id) in algorithm_attack_patterns {
-            let injection_result = std::panic::catch_unwind(|| {
+            let injection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Test algorithm registration with injection pattern
                 let algo = AlgorithmId::new(algorithm_id);
                 decoder.register_algorithm(algo.clone());
@@ -2821,8 +2834,8 @@ mod tests {
                     }
                 }
 
-                Ok(())
-            });
+                Ok::<(), ()>(())
+            }));
 
             assert!(
                 injection_result.is_ok(),
@@ -2957,7 +2970,7 @@ mod tests {
         let algorithm = AlgorithmId::new("simple_concat");
 
         // Test 1: Rapid operations to overflow audit capacity
-        let mut successful_operations = 0;
+        let mut successful_operations: u64 = 0;
         for i in 0..200 {
             let object_id = format!("rapid_audit_test_{:04}", i);
             let trace_id = format!("rapid_trace_{:04}", i);
@@ -3005,8 +3018,8 @@ mod tests {
                                 i
                             );
                             assert!(
-                                entry.timestamp_epoch_secs >= 600,
-                                "Timestamp should be reasonable at index {}, iteration {}",
+                                !entry.proof_hash.is_empty(),
+                                "Proof hash should be present at index {}, iteration {}",
                                 idx,
                                 i
                             );
@@ -3067,7 +3080,7 @@ mod tests {
         ];
 
         for (test_name, object_id, trace_id) in corruption_test_cases {
-            let corruption_result = std::panic::catch_unwind(|| {
+            let corruption_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let decode_result =
                     decoder.repair_reconstruct(object_id, &fragments, &algorithm, 700, trace_id); // ubs:ignore - repair proof decoder API, not JWT parsing.
 
@@ -3118,14 +3131,14 @@ mod tests {
                         test_name
                     );
                     assert!(
-                        entry.timestamp_epoch_secs >= 600,
-                        "All timestamps should be reasonable: {}",
+                        !entry.proof_hash.is_empty(),
+                        "All audit entries should carry a proof hash: {}",
                         test_name
                     );
                 }
 
-                Ok(())
-            });
+                Ok::<(), ()>(())
+            }));
 
             assert!(
                 corruption_result.is_ok(),
@@ -3186,7 +3199,7 @@ mod tests {
         ];
 
         for (test_name, algorithm_name, sign_secret, verify_secret) in algorithm_confusion_tests {
-            let confusion_result = std::panic::catch_unwind(|| {
+            let confusion_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let algorithm = AlgorithmId::new(algorithm_name);
 
                 // Generate proof with first secret
@@ -3285,8 +3298,8 @@ mod tests {
                     }
                 }
 
-                Ok(())
-            });
+                Ok::<(), ()>(())
+            }));
 
             assert!(
                 confusion_result.is_ok(),
@@ -3401,7 +3414,11 @@ mod tests {
         );
 
         let legitimate_proof = legitimate_result.unwrap().proof.expect("Should have proof");
-        let legitimate_verification = verifier_api.verify(&legitimate_proof);
+        let legitimate_verification = verifier_api.verify(
+            &legitimate_proof,
+            &legitimate_proof.input_fragment_hashes,
+            &legitimate_proof.output_hash,
+        );
         assert!(
             legitimate_verification.is_valid(),
             "Legitimate proof should verify"
@@ -3426,7 +3443,11 @@ mod tests {
                 Ok(result) => {
                     // If poisoning succeeds, verify integrity is maintained
                     if let Some(poisoned_proof) = result.proof {
-                        let poisoned_verification = verifier_api.verify(&poisoned_proof);
+                        let poisoned_verification = verifier_api.verify(
+                            &poisoned_proof,
+                            &poisoned_proof.input_fragment_hashes,
+                            &poisoned_proof.output_hash,
+                        );
 
                         // Verify poisoned proof doesn't compromise verification
                         if poisoned_verification.is_valid() {
@@ -3444,7 +3465,7 @@ mod tests {
                             );
 
                             // Verify fragment hashes in proof are distinct
-                            let fragment_hashes = &poisoned_proof.fragment_hashes;
+                            let fragment_hashes = &poisoned_proof.input_fragment_hashes;
                             let mut hash_set = std::collections::HashSet::new();
                             for hash in fragment_hashes {
                                 assert!(
@@ -3524,102 +3545,106 @@ mod tests {
             .expect("Base decode should succeed");
 
         let base_proof = legitimate_result.proof.expect("Should have proof");
-        let base_verification = verifier_api.verify(&base_proof);
+        let base_verification = verifier_api.verify(
+            &base_proof,
+            &base_proof.input_fragment_hashes,
+            &base_proof.output_hash,
+        );
         assert!(base_verification.is_valid(), "Base proof should be valid");
 
         // Attempt various signature malleability attacks
         let malleability_attacks = [
             // Length manipulation
             (
-                format!("{}00", base_proof.attestation_signature),
+                format!("{}00", base_proof.attestation.signature),
                 "Length extension attack",
             ),
             (
                 base_proof
-                    .attestation_signature
+                    .attestation.signature
                     .chars()
-                    .take(base_proof.attestation_signature.len() - 2)
+                    .take(base_proof.attestation.signature.len() - 2)
                     .collect(),
                 "Length truncation attack",
             ),
             // Encoding manipulation
             (
-                base_proof.attestation_signature.to_uppercase(),
+                base_proof.attestation.signature.to_uppercase(),
                 "Case manipulation attack",
             ),
             (
-                base_proof.attestation_signature.to_lowercase(),
+                base_proof.attestation.signature.to_lowercase(),
                 "Case downgrade attack",
             ),
             (
-                format!("{}\x00", base_proof.attestation_signature),
+                format!("{}\x00", base_proof.attestation.signature),
                 "Null termination attack",
             ),
             (
-                format!("\x00{}", base_proof.attestation_signature),
+                format!("\x00{}", base_proof.attestation.signature),
                 "Null prefix attack",
             ),
             // Padding attacks
             (
-                format!("{}{}", base_proof.attestation_signature, "\x3d\x3d"),
+                format!("{}{}", base_proof.attestation.signature, "\x3d\x3d"),
                 "Base64 padding attack",
             ),
             (
-                format!("{}{}", base_proof.attestation_signature, "\x3d\x3d\x3d"),
+                format!("{}{}", base_proof.attestation.signature, "\x3d\x3d\x3d"),
                 "Extended padding attack",
             ),
             (
                 base_proof
-                    .attestation_signature
+                    .attestation.signature
                     .trim_end_matches('=')
                     .to_string(),
                 "Padding removal attack",
             ),
             // Whitespace attacks
             (
-                format!(" {}", base_proof.attestation_signature),
+                format!(" {}", base_proof.attestation.signature),
                 "Leading whitespace attack",
             ),
             (
-                format!("{} ", base_proof.attestation_signature),
+                format!("{} ", base_proof.attestation.signature),
                 "Trailing whitespace attack",
             ),
             (
-                format!("{}\n", base_proof.attestation_signature),
+                format!("{}\n", base_proof.attestation.signature),
                 "Newline injection attack",
             ),
             (
-                format!("{}\r", base_proof.attestation_signature),
+                format!("{}\r", base_proof.attestation.signature),
                 "Carriage return attack",
             ),
             (
-                format!("{}\t", base_proof.attestation_signature),
+                format!("{}\t", base_proof.attestation.signature),
                 "Tab injection attack",
             ),
             // Unicode attacks
             (
-                format!("{}\u{200B}", base_proof.attestation_signature),
+                format!("{}\u{200B}", base_proof.attestation.signature),
                 "Zero-width space attack",
             ),
             (
-                format!("{}\u{FEFF}", base_proof.attestation_signature),
+                format!("{}\u{FEFF}", base_proof.attestation.signature),
                 "BOM injection attack",
             ),
             (
-                format!("{}\u{202E}evil", base_proof.attestation_signature),
+                format!("{}\u{202E}evil", base_proof.attestation.signature),
                 "Bidirectional override attack",
             ),
             // Repetition attacks
             (
-                base_proof.attestation_signature.repeat(2),
+                base_proof.attestation.signature.repeat(2),
                 "Signature duplication attack",
             ),
             (
                 format!(
                     "{}{}",
-                    base_proof.attestation_signature,
+                    base_proof.attestation.signature,
                     base_proof
-                        .attestation_signature
+                        .attestation.signature
                         .chars()
                         .rev()
                         .collect::<String>()
@@ -3637,16 +3662,25 @@ mod tests {
             let malicious_proof = RepairProof {
                 proof_id: base_proof.proof_id.clone(),
                 object_id: format!("malleability_attack_{}", attack_idx),
-                fragment_hashes: base_proof.fragment_hashes.clone(),
+                input_fragment_hashes: base_proof.input_fragment_hashes.clone(),
                 algorithm_id: base_proof.algorithm_id.clone(),
                 output_hash: base_proof.output_hash.clone(),
+                fragment_count: base_proof.fragment_count,
                 timestamp_epoch_secs: base_proof.timestamp_epoch_secs,
                 trace_id: format!("malleability_trace_{}", attack_idx),
-                attestation_signature: malicious_signature.clone(),
+                attestation: Attestation {
+                    signer_id: base_proof.attestation.signer_id.clone(),
+                    signature: malicious_signature.clone(),
+                    payload_hash: base_proof.attestation.payload_hash.clone(),
+                },
             };
 
             // Test malicious proof verification
-            let malicious_verification = verifier_api.verify(&malicious_proof);
+            let malicious_verification = verifier_api.verify(
+                &malicious_proof,
+                &malicious_proof.input_fragment_hashes,
+                &malicious_proof.output_hash,
+            );
 
             // Verify malleability attack is detected and rejected
             assert!(
@@ -3660,14 +3694,9 @@ mod tests {
                 VerificationResult::InvalidSignature => {
                     // Expected behavior for signature attacks
                 }
-                VerificationResult::ProofFormatError { ref reason } => {
-                    // Also acceptable - format errors due to manipulation
-                    assert!(
-                        reason.contains("signature") || reason.contains("format"),
-                        "Attack {}: Format error should be signature-related",
-                        attack_idx
-                    );
-                }
+                // NOTE(bd-yom8c): VerificationResult::ProofFormatError was removed from the
+                // API; a tampered signature now always surfaces as InvalidSignature, so any
+                // other result is an unexpected (non-rejecting) outcome.
                 _ => assert!(
                     false,
                     "Attack {}: Unexpected verification result for malleability attack",
@@ -3676,7 +3705,11 @@ mod tests {
             }
 
             // Test that malicious proof doesn't affect subsequent legitimate operations
-            let post_attack_verification = verifier_api.verify(&base_proof);
+            let post_attack_verification = verifier_api.verify(
+                &base_proof,
+                &base_proof.input_fragment_hashes,
+                &base_proof.output_hash,
+            );
             assert!(
                 post_attack_verification.is_valid(),
                 "Attack {}: Base proof should remain valid after malleability attack",
@@ -3707,15 +3740,24 @@ mod tests {
         let substitution_proof = RepairProof {
             proof_id: base_proof.proof_id.clone(),
             object_id: "signature_substitution_attack".to_string(),
-            fragment_hashes: base_proof.fragment_hashes.clone(),
+            input_fragment_hashes: base_proof.input_fragment_hashes.clone(),
             algorithm_id: base_proof.algorithm_id.clone(),
             output_hash: base_proof.output_hash.clone(),
+            fragment_count: base_proof.fragment_count,
             timestamp_epoch_secs: base_proof.timestamp_epoch_secs,
             trace_id: "substitution_trace".to_string(),
-            attestation_signature: different_proof.attestation_signature, // Wrong signature
+            attestation: Attestation {
+                signer_id: base_proof.attestation.signer_id.clone(),
+                signature: different_proof.attestation.signature, // Wrong signature
+                payload_hash: base_proof.attestation.payload_hash.clone(),
+            },
         };
 
-        let substitution_verification = verifier_api.verify(&substitution_proof);
+        let substitution_verification = verifier_api.verify(
+            &substitution_proof,
+            &substitution_proof.input_fragment_hashes,
+            &substitution_proof.output_hash,
+        );
         assert!(
             !substitution_verification.is_valid(),
             "Signature substitution attack should be rejected"
@@ -3800,7 +3842,7 @@ mod tests {
                 // ubs:ignore - repair proof decoder API, not JWT parsing.
                 &format!("confusion_object_{}", attack_idx),
                 &test_fragments,
-                &AlgorithmId::new(malicious_algo),
+                &AlgorithmId::new(*malicious_algo),
                 3000 + attack_idx as u64,
                 &format!("confusion_trace_{}", attack_idx),
             );
@@ -3810,13 +3852,13 @@ mod tests {
                 // ubs:ignore - repair proof decoder API, not JWT parsing.
                 &format!("legitimate_object_{}", attack_idx),
                 &test_fragments,
-                &AlgorithmId::new(legitimate_algo),
+                &AlgorithmId::new(*legitimate_algo),
                 3100 + attack_idx as u64,
                 &format!("legitimate_trace_{}", attack_idx),
             );
 
             // Analyze confusion attack results
-            match (malicious_result, legitimate_result) {
+            match (&malicious_result, &legitimate_result) {
                 (Ok(malicious), Ok(legitimate)) => {
                     // Both succeeded - verify they produce different results if algorithms differ
                     if malicious_algo != legitimate_algo {
@@ -3868,7 +3910,7 @@ mod tests {
                 // ubs:ignore - repair proof decoder API, not JWT parsing.
                 &format!("cross_decoder_object_{}", attack_idx),
                 &test_fragments,
-                &AlgorithmId::new(malicious_algo),
+                &AlgorithmId::new(*malicious_algo),
                 3200 + attack_idx as u64,
                 &format!("cross_decoder_trace_{}", attack_idx),
             );
@@ -3933,7 +3975,9 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let mut decoder = decoder();
-        let mut verifier_api = verifier("timing-secret");
+        // Verifier must share the decoder's signing secret ("repair-secret" from `decoder()`)
+        // so legitimately generated proofs verify as valid under the current verify() API.
+        let mut verifier_api = verifier("repair-secret");
 
         // Create baseline timing measurements
         let baseline_fragments = fragments();
@@ -4038,14 +4082,18 @@ mod tests {
                             attack_idx
                         );
                         assert!(
-                            !proof.attestation_signature.contains("timing"),
+                            !proof.attestation.signature.contains("timing"),
                             "Attack {}: Signature should not contain timing information",
                             attack_idx
                         );
 
                         // Test proof verification timing
                         let verify_start = Instant::now(); // ubs:ignore - test timing measurement, not random generation.
-                        let verification = verifier_api.verify(&proof);
+                        let verification = verifier_api.verify(
+                            &proof,
+                            &proof.input_fragment_hashes,
+                            &proof.output_hash,
+                        );
                         let verify_timing = verify_start.elapsed();
 
                         assert!(
@@ -4363,11 +4411,11 @@ mod tests {
 
         // Test object ID injection attacks
         let object_id_injections = [
-            "object\x00injection",
-            "object\ninjection",
-            "object<script>evil</script>",
-            "object||injection",
-            "object;injection",
+            "object\x00injection".to_string(),
+            "object\ninjection".to_string(),
+            "object<script>evil</script>".to_string(),
+            "object||injection".to_string(),
+            "object;injection".to_string(),
             "A".repeat(10000),
         ];
 
@@ -4451,28 +4499,33 @@ mod tests {
 
         let test_fragments = fragments();
 
-        // Generate proofs from different contexts
-        let proof_contexts = [
-            (&mut decoder_a, "context_a", ProofMode::Mandatory),
-            (&mut decoder_b, "context_b", ProofMode::Advisory),
-            (&mut decoder_c, "context_c", ProofMode::Mandatory),
-        ];
-
+        // Generate proofs from different contexts.
+        // The decoder &mut borrows are scoped to this block so decoder_a is free again
+        // for the final-state test below.
         let mut context_proofs = Vec::new();
+        {
+            let mut proof_contexts = [
+                (&mut decoder_a, "context_a", ProofMode::Mandatory),
+                (&mut decoder_b, "context_b", ProofMode::Advisory),
+                (&mut decoder_c, "context_c", ProofMode::Mandatory),
+            ];
 
-        for (context_idx, (decoder, context_name, mode)) in proof_contexts.iter().enumerate() {
-            let context_result = decoder.repair_reconstruct(
-                // ubs:ignore - repair proof decoder API, not JWT parsing.
-                &format!("state_confusion_object_{}", context_name),
-                &test_fragments,
-                &AlgorithmId::new("simple_concat"),
-                10000 + context_idx as u64,
-                &format!("state_confusion_trace_{}", context_name),
-            );
+            for (context_idx, (decoder, context_name, mode)) in
+                proof_contexts.iter_mut().enumerate()
+            {
+                let context_result = decoder.repair_reconstruct(
+                    // ubs:ignore - repair proof decoder API, not JWT parsing.
+                    &format!("state_confusion_object_{}", context_name),
+                    &test_fragments,
+                    &AlgorithmId::new("simple_concat"),
+                    10000 + context_idx as u64,
+                    &format!("state_confusion_trace_{}", context_name),
+                );
 
-            if let Ok(result) = context_result {
-                if let Some(proof) = result.proof {
-                    context_proofs.push((context_name, proof, *mode));
+                if let Ok(result) = context_result {
+                    if let Some(proof) = result.proof {
+                        context_proofs.push((*context_name, proof, *mode));
+                    }
                 }
             }
         }
@@ -4483,10 +4536,11 @@ mod tests {
             println!("Testing state confusion with proof from {}", proof_context);
 
             // Test cross-context proof verification
-            let verification_result = verifier_api.verify(proof);
+            let verification_result =
+                verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
 
             // Verify that verification result is consistent with proof origin
-            match (proof_context, &verification_result) {
+            match (*proof_context, &verification_result) {
                 ("context_c", _) => {
                     // Different secret - should fail
                     assert!(
@@ -4499,7 +4553,8 @@ mod tests {
                     // Valid verification - check for state consistency
 
                     // Verify multiple verification attempts are deterministic
-                    let verification_2 = verifier_api.verify(proof);
+                    let verification_2 =
+                        verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
                     assert_eq!(
                         format!("{:?}", verification_result),
                         format!("{:?}", verification_2),
@@ -4509,7 +4564,8 @@ mod tests {
 
                     // Test verification after state manipulation attempts
                     for manipulation_idx in 0..10 {
-                        let manipulation_verification = verifier_api.verify(proof);
+                        let manipulation_verification =
+                            verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
                         assert!(
                             manipulation_verification.is_valid(),
                             "Attack {} Manipulation {}: State should remain consistent",
@@ -4522,7 +4578,8 @@ mod tests {
                     // Invalid verification - check error consistency
 
                     // Verify error is deterministic
-                    let error_verification_2 = verifier_api.verify(proof);
+                    let error_verification_2 =
+                        verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
                     match (&verification_result, &error_verification_2) {
                         (
                             VerificationResult::InvalidSignature,
@@ -4533,8 +4590,8 @@ mod tests {
                             VerificationResult::UnknownAlgorithm { .. },
                         ) => {}
                         (
-                            VerificationResult::ProofFormatError { .. },
-                            VerificationResult::ProofFormatError { .. },
+                            VerificationResult::OutputHashMismatch { .. },
+                            VerificationResult::OutputHashMismatch { .. },
                         ) => {}
                         _ => assert!(
                             false,
@@ -4549,10 +4606,15 @@ mod tests {
             for other_proof_idx in 0..context_proofs.len() {
                 if other_proof_idx != attack_idx {
                     let (_, other_proof, _) = &context_proofs[other_proof_idx];
-                    let other_verification = verifier_api.verify(other_proof);
+                    let other_verification = verifier_api.verify(
+                        other_proof,
+                        &other_proof.input_fragment_hashes,
+                        &other_proof.output_hash,
+                    );
 
                     // Verify that verifying one proof doesn't affect verification of others
-                    let original_verification = verifier_api.verify(proof);
+                    let original_verification =
+                        verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
                     assert_eq!(
                         format!("{:?}", verification_result),
                         format!("{:?}", original_verification),
@@ -4564,7 +4626,8 @@ mod tests {
 
             // Test rapid state transitions
             for rapid_idx in 0..50 {
-                let rapid_verification = verifier_api.verify(proof);
+                let rapid_verification =
+                    verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
 
                 // Verify rapid verification doesn't cause state corruption
                 match (&verification_result, &rapid_verification) {
@@ -4592,10 +4655,14 @@ mod tests {
 
             // Test verifier with modified proof (state corruption attempt)
             let mut modified_proof = proof.clone();
-            modified_proof.attestation_signature =
-                format!("{}modified", modified_proof.attestation_signature);
+            modified_proof.attestation.signature =
+                format!("{}modified", modified_proof.attestation.signature);
 
-            let modified_verification = verifier_api.verify(&modified_proof);
+            let modified_verification = verifier_api.verify(
+                &modified_proof,
+                &modified_proof.input_fragment_hashes,
+                &modified_proof.output_hash,
+            );
             assert!(
                 !modified_verification.is_valid(),
                 "Attack {}: Modified proof should be invalid",
@@ -4603,7 +4670,8 @@ mod tests {
             );
 
             // Verify original proof still validates correctly after modified proof
-            let post_modification_verification = verifier_api.verify(proof);
+            let post_modification_verification =
+                verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
             assert_eq!(
                 format!("{:?}", verification_result),
                 format!("{:?}", post_modification_verification),
@@ -4625,7 +4693,11 @@ mod tests {
             .expect("Final test should succeed");
 
         let final_proof = final_test_result.proof.expect("Final proof should exist");
-        let final_verification = verifier_api.verify(&final_proof);
+        let final_verification = verifier_api.verify(
+            &final_proof,
+            &final_proof.input_fragment_hashes,
+            &final_proof.output_hash,
+        );
         assert!(
             final_verification.is_valid(),
             "Verifier should function correctly after all state confusion attacks"

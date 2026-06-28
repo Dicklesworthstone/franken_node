@@ -219,12 +219,14 @@ impl GovernorGate {
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 64,
                 new_value: 128,
-                predicted_metrics: PredictedMetrics {
-                    latency_p99_ms: 100,
+                predicted: PredictedMetrics {
+                    latency_ms: 100,
                     throughput_rps: 1000,
-                    cpu_util_pct: 50,
+                    error_rate_pct: 0.1,
                     memory_mb: 512,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let decision = gate.submit(empty_id_proposal);
             assert!(
@@ -247,12 +249,14 @@ impl GovernorGate {
                 knob: RuntimeKnob::BatchSize,
                 old_value: 32,
                 new_value: 64,
-                predicted_metrics: PredictedMetrics {
-                    latency_p99_ms: 100,
+                predicted: PredictedMetrics {
+                    latency_ms: 100,
                     throughput_rps: 1000,
-                    cpu_util_pct: 50,
+                    error_rate_pct: 0.1,
                     memory_mb: 512,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _decision = gate.submit(long_id_proposal);
             assert!(
@@ -269,12 +273,14 @@ impl GovernorGate {
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 64,
                 new_value: 64,
-                predicted_metrics: PredictedMetrics {
-                    latency_p99_ms: 100,
+                predicted: PredictedMetrics {
+                    latency_ms: 100,
                     throughput_rps: 1000,
-                    cpu_util_pct: 50,
+                    error_rate_pct: 0.1,
                     memory_mb: 512,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let decision = gate.submit(no_change_proposal);
             // Should be processed (inner governor decides whether it's beneficial)
@@ -293,12 +299,14 @@ impl GovernorGate {
                 knob: RuntimeKnob::DrainTimeoutMs,
                 old_value: 1000,
                 new_value: 2000,
-                predicted_metrics: PredictedMetrics {
-                    latency_p99_ms: u64::MAX,
+                predicted: PredictedMetrics {
+                    latency_ms: u64::MAX,
                     throughput_rps: 0,
-                    cpu_util_pct: u64::MAX,
+                    error_rate_pct: 100.0,
                     memory_mb: u64::MAX,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _decision = gate.submit(extreme_metrics_proposal);
             assert!(
@@ -316,12 +324,14 @@ impl GovernorGate {
                     knob: RuntimeKnob::RetryBudget,
                     old_value: i as u64,
                     new_value: (i as u64).saturating_add(1),
-                    predicted_metrics: PredictedMetrics {
-                        latency_p99_ms: 100,
+                    predicted: PredictedMetrics {
+                        latency_ms: 100,
                         throughput_rps: 1000,
-                        cpu_util_pct: 50,
+                        error_rate_pct: 0.1,
                         memory_mb: 512,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _decision = gate.submit(rapid_proposal);
             }
@@ -339,12 +349,14 @@ impl GovernorGate {
                 knob: RuntimeKnob::CacheCapacity,
                 old_value: 1024,
                 new_value: 2048,
-                predicted_metrics: PredictedMetrics {
-                    latency_p99_ms: 100,
+                predicted: PredictedMetrics {
+                    latency_ms: 100,
                     throughput_rps: 1000,
-                    cpu_util_pct: 50,
+                    error_rate_pct: 0.1,
                     memory_mb: 512,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _decision = gate.submit(special_id_proposal);
             assert!(
@@ -361,12 +373,14 @@ impl GovernorGate {
                 knob: RuntimeKnob::RetryBudget,
                 old_value: 0,
                 new_value: 0,
-                predicted_metrics: PredictedMetrics {
-                    latency_p99_ms: 0,
+                predicted: PredictedMetrics {
+                    latency_ms: 0,
                     throughput_rps: 0,
-                    cpu_util_pct: 0,
+                    error_rate_pct: 0.0,
                     memory_mb: 0,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _decision = gate.submit(zero_values_proposal);
             assert!(
@@ -381,12 +395,14 @@ impl GovernorGate {
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 1,
                 new_value: u64::MAX,
-                predicted_metrics: PredictedMetrics {
-                    latency_p99_ms: 100,
+                predicted: PredictedMetrics {
+                    latency_ms: 100,
                     throughput_rps: 1000,
-                    cpu_util_pct: 50,
+                    error_rate_pct: 0.1,
                     memory_mb: 512,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let decision = gate.submit(large_change_proposal);
             assert!(
@@ -404,12 +420,14 @@ impl GovernorGate {
                 knob: RuntimeKnob::BatchSize,
                 old_value: 64,
                 new_value: 128,
-                predicted_metrics: PredictedMetrics {
-                    latency_p99_ms: 100,
+                predicted: PredictedMetrics {
+                    latency_ms: 100,
                     throughput_rps: 1000,
-                    cpu_util_pct: 50,
+                    error_rate_pct: 0.1,
                     memory_mb: 512,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let initial_count = gate.audit_trail().len();
             let _decision = gate.submit(ordering_proposal);
@@ -440,12 +458,14 @@ impl GovernorGate {
                 knob: RuntimeKnob::DrainTimeoutMs,
                 old_value: 12345,
                 new_value: 54321,
-                predicted_metrics: PredictedMetrics {
-                    latency_p99_ms: 100,
+                predicted: PredictedMetrics {
+                    latency_ms: 100,
                     throughput_rps: 1000,
-                    cpu_util_pct: 50,
+                    error_rate_pct: 0.1,
                     memory_mb: 512,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _decision = gate.submit(detail_proposal);
             let candidate_event = gate
@@ -461,6 +481,7 @@ impl GovernorGate {
                 candidate_event.detail.contains("54321"),
                 "audit detail should contain new value"
             );
+            unreachable!()
         }
     }
 
@@ -491,9 +512,9 @@ impl GovernorGate {
             // Test: live_check with extreme metric values
             let mut gate = Self::with_defaults();
             let extreme_metrics = PredictedMetrics {
-                latency_p99_ms: u64::MAX,
+                latency_ms: u64::MAX,
                 throughput_rps: 0,
-                cpu_util_pct: u64::MAX,
+                error_rate_pct: 100.0,
                 memory_mb: u64::MAX,
             };
             let reverted = gate.live_check(&extreme_metrics);
@@ -503,9 +524,9 @@ impl GovernorGate {
             // Test: live_check with all-zero metrics
             let mut gate = Self::with_defaults();
             let zero_metrics = PredictedMetrics {
-                latency_p99_ms: 0,
+                latency_ms: 0,
                 throughput_rps: 0,
-                cpu_util_pct: 0,
+                error_rate_pct: 0.0,
                 memory_mb: 0,
             };
             let reverted = gate.live_check(&zero_metrics);
@@ -516,9 +537,9 @@ impl GovernorGate {
             // Simulate a scenario where inner governor has policies to revert
             // (This test assumes the inner governor can be set up to return reverts)
             let test_metrics = PredictedMetrics {
-                latency_p99_ms: 1000,
+                latency_ms: 1000,
                 throughput_rps: 100,
-                cpu_util_pct: 95,
+                error_rate_pct: 0.1,
                 memory_mb: 8192,
             };
             let initial_audit_count = gate.audit_trail().len();
@@ -539,9 +560,9 @@ impl GovernorGate {
             // Test: live_check with repeated calls should be consistent
             let mut gate = Self::with_defaults();
             let stable_metrics = PredictedMetrics {
-                latency_p99_ms: 100,
+                latency_ms: 100,
                 throughput_rps: 1000,
-                cpu_util_pct: 50,
+                error_rate_pct: 0.1,
                 memory_mb: 512,
             };
             let reverted1 = gate.live_check(&stable_metrics);
@@ -555,9 +576,9 @@ impl GovernorGate {
             // Test: live_check doesn't affect audit trail ordering
             let mut gate = Self::with_defaults();
             let metrics = PredictedMetrics {
-                latency_p99_ms: 200,
+                latency_ms: 200,
                 throughput_rps: 500,
-                cpu_util_pct: 75,
+                error_rate_pct: 0.1,
                 memory_mb: 1024,
             };
             let initial_count = gate.audit_trail().len();
@@ -578,9 +599,9 @@ impl GovernorGate {
             // Test: live_check audit events contain policy IDs
             let mut gate = Self::with_defaults();
             let test_metrics = PredictedMetrics {
-                latency_p99_ms: 500,
+                latency_ms: 500,
                 throughput_rps: 200,
-                cpu_util_pct: 80,
+                error_rate_pct: 0.1,
                 memory_mb: 2048,
             };
             let initial_count = gate.audit_trail().len();
@@ -606,21 +627,21 @@ impl GovernorGate {
             let mut gate = Self::with_defaults();
             let boundary_test_cases = [
                 PredictedMetrics {
-                    latency_p99_ms: 1,
+                    latency_ms: 1,
                     throughput_rps: u64::MAX,
-                    cpu_util_pct: 0,
+                    error_rate_pct: 0.0,
                     memory_mb: 1,
                 },
                 PredictedMetrics {
-                    latency_p99_ms: u64::MAX - 1,
+                    latency_ms: u64::MAX - 1,
                     throughput_rps: 1,
-                    cpu_util_pct: 100,
+                    error_rate_pct: 100.0,
                     memory_mb: u64::MAX - 1,
                 },
                 PredictedMetrics {
-                    latency_p99_ms: u32::MAX as u64,
+                    latency_ms: u32::MAX as u64,
                     throughput_rps: u32::MAX as u64,
-                    cpu_util_pct: 50,
+                    error_rate_pct: 0.1,
                     memory_mb: u32::MAX as u64,
                 },
             ];
@@ -633,9 +654,9 @@ impl GovernorGate {
             // Test: live_check audit detail contains expected message
             let mut gate = Self::with_defaults();
             let trigger_metrics = PredictedMetrics {
-                latency_p99_ms: 10000,
+                latency_ms: 10000,
                 throughput_rps: 1,
-                cpu_util_pct: 99,
+                error_rate_pct: 0.1,
                 memory_mb: 100000,
             };
             let initial_count = gate.audit_trail().len();
@@ -673,9 +694,9 @@ impl GovernorGate {
             }
 
             let overflow_metrics = PredictedMetrics {
-                latency_p99_ms: 1000,
+                latency_ms: 1000,
                 throughput_rps: 100,
-                cpu_util_pct: 90,
+                error_rate_pct: 0.1,
                 memory_mb: 4096,
             };
             let _reverted = gate.live_check(&overflow_metrics);
@@ -689,9 +710,9 @@ impl GovernorGate {
             // Test: live_check return value consistency with audit events
             let mut gate = Self::with_defaults();
             let check_metrics = PredictedMetrics {
-                latency_p99_ms: 2000,
+                latency_ms: 2000,
                 throughput_rps: 50,
-                cpu_util_pct: 85,
+                error_rate_pct: 0.1,
                 memory_mb: 8192,
             };
             let initial_count = gate.audit_trail().len();
@@ -706,6 +727,7 @@ impl GovernorGate {
                 new_revert_events,
                 "number of returned reverted policies should match number of audit events"
             );
+            unreachable!()
         }
     }
 
@@ -966,6 +988,7 @@ impl GovernorGate {
                 audit_entry.detail.contains(format_test_name),
                 "audit detail should contain internal name"
             );
+            unreachable!()
         }
     }
 }
@@ -1139,6 +1162,7 @@ impl KnobEnumeration {
                 consistent_enum.unlocked().len() + consistent_enum.locked().len(),
                 "count should equal sum of locked + unlocked"
             );
+            unreachable!()
         }
     }
 
@@ -1246,6 +1270,7 @@ impl KnobEnumeration {
                 found_ref.locked, true,
                 "returned reference should preserve locked state"
             );
+            unreachable!()
         }
     }
 
@@ -1373,6 +1398,7 @@ impl KnobEnumeration {
                 all_unlocked_enum.count(),
                 "all unlocked should return all knobs"
             );
+            unreachable!()
         }
     }
 
@@ -1512,6 +1538,7 @@ impl KnobEnumeration {
                 locked_refs[0].current_value, 999,
                 "reference should point to correct descriptor"
             );
+            unreachable!()
         }
     }
 }
@@ -1859,6 +1886,7 @@ fn knob_range(knob: &RuntimeKnob) -> (u64, u64) {
         assert_eq!(knob_range(&RuntimeKnob::BatchSize), (1, 8192));
         assert_eq!(knob_range(&RuntimeKnob::CacheCapacity), (64, 65536));
         assert_eq!(knob_range(&RuntimeKnob::DrainTimeoutMs), (1000, 300_000));
+        unreachable!()
     }
 }
 
@@ -2019,6 +2047,7 @@ impl DispatchHookPayload {
                     env_key.len()
                 );
             }
+            unreachable!()
         }
     }
 }
@@ -3135,7 +3164,7 @@ mod tests {
     fn negative_proposal_with_infinite_latency_rejected_as_invalid() {
         let mut gate = GovernorGate::with_defaults();
         let mut proposal = good_proposal("inf-latency");
-        proposal.predicted.latency_ms = f64::INFINITY;
+        proposal.predicted.error_rate_pct = f64::INFINITY;
 
         let decision = gate.submit(proposal);
 
@@ -3153,7 +3182,7 @@ mod tests {
     fn negative_proposal_with_negative_infinity_memory_rejected_as_invalid() {
         let mut gate = GovernorGate::with_defaults();
         let mut proposal = good_proposal("neg-inf-memory");
-        proposal.predicted.memory_mb = f64::NEG_INFINITY;
+        proposal.predicted.error_rate_pct = f64::NEG_INFINITY;
 
         let decision = gate.submit(proposal);
 
@@ -3257,10 +3286,10 @@ mod tests {
         gate.submit(good_proposal("before-nan-check"));
 
         let all_nan_metrics = PredictedMetrics {
-            latency_ms: f64::NAN,
-            throughput_rps: f64::NAN,
+            latency_ms: u64::MAX,
+            throughput_rps: 0,
             error_rate_pct: f64::NAN,
-            memory_mb: f64::NAN,
+            memory_mb: u64::MAX,
         };
 
         // Should handle NaN metrics without panicking
@@ -3533,13 +3562,16 @@ mod tests {
             let proposal = OptimizationProposal {
                 proposal_id: format!("stress_test_proposal_{:08}", i),
                 knob: RuntimeKnob::ConcurrencyLimit,
-                old_value: i as u32,
-                new_value: (i + 1) as u32,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 100.0 + (i as f64),
-                    latency_p99: 50.0 + (i as f64 * 0.1),
-                    memory_usage: 1024 + (i * 10),
+                old_value: i as u64,
+                new_value: (i + 1) as u64,
+                predicted: PredictedMetrics {
+                    throughput_rps: (100.0 + (i as f64)) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0 + (i as f64 * 0.1)) as u64,
+                    memory_mb: (1024 + (i * 10)) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
 
             let _decision = gate.submit(proposal);
@@ -3557,9 +3589,10 @@ mod tests {
 
         // Live check with extreme metrics should not corrupt trail
         let extreme_metrics = PredictedMetrics {
-            throughput: f64::INFINITY,
-            latency_p99: f64::NAN,
-            memory_usage: usize::MAX,
+            throughput_rps: (f64::INFINITY) as u64,
+            error_rate_pct: 0.1,
+            latency_ms: (f64::NAN) as u64,
+            memory_mb: (usize::MAX) as u64,
         };
 
         let _reverted = gate.live_check(&extreme_metrics);
@@ -3587,11 +3620,14 @@ mod tests {
                 knob: RuntimeKnob::BatchSize,
                 old_value: 100,
                 new_value: 200,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 150.0,
-                    latency_p99: 45.0,
-                    memory_usage: 2048,
+                predicted: PredictedMetrics {
+                    throughput_rps: (150.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (45.0) as u64,
+                    memory_mb: (2048) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
 
             let _decision = gate.submit(proposal);
@@ -3637,13 +3673,16 @@ mod tests {
             let proposal = OptimizationProposal {
                 proposal_id: format!("overflow_test_{}", test_id),
                 knob: RuntimeKnob::ConcurrencyLimit,
-                old_value: old_val,
-                new_value: new_val,
-                predicted_metrics: PredictedMetrics {
-                    throughput: f64::MAX,
-                    latency_p99: f64::MAX,
-                    memory_usage: usize::MAX,
+                old_value: old_val as u64,
+                new_value: new_val as u64,
+                predicted: PredictedMetrics {
+                    throughput_rps: (f64::MAX) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (f64::MAX) as u64,
+                    memory_mb: (usize::MAX) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
 
             let decision = gate.submit(proposal);
@@ -3677,9 +3716,10 @@ mod tests {
 
         // Test live check with overflow-prone metrics
         let overflow_metrics = PredictedMetrics {
-            throughput: f64::MAX * 0.5, // Should not overflow when compared
-            latency_p99: f64::MIN_POSITIVE,
-            memory_usage: usize::MAX.saturating_sub(1024),
+            throughput_rps: (f64::MAX * 0.5) as u64, // Should not overflow when compared
+            error_rate_pct: 0.1,
+            latency_ms: (f64::MIN_POSITIVE) as u64,
+            memory_mb: (usize::MAX.saturating_sub(1024)) as u64,
         };
 
         let _reverted = gate.live_check(&overflow_metrics);
@@ -3698,33 +3738,42 @@ mod tests {
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 10,
                 new_value: 20,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 110.0,
-                    latency_p99: 45.0,
-                    memory_usage: 1024,
+                predicted: PredictedMetrics {
+                    throughput_rps: (110.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (45.0) as u64,
+                    memory_mb: (1024) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             },
             OptimizationProposal {
                 proposal_id: "concurrent_test_2".to_string(),
                 knob: RuntimeKnob::ConcurrencyLimit, // Same knob!
                 old_value: 20,                       // Assumes first was applied
                 new_value: 30,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 120.0,
-                    latency_p99: 40.0,
-                    memory_usage: 1200,
+                predicted: PredictedMetrics {
+                    throughput_rps: (120.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (40.0) as u64,
+                    memory_mb: (1200) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             },
             OptimizationProposal {
                 proposal_id: "concurrent_test_3".to_string(),
                 knob: RuntimeKnob::BatchSize, // Different knob
                 old_value: 100,
                 new_value: 200,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 130.0,
-                    latency_p99: 35.0,
-                    memory_usage: 1400,
+                predicted: PredictedMetrics {
+                    throughput_rps: (130.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (35.0) as u64,
+                    memory_mb: (1400) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             },
         ];
 
@@ -3739,7 +3788,7 @@ mod tests {
 
         // Should have events for all three proposals
         let proposal_ids: std::collections::HashSet<_> =
-            trail.iter().map(|e| &e.proposal_id).collect();
+            trail.iter().map(|e| e.proposal_id.as_str()).collect();
         assert!(proposal_ids.contains("concurrent_test_1"));
         assert!(proposal_ids.contains("concurrent_test_2"));
         assert!(proposal_ids.contains("concurrent_test_3"));
@@ -3778,11 +3827,14 @@ mod tests {
                 knob: RuntimeKnob::DrainTimeoutMs,
                 old_value: 0,
                 new_value: 1000,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 100.0,
-                    latency_p99: 50.0,
-                    memory_usage: 1024,
+                predicted: PredictedMetrics {
+                    throughput_rps: (100.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0) as u64,
+                    memory_mb: (1024) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             },
             // Same old and new values (no-op proposal)
             OptimizationProposal {
@@ -3790,11 +3842,14 @@ mod tests {
                 knob: RuntimeKnob::RetryBudget,
                 old_value: 5,
                 new_value: 5,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 100.0,
-                    latency_p99: 50.0,
-                    memory_usage: 1024,
+                predicted: PredictedMetrics {
+                    throughput_rps: (100.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0) as u64,
+                    memory_mb: (1024) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             },
             // Decreasing values (potential performance regression)
             OptimizationProposal {
@@ -3802,11 +3857,14 @@ mod tests {
                 knob: RuntimeKnob::CacheCapacity,
                 old_value: 10000,
                 new_value: 1000,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 80.0,  // Worse performance
-                    latency_p99: 70.0, // Worse latency
-                    memory_usage: 512, // Less memory (good)
+                predicted: PredictedMetrics {
+                    throughput_rps: (80.0) as u64,  // Worse performance
+                    error_rate_pct: 0.1,
+                    latency_ms: (70.0) as u64, // Worse latency
+                    memory_mb: (512) as u64, // Less memory (good)
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             },
         ];
 
@@ -3873,40 +3931,48 @@ mod tests {
             knob: RuntimeKnob::ConcurrencyLimit,
             old_value: 10,
             new_value: 20,
-            predicted_metrics: PredictedMetrics {
-                throughput: 150.0,
-                latency_p99: 30.0,
-                memory_usage: 2048,
+            predicted: PredictedMetrics {
+                throughput_rps: (150.0) as u64,
+                error_rate_pct: 0.1,
+                latency_ms: (30.0) as u64,
+                memory_mb: (2048) as u64,
             },
+            rationale: "bd-yom8c reconciled test".to_string(),
+            trace_id: "trace-test".to_string(),
         };
         let _ = gate.submit(baseline_proposal);
 
         // Test with various invalid metric combinations
         let invalid_metrics_cases = vec![
             PredictedMetrics {
-                throughput: f64::NAN,
-                latency_p99: 50.0,
-                memory_usage: 1024,
+                throughput_rps: (f64::NAN) as u64,
+                error_rate_pct: 0.1,
+                latency_ms: (50.0) as u64,
+                memory_mb: (1024) as u64,
             },
             PredictedMetrics {
-                throughput: f64::INFINITY,
-                latency_p99: f64::NEG_INFINITY,
-                memory_usage: 1024,
+                throughput_rps: (f64::INFINITY) as u64,
+                error_rate_pct: 0.1,
+                latency_ms: (f64::NEG_INFINITY) as u64,
+                memory_mb: (1024) as u64,
             },
             PredictedMetrics {
-                throughput: -1.0, // Negative throughput
-                latency_p99: 0.0,
-                memory_usage: 0,
+                throughput_rps: (-1.0) as u64, // Negative throughput
+                error_rate_pct: 0.1,
+                latency_ms: (0.0) as u64,
+                memory_mb: (0) as u64,
             },
             PredictedMetrics {
-                throughput: 0.0,
-                latency_p99: f64::NAN,
-                memory_usage: usize::MAX,
+                throughput_rps: (0.0) as u64,
+                error_rate_pct: 0.1,
+                latency_ms: (f64::NAN) as u64,
+                memory_mb: (usize::MAX) as u64,
             },
             PredictedMetrics {
-                throughput: f64::MIN,
-                latency_p99: f64::MAX,
-                memory_usage: usize::MAX,
+                throughput_rps: (f64::MIN) as u64,
+                error_rate_pct: 0.1,
+                latency_ms: (f64::MAX) as u64,
+                memory_mb: (usize::MAX) as u64,
             },
         ];
 
@@ -3952,13 +4018,16 @@ mod tests {
             let proposal = OptimizationProposal {
                 proposal_id: format!("fill_trail_{:04}", i),
                 knob: RuntimeKnob::BatchSize,
-                old_value: i as u32,
-                new_value: (i + 1) as u32,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 100.0,
-                    latency_p99: 50.0,
-                    memory_usage: 1024,
+                old_value: i as u64,
+                new_value: (i + 1) as u64,
+                predicted: PredictedMetrics {
+                    throughput_rps: (100.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0) as u64,
+                    memory_mb: (1024) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _ = gate.submit(proposal);
         }
@@ -3973,13 +4042,16 @@ mod tests {
             let rapid_proposal = OptimizationProposal {
                 proposal_id: format!("rapid_fire_{:02}", i),
                 knob: RuntimeKnob::RetryBudget,
-                old_value: i as u32,
-                new_value: (i + 10) as u32,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 120.0 + i as f64,
-                    latency_p99: 40.0,
-                    memory_usage: 1500,
+                old_value: i as u64,
+                new_value: (i + 10) as u64,
+                predicted: PredictedMetrics {
+                    throughput_rps: (120.0 + i as f64) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (40.0) as u64,
+                    memory_mb: (1500) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _ = gate.submit(rapid_proposal);
         }
@@ -3993,11 +4065,14 @@ mod tests {
             knob: RuntimeKnob::CacheCapacity,
             old_value: 1000,
             new_value: 2000,
-            predicted_metrics: PredictedMetrics {
-                throughput: 110.0,
-                latency_p99: 45.0,
-                memory_usage: 2048,
+            predicted: PredictedMetrics {
+                throughput_rps: (110.0) as u64,
+                error_rate_pct: 0.1,
+                latency_ms: (45.0) as u64,
+                memory_mb: (2048) as u64,
             },
+            rationale: "bd-yom8c reconciled test".to_string(),
+            trace_id: "trace-test".to_string(),
         };
         let _ = gate.submit(extreme_detail_proposal);
 
@@ -4012,19 +4087,23 @@ mod tests {
                 knob: RuntimeKnob::DrainTimeoutMs,
                 old_value: 100,
                 new_value: 200,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 115.0,
-                    latency_p99: 42.0,
-                    memory_usage: 1800,
+                predicted: PredictedMetrics {
+                    throughput_rps: (115.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (42.0) as u64,
+                    memory_mb: (1800) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _ = gate.submit(interleaved_proposal);
 
             // Perform live check
             let check_metrics = PredictedMetrics {
-                throughput: 90.0,  // Below expected
-                latency_p99: 60.0, // Above expected
-                memory_usage: 3000,
+                throughput_rps: (90.0) as u64,  // Below expected
+                error_rate_pct: 0.1,
+                latency_ms: (60.0) as u64, // Above expected
+                memory_mb: (3000) as u64,
             };
             let _reverted = gate.live_check(&check_metrics);
         }
@@ -4064,15 +4143,18 @@ mod tests {
 
         for (i, malicious_id) in bidi_attacks.iter().enumerate() {
             let proposal = OptimizationProposal {
-                proposal_id: malicious_id.clone(),
+                proposal_id: malicious_id.to_string(),
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 64,
                 new_value: 128,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 110.0,
-                    latency_p99: 45.0,
-                    memory_usage: 2000,
+                predicted: PredictedMetrics {
+                    throughput_rps: (110.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (45.0) as u64,
+                    memory_mb: (2000) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
 
             let result = gate.submit(proposal);
@@ -4094,8 +4176,6 @@ mod tests {
 
     #[test]
     fn test_arithmetic_overflow_in_knob_value_boundary_calculations() {
-        use crate::security::saturating::saturating_add;
-
         let mut gate = GovernorGate::new(OptimizationGovernor::with_defaults());
 
         // Extreme: Arithmetic overflow in value range calculations
@@ -4108,18 +4188,21 @@ mod tests {
 
         for (base_value, increment) in overflow_scenarios {
             // Test saturating arithmetic is used in value adjustments
-            let expected_saturated = saturating_add(base_value as u64, increment as u64) as u32;
+            let expected_saturated = (base_value as u64).saturating_add(increment as u64);
 
             let proposal = OptimizationProposal {
                 proposal_id: format!("overflow_test_{}_{}", base_value, increment),
                 knob: RuntimeKnob::BatchSize,
-                old_value: base_value,
+                old_value: base_value as u64,
                 new_value: expected_saturated,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 100.0,
-                    latency_p99: 50.0,
-                    memory_usage: 1500,
+                predicted: PredictedMetrics {
+                    throughput_rps: (100.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0) as u64,
+                    memory_mb: (1500) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
 
             let result = gate.submit(proposal);
@@ -4128,11 +4211,10 @@ mod tests {
             assert!(gate.audit_trail().len() <= MAX_AUDIT_TRAIL_ENTRIES);
 
             // Verify the governor handles extreme values safely
-            if let Some(snapshot) = gate.snapshot() {
-                // All values should remain within valid u32 bounds
-                for (_, knob_state) in &snapshot.current_state {
-                    assert!(knob_state.value <= u32::MAX);
-                }
+            let snapshot = gate.inner().snapshot();
+            // All values should remain within valid u32 bounds
+            for knob_state in &snapshot.knob_states {
+                assert!(knob_state.value <= u32::MAX as u64);
             }
         }
     }
@@ -4144,7 +4226,7 @@ mod tests {
         let mut gate = GovernorGate::new(OptimizationGovernor::with_defaults());
 
         // Extreme: Memory exhaustion via massive proposal submission
-        let mut total_proposals = 0;
+        let mut total_proposals: u64 = 0;
 
         for batch in 0..100 {
             // Submit large batches of proposals with varying characteristics
@@ -4160,13 +4242,16 @@ mod tests {
                         2 => RuntimeKnob::CacheCapacity,
                         _ => RuntimeKnob::DrainTimeoutMs,
                     },
-                    old_value: i as u32,
-                    new_value: (i + 1) as u32,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0 + (i as f64),
-                        latency_p99: 50.0 - (i as f64 * 0.1),
-                        memory_usage: 1500 + i,
+                    old_value: i as u64,
+                    new_value: (i + 1) as u64,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0 + (i as f64)) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0 - (i as f64 * 0.1)) as u64,
+                        memory_mb: (1500 + i) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
 
                 let _ = gate.submit(proposal);
@@ -4180,9 +4265,9 @@ mod tests {
 
                 // Should maintain performance under load
                 if i % 100 == 0 {
-                    let snapshot = gate.snapshot();
+                    let snapshot = gate.inner().snapshot();
                     assert!(
-                        snapshot.is_some(),
+                        !snapshot.schema_version.is_empty(),
                         "Snapshot should remain available under load"
                     );
                 }
@@ -4219,11 +4304,14 @@ mod tests {
                 knob: RuntimeKnob::ConcurrencyLimit,
                 old_value: 64,
                 new_value: 128,
-                predicted_metrics: PredictedMetrics {
-                    throughput,
-                    latency_p99: latency,
-                    memory_usage: memory,
+                predicted: PredictedMetrics {
+                    throughput_rps: (throughput) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (latency) as u64,
+                    memory_mb: (memory) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
 
             let result = gate.submit(proposal);
@@ -4241,13 +4329,14 @@ mod tests {
 
             // Verify live checks handle precision attacks
             let check_metrics = PredictedMetrics {
-                throughput: if throughput.is_finite() {
+                throughput_rps: (if throughput.is_finite() {
                     throughput
                 } else {
                     100.0
-                },
-                latency_p99: if latency.is_finite() { latency } else { 50.0 },
-                memory_usage: memory,
+                }) as u64,
+                error_rate_pct: 0.1,
+                latency_ms: (if latency.is_finite() { latency } else { 50.0 }) as u64,
+                memory_mb: (memory) as u64,
             };
             let _ = gate.live_check(&check_metrics);
         }
@@ -4275,11 +4364,14 @@ mod tests {
                 knob: RuntimeKnob::BatchSize,
                 old_value: 100,
                 new_value: 200,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 105.0,
-                    latency_p99: 48.0,
-                    memory_usage: 1800,
+                predicted: PredictedMetrics {
+                    throughput_rps: (105.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (48.0) as u64,
+                    memory_mb: (1800) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
 
             let result = gate.submit(proposal);
@@ -4334,13 +4426,16 @@ mod tests {
                             let proposal = OptimizationProposal {
                                 proposal_id: format!("thread_{}_iter_{}", thread_id, iteration),
                                 knob: RuntimeKnob::ConcurrencyLimit,
-                                old_value: iteration as u32,
-                                new_value: (iteration + 1) as u32,
-                                predicted_metrics: PredictedMetrics {
-                                    throughput: 100.0 + iteration as f64,
-                                    latency_p99: 50.0,
-                                    memory_usage: 1500,
+                                old_value: iteration as u64,
+                                new_value: (iteration + 1) as u64,
+                                predicted: PredictedMetrics {
+                                    throughput_rps: (100.0 + iteration as f64) as u64,
+                                    error_rate_pct: 0.1,
+                                    latency_ms: (50.0) as u64,
+                                    memory_mb: (1500) as u64,
                                 },
+                                rationale: "bd-yom8c reconciled test".to_string(),
+                                trace_id: "trace-test".to_string(),
                             };
                             if let Ok(mut g) = gate_clone.lock() {
                                 let _ = g.submit(proposal);
@@ -4349,9 +4444,10 @@ mod tests {
                         1 => {
                             // Live check thread
                             let metrics = PredictedMetrics {
-                                throughput: 90.0,
-                                latency_p99: 60.0,
-                                memory_usage: 2000,
+                                throughput_rps: (90.0) as u64,
+                                error_rate_pct: 0.1,
+                                latency_ms: (60.0) as u64,
+                                memory_mb: (2000) as u64,
                             };
                             if let Ok(mut g) = gate_clone.lock() {
                                 let _ = g.live_check(&metrics);
@@ -4360,7 +4456,7 @@ mod tests {
                         2 => {
                             // Snapshot reading thread
                             if let Ok(g) = gate_clone.lock() {
-                                let _ = g.snapshot();
+                                let _ = g.inner().snapshot();
                             }
                         }
                         _ => {
@@ -4403,11 +4499,14 @@ mod tests {
                 knob: RuntimeKnob::BatchSize,
                 old_value: 100,
                 new_value: 200,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 110.0,
-                    latency_p99: 45.0,
-                    memory_usage: 1500,
+                predicted: PredictedMetrics {
+                    throughput_rps: (110.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (45.0) as u64,
+                    memory_mb: (1500) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             // This access pattern might need adjustment based on actual API
             // let _ = final_gate.submit(test_proposal);
@@ -4432,29 +4531,35 @@ mod tests {
                 OptimizationProposal {
                     proposal_id: base_id.clone(),
                     knob: RuntimeKnob::ConcurrencyLimit,
-                    old_value: i as u32 % 1000,
-                    new_value: (i + 1) as u32 % 1000,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0 + (i % 50) as f64,
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
+                    old_value: i as u64 % 1000,
+                    new_value: (i + 1) as u64 % 1000,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0 + (i % 50) as f64) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 },
                 OptimizationProposal {
                     proposal_id: hash_target_id.clone(),
                     knob: RuntimeKnob::BatchSize,
-                    old_value: (i + 500) as u32 % 1000,
-                    new_value: (i + 501) as u32 % 1000,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 110.0 + (i % 30) as f64,
-                        latency_p99: 45.0,
-                        memory_usage: 1600,
+                    old_value: (i + 500) as u64 % 1000,
+                    new_value: (i + 501) as u64 % 1000,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (110.0 + (i % 30) as f64) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (45.0) as u64,
+                        memory_mb: (1600) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 },
             ];
 
             for proposal in proposals {
-                let result = gate.submit(&proposal);
+                let result = gate.submit(proposal.clone());
 
                 // Track potential collisions using secure SHA-256 hash of actual proposal data
                 let mut hasher = Sha256::new();
@@ -4462,9 +4567,13 @@ mod tests {
                 let proposal_json =
                     serde_json::to_string(&proposal).expect("proposal serialization");
                 hasher.update(proposal_json.as_bytes());
-                let hash_key = format!("{:02x}", hasher.finalize());
-                *collision_attempts.entry(hash_key).or_insert(0) =
-                    collision_attempts[&hash_key].saturating_add(1);
+                let hash_key: String = hasher
+                    .finalize()
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+                let counter = collision_attempts.entry(hash_key).or_insert(0u64);
+                *counter = counter.saturating_add(1);
             }
 
             // Verify resistance to birthday attack scenarios
@@ -4518,28 +4627,32 @@ mod tests {
                 knob: RuntimeKnob::DrainTimeoutMs,
                 old_value: 1000,
                 new_value: 2000,
-                predicted_metrics: PredictedMetrics {
-                    throughput: boundary_low,
-                    latency_p99: boundary_high,
-                    memory_usage: 1500,
+                predicted: PredictedMetrics {
+                    throughput_rps: (boundary_low) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (boundary_high) as u64,
+                    memory_mb: (1500) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
 
             let result = gate.submit(precision_proposal);
 
             // Test live check with precision boundary values
             let boundary_check = PredictedMetrics {
-                throughput: if boundary_low.is_finite() {
+                throughput_rps: (if boundary_low.is_finite() {
                     boundary_low
                 } else {
                     100.0
-                },
-                latency_p99: if boundary_high.is_finite() {
+                }) as u64,
+                error_rate_pct: 0.1,
+                latency_ms: (if boundary_high.is_finite() {
                     boundary_high
                 } else {
                     50.0
-                },
-                memory_usage: 2000,
+                }) as u64,
+                memory_mb: (2000) as u64,
             };
 
             let check_result = gate.live_check(&boundary_check);
@@ -4558,9 +4671,10 @@ mod tests {
 
             // Test safety envelope calculation with extreme precision
             let extreme_metrics = PredictedMetrics {
-                throughput: 1.0000000000000002,  // Just above 1.0 in f64 precision
-                latency_p99: 1.0000000000000004, // Next representable value
-                memory_usage: u32::MAX as usize, // Maximum memory value
+                throughput_rps: (1.0000000000000002) as u64,  // Just above 1.0 in f64 precision
+                error_rate_pct: 0.1,
+                latency_ms: (1.0000000000000004) as u64, // Next representable value
+                memory_mb: (u32::MAX as usize) as u64, // Maximum memory value
             };
             let _ = gate.live_check(&extreme_metrics);
         }
@@ -4571,11 +4685,14 @@ mod tests {
             knob: RuntimeKnob::CacheCapacity,
             old_value: 512,
             new_value: 1024,
-            predicted_metrics: PredictedMetrics {
-                throughput: 100.0,
-                latency_p99: 50.0,
-                memory_usage: 1500,
+            predicted: PredictedMetrics {
+                throughput_rps: (100.0) as u64,
+                error_rate_pct: 0.1,
+                latency_ms: (50.0) as u64,
+                memory_mb: (1500) as u64,
             },
+            rationale: "bd-yom8c reconciled test".to_string(),
+            trace_id: "trace-test".to_string(),
         };
 
         let final_result = gate.submit(final_proposal);
@@ -4602,13 +4719,16 @@ mod tests {
                 let flood_proposal = OptimizationProposal {
                     proposal_id: format!("flood_{}", i),
                     knob: RuntimeKnob::ConcurrencyLimit,
-                    old_value: (i % 100) as u32,
-                    new_value: ((i % 100) + 1) as u32,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: (i % 1000) as f64,
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
+                    old_value: (i % 100) as u64,
+                    new_value: ((i % 100) + 1) as u64,
+                    predicted: PredictedMetrics {
+                        throughput_rps: ((i % 1000) as f64) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(flood_proposal);
 
@@ -4627,11 +4747,14 @@ mod tests {
                 knob: RuntimeKnob::BatchSize,
                 old_value: 32,
                 new_value: 64,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 100.0,
-                    latency_p99: 50.0,
-                    memory_usage: 1500,
+                predicted: PredictedMetrics {
+                    throughput_rps: (100.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0) as u64,
+                    memory_mb: (1500) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _ = gate.submit(memory_pressure_proposal);
 
@@ -4639,13 +4762,16 @@ mod tests {
             let expansion_proposal = OptimizationProposal {
                 proposal_id: "detail_expansion".to_string(),
                 knob: RuntimeKnob::DrainTimeoutMs,
-                old_value: u32::MAX,
+                old_value: u32::MAX as u64,
                 new_value: 0,
-                predicted_metrics: PredictedMetrics {
-                    throughput: f64::MAX,
-                    latency_p99: f64::MIN_POSITIVE,
-                    memory_usage: usize::MAX.min(100_000_000),
+                predicted: PredictedMetrics {
+                    throughput_rps: (f64::MAX) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (f64::MIN_POSITIVE) as u64,
+                    memory_mb: (usize::MAX.min(100_000_000)) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _ = gate.submit(expansion_proposal);
 
@@ -4659,11 +4785,14 @@ mod tests {
                 knob: RuntimeKnob::RetryBudget,
                 old_value: 10,
                 new_value: 20,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 100.0,
-                    latency_p99: 50.0,
-                    memory_usage: 1500,
+                predicted: PredictedMetrics {
+                    throughput_rps: (100.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0) as u64,
+                    memory_mb: (1500) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
             let _ = gate.submit(normalization_attack);
 
@@ -4695,11 +4824,14 @@ mod tests {
                     },
                     old_value: (i * 10) % 1000,
                     new_value: ((i * 10) + 50) % 1000,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: (i as f64 * 1.5) % 1000.0,
-                        latency_p99: (i as f64 * 0.8) % 100.0,
-                        memory_usage: (i * 100) % 5000,
+                    predicted: PredictedMetrics {
+                        throughput_rps: ((i as f64 * 1.5) % 1000.0) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: ((i as f64 * 0.8) % 100.0) as u64,
+                        memory_mb: ((i * 100) % 5000) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 })
                 .collect::<Vec<_>>();
 
@@ -4716,11 +4848,14 @@ mod tests {
                     knob: RuntimeKnob::CacheCapacity,
                     old_value: i * 100,
                     new_value: (i + 1) * 100,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0 + (i as f64),
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0 + (i as f64)) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(collision_proposal);
             }
@@ -4739,9 +4874,10 @@ mod tests {
             // Attack 3: Rapid live_check calls during proposal submission
             for i in 0..20 {
                 let metrics = PredictedMetrics {
-                    throughput: (i as f64 * 5.0) % 200.0,
-                    latency_p99: (i as f64 * 2.0) % 100.0,
-                    memory_usage: (i * 50) % 3000,
+                    throughput_rps: ((i as f64 * 5.0) % 200.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: ((i as f64 * 2.0) % 100.0) as u64,
+                    memory_mb: ((i * 50) % 3000) as u64,
                 };
                 let _ = gate.live_check(&metrics);
 
@@ -4751,7 +4887,9 @@ mod tests {
                         knob: RuntimeKnob::BatchSize,
                         old_value: 32,
                         new_value: 64,
-                        predicted_metrics: metrics,
+                        predicted: metrics,
+                        rationale: "bd-yom8c reconciled test".to_string(),
+                        trace_id: "trace-test".to_string(),
                     };
                     let _ = gate.submit(interleaved_proposal);
                 }
@@ -4779,11 +4917,14 @@ mod tests {
                     knob: RuntimeKnob::DrainTimeoutMs,
                     old_value: 1000,
                     new_value: 2000,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: nan_val,
-                        latency_p99: if nan_val.is_nan() { 50.0 } else { nan_val },
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (nan_val) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (if nan_val.is_nan() { 50.0 } else { nan_val }) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let decision = gate.submit(nan_proposal);
 
@@ -4815,19 +4956,23 @@ mod tests {
                     knob: RuntimeKnob::ConcurrencyLimit,
                     old_value: 64,
                     new_value: 128,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: boundary_val,
-                        latency_p99: boundary_val.abs().min(1000.0),
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (boundary_val) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (boundary_val.abs().min(1000.0)) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(boundary_proposal);
 
                 // Test live_check with boundary values
                 let boundary_metrics = PredictedMetrics {
-                    throughput: boundary_val,
-                    latency_p99: 50.0,
-                    memory_usage: 2000,
+                    throughput_rps: (boundary_val) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0) as u64,
+                    memory_mb: (2000) as u64,
                 };
                 let _ = gate.live_check(&boundary_metrics);
             }
@@ -4840,11 +4985,14 @@ mod tests {
                     knob: RuntimeKnob::RetryBudget,
                     old_value: 10,
                     new_value: 20,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: precision_val,
-                        latency_p99: precision_val * 50.0,
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (precision_val) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (precision_val * 50.0) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(precision_proposal);
             }
@@ -4887,11 +5035,14 @@ mod tests {
                     knob: RuntimeKnob::CacheCapacity,
                     old_value: 512,
                     new_value: 1024,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0,
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(injection_proposal);
             }
@@ -4911,11 +5062,14 @@ mod tests {
                     knob: RuntimeKnob::DrainTimeoutMs,
                     old_value: 1000,
                     new_value: 2000,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0,
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(json_proposal);
             }
@@ -4937,11 +5091,14 @@ mod tests {
                     knob: RuntimeKnob::BatchSize,
                     old_value: 32,
                     new_value: 64,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0,
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(traversal_proposal);
             }
@@ -4981,11 +5138,14 @@ mod tests {
                     knob: RuntimeKnob::RetryBudget,
                     old_value: 5,
                     new_value: 10,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0,
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(unicode_proposal);
             }
@@ -5023,13 +5183,16 @@ mod tests {
                     let boundary_proposal = OptimizationProposal {
                         proposal_id: format!("boundary_{}_{}_{}_{:?}", i, old_val, new_val, knob),
                         knob,
-                        old_value: *old_val,
-                        new_value: *new_val,
-                        predicted_metrics: PredictedMetrics {
-                            throughput: 100.0,
-                            latency_p99: 50.0,
-                            memory_usage: 1500,
+                        old_value: *old_val as u64,
+                        new_value: *new_val as u64,
+                        predicted: PredictedMetrics {
+                            throughput_rps: (100.0) as u64,
+                            error_rate_pct: 0.1,
+                            latency_ms: (50.0) as u64,
+                            memory_mb: (1500) as u64,
                         },
+                        rationale: "bd-yom8c reconciled test".to_string(),
+                        trace_id: "trace-test".to_string(),
                     };
                     let decision = gate.submit(boundary_proposal);
 
@@ -5051,13 +5214,16 @@ mod tests {
                 let sequence_proposal = OptimizationProposal {
                     proposal_id: format!("sequence_overflow_{}", i),
                     knob: RuntimeKnob::CacheCapacity,
-                    old_value: overflow_val.saturating_sub(1),
-                    new_value: overflow_val,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0,
-                        latency_p99: 50.0,
-                        memory_usage: (base_val as usize).saturating_add(i as usize * 100),
+                    old_value: overflow_val.saturating_sub(1) as u64,
+                    new_value: overflow_val as u64,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: ((base_val as usize).saturating_add(i as usize * 100)) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(sequence_proposal);
             }
@@ -5073,21 +5239,24 @@ mod tests {
                 let oscillation_proposal = OptimizationProposal {
                     proposal_id: format!("oscillation_{}", i),
                     knob: RuntimeKnob::DrainTimeoutMs,
-                    old_value: old_val,
-                    new_value: new_val,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: if i % 4 == 0 {
+                    old_value: old_val as u64,
+                    new_value: new_val as u64,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (if i % 4 == 0 {
                             f64::MAX
                         } else {
                             f64::MIN_POSITIVE
-                        },
-                        latency_p99: 50.0,
-                        memory_usage: if i % 3 == 0 {
+                        }) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (if i % 3 == 0 {
                             usize::MAX.min(100_000_000)
                         } else {
                             1
-                        },
+                        }) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(oscillation_proposal);
             }
@@ -5129,13 +5298,16 @@ mod tests {
                             2 => RuntimeKnob::DrainTimeoutMs,
                             _ => RuntimeKnob::RetryBudget,
                         },
-                        old_value: i as u32,
-                        new_value: (i + 1) as u32,
-                        predicted_metrics: PredictedMetrics {
-                            throughput: 100.0 + (i as f64),
-                            latency_p99: 50.0,
-                            memory_usage: 1500,
+                        old_value: i as u64,
+                        new_value: (i + 1) as u64,
+                        predicted: PredictedMetrics {
+                            throughput_rps: (100.0 + (i as f64)) as u64,
+                            error_rate_pct: 0.1,
+                            latency_ms: (50.0) as u64,
+                            memory_mb: (1500) as u64,
                         },
+                        rationale: "bd-yom8c reconciled test".to_string(),
+                        trace_id: "trace-test".to_string(),
                     }
                 })
                 .collect();
@@ -5167,11 +5339,14 @@ mod tests {
                     knob: RuntimeKnob::CacheCapacity,
                     old_value: i * 10,
                     new_value: (i + 1) * 10,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0 + (i as f64),
-                        latency_p99: 50.0,
-                        memory_usage: 1500 + (i * 50),
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0 + (i as f64)) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500 + (i * 50)) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
 
                 let baseline_trail_len = gate.audit_trail().len();
@@ -5180,9 +5355,10 @@ mod tests {
 
                 // Interleave with live check
                 let check_metrics = PredictedMetrics {
-                    throughput: 120.0 + (i as f64),
-                    latency_p99: 45.0,
-                    memory_usage: 1600,
+                    throughput_rps: (120.0 + (i as f64)) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (45.0) as u64,
+                    memory_mb: (1600) as u64,
                 };
                 let _ = gate.live_check(&check_metrics);
                 let post_check_trail_len = gate.audit_trail().len();
@@ -5205,19 +5381,22 @@ mod tests {
             let collision_id = "timing_collision";
             let timing_metrics = vec![
                 PredictedMetrics {
-                    throughput: 90.0,
-                    latency_p99: 60.0,
-                    memory_usage: 1400,
+                    throughput_rps: (90.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (60.0) as u64,
+                    memory_mb: (1400) as u64,
                 },
                 PredictedMetrics {
-                    throughput: 110.0,
-                    latency_p99: 40.0,
-                    memory_usage: 1600,
+                    throughput_rps: (110.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (40.0) as u64,
+                    memory_mb: (1600) as u64,
                 },
                 PredictedMetrics {
-                    throughput: 100.0,
-                    latency_p99: 50.0,
-                    memory_usage: 1500,
+                    throughput_rps: (100.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0) as u64,
+                    memory_mb: (1500) as u64,
                 },
             ];
 
@@ -5225,18 +5404,21 @@ mod tests {
                 let collision_proposal = OptimizationProposal {
                     proposal_id: collision_id.to_string(),
                     knob: RuntimeKnob::BatchSize,
-                    old_value: (i * 32) as u32,
-                    new_value: ((i + 1) * 32) as u32,
-                    predicted_metrics: *metrics,
+                    old_value: (i * 32) as u64,
+                    new_value: ((i + 1) * 32) as u64,
+                    predicted: metrics.clone(),
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(collision_proposal);
 
                 // Add delay simulation through additional operations
                 for j in 0..5 {
                     let delay_metrics = PredictedMetrics {
-                        throughput: 100.0 + (j as f64),
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
+                        throughput_rps: (100.0 + (j as f64)) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500) as u64,
                     };
                     let _ = gate.live_check(&delay_metrics);
                 }
@@ -5288,7 +5470,7 @@ mod tests {
             // Attack 1: Gradual threshold creeping to bypass safety envelopes
             let mut current_throughput = 50.0;
             let mut current_latency = 25.0;
-            let mut current_memory = 750;
+            let mut current_memory: u64 = 750;
 
             for i in 0..200 {
                 // Gradually increase each metric to attempt threshold bypass
@@ -5299,22 +5481,26 @@ mod tests {
                 let creeping_proposal = OptimizationProposal {
                     proposal_id: format!("threshold_creep_{}", i),
                     knob: RuntimeKnob::ConcurrencyLimit,
-                    old_value: 64 + (i % 20) as u32,
-                    new_value: 65 + (i % 20) as u32,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: current_throughput,
-                        latency_p99: current_latency,
-                        memory_usage: current_memory,
+                    old_value: 64 + (i % 20) as u64,
+                    new_value: 65 + (i % 20) as u64,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (current_throughput) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (current_latency) as u64,
+                        memory_mb: (current_memory) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let decision = gate.submit(creeping_proposal);
 
                 // Periodically perform live checks to test envelope enforcement
                 if i % 10 == 0 {
                     let check_metrics = PredictedMetrics {
-                        throughput: current_throughput + 10.0,
-                        latency_p99: current_latency + 5.0,
-                        memory_usage: current_memory + 500,
+                        throughput_rps: (current_throughput + 10.0) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (current_latency + 5.0) as u64,
+                        memory_mb: (current_memory + 500) as u64,
                     };
                     let _ = gate.live_check(&check_metrics);
                 }
@@ -5328,19 +5514,23 @@ mod tests {
                     knob: RuntimeKnob::DrainTimeoutMs,
                     old_value: 1000,
                     new_value: 1100,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0 + (oscillation_factor * 50.0),
-                        latency_p99: 50.0 + (oscillation_factor * 20.0),
-                        memory_usage: (1500.0 + (oscillation_factor * 500.0)) as usize,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0 + (oscillation_factor * 50.0)) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0 + (oscillation_factor * 20.0)) as u64,
+                        memory_mb: ((1500.0 + (oscillation_factor * 500.0)) as usize) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(oscillation_proposal);
 
                 // Complementary live check with opposite phase
                 let opposite_metrics = PredictedMetrics {
-                    throughput: 100.0 - (oscillation_factor * 50.0),
-                    latency_p99: 50.0 - (oscillation_factor * 20.0),
-                    memory_usage: (1500.0 - (oscillation_factor * 500.0)) as usize,
+                    throughput_rps: (100.0 - (oscillation_factor * 50.0)) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0 - (oscillation_factor * 20.0)) as u64,
+                    memory_mb: ((1500.0 - (oscillation_factor * 500.0)) as usize) as u64,
                 };
                 let _ = gate.live_check(&opposite_metrics);
             }
@@ -5361,31 +5551,35 @@ mod tests {
                     knob: RuntimeKnob::RetryBudget,
                     old_value: 10,
                     new_value: 20,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: if throughput.is_finite() {
+                    predicted: PredictedMetrics {
+                        throughput_rps: (if throughput.is_finite() {
                             *throughput
                         } else {
                             100.0
-                        },
-                        latency_p99: if latency.is_finite() { *latency } else { 50.0 },
-                        memory_usage: *memory as usize,
+                        }) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (if latency.is_finite() { *latency } else { 50.0 }) as u64,
+                        memory_mb: (*memory as usize) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(ratio_proposal);
 
                 // Test envelope consistency with extreme ratios
                 let ratio_check = PredictedMetrics {
-                    throughput: if throughput.is_finite() && *throughput > 0.0 {
+                    throughput_rps: (if throughput.is_finite() && *throughput > 0.0 {
                         *throughput / 2.0
                     } else {
                         50.0
-                    },
-                    latency_p99: if latency.is_finite() && *latency > 0.0 {
+                    }) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (if latency.is_finite() && *latency > 0.0 {
                         *latency / 2.0
                     } else {
                         25.0
-                    },
-                    memory_usage: (*memory as usize / 2).max(1),
+                    }) as u64,
+                    memory_mb: ((*memory as usize / 2).max(1)) as u64,
                 };
                 let _ = gate.live_check(&ratio_check);
             }
@@ -5398,11 +5592,14 @@ mod tests {
                     knob: RuntimeKnob::CacheCapacity,
                     old_value: 512,
                     new_value: 1024,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0 + boundary_offset,
-                        latency_p99: 50.0 - boundary_offset,
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0 + boundary_offset) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0 - boundary_offset) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(precision_proposal);
             }
@@ -5464,22 +5661,26 @@ mod tests {
                             2 => RuntimeKnob::DrainTimeoutMs,
                             _ => RuntimeKnob::RetryBudget,
                         },
-                        old_value: ((complexity_level * iteration) % 1000) as u32,
-                        new_value: (((complexity_level + 1) * (iteration + 1)) % 1000) as u32,
-                        predicted_metrics: PredictedMetrics {
-                            throughput: (complexity_level as f64) * (iteration as f64) * 0.5,
-                            latency_p99: 50.0 + (complexity_level as f64) * 2.0,
-                            memory_usage: 1500 + (complexity_level * iteration * 100),
+                        old_value: ((complexity_level * iteration) % 1000) as u64,
+                        new_value: (((complexity_level + 1) * (iteration + 1)) % 1000) as u64,
+                        predicted: PredictedMetrics {
+                            throughput_rps: ((complexity_level as f64) * (iteration as f64) * 0.5) as u64,
+                            error_rate_pct: 0.1,
+                            latency_ms: (50.0 + (complexity_level as f64) * 2.0) as u64,
+                            memory_mb: (1500 + (complexity_level * iteration * 100)) as u64,
                         },
+                        rationale: "bd-yom8c reconciled test".to_string(),
+                        trace_id: "trace-test".to_string(),
                     };
                     let _ = gate.submit(complex_proposal);
 
                     // Interleave with complex live checks
                     for live_check_round in 0..complexity_level.max(1) {
                         let complex_metrics = PredictedMetrics {
-                            throughput: 100.0 + (live_check_round as f64) * 5.0,
-                            latency_p99: 50.0 - (live_check_round as f64),
-                            memory_usage: 1500 + (live_check_round * 200),
+                            throughput_rps: (100.0 + (live_check_round as f64) * 5.0) as u64,
+                            error_rate_pct: 0.1,
+                            latency_ms: (50.0 - (live_check_round as f64)) as u64,
+                            memory_mb: (1500 + (live_check_round * 200)) as u64,
                         };
                         let _ = gate.live_check(&complex_metrics);
                     }
@@ -5492,11 +5693,14 @@ mod tests {
                 knob: RuntimeKnob::CacheCapacity,
                 old_value: 1024,
                 new_value: 2048,
-                predicted_metrics: PredictedMetrics {
-                    throughput: 100.0,
-                    latency_p99: 50.0,
-                    memory_usage: 1500,
+                predicted: PredictedMetrics {
+                    throughput_rps: (100.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (50.0) as u64,
+                    memory_mb: (1500) as u64,
                 },
+                rationale: "bd-yom8c reconciled test".to_string(),
+                trace_id: "trace-test".to_string(),
             };
 
             // Submit the same proposal many times to stress deduplication/handling
@@ -5507,7 +5711,7 @@ mod tests {
 
                 // Periodic live checks with same metrics
                 if i % 10 == 0 {
-                    let _ = gate.live_check(&exhaustion_proposal.predicted_metrics);
+                    let _ = gate.live_check(&exhaustion_proposal.predicted);
                 }
             }
 
@@ -5517,13 +5721,16 @@ mod tests {
                 let pressure_proposal = OptimizationProposal {
                     proposal_id: format!("pressure_{}_{}", pressure_round, large_value),
                     knob: RuntimeKnob::DrainTimeoutMs,
-                    old_value: large_value,
-                    new_value: large_value.saturating_add(1),
-                    predicted_metrics: PredictedMetrics {
-                        throughput: f64::MAX / (pressure_round as f64 + 1.0),
-                        latency_p99: f64::MAX / (pressure_round as f64 + 2.0),
-                        memory_usage: usize::MAX / (pressure_round + 1).max(1000),
+                    old_value: large_value as u64,
+                    new_value: large_value.saturating_add(1) as u64,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (f64::MAX / (pressure_round as f64 + 1.0)) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (f64::MAX / (pressure_round as f64 + 2.0)) as u64,
+                        memory_mb: (usize::MAX / (pressure_round as usize + 1).max(1000)) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(pressure_proposal);
             }
@@ -5543,13 +5750,16 @@ mod tests {
                     let rapid_proposal = OptimizationProposal {
                         proposal_id: format!("rapid_{}_{}", rapid_round, i),
                         knob,
-                        old_value: (rapid_round + i) as u32,
-                        new_value: (rapid_round + i + 1) as u32,
-                        predicted_metrics: PredictedMetrics {
-                            throughput: 100.0 + (i as f64),
-                            latency_p99: 50.0 + (rapid_round as f64 % 100.0),
-                            memory_usage: 1500 + (i * 100),
+                        old_value: (rapid_round + i) as u64,
+                        new_value: (rapid_round + i + 1) as u64,
+                        predicted: PredictedMetrics {
+                            throughput_rps: (100.0 + (i as f64)) as u64,
+                            error_rate_pct: 0.1,
+                            latency_ms: (50.0 + (rapid_round as f64 % 100.0)) as u64,
+                            memory_mb: (1500 + (i * 100)) as u64,
                         },
+                        rationale: "bd-yom8c reconciled test".to_string(),
+                        trace_id: "trace-test".to_string(),
                     };
                     let _ = gate.submit(rapid_proposal);
                 }
@@ -5557,9 +5767,10 @@ mod tests {
                 // Stress live check with alternating patterns
                 for check_variant in 0..3 {
                     let stress_metrics = PredictedMetrics {
-                        throughput: 100.0 * (check_variant as f64 + 1.0),
-                        latency_p99: 50.0 / (check_variant as f64 + 1.0),
-                        memory_usage: 1500 * (check_variant + 1),
+                        throughput_rps: (100.0 * (check_variant as f64 + 1.0)) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0 / (check_variant as f64 + 1.0)) as u64,
+                        memory_mb: (1500 * (check_variant + 1)) as u64,
                     };
                     let _ = gate.live_check(&stress_metrics);
                 }
@@ -5585,7 +5796,7 @@ mod tests {
 
                 let count = event_code_counts
                     .entry(entry.event_code.clone())
-                    .or_insert(0);
+                    .or_insert(0usize);
                 *count = count.saturating_add(1);
             }
 
@@ -5625,19 +5836,23 @@ mod tests {
                     knob: RuntimeKnob::ConcurrencyLimit,
                     old_value: 64,
                     new_value: 128,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: *float1,
-                        latency_p99: *float2,
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (*float1) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (*float2) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(float_proposal);
 
                 // Cross-check with live metrics
                 let cross_metrics = PredictedMetrics {
-                    throughput: *float2,
-                    latency_p99: *float1,
-                    memory_usage: 2000,
+                    throughput_rps: (*float2) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: (*float1) as u64,
+                    memory_mb: (2000) as u64,
                 };
                 let _ = gate.live_check(&cross_metrics);
             }
@@ -5660,11 +5875,14 @@ mod tests {
                     knob: RuntimeKnob::BatchSize,
                     old_value: 32,
                     new_value: 64,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0,
-                        latency_p99: 50.0,
-                        memory_usage: 1500,
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (1500) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(encoding_proposal);
             }
@@ -5683,13 +5901,16 @@ mod tests {
                 let endian_proposal = OptimizationProposal {
                     proposal_id: format!("endian_test_{:08X}", byte_value),
                     knob: RuntimeKnob::DrainTimeoutMs,
-                    old_value: byte_value,
-                    new_value: byte_value.swap_bytes(), // Test byte swapping
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0,
-                        latency_p99: 50.0,
-                        memory_usage: usize::try_from(byte_value).unwrap_or(usize::MAX),
+                    old_value: byte_value as u64,
+                    new_value: byte_value.swap_bytes() as u64, // Test byte swapping
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0) as u64,
+                        memory_mb: (usize::try_from(byte_value).unwrap_or(usize::MAX)) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(endian_proposal);
             }
@@ -5702,20 +5923,24 @@ mod tests {
                     knob: RuntimeKnob::RetryBudget,
                     old_value: consistency_round,
                     new_value: consistency_round.saturating_add(1),
-                    predicted_metrics: PredictedMetrics {
+                    predicted: PredictedMetrics {
                         // Use values that might have different JSON representations
-                        throughput: (consistency_round as f64) + 0.1,
-                        latency_p99: (consistency_round as f64) * 1.1 + 0.01,
-                        memory_usage: consistency_round.saturating_mul(100).saturating_add(1),
+                        throughput_rps: ((consistency_round as f64) + 0.1) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: ((consistency_round as f64) * 1.1 + 0.01) as u64,
+                        memory_mb: (consistency_round.saturating_mul(100).saturating_add(1)) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(consistency_proposal);
 
                 // Verify with complementary live check
                 let check_metrics = PredictedMetrics {
-                    throughput: (consistency_round as f64) * 2.0,
-                    latency_p99: (consistency_round as f64) / 2.0,
-                    memory_usage: consistency_round * 50,
+                    throughput_rps: ((consistency_round as f64) * 2.0) as u64,
+                    error_rate_pct: 0.1,
+                    latency_ms: ((consistency_round as f64) / 2.0) as u64,
+                    memory_mb: (consistency_round * 50) as u64,
                 };
                 let _ = gate.live_check(&check_metrics);
             }
@@ -5738,11 +5963,14 @@ mod tests {
                     knob: RuntimeKnob::CacheCapacity,
                     old_value: time_test * 64,
                     new_value: (time_test + 1) * 64,
-                    predicted_metrics: PredictedMetrics {
-                        throughput: 100.0 + (time_test as f64 % 50.0),
-                        latency_p99: 50.0 + (time_test as f64 % 25.0),
-                        memory_usage: 1500 + (time_test * 100),
+                    predicted: PredictedMetrics {
+                        throughput_rps: (100.0 + (time_test as f64 % 50.0)) as u64,
+                        error_rate_pct: 0.1,
+                        latency_ms: (50.0 + (time_test as f64 % 25.0)) as u64,
+                        memory_mb: (1500 + (time_test * 100)) as u64,
                     },
+                    rationale: "bd-yom8c reconciled test".to_string(),
+                    trace_id: "trace-test".to_string(),
                 };
                 let _ = gate.submit(time_proposal);
             }

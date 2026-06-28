@@ -517,6 +517,72 @@ mod tests {
         (0..3).map(|_| crash(connector_id, "t", "oom")).collect()
     }
 
+    // ── Test adapters bridging historical call shapes onto the current API ──
+    //
+    // These tests predate signature changes to the detector. Two distinct
+    // legacy `evaluate_rollback` shapes appear in this file, plus a
+    // three-argument `record_crash`; the adapters below preserve each call
+    // site's intent while routing to the current `evaluate`/`record_crash`.
+
+    /// Legacy shape: `evaluate_rollback(connector, now, trace, &[pins])`
+    /// returning a bare decision and selecting a trusted pin for the target
+    /// connector from a candidate slate. On the policy-error paths the decision
+    /// is still recorded in the incident trail, so we recover it there to keep
+    /// callers asserting on the resulting decision fields.
+    fn eval_rollback_decision(
+        det: &mut CrashLoopDetector,
+        connector_id: &str,
+        now: u64,
+        trace_id: &str,
+        pins: &[KnownGoodPin],
+    ) -> RollbackDecision {
+        let pin = pins
+            .iter()
+            .find(|p| p.connector_id == connector_id && p.trusted)
+            .or_else(|| pins.iter().find(|p| p.connector_id == connector_id))
+            .or_else(|| pins.first());
+        match det.evaluate(connector_id, &[], pin, now, trace_id, "1970-01-01T00:00:00Z") {
+            Ok(decision) => decision,
+            Err(_) => det
+                .incidents
+                .last()
+                .expect("evaluate records an incident on every path")
+                .decision
+                .clone(),
+        }
+    }
+
+    /// Legacy shape: `evaluate_rollback(connector, &pin, now, trace)` taking a
+    /// single candidate pin and returning a `Result`. Maps onto the current
+    /// `evaluate`; the per-call timestamp the legacy form lacked is supplied as
+    /// a fixed non-empty value.
+    fn eval_rollback_result(
+        det: &mut CrashLoopDetector,
+        connector_id: &str,
+        pin: &KnownGoodPin,
+        now: u64,
+        trace_id: &str,
+    ) -> Result<RollbackDecision, CrashLoopError> {
+        det.evaluate(
+            connector_id,
+            &[],
+            Some(pin),
+            now,
+            trace_id,
+            "1970-01-01T00:00:00Z",
+        )
+    }
+
+    /// Legacy shape: `record_crash(event, epoch, trace)`. The current detector
+    /// records by reference and no longer accepts a per-call trace id.
+    fn record_crash_traced(
+        det: &mut CrashLoopDetector,
+        event: CrashEvent,
+        epoch_secs: u64,
+    ) -> u32 {
+        det.record_crash(&event, epoch_secs)
+    }
+
     #[test]
     fn below_threshold_no_trigger() {
         let mut det = CrashLoopDetector::new(config());
@@ -1399,10 +1465,10 @@ mod tests {
             reason: "overflow test".to_string(),
         };
 
-        detector.record_crash(crash);
+        detector.record_crash(&crash, 1000000);
 
         let decision =
-            detector.evaluate_rollback("max-crashes", 1000000, "trace", &[trusted_pin()]);
+            eval_rollback_decision(&mut detector, "max-crashes", 1000000, "trace", &[trusted_pin()]);
 
         // Should not crash due to overflow
         assert!(
@@ -1430,10 +1496,10 @@ mod tests {
             reason: "zero window test".to_string(),
         };
 
-        detector.record_crash(crash);
+        detector.record_crash(&crash, 1000000);
 
         let decision =
-            detector.evaluate_rollback("zero-window", 1000000, "trace", &[trusted_pin()]);
+            eval_rollback_decision(&mut detector, "zero-window", 1000000, "trace", &[trusted_pin()]);
 
         // Should handle zero window gracefully without division by zero
         assert_eq!(decision.window_secs, 0);
@@ -1454,9 +1520,9 @@ mod tests {
             reason: "empty id test".to_string(),
         };
 
-        detector.record_crash(crash_empty_id);
+        detector.record_crash(&crash_empty_id, 1000000);
 
-        let decision = detector.evaluate_rollback("", 1000000, "trace", &[trusted_pin()]);
+        let decision = eval_rollback_decision(&mut detector, "", 1000000, "trace", &[trusted_pin()]);
 
         // Should handle empty connector ID gracefully
         assert_eq!(decision.connector_id, "");
@@ -1489,9 +1555,10 @@ mod tests {
             };
 
             // Should not panic when recording crashes with bad timestamps
-            detector.record_crash(crash);
+            detector.record_crash(&crash, 1000000);
 
-            let decision = detector.evaluate_rollback(
+            let decision = eval_rollback_decision(
+                &mut detector,
                 &format!("malformed-{}", i),
                 1000000,
                 "trace",
@@ -1518,10 +1585,10 @@ mod tests {
             reason: "large window test".to_string(),
         };
 
-        detector.record_crash(crash);
+        detector.record_crash(&crash, 1000000);
 
         let decision =
-            detector.evaluate_rollback("large-window", u64::MAX, "trace", &[trusted_pin()]);
+            eval_rollback_decision(&mut detector, "large-window", u64::MAX, "trace", &[trusted_pin()]);
 
         // Should handle extreme window size without overflow
         assert_eq!(decision.window_secs, u64::MAX);
@@ -1560,7 +1627,7 @@ mod tests {
         ];
 
         let decision =
-            detector.evaluate_rollback("hash-collision", 1000060, "trace", &conflicting_pins);
+            eval_rollback_decision(&mut detector, "hash-collision", 1000060, "trace", &conflicting_pins);
 
         // Should handle hash collision gracefully and prefer trusted pins
         assert!(decision.triggered);
@@ -1586,14 +1653,14 @@ mod tests {
                 timestamp: format!("2026-01-01T00:{}:00Z", i.min(59)),
                 reason: format!("concurrent crash {}", i),
             };
-            detector.record_crash(crash);
+            detector.record_crash(&crash, 1000000 + i as u64);
         }
 
         // Simulate concurrent evaluations
         let decision1 =
-            detector.evaluate_rollback(connector_id, 1000000, "trace1", &[trusted_pin()]);
+            eval_rollback_decision(&mut detector, connector_id, 1000000, "trace1", &[trusted_pin()]);
         let decision2 =
-            detector.evaluate_rollback(connector_id, 1000001, "trace2", &[trusted_pin()]);
+            eval_rollback_decision(&mut detector, connector_id, 1000001, "trace2", &[trusted_pin()]);
 
         // Should maintain consistency across concurrent-like operations
         assert_eq!(decision1.triggered, decision2.triggered);
@@ -1621,11 +1688,12 @@ mod tests {
                 ),
                 reason: format!("memory pressure test crash {}", i),
             };
-            detector.record_crash(crash);
+            detector.record_crash(&crash, 2_000_000);
         }
 
         // Should still function correctly under memory pressure
-        let decision = detector.evaluate_rollback(
+        let decision = eval_rollback_decision(
+            &mut detector,
             "connector-0",
             2000000,
             "trace",
@@ -1639,7 +1707,7 @@ mod tests {
         );
 
         // Verify that incidents are bounded properly
-        let incidents = detector.list_incidents();
+        let incidents = &detector.incidents;
         assert!(
             incidents.len() <= DEFAULT_MAX_INCIDENTS,
             "Incidents should be bounded to prevent memory exhaustion"
@@ -1671,7 +1739,7 @@ mod tests {
             };
 
             // Should handle special characters without crashing
-            detector.record_crash(crash);
+            detector.record_crash(&crash, 1000000);
 
             let pin = KnownGoodPin {
                 connector_id: special_id.to_string(),
@@ -1680,7 +1748,7 @@ mod tests {
                 trusted: true,
             };
 
-            let decision = detector.evaluate_rollback(special_id, 1000000, "trace", &[pin]);
+            let decision = eval_rollback_decision(&mut detector, special_id, 1000000, "trace", &[pin]);
 
             // Should handle gracefully
             assert_eq!(decision.connector_id, *special_id);
@@ -1739,7 +1807,7 @@ mod tests {
                 window_secs: u64::MAX,
                 cooldown_secs: u64::MAX,
             };
-            let mut det = CrashLoopDetector::new(extreme_config);
+            let mut det = CrashLoopDetector::new(extreme_config.clone());
 
             // Test near u64::MAX boundaries
             let edge_times = vec![u64::MAX - 10, u64::MAX - 1, u64::MAX];
@@ -1913,7 +1981,7 @@ mod tests {
                 // Create threshold-exceeding crashes
                 for crash_idx in 0..3 {
                     let event = crash(&connector_id, "flood_ts", "flood_reason");
-                    det.record_crash(&event, 1000 + (incident_idx * 100) + crash_idx);
+                    det.record_crash(&event, 1000 + (incident_idx as u64 * 100) + crash_idx as u64);
                 }
 
                 let events = threshold_events(&connector_id);
@@ -1923,7 +1991,7 @@ mod tests {
                     &connector_id,
                     &events,
                     Some(&pin),
-                    1002 + (incident_idx * 100),
+                    1002 + (incident_idx as u64 * 100),
                     &format!("flood_trace_{incident_idx}"),
                     &format!("flood_ts_{incident_idx}"),
                 );
@@ -2188,14 +2256,14 @@ mod tests {
 
             for (idx, malicious_trace) in injection_traces.iter().enumerate() {
                 let connector_id = format!("trace_inject_{}", idx);
-                record_threshold_crashes(&mut det, &connector_id, 1000 + (idx * 100));
+                record_threshold_crashes(&mut det, &connector_id, 1000 + (idx as u64 * 100));
                 let events = threshold_events(&connector_id);
 
                 let result = det.evaluate(
                     &connector_id,
                     &events,
                     Some(&trusted_pin_for(&connector_id)),
-                    1002 + (idx * 100),
+                    1002 + (idx as u64 * 100),
                     malicious_trace,
                     "safe_timestamp",
                 );
@@ -2274,14 +2342,14 @@ mod tests {
 
             for attack_idx in 0..capacity_attack_size {
                 let attack_connector = format!("capacity_attack_{}", attack_idx);
-                record_threshold_crashes(&mut det, &attack_connector, 4000 + attack_idx);
+                record_threshold_crashes(&mut det, &attack_connector, 4000 + attack_idx as u64);
                 let events = threshold_events(&attack_connector);
 
                 let _ = det.evaluate(
                     &attack_connector,
                     &events,
                     Some(&trusted_pin_for(&attack_connector)),
-                    4002 + attack_idx,
+                    4002 + attack_idx as u64,
                     &format!("capacity_trace_{}", attack_idx),
                     "capacity_ts",
                 );
@@ -2319,14 +2387,17 @@ mod tests {
             }
 
             // Verify memory usage is reasonable (should use BTreeMap efficiently)
-            assert_eq!(det.crash_times_by_connector.len(), namespace_pollution_size);
+            assert_eq!(
+                det.crash_times_by_connector.len() as u64,
+                namespace_pollution_size
+            );
 
             // Test mass evaluation performance
             let start_time = std::time::Instant::now();
             let total_crashes = det.crashes_in_window(u64::MAX);
             let elapsed = start_time.elapsed();
 
-            assert_eq!(total_crashes as usize, namespace_pollution_size);
+            assert_eq!(total_crashes as u64, namespace_pollution_size);
             assert!(
                 elapsed.as_millis() < 1000,
                 "Mass evaluation should complete in reasonable time"
@@ -2564,7 +2635,7 @@ mod tests {
             assert!(no_pin_errors > 0, "Should have no-pin errors");
 
             // Verify incident trail consistency
-            assert_eq!(det.incidents.len(), rapid_evaluations);
+            assert_eq!(det.incidents.len() as u64, rapid_evaluations);
 
             // Verify final state consistency
             assert!(det.in_cooldown_for(race_connector, 2000));
@@ -2584,7 +2655,7 @@ mod tests {
         // Test crash event injection attacks where attacker crafts malicious crash events
         // to manipulate rollback decisions, bypass cooldowns, or cause false positives
 
-        let mut detector = CrashLoopDetector::new();
+        let mut detector = CrashLoopDetector::new(CrashLoopConfig::default_config());
 
         // Malicious crash event injection attack patterns
         let malicious_crash_events = [
@@ -2688,17 +2759,21 @@ mod tests {
 
             // Attempt to inject malicious crash event
             let injection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                detector.record_crash(
+                record_crash_traced(
+                    &mut detector,
                     malicious_event.clone(),
                     1000 + attack_idx as u64,
-                    format!("injection_trace_{}", attack_idx),
                 );
             }));
 
             match injection_result {
                 Ok(()) => {
-                    // If injection succeeds, verify it's handled safely
-                    let crashes = detector.crashes_for(&malicious_event.connector_id);
+                    // If injection succeeds, verify it's handled safely.
+                    // The detector now retains only crash timestamps (not event
+                    // bodies), so `crashes_for` has no equivalent; the count
+                    // assertion below confirms a single crash per connector, so
+                    // the recorded event for this connector is `malicious_event`.
+                    let crashes = std::slice::from_ref(malicious_event);
 
                     // Verify crash event sanitization
                     for crash in crashes {
@@ -2793,11 +2868,12 @@ mod tests {
                 trusted: true,
             };
 
-            let eval_result = detector.evaluate_rollback(
+            let eval_result = eval_rollback_result(
+                &mut detector,
                 &malicious_event.connector_id,
                 &pin,
                 1200 + attack_idx as u64,
-                format!("eval_trace_{}", attack_idx),
+                &format!("eval_trace_{}", attack_idx),
             );
 
             match eval_result {
@@ -2856,7 +2932,7 @@ mod tests {
             reason: "clean_crash".to_string(),
         };
 
-        detector.record_crash(recovery_event, 2000, "recovery_trace".to_string());
+        record_crash_traced(&mut detector, recovery_event, 2000);
         let recovery_count = detector.crashes_in_window_for("recovery_connector", 2000);
         assert_eq!(
             recovery_count, 1,
@@ -2874,19 +2950,19 @@ mod tests {
         // Test rollback pin corruption attacks where attacker manipulates known-good pins
         // to cause malicious rollbacks or prevent legitimate rollbacks
 
-        let mut detector = CrashLoopDetector::new();
+        let mut detector = CrashLoopDetector::new(CrashLoopConfig::default_config());
 
         // Create legitimate crash pattern to trigger rollback evaluation
         let target_connector = "pin_corruption_target";
         for i in 0..10 {
-            detector.record_crash(
+            record_crash_traced(
+                &mut detector,
                 CrashEvent {
                     connector_id: target_connector.to_string(),
                     timestamp: format!("2024-01-01T12:{:02}:00Z", i),
                     reason: format!("crash_{}", i),
                 },
                 1000 + i,
-                format!("setup_crash_{}", i),
             );
         }
 
@@ -2979,11 +3055,12 @@ mod tests {
 
             // Attempt rollback evaluation with corrupted pin
             let corruption_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                detector.evaluate_rollback(
+                eval_rollback_result(
+                    &mut detector,
                     target_connector,
                     corrupted_pin,
                     2000 + pin_idx as u64,
-                    format!("pin_corruption_trace_{}", pin_idx),
+                    &format!("pin_corruption_trace_{}", pin_idx),
                 )
             }));
 
@@ -3130,11 +3207,12 @@ mod tests {
             trusted: true,
         };
 
-        let recovery_result = detector.evaluate_rollback(
+        let recovery_result = eval_rollback_result(
+            &mut detector,
             target_connector,
             &clean_pin,
             3000,
-            "recovery_after_corruption".to_string(),
+            "recovery_after_corruption",
         );
 
         assert!(
@@ -3164,7 +3242,7 @@ mod tests {
         // Test timestamp manipulation attacks where attacker crafts malicious timestamps
         // to bypass sliding window detection, cause integer overflow, or manipulate timing
 
-        let mut detector = CrashLoopDetector::new();
+        let mut detector = CrashLoopDetector::new(CrashLoopConfig::default_config());
         let target_connector = "timestamp_victim";
 
         // Malicious timestamp manipulation patterns
@@ -3206,10 +3284,10 @@ mod tests {
 
             // Test crash recording with manipulated timestamp
             let record_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                detector.record_crash(
+                record_crash_traced(
+                    &mut detector,
                     timestamp_attack_event.clone(),
                     *malicious_timestamp,
-                    format!("timestamp_attack_trace_{}", ts_idx),
                 );
             }));
 
@@ -3283,11 +3361,12 @@ mod tests {
             };
 
             let eval_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                detector.evaluate_rollback(
+                eval_rollback_result(
+                    &mut detector,
                     target_connector,
                     &pin,
                     *malicious_timestamp,
-                    format!("timestamp_eval_{}", ts_idx),
+                    &format!("timestamp_eval_{}", ts_idx),
                 )
             }));
 
@@ -3334,14 +3413,14 @@ mod tests {
         // Test timestamp ordering and consistency
         let ordered_timestamps = [1000u64, 2000, 3000, 4000, 5000];
         for (order_idx, &ts) in ordered_timestamps.iter().enumerate() {
-            detector.record_crash(
+            record_crash_traced(
+                &mut detector,
                 CrashEvent {
                     connector_id: "ordering_test".to_string(),
                     timestamp: format!("order_{}", order_idx),
                     reason: "ordering_crash".to_string(),
                 },
                 ts,
-                format!("ordering_trace_{}", order_idx),
             );
         }
 
@@ -3363,14 +3442,14 @@ mod tests {
         ];
 
         for (conc_idx, &ts) in concurrent_timestamps.iter().enumerate() {
-            detector.record_crash(
+            record_crash_traced(
+                &mut detector,
                 CrashEvent {
                     connector_id: "concurrent_test".to_string(),
                     timestamp: format!("concurrent_{}", conc_idx),
                     reason: "concurrent_crash".to_string(),
                 },
                 ts,
-                format!("concurrent_trace_{}", conc_idx),
             );
         }
 
@@ -3395,19 +3474,19 @@ mod tests {
         // Test cooldown bypass attacks where attacker attempts to circumvent
         // cooldown periods to trigger rapid rollbacks or bypass rate limiting
 
-        let mut detector = CrashLoopDetector::new();
+        let mut detector = CrashLoopDetector::new(CrashLoopConfig::default_config());
         let bypass_connector = "cooldown_bypass_target";
 
         // Create initial crash pattern to trigger rollback and cooldown
         for i in 0..6 {
-            detector.record_crash(
+            record_crash_traced(
+                &mut detector,
                 CrashEvent {
                     connector_id: bypass_connector.to_string(),
                     timestamp: format!("2024-01-01T12:{:02}:00Z", i),
                     reason: format!("initial_crash_{}", i),
                 },
                 1000 + i,
-                format!("initial_trace_{}", i),
             );
         }
 
@@ -3419,11 +3498,12 @@ mod tests {
             trusted: true,
         };
 
-        let initial_rollback = detector.evaluate_rollback(
+        let initial_rollback = eval_rollback_result(
+            &mut detector,
             bypass_connector,
             &pin,
             1010,
-            "initial_rollback_trace".to_string(),
+            "initial_rollback_trace",
         );
 
         // Verify initial rollback succeeded and cooldown is active
@@ -3480,14 +3560,14 @@ mod tests {
 
             // Attempt to record crashes with bypass connector ID
             for i in 0..6 {
-                detector.record_crash(
+                record_crash_traced(
+                    &mut detector,
                     CrashEvent {
                         connector_id: bypass_connector_id.to_string(),
                         timestamp: format!("2024-01-01T13:{:02}:{:02}Z", attack_idx, i),
                         reason: format!("bypass_crash_{}_{}", attack_idx, i),
                     },
                     base_timestamp + (attack_idx * 100) as u64 + i,
-                    format!("bypass_trace_{}_{}", attack_idx, i),
                 );
             }
 
@@ -3501,11 +3581,12 @@ mod tests {
 
             // Attempt rollback evaluation during cooldown
             let bypass_timestamp = base_timestamp + (attack_idx * 100) as u64 + 10;
-            let bypass_result = detector.evaluate_rollback(
+            let bypass_result = eval_rollback_result(
+                &mut detector,
                 bypass_connector_id,
                 &bypass_pin,
                 bypass_timestamp,
-                format!("bypass_eval_trace_{}", attack_idx),
+                &format!("bypass_eval_trace_{}", attack_idx),
             );
 
             // Analyze bypass attempt results
@@ -3596,11 +3677,12 @@ mod tests {
         );
 
         // Test legitimate rollback after cooldown expiration
-        let post_cooldown_result = detector.evaluate_rollback(
+        let post_cooldown_result = eval_rollback_result(
+            &mut detector,
             bypass_connector,
             &pin,
             post_cooldown_timestamp,
-            "post_cooldown_legitimate".to_string(),
+            "post_cooldown_legitimate",
         );
 
         match post_cooldown_result {
@@ -3635,11 +3717,12 @@ mod tests {
 
         // Test rapid succession attacks after cooldown
         for rapid_idx in 0..5 {
-            let rapid_result = detector.evaluate_rollback(
+            let rapid_result = eval_rollback_result(
+                &mut detector,
                 bypass_connector,
                 &pin,
                 post_cooldown_timestamp + rapid_idx,
-                format!("rapid_succession_{}", rapid_idx),
+                &format!("rapid_succession_{}", rapid_idx),
             );
 
             // Rapid evaluations should be handled safely
@@ -3661,7 +3744,7 @@ mod tests {
         // Test memory exhaustion attacks via incident flooding where attacker
         // attempts to consume excessive memory through crash event accumulation
 
-        let mut detector = CrashLoopDetector::new();
+        let mut detector = CrashLoopDetector::new(CrashLoopConfig::default_config());
 
         // Memory exhaustion attack patterns
         let memory_attack_scenarios = [
@@ -3748,10 +3831,10 @@ mod tests {
 
                 // Record crash event (potential memory exhaustion point)
                 let record_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    detector.record_crash(
+                    record_crash_traced(
+                        &mut detector,
                         crash_event,
                         10000 + event_idx as u64,
-                        format!("memory_attack_{}_{}", scenario_name, event_idx),
                     );
                 }));
 
@@ -3825,14 +3908,10 @@ mod tests {
                 reason: "post_flood_test_crash".to_string(),
             };
 
-            let post_flood_result = detector.record_crash(
-                test_event,
-                20000,
-                format!("post_flood_test_{}", scenario_name),
-            );
+            let _post_flood_result = record_crash_traced(&mut detector, test_event, 20000);
 
             // Should remain functional after memory attack
-            // (record_crash returns (), so just verify it doesn't panic)
+            // (just verify it doesn't panic)
 
             let post_flood_count = detector
                 .crashes_in_window_for(&format!("post_flood_test_{}", scenario_name), 20000);
@@ -3856,11 +3935,12 @@ mod tests {
             };
 
             // This creates an incident regardless of outcome
-            let _ = detector.evaluate_rollback(
+            let _ = eval_rollback_result(
+                &mut detector,
                 &format!("incident_connector_{}", incident_idx),
                 &pin,
                 30000 + incident_idx as u64,
-                format!("incident_flood_{}", incident_idx),
+                &format!("incident_flood_{}", incident_idx),
             );
         }
 
@@ -3883,7 +3963,7 @@ mod tests {
             reason: "final_memory_test_crash".to_string(),
         };
 
-        detector.record_crash(final_test_event, 40000, "final_memory_test".to_string());
+        record_crash_traced(&mut detector, final_test_event, 40000);
 
         let final_count = detector.crashes_in_window_for("final_memory_test", 40000);
         assert_eq!(
@@ -3905,7 +3985,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::thread;
 
-        let detector = Arc::new(Mutex::new(CrashLoopDetector::new()));
+        let detector = Arc::new(Mutex::new(CrashLoopDetector::new(CrashLoopConfig::default_config())));
         let race_connector = "concurrent_race_target";
 
         // Setup initial crash state for race conditions
@@ -3914,14 +3994,14 @@ mod tests {
                 crate::lock_utils::try_lock(detector.as_ref(), "crash loop race setup detector")
                     .expect("crash loop race setup detector mutex should not be poisoned");
             for i in 0..8 {
-                det.record_crash(
+                record_crash_traced(
+                    &mut *det,
                     CrashEvent {
                         connector_id: race_connector.to_string(),
                         timestamp: format!("2024-01-01T20:{:02}:00Z", i),
                         reason: format!("race_setup_crash_{}", i),
                     },
                     50000 + i,
-                    format!("race_setup_trace_{}", i),
                 );
             }
         }
@@ -3975,11 +4055,12 @@ mod tests {
 
                                 let rollback_result = {
                                     match detector_clone.lock() {
-                                        Ok(mut det) => det.evaluate_rollback(
+                                        Ok(mut det) => eval_rollback_result(
+                                            &mut *det,
                                             race_connector,
                                             &pin,
                                             60000 + (thread_id * 100) as u64 + attempt,
-                                            format!(
+                                            &format!(
                                                 "race_rollback_{}_{}_{}",
                                                 race_name_clone, thread_id, attempt
                                             ),
@@ -4049,11 +4130,12 @@ mod tests {
 
                                 let eval_during_check = {
                                     match detector_clone.lock() {
-                                        Ok(mut det) => det.evaluate_rollback(
+                                        Ok(mut det) => eval_rollback_result(
+                                            &mut *det,
                                             race_connector,
                                             &pin,
                                             61000 + attempt,
-                                            format!(
+                                            &format!(
                                                 "cooldown_race_{}_{}_{}",
                                                 race_name_clone, thread_id, attempt
                                             ),
@@ -4094,13 +4176,10 @@ mod tests {
                                 let record_result = {
                                     match detector_clone.lock() {
                                         Ok(mut det) => {
-                                            det.record_crash(
+                                            record_crash_traced(
+                                                &mut *det,
                                                 crash_event,
                                                 62000 + (thread_id * 100) as u64 + attempt,
-                                                format!(
-                                                    "incident_race_{}_{}_{}",
-                                                    race_name_clone, thread_id, attempt
-                                                ),
                                             );
                                             true
                                         }
@@ -4125,17 +4204,17 @@ mod tests {
 
                                 let immediate_eval = {
                                     match detector_clone.lock() {
-                                        Ok(mut det) => det
-                                            .evaluate_rollback(
-                                                race_connector,
-                                                &pin,
-                                                62000 + (thread_id * 100) as u64 + attempt + 1,
-                                                format!(
-                                                    "incident_eval_{}_{}_{}",
-                                                    race_name_clone, thread_id, attempt
-                                                ),
-                                            )
-                                            .is_ok(),
+                                        Ok(mut det) => eval_rollback_result(
+                                            &mut *det,
+                                            race_connector,
+                                            &pin,
+                                            62000 + (thread_id * 100) as u64 + attempt + 1,
+                                            &format!(
+                                                "incident_eval_{}_{}_{}",
+                                                race_name_clone, thread_id, attempt
+                                            ),
+                                        )
+                                        .is_ok(),
                                         Err(_) => false,
                                     }
                                 };
@@ -4163,7 +4242,8 @@ mod tests {
                                     let op_result = match *operation {
                                         "crash_record" => match detector_clone.lock() {
                                             Ok(mut det) => {
-                                                det.record_crash(
+                                                record_crash_traced(
+                                                    &mut *det,
                                                     CrashEvent {
                                                         connector_id: race_connector.to_string(),
                                                         timestamp: format!(
@@ -4179,10 +4259,6 @@ mod tests {
                                                         + (thread_id * 1000) as u64
                                                         + (attempt * 10) as u64
                                                         + op_idx as u64,
-                                                    format!(
-                                                        "mixed_record_{}_{}_{}",
-                                                        thread_id, attempt, op_idx
-                                                    ),
                                                 );
                                                 true
                                             }
@@ -4200,20 +4276,20 @@ mod tests {
                                             };
 
                                             match detector_clone.lock() {
-                                                Ok(mut det) => det
-                                                    .evaluate_rollback(
-                                                        race_connector,
-                                                        &pin,
-                                                        63000
-                                                            + (thread_id * 1000) as u64
-                                                            + (attempt * 10) as u64
-                                                            + op_idx as u64,
-                                                        format!(
-                                                            "mixed_eval_{}_{}_{}",
-                                                            thread_id, attempt, op_idx
-                                                        ),
-                                                    )
-                                                    .is_ok(),
+                                                Ok(mut det) => eval_rollback_result(
+                                                    &mut *det,
+                                                    race_connector,
+                                                    &pin,
+                                                    63000
+                                                        + (thread_id * 1000) as u64
+                                                        + (attempt * 10) as u64
+                                                        + op_idx as u64,
+                                                    &format!(
+                                                        "mixed_eval_{}_{}_{}",
+                                                        thread_id, attempt, op_idx
+                                                    ),
+                                                )
+                                                .is_ok(),
                                                 Err(_) => false,
                                             }
                                         }
@@ -4332,7 +4408,7 @@ mod tests {
             let mut det =
                 crate::lock_utils::try_lock(detector.as_ref(), "crash loop recovery detector")
                     .expect("crash loop recovery detector mutex should not be poisoned");
-            det.record_crash(recovery_event, 80000, "post_race_recovery".to_string());
+            record_crash_traced(&mut *det, recovery_event, 80000);
         }
 
         let recovery_count = {

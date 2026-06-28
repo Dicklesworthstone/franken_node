@@ -3131,8 +3131,10 @@ mod tests {
 
     #[test]
     fn mr_larger_entry_capacity_preserves_smaller_capacity_suffix() {
-        let small = run_sequence(LedgerCapacity::new(3, 100_000), 1, 8).snapshot();
-        let large = run_sequence(LedgerCapacity::new(5, 100_000), 1, 8).snapshot();
+        let small =
+            run_sequence(LedgerCapacity::new(3, 100_000), 1, 8, default_verifying_key()).snapshot();
+        let large =
+            run_sequence(LedgerCapacity::new(5, 100_000), 1, 8, default_verifying_key()).snapshot();
 
         let small_ids = snapshot_decision_ids(&small);
         let large_ids = snapshot_decision_ids(&large);
@@ -3143,7 +3145,8 @@ mod tests {
 
     #[test]
     fn mr_irrelevant_prefix_noise_preserves_retained_tail() {
-        let baseline = run_sequence(LedgerCapacity::new(4, 100_000), 5, 8).snapshot();
+        let baseline =
+            run_sequence(LedgerCapacity::new(4, 100_000), 5, 8, default_verifying_key()).snapshot();
 
         let mut with_prefix = EvidenceLedger::new(LedgerCapacity::new(4, 100_000));
         for i in 1..=8 {
@@ -3163,7 +3166,7 @@ mod tests {
 
     #[test]
     fn mr_iter_recent_is_suffix_of_all_entries_for_each_window() {
-        let ledger = run_sequence(LedgerCapacity::new(6, 100_000), 1, 6);
+        let ledger = run_sequence(LedgerCapacity::new(6, 100_000), 1, 6, default_verifying_key());
         let all_ids = iter_decision_ids(&ledger);
 
         for window in [0, 1, 3, 6, 10] {
@@ -3178,7 +3181,8 @@ mod tests {
 
     #[test]
     fn mr_rejected_entry_does_not_mutate_snapshot_or_counters() {
-        let mut ledger = run_sequence(LedgerCapacity::new(3, 100_000), 1, 3);
+        let mut ledger =
+            run_sequence(LedgerCapacity::new(3, 100_000), 1, 3, default_verifying_key());
         let before = ledger.snapshot();
 
         let too_large = make_entry_with_payload("DEC-TOO-LARGE", 99, 200_000);
@@ -3198,8 +3202,15 @@ mod tests {
     #[test]
     fn mr_entry_count_capacity_and_byte_capacity_retain_same_uniform_suffix() {
         let entry_size = make_entry("DEC-001", 1).estimated_size();
-        let by_count = run_sequence(LedgerCapacity::new(3, 100_000), 1, 9).snapshot();
-        let by_bytes = run_sequence(LedgerCapacity::new(100, entry_size * 3), 1, 9).snapshot();
+        let by_count =
+            run_sequence(LedgerCapacity::new(3, 100_000), 1, 9, default_verifying_key()).snapshot();
+        let by_bytes = run_sequence(
+            LedgerCapacity::new(100, entry_size * 3),
+            1,
+            9,
+            default_verifying_key(),
+        )
+        .snapshot();
 
         assert_eq!(
             snapshot_decision_ids(&by_count),
@@ -3263,7 +3274,8 @@ mod tests {
 
     #[test]
     fn mr_snapshot_clone_is_unchanged_by_append_transform() {
-        let mut ledger = run_sequence(LedgerCapacity::new(4, 100_000), 1, 4);
+        let mut ledger =
+            run_sequence(LedgerCapacity::new(4, 100_000), 1, 4, default_verifying_key());
         let before = ledger.snapshot();
 
         ledger
@@ -3601,7 +3613,7 @@ mod tests {
             .expect("first append should establish chain hash");
         let mut second_entry = make_entry("DEC-002", 2);
         second_entry.size_bytes = usize::MAX;
-        second_entry.prev_entry_hash = expected_prev_hash;
+        second_entry.prev_entry_hash = expected_prev_hash.clone();
 
         ledger.append(second_entry).expect("second append");
 
@@ -4428,7 +4440,7 @@ mod tests {
             let snapshot = ledger.snapshot();
             assert_eq!(snapshot.entries.len(), malicious_ids.len());
 
-            for (entry, expected_id) in snapshot.entries.iter().zip(&malicious_ids) {
+            for ((_, entry), expected_id) in snapshot.entries.iter().zip(&malicious_ids) {
                 assert_eq!(entry.decision_id, *expected_id);
             }
         }
@@ -4485,7 +4497,7 @@ mod tests {
             let snapshot = ledger.snapshot();
             assert_eq!(snapshot.entries.len(), overflow_timestamps.len());
 
-            for (entry, expected_ts) in snapshot.entries.iter().zip(&overflow_timestamps) {
+            for ((_, entry), expected_ts) in snapshot.entries.iter().zip(&overflow_timestamps) {
                 assert_eq!(entry.timestamp_ms, *expected_ts);
             }
         }
@@ -4505,7 +4517,7 @@ mod tests {
             }
 
             let snapshot = ledger.snapshot();
-            for (entry, expected_epoch) in snapshot.entries.iter().zip(&boundary_epochs) {
+            for ((_, entry), expected_epoch) in snapshot.entries.iter().zip(&boundary_epochs) {
                 assert_eq!(entry.epoch_id, *expected_epoch);
             }
         }
@@ -4556,7 +4568,7 @@ mod tests {
             let retained_ids: Vec<String> = snapshot
                 .entries
                 .iter()
-                .map(|e| e.decision_id.clone())
+                .map(|(_, e)| e.decision_id.clone())
                 .collect();
 
             assert_eq!(
@@ -4645,6 +4657,7 @@ mod tests {
                     payload: serde_json::json!({}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 },
                 EvidenceEntry {
                     schema_version: "v1.0".to_string(),
@@ -4658,6 +4671,7 @@ mod tests {
                     payload: serde_json::json!({"empty": {}}),
                     size_bytes: 100,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 },
             ];
 
@@ -4683,7 +4697,7 @@ mod tests {
 
             // Get the hash of the first entry for the second entry's prev_hash
             let snapshot = ledger.snapshot();
-            let first_hash = evidence_entry_hash_hex(&snapshot.entries[0]);
+            let first_hash = evidence_entry_hash_hex(&snapshot.entries[0].1);
 
             // Create second entry with correct prev_entry_hash
             let mut second_entry = test_entry("second-decision", 2);
@@ -4726,18 +4740,18 @@ mod tests {
 
             let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, 1_000_000));
 
-            let malicious_decision_ids = [
-                "decision\u{202E}fake\u{202C}",        // BiDi override attack
-                "decision\x1b[31mred\x1b[0m",          // ANSI escape injection
-                "decision\0null\r\n\t",                // Control character injection
-                "decision\"}{\"admin\":true,\"bypass", // JSON injection attempt
-                "decision/../../etc/passwd",           // Path traversal attempt
-                "decision\u{FEFF}BOM",                 // Byte order mark
-                "decision\u{200B}\u{200C}\u{200D}",    // Zero-width characters
-                "decision<script>alert(1)</script>",   // XSS attempt
-                "decision'; DROP TABLE evidence; --",  // SQL injection attempt
-                "decision||rm -rf /",                  // Shell injection attempt
-                "x".repeat(100_000),                   // Extremely long decision ID (100KB)
+            let malicious_decision_ids: Vec<String> = vec![
+                "decision\u{202E}fake\u{202C}".to_string(), // BiDi override attack
+                "decision\x1b[31mred\x1b[0m".to_string(),   // ANSI escape injection
+                "decision\0null\r\n\t".to_string(),         // Control character injection
+                "decision\"}{\"admin\":true,\"bypass".to_string(), // JSON injection attempt
+                "decision/../../etc/passwd".to_string(),    // Path traversal attempt
+                "decision\u{FEFF}BOM".to_string(),          // Byte order mark
+                "decision\u{200B}\u{200C}\u{200D}".to_string(), // Zero-width characters
+                "decision<script>alert(1)</script>".to_string(), // XSS attempt
+                "decision'; DROP TABLE evidence; --".to_string(), // SQL injection attempt
+                "decision||rm -rf /".to_string(),           // Shell injection attempt
+                "x".repeat(100_000),                        // Extremely long decision ID (100KB)
             ];
 
             for malicious_id in malicious_decision_ids {
@@ -4753,6 +4767,7 @@ mod tests {
                     payload: serde_json::json!({"test": "data"}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 // Test ledger append with malicious decision ID
@@ -4798,7 +4813,7 @@ mod tests {
                 // Test constant-time comparison for decision IDs
                 let normal_id = "normal-decision-123";
                 assert!(
-                    !constant_time::ct_eq(malicious_id, normal_id),
+                    !constant_time::ct_eq(&malicious_id, normal_id),
                     "decision ID comparison should be constant-time"
                 );
             }
@@ -4830,6 +4845,7 @@ mod tests {
                     payload: serde_json::json!({"bypass_attempt": true}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 let result = ledger.append(bypass_entry);
@@ -4859,6 +4875,7 @@ mod tests {
                 payload: serde_json::json!({"massive_data": "Y".repeat(1_000_000)}), // 1MB payload
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
 
             // Test appending massive entry
@@ -4920,6 +4937,7 @@ mod tests {
                     payload: serde_json::json!({"injection_test": true}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 let result = ledger.append(injection_entry.clone());
@@ -5016,6 +5034,7 @@ mod tests {
                     payload: malicious_payload.clone(),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 // Test appending malicious payload
@@ -5079,7 +5098,7 @@ mod tests {
 
                 // Get the actual hash from the ledger
                 let snapshot = ledger.snapshot();
-                let actual_hash = evidence_entry_hash_hex(&snapshot.entries[i]);
+                let actual_hash = evidence_entry_hash_hex(&snapshot.entries[i].1);
 
                 // Create second entry that should match this hash exactly
                 let mut second_entry = test_entry(&format!("match-{}", i), (i + 1) as u64);
@@ -5169,7 +5188,7 @@ mod tests {
 
             // Get expected hash
             let snapshot = ledger.snapshot();
-            let expected_hash = evidence_entry_hash_hex(&snapshot.entries[0]);
+            let expected_hash = evidence_entry_hash_hex(&snapshot.entries[0].1);
 
             // Test cases for malformed hex input
             let malformed_hex_cases = vec![
@@ -5388,6 +5407,7 @@ mod tests {
                     payload: serde_json::json!({"epoch_test": epoch_id}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 let result = ledger.append(epoch_entry.clone());
@@ -5425,6 +5445,7 @@ mod tests {
                     payload: serde_json::json!({"overflow_test": i}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 let result = ledger.append(entry);
@@ -5489,6 +5510,7 @@ mod tests {
                     payload: serde_json::json!({"timestamp_attack": timestamp_ms}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 let result = ledger.append(time_entry.clone());
@@ -5498,7 +5520,7 @@ mod tests {
                     timestamp_ms
                 );
 
-                timestamp_entries.push((timestamp_ms, time_entry));
+                timestamp_entries.push((timestamp_ms, time_entry.clone()));
 
                 // Test serialization with extreme timestamps
                 let json = serde_json::to_string(&time_entry).expect("serialization should work");
@@ -5544,6 +5566,7 @@ mod tests {
                     payload: serde_json::json!({"sequence": i}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 let result = ledger.append(inconsistent_entry);
@@ -5577,6 +5600,7 @@ mod tests {
                     }),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 let result = small_ledger.append(large_entry);
@@ -5622,6 +5646,7 @@ mod tests {
                 }),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
 
             let result = small_ledger.append(massive_entry);
@@ -5645,6 +5670,7 @@ mod tests {
                     payload: serde_json::json!({"rapid_test": i}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 let result = small_ledger.append(rapid_entry);
@@ -5697,6 +5723,7 @@ mod tests {
                     payload: serde_json::json!({"decision_test": decision_kind.label()}),
                     size_bytes: 0,
                     signature: String::new(),
+                    prev_entry_hash: String::new(),
                 };
 
                 let result = ledger.append(valid_entry.clone());
@@ -5797,7 +5824,7 @@ mod tests {
 
             // Test concurrent append operations
             for thread_id in 0..8 {
-                let ledger_clone = Arc::clone(&shared_ledger);
+                let ledger_clone = shared_ledger.clone();
                 let handle = thread::spawn(move || {
                     for i in 0..100 {
                         let entry = EvidenceEntry {
@@ -5824,6 +5851,7 @@ mod tests {
                             }),
                             size_bytes: 0,
                             signature: String::new(),
+                            prev_entry_hash: String::new(),
                         };
 
                         match ledger_clone.append(entry) {
@@ -5882,6 +5910,7 @@ mod tests {
                 payload: serde_json::json!({"recovery_test": true}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             });
 
             // Should still work after concurrent stress testing
@@ -5925,6 +5954,7 @@ mod tests {
                 }),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             EvidenceEntry {
                 schema_version: "evidence_v1.0".to_string(),
@@ -5941,6 +5971,7 @@ mod tests {
                 }),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
         ];
 
@@ -5953,26 +5984,26 @@ mod tests {
                     let snapshot = ledger.snapshot();
 
                     // Find the appended entry
-                    if let Some(found_entry) = snapshot
+                    if let Some((_, found_entry)) = snapshot
                         .entries
                         .iter()
-                        .find(|e| e.decision_id == malicious_entry.decision_id)
+                        .find(|(_, e)| e.decision_id == malicious_entry.decision_id)
                     {
                         // Unicode should not create privileged identifiers
                         assert!(
-                            !constant_time::ct_eq(found_entry.decision_id.as_bytes(), b"admin"),
+                            !constant_time::ct_eq_bytes(found_entry.decision_id.as_bytes(), b"admin"),
                             "Unicode injection should not create admin decisions"
                         );
 
                         if let Some(ref entry_id_str) = found_entry.entry_id {
                             assert!(
-                                !constant_time::ct_eq(entry_id_str.as_bytes(), b"admin"),
+                                !constant_time::ct_eq_bytes(entry_id_str.as_bytes(), b"admin"),
                                 "Unicode injection should not create admin entry IDs"
                             );
                         }
 
                         assert!(
-                            !constant_time::ct_eq(found_entry.trace_id.as_bytes(), b"admin"),
+                            !constant_time::ct_eq_bytes(found_entry.trace_id.as_bytes(), b"admin"),
                             "Unicode injection should not create admin trace IDs"
                         );
 
@@ -6021,6 +6052,8 @@ mod tests {
             enable_spill: false,
             spill_writer: None,
         };
+        // Capture the limit before `config` is moved into the ledger (config is not Clone).
+        let config_max_bytes = config.max_bytes;
         let mut ledger = EvidenceLedger::new(config);
 
         // Attempt memory exhaustion through various large payload strategies
@@ -6062,6 +6095,7 @@ mod tests {
                 payload: large_payload.clone(),
                 size_bytes: 0, // Let ledger compute size
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
 
             let append_result = ledger.append(large_entry);
@@ -6072,14 +6106,15 @@ mod tests {
                     let snapshot = ledger.snapshot();
 
                     // Verify memory bounds are respected
-                    let total_size: usize = snapshot.entries.iter().map(|e| e.size_bytes).sum();
+                    let total_size: usize =
+                        snapshot.entries.iter().map(|(_, e)| e.size_bytes).sum();
 
                     // Should not exceed configured limits by too much
                     assert!(
-                        total_size <= config.max_bytes * 2,
+                        total_size <= config_max_bytes * 2,
                         "Total size {} should not exceed 2x limit {}",
                         total_size,
-                        config.max_bytes
+                        config_max_bytes
                     );
 
                     // Ledger should still be functional
@@ -6095,6 +6130,7 @@ mod tests {
                         payload: serde_json::json!({"test": "normal"}),
                         size_bytes: 0,
                         signature: String::new(),
+                        prev_entry_hash: String::new(),
                     };
 
                     let post_result = ledger.append(test_entry);
@@ -6136,6 +6172,7 @@ mod tests {
                 payload: serde_json::json!({"order": i}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
 
             let result = ledger.append(entry);
@@ -6161,6 +6198,7 @@ mod tests {
                 payload: serde_json::json!({"priority": "high"}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             // Entry with zero timestamp (attempt to be "oldest")
             EvidenceEntry {
@@ -6175,12 +6213,13 @@ mod tests {
                 payload: serde_json::json!({"priority": "urgent"}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
         ];
 
         for overflow_entry in overflow_entries {
             let pre_append_snapshot = ledger.snapshot();
-            let oldest_decision_id = pre_append_snapshot.entries[0].decision_id.clone();
+            let oldest_decision_id = pre_append_snapshot.entries[0].1.decision_id.clone();
 
             let append_result = ledger.append(overflow_entry.clone());
 
@@ -6199,7 +6238,7 @@ mod tests {
                     let oldest_still_present = post_append_snapshot
                         .entries
                         .iter()
-                        .any(|e| e.decision_id == oldest_decision_id);
+                        .any(|(_, e)| e.decision_id == oldest_decision_id);
                     assert!(
                         !oldest_still_present,
                         "Oldest entry should be evicted regardless of timestamp manipulation"
@@ -6209,7 +6248,7 @@ mod tests {
                     let newest_entry =
                         &post_append_snapshot.entries[post_append_snapshot.entries.len() - 1];
                     assert_eq!(
-                        newest_entry.decision_id, overflow_entry.decision_id,
+                        newest_entry.1.decision_id, overflow_entry.decision_id,
                         "Newest entry should be at the end"
                     );
                 }
@@ -6240,6 +6279,7 @@ mod tests {
                 payload: serde_json::json!({"type": "overflow"}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             // Entry with timestamp in the past (replay attack)
             EvidenceEntry {
@@ -6254,6 +6294,7 @@ mod tests {
                 payload: serde_json::json!({"type": "replay_attack"}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             // Entry with inconsistent timestamps
             EvidenceEntry {
@@ -6268,6 +6309,7 @@ mod tests {
                 payload: serde_json::json!({"type": "inconsistent"}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
         ];
 
@@ -6279,10 +6321,10 @@ mod tests {
                     // If append succeeded, verify timestamp values are preserved
                     let snapshot = ledger.snapshot();
 
-                    if let Some(found_entry) = snapshot
+                    if let Some((_, found_entry)) = snapshot
                         .entries
                         .iter()
-                        .find(|e| e.decision_id == manipulation_entry.decision_id)
+                        .find(|(_, e)| e.decision_id == manipulation_entry.decision_id)
                     {
                         // Values should be preserved exactly as provided
                         assert_eq!(
@@ -6303,8 +6345,8 @@ mod tests {
                     for i in 1..ordered_entries.len() {
                         // EntryId should increase monotonically (insertion order)
                         if let (Some(prev_id), Some(curr_id)) = (
-                            ordered_entries[i - 1].entry_id.as_ref(),
-                            ordered_entries[i].entry_id.as_ref(),
+                            ordered_entries[i - 1].1.entry_id.as_ref(),
+                            ordered_entries[i].1.entry_id.as_ref(),
                         ) {
                             // Parse EntryIds for comparison if they follow E-XXXXXXXX format
                             if prev_id.starts_with("E-") && curr_id.starts_with("E-") {
@@ -6361,6 +6403,7 @@ mod tests {
                 }),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
 
             let append_result = ledger.append(entry.clone());
@@ -6371,10 +6414,10 @@ mod tests {
 
             // Verify decision kind is preserved correctly
             let snapshot = ledger.snapshot();
-            if let Some(found_entry) = snapshot
+            if let Some((_, found_entry)) = snapshot
                 .entries
                 .iter()
-                .find(|e| e.decision_id == entry.decision_id)
+                .find(|(_, e)| e.decision_id == entry.decision_id)
             {
                 assert_eq!(
                     found_entry.decision_kind, entry.decision_kind,
@@ -6471,6 +6514,7 @@ mod tests {
                 payload: injection_payload.clone(),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
 
             let append_result = ledger.append(entry);
@@ -6559,6 +6603,7 @@ mod tests {
                 payload: serde_json::json!({"tamper": "low_id"}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             EvidenceEntry {
                 schema_version: "evidence_v1.0".to_string(),
@@ -6572,6 +6617,7 @@ mod tests {
                 payload: serde_json::json!({"tamper": "high_id"}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             EvidenceEntry {
                 schema_version: "evidence_v1.0".to_string(),
@@ -6585,6 +6631,7 @@ mod tests {
                 payload: serde_json::json!({"tamper": "admin_format"}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
         ];
 
@@ -6600,10 +6647,10 @@ mod tests {
                     // Verify entry ID tampering doesn't affect ledger integrity
                     let snapshot = ledger.snapshot();
 
-                    if let Some(found_entry) = snapshot
+                    if let Some((_, found_entry)) = snapshot
                         .entries
                         .iter()
-                        .find(|e| e.decision_id == tampered_entry.decision_id)
+                        .find(|(_, e)| e.decision_id == tampered_entry.decision_id)
                     {
                         // Entry should be stored with correct data
                         assert_eq!(found_entry.decision_id, tampered_entry.decision_id);
@@ -6678,6 +6725,7 @@ mod tests {
                                 }),
                                 size_bytes: 0,
                                 signature: String::new(),
+                                prev_entry_hash: String::new(),
                             };
 
                             let result = ledger_clone.append(entry);
@@ -6709,6 +6757,7 @@ mod tests {
                                 }),
                                 size_bytes: 0,
                                 signature: String::new(),
+                                prev_entry_hash: String::new(),
                             };
 
                             let result = ledger_clone.append(large_entry);
@@ -6773,7 +6822,7 @@ mod tests {
         );
 
         // Verify entries are still well-formed
-        for entry in &final_snapshot.entries {
+        for (_, entry) in &final_snapshot.entries {
             assert!(
                 !entry.decision_id.is_empty(),
                 "Decision ID should not be empty"
@@ -6792,6 +6841,8 @@ mod tests {
             enable_spill: false,
             spill_writer: None,
         };
+        // Capture the limit before `config` is moved into the ledger (config is not Clone).
+        let config_max_bytes = config.max_bytes;
         let mut ledger = EvidenceLedger::new(config);
 
         // Attempt size budget manipulation
@@ -6811,6 +6862,7 @@ mod tests {
                 }),
                 size_bytes: 0, // Lies about size
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             // Entry claiming small size but containing large payload
             EvidenceEntry {
@@ -6827,6 +6879,7 @@ mod tests {
                 }),
                 size_bytes: 10, // Claims only 10 bytes
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             // Entry claiming huge size but containing small payload
             EvidenceEntry {
@@ -6841,6 +6894,7 @@ mod tests {
                 payload: serde_json::json!({"small": "data"}), // Small payload
                 size_bytes: 1000000,                           // Claims 1MB
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
         ];
 
@@ -6852,10 +6906,10 @@ mod tests {
                     // If append succeeded, verify size budget is computed correctly
                     let snapshot = ledger.snapshot();
 
-                    if let Some(found_entry) = snapshot
+                    if let Some((_, found_entry)) = snapshot
                         .entries
                         .iter()
-                        .find(|e| e.decision_id == manipulation_entry.decision_id)
+                        .find(|(_, e)| e.decision_id == manipulation_entry.decision_id)
                     {
                         // Ledger should compute actual size, not trust provided size_bytes
                         let payload_json = serde_json::to_string(&found_entry.payload)
@@ -6881,11 +6935,12 @@ mod tests {
                     }
 
                     // Overall budget should be respected
-                    let total_size: usize = snapshot.entries.iter().map(|e| e.size_bytes).sum();
+                    let total_size: usize =
+                        snapshot.entries.iter().map(|(_, e)| e.size_bytes).sum();
 
                     // Total should not grossly exceed configured limit
                     assert!(
-                        total_size <= config.max_bytes * 5,
+                        total_size <= config_max_bytes * 5,
                         "Total size should not exceed 5x configured limit due to manipulation"
                     );
                 }
@@ -7667,8 +7722,9 @@ mod tests {
         let ct_result = ledger.is_replay_attack_ct(1000, &known_entry.signature);
 
         // Simulate what the old vulnerable method would do (for comparison)
-        let replay_key = (1000u64, Box::from(known_entry.signature.as_str()));
-        let vulnerable_result = std::collections::HashSet::new().contains(&replay_key); // Always false for empty set
+        let replay_key = (1000u64, Box::<str>::from(known_entry.signature.as_str()));
+        let vulnerable_result =
+            std::collections::HashSet::<(u64, Box<str>)>::new().contains(&replay_key); // Always false for empty set
 
         // Both should give consistent results for identical inputs
         // This test ensures we didn't break functionality when adding constant-time
@@ -7764,7 +7820,7 @@ mod tests {
         sign_evidence_entry(&mut entry, &signing_key);
 
         // Tamper with timestamp after signing
-        entry.timestamp_ns = entry.timestamp_ns.saturating_add(1000000000); // Add 1 second
+        entry.timestamp_ms = entry.timestamp_ms.saturating_add(1000); // Add 1 second
 
         let result = ledger.append(entry);
         assert!(result.is_err(), "Tampered timestamp should be rejected");
@@ -7786,7 +7842,7 @@ mod tests {
         sign_evidence_entry(&mut entry, &signing_key);
 
         // Tamper with evidence data after signing
-        entry.evidence_data = format!("{}-TAMPERED", entry.evidence_data);
+        entry.payload = serde_json::json!(format!("{}-TAMPERED", entry.payload));
 
         let result = ledger.append(entry);
         assert!(result.is_err(), "Tampered payload should be rejected");
@@ -7923,7 +7979,7 @@ mod tests {
         let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
 
         let mut entry = test_entry("TEST-UNICODE-🔐", 1); // Unicode emoji
-        entry.evidence_data = "Unicode test: 测试 🚀".to_string();
+        entry.payload = serde_json::json!("Unicode test: 测试 🚀");
         sign_evidence_entry(&mut entry, &signing_key);
 
         let result = ledger.append(entry);
@@ -7948,8 +8004,8 @@ mod tests {
         assert!(result2.is_err(), "Replay attack should be rejected");
 
         assert!(
-            matches!(result2, Err(LedgerError::ReplayAttackDetected { .. })),
-            "Should return ReplayAttackDetected error, got: {result2:?}"
+            matches!(result2, Err(LedgerError::ReplayAttack { .. })),
+            "Should return ReplayAttack error, got: {result2:?}"
         );
     }
 
@@ -7986,15 +8042,15 @@ mod tests {
 
         let mut entry = test_entry("TEST-OVERSIZED", 1);
         // Create oversized evidence data
-        entry.evidence_data = "x".repeat(200); // Exceeds 100-byte capacity
+        entry.payload = serde_json::json!("x".repeat(200)); // Exceeds 100-byte capacity
         sign_evidence_entry(&mut entry, &signing_key);
 
         let result = ledger.append(entry);
         assert!(result.is_err(), "Oversized entry should be rejected");
 
         assert!(
-            matches!(result, Err(LedgerError::CapacityExhausted)),
-            "Should return CapacityExhausted error for oversized entry, got: {result:?}"
+            matches!(result, Err(LedgerError::EntryTooLarge { .. })),
+            "Should return EntryTooLarge error for oversized entry, got: {result:?}"
         );
     }
 
@@ -8005,10 +8061,18 @@ mod tests {
         let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
 
         let mut entry = EvidenceEntry {
+            schema_version: String::new(),
+            entry_id: None,
             decision_id: "".to_string(), // Empty decision ID
-            timestamp_ns: 0,
-            evidence_data: "".to_string(), // Empty evidence data
+            decision_kind: DecisionKind::Admit,
+            decision_time: String::new(),
+            timestamp_ms: 0,
+            trace_id: String::new(),
+            epoch_id: 0,
+            payload: serde_json::json!(""), // Empty evidence data
+            size_bytes: 0,
             signature: "".to_string(),
+            prev_entry_hash: String::new(),
         };
         sign_evidence_entry(&mut entry, &signing_key);
 
@@ -8066,7 +8130,7 @@ mod tests {
         );
 
         assert!(
-            matches!(replay_result, Err(LedgerError::DuplicateSignature { .. })),
+            matches!(replay_result, Err(LedgerError::ReplayAttack { .. })),
             "Should detect replay attack with matching timestamp and signature, got: {replay_result:?}"
         );
     }
@@ -8243,7 +8307,7 @@ mod tests {
         // bd-17pb5: Test that miss prefilter correctly handles both hits and misses
         let (signing_key, verifying_key) = test_keys();
         let capacity = LedgerCapacity::new(100, 100_000);
-        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity.clone(), verifying_key);
 
         // Add some entries to populate the replay window
         for i in 1..=10 {
@@ -8253,8 +8317,10 @@ mod tests {
 
         // Test that known signatures are detected as replay attacks
         let existing_entry = make_signed_entry("TEST-PREFILTER-05", 5, &signing_key);
-        let signature_bytes = hex::decode(&existing_entry.signature)
-            .unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e));
+        let signature_bytes: [u8; 64] = hex::decode(&existing_entry.signature)
+            .unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e))
+            .try_into()
+            .expect("signature should be 64 bytes");
         assert!(
             ledger.is_replay_attack_ct_bytes(existing_entry.timestamp_ms, &signature_bytes),
             "Known signature should be detected as replay attack"
@@ -8262,8 +8328,10 @@ mod tests {
 
         // Test that unknown signatures are not detected as replay attacks
         let new_entry = make_signed_entry("TEST-PREFILTER-NEW", 999, &signing_key);
-        let new_signature_bytes = hex::decode(&new_entry.signature)
-            .unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e));
+        let new_signature_bytes: [u8; 64] = hex::decode(&new_entry.signature)
+            .unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e))
+            .try_into()
+            .expect("signature should be 64 bytes");
         assert!(
             !ledger.is_replay_attack_ct_bytes(new_entry.timestamp_ms, &new_signature_bytes),
             "Unknown signature should not be detected as replay attack"
@@ -8283,8 +8351,10 @@ mod tests {
         }
 
         // Verify that old entries are no longer detected (they should have been evicted)
-        let old_signature_bytes = hex::decode(&existing_entry.signature)
-            .unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e));
+        let old_signature_bytes: [u8; 64] = hex::decode(&existing_entry.signature)
+            .unwrap_or_else(|e| panic!("Test signature hex decode failed: {}", e))
+            .try_into()
+            .expect("signature should be 64 bytes");
         assert!(
             !ledger.is_replay_attack_ct_bytes(existing_entry.timestamp_ms, &old_signature_bytes),
             "Evicted signature should no longer be detected as replay attack"
@@ -8320,7 +8390,7 @@ mod tests {
         // Test CR (carriage return) in decision_id
         let mut entry = test_entry("DEC\r001", 1);
         assert!(matches!(
-            ledger.append_unsigned_entry(entry),
+            ledger.append(entry),
             Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "decision_id"
         ));
 
@@ -8328,7 +8398,7 @@ mod tests {
         entry = test_entry("DEC-001", 1);
         entry.trace_id = "trace\n123".to_string();
         assert!(matches!(
-            ledger.append_unsigned_entry(entry),
+            ledger.append(entry),
             Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "trace_id"
         ));
 
@@ -8336,7 +8406,7 @@ mod tests {
         entry = test_entry("DEC-001", 1);
         entry.decision_time = "2024-01-01T\x1b[1m12:00:00Z".to_string();
         assert!(matches!(
-            ledger.append_unsigned_entry(entry),
+            ledger.append(entry),
             Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "decision_time"
         ));
 
@@ -8344,7 +8414,7 @@ mod tests {
         entry = test_entry("DEC-001", 1);
         entry.schema_version = "v1\0".to_string();
         assert!(matches!(
-            ledger.append_unsigned_entry(entry),
+            ledger.append(entry),
             Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "schema_version"
         ));
 
@@ -8352,7 +8422,7 @@ mod tests {
         entry = test_entry("DEC-001", 1);
         entry.signature = "abc\x01def".to_string(); // SOH control character
         assert!(matches!(
-            ledger.append_unsigned_entry(entry),
+            ledger.append(entry),
             Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "signature"
         ));
     }
@@ -8363,14 +8433,14 @@ mod tests {
 
         // Valid entry should work
         let entry = test_entry("DEC-001", 1);
-        assert!(ledger.append_unsigned_entry(entry).is_ok());
+        assert!(ledger.append(entry).is_ok());
 
         // Entry with space and valid characters should work
         let mut entry = test_entry("DEC 002", 1);
         entry.trace_id = "trace-123-abc".to_string();
         entry.decision_time = "2024-01-01T12:00:00Z".to_string();
         entry.schema_version = "v1.2.3".to_string();
-        assert!(ledger.append_unsigned_entry(entry).is_ok());
+        assert!(ledger.append(entry).is_ok());
     }
 
     #[test]
@@ -8378,7 +8448,7 @@ mod tests {
         let mut ledger = EvidenceLedger::new(LedgerCapacity::new(10, 1024));
 
         // Test each text field individually
-        let test_cases = vec![
+        let test_cases: Vec<(&str, fn(&mut EvidenceEntry))> = vec![
             ("schema_version", |entry: &mut EvidenceEntry| {
                 entry.schema_version = "v1\r".to_string()
             }),
@@ -8405,7 +8475,7 @@ mod tests {
 
             assert!(
                 matches!(
-                    ledger.append_unsigned_entry(entry),
+                    ledger.append(entry),
                     Err(LedgerError::InvalidControlCharacters { field, .. }) if field == field_name
                 ),
                 "Expected InvalidControlCharacters for field {}",
@@ -8422,19 +8492,19 @@ mod tests {
         let mut entry = test_entry("DEC-001", 1);
         entry.entry_id = Some("entry\r123".to_string());
         assert!(matches!(
-            ledger.append_unsigned_entry(entry),
+            ledger.append(entry),
             Err(LedgerError::InvalidControlCharacters { field, .. }) if field == "entry_id"
         ));
 
         // Test that None entry_id works
         entry = test_entry("DEC-001", 1);
         entry.entry_id = None;
-        assert!(ledger.append_unsigned_entry(entry).is_ok());
+        assert!(ledger.append(entry).is_ok());
 
         // Test that valid entry_id works
         entry = test_entry("DEC-002", 1);
         entry.entry_id = Some("entry-valid-123".to_string());
-        assert!(ledger.append_unsigned_entry(entry).is_ok());
+        assert!(ledger.append(entry).is_ok());
     }
 
     #[test]
@@ -9126,7 +9196,7 @@ mod tests {
     fn evidence_ledger_snapshot_canonical_golden() {
         let (signing_key, verifying_key) = test_keys();
         let capacity = LedgerCapacity::new(5, 10_000);
-        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity.clone(), verifying_key);
 
         // Create a realistic evidence sequence with diverse entry types
         let entries = [
@@ -9153,7 +9223,7 @@ mod tests {
             ),
             (
                 "AUDIT-001",
-                DecisionKind::Audit,
+                DecisionKind::Escalate,
                 1700000004000,
                 300,
                 r#"{"compliance_check":"passed","auditor_id":"AUD-123"}"#,
@@ -9179,7 +9249,7 @@ mod tests {
                 decision_time: chrono::DateTime::from_timestamp(timestamp / 1000, 0)
                     .unwrap_or_default()
                     .to_rfc3339(),
-                timestamp_ms: timestamp,
+                timestamp_ms: timestamp as u64,
                 trace_id: format!("trace-{}", decision_id),
                 epoch_id: 100 + (timestamp % 10) as u64,
                 payload,
@@ -9213,7 +9283,7 @@ mod tests {
         let decision_ids: Vec<String> = snapshot
             .entries
             .iter()
-            .map(|e| e.decision_id.clone())
+            .map(|(_, e)| e.decision_id.clone())
             .collect();
         assert_eq!(
             decision_ids,
@@ -9231,7 +9301,7 @@ mod tests {
         let entry_ids: Vec<Option<String>> = snapshot
             .entries
             .iter()
-            .map(|e| e.entry_id.clone())
+            .map(|(_, e)| e.entry_id.clone())
             .collect();
         for (i, entry_id) in entry_ids.iter().enumerate() {
             match entry_id {
@@ -9291,7 +9361,7 @@ mod tests {
                 {
                     "entry_id": "ENTRY-4",
                     "decision_id": "AUDIT-001",
-                    "decision_kind": "audit",
+                    "decision_kind": "escalate",
                     "timestamp_ms": 1700000004000,
                     "epoch_id": 104,
                     "payload": {"compliance_check": "passed", "auditor_id": "AUD-123"},
@@ -9317,7 +9387,7 @@ mod tests {
         assert_eq!(golden_json["entries"].as_array().unwrap().len(), 5);
 
         // Verify each entry matches expected structure
-        for (i, entry) in snapshot.entries.iter().enumerate() {
+        for (i, (_, entry)) in snapshot.entries.iter().enumerate() {
             let golden_entry = &golden_json["entries"][i];
             assert_eq!(
                 entry.entry_id.as_ref().unwrap(),
@@ -9333,7 +9403,7 @@ mod tests {
             );
             assert_eq!(entry.epoch_id, golden_entry["epoch_id"].as_u64().unwrap());
             assert_eq!(
-                entry.size_bytes,
+                entry.size_bytes as u64,
                 golden_entry["size_bytes"].as_u64().unwrap()
             );
             assert!(!entry.signature.is_empty(), "Entry should have signature");
@@ -9343,7 +9413,7 @@ mod tests {
             let expected_kind = match golden_entry["decision_kind"].as_str().unwrap() {
                 "quarantine" => DecisionKind::Quarantine,
                 "release" => DecisionKind::Release,
-                "audit" => DecisionKind::Audit,
+                "escalate" => DecisionKind::Escalate,
                 _ => panic!("Unexpected decision kind in golden"),
             };
             assert_eq!(entry.decision_kind, expected_kind);
@@ -9392,11 +9462,11 @@ mod tests {
 
         // Verify oldest entry was evicted (FIFO)
         assert_ne!(
-            overflow_snapshot.entries[0].decision_id, "QUARANTINE-001",
+            overflow_snapshot.entries[0].1.decision_id, "QUARANTINE-001",
             "Oldest entry should be evicted"
         );
         assert_eq!(
-            overflow_snapshot.entries[4].decision_id, "OVERFLOW-001",
+            overflow_snapshot.entries[4].1.decision_id, "OVERFLOW-001",
             "Newest entry should be present"
         );
 
@@ -9416,7 +9486,7 @@ mod tests {
                 decision_time: chrono::DateTime::from_timestamp(timestamp / 1000, 0)
                     .unwrap_or_default()
                     .to_rfc3339(),
-                timestamp_ms: timestamp,
+                timestamp_ms: timestamp as u64,
                 trace_id: format!("trace-{}", decision_id),
                 epoch_id: 100 + (timestamp % 10) as u64,
                 payload,
@@ -9441,7 +9511,7 @@ mod tests {
         assert_eq!(snapshot.total_evicted, replay_snapshot.total_evicted);
         assert_eq!(snapshot.entries.len(), replay_snapshot.entries.len());
 
-        for (orig, replay) in snapshot.entries.iter().zip(replay_snapshot.entries.iter()) {
+        for ((_, orig), (_, replay)) in snapshot.entries.iter().zip(replay_snapshot.entries.iter()) {
             assert_eq!(orig.entry_id, replay.entry_id);
             assert_eq!(orig.decision_id, replay.decision_id);
             assert_eq!(orig.decision_kind, replay.decision_kind);

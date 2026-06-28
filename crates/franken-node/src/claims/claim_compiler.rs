@@ -620,28 +620,21 @@ fn compute_snapshot_digest(
 mod negative_tests {
     use super::*;
     use std::collections::BTreeMap;
-    use tempfile::TempDir;
 
     #[test]
     #[should_panic(expected = "memory exhaustion")]
     fn negative_evidence_uris_unbounded_push_during_compilation() {
         // Tests Vec::push without push_bounded - found at line 243: evidence.evidence_uris.push(uri);
         // This could allow memory exhaustion via unbounded evidence URI accumulation
-        let temp_dir = TempDir::new().unwrap();
-        let config = CompilerConfig {
-            workspace_root: temp_dir.path().to_path_buf(),
-            claim_id: "test-claim".to_string(),
-            now_epoch_ms: 1000000000,
-            expiry_window_ms: 86400000,
-        };
-        let mut compiler = ClaimCompiler::new(config);
+        let config = CompilerConfig::new("test-signer", "test-key", 1000000000);
+        let _compiler = ClaimCompiler::new(config);
 
         // Simulate excessive evidence URI accumulation
-        let mut evidence = Evidence {
-            provider_id: "test".to_string(),
+        let mut evidence = ExternalClaim {
+            claim_id: "test-claim".to_string(),
+            claim_text: "boundary test claim".to_string(),
             evidence_uris: Vec::new(),
-            collected_at_epoch_ms: 1000000000,
-            expires_at_epoch_ms: 1086400000,
+            source_id: "test".to_string(),
         };
 
         // Memory exhaustion simulation - unbounded push
@@ -658,18 +651,12 @@ mod negative_tests {
     fn negative_scoreboard_entry_loop_index_overflow_in_formatting() {
         // Tests loop index overflow potential - found at lines 515, 555 in scoreboard formatting
         // Loop indices without saturating_add could overflow on large datasets
-        let temp_dir = TempDir::new().unwrap();
-        let config = CompilerConfig {
-            workspace_root: temp_dir.path().to_path_buf(),
-            claim_id: "test-claim".to_string(),
-            now_epoch_ms: 1000000000,
-            expiry_window_ms: 86400000,
-        };
-        let compiler = ClaimCompiler::new(config);
+        let config = CompilerConfig::new("test-signer", "test-key", 1000000000);
+        let _compiler = ClaimCompiler::new(config);
 
         // Simulate massive scoreboard entry count
         let mut entries = BTreeMap::new();
-        let large_count = u32::MAX as usize;
+        let _large_count = u32::MAX as usize;
 
         // This would overflow standard += 1 index arithmetic
         let mut index = u32::MAX - 5;
@@ -681,10 +668,10 @@ mod negative_tests {
             entries.insert(
                 format!("entry_{}", i),
                 ScoreboardEntry {
+                    entry_id: format!("entry_{}", i),
                     claim_id: "test".to_string(),
+                    trust_score: 100,
                     evidence_link: "link".to_string(),
-                    signer_id: "signer".to_string(),
-                    signing_key: "key".to_string(),
                     signed_digest: "digest".to_string(),
                     published_at_epoch_ms: 1000000000,
                 },
@@ -696,27 +683,15 @@ mod negative_tests {
     fn negative_evidence_age_boundary_condition_with_expiry_semantics() {
         // Tests expiry boundary semantics - should use >= not > for fail-closed
         // Evidence age calculation could have boundary condition bugs
-        let temp_dir = TempDir::new().unwrap();
-        let config = CompilerConfig {
-            workspace_root: temp_dir.path().to_path_buf(),
-            claim_id: "test-claim".to_string(),
-            now_epoch_ms: 1000000000,
-            expiry_window_ms: 86400000,
-        };
-        let compiler = ClaimCompiler::new(config);
+        let config = CompilerConfig::new("test-signer", "test-key", 1000000000);
 
         // Test exact boundary condition
-        let evidence = Evidence {
-            provider_id: "test".to_string(),
-            evidence_uris: vec!["uri".to_string()],
-            collected_at_epoch_ms: 1000000000,
-            expires_at_epoch_ms: 1000000000, // Expires exactly at current time
-        };
+        let expires_at_epoch_ms: u64 = 1000000000; // Expires exactly at current time
 
         // With fail-closed semantics, this should be treated as expired
         // Using > would incorrectly allow this; >= correctly rejects
-        let is_expired_fail_closed = config.now_epoch_ms >= evidence.expires_at_epoch_ms;
-        let is_expired_vulnerable = config.now_epoch_ms > evidence.expires_at_epoch_ms;
+        let is_expired_fail_closed = config.now_epoch_ms >= expires_at_epoch_ms;
+        let is_expired_vulnerable = config.now_epoch_ms > expires_at_epoch_ms;
 
         assert!(
             is_expired_fail_closed,
@@ -1862,6 +1837,16 @@ mod tests {
 mod claim_compiler_boundary_negative_tests {
     use super::*;
 
+    // FIXME(bd-yom8c): The helpers + tests in the disabled module below target a speculative
+    // claim-compiler API (TrustClaim / ClaimContract / compile_claim(&claim, trace) /
+    // publish_scoreboard_update) that was never implemented. The real surface is
+    // ClaimCompiler::new(CompilerConfig) + compile(&ExternalClaim) -> CompilationResult and the
+    // separate ScoreboardPipeline. Disabled via cfg(any()) until rewritten; equivalent real
+    // negative coverage already lives in `mod tests`.
+    #[cfg(any())]
+    mod speculative_trustclaim_api_disabled {
+        use super::*;
+
     fn malicious_compiler() -> ClaimCompiler {
         ClaimCompiler::new("test-signer", "test-secret")
     }
@@ -2067,20 +2052,25 @@ mod claim_compiler_boundary_negative_tests {
             Ok(_) => panic!("expected failure for empty contracts list"),
         }
     }
+    } // end speculative_trustclaim_api_disabled (cfg(any()))
 
     #[test]
     fn negative_serde_rejects_unknown_compilation_status_variant() {
-        let result: Result<CompilationStatus, _> = serde_json::from_str(r#""Unknown""#);
+        let result: Result<CompilationResult, _> = serde_json::from_str(r#""Unknown""#);
 
         assert!(result.is_err());
     }
 
     #[test]
     fn negative_claim_contract_with_oversized_signature_serializes_safely() {
-        let contract = ClaimContract {
+        let contract = CompiledContract {
             claim_id: "claim-oversized-sig".to_string(),
-            contract_hash: "hash-test".to_string(),
-            evidence_digest: "digest-test".to_string(),
+            claim_text: "oversized signature contract".to_string(),
+            evidence_uris: vec!["https://example.com/evidence".to_string()],
+            source_id: "test-source".to_string(),
+            compiled_at_epoch_ms: 1000,
+            contract_digest: "hash-test".to_string(),
+            signer_id: "test-signer".to_string(),
             signature: "x".repeat(100_000), // Very large signature
         };
 
@@ -2121,7 +2111,6 @@ mod claim_compiler_boundary_negative_tests {
                 claim_text: "This is a test claim".to_string(),
                 evidence_uris: vec!["https://example.com/evidence".to_string()],
                 source_id: "test-source".to_string(),
-                submitted_at_epoch: 1234567890,
             };
 
             // Test serialization safety
@@ -2138,13 +2127,7 @@ mod claim_compiler_boundary_negative_tests {
             // Verify JSON structure integrity
             let json_value: serde_json::Value =
                 serde_json::from_str(&json).expect("JSON should be valid");
-            let expected_keys = [
-                "claim_id",
-                "claim_text",
-                "evidence_uris",
-                "source_id",
-                "submitted_at_epoch",
-            ];
+            let expected_keys = ["claim_id", "claim_text", "evidence_uris", "source_id"];
 
             if let Some(obj) = json_value.as_object() {
                 for key in obj.keys() {
@@ -2164,21 +2147,22 @@ mod claim_compiler_boundary_negative_tests {
             );
 
             // Test claim compilation with malicious ID
-            let compiler = ClaimCompiler::new();
-            let result = compiler.compile_claim(&malicious_claim);
+            let compiler =
+                ClaimCompiler::new(CompilerConfig::new("test-signer", "test-secret", 1000));
+            let result = compiler.compile(&malicious_claim);
 
             // Should either succeed (with ID preserved) or fail gracefully
             match result {
-                Ok(contract) => {
+                CompilationResult::Compiled { contract, .. } => {
                     assert_eq!(
                         contract.claim_id, malicious_id,
                         "compiled contract should preserve claim ID"
                     );
                 }
-                Err(rejection) => {
+                CompilationResult::Rejected { reason, .. } => {
                     // Rejection is acceptable for malicious content
                     assert!(matches!(
-                        rejection.reason,
+                        reason,
                         ClaimRejectionReason::SyntaxInvalid
                             | ClaimRejectionReason::InvalidSource
                             | ClaimRejectionReason::Unverifiable
@@ -2198,7 +2182,6 @@ mod claim_compiler_boundary_negative_tests {
             claim_text: massive_claim_text.clone(),
             evidence_uris: vec!["https://example.com/evidence".to_string()],
             source_id: "test-source".to_string(),
-            submitted_at_epoch: 1234567890,
         };
 
         // Test serialization with massive payload
@@ -2217,18 +2200,18 @@ mod claim_compiler_boundary_negative_tests {
         );
 
         // Test claim compilation with massive payload
-        let compiler = ClaimCompiler::new();
-        let result = compiler.compile_claim(&massive_claim);
+        let compiler = ClaimCompiler::new(CompilerConfig::new("test-signer", "test-secret", 1000));
+        let result = compiler.compile(&massive_claim);
 
         match result {
-            Ok(_contract) => {
+            CompilationResult::Compiled { .. } => {
                 // If compilation succeeds, verify it handles the massive payload safely
                 // Should be bounded or processed efficiently
             }
-            Err(rejection) => {
+            CompilationResult::Rejected { reason, .. } => {
                 // Rejection of massive payloads is acceptable
                 assert!(matches!(
-                    rejection.reason,
+                    reason,
                     ClaimRejectionReason::SyntaxInvalid | ClaimRejectionReason::Unverifiable
                 ));
             }
@@ -2251,7 +2234,6 @@ mod claim_compiler_boundary_negative_tests {
                 claim_text: injection_pattern.repeat(1000), // 1000x repetition for memory stress
                 evidence_uris: vec!["https://example.com/evidence".to_string()],
                 source_id: "test-source".to_string(),
-                submitted_at_epoch: 1234567890,
             };
 
             let json = serde_json::to_string(&injection_claim)
@@ -2273,18 +2255,21 @@ mod claim_compiler_boundary_negative_tests {
 
     #[test]
     fn test_negative_evidence_uris_with_malicious_url_schemes() {
-        let malicious_evidence_uris = vec![
-            vec!["file:///etc/passwd"],                       // Local file access
-            vec!["javascript:alert('XSS')"],                  // JavaScript scheme
-            vec!["data:text/html,<script>alert(1)</script>"], // Data URL injection
-            vec!["ftp://malicious.com/backdoor"],             // Non-HTTP scheme
-            vec!["ldap://malicious.com/inject"],              // LDAP injection
-            vec!["gopher://malicious.com/attack"],            // Gopher protocol
-            vec!["https://example.com/../../etc/passwd"],     // Path traversal in URL
-            vec!["https://example.com?injection='; DROP TABLE evidence; --"], // SQL injection in query
-            vec!["https://example.com\r\nHost: evil.com"], // HTTP header injection
-            vec!["https://\u{202E}evil\u{202C}example.com"], // BiDi override in domain
-            vec!["https://example.com", "https://evil.com"], // Mixed legitimate and malicious
+        let malicious_evidence_uris: Vec<Vec<String>> = vec![
+            vec!["file:///etc/passwd".to_string()], // Local file access
+            vec!["javascript:alert('XSS')".to_string()], // JavaScript scheme
+            vec!["data:text/html,<script>alert(1)</script>".to_string()], // Data URL injection
+            vec!["ftp://malicious.com/backdoor".to_string()], // Non-HTTP scheme
+            vec!["ldap://malicious.com/inject".to_string()], // LDAP injection
+            vec!["gopher://malicious.com/attack".to_string()], // Gopher protocol
+            vec!["https://example.com/../../etc/passwd".to_string()], // Path traversal in URL
+            vec!["https://example.com?injection='; DROP TABLE evidence; --".to_string()], // SQL injection in query
+            vec!["https://example.com\r\nHost: evil.com".to_string()], // HTTP header injection
+            vec!["https://\u{202E}evil\u{202C}example.com".to_string()], // BiDi override in domain
+            vec![
+                "https://example.com".to_string(),
+                "https://evil.com".to_string(),
+            ], // Mixed legitimate and malicious
             (0..1000)
                 .map(|i| format!("https://spam{}.com", i))
                 .collect(), // URI spam (1000 URIs)
@@ -2296,7 +2281,6 @@ mod claim_compiler_boundary_negative_tests {
                 claim_text: "Test claim with malicious evidence URIs".to_string(),
                 evidence_uris: malicious_uris.clone(),
                 source_id: "test-source".to_string(),
-                submitted_at_epoch: 1234567890,
             };
 
             // Test serialization safety
@@ -2310,19 +2294,20 @@ mod claim_compiler_boundary_negative_tests {
             );
 
             // Test claim compilation with malicious URIs
-            let compiler = ClaimCompiler::new();
-            let result = compiler.compile_claim(&malicious_claim);
+            let compiler =
+                ClaimCompiler::new(CompilerConfig::new("test-signer", "test-secret", 1000));
+            let result = compiler.compile(&malicious_claim);
 
             match result {
-                Ok(contract) => {
+                CompilationResult::Compiled { contract, .. } => {
                     // If compilation succeeds, verify URIs are validated/sanitized
                     assert_eq!(contract.claim_id, "uri-test");
                     // Evidence links might be filtered/validated
                 }
-                Err(rejection) => {
+                CompilationResult::Rejected { reason, .. } => {
                     // Rejection of malicious URIs is expected
                     assert!(matches!(
-                        rejection.reason,
+                        reason,
                         ClaimRejectionReason::InvalidSource
                             | ClaimRejectionReason::EvidenceMissing
                             | ClaimRejectionReason::Unverifiable
@@ -2331,30 +2316,22 @@ mod claim_compiler_boundary_negative_tests {
                 }
             }
 
-            // Test scoreboard integration with malicious URIs
-            let scoreboard = ClaimScoreboard::new();
-            let evidence_entry = EvidenceEntry {
-                evidence_uri: malicious_uris.get(0).cloned().unwrap_or_default(),
-                content_hash: "test-hash".to_string(),
-                verified_at_epoch: 1234567890,
-                verification_method: "test-method".to_string(),
-            };
-
-            // Should handle malicious URIs safely in evidence entries
-            let update_result = scoreboard.add_evidence_entry(evidence_entry);
-            // May succeed or fail, but should not crash
+            // FIXME(bd-yom8c): ClaimScoreboard / EvidenceEntry / add_evidence_entry are a
+            // speculative API never implemented; scoreboard publishing lives in
+            // `ScoreboardPipeline`. The malicious-URI scoreboard sub-check is disabled until
+            // rewritten against the real ScoreboardPipeline surface.
         }
     }
 
     #[test]
     fn test_negative_blocked_sources_with_bypass_attempts() {
-        let mut compiler = ClaimCompiler::new();
+        let mut config = CompilerConfig::new("test-signer", "test-secret", 1000);
 
         // Add sources to blocklist
         let blocked_sources = vec!["malicious-source", "spam-source", "untrusted-source"];
 
         for source in &blocked_sources {
-            compiler.block_source(source);
+            config = config.with_blocked_source(*source);
         }
 
         // Test bypass attempts via case sensitivity
@@ -2376,28 +2353,30 @@ mod claim_compiler_boundary_negative_tests {
                 claim_text: "Attempting to bypass source block".to_string(),
                 evidence_uris: vec!["https://example.com/evidence".to_string()],
                 source_id: bypass_source.to_string(),
-                submitted_at_epoch: 1234567890,
             };
 
-            let result = compiler.compile_claim(&bypass_claim);
+            let result = ClaimCompiler::new(config.clone()).compile(&bypass_claim);
 
             if bypass_source == "malicious-source" {
                 // Exact match should be blocked
-                assert!(result.is_err(), "exact match should be blocked");
-                if let Err(rejection) = result {
-                    assert_eq!(rejection.reason, ClaimRejectionReason::Blocked);
+                assert!(
+                    matches!(result, CompilationResult::Rejected { .. }),
+                    "exact match should be blocked"
+                );
+                if let CompilationResult::Rejected { reason, .. } = result {
+                    assert_eq!(reason, ClaimRejectionReason::Blocked);
                 }
             } else {
                 // Other variants might pass or fail depending on implementation
                 // Key is that they don't bypass security through Unicode/case tricks
                 match result {
-                    Ok(_) => {
+                    CompilationResult::Compiled { .. } => {
                         // If bypass succeeds, it should be through legitimate differences
                         assert_ne!(bypass_source, "malicious-source");
                     }
-                    Err(rejection) => {
+                    CompilationResult::Rejected { reason, .. } => {
                         // Blocking variants is acceptable security behavior
-                        if rejection.reason == ClaimRejectionReason::Blocked {
+                        if reason == ClaimRejectionReason::Blocked {
                             // Good - caught potential bypass attempt
                         }
                     }
@@ -2407,37 +2386,40 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test blocked sources list growth with spam
         for i in 0..10_000 {
-            compiler.block_source(&format!("spam-source-{}", i));
+            config = config.with_blocked_source(format!("spam-source-{}", i));
         }
 
         // Verify blocked sources are bounded
         assert!(
-            compiler.blocked_sources.len() <= MAX_BLOCKED_SOURCES,
+            config.blocked_sources.len() <= MAX_BLOCKED_SOURCES,
             "blocked sources should be bounded to prevent memory exhaustion"
         );
 
         // Test with extremely long source IDs
         let long_source = "x".repeat(100_000); // 100KB source ID
-        compiler.block_source(&long_source);
+        config = config.with_blocked_source(long_source.clone());
 
         let long_source_claim = ExternalClaim {
             claim_id: "long-source-test".to_string(),
             claim_text: "Test with extremely long source ID".to_string(),
             evidence_uris: vec!["https://example.com/evidence".to_string()],
             source_id: long_source.clone(),
-            submitted_at_epoch: 1234567890,
         };
 
-        let result = compiler.compile_claim(&long_source_claim);
+        let result = ClaimCompiler::new(config.clone()).compile(&long_source_claim);
         assert!(
-            result.is_err(),
+            matches!(result, CompilationResult::Rejected { .. }),
             "extremely long blocked source should be rejected"
         );
-        if let Err(rejection) = result {
-            assert_eq!(rejection.reason, ClaimRejectionReason::Blocked);
+        if let CompilationResult::Rejected { reason, .. } = result {
+            assert_eq!(reason, ClaimRejectionReason::Blocked);
         }
     }
 
+    // FIXME(bd-yom8c): ClaimScoreboard / EvidenceEntry / add_evidence_entry / compute_evidence_hash
+    // are a speculative API never implemented (scoreboard publishing lives in ScoreboardPipeline).
+    // Disabled via cfg(any()) until rewritten against the real surface.
+    #[cfg(any())]
     #[test]
     fn test_negative_evidence_hash_collision_simulation() {
         use crate::security::constant_time;
@@ -2525,7 +2507,7 @@ mod claim_compiler_boundary_negative_tests {
 
     #[test]
     fn test_negative_contract_generation_with_code_injection_attempts() {
-        let compiler = ClaimCompiler::new();
+        let compiler = ClaimCompiler::new(CompilerConfig::new("test-signer", "test-secret", 1000));
 
         // Test claims with potential code injection in contract generation
         let code_injection_claims = vec![
@@ -2534,59 +2516,46 @@ mod claim_compiler_boundary_negative_tests {
                 claim_text: "function malicious() { return true; } // ".to_string(),
                 evidence_uris: vec!["https://example.com/evidence".to_string()],
                 source_id: "test-source".to_string(),
-                submitted_at_epoch: 1234567890,
             },
             ExternalClaim {
                 claim_id: "sql-injection".to_string(),
                 claim_text: "'; DROP TABLE contracts; --".to_string(),
                 evidence_uris: vec!["https://example.com/evidence".to_string()],
                 source_id: "test-source".to_string(),
-                submitted_at_epoch: 1234567890,
             },
             ExternalClaim {
                 claim_id: "template-injection".to_string(),
                 claim_text: "{{constructor.constructor('return process')().exit()}}".to_string(),
                 evidence_uris: vec!["https://example.com/evidence".to_string()],
                 source_id: "test-source".to_string(),
-                submitted_at_epoch: 1234567890,
             },
             ExternalClaim {
                 claim_id: "shell-injection".to_string(),
                 claim_text: "; rm -rf / #".to_string(),
                 evidence_uris: vec!["https://example.com/evidence".to_string()],
                 source_id: "test-source".to_string(),
-                submitted_at_epoch: 1234567890,
             },
         ];
 
         for injection_claim in code_injection_claims {
-            let result = compiler.compile_claim(&injection_claim);
+            let result = compiler.compile(&injection_claim);
 
             match result {
-                Ok(contract) => {
+                CompilationResult::Compiled { contract, .. } => {
                     // If compilation succeeds, verify the contract is safe
                     assert_eq!(contract.claim_id, injection_claim.claim_id);
 
-                    // Contract should escape/sanitize the claim text
-                    assert!(
-                        contract.executable_script.len() > 0,
-                        "contract should have executable script"
-                    );
-
-                    // Verify injection patterns are neutralized in the contract
-                    assert!(
-                        !contract.executable_script.contains("DROP TABLE"),
-                        "SQL injection should be neutralized"
-                    );
-                    assert!(
-                        !contract.executable_script.contains("rm -rf"),
-                        "shell injection should be neutralized"
-                    );
+                    // The compiled contract preserves the verbatim claim text as data; the
+                    // injection payload must round-trip exactly (not be executed/interpreted).
+                    assert_eq!(contract.claim_text, injection_claim.claim_text);
+                    // FIXME(bd-yom8c): the original test asserted on a `contract.executable_script`
+                    // field that does not exist in CompiledContract (speculative API). The real
+                    // contract carries claim_text + a contract_digest, not an executable script.
                 }
-                Err(rejection) => {
+                CompilationResult::Rejected { reason, .. } => {
                     // Rejection of code injection attempts is expected
                     assert!(matches!(
-                        rejection.reason,
+                        reason,
                         ClaimRejectionReason::SyntaxInvalid | ClaimRejectionReason::Unverifiable
                     ));
                 }
@@ -2599,28 +2568,34 @@ mod claim_compiler_boundary_negative_tests {
             claim_text: "claim ".repeat(1_000_000), // 6MB claim text
             evidence_uris: vec!["https://example.com/evidence".to_string()],
             source_id: "test-source".to_string(),
-            submitted_at_epoch: 1234567890,
         };
 
-        let result = compiler.compile_claim(&massive_claim);
+        let result = compiler.compile(&massive_claim);
         match result {
-            Ok(contract) => {
-                // If compilation succeeds, verify the contract is reasonably sized
+            CompilationResult::Compiled { contract, .. } => {
+                // If compilation succeeds, verify the contract is reasonably sized.
+                // FIXME(bd-yom8c): original asserted on `contract.executable_script` (speculative
+                // field). The real contract carries the claim_text verbatim; bound that instead so
+                // we still detect runaway memory amplification during compilation.
                 assert!(
-                    contract.executable_script.len() < 50_000_000,
+                    contract.claim_text.len() < 50_000_000,
                     "contract should not cause memory explosion"
                 );
             }
-            Err(rejection) => {
+            CompilationResult::Rejected { reason, .. } => {
                 // Rejection of massive claims is acceptable
                 assert!(matches!(
-                    rejection.reason,
+                    reason,
                     ClaimRejectionReason::SyntaxInvalid | ClaimRejectionReason::Unverifiable
                 ));
             }
         }
     }
 
+    // FIXME(bd-yom8c): ClaimScoreboard / verify_signature / sign_data are a speculative API never
+    // implemented (signing lives in ScoreboardPipeline / sign_contract). Disabled via cfg(any())
+    // until rewritten against the real surface.
+    #[cfg(any())]
     #[test]
     fn test_negative_scoreboard_signature_with_malicious_keys() {
         let scoreboard = ClaimScoreboard::new();
@@ -2705,7 +2680,7 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test overflow protection
         let mut overflow_vec = vec!["item"; large_cap * 2]; // Start with more than capacity
-        push_bounded(&mut overflow_vec, "new_item".to_string(), large_cap);
+        push_bounded(&mut overflow_vec, "new_item", large_cap);
 
         assert_eq!(
             overflow_vec.len(),
@@ -2720,12 +2695,12 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test with zero capacity (should clear)
         let mut zero_cap_vec = vec!["a", "b", "c"];
-        push_bounded(&mut zero_cap_vec, "d".to_string(), 0);
+        push_bounded(&mut zero_cap_vec, "d", 0);
         assert_eq!(zero_cap_vec.len(), 0, "zero capacity should clear vector");
 
         // Test with capacity 1 (minimum)
         let mut single_cap_vec = vec!["x", "y", "z"];
-        push_bounded(&mut single_cap_vec, "w".to_string(), 1);
+        push_bounded(&mut single_cap_vec, "w", 1);
         assert_eq!(
             single_cap_vec.len(),
             1,
@@ -2739,7 +2714,7 @@ mod claim_compiler_boundary_negative_tests {
         extreme_vec.resize(10_000, "old");
 
         // This should trigger the saturating arithmetic
-        push_bounded(&mut extreme_vec, "new".to_string(), 100);
+        push_bounded(&mut extreme_vec, "new", 100);
         assert_eq!(extreme_vec.len(), 100, "should be reduced to capacity");
         assert_eq!(extreme_vec[99], "new", "new item should be at end");
 
@@ -2751,7 +2726,7 @@ mod claim_compiler_boundary_negative_tests {
 
         // Test with saturating_sub edge case
         let mut edge_vec = vec!["item"];
-        push_bounded(&mut edge_vec, "new".to_string(), 1000); // cap > len
+        push_bounded(&mut edge_vec, "new", 1000); // cap > len
         assert_eq!(edge_vec.len(), 2, "should not drain when capacity > length");
         assert_eq!(edge_vec[1], "new", "new item should be appended");
     }
@@ -2932,11 +2907,11 @@ mod claim_compiler_boundary_negative_tests {
     #[test]
     fn test_domain_separator_collision_resistance() {
         // Claim compiler uses domain separators in hashing - test collision resistance
-        let domain_separators = vec![
-            b"claim_compiler_hash_v1:",
-            b"claim_compiler_sign_v1:",
-            b"claim_compiler_entry_v1:",
-            b"claim_compiler_snapshot_v1:",
+        let domain_separators: Vec<&[u8]> = vec![
+            &b"claim_compiler_hash_v1:"[..],
+            &b"claim_compiler_sign_v1:"[..],
+            &b"claim_compiler_entry_v1:"[..],
+            &b"claim_compiler_snapshot_v1:"[..],
         ];
 
         // Test that different domain separators produce different hash outputs
@@ -3017,12 +2992,14 @@ mod claim_compiler_boundary_negative_tests {
         }
 
         // Test 2: Hash validation with edge cases
+        let x_repeat = "x".repeat(1000);
+        let y_repeat = "y".repeat(1000);
         let hash_test_cases = vec![
-            ("", ""),                               // Empty hashes
-            ("a", "a"),                             // Single char identical
-            ("a", "b"),                             // Single char different
-            (&"x".repeat(1000), &"x".repeat(1000)), // Large identical
-            (&"x".repeat(1000), &"y".repeat(1000)), // Large different
+            ("", ""),                                   // Empty hashes
+            ("a", "a"),                                 // Single char identical
+            ("a", "b"),                                 // Single char different
+            (x_repeat.as_str(), x_repeat.as_str()),     // Large identical
+            (x_repeat.as_str(), y_repeat.as_str()),     // Large different
         ];
 
         for (hash1, hash2) in hash_test_cases {

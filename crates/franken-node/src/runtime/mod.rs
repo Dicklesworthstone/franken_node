@@ -403,18 +403,18 @@ mod tests {
     #[test]
     fn negative_runtime_bulkhead_arithmetic_overflow_protection_in_capacity_calculations() {
         // Test bulkhead capacity calculations with values that could cause overflow
-        let overflow_test_cases = vec![
-            (u32::MAX - 1, 100),  // Near max capacity
-            (u32::MAX, 1),        // Max capacity, min retry
-            (1000, u32::MAX - 1), // Normal capacity, near max retry
-            (1000, u32::MAX),     // Normal capacity, max retry
+        let overflow_test_cases: Vec<(usize, u64)> = vec![
+            (u32::MAX as usize - 1, 100), // Near max capacity
+            (u32::MAX as usize, 1),       // Max capacity, min retry
+            (1000, u32::MAX as u64 - 1),  // Normal capacity, near max retry
+            (1000, u32::MAX as u64),      // Normal capacity, max retry
         ];
 
         for (capacity, retry_ms) in overflow_test_cases {
             let result = GlobalBulkhead::new(capacity, retry_ms);
 
             match result {
-                Ok(bulkhead) => {
+                Ok(mut bulkhead) => {
                     // If creation succeeded, verify capacity is preserved exactly
                     assert_eq!(bulkhead.max_in_flight(), capacity);
                     assert_eq!(bulkhead.retry_after_ms(), retry_ms);
@@ -422,7 +422,7 @@ mod tests {
                     // Test operations don't cause overflow
                     for i in 0..std::cmp::min(capacity, 100) {
                         let permit_id = format!("overflow_test_permit_{}", i);
-                        let acquire_result = bulkhead.try_acquire(&permit_id);
+                        let acquire_result = bulkhead.try_acquire(&permit_id, i as u64);
 
                         // Should either succeed or fail gracefully
                         assert!(acquire_result.is_ok() || acquire_result.is_err());
@@ -440,21 +440,22 @@ mod tests {
 
         // Test reload with overflow-prone values
         let mut stable_bulkhead = GlobalBulkhead::new(100, 1000).expect("stable bulkhead");
-        let reload_test_cases = vec![
-            (u32::MAX, 1, 1), // Max capacity
-            (1, u32::MAX, 1), // Max retry window
-            (1, 1, u32::MAX), // Max retry delay
+        // reload_limits(new_max_in_flight, new_retry_after_ms, now_ms)
+        let reload_test_cases: Vec<(usize, u64, u64)> = vec![
+            (u32::MAX as usize, 1, 1), // Max capacity
+            (1, u32::MAX as u64, 1),   // Max retry-after window
+            (1, 1, u32::MAX as u64),   // Max reload timestamp
         ];
 
-        for (new_capacity, retry_window, retry_delay) in reload_test_cases {
+        for (new_capacity, new_retry_after, now_ms) in reload_test_cases {
             let reload_result =
-                stable_bulkhead.reload_limits(new_capacity, retry_window, retry_delay);
+                stable_bulkhead.reload_limits(new_capacity, new_retry_after, now_ms);
 
             match reload_result {
                 Ok(_) => {
                     // Values should be applied if accepted
                     assert_eq!(stable_bulkhead.max_in_flight(), new_capacity);
-                    assert_eq!(stable_bulkhead.retry_after_ms(), retry_delay);
+                    assert_eq!(stable_bulkhead.retry_after_ms(), new_retry_after);
                 }
                 Err(_) => {
                     // Should preserve original values on error
@@ -483,14 +484,14 @@ mod tests {
 
         for timestamp in &boundary_timestamps {
             // Test safe mode entry with boundary timestamp
-            let entry_result = std::panic::catch_unwind(|| {
+            let entry_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 controller.enter_safe_mode(
                     SafeModeEntryReason::ExplicitFlag,
                     timestamp,
                     "sha256:boundary_test",
                     vec!["boundary anomaly".to_string()],
                 );
-            });
+            }));
 
             // Should handle timestamp parsing without panics
             assert!(
@@ -501,13 +502,13 @@ mod tests {
 
             if controller.is_active() {
                 // Test safe mode exit with boundary timestamp
-                let exit_result = std::panic::catch_unwind(|| {
+                let exit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     controller.exit_safe_mode(
                         &passing_exit_verification(),
                         "boundary_operator",
                         timestamp,
                     )
-                });
+                }));
 
                 assert!(
                     exit_result.is_ok(),
@@ -541,14 +542,14 @@ mod tests {
 
         for malformed_timestamp in &malformed_timestamps {
             // Should handle malformed timestamps gracefully
-            let entry_result = std::panic::catch_unwind(|| {
+            let entry_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 controller.enter_safe_mode(
                     SafeModeEntryReason::ExplicitFlag,
                     malformed_timestamp,
                     "sha256:malformed_test",
                     Vec::new(),
                 );
-            });
+            }));
 
             // Should either work (if timestamp is accepted) or fail gracefully
             assert!(
@@ -597,16 +598,16 @@ mod tests {
         for (test_idx, anomalies) in extreme_anomaly_patterns.iter().enumerate() {
             let start_time = std::time::Instant::now();
 
-            let entry_result = std::panic::catch_unwind(|| {
+            let entry_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // TrustCorruption is the most-severe (fail-closed) entry reason,
+                // preserving the original "critical incident" classification intent.
                 controller.enter_safe_mode(
-                    SafeModeEntryReason::AnomalyClassification(
-                        AnomalyClassification::CriticalIncident,
-                    ),
+                    SafeModeEntryReason::TrustCorruption,
                     "2026-04-17T12:00:00Z",
                     &format!("sha256:extreme_test_{}", test_idx),
                     anomalies.clone(),
                 );
-            });
+            }));
 
             let entry_duration = start_time.elapsed();
 
@@ -657,102 +658,104 @@ mod tests {
     fn negative_runtime_bulkhead_permit_id_collision_and_unicode_edge_cases() {
         let mut bulkhead = GlobalBulkhead::new(100, 1000).expect("test bulkhead");
 
-        // Test permit IDs with potential collision patterns
-        let collision_test_ids = vec![
+        // Test operation IDs with potential collision patterns
+        let collision_test_ids: Vec<String> = vec![
             // Hash-like patterns that might collide with internal representations
             "a".repeat(64),
             "0123456789abcdef".repeat(4),
             "sha256:deadbeef".repeat(2),
             // Unicode edge cases
-            "permit\u{0000}null",
-            "permit\u{202E}rtl",
-            "permit\u{FEFF}bom",
-            "permit🚀emoji",
-            "permit\r\n\tcontrol",
+            "permit\u{0000}null".to_string(),
+            "permit\u{202E}rtl".to_string(),
+            "permit\u{FEFF}bom".to_string(),
+            "permit🚀emoji".to_string(),
+            "permit\r\n\tcontrol".to_string(),
             // Injection attempts
-            "permit'; DROP TABLE permits; --",
-            "permit</permit><malicious>content</malicious>",
-            "permit${PATH}injection",
-            "permit../../../etc/passwd",
+            "permit'; DROP TABLE permits; --".to_string(),
+            "permit</permit><malicious>content</malicious>".to_string(),
+            "permit${PATH}injection".to_string(),
+            "permit../../../etc/passwd".to_string(),
             // Length edge cases
-            "",                  // Empty
+            "".to_string(),      // Empty
             "x".repeat(100_000), // Very long
-            "a",                 // Single char
-            "\x00",              // Single null byte
+            "a".to_string(),     // Single char
+            "\x00".to_string(),  // Single null byte
             // Special characters
-            "permit with spaces",
-            "permit\twith\ttabs",
-            "permit/with/slashes",
-            "permit\\with\\backslashes",
-            "permit:with:colons",
-            "permit;with;semicolons",
+            "permit with spaces".to_string(),
+            "permit\twith\ttabs".to_string(),
+            "permit/with/slashes".to_string(),
+            "permit\\with\\backslashes".to_string(),
+            "permit:with:colons".to_string(),
+            "permit;with;semicolons".to_string(),
         ];
 
-        for permit_id in &collision_test_ids {
-            // Test acquisition with problematic permit ID
+        for (idx, operation_id) in collision_test_ids.iter().enumerate() {
+            let now_ms = u64::try_from(idx).unwrap_or(u64::MAX);
+            // Test acquisition with problematic operation ID
             let acquire_start = std::time::Instant::now();
-            let acquire_result = bulkhead.try_acquire(permit_id);
+            let acquire_result = bulkhead.try_acquire(operation_id, now_ms);
             let acquire_duration = acquire_start.elapsed();
 
-            // Should complete quickly regardless of permit ID content
+            // Should complete quickly regardless of operation ID content
             assert!(
                 acquire_duration < std::time::Duration::from_millis(100),
-                "Acquire with permit '{}' took too long: {:?}",
-                permit_id.escape_debug(),
+                "Acquire with operation '{}' took too long: {:?}",
+                operation_id.escape_debug(),
                 acquire_duration
             );
 
             match acquire_result {
-                Ok(_) => {
+                Ok(permit) => {
                     // Should track permit correctly
                     assert!(bulkhead.in_flight() > 0);
 
-                    // Release should work with same ID
-                    let release_result = bulkhead.release(permit_id);
+                    // Release should work with the issued permit id and same operation id
+                    let release_result =
+                        bulkhead.release(&permit.permit_id, operation_id, now_ms);
                     assert!(
                         release_result.is_ok() || release_result.is_err(),
-                        "Release should complete deterministically for permit '{}'",
-                        permit_id.escape_debug()
+                        "Release should complete deterministically for operation '{}'",
+                        operation_id.escape_debug()
                     );
                 }
                 Err(_) => {
-                    // Some permit IDs might be rejected, which is acceptable
+                    // Some operation IDs might be rejected, which is acceptable
                 }
             }
         }
 
-        // Test permit ID collision detection
+        // Test permit-id generation under colliding operation ids.
+        // FIXME(bd-yom8c): the old API treated the caller-supplied id as a permit
+        // key and rejected exact duplicates; that uniqueness key was removed.
+        // Operation ids are now non-unique labels and permit ids are generated
+        // per acquisition, so the invariant we assert is that distinct
+        // acquisitions never alias to the same permit id.
         let collision_pairs = vec![
-            ("permit_a", "permit_a"),             // Exact match
-            ("permit\x00null", "permit\x00null"), // Null byte match
+            ("permit_a", "permit_a"),             // Exact operation-id match
+            ("permit\x00null", "permit\x00null"), // Null byte (rejected at acquire)
             ("café", "cafe\u{0301}"),             // Unicode normalization
         ];
 
         for (id1, id2) in collision_pairs {
-            // Acquire first permit
-            if bulkhead.try_acquire(id1).is_ok() {
-                // Attempt to acquire second permit with same/similar ID
-                let duplicate_result = bulkhead.try_acquire(id2);
+            // Acquire first permit (id1 is the operation id).
+            if let Ok(first) = bulkhead.try_acquire(id1, 1) {
+                // Acquire a second permit with the same/similar operation id.
+                let duplicate_result = bulkhead.try_acquire(id2, 2);
 
-                if id1 == id2 {
-                    // Exact duplicates should be rejected
-                    assert!(
-                        duplicate_result.is_err(),
-                        "Duplicate permit ID '{}' should be rejected",
+                // Generated permit ids must never alias, even for identical
+                // operation ids, so the two permits stay independent.
+                if let Ok(ref second) = duplicate_result {
+                    assert_ne!(
+                        first.permit_id, second.permit_id,
+                        "distinct acquisitions must yield distinct permit ids for '{}'",
                         id1.escape_debug()
-                    );
-                } else {
-                    // Different Unicode representations should be treated separately
-                    assert!(
-                        duplicate_result.is_ok() || duplicate_result.is_err(),
-                        "Unicode variants should be handled deterministically"
                     );
                 }
 
-                // Clean up
-                let _ = bulkhead.release(id1);
-                if duplicate_result.is_ok() {
-                    let _ = bulkhead.release(id2);
+                // Clean up.
+                let _ = bulkhead.release(&first.permit_id, id1, 3);
+                if let Ok(second) = duplicate_result {
+                    let _ = bulkhead.release(&second.permit_id, id2, 4);
                 }
             }
         }
@@ -760,65 +763,61 @@ mod tests {
 
     #[test]
     fn negative_runtime_safe_mode_config_validation_with_contradictory_settings() {
-        // Test safe mode configuration with potentially contradictory or extreme settings
+        // Test safe mode configuration with potentially contradictory or extreme settings.
         let contradictory_configs = vec![
-            // Extreme timeout values
+            // Extreme crash-loop thresholds.
             SafeModeConfig {
-                max_recovery_time_secs: u64::MAX, // Infinite recovery time
-                require_operator_confirmation: true,
-                allowed_capabilities: vec![Capability::ReadOnlyOperations],
-                trust_verification_required: true,
+                safe_mode: true,
+                crash_loop_threshold: u32::MAX,
+                crash_loop_window_secs: u64::MAX,
+                check_env_var: true,
+                env_var_name: "FRANKEN_SAFE_MODE".to_string(),
             },
-            // Minimal timeout
+            // Minimal crash-loop settings.
             SafeModeConfig {
-                max_recovery_time_secs: 0, // Zero timeout
-                require_operator_confirmation: false,
-                allowed_capabilities: Vec::new(), // No capabilities
-                trust_verification_required: false,
+                safe_mode: false,
+                crash_loop_threshold: 0,
+                crash_loop_window_secs: 0,
+                check_env_var: false,
+                env_var_name: String::new(),
             },
-            // Contradictory settings
+            // Contradictory settings: zero threshold but an enormous window.
             SafeModeConfig {
-                max_recovery_time_secs: 1,           // Very short timeout
-                require_operator_confirmation: true, // But requires manual confirmation
-                allowed_capabilities: vec![
-                    Capability::ReadOnlyOperations,
-                    Capability::EmergencyBypass, // Contradictory capabilities
-                ],
-                trust_verification_required: true, // Strict verification with emergency bypass
+                safe_mode: true,
+                crash_loop_threshold: 0,
+                crash_loop_window_secs: u64::MAX,
+                check_env_var: true,
+                env_var_name: "FRANKEN_SAFE_MODE".to_string(),
             },
-            // Maximum capabilities
+            // Permissive settings: high threshold, env probing disabled.
             SafeModeConfig {
-                max_recovery_time_secs: 3600,
-                require_operator_confirmation: true,
-                allowed_capabilities: vec![
-                    Capability::ReadOnlyOperations,
-                    Capability::LimitedWriteOperations,
-                    Capability::EmergencyBypass,
-                    Capability::DiagnosticAccess,
-                ],
-                trust_verification_required: false, // Permissive verification with all capabilities
+                safe_mode: false,
+                crash_loop_threshold: 1_000_000,
+                crash_loop_window_secs: 3600,
+                check_env_var: false,
+                env_var_name: "CUSTOM_SAFE_MODE".to_string(),
             },
         ];
 
         for (config_idx, config) in contradictory_configs.iter().enumerate() {
-            let controller = SafeModeController::new(config.clone());
+            let mut controller = SafeModeController::new(config.clone());
 
-            // Should handle contradictory configs without crashing
+            // Should handle contradictory configs without crashing.
             assert_eq!(controller.config(), config);
             assert!(
                 !controller.is_active(),
                 "Should start inactive regardless of config"
             );
 
-            // Test safe mode operations with contradictory config
-            let entry_result = std::panic::catch_unwind(|| {
+            // Test safe mode operations with contradictory config.
+            let entry_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 controller.enter_safe_mode(
                     SafeModeEntryReason::ExplicitFlag,
                     "2026-04-17T12:00:00Z",
                     &format!("sha256:contradictory_test_{}", config_idx),
                     Vec::new(),
                 );
-            });
+            }));
 
             assert!(
                 entry_result.is_ok(),
@@ -827,60 +826,50 @@ mod tests {
             );
 
             if controller.is_active() {
-                // Test capability checks with contradictory settings
-                for capability in &config.allowed_capabilities {
-                    let has_capability = controller.has_capability(capability);
-                    // Should return consistent boolean regardless of config contradictions
+                // INV-SMO-RESTRICTED: every capability is restricted in safe mode,
+                // and the check is deterministic regardless of config contradictions.
+                for capability in Capability::all() {
+                    let restricted = controller.check_capability(&capability).is_err();
                     assert!(
-                        has_capability || !has_capability,
-                        "Capability check should be deterministic for config {}",
-                        config_idx
+                        restricted,
+                        "Capability {capability} must be restricted in safe mode for config {config_idx}"
                     );
                 }
 
-                // Exit operations should handle contradictory settings
-                let exit_verification = ExitVerification {
-                    trust_state_consistent: !config.trust_verification_required, // Opposite of requirement
-                    operator_confirmed: !config.require_operator_confirmation, // Opposite of requirement
+                // INV-SMO-RECOVERY: a verification that fails its preconditions must
+                // block exit and keep safe mode active.
+                let failing_verification = ExitVerification {
+                    trust_state_consistent: false,
+                    operator_confirmed: false,
                     ..passing_exit_verification()
                 };
-
-                let exit_result = controller.exit_safe_mode(
-                    &exit_verification,
+                let blocked_exit = controller.exit_safe_mode(
+                    &failing_verification,
                     "contradictory_test",
                     "2026-04-17T12:05:00Z",
                 );
+                assert!(
+                    blocked_exit.is_err(),
+                    "Config {} must fail exit with a failing verification",
+                    config_idx
+                );
+                assert!(
+                    controller.is_active(),
+                    "Config {} must stay in safe mode after a blocked exit",
+                    config_idx
+                );
 
-                // Should handle verification appropriately based on config
-                match (
-                    config.trust_verification_required,
-                    config.require_operator_confirmation,
-                ) {
-                    (true, true) => {
-                        // Both required but verification fails both - should fail
-                        assert!(
-                            exit_result.is_err(),
-                            "Config {} with strict requirements should fail exit with bad verification",
-                            config_idx
-                        );
-                    }
-                    (false, false) => {
-                        // Neither required - should succeed
-                        assert!(
-                            exit_result.is_ok() || exit_result.is_err(),
-                            "Config {} should handle permissive exit deterministically",
-                            config_idx
-                        );
-                    }
-                    _ => {
-                        // Mixed requirements - behavior should be deterministic
-                        assert!(
-                            exit_result.is_ok() || exit_result.is_err(),
-                            "Config {} should handle mixed requirements deterministically",
-                            config_idx
-                        );
-                    }
-                }
+                // A fully-passing verification clears safe mode deterministically.
+                let exit_result = controller.exit_safe_mode(
+                    &passing_exit_verification(),
+                    "contradictory_test",
+                    "2026-04-17T12:06:00Z",
+                );
+                assert!(
+                    exit_result.is_ok(),
+                    "Config {} should exit safe mode with full verification",
+                    config_idx
+                );
             }
         }
     }
@@ -922,7 +911,7 @@ mod tests {
                         let mut bh =
                             try_lock(&bulkhead, "runtime memory pressure bulkhead acquire")
                                 .expect("bulkhead mutex should lock for acquire");
-                        bh.try_acquire(&permit_id)
+                        bh.try_acquire(&permit_id, operation as u64)
                     };
                     let acquire_duration = acquire_start.elapsed();
 
@@ -936,7 +925,7 @@ mod tests {
                     );
 
                     match acquire_result {
-                        Ok(_) => {
+                        Ok(permit) => {
                             // Hold permit briefly
                             std::thread::sleep(std::time::Duration::from_millis(1));
 
@@ -946,7 +935,7 @@ mod tests {
                                 let mut bh =
                                     try_lock(&bulkhead, "runtime memory pressure bulkhead release")
                                         .expect("bulkhead mutex should lock for release");
-                                bh.release(&permit_id)
+                                bh.release(&permit.permit_id, &permit_id, operation as u64)
                             };
                             let release_duration = release_start.elapsed();
 
@@ -1010,7 +999,7 @@ mod tests {
         );
 
         // Final bulkhead state should be consistent
-        let final_bulkhead = try_lock(
+        let mut final_bulkhead = try_lock(
             &bulkhead,
             "runtime memory pressure final bulkhead verification",
         )
@@ -1024,7 +1013,7 @@ mod tests {
         // Memory cleanup should not affect bulkhead operations
         drop(memory_pressure);
 
-        let post_cleanup_result = final_bulkhead.try_acquire("post_cleanup_permit");
+        let post_cleanup_result = final_bulkhead.try_acquire("post_cleanup_permit", 0);
         assert!(
             post_cleanup_result.is_ok(),
             "Should work after memory cleanup"
@@ -1035,29 +1024,38 @@ mod tests {
     fn negative_runtime_trust_verification_input_with_extreme_field_values() {
         let mut controller = SafeModeController::with_default_config();
 
-        // Test trust verification with extreme field values
+        // Test trust verification with extreme field values.
         let extreme_trust_inputs = vec![
             TrustVerificationInput {
-                evidence_hash: "0".repeat(1_000_000), // 1MB hash
-                operator_identity: "".to_string(),    // Empty identity
-                verification_timestamp: "1970-01-01T00:00:00Z".to_string(), // Epoch start
-                additional_context: (0..100_000).map(|i| format!("context_{}", i)).collect(), // Massive context
+                trust_state_hash: "0".repeat(1_000_000), // 1MB hash
+                evidence_entries: (0..100_000).map(|i| format!("context_{}", i)).collect(), // Massive evidence
+                current_epoch: 0,
+                last_evidence_epoch: 0,
+                staleness_threshold: 5,
+                entry_reason: SafeModeEntryReason::ExplicitFlag,
+                timestamp: "1970-01-01T00:00:00Z".to_string(), // Epoch start
             },
             TrustVerificationInput {
-                evidence_hash: "\x00".repeat(64),       // Null byte hash
-                operator_identity: "x".repeat(100_000), // Massive identity
-                verification_timestamp: "9999-12-31T23:59:59Z".to_string(), // Far future
-                additional_context: vec!["".to_string(); 50_000], // Many empty contexts
+                trust_state_hash: "\x00".repeat(64),               // Null byte hash
+                evidence_entries: vec!["".to_string(); 50_000],    // Many empty entries
+                current_epoch: u64::MAX,
+                last_evidence_epoch: 1,
+                staleness_threshold: 1,
+                entry_reason: SafeModeEntryReason::ExplicitFlag,
+                timestamp: "9999-12-31T23:59:59Z".to_string(), // Far future
             },
             TrustVerificationInput {
-                evidence_hash: "🚀".repeat(16), // Unicode hash
-                operator_identity: "operator\u{0000}null\r\n\tcontrol".to_string(), // Control chars
-                verification_timestamp: "invalid-timestamp".to_string(), // Invalid timestamp
-                additional_context: vec![
+                trust_state_hash: "🚀".repeat(16), // Unicode hash
+                evidence_entries: vec![
                     "context\"; DROP TABLE trust; --".to_string(), // SQL injection
                     "context</context><script>alert('xss')</script>".to_string(), // XSS
                     "context../../../etc/passwd".to_string(),      // Path traversal
                 ],
+                current_epoch: 10,
+                last_evidence_epoch: 9,
+                staleness_threshold: 5,
+                entry_reason: SafeModeEntryReason::ExplicitFlag,
+                timestamp: "invalid-timestamp".to_string(), // Invalid timestamp
             },
         ];
 
@@ -1071,8 +1069,9 @@ mod tests {
 
             // Test trust verification processing with extreme inputs
             let started_at = test_clock_start();
-            let verification_result =
-                std::panic::catch_unwind(|| controller.verify_trust_state(trust_input));
+            let verification_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                SafeModeController::verify_trust_state(trust_input)
+            }));
             let verification_duration = started_at.elapsed();
 
             // Should complete without panic and in reasonable time
@@ -1089,11 +1088,12 @@ mod tests {
                 verification_duration
             );
 
-            // Trust verification should handle extreme values gracefully
-            if let Ok(trust_result) = verification_result {
+            // Trust verification should handle extreme values gracefully and produce
+            // a deterministic, proof-carrying receipt.
+            if let Ok(receipt) = verification_result {
                 assert!(
-                    trust_result.is_ok() || trust_result.is_err(),
-                    "Trust verification {} should return deterministic result",
+                    !receipt.trust_proof_digest.is_empty(),
+                    "Trust verification {} should return a deterministic receipt",
                     test_idx
                 );
             }
@@ -1111,12 +1111,34 @@ mod tests {
     fn negative_runtime_operation_flags_bitwise_boundary_conditions() {
         let mut controller = SafeModeController::with_default_config();
 
-        // Test operation flags with various bitwise patterns that might cause issues
+        // Active-flag count is the bool-field analog of a bitflags `bits` popcount.
+        fn active_count(flags: &OperationFlags) -> usize {
+            flags.active_flag_names().len()
+        }
+        // The all-flags-set value (analog of bitflags `all`).
+        let all_flags = OperationFlags {
+            safe_mode: true,
+            degraded: true,
+            read_only: true,
+            no_network: true,
+        };
+
+        // Test operation flags with various combinations that might cause issues.
         let extreme_flag_patterns = vec![
-            OperationFlags::empty(), // No flags
-            OperationFlags::all(),   // All flags
-            OperationFlags::MAINTENANCE_MODE | OperationFlags::EMERGENCY_ACCESS, // Contradictory flags
-            OperationFlags::READ_ONLY | OperationFlags::EMERGENCY_ACCESS, // Read-only with emergency
+            OperationFlags::none(), // No flags
+            all_flags.clone(),      // All flags
+            OperationFlags {
+                safe_mode: true,
+                degraded: false,
+                read_only: false,
+                no_network: true,
+            }, // Safe-mode with network lockdown
+            OperationFlags {
+                safe_mode: false,
+                degraded: false,
+                read_only: true,
+                no_network: true,
+            }, // Read-only with network lockdown
         ];
 
         for (pattern_idx, flags) in extreme_flag_patterns.iter().enumerate() {
@@ -1127,12 +1149,22 @@ mod tests {
                 Vec::new(),
             );
 
-            // Test operations with extreme flag combinations
+            // The complement (every bool negated) is the analog of bitflags `complement`.
+            let complement = OperationFlags {
+                safe_mode: !flags.safe_mode,
+                degraded: !flags.degraded,
+                read_only: !flags.read_only,
+                no_network: !flags.no_network,
+            };
+
+            // Computing the restricted-capability set for several flag combinations
+            // must be deterministic and panic-free (the analog of evaluating each
+            // operation against the flags).
             let flag_check_start = std::time::Instant::now();
             let flag_operations = vec![
-                controller.check_operation_allowed(*flags, "test_operation"),
-                controller.check_operation_allowed(flags.complement(), "complement_operation"),
-                controller.check_operation_allowed(OperationFlags::empty(), "empty_operation"),
+                SafeModeController::compute_restricted_capabilities(flags),
+                SafeModeController::compute_restricted_capabilities(&complement),
+                SafeModeController::compute_restricted_capabilities(&OperationFlags::none()),
             ];
             let flag_check_duration = flag_check_start.elapsed();
 
@@ -1144,13 +1176,19 @@ mod tests {
                 flag_check_duration
             );
 
-            // All operations should return deterministic boolean results
-            for (op_idx, result) in flag_operations.iter().enumerate() {
-                assert!(
-                    result.is_ok() || result.is_err(),
+            // All operations should be deterministic (recomputing yields the same set).
+            for (op_idx, restricted) in flag_operations.iter().enumerate() {
+                let recomputed = match op_idx {
+                    0 => SafeModeController::compute_restricted_capabilities(flags),
+                    1 => SafeModeController::compute_restricted_capabilities(&complement),
+                    _ => SafeModeController::compute_restricted_capabilities(
+                        &OperationFlags::none(),
+                    ),
+                };
+                assert_eq!(
+                    restricted, &recomputed,
                     "Flag operation {} result {} should be deterministic",
-                    pattern_idx,
-                    op_idx
+                    pattern_idx, op_idx
                 );
             }
 
@@ -1161,23 +1199,29 @@ mod tests {
                 "Flag debug representation should not be empty"
             );
 
-            let flag_bits = flags.bits();
-            assert!(
-                flag_bits == 0 || flag_bits > 0,
-                "Flag bits should be deterministic"
-            );
+            let flag_bits = active_count(flags);
+            assert!(flag_bits <= 4, "Flag count should be deterministic and bounded");
 
-            // Test bitwise operations don't cause overflow
-            let combined_flags = *flags | OperationFlags::all();
-            let intersect_flags = *flags & OperationFlags::all();
-            let xor_flags = *flags ^ OperationFlags::all();
+            // Field-wise union / intersection are the analogs of bitwise | and &.
+            let combined_flags = OperationFlags {
+                safe_mode: flags.safe_mode || all_flags.safe_mode,
+                degraded: flags.degraded || all_flags.degraded,
+                read_only: flags.read_only || all_flags.read_only,
+                no_network: flags.no_network || all_flags.no_network,
+            };
+            let intersect_flags = OperationFlags {
+                safe_mode: flags.safe_mode && all_flags.safe_mode,
+                degraded: flags.degraded && all_flags.degraded,
+                read_only: flags.read_only && all_flags.read_only,
+                no_network: flags.no_network && all_flags.no_network,
+            };
 
             assert!(
-                combined_flags.bits() >= flags.bits(),
+                active_count(&combined_flags) >= active_count(flags),
                 "Union should not reduce flags"
             );
             assert!(
-                intersect_flags.bits() <= flags.bits(),
+                active_count(&intersect_flags) <= active_count(flags),
                 "Intersection should not add flags"
             );
 
