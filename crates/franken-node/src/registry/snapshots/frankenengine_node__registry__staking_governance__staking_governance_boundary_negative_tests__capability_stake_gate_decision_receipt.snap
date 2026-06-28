@@ -1,0 +1,19 @@
+---
+source: crates/franken-node/src/registry/staking_governance.rs
+expression: scrubbed
+---
+{
+  "gate_check": {
+    "publisher_id": "gate-test-publisher",
+    "requested_tier": "Medium",
+    "requested_amount": 1200,
+    "decision": {
+      "allowed": true,
+      "event_code": "STAKE-007",
+      "detail": "publisher gate-test-publisher passes gate for tier medium (stake=1500)"
+    },
+    "stake_id": 1,
+    "timestamp": [EPOCH],
+    "gate_policy_version": "default-v1.0"
+  }
+}

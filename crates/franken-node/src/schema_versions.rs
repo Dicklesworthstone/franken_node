@@ -1206,14 +1206,16 @@ mod tests {
             for case in &boundary_cases {
                 let result = is_semver_triplet(case);
 
-                // Only "1.2.3", "9.9.9", "1.22.333", "123.4.56789", and pure numeric triplets should pass
+                // `is_semver_triplet` accepts any three non-empty, all-ASCII-digit
+                // segments. This is a structural numeric-triplet check (not strict
+                // SemVer), so leading zeros are valid digits and pure numeric triplets
+                // such as "00.0.0" and "001.002.003" are accepted. The oracle mirrors
+                // that contract exactly; malformed inputs (missing/extra segments,
+                // empty, single component) remain rejected.
                 let should_pass = case.split('.').count() == 3
                     && case
                         .split('.')
-                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-                    && !case
-                        .split('.')
-                        .any(|part| part.starts_with('0') && part.len() > 1);
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
 
                 if should_pass {
                     assert!(result, "Should accept valid semver: {:?}", case);

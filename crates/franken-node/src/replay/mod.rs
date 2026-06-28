@@ -210,8 +210,22 @@ mod negative_path_tests {
 
     #[test]
     fn workflow_trace_missing_environment_is_rejected_during_trace_validation() {
-        let mut trace = valid_trace("trace-env-missing");
-        trace.environment.platform.clear();
+        // bd-o776s: prod now seals the environment INTO the trace digest, so
+        // mutating a sealed trace's env trips DigestMismatch first. To exercise
+        // the environment-completeness check itself, build the trace with the
+        // missing-platform env BEFORE computing the canonical digest — the
+        // digest then matches and validation fails on the empty platform.
+        let mut env = valid_environment();
+        env.platform.clear();
+        let trace = WorkflowTrace {
+            trace_id: "trace-env-missing".to_string(),
+            workflow_name: "negative-path".to_string(),
+            trace_digest: String::new(),
+            steps: vec![valid_step(0)],
+            environment: env,
+            schema_version: SCHEMA_VERSION.to_string(),
+        }
+        .with_canonical_digest();
 
         let err = trace.validate().unwrap_err();
 
@@ -270,9 +284,23 @@ mod negative_path_tests {
 
     #[test]
     fn register_trace_rejects_missing_environment_without_storing_trace() {
+        // bd-o776s: the environment is sealed into the digest, so seal the
+        // missing-runtime_version env at construction time (matching the
+        // negative_missing_*_rejected_on_registration conformance tests). The
+        // digest then matches and registration fails on the incomplete env
+        // rather than on a digest mismatch.
         let mut engine = ReplayEngine::new();
-        let mut trace = valid_trace("trace-register-bad-env");
-        trace.environment.runtime_version.clear();
+        let mut env = valid_environment();
+        env.runtime_version.clear();
+        let trace = WorkflowTrace {
+            trace_id: "trace-register-bad-env".to_string(),
+            workflow_name: "negative-path".to_string(),
+            trace_digest: String::new(),
+            steps: vec![valid_step(0)],
+            environment: env,
+            schema_version: SCHEMA_VERSION.to_string(),
+        }
+        .with_canonical_digest();
 
         let err = engine.register_trace(trace).unwrap_err();
 

@@ -1,0 +1,13 @@
+---
+source: crates/franken-node/src/registry/staking_governance.rs
+expression: scrubbed
+---
+{
+  "appeal_id": 11223,
+  "stake_id": 54321,
+  "slash_id": 9876,
+  "reason": "Evidence was based on false positive security scan",
+  "outcome": "upheld",
+  "filed_at": [EPOCH],
+  "resolved_at": [EPOCH]
+}

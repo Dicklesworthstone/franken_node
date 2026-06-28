@@ -208,11 +208,29 @@ mod tests {
     #[test]
     fn mr_multiplicative_proposal_scaling() {
         // MR5: Scaling both old_value and new_value by same factor should preserve decision rationale
-        proptest!(|(base_proposal: OptimizationProposal, scale_factor: u64)| {
-            prop_assume!(scale_factor > 1 && scale_factor < 10); // Reasonable scaling
+        //
+        // bd-o776s: `scale_factor` is drawn directly from a bounded strategy
+        // (`2u64..10`) rather than generated full-range and filtered with
+        // `prop_assume!` — the latter rejected ~all u64 values and aborted the
+        // test with "Too many global rejects".
+        proptest!(|(base_proposal: OptimizationProposal, scale_factor in 2u64..10)| {
             prop_assume!(!base_proposal.proposal_id.is_empty());
             prop_assume!(!base_proposal.trace_id.is_empty());
-            prop_assume!(base_proposal.old_value > 0 && base_proposal.new_value > 0);
+
+            // `old_value` is an ABSOLUTE baseline that the governor matches against
+            // the knob's current value; the default knob values are {3,64,128,1024,
+            // 30000}. Pin the baseline into 2000..3000 (which contains none of those
+            // defaults) so that BOTH the base and the scaled proposal are evaluated
+            // against a non-matching baseline. The metamorphic relation then holds
+            // deterministically: scaling old/new together preserves the decision
+            // type (both are rejected for a stale/non-matching baseline), instead of
+            // depending on the random baseline coincidentally matching a default.
+            let base_old = 2000u64 + (base_proposal.old_value % 1000);
+            let base_proposal = OptimizationProposal {
+                old_value: base_old,
+                new_value: base_old.saturating_add(1),
+                ..base_proposal
+            };
 
             let scaled_proposal = OptimizationProposal {
                 old_value: base_proposal.old_value.saturating_mul(scale_factor),

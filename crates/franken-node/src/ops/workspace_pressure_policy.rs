@@ -4538,11 +4538,17 @@ mod tests {
     #[test]
     fn test_coordination_issues_affect_cleanup() {
         let policy = WorkspacePressurePolicy::with_balanced_defaults();
+        // No RCH slots: a Cleanup (which prefers_rch) would otherwise be
+        // offloaded with RequireRch *before* the coordination check runs, so
+        // RCH must be unavailable for the coordination-issue deferral to be the
+        // deciding factor. With local cleanup the only escape, degraded
+        // coordination defers the work to Wait (the same inputs with healthy
+        // coordination admit AllowLocal — coordination is the differentiator).
         let inputs = WorkspacePressureInputs {
             free_disk_bytes: 1_000_000_000,
             target_dir_bytes: 2_000_000_000,
             active_build_count: 1,
-            rch_available_slots: Some(5),
+            rch_available_slots: None,
             memory_pressure: 0.3,
             active_reservations: 60, // High
             coordination_healthy: false,

@@ -4907,8 +4907,14 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let mut attempt = flight_attempt(FlightRecorderAdapterOutcomeClass::Passed);
 
-        // Set target path to our temp directory
-        attempt.target_dir.path = Some(temp_dir.path().to_string_lossy().to_string());
+        // Point at a not-yet-created target dir beneath the temp root. Prod
+        // classifies a missing target as Clean *and* records a
+        // "does not exist - clean state" diagnostic detail, which is what now
+        // drives the appended "Target hygiene:" summary asserted below. (An
+        // existing empty dir is also Clean but yields no diagnostic_details, so
+        // prod gates out the hygiene summary for it.)
+        let target_dir = temp_dir.path().join("validation-target");
+        attempt.target_dir.path = Some(target_dir.to_string_lossy().to_string());
 
         hygiene_detector::populate_flight_recorder_hygiene(&mut attempt);
 

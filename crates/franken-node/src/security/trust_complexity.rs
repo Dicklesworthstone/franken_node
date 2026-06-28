@@ -1588,7 +1588,14 @@ mod tests {
                         .sum::<usize>()
             })
             .sum();
-        assert!(total_decision_size < 100_000_000); // Reasonable memory bound
+        // push_bounded caps the COUNT at MAX_DECISIONS; the measured size is therefore
+        // bounded by cap * per-entry size, not by a fixed byte ceiling. Each stored entry's
+        // id + endpoint + capability bytes cannot exceed the largest payload constructed above.
+        let per_decision_max = massive_decision_id.len()
+            + massive_endpoint.len()
+            + massive_capabilities.iter().map(|c| c.len()).sum::<usize>()
+            + 16; // slack for the "-{i}" suffixes appended to id/endpoint
+        assert!(total_decision_size <= MAX_DECISIONS * per_decision_max); // bounded by cap * per-entry
 
         // Test replay with massive payload
         if !gate.decisions().is_empty() {
@@ -1733,7 +1740,9 @@ mod tests {
             vec!["cap".to_string()],
             "2026-01-01T00:00:00Z",
         );
-        degraded_gate.update_degraded_elapsed(u64::MAX - 1);
+        // is_expired() is fail-closed at the boundary (elapsed >= max_duration). With a
+        // max_duration of u64::MAX, expiry only fires once elapsed REACHES u64::MAX.
+        degraded_gate.update_degraded_elapsed(u64::MAX);
         assert!(degraded_gate.is_degraded_expired()); // Should handle extreme elapsed time
 
         degraded_gate.update_degraded_elapsed(0);
@@ -1902,8 +1911,10 @@ mod tests {
         // Verify final state consistency
         let final_gate = try_lock(&gate, "trust complexity final consistency check")
             .expect("trust complexity gate mutex should not be poisoned");
-        assert!(final_gate.decisions().len() <= 10); // At most 10 decisions added
-        assert!(final_gate.replay_results().len() <= 10); // At most 10 replays
+        // record/replay append without dedup (push_bounded), so 10 threads each issuing
+        // ~17 record + ~17 replay ops accumulate well past 10; the genuine ceiling is the cap.
+        assert!(final_gate.decisions().len() <= MAX_DECISIONS); // bounded storage, no dedup
+        assert!(final_gate.replay_results().len() <= MAX_REPLAY_RESULTS); // bounded storage, no dedup
         assert!(final_gate.events().len() <= MAX_EVENTS);
 
         // Verify no data corruption from concurrent access
@@ -2150,7 +2161,9 @@ mod tests {
                 capability_set: vec![long_str.clone()],
                 clock_value: format!(
                     "2026-01-01T00:00:00Z-{}",
-                    &long_str[..std::cmp::min(50, long_str.len())]
+                    // Take a bounded prefix on a CHAR boundary; a fixed byte slice can land
+                    // inside a multibyte char (e.g. 'a'/'x' are 1 byte but '💩' is 4).
+                    long_str.chars().take(50).collect::<String>()
                 ),
                 chain_depth: 1,
             };

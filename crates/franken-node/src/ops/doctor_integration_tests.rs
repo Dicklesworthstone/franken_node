@@ -96,10 +96,15 @@ mod tests {
         let doctor = WorkspacePressureDoctor::with_thresholds(conservative_thresholds);
         let output = doctor.generate_report(&inputs);
 
-        // With conservative thresholds, this should be more restrictive
+        // With conservative thresholds (1 GB minimum free disk), 800 MB free disk now
+        // crosses the critical floor: every non-SourceOnly work class refuses local
+        // fallback, so the overall status escalates to Critical. The discriminating
+        // intent is that conservative thresholds drive this borderline input OFF
+        // Healthy (a Healthy status would still fail this assertion).
+        // bd-o776s: reconcile to current prod policy.
         assert!(matches!(
             output.status,
-            DoctorStatus::Warning | DoctorStatus::Degraded
+            DoctorStatus::Warning | DoctorStatus::Degraded | DoctorStatus::Critical
         ));
         assert_eq!(output.policy_decisions.len(), 6);
     }
@@ -116,9 +121,11 @@ mod tests {
         assert!(human_report.contains("📊 Resource Summary"));
         assert!(human_report.contains("🎯 Policy Decisions"));
 
-        // Check resource formatting
-        assert!(human_report.contains("Free Disk: 10.0 GB"));
-        assert!(human_report.contains("Target Dir: 500.0 MB"));
+        // Check resource formatting. `format_bytes` uses binary (1024) units, so the
+        // decimal byte inputs render as 10_000_000_000 B → "9.3 GB" and
+        // 500_000_000 B → "476.8 MB" (bd-o776s: reconcile to current prod formatter).
+        assert!(human_report.contains("Free Disk: 9.3 GB"));
+        assert!(human_report.contains("Target Dir: 476.8 MB"));
         assert!(human_report.contains("Memory Pressure: 20.0%"));
         assert!(human_report.contains("RCH Status: Available (8 slots)"));
         assert!(human_report.contains("Coordination: Healthy"));
@@ -301,11 +308,52 @@ mod tests {
                 golden_path.display()
             )
         });
-        assert_eq!(
-            expected_text, actual_text,
+        let expected: Value = serde_json::from_str(&expected_text)
+            .expect("workspace pressure policy golden should be valid JSON");
+        // bd-o776s: the policy now serializes f32 pressure/confidence fields, whose JSON
+        // text representation expands (e.g. 0.85 -> 0.8500000238418579) versus the f64
+        // values recorded in the golden, and object key ordering depends on the
+        // serde_json `preserve_order` feature. Compare structurally with a float
+        // tolerance instead of byte-for-byte so the real policy decisions are still
+        // fully cross-checked (a genuine decision/value change would still fail) without
+        // making the test brittle to float-text formatting or map ordering.
+        assert!(
+            json_value_approx_eq(&expected, &actual),
             "workspace pressure policy golden drifted from the real policy implementation; \
-             rerun this test with UPDATE_GOLDENS=1 only after reviewing the diff"
+             rerun this test with UPDATE_GOLDENS=1 only after reviewing the diff.\n\
+             expected: {expected_text}\nactual: {actual_text}"
         );
+    }
+
+    /// Structurally compare two JSON values, treating numbers as equal within a small
+    /// relative tolerance (to absorb f32 -> f64 JSON-text expansion) and objects as
+    /// order-independent. Every key, string, bool, array element, and numeric value is
+    /// still verified, so real policy-decision drift is caught.
+    fn json_value_approx_eq(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => match (x.as_f64(), y.as_f64()) {
+                (Some(xf), Some(yf)) => {
+                    let scale = xf.abs().max(yf.abs()).max(1.0);
+                    (xf - yf).abs() <= 1e-6 * scale
+                }
+                _ => x == y,
+            },
+            (Value::Array(xs), Value::Array(ys)) => {
+                xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(ys.iter())
+                        .all(|(x, y)| json_value_approx_eq(x, y))
+            }
+            (Value::Object(xs), Value::Object(ys)) => {
+                xs.len() == ys.len()
+                    && xs.iter().all(|(key, xv)| {
+                        ys.get(key)
+                            .is_some_and(|yv| json_value_approx_eq(xv, yv))
+                    })
+            }
+            _ => a == b,
+        }
     }
 
     #[test]

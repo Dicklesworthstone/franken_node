@@ -3472,14 +3472,19 @@ mod tests {
         // Should not exceed maximum capacity
         assert!(dec.registered_algorithms().len() <= MAX_REGISTERED_ALGORITHMS);
 
-        // Latest algorithms should be preserved (oldest dropped)
+        // Registration is bounded by REJECTING new entries once at capacity (earliest kept),
+        // so the FIRST registered algorithm is preserved and the LAST one (registered past
+        // capacity) was rejected rather than stored.
+        let first_algo = AlgorithmId::new("algo-0");
+        assert!(dec.registered_algorithms().contains(&first_algo));
+
         let last_algo = AlgorithmId::new(format!(
             "algo-{}",
             MAX_REGISTERED_ALGORITHMS.saturating_add(9)
         ));
-        assert!(dec.registered_algorithms().contains(&last_algo));
+        assert!(!dec.registered_algorithms().contains(&last_algo));
 
-        // Original algorithms may have been evicted
+        // Capacity bound holds.
         let final_count = dec.registered_algorithms().len();
         assert!(final_count <= MAX_REGISTERED_ALGORITHMS);
     }
@@ -3577,9 +3582,10 @@ mod tests {
         );
         let fragments = test_fragments();
 
-        // Create objects with extremely long IDs
+        // Create objects with long IDs that are still within MAX_OBJECT_ID_BYTES (512);
+        // prod fail-closes on over-length object IDs, so "long" here means "near the bound".
         for i in 0..3 {
-            let long_id = format!("obj-{}-{}", "x".repeat(1000), i);
+            let long_id = format!("obj-{}-{}", "x".repeat(480), i);
             let result = dec.decode(
                 &long_id,
                 &fragments,
@@ -3593,7 +3599,7 @@ mod tests {
         // Audit log should handle long object IDs without issues
         assert_eq!(dec.audit_log().len(), 3);
         for entry in dec.audit_log() {
-            assert!(entry.object_id.len() > 1000);
+            assert!(entry.object_id.len() > 400);
             assert_eq!(entry.event_code, REPAIR_PROOF_EMITTED);
         }
     }
@@ -3948,11 +3954,11 @@ mod tests {
         let proof = decode_result.proof.expect("proof should exist");
         assert_eq!(proof.input_fragment_hashes.len(), 3);
 
-        // All fragment hashes should be identical since data is identical
-        let first_hash = &proof.input_fragment_hashes[0];
-        for hash in &proof.input_fragment_hashes {
-            assert_eq!(hash, first_hash);
-        }
+        // Fragment hashes bind the fragment_id as well as the data, so the three fragments
+        // (identical data, distinct IDs dup1/dup2/dup3) produce three DISTINCT hashes.
+        let unique_hashes: std::collections::HashSet<_> =
+            proof.input_fragment_hashes.iter().collect();
+        assert_eq!(unique_hashes.len(), proof.input_fragment_hashes.len());
     }
 
     #[test]
@@ -4258,7 +4264,14 @@ mod tests {
                 &format!("unicode_trace_{}", i),
             );
 
-            // Should handle Unicode gracefully without corruption
+            // object_id fail-closes on control characters, so patterns carrying control chars
+            // are correctly rejected; non-control Unicode object IDs are handled gracefully.
+            if unicode_obj_id.chars().any(char::is_control) {
+                assert!(result.is_err());
+                continue;
+            }
+
+            // Should handle (non-control) Unicode gracefully without corruption
             assert!(result.is_ok());
             let decode_result = result.unwrap();
             let proof = decode_result.proof.unwrap();
@@ -4546,9 +4559,9 @@ mod tests {
             &json_str.replace("algorithm_id", "算法_id"),
             // Null byte injection
             &format!("{}\x00{}", &json_str[..50], &json_str[50..]),
-            // Binary data injection
+            // Binary data injection (raw control bytes — invalid unescaped inside JSON)
             &format!(
-                "{}\\u0000\\u0001\\u0002{}",
+                "{}\u{0000}\u{0001}\u{0002}{}",
                 &json_str[..100],
                 &json_str[100..]
             ),

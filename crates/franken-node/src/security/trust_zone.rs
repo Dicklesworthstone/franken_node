@@ -1985,7 +1985,11 @@ mod tests {
             .register_zone(make_zone("staging", 70, 3, IsolationLevel::Strict))
             .unwrap();
 
-        // Test various whitespace-only authorization proofs that try to bypass validation
+        // Test various whitespace-only authorization proofs that try to bypass validation.
+        // Every entry below has the Unicode White_Space property, so `str::trim()`
+        // strips it to empty and the dual-owner presence check must reject it.
+        // (Zero-width FORMAT characters such as U+200B/U+2060/U+FEFF are Unicode
+        // category Cf, NOT White_Space, so they are handled separately below.)
         let whitespace_proofs = vec![
             "   ",      // Spaces
             "\t\t\t",   // Tabs
@@ -2004,9 +2008,6 @@ mod tests {
             "\u{2008}", // Punctuation space
             "\u{2009}", // Thin space
             "\u{200A}", // Hair space
-            "\u{200B}", // Zero-width space
-            "\u{2060}", // Word joiner
-            "\u{FEFF}", // Zero-width non-breaking space (BOM)
         ];
 
         for &proof in &whitespace_proofs {
@@ -2025,6 +2026,41 @@ mod tests {
         // Should have generated isolation violation events for each failed attempt
         assert!(engine.event_count(ZTS_004_ISOLATION_VIOLATION) >= whitespace_proofs.len());
         assert_eq!(engine.event_count(ZTS_003_CROSS_ZONE_AUTHORIZED), 0);
+
+        // Zero-width FORMAT characters (Unicode category Cf) are NOT Unicode
+        // White_Space, so `str::trim()` does not strip them: the dual-owner
+        // presence check treats them as a present (non-empty) proof token, just
+        // like any other non-empty string. Critically, the real cross-zone
+        // security boundary is the isolation / allowed-targets gate -- NOT proof
+        // content -- so these invisible characters cannot be used to cross into a
+        // zone that the source is not authorized to reach.
+        let zero_width_format_proofs = vec![
+            "\u{200B}", // Zero-width space
+            "\u{2060}", // Word joiner
+            "\u{FEFF}", // Zero-width non-breaking space (BOM)
+        ];
+        for &proof in &zero_width_format_proofs {
+            // To an allowed target, the presence check accepts a non-empty proof.
+            let allowed =
+                CrossZoneRequest::new("prod", "staging", "test-action", "test-user", proof);
+            assert_eq!(
+                engine.authorize_cross_zone(&allowed),
+                Ok(()),
+                "Zero-width format char U+{:04X} is not Unicode whitespace; presence check accepts it",
+                proof.chars().next().unwrap_or('\0') as u32
+            );
+
+            // To a NON-allowed strict target the isolation gate still rejects it,
+            // proving invisible proof content cannot bypass cross-zone enforcement.
+            let blocked =
+                CrossZoneRequest::new("staging", "prod", "test-action", "test-user", proof);
+            assert_eq!(
+                engine.authorize_cross_zone(&blocked),
+                Err(SegmentationError::IsolationViolation),
+                "Zero-width format char U+{:04X} must not bypass the isolation/allowed-targets gate",
+                proof.chars().next().unwrap_or('\0') as u32
+            );
+        }
     }
 
     #[test]
@@ -2499,7 +2535,10 @@ mod tests {
         assert_eq!(drained_events.len(), 100);
         assert!(engine.events().is_empty());
 
-        // Next event should continue trace ID sequence
+        // Trace IDs are positional within the current event buffer
+        // (`format!("trace-{}", self.events.len())`), not a globally monotonic
+        // counter. Because `take_events()` empties the buffer, the next emitted
+        // event's index resets to 0, so its trace ID is "trace-0".
         engine
             .register_zone(ZonePolicy::new(
                 "continuation-zone",
@@ -2510,7 +2549,7 @@ mod tests {
             .unwrap();
         let new_events = engine.events();
         assert_eq!(new_events.len(), 1);
-        assert_eq!(new_events[0].trace_id, "trace-100"); // Continues sequence
+        assert_eq!(new_events[0].trace_id, "trace-0"); // Index resets after drain
     }
 
     #[test]
@@ -2542,12 +2581,20 @@ mod tests {
                 IsolationLevel::Strict,
             ))
             .unwrap();
+        // A second, EXISTING zone that "violation-zone" is not authorized to reach.
+        // Targeting a nonexistent zone would short-circuit with ZoneNotFound before
+        // any audit event is emitted; to exercise genuine ZTS-004 isolation
+        // violations the target must exist but be outside the source's allowed
+        // cross-zone targets (Strict isolation, never granted via allow_cross_zone).
+        violation_engine
+            .register_zone(ZonePolicy::new("blocked-zone", 80, 5, IsolationLevel::Strict))
+            .unwrap();
 
         // Generate many isolation violations
         for i in 0..50 {
             let req = CrossZoneRequest::new(
                 "violation-zone",
-                "nonexistent-zone",
+                "blocked-zone",
                 format!("bad-action-{}", i),
                 "attacker",
                 "fake-proof",

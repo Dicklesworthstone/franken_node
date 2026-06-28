@@ -2972,9 +2972,25 @@ mod tests {
 
     #[test]
     fn evicts_when_max_bytes_exceeded() {
-        let small_entry = make_entry("DEC-001", 1);
-        let entry_size = small_entry.estimated_size();
-        let max_bytes = entry_size * 2 + 10;
+        // bd-o776s: prod charges each chained entry's full serialized size, which now
+        // includes the 64-hex prev_entry_hash on every entry after the first and the
+        // self-referential size_bytes digits. A naive `estimated_size()*2` budget no longer
+        // holds two chained entries, so measure the ACTUAL stored size of the two newest
+        // entries and size the budget to exactly that — the third append is then the one
+        // that trips the max_bytes eviction.
+        let mut probe = EvidenceLedger::new(LedgerCapacity::new(100, 1_000_000_000));
+        probe
+            .append(make_entry("DEC-001", 1))
+            .expect("should succeed");
+        let after_one = probe.current_bytes();
+        probe
+            .append(make_entry("DEC-002", 2))
+            .expect("should succeed");
+        probe
+            .append(make_entry("DEC-003", 3))
+            .expect("should succeed");
+        // Bytes of the two newest chained entries (S2 + S3).
+        let max_bytes = probe.current_bytes().saturating_sub(after_one);
         let mut ledger = EvidenceLedger::new(LedgerCapacity::new(100, max_bytes));
         ledger
             .append(make_entry("DEC-001", 1))
@@ -3201,11 +3217,19 @@ mod tests {
 
     #[test]
     fn mr_entry_count_capacity_and_byte_capacity_retain_same_uniform_suffix() {
-        let entry_size = make_entry("DEC-001", 1).estimated_size();
+        // bd-o776s: each signed, chained entry now carries a 128-hex signature and a 64-hex
+        // prev_entry_hash that `estimated_size()` omits, so a naive `estimated_size()*3`
+        // budget can no longer hold three entries. Size the byte budget from the ACTUAL
+        // steady-state size of three chained entries (measured via a count-capacity probe)
+        // so the byte-capacity ledger retains the same 3-entry suffix as the count cap.
+        let three_entry_bytes =
+            run_sequence(LedgerCapacity::new(3, 1_000_000), 1, 9, default_verifying_key())
+                .snapshot()
+                .current_bytes;
         let by_count =
-            run_sequence(LedgerCapacity::new(3, 100_000), 1, 9, default_verifying_key()).snapshot();
+            run_sequence(LedgerCapacity::new(3, 1_000_000), 1, 9, default_verifying_key()).snapshot();
         let by_bytes = run_sequence(
-            LedgerCapacity::new(100, entry_size * 3),
+            LedgerCapacity::new(100, three_entry_bytes),
             1,
             9,
             default_verifying_key(),
@@ -3218,7 +3242,7 @@ mod tests {
         );
         assert_eq!(by_count.total_appended, by_bytes.total_appended);
         assert_eq!(by_count.total_evicted, by_bytes.total_evicted);
-        assert!(by_bytes.current_bytes <= entry_size * 3);
+        assert!(by_bytes.current_bytes <= three_entry_bytes);
     }
 
     #[test]
@@ -3688,10 +3712,14 @@ mod tests {
                 "closed-form size solver must match actual serialized length"
             );
 
-            let initial_guess = base_size
-                .saturating_sub(1)
-                .saturating_add(decimal_digit_count(base_size));
-            if decimal_digit_count(computed_size) != decimal_digit_count(initial_guess) {
+            // bd-o776s: a size_bytes decimal-boundary crossover is when the real serialized
+            // length (which carries the self-referential size_bytes digits) lands in a
+            // different digit bucket than the naive base estimate (which serializes size_bytes
+            // as the single char "0"). Compare against `base_size` itself: this fires at e.g.
+            // base_size = 999 → computed = 1002, exercising the solver's fixed-point iteration.
+            // (The prior comparison against `initial_guess` already absorbed that one bump, so
+            // it never fired as the entry base size drifted.)
+            if decimal_digit_count(computed_size) != decimal_digit_count(base_size) {
                 found_digit_boundary = true;
                 break;
             }
@@ -4429,18 +4457,35 @@ mod tests {
                 "decision\"quote",                    // Quote injection
             ];
 
+            // bd-o776s: prod now fail-closes on C0 control characters in text fields
+            // (NUL, LF, CR, ESC, …) as a log-injection defense (validate_text_field); tab
+            // and space are exempt and every other byte is stored opaquely. Malicious IDs are
+            // therefore handled safely either way — control-char IDs are rejected cleanly,
+            // the rest are preserved verbatim for forensics.
+            let mut stored_ids = Vec::new();
             for (i, malicious_id) in malicious_ids.iter().enumerate() {
                 let mut entry = make_entry("BASE", i as u64);
                 entry.decision_id = malicious_id.to_string();
 
+                let has_control = malicious_id
+                    .bytes()
+                    .any(|b| b < 32 && b != b' ' && b != b'\t');
                 let result = ledger.append(entry);
-                assert!(result.is_ok());
+                if has_control {
+                    assert!(
+                        matches!(result, Err(LedgerError::InvalidControlCharacters { .. })),
+                        "control-char decision_id should be rejected: {result:?}"
+                    );
+                } else {
+                    assert!(result.is_ok(), "opaque malicious id should append: {result:?}");
+                    stored_ids.push((*malicious_id).to_string());
+                }
             }
 
             let snapshot = ledger.snapshot();
-            assert_eq!(snapshot.entries.len(), malicious_ids.len());
+            assert_eq!(snapshot.entries.len(), stored_ids.len());
 
-            for ((_, entry), expected_id) in snapshot.entries.iter().zip(&malicious_ids) {
+            for ((_, entry), expected_id) in snapshot.entries.iter().zip(&stored_ids) {
                 assert_eq!(entry.decision_id, *expected_id);
             }
         }
@@ -4551,7 +4596,11 @@ mod tests {
 
         #[test]
         fn negative_capacity_overflow_fifo_behavior_stress() {
-            let small_capacity = LedgerCapacity::new(3, 1000);
+            // bd-o776s: this exercises ENTRY-count FIFO (max_entries=3). Each chained, signed
+            // entry now serializes larger (128-hex signature + 64-hex prev_entry_hash framing),
+            // so the old 1000-byte secondary budget evicted down to 2 before the entry cap
+            // bound. Make the entry-count cap the binding constraint with a generous byte cap.
+            let small_capacity = LedgerCapacity::new(3, 1_000_000);
             let mut ledger = EvidenceLedger::new(small_capacity);
 
             // Add many entries to force overflow
@@ -4707,6 +4756,12 @@ mod tests {
             let result2 = ledger.append(second_entry.clone());
             assert!(result2.is_ok(), "Append with correct hash should succeed");
 
+            // bd-o776s: after the second append the chain head advanced to the second entry's
+            // hash, so a mis-chained third entry must be rejected against THAT head — not the
+            // first entry's hash. (The prior assertion pinned `first_hash` and never ran.)
+            let head_after_second =
+                evidence_entry_hash_hex(&ledger.snapshot().entries.last().expect("entry").1);
+
             // Create third entry with wrong prev_entry_hash to test error case
             let mut third_entry = test_entry("third-decision", 3);
             third_entry.prev_entry_hash =
@@ -4721,8 +4776,8 @@ mod tests {
                     expected_hash,
                     provided_hash,
                 } => {
-                    // Verify error contains correct expected hash
-                    assert_eq!(expected_hash, first_hash);
+                    // Verify error reports the current chain head as the expected hash
+                    assert_eq!(expected_hash, head_after_second);
                     assert_eq!(
                         provided_hash,
                         "0000000000000000000000000000000000000000000000000000000000000000"
@@ -4770,12 +4825,25 @@ mod tests {
                     prev_entry_hash: String::new(),
                 };
 
-                // Test ledger append with malicious decision ID
+                // Test ledger append with malicious decision ID.
+                // bd-o776s: prod fail-closes on C0 control characters (ESC, NUL, CR, LF) as a
+                // log-injection defense; everything else is stored opaquely. Both outcomes are
+                // safe handling of the malicious input.
+                let has_control = malicious_id
+                    .bytes()
+                    .any(|b| b < 32 && b != b' ' && b != b'\t');
                 let result = ledger.append(malicious_entry.clone());
-                assert!(
-                    result.is_ok(),
-                    "ledger should handle malicious decision IDs"
-                );
+                if has_control {
+                    assert!(
+                        matches!(result, Err(LedgerError::InvalidControlCharacters { .. })),
+                        "control-char decision_id should be rejected: {result:?}"
+                    );
+                } else {
+                    assert!(
+                        result.is_ok(),
+                        "ledger should handle malicious decision IDs"
+                    );
+                }
 
                 if let Ok(entry_id) = result {
                     // Verify entry is stored with decision ID preserved
@@ -4940,11 +5008,24 @@ mod tests {
                     prev_entry_hash: String::new(),
                 };
 
+                // bd-o776s: prod fail-closes on C0 control characters (ESC, NUL, CR, LF) in
+                // text fields as a log-injection defense; other injection payloads are stored
+                // opaquely. Both are safe handling.
+                let has_control = injection_trace_id
+                    .bytes()
+                    .any(|b| b < 32 && b != b' ' && b != b'\t');
                 let result = ledger.append(injection_entry.clone());
-                assert!(
-                    result.is_ok(),
-                    "ledger should handle injection trace IDs safely"
-                );
+                if has_control {
+                    assert!(
+                        matches!(result, Err(LedgerError::InvalidControlCharacters { .. })),
+                        "control-char trace_id should be rejected: {result:?}"
+                    );
+                } else {
+                    assert!(
+                        result.is_ok(),
+                        "ledger should handle injection trace IDs safely"
+                    );
+                }
 
                 // Verify JSON serialization is safe
                 let json =
@@ -5003,8 +5084,12 @@ mod tests {
                 serde_json::json!(42),
                 serde_json::json!(true),
                 serde_json::json!("just_a_string"),
-                // Circular reference simulation (deeply nested)
-                (0..1000).fold(
+                // Circular reference simulation (deeply nested). bd-o776s: serde_json caps
+                // deserialization recursion at 128 as a DoS guard, so the round-trip below
+                // cannot reconstruct an arbitrarily deep structure. Keep this adversarially
+                // deep but within the codec's documented limit so the ledger-resilience +
+                // round-trip intent still holds.
+                (0..100).fold(
                     serde_json::json!({"end": true}),
                     |acc, i| serde_json::json!({"level": i, "next": acc}),
                 ),
@@ -5090,21 +5175,24 @@ mod tests {
                 "8000000000000000000000000000000000000000000000000000000000000000",
             ];
 
+            // bd-o776s: this loop appends two entries per iteration (the third is rejected),
+            // so the ledger's chain head advances each append. The prior version read
+            // `snapshot.entries[i]` and pinned the *first* entry's hash, which only coincided
+            // with the chain head for i == 0 and reported a stale expected_hash. Track the
+            // real chain head (the most-recently appended entry) consistently.
             for (i, hash_hex) in test_hashes.iter().enumerate() {
-                // Create entry that establishes this hash as expected
+                // Establish an entry; the chain head is now this entry's hash.
                 let first_entry = test_entry(&format!("establish-{}", i), i as u64);
                 let result1 = ledger.append(first_entry);
                 assert!(result1.is_ok(), "Failed to append entry {}", i);
 
-                // Get the actual hash from the ledger
-                let snapshot = ledger.snapshot();
-                let actual_hash = evidence_entry_hash_hex(&snapshot.entries[i].1);
+                // The current chain head is the hash of the most-recently appended entry.
+                let head_hash =
+                    evidence_entry_hash_hex(&ledger.snapshot().entries.last().expect("entry").1);
 
-                // Create second entry that should match this hash exactly
+                // A second entry that chains correctly onto the head must succeed.
                 let mut second_entry = test_entry(&format!("match-{}", i), (i + 1) as u64);
-                second_entry.prev_entry_hash = actual_hash.clone();
-
-                // This should succeed with correct hash
+                second_entry.prev_entry_hash = head_hash.clone();
                 let result2 = ledger.append(second_entry);
                 assert!(
                     result2.is_ok(),
@@ -5113,16 +5201,19 @@ mod tests {
                     hash_hex
                 );
 
-                // Verify the hash chain is maintained
+                // Two entries were added this iteration; the third below is rejected.
                 let updated_snapshot = ledger.snapshot();
                 assert_eq!(
                     updated_snapshot.entries.len(),
-                    i + 2,
+                    2 * (i + 1),
                     "Entry count mismatch"
                 );
 
-                // Create third entry with a single bit flip to test constant-time comparison
-                let mut flipped_hash = actual_hash.clone();
+                // After the second append the head advanced; the bit-flip case must target
+                // the REAL current expected head so it genuinely exercises the chain check.
+                let head_after_second =
+                    evidence_entry_hash_hex(&updated_snapshot.entries.last().expect("entry").1);
+                let mut flipped_hash = head_after_second.clone();
                 if let Some(last_char) = flipped_hash.chars().last() {
                     let flipped_char = match last_char {
                         '0' => '1',
@@ -5150,7 +5241,7 @@ mod tests {
                         provided_hash,
                     } => {
                         assert_eq!(
-                            expected_hash, actual_hash,
+                            expected_hash, head_after_second,
                             "Expected hash mismatch for vector {}",
                             i
                         );
@@ -5167,11 +5258,11 @@ mod tests {
                 }
             }
 
-            // Verify final ledger state
+            // Verify final ledger state (two retained entries per vector).
             let final_snapshot = ledger.snapshot();
             assert_eq!(
                 final_snapshot.entries.len(),
-                test_hashes.len(),
+                2 * test_hashes.len(),
                 "Final entry count should match test vectors"
             );
         }
@@ -5324,14 +5415,19 @@ mod tests {
                     description
                 );
 
+                // bd-o776s: prod validates text fields for C0 control characters BEFORE the
+                // hash-chain check, so a malformed prev_entry_hash carrying NUL/CR/LF/ESC is
+                // now rejected with `InvalidControlCharacters` rather than `HashChainBroken`.
+                // Both are fail-closed rejections that leave ledger state unchanged.
+                let has_control = malformed_hash
+                    .bytes()
+                    .any(|b| b < 32 && b != b' ' && b != b'\t');
                 match result.unwrap_err() {
-                    LedgerError::HashChainBroken {
-                        expected_hash,
-                        provided_hash,
-                    } => {
-                        assert_eq!(
-                            expected_hash, expected_hash,
-                            "Expected hash should be preserved for case: {}",
+                    LedgerError::HashChainBroken { provided_hash, .. } => {
+                        assert!(
+                            !has_control,
+                            "control-char hash should be rejected as InvalidControlCharacters, \
+                             got HashChainBroken for case: {}",
                             description
                         );
                         assert_eq!(
@@ -5340,8 +5436,21 @@ mod tests {
                             description
                         );
                     }
+                    LedgerError::InvalidControlCharacters { field, .. } => {
+                        assert!(
+                            has_control,
+                            "non-control malformed hex should be HashChainBroken, \
+                             got InvalidControlCharacters for case: {}",
+                            description
+                        );
+                        assert_eq!(
+                            field, "prev_entry_hash",
+                            "control-char rejection should name the prev_entry_hash field: {}",
+                            description
+                        );
+                    }
                     other => panic!(
-                        "Expected HashChainBroken error for malformed hex '{}' ({}), got: {:?}",
+                        "Expected HashChainBroken or InvalidControlCharacters for malformed hex '{}' ({}), got: {:?}",
                         malformed_hash, description, other
                     ),
                 }
@@ -6151,7 +6260,10 @@ mod tests {
     fn test_security_fifo_overflow_manipulation_attempts() {
         let config = EvidenceLedgerConfig {
             max_entries: 5, // Small capacity for overflow testing
-            max_bytes: 1024,
+            // bd-o776s: this exercises ENTRY-count FIFO; each stored entry now also carries a
+            // 64-hex prev_entry_hash, so the old 1024-byte secondary budget evicted down to 2
+            // before the entry cap bound. Keep the entry-count cap as the binding constraint.
+            max_bytes: 1_000_000,
             lab_mode: false,
             enable_spill: false,
             spill_writer: None,
@@ -6431,9 +6543,14 @@ mod tests {
             }
         }
 
-        // Verify JSON serialization preserves decision kinds correctly
+        // Verify JSON serialization preserves decision kinds correctly.
+        // bd-o776s: snapshot entries are `(EntryId, EvidenceEntry)` pairs (EntryId serializes
+        // as a bare integer), so serialize the EvidenceEntry values themselves for the
+        // entry-shaped roundtrip below.
         let snapshot = ledger.snapshot();
-        let json = serde_json::to_string(&snapshot.entries).expect("should serialize");
+        let entries: Vec<EvidenceEntry> =
+            snapshot.entries.iter().map(|(_, e)| e.clone()).collect();
+        let json = serde_json::to_string(&entries).expect("should serialize");
 
         // JSON should contain all decision kind labels
         for decision_kind in &all_decision_kinds {
@@ -6523,18 +6640,29 @@ mod tests {
                 "Injection payload should be stored safely"
             );
 
-            // Verify payload is stored and serialized safely
+            // Verify payload is stored and serialized safely.
+            // bd-o776s: snapshot entries are `(EntryId, EvidenceEntry)` pairs; serialize the
+            // EvidenceEntry values so the entry-shaped roundtrip below deserializes cleanly.
             let snapshot = ledger.snapshot();
-            let json = serde_json::to_string(&snapshot.entries).expect("should serialize");
+            let entries: Vec<EvidenceEntry> =
+                snapshot.entries.iter().map(|(_, e)| e.clone()).collect();
+            let json = serde_json::to_string(&entries).expect("should serialize");
 
             // JSON should escape all injection attempts
             assert!(
                 !json.contains("alert('xss')") || json.contains("\\\""),
                 "JavaScript injection should be escaped"
             );
+            // bd-o776s: serde_json deliberately does NOT HTML-escape `<`/`>` (that is the
+            // embedding layer's job); its guarantee is that injected markup stays confined to
+            // a quoted JSON string and cannot break out into JSON structure. Verify that real
+            // property: the serialized form must still parse to a structurally-valid array,
+            // i.e. the `</script>` payload did not corrupt the JSON.
+            let reparsed: serde_json::Value = serde_json::from_str(&json)
+                .expect("injected HTML must not break JSON structure");
             assert!(
-                !json.contains("</script>") || json.contains("\\u003c"),
-                "HTML injection should be escaped"
+                reparsed.is_array(),
+                "HTML injection must remain contained within JSON string values"
             );
             assert!(
                 !json.contains("rm -rf") || json.contains("\\"),
@@ -6647,7 +6775,7 @@ mod tests {
                     // Verify entry ID tampering doesn't affect ledger integrity
                     let snapshot = ledger.snapshot();
 
-                    if let Some((_, found_entry)) = snapshot
+                    if let Some((authoritative_id, found_entry)) = snapshot
                         .entries
                         .iter()
                         .find(|(_, e)| e.decision_id == tampered_entry.decision_id)
@@ -6656,15 +6784,16 @@ mod tests {
                         assert_eq!(found_entry.decision_id, tampered_entry.decision_id);
                         assert_eq!(found_entry.decision_kind, tampered_entry.decision_kind);
 
-                        // Entry ID in stored entry might be different from what was provided
-                        // (ledger may assign its own IDs)
-                        if let Some(ref stored_entry_id) = found_entry.entry_id {
-                            // Should not contain administrative patterns
-                            assert!(
-                                !stored_entry_id.to_uppercase().contains("ADMIN"),
-                                "Stored entry ID should not contain admin patterns"
-                            );
-                        }
+                        // bd-o776s: the ledger's AUTHORITATIVE identity is the monotonic
+                        // EntryId it assigns (the snapshot tuple key), not the client-supplied
+                        // `entry_id` metadata field. A tampered "ADMIN-ENTRY" field is preserved
+                        // verbatim as opaque metadata but confers no privilege — identity comes
+                        // from the ledger-assigned id, which equals the id returned by append.
+                        assert_eq!(
+                            *authoritative_id, returned_entry_id,
+                            "Ledger identity must come from the assigned EntryId, not the \
+                             tampered client entry_id field"
+                        );
                     }
                 }
                 Err(_) => {
@@ -7060,9 +7189,11 @@ mod tests {
             assert!(false, "Should return SignatureInvalid error");
             return;
         };
+        // bd-o776s: an empty signature is now rejected up-front by the dedicated empty check
+        // in `decode_replay_signature`, before any hex decoding is attempted.
         assert!(
-            reason.contains("invalid hex signature"),
-            "Should fail on invalid hex"
+            reason.contains("signature cannot be empty"),
+            "Should fail on empty signature: {reason}"
         );
 
         assert_eq!(ledger.len(), 0);
@@ -7370,14 +7501,17 @@ mod tests {
 
     #[test]
     fn test_wrong_verifying_key_rejected() {
-        let (signing_key, _) = test_keys();
-        let (_, different_verifying_key) = test_keys(); // Different key pair
+        // bd-o776s: `test_keys()` is deterministic (always the [42; 32] pair), so the old
+        // "different" verifying key was identical to the signing key and verification passed.
+        // Sign with a genuinely different key so the mismatch is real.
+        let wrong_signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        let (_, verifying_key) = test_keys(); // verifying key for the [42; 32] pair
 
         let capacity = LedgerCapacity::new(10, 100_000);
-        let mut ledger = EvidenceLedger::with_verifying_key(capacity, different_verifying_key);
+        let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
 
         let mut entry = test_entry("TEST-WRONG-KEY", 1);
-        sign_evidence_entry(&mut entry, &signing_key);
+        sign_evidence_entry(&mut entry, &wrong_signing_key);
 
         let result = ledger.append(entry);
         assert!(
@@ -7437,12 +7571,13 @@ mod tests {
             );
             return;
         };
+        // bd-o776s: the hex length cap is now 256 chars (allowing up to 128 raw bytes), so a
+        // 129-char signature is WITHIN the cap and is instead rejected as malformed hex — it
+        // has an odd number of digits. (The dedicated 257-char test still covers the cap.)
         assert!(
-            reason.contains("signature hex too long"),
-            "Should mention length cap"
+            reason.contains("invalid hex signature"),
+            "Should reject odd-length malformed hex: {reason}"
         );
-        assert!(reason.contains("129"), "Should mention actual length");
-        assert!(reason.contains("256"), "Should mention max length");
     }
 
     #[test]
@@ -7571,9 +7706,13 @@ mod tests {
             .append(known_entry.clone())
             .expect("Known entry should succeed");
 
-        // Time comparison with identical signature (replay attack)
-        let (is_replay_identical, time_identical) =
-            measure_elapsed(|| ledger.is_replay_attack_ct(1000, &known_entry.signature));
+        // Time comparison with identical signature (replay attack).
+        // bd-o776s: a replay key is (timestamp_ms, signature); the entry was stored with
+        // timestamp_ms = epoch*1000 (== 1_000_000 here, via test_entry), so the replay query
+        // must use that same timestamp rather than the bare epoch number.
+        let (is_replay_identical, time_identical) = measure_elapsed(|| {
+            ledger.is_replay_attack_ct(known_entry.timestamp_ms, &known_entry.signature)
+        });
 
         assert!(
             is_replay_identical,
@@ -7582,8 +7721,9 @@ mod tests {
 
         // Time comparison with different signature (not a replay)
         let different_signature = "ff".repeat(64); // Different signature
-        let (is_replay_different, time_different) =
-            measure_elapsed(|| ledger.is_replay_attack_ct(1000, &different_signature));
+        let (is_replay_different, time_different) = measure_elapsed(|| {
+            ledger.is_replay_attack_ct(known_entry.timestamp_ms, &different_signature)
+        });
 
         assert!(
             !is_replay_different,
@@ -7896,7 +8036,14 @@ mod tests {
             );
             return;
         };
-        assert!(reason.contains("invalid hex") || reason.contains("Invalid character"));
+        // bd-o776s: a non-hex character is now caught by the canonical-lowercase-hex check,
+        // which runs before `hex::decode`, so the message names that requirement.
+        assert!(
+            reason.contains("canonical lowercase hex")
+                || reason.contains("invalid hex")
+                || reason.contains("Invalid character"),
+            "Should reject invalid hex characters: {reason}"
+        );
     }
 
     #[test]
@@ -8344,9 +8491,14 @@ mod tests {
             "Hash prefilter should contain all added signatures"
         );
 
-        // Test that eviction also removes hashes from the prefilter
-        for i in 11..=150 {
-            let entry = make_signed_entry(&format!("TEST-PREFILTER-{i:03}"), i, &signing_key);
+        // Test that eviction also removes hashes from the prefilter.
+        // bd-o776s: the replay window floor is MIN_SEEN_SIGNATURES (8192), so a signature only
+        // leaves the prefilter once the window overflows — 150 appends are no longer enough to
+        // evict entry #5. Append past the window so the early entries are genuinely evicted
+        // from both the seen-signature ring and the hash prefilter.
+        let total_to_append = MIN_SEEN_SIGNATURES as u64 + 20;
+        for i in 11..=total_to_append {
+            let entry = make_signed_entry(&format!("TEST-PREFILTER-{i:05}"), i, &signing_key);
             ledger.append(entry).expect("append should succeed");
         }
 
@@ -9258,10 +9410,10 @@ mod tests {
                 prev_entry_hash: String::new(),
             };
 
-            // Sign the entry
-            let entry_bytes = serde_json::to_vec(&entry).expect("Entry should serialize");
-            let signature = signing_key.sign(&entry_bytes);
-            entry.signature = hex::encode(signature.to_bytes());
+            // Sign the entry with prod's canonical signing scheme. bd-o776s: the ledger now
+            // verifies against `canonical_entry_bytes`, not a raw serde_json blob, so manual
+            // serde signing no longer yields a verifiable signature.
+            sign_evidence_entry(&mut entry, &signing_key);
 
             ledger
                 .append(entry)
@@ -9297,21 +9449,15 @@ mod tests {
             "Snapshot should preserve append order"
         );
 
-        // Verify entry IDs are sequential
-        let entry_ids: Vec<Option<String>> = snapshot
-            .entries
-            .iter()
-            .map(|(_, e)| e.entry_id.clone())
-            .collect();
-        for (i, entry_id) in entry_ids.iter().enumerate() {
-            match entry_id {
-                Some(id) => assert_eq!(
-                    id,
-                    &format!("ENTRY-{}", i + 1),
-                    "Entry IDs should be sequential"
-                ),
-                None => panic!("Entry ID should be assigned by ledger"),
-            }
+        // bd-o776s: the ledger's authoritative identity is the assigned EntryId (the snapshot
+        // tuple key), which is sequential; prod does not stamp the optional `entry_id` metadata
+        // field, so it stays as supplied (None here).
+        for (i, (id, _)) in snapshot.entries.iter().enumerate() {
+            assert_eq!(
+                *id,
+                EntryId((i + 1) as u64),
+                "Ledger should assign sequential authoritative EntryIds"
+            );
         }
 
         // Create golden JSON for deterministic comparison
@@ -9387,12 +9533,11 @@ mod tests {
         assert_eq!(golden_json["entries"].as_array().unwrap().len(), 5);
 
         // Verify each entry matches expected structure
-        for (i, (_, entry)) in snapshot.entries.iter().enumerate() {
+        for (i, (id, entry)) in snapshot.entries.iter().enumerate() {
             let golden_entry = &golden_json["entries"][i];
-            assert_eq!(
-                entry.entry_id.as_ref().unwrap(),
-                golden_entry["entry_id"].as_str().unwrap()
-            );
+            // bd-o776s: authoritative identity is the ledger-assigned EntryId, not the entry_id
+            // metadata field (which prod leaves as supplied — None here).
+            assert_eq!(*id, EntryId((i + 1) as u64));
             assert_eq!(
                 entry.decision_id,
                 golden_entry["decision_id"].as_str().unwrap()
@@ -9401,11 +9546,14 @@ mod tests {
                 entry.timestamp_ms,
                 golden_entry["timestamp_ms"].as_u64().unwrap()
             );
-            assert_eq!(entry.epoch_id, golden_entry["epoch_id"].as_u64().unwrap());
-            assert_eq!(
-                entry.size_bytes as u64,
-                golden_entry["size_bytes"].as_u64().unwrap()
-            );
+            // bd-o776s: the golden literal epoch_ids (101..105) never matched the construction
+            // formula `100 + timestamp_ms % 10`, which is 100 for these 000-terminated
+            // timestamps. Assert the preserved constructed value instead of the stale literal.
+            assert_eq!(entry.epoch_id, 100 + entry.timestamp_ms % 10);
+            // bd-o776s: prod overwrites the input size hint with the server-computed serialized
+            // size; assert that fixed-point invariant (size_bytes == serialized length) rather
+            // than the stale input hint in the golden literal.
+            assert_eq!(entry.size_bytes, serialized_entry_size(entry));
             assert!(!entry.signature.is_empty(), "Entry should have signature");
             assert_eq!(entry.payload, golden_entry["payload"]);
 
@@ -9438,10 +9586,8 @@ mod tests {
         };
 
         // Add one more entry to trigger overflow (capacity is 5)
-        let overflow_bytes = serde_json::to_vec(&overflow_entry).expect("Should serialize");
-        let overflow_signature = signing_key.sign(&overflow_bytes);
         let mut signed_overflow = overflow_entry;
-        signed_overflow.signature = hex::encode(overflow_signature.to_bytes());
+        sign_evidence_entry(&mut signed_overflow, &signing_key);
 
         ledger
             .append(signed_overflow)
@@ -9495,9 +9641,7 @@ mod tests {
                 prev_entry_hash: String::new(),
             };
 
-            let entry_bytes = serde_json::to_vec(&entry).expect("Entry should serialize");
-            let signature = signing_key_2.sign(&entry_bytes);
-            entry.signature = hex::encode(signature.to_bytes());
+            sign_evidence_entry(&mut entry, &signing_key_2);
 
             replay_ledger
                 .append(entry)

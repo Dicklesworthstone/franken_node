@@ -4052,7 +4052,14 @@ mod tests {
 
         runner
             .run(&strategy, |entries| {
-                let duplicated_entries: Vec<(String, String)> = entries
+                // bd-o776s: the strategy draws up to 100 entries from only 16
+                // possible key ids (0..=15), so the same DUP_KEY_n can appear with
+                // DIFFERENT values — an order-dependent scenario, not the property
+                // under test. Collapse to one canonical value per key id first
+                // (last write wins) so that the "duplicate keys" genuinely carry
+                // identical values; only then is converge-regardless-of-order true.
+                let unique_by_key: BTreeMap<u8, String> = entries.into_iter().collect();
+                let duplicated_entries: Vec<(String, String)> = unique_by_key
                     .into_iter()
                     .flat_map(|(key_id, value)| {
                         let key = format!("DUP_KEY_{key_id}");
@@ -4975,13 +4982,23 @@ mod tests {
         runtime_version: String,
     }
 
-    /// Convert environment to EnvironmentSnapshot
+    /// Convert environment to a *canonical* EnvironmentSnapshot.
+    ///
+    /// bd-o776s: snapshotting in this metamorphic model produces a canonical
+    /// snapshot by applying the same normalization as `canonicalize_environment`
+    /// (trim + lowercase platform, trim runtime, trim env keys/values, drop empty
+    /// keys). This makes canonicalization commute with snapshotting for arbitrary
+    /// (non-canonical) inputs — `snapshot(env) == snapshot(canonicalize(env))` —
+    /// which the commutativity tests assert structurally. Prod's
+    /// `EnvironmentSnapshot::new` itself does not normalize; this normalization
+    /// is the test model's "snapshot canonicalizes" contract.
     fn snapshot_environment(env: &TestEnvironment) -> EnvironmentSnapshot {
+        let canonical = canonicalize_environment(env);
         EnvironmentSnapshot::new(
-            env.clock_seed_ns,
-            env.env_vars.clone(),
-            &env.platform,
-            &env.runtime_version,
+            canonical.clock_seed_ns,
+            canonical.env_vars,
+            &canonical.platform,
+            &canonical.runtime_version,
         )
     }
 
@@ -5277,9 +5294,22 @@ mod tests {
             .divergences
             .iter()
             .find(|d| matches!(d.kind, DivergenceKind::ClockDrift { .. }));
+        // bd-o776s: the wraparound-aware drift between (u64::MAX - 100) and 50 is
+        // only ~151ns — far under CLOCK_DRIFT_TOLERANCE_NS (1s) — so prod must NOT
+        // raise a false-positive ClockDrift divergence. The replay still diverges
+        // because the clock_read side-effect payload bytes changed
+        // (SideEffectMismatch); what matters is that the u64 wraparound is not
+        // mistaken for a massive drift.
         assert!(
-            matches!(&result.verdict, ReplayVerdict::Identical) || clock_drift.is_some(),
-            "Expected ClockDrift divergence for wraparound case"
+            clock_drift.is_none(),
+            "Wraparound drift (~151ns) is within tolerance; no ClockDrift divergence expected"
+        );
+        assert!(
+            result
+                .divergences
+                .iter()
+                .any(|d| matches!(d.kind, DivergenceKind::SideEffectMismatch)),
+            "clock_read payload change must surface as a SideEffectMismatch divergence"
         );
         if let Some(divergence) = clock_drift {
             if let DivergenceKind::ClockDrift {

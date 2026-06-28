@@ -717,7 +717,7 @@ mod tests {
     fn serde_rejects_malformed_backend_audit_record() {
         let json = serde_json::json!({
             "connector_id": "conn-1",
-            "selected_backend": "microvm",
+            "selected_backend": "micro_vm",
             "equivalence": "full",
             "timestamp": "2026-01-01T00:00:00Z"
         });
@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn serde_rejects_backend_selection_missing_policy() {
         let json = serde_json::json!({
-            "backend": "microvm",
+            "backend": "micro_vm",
             "capabilities": linux_kvm_caps(),
             "equivalence": "full"
         });

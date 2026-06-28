@@ -1988,10 +1988,15 @@ mod tests {
     fn negative_saturating_add_counter_overflow_protection() {
         let mut ledger = StakingLedger::new();
 
-        // Force all internal counters to near-overflow conditions
+        // Force all internal counters to near-overflow conditions.
+        // `next_appeal_id` is pinned at `u64::MAX` (fully exhausted): prod
+        // fails the appeal closed only when the counter has actually reached
+        // `u64::MAX` (file_appeal: `if next_appeal_id == u64::MAX { Err }`),
+        // since `MAX - 1` is still a usable id. Reconciled for bd-o776s — the
+        // test previously seeded `MAX - 1`, which let the appeal succeed.
         ledger.state.next_stake_id = u64::MAX - 2;
         ledger.state.next_slash_id = u64::MAX - 3;
-        ledger.state.next_appeal_id = u64::MAX - 1;
+        ledger.state.next_appeal_id = u64::MAX;
         ledger.state.next_audit_id = u64::MAX - 4;
 
         // Test stake ID overflow boundary
@@ -2122,15 +2127,22 @@ mod tests {
         ];
 
         for (test_time, should_succeed) in test_cases {
+            // Anchor each deposit + slash to FIXED timestamps so the appeal
+            // deadline is `slash_timestamp + 172800 = appeal_deadline (174800)`
+            // and `test_time` is the varying appeal-filing instant. The original
+            // test slashed at `test_time - 50`, which re-anchored the window to
+            // each iteration (elapsed always 50s) so it never expired and every
+            // case "succeeded". Reconciled for bd-o776s — now genuinely exercises
+            // the `current_time < deadline` (>= = expired) fail-closed boundary.
             let test_id = ledger
-                .deposit("boundary-pub", 1000, RiskTier::Critical, test_time - 100)
+                .deposit("boundary-pub", 1000, RiskTier::Critical, 1000)
                 .unwrap();
             let test_evidence = test_evidence_unique(
                 ViolationType::MaliciousCode,
                 &format!("evidence-{test_time}"),
             );
             ledger
-                .slash(test_id, test_evidence, test_time - 50)
+                .slash(test_id, test_evidence, slash_timestamp)
                 .unwrap();
 
             let appeal_result = ledger.file_appeal(test_id, 1, "boundary test", test_time);
@@ -2196,8 +2208,17 @@ mod tests {
             (c_block.as_str(), "short"),
         ];
 
-        let mut evidence_hashes = std::collections::HashSet::new();
-        let mut penalty_hashes = std::collections::HashSet::new();
+        // A digest may legitimately recur because the adversarial corpus reuses
+        // some payloads (e.g. "" and "evidence" each appear in more than one
+        // pair). The same input hashing to the same digest is NOT a collision —
+        // only two *distinct* sources sharing a digest is. Track digest -> source
+        // and flag only genuine clashes. (Reconciled for bd-o776s: the original
+        // strict-uniqueness HashSet insert tripped on the corpus's own duplicate
+        // inputs, not on any real hash collision.)
+        let mut evidence_hashes: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut penalty_hashes: std::collections::HashMap<String, (String, u64, u64)> =
+            std::collections::HashMap::new();
 
         for (payload1, payload2) in collision_test_payloads {
             // Test evidence hash domain separation
@@ -2212,20 +2233,35 @@ mod tests {
                 payload2.chars().take(50).collect::<String>()
             );
 
-            assert!(
-                evidence_hashes.insert(hash1.clone()),
-                "Duplicate evidence hash generated"
-            );
-            assert!(
-                evidence_hashes.insert(hash2.clone()),
-                "Duplicate evidence hash generated"
-            );
+            if let Some(prev) = evidence_hashes.insert(hash1.clone(), payload1.to_string()) {
+                assert_eq!(
+                    prev.as_str(),
+                    payload1,
+                    "Evidence hash collision: distinct payloads share a digest"
+                );
+            }
+            if let Some(prev) = evidence_hashes.insert(hash2.clone(), payload2.to_string()) {
+                assert_eq!(
+                    prev.as_str(),
+                    payload2,
+                    "Evidence hash collision: distinct payloads share a digest"
+                );
+            }
 
             // Test penalty hash domain separation with different parameters
             let penalty_hash1 = compute_penalty_hash(&hash1, 5000, 1000);
             let penalty_hash2 = compute_penalty_hash(&hash2, 5000, 1000);
             let penalty_hash3 = compute_penalty_hash(&hash1, 5001, 1000); // Different fraction
             let penalty_hash4 = compute_penalty_hash(&hash1, 5000, 1001); // Different amount
+
+            // Source tuple (evidence_hash, bps, amount) behind each penalty digest,
+            // in the same order as `penalty_set` below.
+            let penalty_inputs: [(&str, u64, u64); 4] = [
+                (hash1.as_str(), 5000, 1000),
+                (hash2.as_str(), 5000, 1000),
+                (hash1.as_str(), 5001, 1000),
+                (hash1.as_str(), 5000, 1001),
+            ];
 
             // All should be different due to domain separation
             let penalty_set = vec![
@@ -2244,16 +2280,23 @@ mod tests {
                         );
                     }
                 }
-                assert!(
-                    penalty_hashes.insert((*hash_a).clone()),
-                    "Duplicate penalty hash generated"
+                let source = (
+                    penalty_inputs[i].0.to_string(),
+                    penalty_inputs[i].1,
+                    penalty_inputs[i].2,
                 );
+                if let Some(prev) = penalty_hashes.insert((*hash_a).clone(), source.clone()) {
+                    assert_eq!(
+                        prev, source,
+                        "Penalty hash collision: distinct (evidence, bps, amount) share a digest"
+                    );
+                }
             }
         }
 
         // Verify domain separators prevent cross-function collisions
-        for evidence_hash in &evidence_hashes {
-            for penalty_hash in &penalty_hashes {
+        for evidence_hash in evidence_hashes.keys() {
+            for penalty_hash in penalty_hashes.keys() {
                 assert_ne!(
                     evidence_hash, penalty_hash,
                     "Cross-function hash collision between evidence and penalty hashes"
@@ -2563,8 +2606,21 @@ mod tests {
 
         let (allowed, _, detail) = gate.check_stake(&ledger, "pub-cooldown", &RiskTier::High, 203);
 
-        assert!(!allowed);
-        assert!(detail.contains("cooldown until"));
+        // Current prod semantics (resolve_appeal with upheld=false): a REVERSED
+        // appeal EXONERATES the publisher — the slash is undone, the stake is
+        // restored to Active, and the residual cooldown is CLEARED
+        // (cooldown_until = None, see resolve_appeal()/test_resolve_appeal_reversed).
+        // The capability gate therefore ADMITS the re-staking request rather than
+        // holding it under a cooldown. Reconciled for bd-o776s — the test's
+        // original premise that a reversal leaves a standing cooldown no longer
+        // matches prod. (NB: the test name is now stale; left as-is — renaming a
+        // test changes its identity. A prod-owner rename to
+        // `..._allows_exonerated_stake_after_reversal` would be clearer.)
+        assert!(
+            allowed,
+            "exonerated (reversed) stake should pass the gate: {detail}"
+        );
+        assert!(detail.contains("passes gate"));
     }
 
     #[test]
@@ -4227,10 +4283,19 @@ mod staking_governance_boundary_negative_tests {
             .resolve_appeal(bob_appeal.appeal_id, true, 3000)
             .expect("bob appeal resolution should succeed");
 
-        // Phase 5: Charlie's stake expires naturally
+        // Phase 5: Charlie's stake expires naturally. Prod `expire()` requires a
+        // deadline (`expires_at`) that has been set and reached — a stake with
+        // `expires_at: None` is rejected with InvalidTransition. Set the deadline
+        // before expiring (reconciled for bd-o776s; mirrors test_expire_stake).
         let charlie_with_expiry = ledger
             .deposit("charlie-expiring", 10000, RiskTier::Medium, 3100)
             .expect("charlie expiring deposit should succeed");
+        ledger
+            .state
+            .stakes
+            .get_mut(&charlie_with_expiry.0)
+            .expect("charlie stake should exist")
+            .expires_at = Some(4000);
         ledger
             .expire(charlie_with_expiry, 4000)
             .expect("charlie expiry should succeed");
@@ -4561,8 +4626,13 @@ mod staking_governance_boundary_negative_tests {
 
         // Test maximum stake records boundary
         for i in 0..MAX_STAKE_RECORDS.min(100) {
-            // Limit for test performance
-            let stake_amount = 10 + (i % 100) as u64;
+            // Limit for test performance. The amount must clear the *highest*
+            // per-tier minimum (Critical = 1000) because the tier cycles through
+            // all four tiers below; otherwise prod's INV-STAKE-MINIMUM check
+            // rejects the Medium/High/Critical deposits with InsufficientStake.
+            // This test exercises the capacity boundary, not the minimum gate,
+            // so seed above every minimum (reconciled for bd-o776s).
+            let stake_amount = 1000 + (i % 100) as u64;
             let result = capacity_ledger.deposit(
                 &format!("publisher-{:04}", i),
                 stake_amount,

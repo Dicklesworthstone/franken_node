@@ -843,11 +843,21 @@ mod remote_module_negative_tests {
 
                     // Error message should not contain the raw values (avoid information leakage)
                     if config.max_faults == usize::MAX {
-                        // Large values should be described generically
+                        // The raw oversized input value must never appear in the message.
+                        assert!(
+                            !error_msg.contains(&usize::MAX.to_string()),
+                            "Error must not leak the raw oversized max_faults value for config {}: {}",
+                            i,
+                            error_msg
+                        );
+                        // Large values should be described generically. Prod reports the
+                        // violated bound (e.g. "max_faults must be <= 16384"), which names
+                        // the limit constant rather than echoing the raw input.
                         assert!(
                             error_msg.contains("too large")
                                 || error_msg.contains("exceeds")
-                                || error_msg.contains("invalid"),
+                                || error_msg.contains("invalid")
+                                || error_msg.contains("must be <="),
                             "Error should describe boundary violation generically for config {}: {}",
                             i,
                             error_msg

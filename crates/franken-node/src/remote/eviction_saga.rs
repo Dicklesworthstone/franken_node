@@ -2039,17 +2039,21 @@ mod tests {
     fn test_security_remote_cap_denied_never_grants_access() {
         let mut mgr = EvictionSagaManager::new();
 
-        // Test that RemoteCapLookup::Denied prevents saga start
+        // Test that RemoteCapLookup::Denied prevents saga start. Prod fails closed with
+        // "RemoteCap required for upload phase: {lookup:?}"; assert on the explicit
+        // Denied variant so the denial reason (not merely "not granted") is preserved.
         let err = mgr
             .start_saga("artifact-denied", RemoteCapLookup::Denied, "t1")
             .expect_err("denied capability must fail closed");
-        assert!(err.contains("remote capability denied"));
+        assert!(err.contains("RemoteCap required"));
+        assert!(err.contains("Denied"));
 
-        // Test that RemoteCapLookup::NotPresent prevents saga start
+        // Test that RemoteCapLookup::NotPresent prevents saga start.
         let err = mgr
             .start_saga("artifact-missing", RemoteCapLookup::NotPresent, "t1")
             .expect_err("absent capability must fail closed");
-        assert!(err.contains("remote capability denied"));
+        assert!(err.contains("RemoteCap required"));
+        assert!(err.contains("NotPresent"));
     }
 
     #[test]

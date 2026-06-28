@@ -1684,9 +1684,17 @@ mod tests {
                 for verdict in verdicts {
                     // Test debug display formatting safety
                     let verdict_display = format!("{:?}", verdict);
+                    // Rust format strings are compile-time literals, so runtime
+                    // data can NEVER be interpreted as a format directive:
+                    // C-style specifiers like `%s`/`%x`/`%d` are inert literal
+                    // text here, not an injection vector (unlike printf), so their
+                    // presence in the debug output is harmless and expected. The
+                    // genuine display-injection risk is RAW control bytes — and
+                    // `{:?}` (escape_debug) escapes every one of them, so no raw
+                    // C0/C1 control character survives in the rendering.
                     assert!(
-                        !verdict_display.contains("%s"),
-                        "Verdict display should not contain format specifiers: {}",
+                        !verdict_display.chars().any(|c| c.is_control()),
+                        "Verdict display must escape all raw control chars: {}",
                         attack_name
                     );
                     assert!(

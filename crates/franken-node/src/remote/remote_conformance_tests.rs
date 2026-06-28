@@ -16,7 +16,7 @@ mod tests {
     };
     use crate::security::constant_time;
     use crate::{
-        capacity_defaults::aliases::MAX_SAGAS,
+        capacity_defaults::aliases::{MAX_LATENCY_SAMPLES, MAX_SAGAS},
         config::RemoteConfig,
         security::{
             constant_time::ct_eq,
@@ -100,17 +100,19 @@ mod tests {
     fn vtf_reorder_depth_zero_protection() {
         let mut harness = VirtualTransportFaultHarness::new(1);
 
-        // Depth 0 should not cause issues
+        // Depth 0 is immediate passthrough: the just-buffered message exceeds the
+        // zero-depth window, so it is promoted (returned) on the same call and the buffer
+        // is drained. This must not panic and must remain deterministic.
         let result = harness.apply_reorder(1, b"test", 0, "test");
-        assert!(result.is_none()); // Nothing should be returned immediately
+        assert_eq!(result, Some(b"test".to_vec()));
 
-        // Adding another message should not return anything since depth is 0
+        // A second zero-depth message is likewise returned immediately.
         let result2 = harness.apply_reorder(2, b"test2", 0, "test");
-        assert!(result2.is_none());
+        assert_eq!(result2, Some(b"test2".to_vec()));
 
-        // Buffer should contain messages but nothing promoted
+        // Nothing is left buffered once depth-0 messages pass straight through.
         let flushed = harness.flush_reorder_buffer();
-        assert_eq!(flushed.len(), 2);
+        assert!(flushed.is_empty());
     }
 
     #[test]
@@ -270,10 +272,10 @@ mod tests {
 
         registry.register_computation(entry, "test").unwrap();
 
-        let provider =
-            CapabilityProvider::new("test-secret").expect("valid signing secret builds a provider");
-        let mut gate =
-            CapabilityGate::new("test-secret").expect("valid verification secret builds a gate");
+        let provider = CapabilityProvider::new("conformance-secret-material-v1")
+            .expect("valid signing secret builds a provider");
+        let mut gate = CapabilityGate::new("conformance-secret-material-v1")
+            .expect("valid verification secret builds a gate");
 
         // Test with insufficient capabilities
         let (limited_cap, _) = provider
@@ -634,13 +636,15 @@ mod tests {
 
         // Release permits one by one
         bulkhead.release(permit1, 1005).unwrap();
-        assert_eq!(bulkhead.draining_target(), Some(1)); // Still draining
+        assert_eq!(bulkhead.draining_target(), Some(1)); // in_flight=2 > target=1, still draining
 
+        // Draining completes as soon as in_flight drops to the target cap (in_flight <=
+        // target_cap), i.e. once the bulkhead is no longer over its reduced capacity.
         bulkhead.release(permit2, 1006).unwrap();
-        assert_eq!(bulkhead.draining_target(), Some(1)); // Still draining
+        assert_eq!(bulkhead.draining_target(), None); // in_flight=1 == target=1, drain complete
 
         bulkhead.release(permit3, 1007).unwrap();
-        assert_eq!(bulkhead.draining_target(), None); // Draining complete
+        assert_eq!(bulkhead.draining_target(), None); // remains complete
 
         // Should now be able to acquire within new capacity
         let new_permit = bulkhead.acquire(RemoteCapLookup::Granted, "req5", 1008).unwrap();
@@ -670,8 +674,11 @@ mod tests {
         // Test latency target evaluation
         assert!(!bulkhead.latency_within_target()); // P99=99 > target=50
 
-        // Add many low latency samples to bring P99 down
-        for i in 0..1000 {
+        // Add enough low-latency samples to fully flush the bounded sample buffer
+        // (oldest-first eviction, capacity MAX_LATENCY_SAMPLES). Adding fewer than the
+        // buffer capacity would leave a high-latency tail behind and keep P99 elevated, so
+        // overshoot the capacity to drive every retained sample to the low value.
+        for i in 0..(MAX_LATENCY_SAMPLES as u64 + 100) {
             bulkhead.record_foreground_latency(10, 2000 + i);
         }
 

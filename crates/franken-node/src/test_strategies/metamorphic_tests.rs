@@ -40,9 +40,10 @@ mod tests {
     #[test]
     fn mr_equivalence_generator_determinism() {
         // MR1: Same seed should produce same generated values across runs
-        proptest!(|(seed: u64, max_len: usize)| {
-            prop_assume!(max_len > 0 && max_len < 1000);
-
+        // Generate `max_len` directly in-range (1..1000); a bare `usize` param
+        // spans the full integer range so a `prop_assume!(max_len < 1000)` filter
+        // rejects ~every case and aborts on too-many-global-rejects.
+        proptest!(|(seed: u64, max_len in 1usize..1000)| {
             let mut rng1 = seeded_runner(seed);
             let mut rng2 = seeded_runner(seed);
 
@@ -57,10 +58,8 @@ mod tests {
     #[test]
     fn mr_inclusive_length_bound_containment() {
         // MR2: Smaller max_len generators should produce subset of larger ones
-        proptest!(|(max_len_small: usize, extra_len: usize)| {
-            prop_assume!(max_len_small > 0 && max_len_small < 100);
-            prop_assume!(extra_len > 0 && extra_len < 50);
-
+        // Generate both lengths in-range (see MR1) rather than filtering full-range usize.
+        proptest!(|(max_len_small in 1usize..100, extra_len in 1usize..50)| {
             let max_len_large = max_len_small.saturating_add(extra_len);
 
             let small_strategy = bounded_text(max_len_small);
@@ -97,9 +96,8 @@ mod tests {
     #[test]
     fn mr_multiplicative_size_scaling() {
         // MR3: Doubling max_len should expand the potential output space
-        proptest!(|(base_len: usize)| {
-            prop_assume!(base_len > 0 && base_len < 50);
-
+        // Generate `base_len` in-range (see MR1) rather than filtering full-range usize.
+        proptest!(|(base_len in 1usize..50)| {
             let doubled_len = base_len.saturating_mul(2);
 
             let base_strategy = bounded_text(base_len);
@@ -135,9 +133,8 @@ mod tests {
     #[test]
     fn mr_equivalence_identifier_format_invariants() {
         // MR4: Generated identifiers should always match their expected format
-        proptest!(|(max_len: usize)| {
-            prop_assume!(max_len > 0 && max_len < 100);
-
+        // Generate `max_len` in-range (see MR1) rather than filtering full-range usize.
+        proptest!(|(max_len in 1usize..100)| {
             let strategy = ascii_identifier(max_len);
 
             // Test multiple generations
@@ -248,9 +245,8 @@ mod tests {
     #[test]
     fn mr_inclusive_hex_length_scaling() {
         // MR7: hex_bytes generator should produce exact length outputs
-        proptest!(|(target_len: usize)| {
-            prop_assume!(target_len > 0 && target_len < 100);
-
+        // Generate `target_len` in-range (see MR1) rather than filtering full-range usize.
+        proptest!(|(target_len in 1usize..100)| {
             let strategy = hex_bytes(target_len);
 
             for seed in 0..10u64 {

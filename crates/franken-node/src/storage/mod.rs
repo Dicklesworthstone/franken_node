@@ -35,7 +35,7 @@ mod negative_path_tests {
         ArtifactId, ERR_HASH_MISMATCH, ERR_INVALID_ARTIFACT_ID, ERR_INVALID_SEGMENT_ID,
         ERR_LATENCY_EXCEEDED, ERR_TARGET_UNREACHABLE, ProofFailureReason, RG_EVICTION_BLOCKED,
         RG_PROOF_FAILED, RetrievabilityConfig, RetrievabilityGate, SegmentId, StorageTier,
-        TargetTierState,
+        TargetTierState, content_hash,
     };
     use super::test_support::seed_retrievability_target;
     use crate::security::constant_time;
@@ -171,12 +171,15 @@ mod negative_path_tests {
         });
         let artifact = artifact("artifact-latency");
         let segment = segment("segment-latency");
+        // Canonical observed digest so the latency gate (which runs after the
+        // observed-hash validity gate) is the failing check.
+        let hash = content_hash(b"exact-latency-payload");
         seed_retrievability_target(
             &mut gate,
             &artifact,
             &segment,
             StorageTier::L3Archive,
-            reachable_state("hash", 25),
+            reachable_state(&hash, 25),
         );
 
         let err = gate
@@ -185,7 +188,7 @@ mod negative_path_tests {
                 &segment,
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "hash",
+                &hash,
             )
             .unwrap_err();
 
@@ -198,16 +201,19 @@ mod negative_path_tests {
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
         let artifact = artifact("artifact-hash-mismatch");
         let segment = segment("segment-hash-mismatch");
+        // Two well-formed canonical digests that differ → genuine hash mismatch.
+        let observed = content_hash(b"mismatch-actual-hash");
+        let expected = content_hash(b"mismatch-expected-hash");
         seed_retrievability_target(
             &mut gate,
             &artifact,
             &segment,
             StorageTier::L3Archive,
-            reachable_state("actual-hash", 1),
+            reachable_state(&observed, 1),
         );
 
         let err = gate
-            .attempt_eviction(&artifact, &segment, "expected-hash")
+            .attempt_eviction(&artifact, &segment, &expected)
             .unwrap_err();
 
         assert_eq!(err.code, ERR_HASH_MISMATCH);
@@ -296,12 +302,16 @@ mod negative_path_tests {
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
         let artifact = artifact("artifact-mismatch-detail");
         let segment = segment("segment-mismatch-detail");
+        // Canonical digests so the failure is a genuine hash mismatch; the
+        // mismatch reason must bind these exact expected/actual digests.
+        let observed = content_hash(b"detail-actual-digest");
+        let expected_digest = content_hash(b"detail-expected-digest");
         seed_retrievability_target(
             &mut gate,
             &artifact,
             &segment,
             StorageTier::L3Archive,
-            reachable_state("actual-digest", 1),
+            reachable_state(&observed, 1),
         );
 
         let err = gate
@@ -310,7 +320,7 @@ mod negative_path_tests {
                 &segment,
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "expected-digest",
+                &expected_digest,
             )
             .unwrap_err();
 
@@ -320,11 +330,11 @@ mod negative_path_tests {
         };
         assert!(constant_time::ct_eq_bytes(
             expected.as_bytes(),
-            b"expected-digest"
+            expected_digest.as_bytes()
         ));
         assert!(constant_time::ct_eq_bytes(
             actual.as_bytes(),
-            b"actual-digest"
+            observed.as_bytes()
         ));
     }
 
@@ -336,12 +346,16 @@ mod negative_path_tests {
         });
         let artifact = artifact("artifact-latency-before-hash");
         let segment = segment("segment-latency-before-hash");
+        // Canonical observed digest that differs from the expected digest: both
+        // the latency and hash-match gates would fail, but latency precedes hash.
+        let observed = content_hash(b"precedence-actual-digest");
+        let expected = content_hash(b"precedence-expected-digest");
         seed_retrievability_target(
             &mut gate,
             &artifact,
             &segment,
             StorageTier::L3Archive,
-            reachable_state("actual-digest", 10),
+            reachable_state(&observed, 10),
         );
 
         let err = gate
@@ -350,7 +364,7 @@ mod negative_path_tests {
                 &segment,
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "expected-digest",
+                &expected,
             )
             .unwrap_err();
 

@@ -2662,9 +2662,13 @@ mod tests {
 
     #[test]
     fn missing_top_level_subcommand_is_rejected() {
+        // An empty invocation is still rejected (never parses to a `Cli`). With a
+        // required derived subcommand and no other required top-level args, current
+        // clap surfaces this as `DisplayHelpOnMissingArgumentOrSubcommand` (it renders
+        // help) rather than `MissingSubcommand`; both encode "no subcommand provided".
         assert_eq!(
             parse_error_kind(&[]),
-            clap::error::ErrorKind::MissingSubcommand
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
     }
 
@@ -3168,27 +3172,42 @@ mod tests {
                             Command::Run(run_args) => {
                                 let script_path = run_args.app_path.to_string_lossy();
 
-                                // Verify no command injection in parsed path
-                                assert!(
-                                    !script_path.contains(';'),
-                                    "Script path should not contain semicolon: {}",
-                                    attack_name
-                                );
-                                assert!(
-                                    !script_path.contains('|'),
-                                    "Script path should not contain pipe: {}",
-                                    attack_name
-                                );
-                                assert!(
-                                    !script_path.contains('&'),
-                                    "Script path should not contain ampersand: {}",
-                                    attack_name
-                                );
-                                assert!(
-                                    !script_path.contains('`'),
-                                    "Script path should not contain backticks: {}",
-                                    attack_name
-                                );
+                                // franken-node never hands CLI arguments to a shell;
+                                // clap captures `app_path` as an opaque literal value
+                                // (`parse_safe_content_pathbuf` rejects NUL, absolute
+                                // paths, backslashes, and `..` segments but treats shell
+                                // metacharacters as ordinary filename bytes). Injection
+                                // safety therefore means each metacharacter is preserved
+                                // verbatim — never shell-interpreted, and never stripped
+                                // (stripping would corrupt legitimate filenames).
+                                if malicious_input.contains(';') {
+                                    assert!(
+                                        script_path.contains(';'),
+                                        "Semicolon must survive as a literal path byte, never shell-interpreted: {}",
+                                        attack_name
+                                    );
+                                }
+                                if malicious_input.contains('|') {
+                                    assert!(
+                                        script_path.contains('|'),
+                                        "Pipe must survive as a literal path byte, never shell-interpreted: {}",
+                                        attack_name
+                                    );
+                                }
+                                if malicious_input.contains('&') {
+                                    assert!(
+                                        script_path.contains('&'),
+                                        "Ampersand must survive as a literal path byte, never shell-interpreted: {}",
+                                        attack_name
+                                    );
+                                }
+                                if malicious_input.contains('`') {
+                                    assert!(
+                                        script_path.contains('`'),
+                                        "Backtick must survive as a literal path byte, never shell-interpreted: {}",
+                                        attack_name
+                                    );
+                                }
 
                                 // The path itself may contain these characters but should be treated as literal
                                 assert_eq!(
@@ -3310,11 +3329,19 @@ mod tests {
                     Ok(cli) => {
                         // Test debug display formatting safety
                         let debug_display = format!("{:?}", cli);
-                        assert!(
-                            !debug_display.contains("%s"),
-                            "Debug should not contain format specifiers: {}",
-                            attack_name
-                        );
+                        // Rust's formatting machinery never interprets C-style format
+                        // specifiers (`%s`, `%x`, …) the way printf does — they are
+                        // emitted verbatim as inert text. "Display injection safety"
+                        // here means the specifier is preserved literally (not
+                        // interpreted), so verify it round-trips rather than asserting
+                        // its absence (which would wrongly require mangling the value).
+                        if malicious_content.contains("%s") {
+                            assert!(
+                                debug_display.contains("%s"),
+                                "Rust Debug must emit format specifiers verbatim, never interpret them: {}",
+                                attack_name
+                            );
+                        }
                         assert!(
                             !debug_display.contains("\x1b["),
                             "Debug should escape ANSI sequences: {}",
@@ -3329,11 +3356,15 @@ mod tests {
                         match cli.command {
                             Command::Init(init_args) => {
                                 let profile_display = format!("{:?}", init_args.profile);
-                                assert!(
-                                    !profile_display.contains("%s"),
-                                    "Profile display should be safe: {}",
-                                    attack_name
-                                );
+                                // Same Rust-vs-printf reasoning as above: a `%s` in the
+                                // profile is preserved verbatim, never interpreted.
+                                if malicious_content.contains("%s") {
+                                    assert!(
+                                        profile_display.contains("%s"),
+                                        "Profile Debug must emit format specifiers verbatim: {}",
+                                        attack_name
+                                    );
+                                }
                                 assert!(
                                     !profile_display.contains("\x1b["),
                                     "Profile display should escape ANSI: {}",

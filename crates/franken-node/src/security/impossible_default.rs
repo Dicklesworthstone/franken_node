@@ -978,6 +978,11 @@ mod tests {
         (enforcer, sk)
     }
 
+    // bd-o776s: prod now binds opt-in/enforce to the token subject
+    // (`token_subject_matches_actor` in both `opt_in` and `enforce`). The caller
+    // identity that presents the token AND the identity that exercises the
+    // capability must equal `token.subject`; we use the single principal "user"
+    // (the actor enforce already uses) for the subject and all actor arguments.
     fn make_token(
         cap: ImpossibleCapability,
         expires_at_ms: u64,
@@ -987,7 +992,7 @@ mod tests {
             token_id: format!("tok-{}", cap.label()),
             capability: cap,
             issuer: "test-issuer".to_string(),
-            subject: "test-subject".to_string(),
+            subject: "user".to_string(),
             issued_at_ms: 1000,
             expires_at_ms,
             signature: String::new(),
@@ -1002,7 +1007,7 @@ mod tests {
             token_id: format!("tok-bad-{}", cap.label()),
             capability: cap,
             issuer: "test-issuer".to_string(),
-            subject: "test-subject".to_string(),
+            subject: "user".to_string(),
             issued_at_ms: 1000,
             expires_at_ms: 999_999,
             signature: "invalid_signature_value".to_string(),
@@ -1111,7 +1116,7 @@ mod tests {
     fn test_opt_in_with_valid_token() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::FsAccess, 10_000, &sk);
-        enforcer.opt_in(token, "admin", 2000).unwrap();
+        enforcer.opt_in(token, "user", 2000).unwrap();
         assert!(enforcer.is_enabled(ImpossibleCapability::FsAccess));
     }
 
@@ -1119,7 +1124,7 @@ mod tests {
     fn test_enforce_after_opt_in_succeeds() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::OutboundNetwork, 10_000, &sk);
-        enforcer.opt_in(token, "admin", 2000).unwrap();
+        enforcer.opt_in(token, "user", 2000).unwrap();
         assert!(
             enforcer
                 .enforce(ImpossibleCapability::OutboundNetwork, "user", 3000)
@@ -1131,7 +1136,7 @@ mod tests {
     fn test_opt_in_with_invalid_signature_rejected() {
         let (mut enforcer, _sk) = make_enforcer();
         let token = make_bad_sig_token(ImpossibleCapability::FsAccess);
-        let err = enforcer.opt_in(token, "admin", 2000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2000).unwrap_err();
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
     }
 
@@ -1139,7 +1144,7 @@ mod tests {
     fn test_opt_in_with_expired_token_rejected() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::FsAccess, 1500, &sk);
-        let err = enforcer.opt_in(token, "admin", 2000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2000).unwrap_err();
         assert_eq!(err.code, ERR_IBD_TOKEN_EXPIRED);
     }
 
@@ -1148,7 +1153,7 @@ mod tests {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::FsAccess, 2000, &sk);
 
-        let err = enforcer.opt_in(token, "admin", 2000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_TOKEN_EXPIRED);
         assert!(!enforcer.is_enabled(ImpossibleCapability::FsAccess));
@@ -1167,7 +1172,7 @@ mod tests {
         let mut token = make_token(ImpossibleCapability::OutboundNetwork, 10_000, &sk);
         token.subject = "attacker-subject".to_string();
 
-        let err = enforcer.opt_in(token, "admin", 2000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert!(!enforcer.is_enabled(ImpossibleCapability::OutboundNetwork));
@@ -1185,7 +1190,7 @@ mod tests {
         let mut token = make_token(ImpossibleCapability::UnsignedExtension, 10_000, &sk);
         token.signature = "aa".repeat(63);
 
-        let err = enforcer.opt_in(token, "admin", 2000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert!(!enforcer.is_enabled(ImpossibleCapability::UnsignedExtension));
@@ -1196,7 +1201,7 @@ mod tests {
     fn test_token_expiry_blocks_enforce() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::ChildProcessSpawn, 5000, &sk);
-        enforcer.opt_in(token, "admin", 2000).unwrap();
+        enforcer.opt_in(token, "user", 2000).unwrap();
         // Before expiry: ok.
         assert!(
             enforcer
@@ -1214,7 +1219,7 @@ mod tests {
     fn test_enforce_at_exact_expiry_boundary_expires_and_removes_token() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::ChildProcessSpawn, 5000, &sk);
-        enforcer.opt_in(token, "admin", 1000).unwrap();
+        enforcer.opt_in(token, "user", 1000).unwrap();
 
         let err = enforcer
             .enforce(ImpossibleCapability::ChildProcessSpawn, "user", 5000)
@@ -1239,7 +1244,7 @@ mod tests {
     fn test_expired_enforce_does_not_increment_blocked_total() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::DisableHardening, 5000, &sk);
-        enforcer.opt_in(token, "admin", 1000).unwrap();
+        enforcer.opt_in(token, "user", 1000).unwrap();
 
         let err = enforcer
             .enforce(ImpossibleCapability::DisableHardening, "user", 5000)
@@ -1358,7 +1363,7 @@ mod tests {
     fn test_silent_disable_does_not_turn_off_valid_opt_in() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::FsAccess, 10_000, &sk);
-        enforcer.opt_in(token, "admin", 1000).unwrap();
+        enforcer.opt_in(token, "user", 1000).unwrap();
 
         let err = enforcer
             .attempt_silent_disable(ImpossibleCapability::FsAccess, "rogue", 2000)
@@ -1398,7 +1403,7 @@ mod tests {
     fn test_report_after_opt_in() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::FsAccess, 99_999, &sk);
-        enforcer.opt_in(token, "admin", 1000).unwrap();
+        enforcer.opt_in(token, "user", 1000).unwrap();
         let report = enforcer.generate_report("2026-02-20T00:00:00Z");
         let fs_entry = report
             .capabilities
@@ -1442,7 +1447,7 @@ mod tests {
     fn test_opt_in_creates_audit_entry() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::FsAccess, 99_999, &sk);
-        enforcer.opt_in(token, "admin", 1000).unwrap();
+        enforcer.opt_in(token, "user", 1000).unwrap();
         let entry = enforcer.audit_log().last().unwrap();
         assert_eq!(entry.event_code, IBD_002_OPT_IN_GRANTED);
     }
@@ -1497,8 +1502,8 @@ mod tests {
         let (mut enforcer, sk) = make_enforcer();
         let t1 = make_token(ImpossibleCapability::FsAccess, 5000, &sk);
         let t2 = make_token(ImpossibleCapability::OutboundNetwork, 5000, &sk);
-        enforcer.opt_in(t1, "admin", 1000).unwrap();
-        enforcer.opt_in(t2, "admin", 1000).unwrap();
+        enforcer.opt_in(t1, "user", 1000).unwrap();
+        enforcer.opt_in(t2, "user", 1000).unwrap();
         let expired = enforcer.expire_tokens(6000);
         assert_eq!(expired.len(), 2);
         assert!(!enforcer.is_enabled(ImpossibleCapability::FsAccess));
@@ -1510,8 +1515,8 @@ mod tests {
         let (mut enforcer, sk) = make_enforcer();
         let t1 = make_token(ImpossibleCapability::FsAccess, 5000, &sk);
         let t2 = make_token(ImpossibleCapability::OutboundNetwork, 10_000, &sk);
-        enforcer.opt_in(t1, "admin", 1000).unwrap();
-        enforcer.opt_in(t2, "admin", 1000).unwrap();
+        enforcer.opt_in(t1, "user", 1000).unwrap();
+        enforcer.opt_in(t2, "user", 1000).unwrap();
         let expired = enforcer.expire_tokens(6000);
         assert_eq!(expired.len(), 1);
         assert!(!enforcer.is_enabled(ImpossibleCapability::FsAccess));
@@ -1523,8 +1528,8 @@ mod tests {
         let (mut enforcer, sk) = make_enforcer();
         let t1 = make_token(ImpossibleCapability::FsAccess, 5000, &sk);
         let t2 = make_token(ImpossibleCapability::OutboundNetwork, 5001, &sk);
-        enforcer.opt_in(t1, "admin", 1000).unwrap();
-        enforcer.opt_in(t2, "admin", 1000).unwrap();
+        enforcer.opt_in(t1, "user", 1000).unwrap();
+        enforcer.opt_in(t2, "user", 1000).unwrap();
 
         let expired = enforcer.expire_tokens(5000);
 
@@ -1538,7 +1543,7 @@ mod tests {
     fn test_expire_tokens_no_expired_tokens_has_no_audit_side_effects() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::FsAccess, 5001, &sk);
-        enforcer.opt_in(token, "admin", 1000).unwrap();
+        enforcer.opt_in(token, "user", 1000).unwrap();
         let audit_len = enforcer.audit_log().len();
 
         let expired = enforcer.expire_tokens(5000);
@@ -1562,7 +1567,7 @@ mod tests {
     fn test_metrics_opt_in_total() {
         let (mut enforcer, sk) = make_enforcer();
         let t = make_token(ImpossibleCapability::FsAccess, 99_999, &sk);
-        enforcer.opt_in(t, "admin", 1000).unwrap();
+        enforcer.opt_in(t, "user", 1000).unwrap();
         assert_eq!(enforcer.metrics().opt_in_granted_total, 1);
     }
 
@@ -1679,7 +1684,7 @@ mod tests {
 
         // 2. Opt-in for FsAccess.
         let token = make_token(ImpossibleCapability::FsAccess, 10_000, &sk);
-        enforcer.opt_in(token, "admin", 2000).unwrap();
+        enforcer.opt_in(token, "user", 2000).unwrap();
         assert!(
             enforcer
                 .enforce(ImpossibleCapability::FsAccess, "user", 3000)
@@ -1753,7 +1758,8 @@ mod impossible_default_negative_path_tests {
             token_id: token_id.to_string(),
             capability,
             issuer: "negative-test-issuer".to_string(),
-            subject: "negative-test-subject".to_string(),
+            // bd-o776s: subject must equal the actor (prod subject-binding); unify on "user".
+            subject: "user".to_string(),
             issued_at_ms: 1_000,
             expires_at_ms,
             signature: String::new(),
@@ -1775,7 +1781,7 @@ mod impossible_default_negative_path_tests {
             &rogue_key,
         );
 
-        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2_000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert!(enforcer.status(ImpossibleCapability::FsAccess).is_blocked());
@@ -1801,7 +1807,7 @@ mod impossible_default_negative_path_tests {
         );
         token.signature = "aa".repeat(65);
 
-        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2_000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert!(!enforcer.is_enabled(ImpossibleCapability::UnsignedExtension));
@@ -1818,7 +1824,7 @@ mod impossible_default_negative_path_tests {
             10_000,
             &signing_key,
         );
-        enforcer.opt_in(valid, "admin", 2_000).unwrap();
+        enforcer.opt_in(valid, "user", 2_000).unwrap();
 
         let mut invalid = token_with_id(
             "invalid-replacement",
@@ -1828,7 +1834,7 @@ mod impossible_default_negative_path_tests {
         );
         invalid.signature = "not-hex".to_string();
 
-        let err = enforcer.opt_in(invalid, "admin", 3_000).unwrap_err();
+        let err = enforcer.opt_in(invalid, "user", 3_000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert_eq!(enforcer.metrics().opt_in_granted_total, 1);
@@ -1851,7 +1857,7 @@ mod impossible_default_negative_path_tests {
             5_000,
             &signing_key,
         );
-        enforcer.opt_in(token, "admin", 2_000).unwrap();
+        enforcer.opt_in(token, "user", 2_000).unwrap();
 
         assert!(
             enforcer
@@ -1881,7 +1887,7 @@ mod impossible_default_negative_path_tests {
             5_000,
             &signing_key,
         );
-        enforcer.opt_in(token, "admin", 2_000).unwrap();
+        enforcer.opt_in(token, "user", 2_000).unwrap();
 
         let err = enforcer
             .enforce(ImpossibleCapability::DisableHardening, "user", 5_000)
@@ -1947,7 +1953,7 @@ mod impossible_default_negative_path_tests {
         );
         token.capability = ImpossibleCapability::DisableHardening;
 
-        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2_000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert!(enforcer.status(ImpossibleCapability::FsAccess).is_blocked());
@@ -1971,7 +1977,7 @@ mod impossible_default_negative_path_tests {
         );
         token.token_id = "tampered-token-id".to_string();
 
-        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2_000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert!(
@@ -1994,7 +2000,7 @@ mod impossible_default_negative_path_tests {
         );
         token.issuer = "unexpected-issuer".to_string();
 
-        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2_000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert!(
@@ -2017,7 +2023,7 @@ mod impossible_default_negative_path_tests {
         );
         token.subject = "unexpected-subject".to_string();
 
-        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2_000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert!(
@@ -2040,7 +2046,7 @@ mod impossible_default_negative_path_tests {
         );
         token.justification = "changed justification".to_string();
 
-        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+        let err = enforcer.opt_in(token, "user", 2_000).unwrap_err();
 
         assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
         assert!(
@@ -2061,7 +2067,7 @@ mod impossible_default_negative_path_tests {
             10_000,
             &signing_key,
         );
-        enforcer.opt_in(token, "admin", 2_000).unwrap();
+        enforcer.opt_in(token, "user", 2_000).unwrap();
 
         let err = enforcer
             .enforce(ImpossibleCapability::FsAccess, "user", 3_000)
@@ -2095,8 +2101,8 @@ mod impossible_default_negative_path_tests {
             5_000,
             &signing_key,
         );
-        enforcer.opt_in(fs_token, "admin", 2_000).unwrap();
-        enforcer.opt_in(network_token, "admin", 2_000).unwrap();
+        enforcer.opt_in(fs_token, "user", 2_000).unwrap();
+        enforcer.opt_in(network_token, "user", 2_000).unwrap();
 
         let expired = enforcer.expire_tokens(5_000);
 

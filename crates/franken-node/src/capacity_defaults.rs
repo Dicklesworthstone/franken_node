@@ -1703,7 +1703,11 @@ mod negative_path_tests {
                             assert!(
                                 error_msg.contains("zero")
                                     || error_msg.contains("0")
-                                    || error_msg.contains("invalid"),
+                                    || error_msg.contains("invalid")
+                                    // sized validators reject a zero capacity with a
+                                    // "must stay <bucket>-sized" message, which is still
+                                    // an informative rejection of the boundary value.
+                                    || error_msg.contains("sized"),
                                 "Zero capacity error should be informative: {}",
                                 error_msg
                             );

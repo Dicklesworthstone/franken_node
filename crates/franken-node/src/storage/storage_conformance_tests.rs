@@ -225,16 +225,25 @@ mod input_validation_edge_tests {
     fn test_empty_keys_and_values() {
         let mut adapter = FrankensqliteAdapter::default();
 
+        // The store accepts empty keys/values, but the caller context now
+        // requires a non-empty trace_id (fail-closed auth). The test-caller
+        // shim derives trace_id from the key, so drive the inherent `write`
+        // with an explicit, valid System caller to exercise store behavior.
+        let caller = CallerContext::system("storage::tests", "empty-key-value-trace");
+
         // Empty key should work
-        FrankensqliteTestCallerExt::write(&mut adapter, PersistenceClass::ControlState, "", b"data")
+        adapter
+            .write(&caller, PersistenceClass::ControlState, "", b"data")
             .expect("empty key should be allowed");
 
         // Empty value should work
-        FrankensqliteTestCallerExt::write(&mut adapter, PersistenceClass::ControlState, "key", b"")
+        adapter
+            .write(&caller, PersistenceClass::ControlState, "key", b"")
             .expect("empty value should be allowed");
 
         // Both empty should work
-        FrankensqliteTestCallerExt::write(&mut adapter, PersistenceClass::ControlState, "", b"")
+        adapter
+            .write(&caller, PersistenceClass::ControlState, "", b"")
             .expect("both empty should be allowed");
     }
 
@@ -242,8 +251,9 @@ mod input_validation_edge_tests {
     fn test_very_long_keys() {
         let mut adapter = FrankensqliteAdapter::default();
 
-        // Very long key
-        let long_key = "a".repeat(10_000);
+        // Very long but still within the store's key-length cap (oversized keys
+        // are rejected; that fail-closed path is covered by a separate test).
+        let long_key = "a".repeat(MAX_STORE_KEY_BYTES);
         FrankensqliteTestCallerExt::write(
             &mut adapter,
             PersistenceClass::ControlState,
@@ -403,6 +413,11 @@ mod retrievability_gate_edge_tests {
         };
         let mut gate = RetrievabilityGate::new(config);
 
+        // Observed digest must be a canonical SHA-256 hash; reuse it as the
+        // expected hash so the under-limit case passes the hash-match gate and
+        // the latency gate is the sole discriminator.
+        let canonical_hash = content_hash(b"latency-boundary-payload");
+
         let test_cases = vec![
             (999, true, "just under limit should pass"),
             (1000, false, "exactly at limit should fail (fail-closed)"),
@@ -416,7 +431,7 @@ mod retrievability_gate_edge_tests {
                 &SegmentId("test_segment".to_string()),
                 StorageTier::L3Archive,
                 TargetTierState {
-                    content_hash: "test_hash".to_string(),
+                    content_hash: canonical_hash.clone(),
                     reachable: true,
                     fetch_latency_ms: latency_ms,
                 },
@@ -427,7 +442,7 @@ mod retrievability_gate_edge_tests {
                 &SegmentId("test_segment".to_string()),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "test_hash",
+                &canonical_hash,
             );
 
             assert_eq!(result.is_ok(), should_pass, "{}", description);
@@ -447,14 +462,16 @@ mod retrievability_gate_edge_tests {
         };
         let mut gate = RetrievabilityGate::new(config);
 
-        // Any non-zero latency should fail
+        // Any non-zero latency should fail. Seed a canonical observed digest so
+        // the latency gate (not the observed-hash validity gate) is what fires.
+        let canonical_hash = content_hash(b"zero-latency-config-payload");
         seed_retrievability_target(
             &mut gate,
             &ArtifactId("test".to_string()),
             &SegmentId("test".to_string()),
             StorageTier::L3Archive,
             TargetTierState {
-                content_hash: "hash".to_string(),
+                content_hash: canonical_hash.clone(),
                 reachable: true,
                 fetch_latency_ms: 1, // Any positive latency
             },
@@ -466,7 +483,7 @@ mod retrievability_gate_edge_tests {
                 &SegmentId("test".to_string()),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "hash",
+                &canonical_hash,
             )
             .unwrap_err();
 
@@ -495,13 +512,18 @@ mod constant_time_comparison_tests {
         ];
 
         for (expected, actual) in test_cases {
+            // Observed/expected digests must be canonical SHA-256 hashes. Hash
+            // the raw fixtures so equal inputs yield equal digests (pass) and
+            // distinct inputs yield distinct digests (mismatch via ct_eq).
+            let observed_hash = content_hash(actual.as_bytes());
+            let expected_hash = content_hash(expected.as_bytes());
             seed_retrievability_target(
                 &mut gate,
                 &ArtifactId("test".to_string()),
                 &SegmentId("test".to_string()),
                 StorageTier::L3Archive,
                 TargetTierState {
-                    content_hash: actual.to_string(),
+                    content_hash: observed_hash,
                     reachable: true,
                     fetch_latency_ms: 100,
                 },
@@ -512,7 +534,7 @@ mod constant_time_comparison_tests {
                 &SegmentId("test".to_string()),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                expected,
+                &expected_hash,
             );
 
             if expected == actual {
@@ -532,13 +554,16 @@ mod constant_time_comparison_tests {
         };
         let mut gate = RetrievabilityGate::new(config);
 
+        // Relaxed mode skips the hash-match check but still requires a canonical
+        // observed digest, so seed one and compare against a different hash.
+        let observed_hash = content_hash(b"relaxed-actual-hash");
         seed_retrievability_target(
             &mut gate,
             &ArtifactId("test".to_string()),
             &SegmentId("test".to_string()),
             StorageTier::L3Archive,
             TargetTierState {
-                content_hash: "actual_hash".to_string(),
+                content_hash: observed_hash.clone(),
                 reachable: true,
                 fetch_latency_ms: 100,
             },
@@ -556,7 +581,7 @@ mod constant_time_comparison_tests {
             .unwrap();
 
         // Proof should bind to actual hash from target
-        assert_eq!(proof.content_hash, "actual_hash");
+        assert_eq!(proof.content_hash, observed_hash);
     }
 }
 
@@ -582,12 +607,13 @@ mod resource_exhaustion_tests {
         // Events should be bounded to MAX_EVENTS
         assert_eq!(adapter.events().len(), MAX_EVENTS);
 
-        // Latest events should be preserved
+        // Latest events should be preserved. The success marker lives in the
+        // event `code` field; `detail` carries "key=…, tier=…, latency_us=…".
         let latest_events = adapter.events();
         assert!(
             latest_events
                 .iter()
-                .any(|e| e.detail.contains("FRANKENSQLITE_WRITE_SUCCESS"))
+                .any(|e| e.code == event_codes::FRANKENSQLITE_WRITE_SUCCESS)
         );
     }
 
@@ -1102,20 +1128,23 @@ mod storage_negative_path_regression_tests {
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
         let artifact = ArtifactId("artifact-hash".to_string());
         let segment = SegmentId("segment-hash".to_string());
+        // Two well-formed canonical digests that differ → genuine hash mismatch.
+        let observed_hash = content_hash(b"strict-actual-hash");
+        let expected_hash = content_hash(b"strict-expected-hash");
         seed_retrievability_target(
             &mut gate,
             &artifact,
             &segment,
             StorageTier::L3Archive,
             TargetTierState {
-                content_hash: "actual-hash".to_string(),
+                content_hash: observed_hash,
                 reachable: true,
                 fetch_latency_ms: 1,
             },
         );
 
         let err = gate
-            .attempt_eviction(&artifact, &segment, "expected-hash")
+            .attempt_eviction(&artifact, &segment, &expected_hash)
             .unwrap_err();
 
         assert_eq!(err.code, ERR_HASH_MISMATCH);
@@ -1131,13 +1160,16 @@ mod storage_negative_path_regression_tests {
         });
         let artifact = ArtifactId("artifact-zero-latency".to_string());
         let segment = SegmentId("segment-zero-latency".to_string());
+        // Canonical observed digest so the zero-latency fail-closed gate (0 >= 0)
+        // is the failing check rather than the observed-hash validity gate.
+        let canonical_hash = content_hash(b"zero-latency-target-payload");
         seed_retrievability_target(
             &mut gate,
             &artifact,
             &segment,
             StorageTier::L3Archive,
             TargetTierState {
-                content_hash: "hash".to_string(),
+                content_hash: canonical_hash.clone(),
                 reachable: true,
                 fetch_latency_ms: 0,
             },
@@ -1149,7 +1181,7 @@ mod storage_negative_path_regression_tests {
                 &segment,
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "hash",
+                &canonical_hash,
             )
             .unwrap_err();
 
@@ -1210,13 +1242,14 @@ mod model_serialization_tests {
             sample_size: 0,                         // Zero samples
         };
 
+        // JSON has no NaN representation: serde_json serializes a NaN f64 as
+        // `null`, which then fails to deserialize back into the required f64
+        // field. This documents that NaN coverage values are not round-trippable.
         let json = serde_json::to_string(&coverage_record).expect("should serialize");
-        let parsed: OfflineCoverageMetricRecord =
-            serde_json::from_str(&json).expect("should deserialize");
-        assert_eq!(parsed.metric_id, coverage_record.metric_id);
-        assert_eq!(parsed.domain_name, coverage_record.domain_name);
-        assert!(parsed.coverage_pct.is_nan()); // NaN comparison
-        assert_eq!(parsed.sample_size, 0);
+        assert!(json.contains("\"coverage_pct\":null"));
+        let parsed = serde_json::from_str::<OfflineCoverageMetricRecord>(&json);
+        let err = parsed.expect_err("null coverage_pct must fail to deserialize into f64");
+        assert!(err.is_data());
     }
 
     #[test]

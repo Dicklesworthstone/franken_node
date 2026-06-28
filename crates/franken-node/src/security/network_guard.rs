@@ -565,7 +565,7 @@ mod tests {
     }
 
     fn gate_and_cap(single_use: bool) -> (CapabilityGate, RemoteCap) {
-        let provider = CapabilityProvider::new("guard-secret").expect("capability provider");
+        let provider = CapabilityProvider::new("network-guard-secret-7f3a9c2e").expect("capability provider");
         let (cap, _) = provider
             .issue(
                 "network-guard-tests",
@@ -577,7 +577,7 @@ mod tests {
                 "trace-cap-issue",
             )
             .expect("issue remote cap");
-        let gate = CapabilityGate::new("guard-secret").expect("verification gate");
+        let gate = CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
         (gate, cap)
     }
 
@@ -897,7 +897,7 @@ mod tests {
     #[test]
     fn missing_remote_cap_is_denied() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let mut gate = CapabilityGate::new("guard-secret").expect("verification gate");
+        let mut gate = CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
         let err = guard
             .process_egress(
                 "api.example.com",
@@ -1093,7 +1093,7 @@ mod tests {
     #[test]
     fn missing_remote_cap_is_audited_as_denied_even_when_policy_would_allow() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let mut gate = CapabilityGate::new("guard-secret").expect("verification gate");
+        let mut gate = CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
 
         let err = guard
             .process_egress(
@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn remote_cap_scope_denial_is_audited_before_policy_allow() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let provider = CapabilityProvider::new("guard-secret").expect("capability provider");
+        let provider = CapabilityProvider::new("network-guard-secret-7f3a9c2e").expect("capability provider");
         let (cap, _) = provider
             .issue(
                 "network-guard-tests",
@@ -1276,7 +1276,7 @@ mod tests {
                 "trace-scope-issue",
             )
             .expect("issue remote cap with non-egress scope");
-        let mut gate = CapabilityGate::new("guard-secret").expect("verification gate");
+        let mut gate = CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
 
         let err = guard
             .process_egress(
@@ -2081,7 +2081,20 @@ mod network_guard_additional_negative_tests {
         for attack_host in traversal_attacks {
             let (action, rule_idx) = policy.evaluate(attack_host, 443, Protocol::Http);
 
-            if attack_host == "safe.internal." {
+            if attack_host == "evil.com.safe.internal" {
+                // bd-o776s: `*.safe.internal` legitimately matches this multi-label
+                // subdomain under prod's loose-wildcard suffix semantics (any host
+                // ending in `.safe.internal`), consistent with `wildcard_host_match`
+                // asserting `*.example.com` matches `sub.api.example.com`. It is a real
+                // subdomain of safe.internal, not a traversal bypass, so prod allows it.
+                assert_eq!(
+                    action,
+                    Action::Allow,
+                    "Legitimate subdomain '{}' matches the wildcard allow rule",
+                    attack_host
+                );
+                assert_eq!(rule_idx, Some(0));
+            } else if attack_host == "safe.internal." {
                 // Trailing dot should normalize and be denied (wildcard requires subdomain)
                 assert_eq!(
                     action,

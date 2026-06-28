@@ -1168,7 +1168,7 @@ mod tests {
         registry
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("register");
-        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1190,7 +1190,7 @@ mod tests {
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("register");
 
-        let provider = CapabilityProvider::new("registry-secret").expect("provider");
+        let provider = CapabilityProvider::new("registry-secret-material-v1").expect("provider");
         let (cap, _) = provider
             .issue(
                 "ops-control-plane",
@@ -1205,7 +1205,7 @@ mod tests {
                 "trace-issue",
             )
             .expect("issue capability");
-        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let entry = registry
             .authorize_dispatch(
@@ -1239,7 +1239,7 @@ mod tests {
             )
             .expect("register");
 
-        let provider = CapabilityProvider::new("registry-secret").expect("provider");
+        let provider = CapabilityProvider::new("registry-secret-material-v1").expect("provider");
         let (cap, _) = provider
             .issue(
                 "ops-control-plane",
@@ -1254,7 +1254,7 @@ mod tests {
                 "trace-issue",
             )
             .expect("issue capability");
-        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1297,7 +1297,7 @@ mod tests {
             )
             .expect("register");
 
-        let provider = CapabilityProvider::new("registry-secret").expect("provider");
+        let provider = CapabilityProvider::new("registry-secret-material-v1").expect("provider");
         let (cap, _) = provider
             .issue(
                 "ops-control-plane",
@@ -1315,7 +1315,7 @@ mod tests {
                 "trace-issue",
             )
             .expect("issue capability");
-        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let entry = registry
             .authorize_dispatch(
@@ -1508,7 +1508,7 @@ mod tests {
     #[test]
     fn dispatch_rejects_malformed_name_before_capability_authorization() {
         let mut registry = ComputationRegistry::new(1, "trace-load");
-        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1646,7 +1646,7 @@ mod tests {
     #[test]
     fn dispatch_unknown_name_does_not_touch_capability_gate() {
         let mut registry = ComputationRegistry::new(1, "trace-load");
-        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1676,7 +1676,7 @@ mod tests {
         registry
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("register");
-        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1858,7 +1858,7 @@ mod tests {
         registry
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("registration should succeed");
-        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -2095,25 +2095,30 @@ mod tests {
             "Version component over MAX_COMPONENT_LENGTH should be rejected"
         );
 
-        // Full computation name bounds (MAX_COMPUTATION_NAME_LENGTH = 512)
-        // Build name at exactly 512 chars: component1 + '.' + component2 + '.' + version
-        // Use 128-char components: 128 + 1 + 128 + 1 + remaining = 512
-        let remaining_for_version = 512 - 128 - 1 - 128 - 1; // 254 chars for version
-        let at_limit_name = format!(
+        // Full computation name bounds. Every component (including the version
+        // component) is independently capped at MAX_COMPONENT_LENGTH (128), so the
+        // largest *structurally valid* canonical name is
+        //   128 (domain) + 1 ('.') + 128 (action) + 1 ('.') + 128 (version) = 386 chars.
+        // A 512-char name is therefore unreachable as a valid name: it would require a
+        // component to exceed the per-component cap, which is rejected independently.
+        let max_valid_name = format!(
             "{}.{}.v{}",
             "a".repeat(128),
             "b".repeat(128),
-            "1".repeat(remaining_for_version - 1) // -1 for 'v' prefix
+            "1".repeat(127) // 'v' + 127 digits = 128-char version component
         );
-        assert_eq!(at_limit_name.len(), 512);
+        assert_eq!(max_valid_name.len(), 386);
 
         assert!(
-            is_canonical_computation_name(&at_limit_name),
-            "Computation name at MAX_COMPUTATION_NAME_LENGTH should be accepted"
+            is_canonical_computation_name(&max_valid_name),
+            "Largest structurally valid computation name should be accepted"
         );
 
-        // Name over limit should be rejected
-        let over_limit_name = format!("{}_extra", at_limit_name);
+        // A name whose total length exceeds MAX_COMPUTATION_NAME_LENGTH is rejected by
+        // the global length guard before any per-component validation runs.
+        let over_limit_name =
+            format!("{}.{}.v{}", "a".repeat(200), "b".repeat(200), "1".repeat(200));
+        assert!(over_limit_name.len() > MAX_COMPUTATION_NAME_LENGTH);
         assert!(
             !is_canonical_computation_name(&over_limit_name),
             "Computation name over MAX_COMPUTATION_NAME_LENGTH should be rejected"

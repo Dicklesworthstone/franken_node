@@ -1111,8 +1111,13 @@ mod tests {
         let manifest = build_and_sign_manifest(&[(name, content as &[u8])], &sk);
         let sig = sign_artifact(&sk, content);
 
+        // Use a tamper payload that is the SAME length as the original so the
+        // size pre-check passes and the checksum comparison is exercised. The
+        // dedicated `verify_release_rejects_signed_size_metadata_mismatch` test
+        // covers the size-mismatch path; this test asserts content tampering is
+        // caught by the checksum.
         let mut arts = BTreeMap::new();
-        arts.insert(name.to_string(), b"tampered binary!!!".to_vec());
+        arts.insert(name.to_string(), b"tampered binary!!!!".to_vec());
         let mut sigs = BTreeMap::new();
         sigs.insert(name.to_string(), sig);
 
@@ -1660,7 +1665,10 @@ mod tests {
             .get_mut(name)
             .expect("manifest entry should exist")
             .size_bytes = len_to_u64(content.len()).saturating_add(1);
-        manifest.signature = sign_bytes(&sk, &manifest.canonical_bytes());
+        // Re-sign over the domain-separated payload that `verify_release`
+        // actually verifies (matches `build_and_sign_manifest`), not the raw
+        // canonical bytes, so the manifest signature stays valid.
+        manifest.signature = sign_bytes(&sk, &manifest.canonical_signature_payload());
 
         let mut arts = BTreeMap::new();
         arts.insert(name.to_string(), content.to_vec());

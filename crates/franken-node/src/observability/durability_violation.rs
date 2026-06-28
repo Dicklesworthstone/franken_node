@@ -1832,9 +1832,15 @@ mod tests {
         assert_eq!(items, vec![3, 4, 5]);
     }
 
-    // Frozen SHA-256 hex over the canonical byte layout produced by
-    // `generate_bundle` (durability_violation.rs:693). The function builds the
-    // `bundle_id` from:
+    // Frozen golden over the canonical byte layout produced by
+    // `generate_bundle` (durability_violation.rs:693). The function SHA-256-hashes
+    // the canonical byte layout below, then renders the `bundle_id` as
+    // `format!("VB-{hash:016x}")` where `hash` is the first 8 digest bytes read as
+    // a little-endian u64 (durability_violation.rs:801-802) — i.e. a `VB-` prefix
+    // plus 16 lowercase hex chars (19 chars total), NOT the full 64-hex digest.
+    // The goldens below are pinned to that truncated form; the underlying digest
+    // is unchanged, so any drift in the layout still flips the truncated id.
+    // The function builds the hashed `bundle_id` input from:
     //
     //   b"franken_node:observability:durability_violation_bundle:v1"
     //   || domain-prefixed LE64(epoch_id)
@@ -1875,12 +1881,17 @@ mod tests {
         let empty_bundle = generate_bundle(&empty_ctx);
         assert_eq!(
             empty_bundle.bundle_id.0,
-            "b6918607d8b7943dc65ed97b8e84dfcda6283486b209eb0143aee09bfda2691b",
+            "VB-3d94b7d8078691b6",
             "empty-context bundle_id drifted — \
              check the v1 domain separator or the events/artifacts/proofs \
              zero-length section framing"
         );
-        assert_eq!(empty_bundle.bundle_id.0.len(), 64);
+        assert!(
+            empty_bundle.bundle_id.0.starts_with("VB-"),
+            "bundle_id must carry the VB- format prefix"
+        );
+        // `VB-` prefix (3) + 16-hex truncated LE-u64 of the first 8 digest bytes.
+        assert_eq!(empty_bundle.bundle_id.0.len(), 19);
 
         // Populated fixture exercises the non-empty branches: 1 event with
         // Some(evidence_ref), 1 artifact (all 4 length-prefixed fields), and
@@ -1915,12 +1926,12 @@ mod tests {
         let populated_bundle = generate_bundle(&populated_ctx);
         assert_eq!(
             populated_bundle.bundle_id.0,
-            "30e16fd684cc83af35eef42ddfcb2948736552fc747653a14da64ffba1ae5346",
+            "VB-af83cc84d66fe130",
             "populated-context bundle_id drifted — \
              check per-event evidence_ref Some/None framing, per-artifact field \
              ordering, or string_list_item domain bytes"
         );
-        assert_eq!(populated_bundle.bundle_id.0.len(), 64);
+        assert_eq!(populated_bundle.bundle_id.0.len(), 19);
         assert_ne!(
             empty_bundle.bundle_id.0, populated_bundle.bundle_id.0,
             "empty and populated fixtures must produce distinct bundle_id values"

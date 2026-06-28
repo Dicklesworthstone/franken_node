@@ -1116,8 +1116,13 @@ mod tests {
         let mut successful_deposits = 0;
 
         for (publisher_id, description) in unicode_publisher_ids {
+            // Medium tier minimum_stake is 100; the original amount (50) is below
+            // it and prod rejects every deposit with InsufficientStake, leaving
+            // `successful_deposits == 0`. This test probes Unicode publisher-id
+            // handling, not the minimum gate, so seed at/above the tier minimum
+            // (reconciled for bd-o776s).
             let result =
-                ledger.deposit(publisher_id, 50, RiskTier::Medium, successful_deposits + 1);
+                ledger.deposit(publisher_id, 100, RiskTier::Medium, successful_deposits + 1);
 
             match result {
                 Ok(stake_id) => {
@@ -1138,7 +1143,7 @@ mod tests {
                     if description.contains("NFC") {
                         let nfd_result = ledger.deposit(
                             "cafe\u{0301}",
-                            50,
+                            100,
                             RiskTier::Medium,
                             successful_deposits + 100,
                         );
@@ -1688,7 +1693,12 @@ mod tests {
             .expect("account2 should exist");
 
         assert_eq!(account1.balance, account2.balance);
-        assert_eq!(account1.deposited, account2.deposited);
+        // `deposited` is a CUMULATIVE lifetime counter — deposit() adds to it and
+        // withdraw() never subtracts. The admission/eviction cycle therefore
+        // deposits twice, so `deposited` is NOT idempotent the way `balance` is.
+        // Assert the cumulative relationship (path 2 deposited twice) rather than
+        // equality (reconciled for bd-o776s).
+        assert_eq!(account2.deposited, account1.deposited.saturating_mul(2));
         // Note: account2 may have different total_withdrawn due to the cycle, which is expected
 
         // Registry integrity should be maintained
@@ -1714,6 +1724,11 @@ mod tests {
     fn mr_registry_publisher_operation_commutativity() {
         let publisher_a = "publisher-A";
         let publisher_b = "publisher-B";
+        // publisher_b stakes at the High tier, whose minimum_stake is 500; the
+        // original 200 is below it and prod rejects with InsufficientStake. The
+        // amount is incidental to the commutativity property, so seed above the
+        // tier minimum (reconciled for bd-o776s). publisher_a (Low, min 10) is
+        // already above its minimum at 100.
 
         // Path 1: A then B
         let mut ledger1 = StakingLedger::new();
@@ -1721,13 +1736,13 @@ mod tests {
             .deposit(publisher_a, 100, RiskTier::Low, 1000)
             .expect("deposit A first");
         let stake_b1 = ledger1
-            .deposit(publisher_b, 200, RiskTier::High, 2000)
+            .deposit(publisher_b, 500, RiskTier::High, 2000)
             .expect("deposit B second");
 
         // Path 2: B then A
         let mut ledger2 = StakingLedger::new();
         let stake_b2 = ledger2
-            .deposit(publisher_b, 200, RiskTier::High, 2000)
+            .deposit(publisher_b, 500, RiskTier::High, 2000)
             .expect("deposit B first");
         let stake_a2 = ledger2
             .deposit(publisher_a, 100, RiskTier::Low, 1000)
@@ -1793,8 +1808,13 @@ mod tests {
             .file_appeal(stake_id2, slash_event.slash_id, "false positive", 3000)
             .expect("appeal should succeed");
 
+        // `resolve_appeal(appeal_id, upheld, ...)`: `upheld = true` UPHOLDS the
+        // slash (appeal denied, stake stays Slashed at amount 0). The test wants
+        // a SUCCESSFUL restoration, which is `upheld = false` (appeal granted →
+        // slash reversed, stake + balance restored). Reconciled for bd-o776s — the
+        // original `true` left the stake slashed, contradicting the test's intent.
         ledger2
-            .resolve_appeal(appeal_event.appeal_id, true, 4000)
+            .resolve_appeal(appeal_event.appeal_id, false, 4000)
             .expect("appeal resolution should succeed");
 
         // Metamorphic relation: After successful appeal resolution, stake should be equivalent to clean stake

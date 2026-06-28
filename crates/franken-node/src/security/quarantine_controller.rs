@@ -1583,10 +1583,28 @@ mod quarantine_controller_additional_negative_tests {
                     "Unicode injection should not create admin privileges"
                 );
 
-                // Trace ID should preserve injection detection
+                // Trace ID should preserve injection detection.
+                //
+                // serde_json is a codec, not a validator: prod stores the
+                // trace_id verbatim (decide_for_posterior_with_context:
+                // `trace_id.to_string()`) and signs the RAW bytes for integrity
+                // (sign_evidence MACs `trace_id.as_bytes()`), so a caller-
+                // supplied null byte survives in the in-memory String by design.
+                // The real injection-safe property is that the null byte is
+                // ESCAPED (never emitted as a raw NUL that could terminate a C
+                // string or break out of the JSON string) yet still roundtrips
+                // losslessly so any tampering stays detectable.
+                let trace_json =
+                    serde_json::to_string(&evidence.trace_id).expect("trace_id should serialize");
                 assert!(
-                    !evidence.trace_id.contains('\0'),
-                    "Null bytes should not appear in trace ID"
+                    !trace_json.contains('\0'),
+                    "Null bytes must be escaped, not emitted raw, in serialized trace ID"
+                );
+                let trace_back: String =
+                    serde_json::from_str(&trace_json).expect("trace_id should deserialize");
+                assert_eq!(
+                    trace_back, evidence.trace_id,
+                    "trace ID must roundtrip losslessly so tampering stays detectable"
                 );
             }
         }
@@ -1797,26 +1815,40 @@ mod quarantine_controller_additional_negative_tests {
         let evidence = controller.evaluate(&posterior).expect("should evaluate");
         let json = serde_json::to_string(&evidence).expect("should serialize");
 
-        // JSON should escape all injection attempts
-        assert!(
-            !json.contains("alert('xss')"),
-            "JavaScript injection should be escaped"
-        );
-        assert!(
-            !json.contains("</script>"),
-            "HTML injection should be escaped"
-        );
+        // serde_json is a codec, not a validator: it does NOT strip or sanitize
+        // field content, and prod signs the raw principal_id/trace_id for
+        // integrity (sign_evidence). `alert('xss')` / `</script>` contain no
+        // JSON-special characters, so they serialize verbatim — asserting their
+        // absence would test input sanitization that neither JSON nor prod
+        // performs. The genuine injection-safe property is that CONTROL
+        // characters ARE escaped, so a payload cannot terminate the JSON string
+        // or inject line/record structure into a downstream log sink.
         assert!(!json.contains("\n"), "Newline injection should be escaped");
         assert!(
             !json.contains("\r"),
             "Carriage return injection should be escaped"
         );
 
-        // Roundtrip should preserve structure but escape content
+        // Roundtrip should preserve structure AND carry every payload losslessly
+        // as inert data CONTAINED inside the escaped string fields — proving the
+        // injection was safely encoded (kept inside a properly escaped JSON
+        // string), not interpreted or able to break out.
         let parsed: SignedEvidenceEntry = serde_json::from_str(&json).expect("should deserialize");
         assert_eq!(evidence.event_code, parsed.event_code);
         assert_eq!(evidence.action, parsed.action);
         assert!((evidence.posterior - parsed.posterior).abs() < f64::EPSILON);
+        assert_eq!(
+            parsed.principal_id, evidence.principal_id,
+            "principal_id must roundtrip losslessly through JSON"
+        );
+        assert!(
+            parsed.principal_id.contains("alert('xss')"),
+            "JS payload survives only as inert data contained inside the escaped principal_id string"
+        );
+        assert_eq!(
+            parsed.trace_id, evidence.trace_id,
+            "trace_id must roundtrip losslessly through JSON"
+        );
     }
 
     #[test]
@@ -1994,16 +2026,30 @@ mod quarantine_controller_additional_negative_tests {
                         .evaluate(&test_posterior)
                         .expect("should evaluate");
 
-                    // Signature should be non-empty and deterministic
+                    // Signature should be non-empty and verifiable.
                     assert!(!evidence.signature.is_empty());
+                    assert!(
+                        controller.verify_signature(&evidence),
+                        "Emitted signature must verify under its own controller"
+                    );
 
-                    // Same input should produce same signature
+                    // Each evaluation mints a FRESH decision identity (a unique
+                    // v7 decision_id + issued_at_ms timestamp folded into the
+                    // HMAC), so the same posterior is intentionally NOT byte-
+                    // equal across evaluations (cf.
+                    // signed_evidence_has_fresh_unique_decision_identity). The
+                    // security invariant is that BOTH signatures still verify
+                    // under the controller's key.
                     let evidence2 = controller
                         .evaluate(&test_posterior)
                         .expect("should evaluate");
-                    assert_eq!(
+                    assert!(
+                        controller.verify_signature(&evidence2),
+                        "Repeated evaluation must also produce a verifiable signature"
+                    );
+                    assert_ne!(
                         evidence.signature, evidence2.signature,
-                        "Signatures should be deterministic"
+                        "Each evaluation must mint a fresh, uniquely-identified decision"
                     );
                 }
                 Err(QuarantineControllerError::InvalidSigningKey) => {

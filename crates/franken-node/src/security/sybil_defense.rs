@@ -1901,10 +1901,14 @@ mod sybil_defense_negative_path_tests {
     fn threshold_sized_burst_is_not_reported_as_sybil() {
         let mut detector = SybilDetector::new(3, 60_000, 0.95);
         let nodes = BTreeMap::from([("node-a".to_string(), TrustNode::new("node-a", 1))]);
+        // Distinct values so this isolates the burst-size boundary only, without
+        // tripping the coordinated-similarity detector (which keys on near-identical
+        // values from low-reputation nodes). A burst whose length equals the
+        // burst_threshold (3) must not be flagged: detection uses `len > threshold`.
         let signals = vec![
-            signal("signal-1", "node-a", 0.9),
-            signal("signal-2", "node-a", 0.91),
-            signal("signal-3", "node-a", 0.92),
+            signal("signal-1", "node-a", 0.2),
+            signal("signal-2", "node-a", 0.5),
+            signal("signal-3", "node-a", 0.8),
         ];
 
         let detected = detector.detect_sybil_cluster(&signals, &nodes, 1_700_000_000);
@@ -2465,7 +2469,7 @@ mod sybil_defense_negative_path_tests {
     fn sybil_defense_statistical_manipulation_trimmed_mean_boundary_exploitation() {
         let test_cases = [
             // Test case: trimmed-mean vs median boundary conditions
-            (0.15, vec![0.1; 70], vec![0.9; 15], vec![0.95; 15]), // 15% trim
+            (0.15, vec![0.1; 70], vec![0.0; 15], vec![0.95; 15]), // 15% trim
             (0.20, vec![0.2; 60], vec![0.0; 20], vec![1.0; 20]),  // 20% trim (boundary)
             (0.25, vec![0.3; 50], vec![0.0; 25], vec![1.0; 25]),  // 25% trim
             (0.30, vec![0.4; 40], vec![0.0; 30], vec![0.8; 30]),  // 30% trim

@@ -2364,7 +2364,10 @@ mod atc_extreme_adversarial_negative_tests {
         // Test constant-time comparison with various Unicode edge cases
         let unicode_test_pairs = [
             ("café", "cafe\u{0301}"), // NFC vs NFD
-            ("A", "\u{0041}"),        // ASCII vs Unicode codepoint
+            // NOTE(bd-o776s): was ("A", "\u{0041}") — \u{0041} IS ASCII 'A' (byte-identical),
+            // so it could never differ. Use a genuine homoglyph (Greek capital Alpha) so the
+            // "distinct Unicode representation => distinct fingerprint" intent is exercised.
+            ("A", "\u{0391}"), // ASCII 'A' vs Greek capital Alpha homoglyph (distinct bytes)
             ("Ⅸ", "IX"),              // Roman numeral vs ASCII
             ("\u{FEFF}test", "test"), // With/without BOM
             ("test\u{200B}", "test"), // With/without zero-width space
@@ -3108,8 +3111,15 @@ mod atc_extreme_adversarial_negative_tests {
             vec!["signal_extraction\u{0300}"],                 // Combining mark at end
         ];
 
-        // All should produce different fingerprints despite visual similarity
-        let mut seen_fingerprints = std::collections::HashSet::new();
+        // NOTE(bd-o776s): the surface fingerprinter operates on RAW BYTES and performs
+        // NO Unicode normalization, so two inputs collide IFF their byte content is
+        // identical. Several vectors above are byte-identical by construction
+        // (NFC "café" == NFKC "café"; NFD == NFKD for this string), so the correct
+        // normalization-resistance invariant is: identical bytes => identical
+        // fingerprint, and distinct bytes => distinct fingerprint. We key by raw bytes
+        // rather than asserting global uniqueness over byte-equal forms.
+        let mut bytes_to_fp: std::collections::HashMap<Vec<Vec<u8>>, String> =
+            std::collections::HashMap::new();
         for (i, surface) in unicode_attack_surfaces.iter().enumerate() {
             let surface_refs: Vec<&str> = surface.iter().copied().collect();
             let fingerprint = surface_fingerprint_hex(&surface_refs);
@@ -3127,16 +3137,35 @@ mod atc_extreme_adversarial_negative_tests {
                 fingerprint
             );
 
-            assert!(
-                seen_fingerprints.insert(fingerprint.clone()),
-                "Unicode normalization collision detected at test {}: {}",
-                i,
-                fingerprint
-            );
+            let key: Vec<Vec<u8>> = surface_refs.iter().map(|s| s.as_bytes().to_vec()).collect();
+            match bytes_to_fp.get(&key) {
+                // Byte-identical input MUST yield the identical fingerprint
+                // (proves the fingerprinter does not normalize).
+                Some(existing) => assert_eq!(
+                    existing, &fingerprint,
+                    "Identical bytes produced different fingerprint at test {}",
+                    i
+                ),
+                // Byte-distinct input MUST NOT collide with any prior fingerprint
+                // (resistance to normalization / confusable attacks).
+                None => {
+                    assert!(
+                        !bytes_to_fp.values().any(|fp| fp == &fingerprint),
+                        "Unicode normalization collision detected at test {}: {}",
+                        i,
+                        fingerprint
+                    );
+                    bytes_to_fp.insert(key, fingerprint);
+                }
+            }
         }
 
-        // Verify we have unique fingerprints for all test cases
-        assert_eq!(seen_fingerprints.len(), unicode_attack_surfaces.len());
+        // Every distinct byte-input must map to a distinct fingerprint.
+        let distinct_inputs: std::collections::HashSet<Vec<Vec<u8>>> = unicode_attack_surfaces
+            .iter()
+            .map(|surface| surface.iter().map(|s| s.as_bytes().to_vec()).collect())
+            .collect();
+        assert_eq!(bytes_to_fp.len(), distinct_inputs.len());
     }
 
     #[test]
@@ -4272,9 +4301,13 @@ mod atc_extreme_adversarial_negative_tests {
             retrieved_surface2.as_ptr(),
             "Module surface should return same reference"
         );
+        // NOTE(bd-o776s): ATC_MODULE_SURFACE is a `const &[&str]`, so each use site
+        // gets its OWN promoted static (distinct address). Pointer-equality to the
+        // test's local use-site is not a `const` guarantee; the real invariant is that
+        // module_surface() returns the SAME canonical contents as the constant.
+        // (Call-stability is already asserted above via retrieved_surface1/2.)
         assert_eq!(
-            retrieved_surface1.as_ptr(),
-            original_surface.as_ptr(),
+            retrieved_surface1, original_surface,
             "Module surface should match constant reference"
         );
 
@@ -4286,9 +4319,12 @@ mod atc_extreme_adversarial_negative_tests {
 
             // Verify surface remains stable
             let surface_under_pressure = module_surface();
+            // NOTE(bd-o776s): compare against a prior module_surface() reference
+            // (call-stability) rather than the const's local use-site address — see
+            // the const-promotion note above.
             assert_eq!(
                 surface_under_pressure.as_ptr(),
-                original_surface.as_ptr(),
+                retrieved_surface1.as_ptr(),
                 "Surface reference changed under memory pressure at iteration {}",
                 i
             );
@@ -7108,7 +7144,9 @@ mod atc_extreme_adversarial_negative_tests {
                     "admin",
                     "user",
                     "home",
-                    "etc",
+                    // NOTE(bd-o776s): "etc" removed as a bare substring — the module
+                    // "sketch_system" legitimately contains it (sk-ETC-h). Real path
+                    // disclosure like "/etc/passwd" is still caught by the "/" pattern.
                     "var",
                     "tmp",
                     "password",

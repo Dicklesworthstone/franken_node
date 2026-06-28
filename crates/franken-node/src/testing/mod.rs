@@ -443,8 +443,17 @@ mod testing_module_negative_tests {
                     .build()
                     .expect("should build successfully");
 
-                // Verify the control characters are preserved
-                assert!(scenario.to_json().unwrap().contains(control_char_name));
+                // serde_json \u-escapes ASCII control characters, so the raw bytes
+                // won't appear verbatim in the JSON text; verify the name is preserved
+                // exactly by round-tripping through deserialization instead.
+                let json = scenario.to_json().unwrap();
+                let parsed = Scenario::from_json(&json).expect("round-trip should parse");
+                let node = parsed
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == "n1")
+                    .expect("node n1 should be present");
+                assert_eq!(node.name, control_char_name);
             }
             Err(_) => {
                 // Early rejection of control characters is also valid
@@ -475,10 +484,14 @@ mod testing_module_negative_tests {
             .expect("message should be delivered");
 
         assert_eq!(delivered.payload, b"test message");
+        // `with_event_log_capacity` clamps capacity to a minimum of 1 (see `.max(1)`),
+        // so a requested capacity of 0 retains at most the most-recent event rather
+        // than staying empty.
         assert!(
-            transport.event_log().is_empty(),
-            "event log should remain empty with zero capacity"
+            transport.event_log().len() <= 1,
+            "zero requested capacity is clamped to a minimum of 1 event"
         );
+        assert_eq!(transport.event_log_capacity(), 1);
     }
 
     #[test]
@@ -557,10 +570,12 @@ mod testing_module_negative_tests {
 
     #[test]
     fn negative_scenario_builder_deeply_nested_json_serialization_stress() {
+        use super::scenario_builder::MAX_NODES;
         let mut builder = ScenarioBuilder::new("deep-nesting-test").seed(42);
 
-        // Add many nodes and links to create complex JSON structure
-        for i in 0..100 {
+        // Add the maximum number of nodes the builder accepts. `build()` enforces
+        // MAX_NODES; adding more makes build() fail with TooManyNodes.
+        for i in 0..MAX_NODES {
             let node_id = format!("node_{}", i);
             let node_desc = format!("Node {} Description", i);
             let role = if i == 0 {
@@ -574,8 +589,8 @@ mod testing_module_negative_tests {
                 .expect("node addition should work");
         }
 
-        // Add many links between nodes
-        for i in 0..99 {
+        // Add links between every consecutive pair of nodes.
+        for i in 0..MAX_NODES - 1 {
             let link_id = format!("link_{}", i);
             let from = format!("node_{}", i);
             let to = format!("node_{}", i + 1);
@@ -585,8 +600,8 @@ mod testing_module_negative_tests {
                 .expect("link addition should work");
         }
 
-        // Add many assertions
-        for i in 0..50 {
+        // Add an assertion for each consecutive pair.
+        for i in 0..MAX_NODES - 1 {
             let from = format!("node_{}", i);
             let to = format!("node_{}", i + 1);
 
@@ -607,9 +622,11 @@ mod testing_module_negative_tests {
         );
 
         if let Ok(Ok(json)) = json_result {
-            assert!(json.len() > 1000, "JSON should contain substantial content");
-            assert!(json.contains("node_99"), "should contain all nodes");
-            assert!(json.contains("link_98"), "should contain all links");
+            assert!(json.len() > 200, "JSON should contain substantial content");
+            let last_node = format!("node_{}", MAX_NODES - 1);
+            let last_link = format!("link_{}", MAX_NODES - 2);
+            assert!(json.contains(&last_node), "should contain all nodes");
+            assert!(json.contains(&last_link), "should contain all links");
         }
     }
 
@@ -702,11 +719,14 @@ mod testing_module_negative_tests {
                 let parsed = super::scenario_builder::Scenario::from_json(&json)
                     .expect("JSON deserialization should work");
 
-                // Verify the pattern is preserved exactly
-                assert!(
-                    json.contains(pattern),
-                    "pattern should be preserved in JSON"
-                );
+                // serde_json \u-escapes ASCII control characters (NUL, CR, LF), so the
+                // raw pattern won't always appear verbatim in the JSON text; verify
+                // exact preservation through the deserialization round-trip instead.
+                let preserved = parsed
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == "n1" && n.name == *pattern);
+                assert!(preserved, "pattern should be preserved through round-trip");
                 parsed
             });
 
@@ -855,6 +875,10 @@ mod testing_module_negative_tests {
         // Single byte payload
         let single_result = transport.send_message("a", "b", vec![42]);
         assert!(single_result.is_ok(), "Single byte should work");
+
+        // Messages accumulate per-link until delivered (FIFO buffer); drain the two
+        // previously-buffered messages so the large payload is next in delivery order.
+        while transport.deliver_next("a->b").unwrap().is_some() {}
 
         // Maximum realistic payload (10MB)
         let large_payload = vec![0xFF; 10_000_000];
@@ -2133,7 +2157,9 @@ mod testing_module_negative_tests {
                                     // current advance_tick + deliver_next + Message::tick_delivered
                                     // delivery API (canonical link id is "source->target").
                                     let link_id = "message_source->message_target";
-                                    for tick in 1..=std::cmp::min(within_ticks + 100, 1000) {
+                                    // `within_ticks` can be u64::MAX (edge-case vector),
+                                    // so saturate to avoid overflow in the loop bound.
+                                    for tick in 1..=std::cmp::min(within_ticks.saturating_add(100), 1000) {
                                         transport.advance_tick(tick);
 
                                         // Check if message delivered

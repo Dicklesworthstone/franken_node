@@ -80,7 +80,8 @@ mod tests {
 
     #[test]
     fn negative_remote_cap_issue_requires_operator_authorization() {
-        let provider = CapabilityProvider::new("negative-secret").expect("provider should construct");
+        let provider =
+            CapabilityProvider::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("provider should construct");
 
         let err = provider
             .issue(
@@ -100,7 +101,8 @@ mod tests {
 
     #[test]
     fn negative_remote_cap_issue_rejects_zero_ttl() {
-        let provider = CapabilityProvider::new("negative-secret").expect("provider should construct");
+        let provider =
+            CapabilityProvider::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("provider should construct");
 
         let err = provider
             .issue(
@@ -121,7 +123,7 @@ mod tests {
     #[test]
     fn negative_remote_cap_gate_denies_missing_capability() {
         let mut gate =
-            CapabilityGate::new("negative-secret").expect("gate should construct");
+            CapabilityGate::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -581,7 +583,7 @@ mod security_extreme_adversarial_negative_tests {
     #[test]
     fn extreme_adversarial_remote_capability_endpoint_confusion_attack() {
         let provider =
-            CapabilityProvider::new("confusion-secret").expect("provider should construct");
+            CapabilityProvider::new("V4ult!8x-Hsm#Torus9@Cipher").expect("provider should construct");
 
         // Crafted endpoints designed to confuse URL parsing
         let confusing_endpoints = vec![
@@ -608,7 +610,7 @@ mod security_extreme_adversarial_negative_tests {
 
         if let Ok((cap, _)) = cap_result {
             let mut gate =
-                CapabilityGate::new("confusion-secret").expect("gate should construct");
+                CapabilityGate::new("V4ult!8x-Hsm#Torus9@Cipher").expect("gate should construct");
 
             // Test various malformed endpoint access attempts
             let malicious_attempts = vec![
@@ -708,12 +710,20 @@ mod security_extreme_adversarial_negative_tests {
 
             let result = evaluate_freshness(&policy, &check, None);
 
-            // Should reject due to staleness, not crash on Unicode
+            // Should fail closed, not crash on Unicode. Prod validates identifier
+            // fields (null bytes / control characters / surrounding whitespace) and
+            // rejects them with PolicyInvalid BEFORE the staleness check; inputs that
+            // survive that validation are still denied as StaleFrontier. Both are
+            // fail-closed rejections of the injection attempt.
             assert!(result.is_err());
-            if let Err(FreshnessError::StaleFrontier { .. }) = result {
-                // Expected stale error, Unicode handled gracefully
-            } else {
-                panic!("unexpected error type for Unicode injection test {i}");
+            match result {
+                Err(FreshnessError::StaleFrontier { .. })
+                | Err(FreshnessError::PolicyInvalid { .. }) => {
+                    // Expected fail-closed rejection, Unicode handled gracefully
+                }
+                other => {
+                    panic!("unexpected error type for Unicode injection test {i}: {other:?}");
+                }
             }
         }
     }
@@ -821,12 +831,14 @@ mod security_extreme_adversarial_negative_tests {
             .expect("capability should issue")
             .0;
 
-        // Simulate concurrent access attempts to single-use capability
-        let mut gates = vec![
-            CapabilityGate::new("race-condition-secret").expect("gate should construct"),
-            CapabilityGate::new("race-condition-secret").expect("gate should construct"),
-            CapabilityGate::new("race-condition-secret").expect("gate should construct"),
-        ];
+        // Simulate concurrent access attempts to single-use capability. The three
+        // gates must share one replay store, otherwise each independent in-memory
+        // store would let the same single-use token be consumed three times.
+        // Cloning a gate shares its `consumed_tokens` replay state (Arc-backed), so
+        // single-use enforcement applies across all attempts — the same sharing
+        // model used by the in-process memory replay-store concurrency tests.
+        let base_gate = CapabilityGate::new("race-condition-secret").expect("gate should construct");
+        let mut gates = vec![base_gate.clone(), base_gate.clone(), base_gate];
 
         let mut results = Vec::new();
         for gate in &mut gates {

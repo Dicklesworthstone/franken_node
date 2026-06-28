@@ -1461,14 +1461,11 @@ mod tests {
     fn test_float_validation_and_nan_inf_handling() {
         // Test for missing NaN/Infinity guards on float inputs
 
-        // Test with NaN repairability score
-        let nan_evidence = EvidenceTrajectory {
-            recent_rejections: 1,
-            recent_escalations: 0,
-            avg_repairability: f64::NAN,
-            trend: Trend::Stable,
-            epoch_id: 1000,
-        };
+        // Test with NaN repairability score. Build via the constructor (as the
+        // infinity cases below do) so its non-finite guard runs — a raw struct
+        // literal would bypass clamping and store NaN verbatim, which is exactly
+        // what this test must guard against.
+        let nan_evidence = EvidenceTrajectory::new(1, 0, f64::NAN, Trend::Stable, 1000);
 
         // Constructor should clamp NaN to finite value
         assert!(

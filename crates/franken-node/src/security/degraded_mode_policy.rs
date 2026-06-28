@@ -1670,9 +1670,20 @@ mod tests {
                 !json_str.contains(r#""malicious":"#),
                 "JSON injection should be escaped"
             );
+            // serde_json is a codec, not a sanitizer: `<`/`>`/`(`/`)`/`'` are not
+            // JSON-special, so the script payload is preserved verbatim inside a
+            // properly-escaped JSON string — never stripped or executed. The real
+            // injection-safety property is lossless containment plus escaped control
+            // chars so the value can never break out of its string context.
+            let roundtrip: DegradedModeAuditEvent =
+                serde_json::from_str(&json_str).expect("audit event should round-trip");
+            assert_eq!(
+                roundtrip, *event,
+                "Injection payloads must be losslessly contained, not stripped"
+            );
             assert!(
-                !json_str.contains("<script>"),
-                "Script injection should be escaped"
+                !json_str.contains('\n') && !json_str.contains('\r'),
+                "Control chars must be escaped; nothing breaks out of the JSON string"
             );
         }
 
@@ -1695,7 +1706,15 @@ mod tests {
             "trace-circumvent",
         );
 
-        // Attempt to bypass denied actions through case manipulation
+        // Attempt to bypass denied actions through case manipulation.
+        // bd-o776s NOTE: in Degraded state prod is default-ALLOW with an
+        // EXACT-match deny-list (`denied_actions.contains(action_name)`, no
+        // canonicalization). These case/whitespace variants of a denied action
+        // are therefore currently PERMITTED — a fail-open deny-list circumvention
+        // that this test correctly catches. Left failing as a genuine prod gap
+        // (Class B): the Degraded-mode deny-list should canonicalize (trim +
+        // case-fold) action names before the exact-match, mirroring the dispatch
+        // layer. Do NOT relax these assertions to bless the bypass.
         let decision1 = engine.evaluate_action("Policy.Change", "attacker", 1_001, "trace-1");
         assert!(
             !decision1.permitted,

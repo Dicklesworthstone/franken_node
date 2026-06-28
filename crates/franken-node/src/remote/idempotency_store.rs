@@ -1431,7 +1431,10 @@ mod tests {
 
         push_bounded(&mut items, 4, 2);
 
-        assert_eq!(items, vec![2, 3, 4]);
+        // cap=2 with oldest-first eviction: pushing 4 onto [1, 2, 3] drains [1, 2] and
+        // keeps the two newest items. (The prior [2, 3, 4] expectation contradicted the
+        // len()==2 assertion below.)
+        assert_eq!(items, vec![3, 4]);
         assert_eq!(items.len(), 2);
     }
 

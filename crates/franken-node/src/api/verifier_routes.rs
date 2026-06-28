@@ -1188,13 +1188,20 @@ mod tests {
 
     fn test_guard() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("test guard")
+        let lock = LOCK.get_or_init(|| Mutex::new(()));
+        // Recover from poison so one failing test does not cascade into every
+        // other serialized test (bd-o776s: inline-lane runtime triage).
+        lock.clear_poison();
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn reset_verifier_state() {
-        let mut state = verifier_route_state().lock().expect("state lock");
+        let state_mutex = verifier_route_state();
+        state_mutex.clear_poison();
+        let mut state = state_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *state = VerifierRouteState::default();
     }
 
@@ -1283,7 +1290,11 @@ mod tests {
         let err = get_evidence(&apikey_verifier_identity(), &test_trace(), "check-1")
             .expect_err("evidence fails");
         match err {
-            ApiError::AuthFailed { detail, .. } => assert!(detail.contains("route contract")),
+            // Prod `enforce_route_contract` rejects a wrong AuthMethod (ApiKey on a
+            // BearerToken-only endpoint) with this fixed, timing-safe detail.
+            ApiError::AuthFailed { detail, .. } => {
+                assert!(detail.contains("authentication method not permitted"))
+            }
             other => panic!("unexpected error: {other:?}"),
         }
     }

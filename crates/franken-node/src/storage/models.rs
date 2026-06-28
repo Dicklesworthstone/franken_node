@@ -1459,7 +1459,9 @@ mod tests {
         let err = serde_json::from_value::<LeaseServiceRecord>(value)
             .expect_err("null state must fail deserialization");
 
-        assert!(err.to_string().contains("state"));
+        // serde type-mismatch errors do not embed the field name; assert the
+        // rejection is a schema/data error (cf. is_syntax() for malformed JSON).
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1478,7 +1480,7 @@ mod tests {
         let err = serde_json::from_value::<LeaseQuorumRecord>(value)
             .expect_err("string ack_count must fail deserialization");
 
-        assert!(err.to_string().contains("ack_count"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1497,7 +1499,7 @@ mod tests {
         let err = serde_json::from_value::<RolloutStateRecord>(value)
             .expect_err("string health gate flag must fail deserialization");
 
-        assert!(err.to_string().contains("health_gate_passed"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1514,7 +1516,7 @@ mod tests {
         let err = serde_json::from_value::<SchemaMigrationRecord>(value)
             .expect_err("boolean checksum must fail deserialization");
 
-        assert!(err.to_string().contains("checksum"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1530,7 +1532,7 @@ mod tests {
         let err = serde_json::from_value::<OfflineCoverageMetricRecord>(value)
             .expect_err("string coverage_pct must fail deserialization");
 
-        assert!(err.to_string().contains("coverage_pct"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1547,7 +1549,7 @@ mod tests {
         let err = serde_json::from_value::<LifecycleTransitionCacheRecord>(value)
             .expect_err("null to_state must fail deserialization");
 
-        assert!(err.to_string().contains("to_state"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1574,7 +1576,7 @@ mod tests {
         let err = serde_json::from_value::<HealthGatePolicyRecord>(value)
             .expect_err("null required flag must fail deserialization");
 
-        assert!(err.to_string().contains("required"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1591,7 +1593,7 @@ mod tests {
         let err = serde_json::from_value::<ControlChannelStateRecord>(value)
             .expect_err("negative window_low must fail deserialization");
 
-        assert!(err.to_string().contains("window_low"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1648,7 +1650,7 @@ mod tests {
         let err = serde_json::from_value::<ArtifactJournalRecord>(value)
             .expect_err("object metadata_json must fail deserialization");
 
-        assert!(err.to_string().contains("metadata_json"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1667,7 +1669,7 @@ mod tests {
         let err = serde_json::from_value::<TieredTrustArtifactRecord>(value)
             .expect_err("string assurance_level must fail deserialization");
 
-        assert!(err.to_string().contains("assurance_level"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1683,7 +1685,7 @@ mod tests {
         let err = serde_json::from_value::<CanonicalStateRootRecord>(value)
             .expect_err("array root_hash must fail deserialization");
 
-        assert!(err.to_string().contains("root_hash"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1699,7 +1701,7 @@ mod tests {
         let err = serde_json::from_value::<DurabilityModeRecord>(value)
             .expect_err("string wal_enabled must fail deserialization");
 
-        assert!(err.to_string().contains("wal_enabled"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1733,7 +1735,7 @@ mod tests {
         let err = serde_json::from_value::<SnapshotPolicyRecord>(value)
             .expect_err("string retention_count must fail deserialization");
 
-        assert!(err.to_string().contains("retention_count"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1749,7 +1751,7 @@ mod tests {
         let err = serde_json::from_value::<CrdtMergeStateRecord>(value)
             .expect_err("object vector_clock_json must fail deserialization");
 
-        assert!(err.to_string().contains("vector_clock_json"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -1766,7 +1768,7 @@ mod tests {
         let err = serde_json::from_value::<RetentionPolicyRecord>(value)
             .expect_err("negative max_entries must fail deserialization");
 
-        assert!(err.to_string().contains("max_entries"));
+        assert!(err.is_data());
     }
 
     #[test]
@@ -2219,8 +2221,10 @@ mod tests {
                     }
                 }
                 Err(err) => {
-                    // Graceful failure is acceptable for non-finite values
-                    assert!(err.to_string().contains("coverage_pct"));
+                    // Graceful failure is acceptable for non-finite values.
+                    // serde_json maps non-finite floats to JSON null, so the
+                    // rejection is a schema/data error (no field name embedded).
+                    assert!(err.is_data());
                 }
             }
         }

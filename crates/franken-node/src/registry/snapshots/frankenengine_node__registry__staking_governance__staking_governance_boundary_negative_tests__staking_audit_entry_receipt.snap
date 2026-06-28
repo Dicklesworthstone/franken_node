@@ -1,0 +1,18 @@
+---
+source: crates/franken-node/src/registry/staking_governance.rs
+expression: scrubbed
+---
+{
+  "entry_id": 12345,
+  "event_code": "STAKE-001",
+  "timestamp": [EPOCH],
+  "publisher_id": "acme-corp",
+  "stake_id": 67890,
+  "operation": "DEPOSIT",
+  "evidence_hash": null,
+  "outcome": "Stake deposit for high-risk tier capability",
+  "invariants_checked": [
+    "INV-STAKE-MINIMUM",
+    "INV-STAKE-AUDIT-COMPLETE"
+  ]
+}

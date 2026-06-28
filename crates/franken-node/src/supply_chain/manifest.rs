@@ -1575,13 +1575,19 @@ mod tests {
             manifest.entrypoint = path;
             let result = validate_signed_manifest(&manifest);
 
-            // Should handle long paths gracefully
-            if let Err(e) = result {
-                // May reject due to length, but not path traversal for valid chars
-                if !e.code().starts_with("EMS_ENGINE_") {
-                    assert_ne!(e.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
-                }
-            }
+            // Oversized entrypoints must be rejected, never silently accepted.
+            // Prod's manifest-local guard now bounds entrypoint length and
+            // surfaces it as EMS_ENTRYPOINT_PATH_TRAVERSAL ("exceeds ... bytes");
+            // paths under that bound but over the engine entrypoint limit are
+            // rejected at the engine layer (EMS_ENGINE_*). Either category is a
+            // valid boundary rejection.
+            let error = result.expect_err("oversized entrypoint must be rejected");
+            assert!(
+                error.code() == "EMS_ENTRYPOINT_PATH_TRAVERSAL"
+                    || error.code().starts_with("EMS_ENGINE_"),
+                "unexpected code for oversized entrypoint: {}",
+                error.code()
+            );
         }
     }
 

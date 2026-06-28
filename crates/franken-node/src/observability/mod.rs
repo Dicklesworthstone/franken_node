@@ -216,17 +216,26 @@ mod tests {
     fn negative_strict_validator_rejects_blank_locator() {
         let mut validator = WitnessValidator::strict();
         let entry = obs_entry("obs-blank-locator", DecisionKind::Deny);
-        let witnesses = obs_single_witness_set(
+        let mut witnesses = WitnessSet::new();
+        witnesses.add(
             obs_witness("obs-wit-blank-locator", WitnessKind::ExternalSignal, 4)
                 .with_locator(" \t\n "),
         );
 
-        let err = validator
-            .validate(&entry, &witnesses)
-            .expect_err("blank locators should be unresolvable");
+        // bd-2qre3: a whitespace-only locator fails strict_replay_bundle_locator_is_safe,
+        // so WitnessSet::add drops the witness — a blank locator is now rejected by the
+        // structural pre-filter before it can ever reach the strict validator.
+        assert!(
+            witnesses.is_empty(),
+            "blank locator witness must be rejected by the structural pre-filter"
+        );
 
-        assert_eq!(err.code(), "ERR_UNRESOLVABLE_LOCATOR");
-        assert_eq!(validator.rejected_count(), 1);
+        // The low-impact entry is left with no witnesses, which strict mode accepts
+        // (only high-impact entries require witnesses); no rejection is recorded.
+        validator
+            .validate(&entry, &witnesses)
+            .expect("low-impact entry with no witnesses validates under strict mode");
+        assert_eq!(validator.rejected_count(), 0);
     }
 
     #[test]
@@ -260,7 +269,11 @@ mod tests {
             obs_entry("obs-audit-present", DecisionKind::Release),
             obs_single_witness_set(
                 obs_witness("obs-wit-audit", WitnessKind::ProofArtifact, 7)
-                    .with_locator("file:///tmp/replay-bundle.jsonl"),
+                    // bd-2qre3: WitnessSet::add drops any witness whose locator fails the
+                    // structural safety pre-filter (a `file:///` URI is rejected — it
+                    // contains `//` and `:`), so use a safe relative locator so the
+                    // witness is actually stored and counts toward coverage.
+                    .with_locator("evidence/replay-bundle.jsonl"),
             ),
         );
 
@@ -333,9 +346,19 @@ mod tests {
     fn negative_strict_validator_rejects_high_impact_whitespace_locator() {
         let mut validator = WitnessValidator::strict();
         let entry = obs_entry("obs-high-impact-blank-locator", DecisionKind::Release);
-        let witnesses = obs_single_witness_set(
+        let mut witnesses = WitnessSet::new();
+        witnesses.add(
             obs_witness("obs-blank-high-impact", WitnessKind::ProofArtifact, 12)
                 .with_locator("  \n\t  "),
+        );
+
+        // bd-2qre3: the witness carrying a whitespace-only locator fails the structural
+        // pre-filter in WitnessSet::add and is dropped, leaving this high-impact entry with
+        // no witnesses at all. Strict validation therefore rejects it as missing-witnesses
+        // (still fail-closed — a blank locator can never satisfy high-impact validation).
+        assert!(
+            witnesses.is_empty(),
+            "blank locator witness must be dropped by the structural pre-filter"
         );
 
         let err = validator
@@ -344,15 +367,10 @@ mod tests {
 
         assert!(matches!(
             &err,
-            WitnessValidationError::UnresolvableLocator { .. }
+            WitnessValidationError::MissingWitnesses { .. }
         ));
-        if let WitnessValidationError::UnresolvableLocator {
-            entry_id,
-            witness_id,
-        } = err
-        {
+        if let WitnessValidationError::MissingWitnesses { entry_id, .. } = err {
             assert_eq!(entry_id, "obs-high-impact-blank-locator");
-            assert_eq!(witness_id, "obs-blank-high-impact");
         }
         assert_eq!(validator.rejected_count(), 1);
     }
@@ -441,23 +459,20 @@ mod tests {
         witnesses.add(obs_witness("", WitnessKind::Telemetry, 18));
         witnesses.add(obs_witness("", WitnessKind::ExternalSignal, 19));
 
-        let err = validator
-            .validate(&entry, &witnesses)
-            .expect_err("duplicate blank witness IDs should still be rejected");
+        // bd-2qre3: blank witness IDs fail the structural pre-filter in WitnessSet::add,
+        // so they are dropped before they can be stored. A blank ID is therefore rejected
+        // at the point of insertion and never reaches duplicate detection in validate().
+        assert!(
+            witnesses.is_empty(),
+            "blank witness IDs must be rejected by the structural pre-filter"
+        );
 
-        assert!(matches!(
-            &err,
-            WitnessValidationError::DuplicateWitnessId { .. }
-        ));
-        if let WitnessValidationError::DuplicateWitnessId {
-            entry_id,
-            witness_id,
-        } = err
-        {
-            assert_eq!(entry_id, "obs-blank-duplicate-id");
-            assert!(witness_id.is_empty());
-        }
-        assert_eq!(validator.rejected_count(), 1);
+        // With both blank-ID witnesses dropped, the low-impact entry validates with no
+        // coverage (Admit does not require witnesses) and records no rejection.
+        validator
+            .validate(&entry, &witnesses)
+            .expect("dropped blank witnesses leave an empty low-impact set that validates");
+        assert_eq!(validator.rejected_count(), 0);
     }
 
     #[test]
@@ -497,10 +512,16 @@ mod tests {
             obs_witness("obs-locator-two", WitnessKind::StateSnapshot, 25)
                 .with_locator("tmp/witness-two.jsonl"),
         );
-        witnesses.add(
-            obs_witness("obs-locator-late-blank", WitnessKind::ProofArtifact, 26)
-                .with_locator(" \n\t "),
-        );
+        // bd-2qre3: a witness carrying a *blank* locator is dropped by WitnessSet::add's
+        // structural pre-filter and would never reach validate(). To exercise the property
+        // under test — strict mode inspects *every* witness, not just the first — the
+        // trailing witness omits its locator entirely. A missing (`None`) locator survives
+        // add() but is still rejected by the strict validator's per-witness locator check.
+        witnesses.add(obs_witness(
+            "obs-locator-late-blank",
+            WitnessKind::ProofArtifact,
+            26,
+        ));
 
         let err = validator
             .validate(&entry, &witnesses)
@@ -1295,22 +1316,21 @@ mod tests {
                     let serialized = serde_json::to_string(&injection_entry.payload);
                     match serialized {
                         Ok(json_str) => {
-                            // Verify serialized JSON doesn't contain injection artifacts
-                            assert!(
-                                !json_str.contains("\"admin\":true"),
-                                "JSON should not contain admin privilege injection"
-                            );
-                            assert!(
-                                !json_str.contains("DROP TABLE"),
-                                "JSON should not contain SQL injection"
-                            );
-
-                            // Verify round-trip integrity
-                            let parsed: Result<serde_json::Value, _> =
-                                serde_json::from_str(&json_str);
-                            assert!(
-                                parsed.is_ok(),
-                                "Payload should survive JSON round-trip: {}",
+                            // serde_json escapes every string value, so injection attempts
+                            // embedded in the payload cannot break out of their JSON context.
+                            // The structural guarantee (the real neutralization) is that the
+                            // serialized form round-trips back to *exactly* the original
+                            // payload: no smuggled top-level keys (e.g. an injected `admin`
+                            // field), no altered nesting. Substring checks like
+                            // `!contains("\"admin\":true")` are not a meaningful assertion
+                            // here — the payloads legitimately *contain* those bytes as inert,
+                            // escaped data; what matters is that they cannot change structure.
+                            let parsed: serde_json::Value = serde_json::from_str(&json_str)
+                                .expect("payload should survive JSON round-trip");
+                            assert_eq!(
+                                parsed, injection_entry.payload,
+                                "JSON round-trip must preserve payload structure exactly \
+                                 (injection neutralized via escaping): {}",
                                 description
                             );
                         }
@@ -1455,7 +1475,10 @@ mod tests {
             ("Sequential IDs", |i| format!("witness-{:04}", i)),
             ("Reverse IDs", |i| format!("witness-{:04}", 9999 - i)),
             ("Hash-like IDs", |i| {
-                format!("witness-{:x}", i * 2654435761_u32)
+                // bd-o776s: Knuth's multiplicative hash is defined modulo 2^32; use
+                // wrapping_mul so the (intended) wrap-around does not panic as a debug
+                // overflow. This preserves the hash-like ID distribution under test.
+                format!("witness-{:x}", i.wrapping_mul(2654435761_u32))
             }), // Hash-like distribution
             ("Prefix collision", |i| format!("witness-prefix-{}", i % 10)), // Many colliding prefixes
         ];

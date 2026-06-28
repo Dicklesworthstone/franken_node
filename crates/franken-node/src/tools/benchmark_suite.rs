@@ -2787,7 +2787,17 @@ mod tests {
                 actual
             } if scenario == "test_scenario" && actual == MAX_RAW_BENCHMARK_SAMPLES + 1
         ));
-        assert!(suite.events().is_empty());
+        // `new()` always emits BS_SUITE_INITIALIZED, so events() is never empty.
+        // The "before collecting" contract is that execute_scenario's
+        // validate_sample_count rejects the oversized input BEFORE
+        // execute_scenario_samples emits any BS_SCENARIO_STARTED /
+        // BS_MEASUREMENT_RECORDED event — i.e. no collection ever began.
+        assert!(
+            !suite.events().iter().any(|event| {
+                event.code == BS_SCENARIO_STARTED || event.code == BS_MEASUREMENT_RECORDED
+            }),
+            "oversized measurements must be rejected before any collection event"
+        );
     }
 
     #[test]
@@ -3057,9 +3067,11 @@ mod tests {
         // Test NaN input
         assert_eq!(config.score(f64::NAN), 0);
 
-        // Test infinity inputs
+        // Test infinity inputs: BOTH fail closed to 0. The scoring formula maps
+        // +/-inf measured values to a non-finite raw score, which score() now
+        // clamps to 0 (fail-closed on non-finite raw, see ScoringConfig::score).
         assert_eq!(config.score(f64::INFINITY), 0);
-        assert_eq!(config.score(f64::NEG_INFINITY), 100);
+        assert_eq!(config.score(f64::NEG_INFINITY), 0);
 
         // Test normal inputs still work
         assert_eq!(config.score(100.0), 100);
@@ -3081,19 +3093,21 @@ mod tests {
 
     #[test]
     fn test_confidence_interval_handles_nan_infinity() {
-        // Test with NaN values in input
+        // Test with NaN values in input. mean() and std_dev() deterministically
+        // PROPAGATE NaN (their guards surface non-finiteness rather than clamping
+        // it to a finite value), so the confidence interval is NaN on both bounds.
         let values_with_nan = vec![1.0, 2.0, f64::NAN, 4.0, 5.0];
         let ci = confidence_interval_95(&values_with_nan);
-        // Should handle gracefully (mean() and std_dev() have their own guards)
-        assert!(ci.lower.is_finite() || ci.lower == 0.0);
-        assert!(ci.upper.is_finite() || ci.upper == 0.0);
+        assert!(ci.lower.is_nan());
+        assert!(ci.upper.is_nan());
 
-        // Test with infinity values
+        // Test with infinity values. mean()/std_dev() propagate +inf, so the
+        // margin is +inf: the lower bound becomes inf - inf = NaN and the upper
+        // bound stays +inf. Both are deterministically non-finite (propagated).
         let values_with_inf = vec![1.0, 2.0, f64::INFINITY, 4.0, 5.0];
         let ci = confidence_interval_95(&values_with_inf);
-        // Should fallback to mean when margin is not finite
-        assert!(ci.lower.is_finite() || ci.lower == 0.0);
-        assert!(ci.upper.is_finite() || ci.upper == 0.0);
+        assert!(ci.lower.is_nan());
+        assert!(ci.upper.is_infinite() && ci.upper.is_sign_positive());
 
         // Test with very small values that might cause precision issues
         let tiny_values = vec![1e-300, 2e-300, 3e-300];
@@ -3123,10 +3137,15 @@ mod tests {
         assert!(result.is_finite());
         assert!(result.abs() < f64::EPSILON);
 
-        // Test with very spread out values
+        // Test with very spread out values. The variance of [tiny, MAX/2] is so
+        // large that Welford's intermediate `m2` accumulator overflows f64 to
+        // +inf before the final sqrt can bring it back into range, so std_dev
+        // returns +inf. Prod only guards non-finite INPUTS (returns NaN/inf for
+        // NaN/inf elements); it does not guard intermediate overflow on finite
+        // inputs, so the overflow is propagated as +inf.
         let spread_values = vec![f64::MIN_POSITIVE, f64::MAX / 2.0];
         let result = std_dev(&spread_values);
-        assert!(result.is_finite() || result == 0.0);
+        assert!(result.is_infinite() && result.is_sign_positive());
     }
 
     #[test]
@@ -3625,7 +3644,13 @@ mod tests {
         // Test push_bounded with zero capacity
         let mut items = vec![1, 2, 3];
         push_bounded(&mut items, 4, 0);
-        assert_eq!(items, vec![4], "Zero capacity should keep only new item");
+        // Zero capacity clears the vector AND drops the incoming item (prod:
+        // `if cap == 0 { items.clear(); return; }` in lib.rs::push_bounded), so
+        // nothing is retained — not even the new item.
+        assert!(
+            items.is_empty(),
+            "Zero capacity should clear all and drop the new item"
+        );
 
         // Test with capacity 1
         push_bounded(&mut items, 5, 1);

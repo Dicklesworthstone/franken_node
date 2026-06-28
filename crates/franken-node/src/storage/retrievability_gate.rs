@@ -1099,11 +1099,17 @@ mod tests {
     #[test]
     fn test_hash_mismatch_blocks() {
         let mut gate = make_gate();
+        // Observed hash is a well-formed canonical digest that differs from the
+        // caller-supplied expected digest → must surface as a hash mismatch (not
+        // as an invalid-observed-hash rejection, which is reserved for malformed
+        // stored digests).
+        let observed = content_hash(b"observed-archive-content");
+        let expected = content_hash(b"expected-caller-content");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("wrong_hash"),
+            good_state(&observed),
         );
         let err = gate
             .check_retrievability(
@@ -1111,7 +1117,7 @@ mod tests {
                 &sid("s1"),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "expected_hash",
+                &expected,
             )
             .unwrap_err();
         assert_eq!(err.code, ERR_HASH_MISMATCH);
@@ -1195,12 +1201,15 @@ mod tests {
     #[test]
     fn test_latency_exceeded_blocks() {
         let mut gate = make_gate();
+        // Latency is checked after the observed-hash validity gate, so seed a
+        // well-formed canonical digest to ensure the latency path is exercised.
+        let hash = content_hash(b"latency-exceeded-payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
-                content_hash: "abc".to_string(),
+                content_hash: hash.clone(),
                 reachable: true,
                 fetch_latency_ms: 10000, // exceeds 5000 default
             },
@@ -1211,7 +1220,7 @@ mod tests {
                 &sid("s1"),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "abc",
+                &hash,
             )
             .unwrap_err();
         assert_eq!(err.code, ERR_LATENCY_EXCEEDED);
@@ -1220,12 +1229,15 @@ mod tests {
     #[test]
     fn test_latency_at_limit_is_rejected() {
         let mut gate = make_gate();
+        // Seed a well-formed canonical digest so the latency gate (which runs
+        // after observed-hash validation) is the failing check.
+        let hash = content_hash(b"latency-at-limit-payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
-                content_hash: "abc".to_string(),
+                content_hash: hash.clone(),
                 reachable: true,
                 fetch_latency_ms: 5000, // exactly at limit → fail-closed
             },
@@ -1236,7 +1248,7 @@ mod tests {
                 &sid("s1"),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "abc",
+                &hash,
             )
             .unwrap_err();
         assert_eq!(err.code, ERR_LATENCY_EXCEEDED);
@@ -1425,12 +1437,15 @@ mod tests {
             max_latency_ms: 25,
             require_hash_match: false,
         });
+        // Even in relaxed-hash mode the observed digest must be well-formed; seed
+        // a canonical digest so the latency-at-limit gate is what fails closed.
+        let hash = content_hash(b"relaxed-latency-payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
-                content_hash: "archive_hash".to_string(),
+                content_hash: hash.clone(),
                 reachable: true,
                 fetch_latency_ms: 25,
             },
@@ -2114,7 +2129,9 @@ mod tests {
             .attempt_eviction(&aid("a1"), &sid("s1"), "")
             .expect_err("empty digest must not satisfy required hash gate");
 
-        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        // A malformed (here: empty) stored digest fails closed at the
+        // observed-hash validity gate, which precedes the hash-match check.
+        assert_eq!(err.code, ERR_INVALID_OBSERVED_HASH);
     }
 
     #[test]
@@ -2135,7 +2152,9 @@ mod tests {
             .attempt_eviction(&aid("a1"), &sid("s1"), "archive hash")
             .expect_err("whitespace-bearing digest must fail closed");
 
-        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        // Whitespace makes the stored digest non-canonical → rejected at the
+        // observed-hash validity gate (fail-closed), ahead of any hash compare.
+        assert_eq!(err.code, ERR_INVALID_OBSERVED_HASH);
     }
 
     #[test]
@@ -2156,7 +2175,8 @@ mod tests {
             .attempt_eviction(&aid("a1"), &sid("s1"), "deadbeef")
             .expect_err("short hex digest must fail closed");
 
-        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        // A too-short digest is non-canonical → observed-hash validity gate.
+        assert_eq!(err.code, ERR_INVALID_OBSERVED_HASH);
     }
 
     #[test]
@@ -2178,7 +2198,9 @@ mod tests {
             .attempt_eviction(&aid("a1"), &sid("s1"), &canonical)
             .expect_err("uppercase hex digest must fail closed");
 
-        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        // Canonical digests must be lowercase; uppercase fails the observed-hash
+        // validity gate (fail-closed) before reaching the hash-match check.
+        assert_eq!(err.code, ERR_INVALID_OBSERVED_HASH);
     }
 
     #[test]
@@ -2200,7 +2222,9 @@ mod tests {
             .attempt_eviction(&aid("a1"), &sid("s1"), &digest)
             .expect_err("digest-length non-hex string must fail closed");
 
-        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        // Correct length but non-hex characters → non-canonical → observed-hash
+        // validity gate rejects it (fail-closed).
+        assert_eq!(err.code, ERR_INVALID_OBSERVED_HASH);
     }
 
     #[test]
@@ -2222,7 +2246,9 @@ mod tests {
             .attempt_eviction(&aid("a1"), &sid("s1"), digest)
             .expect_err("non-ASCII digest must fail closed");
 
-        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        // Non-ASCII bytes make the stored digest invalid → observed-hash
+        // validity gate (fail-closed).
+        assert_eq!(err.code, ERR_INVALID_OBSERVED_HASH);
     }
 
     #[test]
@@ -2243,7 +2269,8 @@ mod tests {
             .attempt_eviction(&aid("a1"), &sid("s1"), "archive_hash")
             .expect_err("short non-hex digest must fail closed");
 
-        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        // Short, non-hex digest is non-canonical → observed-hash validity gate.
+        assert_eq!(err.code, ERR_INVALID_OBSERVED_HASH);
     }
 
     #[test]
@@ -2264,7 +2291,9 @@ mod tests {
             .attempt_eviction(&aid("a1"), &sid("s1"), "not:a:digest")
             .expect_err("punctuation digest must fail closed");
 
-        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        // Punctuation makes the stored digest non-hex/non-canonical →
+        // observed-hash validity gate (fail-closed).
+        assert_eq!(err.code, ERR_INVALID_OBSERVED_HASH);
     }
 
     #[test]
@@ -2285,7 +2314,9 @@ mod tests {
             .attempt_eviction(&aid("a1"), &sid("s1"), "archive\nhash")
             .expect_err("control-character digest must fail closed");
 
-        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        // Control characters make the stored digest invalid → observed-hash
+        // validity gate (fail-closed), before any hash comparison.
+        assert_eq!(err.code, ERR_INVALID_OBSERVED_HASH);
     }
 
     #[test]
@@ -2736,16 +2767,20 @@ mod storage_migration_integration_tests {
     #[test]
     fn hash_mismatch_and_migration_evidence_both_gate() {
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
+        // Both digests are well-formed canonical digests that differ, so the
+        // failure is a genuine hash mismatch (not a malformed-digest rejection).
+        let observed = content_hash(b"corrupted-archive-content");
+        let expected = content_hash(b"expected-archive-content");
         gate.register_target(
             &aid("art-3"),
             &sid("seg-3"),
             StorageTier::L3Archive,
-            good_target("corrupted_hash"),
+            good_target(&observed),
         );
 
         // Storage gate: hash mismatch
         let err = gate
-            .attempt_eviction(&aid("art-3"), &sid("seg-3"), "expected_hash")
+            .attempt_eviction(&aid("art-3"), &sid("seg-3"), &expected)
             .unwrap_err();
         assert_eq!(err.code, ERR_HASH_MISMATCH);
 
@@ -2947,19 +2982,22 @@ mod storage_migration_integration_tests {
     #[test]
     fn latency_failure_blocks_despite_stable_migration() {
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
+        // Well-formed canonical digest so the latency gate (which follows the
+        // observed-hash validity gate) is the check that fails closed.
+        let hash = content_hash(b"latency-block-payload");
         gate.register_target(
             &aid("art-8"),
             &sid("seg-8"),
             StorageTier::L3Archive,
             TargetTierState {
-                content_hash: "h1".to_string(),
+                content_hash: hash.clone(),
                 reachable: true,
                 fetch_latency_ms: 15000, // exceeds 5000ms limit
             },
         );
 
         let err = gate
-            .attempt_eviction(&aid("art-8"), &sid("seg-8"), "h1")
+            .attempt_eviction(&aid("art-8"), &sid("seg-8"), &hash)
             .unwrap_err();
         assert_eq!(err.code, ERR_LATENCY_EXCEEDED);
 
@@ -3207,23 +3245,25 @@ mod storage_migration_integration_tests {
                 "Unicode injection should not create admin segments"
             );
 
-            // Verify null bytes don't appear in identifiers
-            assert!(
-                !artifact_id.0.contains('\0'),
-                "Artifact ID should not contain null bytes"
-            );
-            assert!(
-                !segment_id.0.contains('\0'),
-                "Segment ID should not contain null bytes"
-            );
+            // Null bytes (and any control characters) are a hard injection
+            // attempt: prod's identifier validators reject them, so such a proof
+            // must fail closed rather than be admitted. (Some of these vectors
+            // deliberately embed a NUL/control character.)
+            let injects_control = artifact_id.0.chars().any(|c| c.is_control())
+                || segment_id.0.chars().any(|c| c.is_control());
 
             // Verify proof request works deterministically despite Unicode
             let proof_result =
                 proof_eviction_safety(&mut gate, &artifact_id, &segment_id, &test_hash);
             match proof_result {
                 Ok(_receipt) => {
-                    // If proof passed, verify it was for the correct identifiers
-                    assert!(gate.receipts().len() > 0, "Should have receipts");
+                    // Admission is only acceptable when no control-character
+                    // injection was present in the identifiers.
+                    assert!(
+                        !injects_control,
+                        "control-character-injected identifiers must be rejected, not admitted"
+                    );
+                    assert!(!gate.receipts().is_empty(), "Should have receipts");
                 }
                 Err(_) => {
                     // Graceful rejection of Unicode-injected IDs is acceptable
@@ -3953,21 +3993,34 @@ mod storage_migration_integration_tests {
 
             match result {
                 Ok(proof) => {
-                    // Timestamp should saturate at u64::MAX, not wrap to 0
+                    // saturating_add: the counter climbs from u64::MAX-5 toward
+                    // u64::MAX and never wraps to 0.
                     assert!(proof.proof_timestamp >= u64::MAX.saturating_sub(10));
-                    assert_eq!(proof.proof_timestamp, u64::MAX);
+                    // After enough iterations the counter saturates exactly at
+                    // u64::MAX and stays there (no wrap-around).
+                    if i >= 5 {
+                        assert_eq!(proof.proof_timestamp, u64::MAX);
+                        assert_eq!(gate.timestamp_counter, u64::MAX);
+                    }
                 }
-                Err(e) => assert!(false, "overflow test #{} failed: {}", i, e),
+                Err(e) => panic!("overflow test #{i} failed: {e}"),
             }
-
-            // Counter should remain at u64::MAX after saturation
-            assert_eq!(gate.timestamp_counter, u64::MAX);
         }
 
-        // Verify receipts all have saturated timestamps
+        // Counter has saturated at u64::MAX after the loop.
+        assert_eq!(gate.timestamp_counter, u64::MAX);
+
+        // No receipt wrapped past u64::MAX, and the final receipts saturate at it.
         for receipt in &gate.receipts {
-            assert_eq!(receipt.proof_timestamp, u64::MAX);
+            assert!(receipt.proof_timestamp >= u64::MAX.saturating_sub(10));
         }
+        assert_eq!(
+            gate.receipts
+                .last()
+                .expect("at least one receipt recorded")
+                .proof_timestamp,
+            u64::MAX
+        );
     }
 
     #[test]
@@ -4095,14 +4148,18 @@ mod storage_migration_integration_tests {
                     attack_type, malicious_hash
                 ),
                 Err(e) => {
-                    // Should fail with hash mismatch, not other errors
-                    if malicious_hash.is_empty() {
-                        // Empty hash has special handling in content_digest_matches
-                        assert_eq!(e.code, ERR_HASH_MISMATCH);
+                    // Every collision vector fails closed. Malformed stored
+                    // digests (empty, uppercase, domain-separator-injected, …)
+                    // are rejected at the observed-hash validity gate; well-formed
+                    // canonical digests that simply differ fail at the hash-match
+                    // gate. Both outcomes are correct fail-closed behavior.
+                    if invalid_observed_content_hash_reason(&malicious_hash).is_some() {
+                        assert_eq!(e.code, ERR_INVALID_OBSERVED_HASH);
+                        assert!(e.reason.label() == "invalid_observed_hash");
                     } else {
                         assert_eq!(e.code, ERR_HASH_MISMATCH);
+                        assert!(e.reason.label() == "hash_mismatch");
                     }
-                    assert!(e.reason.label() == "hash_mismatch");
 
                     // Timing should be consistent (within reasonable bounds for constant-time)
                     assert!(

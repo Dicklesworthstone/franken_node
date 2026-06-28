@@ -1,0 +1,12 @@
+---
+source: crates/franken-node/src/supply_chain/trust_card.rs
+expression: scrubbed
+---
+extension: npm:@acme/security-scanner@2.1.0
+publisher: ACME Corporation
+certification: Gold
+reputation: 8750bp (Improving)
+revocation: active
+quarantine: false
+capabilities: network.scan, fs.read_config
+risk: Low - Well-maintained security tool with verified provenance

@@ -1305,9 +1305,14 @@ mod tests {
         let request_bytes = b"shared request data";
         let epoch = 1234567890;
 
-        // Test domain separation with computation names that might bypass separation
-        let binary_suffix_a = String::from_utf8_lossy(b"suffix\xFF").into_owned();
-        let binary_suffix_b = String::from_utf8_lossy(b"suffix\xFE").into_owned();
+        // Test domain separation with computation names that might bypass separation.
+        // NOTE(bd-o776s): raw bytes 0xFF and 0xFE BOTH lossily decode to U+FFFD, which
+        // collapses the two suffixes into the same `&str` (derive_key takes &str, so the
+        // distinction is destroyed before it reaches the hasher). Use two distinct valid
+        // non-ASCII code points so the property is exercised against a real byte-level
+        // difference (U+00FF -> C3 BF, U+00FE -> C3 BE).
+        let binary_suffix_a = "suffix\u{00FF}".to_string();
+        let binary_suffix_b = "suffix\u{00FE}".to_string();
 
         let separation_tests = [
             // Basic separation
@@ -1402,16 +1407,30 @@ mod tests {
                 "very_long_computation_name_that_might_confuse",
                 b"short".as_slice(),
             ),
-            // Zero-length field tests
-            ("", b"request".as_slice()),
+            // Zero-length field tests. NOTE(bd-o776s): prod now fail-closes on an empty
+            // (or whitespace-only) computation name (IdempotencyError::EmptyComputationName),
+            // so an empty name is no longer a derivable key input. The empty-name rows are
+            // covered by the explicit fail-closed assertion below; an empty *request* with a
+            // valid name is still supported and remains exercised here.
             ("compute", b"".as_slice()),
-            ("", b"".as_slice()),
             // Length boundary tests
             ("x", b"y".as_slice()),
             (x_255.as_str(), b"y".as_slice()),
             ("x", y_255.as_slice()),
             (x_65535.as_str(), y_65535.as_slice()),
         ];
+
+        // Empty / whitespace-only computation names must fail closed (no derivable key),
+        // preserving the length-prefix separation invariant at the zero-length boundary.
+        for empty_name in ["", " ", "\t"] {
+            assert!(
+                matches!(
+                    IdempotencyKeyDeriver::default().derive_key(empty_name, epoch, b"request"),
+                    Err(IdempotencyError::EmptyComputationName)
+                ),
+                "empty computation name {empty_name:?} must be rejected fail-closed"
+            );
+        }
 
         let mut derived_keys: Vec<(&str, Vec<u8>, IdempotencyKey)> = Vec::new();
 

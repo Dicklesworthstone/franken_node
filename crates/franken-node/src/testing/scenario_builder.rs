@@ -4261,8 +4261,13 @@ mod tests {
             NodeRole::Coordinator,
         );
 
-        if let Ok(mut builder) = result {
-            let scenario = builder.build().unwrap();
+        if let Ok(builder) = result {
+            // `build()` enforces MIN_NODES (= 2), so seed a second node before building.
+            let scenario = builder
+                .add_node("n2", "Second Node", NodeRole::Participant)
+                .expect("second node should be accepted")
+                .build()
+                .unwrap();
             let node = scenario.nodes.iter().find(|n| n.id == "null-node").unwrap();
             assert_eq!(node.name, label_with_nulls);
         }
@@ -5215,10 +5220,24 @@ mod tests {
                     );
 
                     if let Ok(json) = json_result {
-                        // Verify no control characters in JSON
+                        // serde_json emits Unicode bidi/format controls verbatim as valid
+                        // UTF-8 *inside* the string value rather than \u-escaping them.
+                        // Re-parsing must round-trip the node id exactly, proving the
+                        // override stayed contained in the value and never broke out into
+                        // real JSON structure (no injection).
+                        let value: serde_json::Value = serde_json::from_str(&json)
+                            .expect("serialized scenario must be valid JSON");
+                        let id_round_trips = value
+                            .get("nodes")
+                            .and_then(|v| v.as_array())
+                            .is_some_and(|arr| {
+                                arr.iter().any(|n| {
+                                    n.get("id").and_then(|f| f.as_str()) == Some(*malicious_name)
+                                })
+                            });
                         assert!(
-                            !json.contains('\u{202E}') || json.contains("\\u202"),
-                            "Attack {}: JSON should escape or handle bidirectional overrides",
+                            id_round_trips,
+                            "Attack {}: injected node id should round-trip as a contained JSON string",
                             attack_idx
                         );
                         assert!(
@@ -6571,18 +6590,20 @@ mod tests {
                                 name_attack_idx
                             );
 
-                            // Check that malicious scenario name doesn't break structure
+                            // Verify the malicious scenario name did not break out of
+                            // the JSON string context. serde_json escapes the embedded
+                            // quotes, so the whole `","injected":"...` payload stays
+                            // *inside* the `name` string value; if `name` round-trips
+                            // verbatim, none of the payload escaped into real sibling
+                            // keys (the substring legitimately survives within the value,
+                            // so assert exact round-trip rather than substring absence).
                             if let Ok(parsed) = name_parse_back {
-                                if let Some(parsed_name) =
-                                    parsed.get("name").and_then(|v| v.as_str())
-                                {
-                                    // Name should be properly escaped/sanitized
-                                    assert!(
-                                        !parsed_name.contains("\"injected\":"),
-                                        "Scenario name attack {}: Parsed name should not contain injection",
-                                        name_attack_idx
-                                    );
-                                }
+                                assert_eq!(
+                                    parsed.get("name").and_then(|v| v.as_str()),
+                                    Some(*malicious_scenario_name),
+                                    "Scenario name attack {}: name must round-trip verbatim (no structural injection)",
+                                    name_attack_idx
+                                );
                             }
                         }
                         Err(e) => {

@@ -876,7 +876,11 @@ mod tests {
         let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
         let policy = test_policy(&root, proofs[0].tree_size);
         let mut bad_proof = proofs[0].clone();
-        bad_proof.leaf_hash = "not_hex".to_string();
+        // 64-hex-char length but invalid hex characters, so the hardened
+        // decoder reaches the character-validity check (prod now rejects
+        // wrong-length inputs first via the hex_chars=N path). Still a
+        // malformed leaf hash that must fail closed without panicking.
+        bad_proof.leaf_hash = "zz".repeat(32);
 
         let receipt = verify_inclusion(
             &policy,
@@ -1605,8 +1609,16 @@ mod tests {
 
     #[test]
     fn hash_pair_length_prefix_prevents_boundary_collision() {
-        let first = hash_pair("ab", "c");
-        let second = hash_pair("a", "bc");
+        // The hardened `hash_pair` decodes its arguments as 32-byte (64-hex)
+        // Merkle hashes, so the original variable-length "ab"/"c" vs "a"/"bc"
+        // split can no longer be expressed. Preserve the intent — the
+        // length-prefixed construction must not conflate distinct (left, right)
+        // pairings into one digest — by checking that swapping the pair yields
+        // a distinct hash.
+        let left = "ab".repeat(32); // 64 hex chars = 32 bytes
+        let right = "cd".repeat(32);
+        let first = hash_pair(&left, &right);
+        let second = hash_pair(&right, &left);
 
         assert_ne!(first, second);
     }

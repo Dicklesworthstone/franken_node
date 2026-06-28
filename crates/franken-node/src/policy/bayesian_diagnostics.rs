@@ -1997,14 +1997,21 @@ mod tests {
 
             match json_result {
                 Ok(json) => {
-                    // If serialization succeeds, verify no injection
+                    // JSON serialization neutralizes injection by ESCAPING
+                    // structural metacharacters (quotes, control bytes), NOT by
+                    // stripping payload text. Opaque candidate names such as
+                    // `<script>`/`HTTP/1.1` are preserved verbatim as inert data
+                    // and must survive a lossless round-trip (asserted below).
+                    // The structural defenses are: embedded `"` is escaped to
+                    // `\"`, and raw control bytes (NUL/CR/LF) never appear
+                    // unescaped — so the payload cannot break out of its token.
                     assert!(
-                        !json.contains("<script>"),
-                        "Should not contain script injection"
+                        json.contains("\\\""),
+                        "embedded double-quote must be escaped to prevent JSON breakout"
                     );
                     assert!(
-                        !json.contains("HTTP/1.1"),
-                        "Should not contain HTTP injection"
+                        !json.contains('\u{0000}'),
+                        "raw NUL byte must be escaped, not emitted literally"
                     );
 
                     // Verify can be safely deserialized

@@ -3519,16 +3519,31 @@ mod tests {
 
     #[test]
     fn test_register_replay_capsule_evicts_oldest_issued_at_with_capsule_id_tiebreak() {
-        let mut reg = make_registry();
+        // The fail-closed freshness check (`replay_capsule_freshness_window_valid`)
+        // now requires `issued_at <= now < expires_at`, so EVERY capsule must be
+        // within its validity interval at the instant it is registered. This test
+        // places MAX_REPLAY_CAPSULES capsules one second apart, so the issued_at
+        // values span >MAX_REPLAY_CAPSULES seconds — far wider than the default
+        // 3600s window. Configure the registry (and matching per-capsule expires_at)
+        // with a freshness window wide enough to keep all of them simultaneously
+        // valid for the whole (slow, signing-bound) run, while still giving each
+        // capsule a distinct, ordered issued_at for the eviction/tiebreak assertions.
+        let span_secs =
+            i64::try_from(MAX_REPLAY_CAPSULES + 2).expect("capsule span should fit within i64");
+        let freshness_secs = span_secs + 3600;
+        let mut reg = VerifierEconomyRegistry::with_replay_capsule_freshness_secs(
+            u64::try_from(freshness_secs).expect("freshness window should fit within u64"),
+        );
         let (verifier, attestation) = register_and_submit(&mut reg);
         let signing_key = registration_signing_key();
-        let base = chrono::Utc::now() - chrono::Duration::minutes(50);
+        // Anchor the oldest capsule comfortably in the past so even the newest
+        // (issued at base + span_secs) stays at or before `now` for the full run.
+        let base = chrono::Utc::now() - chrono::Duration::seconds(span_secs + 120);
 
         let register_at =
             |reg: &mut VerifierEconomyRegistry, capsule_id: &str, label: &str, offset_secs: i64| {
                 let issued_at = base + chrono::Duration::seconds(offset_secs);
-                let expires_at =
-                    issued_at + chrono::Duration::seconds(DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS);
+                let expires_at = issued_at + chrono::Duration::seconds(freshness_secs);
                 register_capsule_with_times(
                     reg,
                     &verifier.verifier_id,
@@ -5226,10 +5241,10 @@ mod tests {
         // Format verification: Assert non-sensitive fields still appear correctly
         assert!(debug_output.contains("test-verifier"), "Name should appear");
         assert!(
-            debug_output.contains("Compliance"),
+            debug_output.contains("Conformance"),
             "Capabilities should appear"
         );
-        assert!(debug_output.contains("Enterprise"), "Tier should appear");
+        assert!(debug_output.contains("Advanced"), "Tier should appear");
         assert!(
             debug_output.contains("contact"),
             "Field name should appear (but not value)"

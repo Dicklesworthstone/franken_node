@@ -2151,7 +2151,17 @@ mod tests {
     fn receipt_digest_mismatch_fails_closed() {
         let (dir, store, key, _entry) = populated_store(|_| {});
         let receipt_path = dir.path().join("receipts/bd-8j9au.json");
-        fs::write(receipt_path, b"{\"tampered\": true}").expect("tampered receipt");
+        // Overwrite the on-disk receipt with a still-valid receipt whose content
+        // was altered (a different recorded duration). It parses and satisfies
+        // every key/command/input/policy invariant, so the lookup reaches the
+        // receipt-digest comparison and fails closed there — exercising the
+        // genuine digest-mismatch path. A non-receipt JSON body (e.g.
+        // `{"tampered": true}`) would instead be rejected as ERR_VPC_MALFORMED_ENTRY
+        // at the serde parse step before the digest check is ever reached.
+        let mut tampered = fresh_receipt();
+        tampered.timing.duration_ms = tampered.timing.duration_ms.wrapping_add(1);
+        let tampered_bytes = serde_json::to_vec_pretty(&tampered).expect("tampered receipt json");
+        fs::write(receipt_path, tampered_bytes).expect("tampered receipt");
 
         let err = store
             .lookup(&key, ts(4))

@@ -1753,8 +1753,11 @@ mod tests {
         assert!(human_report.contains("Workspace Pressure Report"));
         assert!(human_report.contains("📊 Resource Summary"));
         assert!(human_report.contains("🎯 Policy Decisions"));
-        assert!(human_report.contains("2.0 GB")); // Free disk formatting
-        assert!(human_report.contains("3.0 GB")); // Target dir formatting
+        // `format_bytes` uses binary (1024) units, so the decimal byte inputs render
+        // as 2_000_000_000 B → "1.9 GB" and 3_000_000_000 B → "2.8 GB"
+        // (bd-o776s: reconcile expectation to current prod formatter).
+        assert!(human_report.contains("1.9 GB")); // Free disk formatting
+        assert!(human_report.contains("2.8 GB")); // Target dir formatting
         assert!(human_report.contains("60.0%")); // Memory pressure
     }
 

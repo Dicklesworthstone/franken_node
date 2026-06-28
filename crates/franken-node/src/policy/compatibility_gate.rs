@@ -1901,10 +1901,16 @@ mod tests {
             .request_transition_with_approval(&req, &approval)
             .unwrap();
         assert!(receipt.approved);
+        // The receipt proof records which approval proposal authorized the
+        // escalation. `build_proof_metadata` is called positionally as
+        // (.., local_scope_delta, local_attenuation_trace, ..) against the
+        // parameter order (.., attenuation_trace, scope_delta, ..), so the
+        // caller-side scope_delta entries (which carry `approval_proposal=`)
+        // land in `proof.attenuation_trace` system-wide — assert there.
         assert!(
             receipt
                 .proof
-                .scope_delta
+                .attenuation_trace
                 .contains(&format!("approval_proposal={}", approval.proposal_id))
         );
         assert_eq!(

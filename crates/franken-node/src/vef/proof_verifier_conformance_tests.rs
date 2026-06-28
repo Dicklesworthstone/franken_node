@@ -675,10 +675,11 @@ fn test_decision_summary_accuracy() {
 /// Test edge cases in push_bounded function
 #[test]
 fn test_push_bounded_edge_cases() {
-    // Test with capacity 0 (should handle gracefully)
+    // Test with capacity 0 (should handle gracefully). Prod semantics: a zero capacity has
+    // no room for any element, so push_bounded clears the vec and does NOT push the new item.
     let mut items = vec![1, 2, 3];
     push_bounded(&mut items, 4, 0);
-    assert_eq!(items, vec![4], "Should handle zero capacity");
+    assert_eq!(items, Vec::<i32>::new(), "Should handle zero capacity");
 
     // Test with capacity 1 (constant replacement)
     let mut items = vec![1];

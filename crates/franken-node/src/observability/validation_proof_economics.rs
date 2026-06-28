@@ -780,10 +780,12 @@ mod tests {
         let report = generator.generate_report(&proof_statuses, &debt_ledger, reporting_period);
 
         // Check savings by evidence source
+        // Key is `ProofEvidenceSource::as_str()` (snake_case, validation_broker.rs:293),
+        // not the PascalCase variant name.
         let coalescing_savings = report
             .economics_breakdown
             .savings_by_evidence_source
-            .get("CoalescedCompleted")
+            .get("coalesced_completed")
             .expect("Coalescing savings should exist");
 
         assert_eq!(coalescing_savings.duplicate_proofs_avoided, 1);

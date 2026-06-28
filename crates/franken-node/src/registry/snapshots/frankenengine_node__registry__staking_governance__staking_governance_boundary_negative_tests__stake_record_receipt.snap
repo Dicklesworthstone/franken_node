@@ -1,0 +1,15 @@
+---
+source: crates/franken-node/src/registry/staking_governance.rs
+expression: scrubbed
+---
+{
+  "id": 99887,
+  "publisher_id": "enterprise-publisher",
+  "amount": 5000,
+  "state": "active",
+  "risk_tier": "critical",
+  "deposited_at": [EPOCH],
+  "expires_at": null,
+  "withdrawn_at": null,
+  "slashed_at": null
+}

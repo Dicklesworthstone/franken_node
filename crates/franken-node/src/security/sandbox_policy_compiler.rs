@@ -962,12 +962,20 @@ mod tests {
                 capability: malicious_cap.to_string(),
                 access: AccessLevel::Deny,
             });
-            // Should not confuse capability matching
-            let result = validate_policy(&policy);
-            assert!(
-                result.is_ok(),
-                "Unicode in capability should not break validation"
-            );
+            // Validation must handle the injection safely without panicking, and must
+            // never silently alias a standard capability. Prod trims and rejects
+            // capability names padded with Unicode whitespace (e.g. U+2028 LINE
+            // SEPARATOR / U+2029), so a clean fail-closed CompileError is also valid.
+            match validate_policy(&policy) {
+                Ok(()) => assert!(
+                    !CAPABILITIES.contains(malicious_cap),
+                    "injected capability must not alias a standard capability"
+                ),
+                Err(SandboxError::CompileError { .. }) => {}
+                Err(other) => {
+                    panic!("Unicode in capability produced an unexpected error: {other}")
+                }
+            }
         }
     }
 
@@ -978,7 +986,8 @@ mod tests {
         let mut tracker = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
 
         // Attempt memory exhaustion by rapidly changing profiles to fill audit log
-        for i in 0..MAX_AUDIT_LOG_ENTRIES.saturating_mul(3) {
+        let total_changes = MAX_AUDIT_LOG_ENTRIES.saturating_mul(3);
+        for i in 0..total_changes {
             let profile = if i % 2 == 0 {
                 SandboxProfile::Moderate
             } else {
@@ -996,23 +1005,19 @@ mod tests {
             );
         }
 
-        // Audit log should be bounded to MAX_AUDIT_LOG_ENTRIES
-        assert!(
-            tracker.audit_log.len() <= MAX_AUDIT_LOG_ENTRIES,
-            "Audit log exceeded maximum capacity: {} > {}",
+        // SECURITY (bd-2n0k4): the audit log is intentionally UNBOUNDED so that
+        // security audit events are NEVER silently dropped. Flooding it must not
+        // evict prior records, so every change is retained: the initial assignment
+        // plus one record per profile change.
+        assert_eq!(
             tracker.audit_log.len(),
-            MAX_AUDIT_LOG_ENTRIES
+            total_changes.saturating_add(1),
+            "Every audit event must be retained under flooding (no silent drop)"
         );
 
-        // Verify oldest entries were evicted (FIFO behavior)
-        if tracker.audit_log.len() == MAX_AUDIT_LOG_ENTRIES {
-            let oldest_reason = &tracker.audit_log[0].reason;
-            assert!(
-                !oldest_reason.contains("change_0"),
-                "Oldest entries should have been evicted, found: {}",
-                oldest_reason
-            );
-        }
+        // The oldest entries must survive the flood (no FIFO eviction of evidence).
+        assert_eq!(tracker.audit_log[0].reason, "initial assignment");
+        assert_eq!(tracker.audit_log[1].reason, "change_0");
     }
 
     #[test]
@@ -1028,14 +1033,20 @@ mod tests {
         );
         assert!(matches!(result, Err(SandboxError::DowngradeBlocked { .. })));
 
-        // Multi-step downgrade attempts through intermediate levels
+        // Multi-step downgrade attempts through intermediate levels are also blocked:
+        // from Permissive (most permissive, level 3) moving to the more-restrictive
+        // Moderate (level 2) is itself a downgrade and must not succeed without an
+        // explicit override.
         let result1 = tracker.change_profile(
             SandboxProfile::Moderate,
             "step1".into(),
             "ts1".into(),
             false,
         );
-        assert!(result1.is_ok(), "Upgrade should succeed");
+        assert!(
+            matches!(result1, Err(SandboxError::DowngradeBlocked { .. })),
+            "Intermediate downgrade step should be blocked"
+        );
 
         let result2 =
             tracker.change_profile(SandboxProfile::Strict, "step2".into(), "ts2".into(), false);
@@ -1044,9 +1055,9 @@ mod tests {
             "Subsequent downgrade should still be blocked"
         );
 
-        // Verify state consistency after blocked attempts
-        assert_eq!(tracker.current_profile, SandboxProfile::Moderate);
-        assert_eq!(tracker.compiled_policy.profile, SandboxProfile::Moderate);
+        // Verify state consistency after blocked attempts: profile is unchanged.
+        assert_eq!(tracker.current_profile, SandboxProfile::Permissive);
+        assert_eq!(tracker.compiled_policy.profile, SandboxProfile::Permissive);
 
         // Override flag should allow downgrade with explicit permission
         let result3 = tracker.change_profile(
@@ -1378,7 +1389,9 @@ mod tests {
 
         let mut tracker = ProfileTracker::new("conn-initial".into(), SandboxProfile::Strict);
 
-        // Fill audit log exactly to capacity
+        // Record one transition per iteration. The audit log is intentionally
+        // UNBOUNDED (bd-2n0k4: security audit events must never be silently
+        // dropped), so it grows monotonically with no FIFO eviction.
         for i in 1..MAX_AUDIT_LOG_ENTRIES {
             let result = tracker.change_profile(
                 if i % 2 == 0 {
@@ -1390,16 +1403,18 @@ mod tests {
                 format!("ts_{}", i),
                 true,
             );
-            assert!(result.is_ok(), "Should fill audit log without error");
+            assert!(result.is_ok(), "Should record audit entry without error");
         }
 
+        // 1 initial assignment + (MAX - 1) recorded transitions.
         assert_eq!(tracker.audit_log.len(), MAX_AUDIT_LOG_ENTRIES);
 
-        // Verify FIFO eviction behavior
+        // FIFO append order: the oldest entry stays at the head (never evicted).
         let first_entry_reason = tracker.audit_log[0].reason.clone();
         assert_eq!(first_entry_reason, "initial assignment");
 
-        // Add one more entry to trigger eviction
+        // Add one more entry; because the log is unbounded it GROWS rather than
+        // evicting the oldest record.
         let overflow_result = tracker.change_profile(
             SandboxProfile::Permissive,
             "overflow_trigger".into(),
@@ -1408,14 +1423,18 @@ mod tests {
         );
 
         assert!(overflow_result.is_ok(), "Overflow entry should succeed");
-        assert_eq!(tracker.audit_log.len(), MAX_AUDIT_LOG_ENTRIES);
+        assert_eq!(
+            tracker.audit_log.len(),
+            MAX_AUDIT_LOG_ENTRIES + 1,
+            "Audit log is unbounded: the extra event is retained, not evicted"
+        );
 
-        // Initial entry should be evicted, first entry should now be "fill_entry_1"
+        // The oldest entry must NOT be evicted under append pressure.
         let new_first_entry = &tracker.audit_log[0];
-        assert_eq!(new_first_entry.reason, "fill_entry_1");
+        assert_eq!(new_first_entry.reason, "initial assignment");
 
-        // Last entry should be the overflow trigger
-        let last_entry = &tracker.audit_log[MAX_AUDIT_LOG_ENTRIES - 1];
+        // The newest entry, appended at the tail, is the overflow trigger.
+        let last_entry = tracker.audit_log.last().unwrap();
         assert_eq!(last_entry.reason, "overflow_trigger");
 
         // Test zero capacity edge case

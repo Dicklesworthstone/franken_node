@@ -1921,7 +1921,13 @@ mod tests {
                     ExecutionReceipt {
                         schema_version: RECEIPT_SCHEMA_VERSION.to_string(),
                         action_type: ExecutionActionType::NetworkAccess,
-                        capability_context: BTreeMap::new(),
+                        // Prod's receipt validation now requires a non-empty
+                        // capability_context (ERR-VEF-RECEIPT-MISSING-FIELD); this test
+                        // exercises timestamp arithmetic, so supply a minimal valid context.
+                        capability_context: BTreeMap::from([(
+                            "capability".to_string(),
+                            "network.egress".to_string(),
+                        )]),
                         actor_identity: format!("actor-{i}"),
                         artifact_identity: format!("artifact-{i}"),
                         policy_snapshot_hash: format!("sha256:{i:064x}"),
@@ -2129,10 +2135,13 @@ mod tests {
                 vec!["ab".to_string(), "cd".to_string()],
                 vec!["a".to_string(), "bcd".to_string()],
             ),
-            // Test case 2: Empty vs single element
+            // Test case 2: element-count boundary. Prod rejects empty predicate entries
+            // (ERR-VEF-PROOF-INPUT), so probe the count-vs-concatenation collision with a
+            // non-empty single-char element instead of an empty one: with length-prefixing,
+            // ["x","test"] (two entries) must not collide with ["xtest"] (one entry).
             (
-                vec!["".to_string(), "test".to_string()],
-                vec!["test".to_string()],
+                vec!["x".to_string(), "test".to_string()],
+                vec!["xtest".to_string()],
             ),
             // Test case 3: Unicode boundary issues
             (

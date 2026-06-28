@@ -435,8 +435,11 @@ mod tests {
     fn test_rebuild_on_full_detection() {
         let mut filter = CuckooFilter::new(100);
 
-        // Fill filter close to capacity
-        for i in 0..90 {
+        // Fill filter close to capacity.
+        // capacity 100 -> bucket_count = (100/4).next_power_of_two() = 32
+        // -> max_items = (32 * 4 * 95) / 100 = 121; insert 110 so
+        // load_factor = 110/121 = 0.909 > 0.90 (the should_rebuild threshold).
+        for i in 0..110 {
             assert!(filter.insert(&format!("token_{}", i)));
         }
 
@@ -483,9 +486,11 @@ mod tests {
             }
         }
 
-        // Should accept most items but eventually fail when full
+        // Should accept most items but eventually fail when full.
+        // capacity 10 -> bucket_count = (10/4).next_power_of_two() = 2
+        // -> max_items = (2 * 4 * 95) / 100 = 7, so 7 is the real capacity.
         assert!(
-            inserted >= 8,
+            inserted >= 7,
             "Filter should accept most items within capacity"
         );
         assert!(inserted < 20, "Filter should reject some items when full");

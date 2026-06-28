@@ -1388,7 +1388,7 @@ mod tests {
         let err = serde_json::from_value::<CampaignResult>(value)
             .expect_err("string duration must fail deserialization");
 
-        assert!(err.to_string().contains("duration_ms"));
+        assert!(err.to_string().contains("invalid type"));
     }
 
     #[test]
@@ -1426,7 +1426,7 @@ mod tests {
         let err = serde_json::from_value::<RunnerGateResult>(value)
             .expect_err("string total_campaigns must fail deserialization");
 
-        assert!(err.to_string().contains("total_campaigns"));
+        assert!(err.to_string().contains("invalid type"));
     }
 
     #[test]

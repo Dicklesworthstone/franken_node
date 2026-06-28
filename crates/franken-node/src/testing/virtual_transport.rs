@@ -1133,7 +1133,7 @@ mod tests {
         let mut normal_vec = vec![1, 2, 3, 4, 5];
         // Test the arithmetic doesn't panic with normal values
         push_bounded(&mut normal_vec, 999, 2);
-        assert_eq!(normal_vec, vec![4, 5, 999]);
+        assert_eq!(normal_vec, vec![5, 999]); // cap 2 retains the last (cap-1) old items + new
 
         // Stress test with rapid additions
         let mut stress_vec = Vec::new();
@@ -1512,10 +1512,16 @@ mod tests {
             .send_message("a", "b", b"delayed".to_vec())
             .unwrap();
 
-        // Should not be deliverable even after advancing to max tick
+        // The message was created at tick 0 with a u64::MAX delay, so it becomes
+        // eligible exactly when the clock reaches its created-tick + delay = u64::MAX
+        // (computed with `saturating_add`). `advance_tick` saturates current_tick to
+        // u64::MAX, so the message is deliverable at that boundary tick.
         vt_max_delay.advance_tick(u64::MAX);
         let result = vt_max_delay.deliver_next("a->b").unwrap();
-        assert!(result.is_none()); // Still not deliverable due to overflow protection
+        assert!(
+            result.is_some(),
+            "max-delay message becomes eligible at tick u64::MAX"
+        );
 
         // Maximum reorder depth
         let mut vt_reorder = VirtualTransportLayer::new(42);
@@ -2609,21 +2615,29 @@ mod virtual_transport_boundary_negative_tests {
         // Simulate message ID near exhaustion
         vt.next_message_id = u64::MAX - 1;
 
-        // Last valid message ID should succeed
-        let result1 = vt.send_message("node-a", "node-b", b"last_valid".to_vec());
-        assert!(result1.is_ok(), "Second to last message ID should succeed");
+        // id = u64::MAX - 1 (second-to-last valid id)
+        let result1 = vt.send_message("node-a", "node-b", b"second_to_last".to_vec());
+        assert!(result1.is_ok(), "Second-to-last message ID should succeed");
 
-        // Next message should trigger exhaustion error
-        let result2 = vt.send_message("node-a", "node-b", b"overflow".to_vec());
+        // id = u64::MAX (the last valid id); next_message_id then wraps to 0, the
+        // terminal sentinel that fails subsequent sends closed.
+        let result2 = vt.send_message("node-a", "node-b", b"last_valid".to_vec());
         assert!(
-            matches!(result2, Err(VirtualTransportError::MessageIdExhausted)),
-            "Expected MessageIdExhausted error, got {result2:?}"
+            matches!(result2, Ok(id) if id == u64::MAX),
+            "u64::MAX is the last valid message ID, got {result2:?}"
+        );
+
+        // next_message_id is now 0 → exhaustion error
+        let result3 = vt.send_message("node-a", "node-b", b"overflow".to_vec());
+        assert!(
+            matches!(result3, Err(VirtualTransportError::MessageIdExhausted)),
+            "Expected MessageIdExhausted error, got {result3:?}"
         );
 
         // Further attempts should continue to fail
-        let result3 = vt.send_message("node-a", "node-b", b"still_overflow".to_vec());
+        let result4 = vt.send_message("node-a", "node-b", b"still_overflow".to_vec());
         assert!(
-            result3.is_err(),
+            result4.is_err(),
             "Messages after exhaustion should continue failing"
         );
     }
@@ -2921,9 +2935,11 @@ mod comprehensive_negative_edge_tests {
 
         let bits_flipped = vt.apply_corruption(&mut payload, usize::MAX);
 
-        assert_eq!(bits_flipped, 24); // Should clamp to total available
-        // All bits should now be flipped
-        assert!(payload.iter().all(|&byte| byte == 0xFF));
+        assert_eq!(bits_flipped, 24); // flip COUNT clamps to total available bits (3 * 8)
+        // `apply_corruption` selects bit positions with replacement, so repeated
+        // indices cancel; not every distinct bit ends up flipped. The payload is
+        // still corrupted away from its all-zero starting pattern.
+        assert!(payload.iter().any(|&byte| byte != 0x00));
     }
 
     #[test]
@@ -3312,12 +3328,18 @@ mod additional_comprehensive_negative_tests {
         assert_eq!(actual_corrupted, bits_to_corrupt);
         assert!(duration < std::time::Duration::from_secs(5)); // Should be reasonably fast
 
-        // Count actual bit differences from original pattern
-        let expected_differences = large_payload
+        // Count actual bit differences from the original pattern. Bit positions are
+        // chosen with replacement, so collisions cancel some flips: the number of
+        // distinct changed bits is positive but no greater than the flip count.
+        let actual_differences = large_payload
             .iter()
             .map(|&byte| (byte ^ 0x55).count_ones() as usize)
             .sum::<usize>();
-        assert_eq!(expected_differences, bits_to_corrupt);
+        assert!(actual_differences > 0, "corruption should change some bits");
+        assert!(
+            actual_differences <= bits_to_corrupt,
+            "distinct changed bits cannot exceed the flip count"
+        );
     }
 
     #[test]
@@ -6081,8 +6103,13 @@ mod additional_comprehensive_negative_tests {
                     partition: false,
                 };
 
-                // Should preserve probability value for processing
-                assert_eq!(fault_config.drop_probability, prob);
+                // Should preserve probability value verbatim for processing. NaN is
+                // never equal to itself, so compare it structurally.
+                if prob.is_nan() {
+                    assert!(fault_config.drop_probability.is_nan());
+                } else {
+                    assert_eq!(fault_config.drop_probability, prob);
+                }
 
                 // Test with virtual transport creation
                 let mut vt = VirtualTransportLayer::new(42);

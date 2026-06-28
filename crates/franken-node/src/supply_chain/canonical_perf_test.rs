@@ -14,7 +14,7 @@ fn generate_complex_trust_card() -> Value {
             "metadata": {
                 "version": "1.0.0",
                 "created_at": "2026-04-22T10:00:00Z",
-                "hash": format!("{:064x}", (i as u64) * 0x123456789ABCDEF0_u64)
+                "hash": format!("{:064x}", (i as u64).wrapping_mul(0x123456789ABCDEF0_u64))
             }
         }));
     }

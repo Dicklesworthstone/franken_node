@@ -1216,9 +1216,14 @@ mod tests {
 
         let mut state = TrustState::new(1);
 
-        // Insert more records than the limit to test bounding
+        // Insert more records than the limit to test bounding. Prod now admits records by
+        // precedence at capacity (MAX_TRUST_RECORDS == MAX_RECORD_IDS): an equal-precedence
+        // candidate is rejected once full. Give each record a strictly increasing
+        // recorded_at_ms so every new record outranks the lowest incumbent and evicts it,
+        // exercising the bound while keeping the retained set the most-recent MAX_RECORD_IDS.
         for i in 0..(MAX_RECORD_IDS + 100) {
-            let (record, _) = make_record(&format!("record-{:06}", i), 1);
+            let (record, _) =
+                make_record_with_meta(&format!("record-{:06}", i), 1, i as u64, "node-a");
             assert!(state.insert(record));
         }
 
@@ -1463,12 +1468,27 @@ mod tests {
 
     #[test]
     fn test_accepted_record_cap_allows_batches_larger_than_event_log() {
-        assert_eq!(accepted_record_cap(MAX_EVENTS + 1), MAX_EVENTS + 1);
+        // The accepted-record cap is governed by MAX_ACCEPTED_RECORDS, independent of the
+        // event-log size. Capacity migration made MAX_ACCEPTED_RECORDS smaller than
+        // MAX_EVENTS, so a request below the cap is honored as-is while anything at/above it
+        // (including MAX_EVENTS + 1) clamps to MAX_ACCEPTED_RECORDS.
+        assert_eq!(
+            accepted_record_cap(MAX_ACCEPTED_RECORDS - 1),
+            MAX_ACCEPTED_RECORDS - 1
+        );
+        assert_eq!(accepted_record_cap(MAX_EVENTS + 1), MAX_ACCEPTED_RECORDS);
         assert_eq!(accepted_record_cap(usize::MAX), MAX_ACCEPTED_RECORDS);
     }
 
     // -- MMR proof verification (canonical) --
 
+    // FIXME(bd-o776s): KNOWN-FAILING — genuine prod regression (case B), left failing by
+    // design. verify_mmr_proof derives the leaf marker from `hex(record.digest())`
+    // (701df9905), but TrustRecord::digest() includes the inclusion proof's leaf_hash
+    // (bd77f46e5). That makes proof.leaf_hash == marker_leaf_hash(hex(digest(..leaf_hash..)))
+    // a SHA-256 fixed point — unsatisfiable for any proof-carrying record. No test-only
+    // change can produce an accepted valid proof; needs a prod fix (envelope digest that
+    // excludes the inclusion proof). See report.
     #[test]
     fn test_valid_proof_accepted() {
         let (rec, root) = make_record("r1", 1);
@@ -1693,7 +1713,12 @@ mod tests {
 
     #[test]
     fn test_reconcile_large_batch_above_event_log_cap_does_not_silently_drop_records() {
-        let batch_size = MAX_EVENTS + 2;
+        // Capacity migration: a TrustState now caps at MAX_TRUST_RECORDS, which is smaller
+        // than MAX_EVENTS, so a batch literally larger than the event-log cap can no longer
+        // be staged. Reconcile a full record-capacity batch instead; the invariant under
+        // test (a large batch reconciles fully without silently dropping records, and the
+        // event log stays bounded) is preserved at the real capacity boundary.
+        let batch_size = MAX_TRUST_RECORDS;
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         let mut root = MmrRoot {
@@ -1778,8 +1803,16 @@ mod tests {
         let mut remote = TrustState::new(1);
         let (record, root) = make_record("r1", 1);
         assert!(remote.insert(record));
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).expect("should succeed");
+        // bd-o776s: this test exercises reconciliation IDEMPOTENCE, not MMR proof
+        // verification. The default config's proof path is currently broken in prod (see
+        // B-report: verify_mmr_proof vs digest() circular dependency), so disable
+        // proof_required to isolate the
+        // idempotence invariant; proof acceptance is covered by test_valid_proof_accepted.
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        })
+        .expect("should succeed");
         let cancel = no_cancel();
 
         let first = reconciler
@@ -2222,6 +2255,10 @@ mod tests {
         assert!(!local.contains("above-limit"));
     }
 
+    // FIXME(bd-o776s): KNOWN-FAILING — same genuine prod regression (case B) as
+    // test_valid_proof_accepted: proof_required=true gates acceptance on verify_mmr_proof,
+    // which is unsatisfiable because digest() commits to the proof's own leaf_hash. Left
+    // failing by design (this test's whole purpose is the proof-verified accept path).
     #[test]
     fn test_reconcile_with_proof_verification() {
         let mut reconciler =
@@ -2310,8 +2347,14 @@ mod tests {
 
     #[test]
     fn test_reconcile_replaces_lower_precedence_local_record() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).expect("should succeed");
+        // bd-o776s: exercises PRECEDENCE-based replacement, not MMR proof verification.
+        // The default config's proof path is broken in prod (see B-report); disable
+        // proof_required to isolate the precedence invariant.
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        })
+        .expect("should succeed");
         let mut local = TrustState::new(2);
         let mut remote = TrustState::new(2);
         let (local_rec, _) = make_record_with_meta("r1", 1, 1_000, "node-a");
@@ -2336,8 +2379,14 @@ mod tests {
 
     #[test]
     fn test_reconcile_uses_node_id_as_final_tie_breaker() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).expect("should succeed");
+        // bd-o776s: exercises the node-id TIE-BREAKER, not MMR proof verification.
+        // The default config's proof path is broken in prod (see B-report); disable
+        // proof_required to isolate the tie-breaker invariant.
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        })
+        .expect("should succeed");
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         let (local_rec, _) = make_record_with_meta("r1", 1, 1_000, "node-a");
@@ -2425,6 +2474,11 @@ mod tests {
         assert!(matches!(err, ReconciliationError::BatchExceeded { .. }));
     }
 
+    // FIXME(bd-o776s): KNOWN-FAILING — same genuine prod regression (case B). This test
+    // intrinsically needs the proof path: it asserts a valid-proof record is ACCEPTED while a
+    // no-proof record is REJECTED, so it cannot be reconciled by disabling proof_required
+    // (that would wrongly accept the no-proof record). Left failing by design; needs the
+    // prod envelope-digest fix. See report.
     #[test]
     fn test_reconcile_mixed_accept_reject() {
         // Use a single-record root for the valid record
@@ -2555,8 +2609,15 @@ mod tests {
 
     #[test]
     fn test_events_recorded() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).expect("should succeed");
+        // bd-o776s: exercises lifecycle EVENT emission (incl. EVT_RECORD_ACCEPTED), not MMR
+        // proof verification. The default config's proof path is broken in prod (see
+        // B-report), so disable proof_required to let the valid record be accepted and emit
+        // its acceptance event.
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        })
+        .expect("should succeed");
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         let (rec, root) = make_record("r1", 1);
@@ -3442,11 +3503,13 @@ mod tests {
             },
         ];
 
-        // First config should be invalid
+        // First config should be invalid (zero batch size)
         assert!(malformed_configs[0].validate().is_err());
 
-        // Second config with extreme values should still validate
-        assert!(malformed_configs[1].validate().is_ok());
+        // Second config sets max_delta_batch to usize::MAX, which prod now fails closed on:
+        // validate() caps max_delta_batch at 100,000 as a memory-exhaustion DoS guard, so an
+        // extreme batch size is correctly rejected (the other extreme fields are unbounded).
+        assert!(malformed_configs[1].validate().is_err());
 
         // Test edge case where max_delta_batch is 1
         let minimal_config = ReconciliationConfig {
@@ -4601,8 +4664,12 @@ mod tests {
     fn negative_epoch_tolerance_boundary_with_greater_than_comparison() {
         // Test epoch tolerance boundary using > comparison
         // Lines 571-574: record.epoch > local.current_epoch().saturating_add(epoch_tolerance)
+        // bd-o776s: this isolates the EPOCH-tolerance boundary. With the default proof path
+        // broken in prod (see B-report), proof_required would reject epoch-valid records for
+        // proof reasons; disable it so the assertions reflect epoch handling only.
         let config = ReconciliationConfig {
             epoch_tolerance: 5,
+            proof_required: false,
             ..ReconciliationConfig::default()
         };
         let mut reconciler = AntiEntropyReconciler::new(config).unwrap();

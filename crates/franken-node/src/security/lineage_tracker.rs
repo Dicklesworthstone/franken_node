@@ -3659,7 +3659,8 @@ mod tests {
         let mut ledger = FlowLedger::new();
         let mut second = sensitive_descriptor(BTreeMap::new());
         second.epoch = 7;
-        second.digest = "sha256:second".to_string();
+        second.digest =
+            "sha256:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef".to_string();
 
         ledger
             .register_sensitive_source(&mut graph, "datum-b", second, b"salt-b")
@@ -5868,8 +5869,10 @@ mod tests {
             assert!(!display_output.contains("(null)"));
             assert!(!display_output.contains("Error"));
 
-            // Debug output should also be safe
-            assert!(debug_output.contains("LineageError"));
+            // Debug output should also be safe: the derived Debug emits the variant
+            // (e.g. `LabelNotFound { detail: "ERR_IFL_..." }`), not the enum name, so
+            // assert the structured error-code content is carried through intact.
+            assert!(debug_output.contains("ERR_IFL_"));
         }
     }
 

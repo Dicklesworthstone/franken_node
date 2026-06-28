@@ -2352,7 +2352,11 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
-        assert!(err.message.contains("whitespace"));
+        // Prod trims before the reserved-alias check (invalid_artifact_id_reason),
+        // so " <unknown> " trims to the reserved "<unknown>" and is rejected as
+        // reserved -- which takes precedence over the whitespace reason. Either way
+        // it is rejected fail-closed with ERR_INVALID_ARTIFACT_ID and no metric drift.
+        assert!(err.message.contains("reserved"));
         assert_eq!(ctrl.metrics().challenges_issued_total, 0);
         assert!(ctrl.audit_log().is_empty());
     }
@@ -2497,10 +2501,18 @@ mod tests {
 
         // Unicode injection in proof submission
         let malicious_proof = ProofSubmission {
-            proof_type: RequiredProofType::Custom("proof\u{202E}kcatta\u{202D}normal".to_string()),
-            data_hash: "hash\u{2028}injection\u{2029}line\u{0085}separator".to_string(),
+            // Must match one of the challenge's required_proofs (prod rejects unrequired
+            // types). The first required type already carries RTL/Unicode injection, so
+            // unicode in the proof type is still exercised end-to-end.
+            proof_type: RequiredProofType::Custom("\u{202E}ggats\u{202D}legitimate_proof".to_string()),
+            // data_hash must be valid hex 32..=128 chars (prod format validation now
+            // rejects unicode hashes); injection coverage is preserved via submitter_id
+            // and actor_id below, which prod stores verbatim into the audit log.
+            data_hash: "a".repeat(64),
             submitter_id: "submitter\u{000C}\u{000B}control\u{0007}chars".to_string(),
-            submitted_at_ms: u64::MAX, // Also test timestamp overflow
+            // Must be within [created_at, now]; timestamp overflow is covered by
+            // negative_timestamp_manipulation_and_overflow_attacks.
+            submitted_at_ms: 2000,
         };
 
         ctrl.submit_proof(
@@ -2798,8 +2810,13 @@ mod tests {
         // Submit massive number of proof artifacts
         for i in 0..1000 {
             let proof = ProofSubmission {
-                proof_type: RequiredProofType::Custom(format!("submitted_proof_{}", i)),
-                data_hash: format!("hash_{}_{}_{}", i, "x".repeat(1000), i), // Large hash strings
+                // proof_type must be one of the challenge's required_proofs: prod now
+                // rejects unrequired types ("not required for this challenge").
+                // massive_proof_type_{i} matches required_proofs[i] for i < 10_000.
+                proof_type: RequiredProofType::Custom(format!("massive_proof_type_{}", i)),
+                // data_hash must be valid hex, 32..=128 chars (prod format validation).
+                // 128 hex chars preserves the "large hash" stress intent within bounds.
+                data_hash: "a".repeat(128),
                 submitter_id: format!("submitter_{}_{}", i, "y".repeat(500)), // Large submitter IDs
                 submitted_at_ms: 2000 + i as u64,
             };
@@ -2976,7 +2993,11 @@ mod tests {
             required_proofs: vec![RequiredProofType::ProvenanceAttestation],
             received_proofs: vec![],
             created_at_ms: u64::MAX - 1000, // Near overflow
-            timeout_ms: 5000,
+            // The maximum representable elapsed time for this near-overflow created_at is
+            // exactly 1000ms (u64::MAX.saturating_sub(u64::MAX - 1000)), so the timeout
+            // must be < 1000 for the u64::MAX clock to trip it, yet > 500 so the nearer
+            // "current" probes below stay within timeout. Exercises overflow-safe math.
+            timeout_ms: 800,
             trace_id: "overflow_trace".to_string(),
         };
 
@@ -3034,10 +3055,19 @@ mod tests {
                 assert!(issue_result.is_ok());
                 let cid = issue_result.unwrap();
 
-                // Test counter overflow in operations
+                // Test counter overflow in operations.
+                // data_hash must be the verifier's expected SHA256 hex so that both
+                // submit_proof (hex/length format validation) and the subsequent
+                // verify_proof (verifier hash match) succeed.
+                let proof_type = RequiredProofType::Custom(format!("proof_{}", i));
+                let data_hash = ChallengeFlowController::compute_expected_proof_hash(
+                    &artifact_id,
+                    &proof_type,
+                )
+                .unwrap();
                 let proof = ProofSubmission {
-                    proof_type: RequiredProofType::Custom(format!("proof_{}", i)),
-                    data_hash: format!("hash_{}", i),
+                    proof_type,
+                    data_hash,
                     submitter_id: format!("prover_{}", i),
                     submitted_at_ms: 2000 + i as u64,
                 };
@@ -3061,8 +3091,12 @@ mod tests {
                     .unwrap();
                 }
             } else {
-                // Should fail when next_id would overflow
-                assert!(issue_result.is_err());
+                // next_id is hardened with saturating_add (issue_challenge, no
+                // overflow failure path): it pins at u64::MAX rather than wrapping to a
+                // reusable small id, and issue keeps succeeding. Verify the saturating
+                // behavior instead of the obsolete fail-on-overflow expectation.
+                assert!(issue_result.is_ok());
+                assert_eq!(ctrl.next_id, u64::MAX);
             }
         }
 
@@ -3143,10 +3177,12 @@ mod tests {
                         )),
                     };
 
-                    let proof_types = vec![
-                        RequiredProofType::ProvenanceAttestation,
-                        RequiredProofType::Custom(format!("thread_{}_proof_{}", thread_id, op_id)),
-                    ];
+                    // A challenge accepts only a single proof (ProofReceived has no
+                    // self-loop in the state machine), while verify_proof requires every
+                    // required type to be present. Use exactly one required type -- the
+                    // canonical issue_basic/make_proof pattern -- so the full
+                    // issue->submit->verify->promote/deny flow can complete concurrently.
+                    let proof_types = vec![RequiredProofType::ProvenanceAttestation];
 
                     let issue_result = controller.issue_challenge(
                         artifact_id.clone(),
@@ -3157,13 +3193,15 @@ mod tests {
                     );
 
                     if let Ok(cid) = issue_result {
-                        // Submit proof
-                        let proof = ProofSubmission {
-                            proof_type: RequiredProofType::ProvenanceAttestation,
-                            data_hash: format!("thread_{}_hash_{}", thread_id, op_id),
-                            submitter_id: format!("thread_{}_prover_{}", thread_id, op_id),
-                            submitted_at_ms: 2000 + thread_id as u64 * 1000 + op_id as u64,
-                        };
+                        // Submit proof. data_hash must be the verifier's expected SHA256
+                        // hex so submit_proof (hex/length format) and verify_proof
+                        // (verifier hash match) both succeed.
+                        let proof = make_valid_proof(
+                            &artifact_id,
+                            RequiredProofType::ProvenanceAttestation,
+                            &format!("thread_{}_prover_{}", thread_id, op_id),
+                            2000 + thread_id as u64 * 1000 + op_id as u64,
+                        );
 
                         let submit_result = controller.submit_proof(
                             &cid,

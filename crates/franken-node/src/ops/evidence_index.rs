@@ -1628,7 +1628,13 @@ mod tests {
                 .iter()
                 .map(|result| (result.record_id.as_str(), result.score))
                 .collect::<Vec<_>>(),
-            vec![("rec-b", 85), ("rec-a", 60)]
+            // rec-b: bead_id(50) + agent_name(25) = 75. Its "proof" token is
+            // dropped from the term index because rec-b yields 22 unique terms
+            // and `max_terms_per_record = 12` truncates the alphabetically
+            // sorted set before "proof" (so no term(10) credit). rec-a:
+            // bead_id(50) + term "proof"(10) = 60. rec-b still outranks rec-a,
+            // exercising score-then-record_id ordering.
+            vec![("rec-b", 75), ("rec-a", 60)]
         );
         assert_eq!(
             index

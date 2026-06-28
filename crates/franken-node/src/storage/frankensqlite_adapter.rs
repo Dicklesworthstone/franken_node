@@ -2550,12 +2550,15 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
     fn negative_saturating_add_arithmetic_overflow_counter_protection() {
         let mut adapter = FrankensqliteAdapter::default();
 
-        // Force near-overflow conditions on all counter fields
+        // Force near-overflow conditions on all counter fields. The replays
+        // below operate on consistent audit data, so no replay mismatch is
+        // triggered; seed replay_mismatches at the boundary (usize::MAX) so its
+        // saturating no-wrap invariant is still asserted.
         adapter.write_count = usize::MAX - 2;
         adapter.read_count = usize::MAX - 1;
         adapter.write_failures = usize::MAX - 3;
         adapter.replay_count = usize::MAX - 4;
-        adapter.replay_mismatches = usize::MAX - 5;
+        adapter.replay_mismatches = usize::MAX;
 
         // Test operations at overflow boundary
         for i in 0..10 {
@@ -2837,12 +2840,14 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
     fn negative_counter_increment_overflow_without_saturating_add() {
         let mut adapter = FrankensqliteAdapter::default();
 
-        // Set counters near overflow to test saturating_add protection
-        adapter.write_count = usize::MAX - 2;
-        adapter.read_count = usize::MAX - 1;
+        // Seed each asserted counter at the overflow boundary (usize::MAX) so the
+        // next increment exercises saturating_add: without it a naive `+= 1` would
+        // wrap to 0; with it the counter must stay pinned at MAX.
+        adapter.write_count = usize::MAX;
+        adapter.read_count = usize::MAX;
         adapter.write_failures = usize::MAX;
-        adapter.replay_count = usize::MAX - 3;
-        adapter.replay_mismatches = usize::MAX - 4;
+        adapter.replay_count = usize::MAX;
+        adapter.replay_mismatches = usize::MAX;
 
         // Operations should use saturating_add to prevent wraparound
         let _ = adapter.write_legacy(PersistenceClass::ControlState, "overflow_test", b"data");
@@ -2974,7 +2979,11 @@ mod frankensqlite_adapter_extreme_adversarial_negative_tests {
             }
         }
 
-        // Test with incremental versions near boundary
+        // Test with incremental versions near boundary. Use a fresh adapter: the
+        // u32::MAX migration above may have advanced the schema to u32::MAX,
+        // leaving no headroom for `current + 1` (which would overflow in the test
+        // harness, not prod).
+        let mut adapter = FrankensqliteAdapter::default();
         let current = adapter.schema_version();
 
         // Test exact boundary (should fail closed)

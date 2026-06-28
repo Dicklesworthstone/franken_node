@@ -65,8 +65,16 @@ mod tests {
         let env = EnvironmentSnapshot::new(0, BTreeMap::new(), "linux", "");
         assert!(env.validate("test").is_err());
 
-        // Whitespace-only platform should fail
+        // Whitespace-only platform is accepted: bd-o776s — environment
+        // validation only rejects empty or ASCII-control-containing fields.
+        // Environment metadata may legitimately contain spaces (e.g. "Mac OS X");
+        // blank/whitespace rejection applies to trace identifiers, not to
+        // environment snapshot fields.
         let env = EnvironmentSnapshot::new(0, BTreeMap::new(), "   ", "v1.0");
+        assert!(env.validate("test").is_ok());
+
+        // Platform containing ASCII control bytes should fail.
+        let env = EnvironmentSnapshot::new(0, BTreeMap::new(), "linux\u{0007}", "v1.0");
         assert!(env.validate("test").is_err());
 
         // Unicode platform names should work
@@ -391,13 +399,15 @@ mod tests {
 
         assert_eq!(engine.trace_count(), MAX_REGISTERED_TRACES);
 
-        // Adding one more should evict the oldest
+        // bd-o776s: at capacity prod fails closed by REJECTING new registrations
+        // (no eviction) — see engine_capacity_rejects_new_trace_without_evicting_oldest.
         let overflow_trace = build_demo_trace("overflow", "test", 1);
-        engine.register_trace(overflow_trace).unwrap();
+        let err = engine.register_trace(overflow_trace).unwrap_err();
+        assert!(matches!(err, TimeTravelError::TraceCapacityExceeded { .. }));
 
         assert_eq!(engine.trace_count(), MAX_REGISTERED_TRACES);
-        assert!(engine.get_trace("trace-0000").is_none()); // Oldest evicted
-        assert!(engine.get_trace("overflow").is_some()); // New trace present
+        assert!(engine.get_trace("trace-0000").is_some()); // Oldest retained (not evicted)
+        assert!(engine.get_trace("overflow").is_none()); // New trace rejected
     }
 
     #[test]
@@ -415,23 +425,25 @@ mod tests {
         // trace_ids() should return sorted order
         assert_eq!(engine.trace_ids(), vec!["alpha", "bravo", "charlie"]);
 
-        // But eviction should be based on registration order (charlie first)
+        // Fill the remaining capacity exactly.
         for i in 0..MAX_REGISTERED_TRACES - 3 {
             engine
                 .register_trace(build_demo_trace(&format!("filler-{}", i), "test", 1))
                 .unwrap();
         }
 
-        // Add one more to trigger eviction
-        engine
+        // bd-o776s: at capacity, a further registration fails closed (no eviction).
+        let err = engine
             .register_trace(build_demo_trace("newest", "test", 1))
-            .unwrap();
+            .unwrap_err();
+        assert!(matches!(err, TimeTravelError::TraceCapacityExceeded { .. }));
 
-        // Charlie should be evicted (oldest registration)
-        assert!(engine.get_trace("charlie").is_none());
+        // Nothing is evicted: the earliest registrations are retained and the
+        // overflow registration is rejected.
+        assert!(engine.get_trace("charlie").is_some());
         assert!(engine.get_trace("alpha").is_some());
         assert!(engine.get_trace("bravo").is_some());
-        assert!(engine.get_trace("newest").is_some());
+        assert!(engine.get_trace("newest").is_none());
     }
 
     #[test]
@@ -587,16 +599,28 @@ mod tests {
         assert_eq!(engine.trace_count(), 2);
         assert!(engine.get_trace("remove-2").is_none());
 
-        // Registration order should be preserved for remaining traces
-        // Add many traces to trigger eviction
+        // bd-o776s: fill to capacity. At capacity prod fails closed by rejecting
+        // further registrations (no eviction), so the originally-registered
+        // traces are retained rather than evicted.
+        let mut capacity_rejected = false;
         for i in 0..MAX_REGISTERED_TRACES {
-            engine
-                .register_trace(build_demo_trace(&format!("fill-{}", i), "test", 1))
-                .unwrap();
+            match engine.register_trace(build_demo_trace(&format!("fill-{}", i), "test", 1)) {
+                Ok(()) => {}
+                Err(TimeTravelError::TraceCapacityExceeded { .. }) => {
+                    capacity_rejected = true;
+                    break;
+                }
+                Err(other) => panic!("unexpected registration error: {other}"),
+            }
         }
+        assert!(
+            capacity_rejected,
+            "engine should reject registration once at capacity"
+        );
+        assert_eq!(engine.trace_count(), MAX_REGISTERED_TRACES);
 
-        // remove-1 should be evicted before remove-3 (older registration)
-        assert!(engine.get_trace("remove-1").is_none());
+        // No eviction occurs: both surviving originals are retained.
+        assert!(engine.get_trace("remove-1").is_some());
         assert!(engine.get_trace("remove-3").is_some());
     }
 
@@ -724,7 +748,13 @@ mod tests {
             ),
         ];
 
-        let mut digests = std::collections::HashSet::new();
+        // bd-o776s: side_effects_digest() covers ONLY the side effects, not the
+        // input/output. Cases that differ only in input/output (e.g. the
+        // empty-side-effects cases 0/1/2) legitimately share a side-effects
+        // digest, so a repeated digest is only a TRUE collision when it maps to
+        // a DIFFERENT side-effect vector. Track digest -> effects to distinguish.
+        let mut digests: std::collections::HashMap<String, Vec<SideEffect>> =
+            std::collections::HashMap::new();
 
         for (i, (input, output, effects1, effects2)) in test_cases.iter().enumerate() {
             let step1 = TraceStep::new(
@@ -749,18 +779,26 @@ mod tests {
                 assert_ne!(digest1, digest2, "Hash collision detected for case {}", i);
             }
 
-            // All digests should be unique
-            assert!(
-                digests.insert(digest1.clone()),
-                "Duplicate digest: {}",
-                digest1
-            );
-            if effects1 != effects2 {
-                assert!(
-                    digests.insert(digest2.clone()),
-                    "Duplicate digest: {}",
-                    digest2
+            // Distinct side-effect vectors must never share a digest.
+            if let Some(prev) = digests.get(&digest1) {
+                assert_eq!(
+                    prev, effects1,
+                    "Hash collision detected: case {} (effects1)",
+                    i
                 );
+            } else {
+                digests.insert(digest1.clone(), effects1.clone());
+            }
+            if effects1 != effects2 {
+                if let Some(prev) = digests.get(&digest2) {
+                    assert_eq!(
+                        prev, effects2,
+                        "Hash collision detected: case {} (effects2)",
+                        i
+                    );
+                } else {
+                    digests.insert(digest2.clone(), effects2.clone());
+                }
             }
         }
     }

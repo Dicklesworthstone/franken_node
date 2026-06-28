@@ -1661,7 +1661,16 @@ mod tests {
 
     #[test]
     fn mitigation_hash_collision_resistance() {
-        // Test trace hash resistance to collision attacks
+        // Test trace hash resistance to collision attacks.
+        //
+        // Expected relationship of a collision attempt's hash to the baseline.
+        enum HashRelation {
+            /// Hashed content differs ⇒ hash must differ (collision resistance).
+            DistinctFromBaseline,
+            /// Only un-hashed fields differ ⇒ identical hash is correct by design.
+            SameAsBaseline,
+        }
+
         let base_decisions = vec![LabDecision {
             sequence_number: 1,
             action: "baseline".to_string(),
@@ -1671,9 +1680,17 @@ mod tests {
 
         let base_trace = build_trace("INC-BASELINE", base_decisions, "policy-v1");
 
-        // Attempt various collision strategies
+        // The integrity hash (`IncidentTrace::compute_hash`) covers ONLY the
+        // decision sequence under the `mitigation_synthesis_hash_v1:` domain:
+        // per decision it hashes `sequence_number`, the length-framed `action`
+        // bytes, and `expected_loss`. It deliberately does NOT cover
+        // `incident_id`, `policy_version`, or `rationale`. Collision resistance
+        // therefore applies to inputs that differ in the *hashed* content; two
+        // traces that differ only in un-hashed fields share a hash by design.
+        // The third tuple element records the expected hash relationship.
         let collision_attempts = [
-            // Different incident ID, same content
+            // Different incident ID, identical decision content. incident_id is
+            // outside the hash scope, so an identical hash is correct.
             (
                 "INC-COLLISION-1",
                 vec![LabDecision {
@@ -1682,8 +1699,10 @@ mod tests {
                     expected_loss: 100,
                     rationale: "baseline-rationale".to_string(),
                 }],
+                HashRelation::SameAsBaseline,
             ),
-            // Same action bytes but different structure
+            // Different action bytes (and length): hashed content differs, so
+            // the hash must differ.
             (
                 "INC-COLLISION-2",
                 vec![LabDecision {
@@ -1692,8 +1711,10 @@ mod tests {
                     expected_loss: 100,
                     rationale: "linebaseline-rationale".to_string(),
                 }],
+                HashRelation::DistinctFromBaseline,
             ),
-            // NULL byte injection attempt
+            // NULL byte injection inside `action`: hashed content differs (the
+            // length frame defeats truncation/concatenation), so hash differs.
             (
                 "INC-COLLISION-3",
                 vec![LabDecision {
@@ -1702,8 +1723,10 @@ mod tests {
                     expected_loss: 100,
                     rationale: "baseline-rationale".to_string(),
                 }],
+                HashRelation::DistinctFromBaseline,
             ),
-            // Unicode normalization attack
+            // Zero-width-space appended to `rationale` only. rationale is
+            // outside the hash scope, so an identical hash is correct.
             (
                 "INC-COLLISION-4",
                 vec![LabDecision {
@@ -1712,17 +1735,31 @@ mod tests {
                     expected_loss: 100,
                     rationale: "baseline-rationale\u{200b}".to_string(),
                 }],
+                HashRelation::SameAsBaseline,
             ),
         ];
 
-        for (incident_id, decisions) in collision_attempts {
+        for (incident_id, decisions, relation) in collision_attempts {
             let collision_trace = build_trace(incident_id, decisions, "policy-v1");
 
-            // Hashes should be different for different content
-            assert_ne!(
-                base_trace.trace_hash, collision_trace.trace_hash,
-                "Hash collision detected between baseline and {incident_id}"
-            );
+            match relation {
+                HashRelation::DistinctFromBaseline => {
+                    // Distinct hashed content must yield a distinct hash.
+                    assert_ne!(
+                        base_trace.trace_hash, collision_trace.trace_hash,
+                        "Hash collision detected between baseline and {incident_id}"
+                    );
+                }
+                HashRelation::SameAsBaseline => {
+                    // Differs only in fields outside the integrity-hash scope
+                    // (incident_id / rationale): an identical hash is correct.
+                    assert_eq!(
+                        base_trace.trace_hash, collision_trace.trace_hash,
+                        "Expected identical hash (only un-hashed field differs) \
+                         for {incident_id}"
+                    );
+                }
+            }
 
             // Each should validate independently
             assert!(base_trace.validate_integrity().is_ok());

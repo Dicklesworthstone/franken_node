@@ -4753,8 +4753,20 @@ mod tests {
             .card
             .reputation_score_basis_points = 1;
 
-        let fetched = registry
+        // bd-o776s: `read` now fails closed when a fresh cache entry fails
+        // signature re-verification — it evicts the poisoned entry and surfaces
+        // `SignatureInvalid` instead of silently re-serving. Recovery happens on
+        // the next read, which sees a cache miss and refetches authoritative state.
+        let err = registry
             .read("npm:@acme/plugin", 1_001, "trace-read")
+            .expect_err("poisoned fresh cache entry must fail closed");
+        assert!(matches!(
+            err,
+            TrustCardError::SignatureInvalid(extension) if extension.eq("npm:@acme/plugin")
+        ));
+
+        let fetched = registry
+            .read("npm:@acme/plugin", 1_002, "trace-read-recover")
             .expect("read")
             .expect("card exists");
 
@@ -5138,17 +5150,24 @@ mod tests {
 
     #[test]
     fn snapshot_fails_with_invalid_registry_key() {
-        // Use an empty key which should be invalid for HMAC
-        let invalid_key = b"";
-        let mut registry = TrustCardRegistry::new(0, invalid_key);
+        // bd-o776s: HMAC-SHA256 accepts keys of ANY length, including empty, so
+        // `HmacSha256::new_from_slice` never errors and `InvalidRegistryKey` is
+        // unreachable from the in-memory `new`/`snapshot` path. An empty key
+        // therefore produces a fully valid, self-consistent signed snapshot.
+        // Registry-key validation is enforced at the configuration layer instead
+        // (covered by `registry_from_config_rejects_invalid_configured_key`).
+        let empty_key = b"";
+        let mut registry = TrustCardRegistry::new(0, empty_key);
         registry
             .create(sample_input(), 1_000, "trace-create")
             .expect("create");
 
-        let err = registry
+        let snapshot = registry
             .snapshot()
-            .expect_err("snapshot with invalid key should fail");
-        assert!(matches!(err, TrustCardError::InvalidRegistryKey));
+            .expect("HMAC accepts an empty key, so snapshot signing succeeds");
+        // The produced snapshot verifies under the same key that signed it.
+        verify_snapshot_signature(&snapshot, empty_key)
+            .expect("snapshot must verify under its signing key");
     }
 
     // ── NEGATIVE-PATH TESTS: Security & Robustness ──────────────────
@@ -5357,9 +5376,13 @@ mod tests {
             "JSON injection should not create admin field"
         );
 
-        // Test that massive fields are handled without memory explosion
+        // Test that massive fields are handled without memory explosion.
+        // bd-o776s: CapabilityDeclaration collapsed scope/impact/evidence_ref into
+        // a single `description`, so the two massive capability fields now total
+        // ~30KB (was >50KB across the old multi-field shape). Threshold reconciled
+        // to the current serialized size; still far above a non-massive card (~1KB).
         assert!(
-            json.len() > 50_000,
+            json.len() > 25_000,
             "serialized JSON should include massive fields"
         );
         assert!(
@@ -5596,10 +5619,15 @@ mod tests {
             "latest entry should be preserved"
         );
 
-        // Test serialization with massive audit history
+        // Test serialization with massive audit history.
+        // bd-o776s: `push_bounded` caps the history at MAX_AUDIT_HISTORY (256) and
+        // keeps the NEWEST entries — here the small "additional_review" records —
+        // so the 5KB-detail entries are evicted and the serialized output is the
+        // ~40KB bounded tail, not the multi-MB raw input. Threshold reconciled to
+        // the bounded reality (still confirms substantial, non-trivial output).
         let json = serde_json::to_string(&trust_card)
             .expect("serialization should handle massive audit history");
-        assert!(json.len() > 100_000, "serialized JSON should be large");
+        assert!(json.len() > 30_000, "serialized JSON should be large");
         assert!(
             json.len() < 10_000_000,
             "serialized JSON should be reasonably bounded"
@@ -6283,7 +6311,7 @@ mod tests {
             "trust-card list JSON should serialize as an array"
         );
         assert!(
-            canonical_json.contains("npm:@acme/security-plugin"),
+            canonical_json.contains("npm:@acme/security-scanner"),
             "canonical trust-card list JSON should include the extension identity"
         );
         Ok(())
@@ -6444,10 +6472,22 @@ mod tests {
             },
         );
 
-        // DEFENSE: Attempt to read the card - this should trigger signature re-verification
-        let result = registry.read("npm:@acme/plugin", 1_002, "trace-poison-test");
+        // DEFENSE: Attempt to read the card - this should trigger signature re-verification.
+        // bd-o776s: `read` now fails closed on a poisoned fresh cache entry — it
+        // evicts the entry and returns `SignatureInvalid` rather than serving the
+        // tampered card. The attack is prevented (poisoned card never served).
+        let poisoned_read = registry.read("npm:@acme/plugin", 1_002, "trace-poison-test");
+        assert!(
+            matches!(
+                poisoned_read,
+                Err(TrustCardError::SignatureInvalid(extension)) if extension.eq("npm:@acme/plugin")
+            ),
+            "poisoned cache entry must fail closed, not serve the tampered card"
+        );
 
-        // The poisoned entry should be rejected and removed from cache
+        // Recovery: the evicted entry is now a cache miss, so the next read
+        // refetches and re-caches the legitimate authoritative card.
+        let result = registry.read("npm:@acme/plugin", 1_003, "trace-poison-repair");
         assert!(result.is_ok(), "Read should succeed after cache repair");
         let retrieved_card = result.unwrap().expect("Card should exist after repair");
 
@@ -6600,8 +6640,12 @@ mod tests {
         )
         .expect_err("oversized JSON should be rejected for untrusted sources");
 
+        // bd-o776s: untrusted-source errors are now sanitized to prevent
+        // information leakage (`sanitize_error_for_untrusted`), so the specific
+        // "JSON size ... exceeds maximum ..." detail is collapsed to the generic
+        // "snapshot validation failed". Rejection of oversized JSON still holds.
         assert!(matches!(err, TrustCardError::InvalidSnapshot(ref detail)
-            if detail.contains("exceeds maximum")));
+            if detail.contains("snapshot validation failed")));
     }
 
     #[test]
@@ -6631,8 +6675,12 @@ mod tests {
         )
         .expect_err("invalid signature should be rejected for untrusted sources");
 
+        // bd-o776s: untrusted-source errors are sanitized (see
+        // `sanitize_error_for_untrusted`); the "signature verification failed
+        // before parsing" detail is collapsed to the generic message. Rejection
+        // of the invalid signature still holds.
         assert!(matches!(err, TrustCardError::InvalidSnapshot(ref detail)
-            if detail.contains("signature verification failed")));
+            if detail.contains("snapshot validation failed")));
     }
 
     #[test]

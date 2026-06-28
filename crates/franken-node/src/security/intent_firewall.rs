@@ -2518,20 +2518,13 @@ mod tests {
             schema_version: SCHEMA_VERSION.into(),
         };
 
-        // JSON serialization should escape all injection attempts
+        // serde_json is a codec, not a sanitizer: `<`/`>`/`/`/`(`/`)`/`'`/space are
+        // not JSON-special, so JS/HTML/command payloads are preserved verbatim
+        // inside properly-escaped JSON strings — never stripped or executed. The
+        // real injection-safety property is that every payload stays contained in
+        // its string context and round-trips losslessly (asserted below), while
+        // control chars (newline/CR/NUL) ARE escaped so nothing breaks out.
         let json = serde_json::to_string(&decision).expect("serialization should succeed");
-        assert!(
-            !json.contains("alert('xss')"),
-            "JavaScript injection should be escaped"
-        );
-        assert!(
-            !json.contains("</script>"),
-            "HTML injection should be escaped"
-        );
-        assert!(
-            !json.contains("rm -rf"),
-            "Command injection should be escaped"
-        );
         assert!(!json.contains("\n"), "Newline injection should be escaped");
         assert!(
             !json.contains("\r"),
@@ -2539,9 +2532,15 @@ mod tests {
         );
         assert!(!json.contains("\0"), "Null injection should be escaped");
 
-        // Roundtrip should preserve structure but escape content
+        // Roundtrip should preserve structure but escape content. Full equality
+        // proves the injected string fields (receipt_id/effect_id/origin/rationale/
+        // timestamp) are losslessly contained — escaped, not stripped or executed.
         let parsed: FirewallDecision =
             serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(
+            decision, parsed,
+            "All injection payloads must round-trip losslessly inside their JSON string context"
+        );
         assert_eq!(decision.intent, parsed.intent);
         assert_eq!(decision.verdict, parsed.verdict);
         assert_eq!(decision.matched_rule_priority, parsed.matched_rule_priority);
@@ -2660,19 +2659,30 @@ mod tests {
 
     #[test]
     fn test_security_host_pattern_bypass_attempts() {
-        let mut firewall = make_firewall();
-
-        // Add rule allowing only specific hosts
-        let restrictive_rule = TrafficPolicyRule {
-            intent: IntentClassification::DataFetch,
-            verdict: FirewallVerdict::Allow,
-            host_pattern: Some("safe.example.com".to_string()),
-            priority: 0,
-            rationale: "only allow safe host".to_string(),
+        // Allowlist semantics require NO permissive fallback rule: the default
+        // policy allows all non-risky DataFetch traffic (host_pattern: None), so a
+        // host-restricted rule layered on top would never restrict anything. Build a
+        // policy whose ONLY DataFetch rule is the host-scoped allow, so non-matching
+        // hosts fall through to the fail-closed default deny (mirrors
+        // `test_host_specific_policy_gap_denies_when_no_fallback_rule_exists`).
+        let mut policy = TrafficPolicy {
+            policy_id: "host-allowlist-only".into(),
+            schema_version: SCHEMA_VERSION.into(),
+            rules: BTreeMap::new(),
+            registered_extensions: BTreeSet::from(["ext-001".into()]),
+            quarantine_capacity: 10,
         };
-        firewall
-            .update_policy_rule(restrictive_rule)
-            .expect("should update");
+        policy.rules.insert(
+            0,
+            TrafficPolicyRule {
+                intent: IntentClassification::DataFetch,
+                verdict: FirewallVerdict::Allow,
+                host_pattern: Some("safe.example.com".to_string()),
+                priority: 0,
+                rationale: "only allow safe host".to_string(),
+            },
+        );
+        let mut firewall = EffectsFirewall::new(policy);
 
         let bypass_hosts = vec![
             "safe.example.com.evil.com",         // Domain append
@@ -2701,10 +2711,14 @@ mod tests {
 
             let decision = firewall.process_request(effect).expect("should process");
 
-            // Bypass attempts should not be allowed through host pattern matching
+            // A request is allowed ONLY if its host genuinely IS safe.example.com
+            // (ASCII case-insensitive, which is intended). Every confusable variant
+            // — suffix-append, subdomain, NUL/port/unicode — must NOT match the
+            // exact allowlist entry and so must be denied (fail-closed). This would
+            // FAIL loudly if the matcher ever allowed a real bypass through.
             assert!(
                 !matches!(decision.verdict, FirewallVerdict::Allow)
-                    || decision.rationale.contains("safe.example.com"),
+                    || malicious_host.eq_ignore_ascii_case("safe.example.com"),
                 "Host pattern bypass should be prevented for: {}",
                 malicious_host
             );

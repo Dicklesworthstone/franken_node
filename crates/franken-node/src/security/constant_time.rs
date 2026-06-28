@@ -1047,9 +1047,12 @@ mod comprehensive_boundary_negative_tests {
             if is_safe {
                 // Safe to use in arithmetic
                 let safe_calculation = problematic_value * 2.0;
+                // A finite input stays finite under doubling unless its magnitude
+                // exceeds half of f64::MAX, where the product overflows to infinity —
+                // exactly the case production code must catch with an is_finite() guard.
                 assert!(
-                    safe_calculation.is_finite() || problematic_value == 0.0,
-                    "Safe calculation should remain finite"
+                    safe_calculation.is_finite() || problematic_value.abs() > f64::MAX / 2.0,
+                    "Safe calculation should remain finite unless the finite input overflows on doubling"
                 );
             } else {
                 // Should be rejected or replaced with safe default

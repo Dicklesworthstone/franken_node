@@ -579,6 +579,11 @@ mod tests {
                 ("policy_deploy".to_string(), SafetyTier::Standard),
                 ("connector_activate".to_string(), SafetyTier::Standard),
                 ("telemetry_config".to_string(), SafetyTier::Advisory),
+                // Generic advisory action used by replay/nonce/epoch tests. Prod now
+                // fails closed for unclassified action_ids (matching_tier -> None ->
+                // ProofTampered "not classified in the tier table"), so the bare "act"
+                // prefix must be registered. No other test action starts with "act".
+                ("act".to_string(), SafetyTier::Advisory),
             ],
         )
     }
@@ -1854,14 +1859,28 @@ mod tests {
                 let decision = result.unwrap();
                 assert!(!decision.degraded);
             } else {
-                assert!(
-                    result.is_err(),
-                    "Expected stale proof to fail: tier={:?}, proof_epoch={}, current_epoch={}",
-                    tier,
-                    proof_epoch,
-                    current_epoch
-                );
-                assert_eq!(result.unwrap_err().code(), "ERR_RFG_STALE");
+                // At the exact staleness boundary the proof is NOT fresh. Critical and
+                // Standard (no owner-bypass) fail closed with ERR_RFG_STALE; Advisory
+                // degrades to proceed-with-warning (INV-RFG-DEGRADE) -> Ok + degraded.
+                match tier {
+                    SafetyTier::Advisory => {
+                        assert!(
+                            result.is_ok(),
+                            "Expected stale Advisory proof to degrade (proceed-with-warning): proof_epoch={proof_epoch}, current_epoch={current_epoch}"
+                        );
+                        assert!(result.unwrap().degraded);
+                    }
+                    _ => {
+                        assert!(
+                            result.is_err(),
+                            "Expected stale proof to fail: tier={:?}, proof_epoch={}, current_epoch={}",
+                            tier,
+                            proof_epoch,
+                            current_epoch
+                        );
+                        assert_eq!(result.unwrap_err().code(), "ERR_RFG_STALE");
+                    }
+                }
             }
         }
     }
@@ -2141,11 +2160,14 @@ mod tests {
             vec!["\u{202E}evil\u{202C}cred".to_string()],          // BiDi override in credential
         ];
 
-        for attack_creds in credential_attacks {
+        for (idx, attack_creds) in credential_attacks.into_iter().enumerate() {
             let mut cred_proof = FreshnessProof {
                 timestamp: 1700000000,
                 credentials_checked: attack_creds.clone(),
-                nonce: format!("cred-attack-{}", attack_creds.len()),
+                // Use the iteration index, not attack_creds.len(): several attack
+                // vectors share the same length, which previously produced colliding
+                // nonces and a spurious ReplayDetected on later iterations.
+                nonce: format!("cred-attack-{idx}"),
                 signature: String::new(),
                 tier: SafetyTier::Advisory,
                 epoch: 100,
@@ -2409,6 +2431,10 @@ mod tests {
                 .collect::<Vec<_>>();
 
             for nonce in pattern_nonces {
+                // Capture replay state BEFORE check(): a successful check consumes the
+                // nonce, so probing is_nonce_consumed afterwards would always report
+                // "consumed" and mis-route a legitimate first use into the replay arm.
+                let already_consumed = g.is_nonce_consumed(&nonce);
                 let pattern_proof = proof(SafetyTier::Advisory, 100, &nonce);
                 let result = g.check(
                     &pattern_proof,
@@ -2420,7 +2446,7 @@ mod tests {
                 );
 
                 // First occurrence should succeed
-                if !g.is_nonce_consumed(&nonce) {
+                if !already_consumed {
                     assert!(result.is_ok(), "First use of pattern nonce should succeed");
                 } else {
                     // Subsequent uses should fail with replay

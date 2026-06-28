@@ -1406,7 +1406,12 @@ mod tests {
             },
             RailRouterError::InvalidRiskScore {
                 workload_id: "normal-id".to_string(),
-                score: f64::NAN,
+                // NOTE: serde_json serializes a non-finite f64 (NaN/Infinity) as
+                // JSON `null`, which then fails to deserialize back into f64, so a
+                // NaN score cannot survive the round-trip exercised below. Use a
+                // finite out-of-[0.0, 1.0] score so the InvalidRiskScore variant
+                // still round-trips to the intended variant.
+                score: 1.5,
             },
             RailRouterError::SameRailElevation {
                 workload_id: "test-id".to_string(),

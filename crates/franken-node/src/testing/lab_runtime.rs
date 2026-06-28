@@ -1201,10 +1201,11 @@ mod tests {
     /// Test push_bounded with overflow and capacity edge cases
     #[test]
     fn test_push_bounded_negative_paths() {
-        // Zero capacity - should not panic but clear and add
+        // Zero capacity clears the vector entirely (including the new item) — the
+        // crate-wide `push_bounded` short-circuits to `items.clear()` on cap == 0.
         let mut vec = vec![1, 2, 3];
         push_bounded(&mut vec, 999, 0);
-        assert_eq!(vec, vec![999]); // Different behavior than other push_bounded implementations
+        assert!(vec.is_empty());
 
         // Single capacity with existing items
         let mut vec = vec![1, 2, 3, 4, 5];
@@ -1261,10 +1262,13 @@ mod tests {
         let max_val = rng_max.next_u64();
         assert!(max_val > 0); // Should not produce zero immediately
 
-        // Seed that could cause wrapping issues
+        // Seed chosen so the first `state += GOLDEN` wraps exactly to 0. SplitMix64's
+        // finalizer is a bijection that maps 0 -> 0, so the FIRST output is legitimately
+        // 0; the generator still advances, so subsequent outputs are non-zero.
         let mut rng_wrap = SplitMix64::new(u64::MAX - 0x9e37_79b9_7f4a_7c15 + 1);
         let wrap_val = rng_wrap.next_u64();
-        assert!(wrap_val > 0);
+        assert_eq!(wrap_val, 0, "wrapped-to-zero state yields a 0 output");
+        assert!(rng_wrap.next_u64() > 0, "generator recovers after the zero-state output");
 
         // Test next_f64 edge cases
         let mut rng_float = SplitMix64::new(1);
@@ -3149,14 +3153,12 @@ mod tests {
         let mut items = vec![1, 2, 3, 4, 5];
         let original_len = items.len();
 
-        // Test with cap=0 - should trigger overflow calculation
+        // Test with cap=0 - the hardened `push_bounded` short-circuits on zero
+        // capacity and clears the vector entirely (including the new item), rather
+        // than performing the vulnerable `len - cap + 1` subtraction.
+        let _ = original_len;
         push_bounded(&mut items, 99, 0);
-
-        // With the vulnerable implementation using `items.len() - cap + 1`,
-        // this could cause issues if len < cap. The correct implementation
-        // should use saturating arithmetic: items.len().saturating_sub(cap).saturating_add(1)
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0], 99);
+        assert!(items.is_empty());
 
         // Test boundary condition where cap > len
         let mut small_vec = vec![1];
@@ -3631,10 +3633,11 @@ mod tests {
         assert_eq!(large_vec[4], 9999); // New item at end
         assert!(large_vec[0] >= 995); // Only recent items remain
 
-        // Edge case: capacity of 0 should clear all items
+        // Edge case: capacity of 0 clears all items (including the new one) — the
+        // crate-wide `push_bounded` short-circuits to `items.clear()` on cap == 0.
         let mut test_vec = vec![1, 2, 3];
         push_bounded(&mut test_vec, 42, 0);
-        assert_eq!(test_vec, vec![42]);
+        assert!(test_vec.is_empty());
 
         // Edge case: capacity of 1 should keep only new item
         push_bounded(&mut test_vec, 99, 1);
@@ -3696,11 +3699,14 @@ mod tests {
             assert!(timer_id > 0);
         }
 
-        // Attempting to schedule beyond u64::MAX should fail
-        let overflow_result = clock.schedule_timer(1, "overflow_timer");
+        // Attempting to schedule beyond u64::MAX should fail. `schedule_timer` records
+        // pending timers without advancing the clock, so `current_tick` is still
+        // u64::MAX - 10 here; a delta of 11 is the smallest that pushes the fire tick
+        // past u64::MAX (delta <= 10 lands on a valid tick).
+        let overflow_result = clock.schedule_timer(11, "overflow_timer");
         assert!(
             matches!(overflow_result, Err(LabError::TickOverflow { current, delta })
-                         if current == u64::MAX - 10 && delta == 1)
+                         if current == u64::MAX - 10 && delta == 11)
         );
 
         // Advance to u64::MAX exactly
@@ -4079,7 +4085,10 @@ mod tests {
                        if current >= u64::MAX - 10 && delta == 100)
         );
 
-        // Test timer scheduling with extreme tick values
+        // Test timer scheduling with extreme tick values. The overflow probes above
+        // leave `current_tick` near u64::MAX, so adding a near-max DELAY would itself
+        // overflow; reset to the start of the timeline so the near-max delay fits.
+        rt.test_clock.current_tick = 0;
         let timer_result = rt.schedule_timer(u64::MAX - 1, "near-max-timer");
         assert!(
             timer_result.is_ok(),

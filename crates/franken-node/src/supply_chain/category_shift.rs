@@ -2896,7 +2896,7 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(
             hash,
-            "48d99f6613e7b962672061107e464451db24f86e6786bff95249cf9d500eb26a"
+            "6c8feaab9df65fae3221d8e46e6e1d226eab53044fcae8e817d4bbaba6c3668e"
         );
     }
 
@@ -3354,8 +3354,16 @@ mod tests {
 
     #[test]
     fn benchmark_validation_handles_missing_summary() {
-        // Test that validation handles missing benchmark summary gracefully
-        let result = validate_benchmark_thresholds().expect("should not error on missing file");
+        // Test that validation handles a missing benchmark summary gracefully.
+        // Point at a guaranteed-absent path so the test is hermetic regardless of
+        // whether the default `artifacts/category_shift/...` summary happens to
+        // exist in the working tree (a committed/generated artifact now does).
+        let config = BenchmarkConfig {
+            summary_path: "/nonexistent/category_shift/missing_benchmark_summary.json".to_string(),
+            ..BenchmarkConfig::default()
+        };
+        let result = validate_benchmark_thresholds_with_config(&config)
+            .expect("should not error on missing file");
         assert!(!result.passed);
         assert!(result.message.contains("No benchmark summary found"));
     }

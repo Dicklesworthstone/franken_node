@@ -1375,10 +1375,15 @@ mod correctness_envelope_comprehensive_negative_tests {
             ("../hardening.direction", true),
             ("./hardening.direction", true),
             ("config/../hardening.direction", true),
-            // Injection attacks in field names
+            // Injection attacks in field names. `validate_policy_field` rejects
+            // any field containing a path separator ('/' or '\\'), so payloads
+            // carrying `</script>` or `HTTP/1.1` (both contain '/') are now
+            // refused as malformed (Err). The SQL-style payload has no '/', '\\',
+            // '\0', leading/trailing '.', or '..', so it stays a harmless
+            // unknown field (Ok).
             ("hardening.direction'; DROP TABLE config; --", false),
-            ("hardening.direction<script>alert('field')</script>", false),
-            ("hardening.direction\r\nHTTP/1.1 200 OK\r\n\r\n", false),
+            ("hardening.direction<script>alert('field')</script>", true),
+            ("hardening.direction\r\nHTTP/1.1 200 OK\r\n\r\n", true),
         ];
 
         for (malicious_field, should_violate) in bypass_attempts {
@@ -1942,11 +1947,16 @@ mod correctness_envelope_additional_negative_path_tests {
         let json = serde_json::to_string(&memory_attack_proposal).unwrap();
         assert!(json.len() > 1_000_000); // Should be very large but bounded
 
-        // Test deserialization round-trip
-        let deserialized: PolicyProposal = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.proposal_id, memory_attack_proposal.proposal_id);
-        assert_eq!(deserialized.epoch_id, u64::MAX);
-        assert_eq!(deserialized.changes.len(), 1);
+        // Deserialization of a pathologically deep (1000-level) structure is
+        // rejected GRACEFULLY: serde_json's deserializer enforces a bounded
+        // recursion limit (DoS defense), so it returns an `Err("recursion limit
+        // exceeded")` instead of overflowing the stack. That bounded, no-panic
+        // rejection IS the memory-exhaustion protection this test exercises.
+        let deserialized = serde_json::from_str::<PolicyProposal>(&json);
+        assert!(
+            deserialized.is_err(),
+            "deeply nested input must be rejected by the bounded-recursion deserializer, not round-tripped"
+        );
     }
 
     #[test]
@@ -2181,15 +2191,19 @@ mod correctness_envelope_additional_negative_path_tests {
             ("hardening&#x2E;direction", false),
             // Base64 encoding attempts
             ("aGFyZGVuaW5nLmRpcmVjdGlvbg==", false), // "hardening.direction" in base64
-            // Hex encoding attempts
+            // Hex encoding attempts. The literal `\xNN` form contains backslash
+            // bytes, which `validate_policy_field` refuses as a path separator —
+            // so the obfuscated field is rejected (Err) rather than silently
+            // bypassing as an unknown field.
             (
                 "\\x68\\x61\\x72\\x64\\x65\\x6E\\x69\\x6E\\x67\\x2E\\x64\\x69\\x72\\x65\\x63\\x74\\x69\\x6F\\x6E",
-                false,
+                true,
             ),
-            // Unicode escape attempts
+            // Unicode escape attempts. The literal `\uNNNN` form likewise carries
+            // backslash bytes and is rejected by `validate_policy_field`.
             (
                 "\\u0068\\u0061\\u0072\\u0064\\u0065\\u006E\\u0069\\u006E\\u0067\\u002E\\u0064\\u0069\\u0072\\u0065\\u0063\\u0074\\u0069\\u006F\\u006E",
-                false,
+                true,
             ),
             // Case variations (should pass since we do exact matching)
             ("Hardening.Direction", false),
@@ -2223,7 +2237,20 @@ mod correctness_envelope_additional_negative_path_tests {
                     field
                 );
                 let err = result.unwrap_err();
-                assert_eq!(err.invariant_id.as_str(), "INV-001-MONOTONIC-HARDENING");
+                // The plain `hardening.direction` field is caught by the
+                // monotonic-hardening invariant; backslash-bearing escape forms
+                // (`\xNN`/`\uNNNN`) are caught earlier by the proposal-shape
+                // guard. Both are recognized envelope rejections — neither
+                // bypasses validation.
+                assert!(
+                    matches!(
+                        err.invariant_id.as_str(),
+                        "INV-001-MONOTONIC-HARDENING" | "INV-000-POLICY-PROPOSAL-SHAPE"
+                    ),
+                    "Encoded field '{}' rejected by unexpected invariant {}",
+                    field,
+                    err.invariant_id.as_str()
+                );
             } else {
                 assert!(
                     result.is_ok(),

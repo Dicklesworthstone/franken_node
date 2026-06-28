@@ -747,6 +747,15 @@ mod override_receipt_negative_tests {
         );
     }
 
+    fn expect_policy_invalid(err: FreshnessError, reason: &str) {
+        assert_eq!(
+            err,
+            FreshnessError::PolicyInvalid {
+                reason: reason.to_string(),
+            }
+        );
+    }
+
     #[test]
     fn stale_override_rejects_mismatched_action_id() {
         let check = stale_check(SafetyTier::Risky);
@@ -866,7 +875,10 @@ mod override_receipt_negative_tests {
 
         let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
 
-        expect_override_required(err, SafetyTier::Risky, 7200);
+        // Prod fail-closed hardening: an empty check action_id is rejected with a
+        // PolicyInvalid validation error before the stale-override path is evaluated,
+        // so the override is refused (never granted).
+        expect_policy_invalid(err, "freshness check action_id must not be empty");
     }
 
     #[test]
@@ -878,7 +890,10 @@ mod override_receipt_negative_tests {
 
         let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
 
-        expect_override_required(err, SafetyTier::Dangerous, 7200);
+        // Prod fail-closed hardening: a whitespace-only check action_id trims to empty
+        // and is rejected with a PolicyInvalid validation error before the stale-override
+        // path is evaluated, so the override is refused (never granted).
+        expect_policy_invalid(err, "freshness check action_id must not be empty");
     }
 
     #[test]
@@ -929,7 +944,10 @@ mod override_receipt_negative_tests {
 
         let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
 
-        expect_override_required(err, SafetyTier::Risky, 7200);
+        // Prod fail-closed hardening: an empty check trace_id is rejected with a
+        // PolicyInvalid validation error before the stale-override path is evaluated,
+        // so the override is refused (never granted).
+        expect_policy_invalid(err, "freshness check trace_id must not be empty");
     }
 
     #[test]
@@ -940,7 +958,10 @@ mod override_receipt_negative_tests {
 
         let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
 
-        expect_override_required(err, SafetyTier::Dangerous, 7200);
+        // Prod fail-closed hardening: a whitespace-only check trace_id trims to empty
+        // and is rejected with a PolicyInvalid validation error before the stale-override
+        // path is evaluated, so the override is refused (never granted).
+        expect_policy_invalid(err, "freshness check trace_id must not be empty");
     }
 
     #[test]

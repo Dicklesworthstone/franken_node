@@ -1134,13 +1134,20 @@ mod tests {
         );
 
         let serialized = serde_json::to_string(&event).unwrap();
-        assert!(
-            !serialized.contains("<script>"),
-            "Script injection should be escaped"
+        // serde_json is a codec, not a sanitizer: `<`/`>`/`'`/`;`/`-`/space are not
+        // JSON-special, so the script and SQL payloads are preserved verbatim
+        // inside properly-escaped JSON strings — never stripped or executed. The
+        // injection-safety property is lossless containment plus escaped control
+        // chars so a value can never break out of its string context.
+        let roundtrip: EpochAuthEvent =
+            serde_json::from_str(&serialized).expect("event should round-trip");
+        assert_eq!(
+            roundtrip, event,
+            "Injection payloads must be losslessly contained, not stripped"
         );
         assert!(
-            !serialized.contains("DROP TABLE"),
-            "SQL injection should be escaped"
+            !serialized.contains('\n') && !serialized.contains('\r'),
+            "Control chars (newline/CR) must be escaped, not left raw"
         );
 
         // Test trace_id with control characters
@@ -1459,7 +1466,10 @@ mod tests {
         let test_params = vec![
             (ControlEpoch::new(1), "marker"),
             (ControlEpoch::new(100), "test-domain"),
-            (ControlEpoch::new(0), ""),
+            // Prod's signing path now requires a non-empty, trimmed domain
+            // (`validate_domain` → `AuthError::DomainEmpty`); use a valid domain so
+            // the epoch=0 consistency case still exercises the full sign path.
+            (ControlEpoch::new(0), "zero-epoch-domain"),
         ];
 
         for (epoch, domain) in test_params {

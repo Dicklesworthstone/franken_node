@@ -1,0 +1,32 @@
+---
+source: crates/franken-node/src/registry/staking_governance.rs
+expression: scrubbed
+---
+{
+  "tiers": {
+    "critical": {
+      "minimum_stake": 1000,
+      "slash_fraction_bps": 10000,
+      "cooldown_secs": 259200,
+      "appeal_window_secs": 172800
+    },
+    "high": {
+      "minimum_stake": 500,
+      "slash_fraction_bps": 5000,
+      "cooldown_secs": 172800,
+      "appeal_window_secs": 129600
+    },
+    "low": {
+      "minimum_stake": 10,
+      "slash_fraction_bps": 1000,
+      "cooldown_secs": 43200,
+      "appeal_window_secs": 43200
+    },
+    "medium": {
+      "minimum_stake": 100,
+      "slash_fraction_bps": 2500,
+      "cooldown_secs": 86400,
+      "appeal_window_secs": 86400
+    }
+  }
+}

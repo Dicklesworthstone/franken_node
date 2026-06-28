@@ -907,13 +907,22 @@ mod tests {
             .map(|i| RampCurve::Stepped { plateau_count: 4 }.value_at(i, n))
             .collect();
 
-        // Endpoints: every curve starts at 0.0 and reaches its top sample
-        // at i == n-1.
-        for seq in [&linear, &exp, &sigmoid, &stepped] {
+        // Endpoints: the linear, exponential, and stepped curves start at
+        // exactly 0.0. The logistic sigmoid starts at its analytic floor
+        // `1 / (1 + e^steepness)` — a small positive value, not 0.0 — because
+        // `value_at` evaluates the raw (un-normalized) logistic (see the
+        // Sigmoid arm of `RampCurve::value_at`). Every curve still starts at
+        // the bottom of its range and rises toward its top sample at i == n-1.
+        for seq in [&linear, &exp, &stepped] {
             assert!(seq.iter().all(|v| v.is_finite()));
             assert!((seq[0] - 0.0).abs() < 1e-9);
             assert!((0.0..=1.0).contains(&seq[(n - 1) as usize]));
         }
+        // steepness == 6.0 here, matching the Sigmoid curve constructed above.
+        let sigmoid_floor = 1.0 / (1.0 + 6.0_f64.exp());
+        assert!(sigmoid.iter().all(|v| v.is_finite()));
+        assert!((sigmoid[0] - sigmoid_floor).abs() < 1e-9);
+        assert!((0.0..=1.0).contains(&sigmoid[(n - 1) as usize]));
         // Middle samples should differ across non-trivial curves so that
         // the harness can actually distinguish ramp styles.
         let mid = (n / 2) as usize;

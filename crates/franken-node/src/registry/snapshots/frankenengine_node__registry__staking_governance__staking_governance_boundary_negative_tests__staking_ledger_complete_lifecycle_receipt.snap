@@ -1,0 +1,167 @@
+---
+source: crates/franken-node/src/registry/staking_governance.rs
+expression: scrubbed
+---
+{
+  "accounts": {
+    "lifecycle-publisher": {
+      "publisher_id": "lifecycle-publisher",
+      "balance": 2000,
+      "deposited": 2000,
+      "slashed_total": 0,
+      "slash_history": [
+        {
+          "violation_id": "slash-1",
+          "amount": 1000,
+          "reason": "policy_violation",
+          "evidence_hash": "69757a855941b7fdd76fdc67a95277b87183538478ed8fb63f8ef69c26711de7",
+          "timestamp": 1200
+        }
+      ],
+      "cooldown_until": null
+    }
+  },
+  "state": {
+    "stakes": {
+      "1": {
+        "id": 1,
+        "publisher_id": "lifecycle-publisher",
+        "amount": 2000,
+        "state": "active",
+        "risk_tier": "high",
+        "deposited_at": 1000,
+        "expires_at": null,
+        "withdrawn_at": null,
+        "slashed_at": 1200
+      }
+    },
+    "slash_events": [
+      {
+        "slash_id": 1,
+        "stake_id": 1,
+        "publisher_id": "lifecycle-publisher",
+        "evidence": {
+          "violation_type": "policy_violation",
+          "description": "Lifecycle test violation",
+          "evidence_payload": "Test payload for complete lifecycle",
+          "evidence_hash": "69757a855941b7fdd76fdc67a95277b87183538478ed8fb63f8ef69c26711de7",
+          "collector_identity": "test-collector",
+          "collected_at": 1100
+        },
+        "slash_amount": 1000,
+        "pre_balance": 2000,
+        "post_balance": 1000,
+        "risk_tier": "high",
+        "timestamp": 1200,
+        "penalty_hash": "640825400b3fc25d662956c9e9e00e4876c7778d0c3d42dc75ca5bea8a286eb9"
+      }
+    ],
+    "appeals": [
+      {
+        "appeal_id": 1,
+        "stake_id": 1,
+        "slash_id": 1,
+        "reason": "False positive test appeal",
+        "outcome": "reversed",
+        "filed_at": 1300,
+        "resolved_at": 1400
+      }
+    ],
+    "audit_log": [
+      {
+        "entry_id": 1,
+        "event_code": "STAKE-001",
+        "timestamp": 1000,
+        "publisher_id": "lifecycle-publisher",
+        "stake_id": 1,
+        "operation": "deposit",
+        "evidence_hash": null,
+        "outcome": "deposited 2000 for tier high",
+        "invariants_checked": [
+          "INV-STAKE-MINIMUM",
+          "INV-STAKE-AUDIT-COMPLETE"
+        ]
+      },
+      {
+        "entry_id": 2,
+        "event_code": "STAKE-002",
+        "timestamp": 1200,
+        "publisher_id": "lifecycle-publisher",
+        "stake_id": 1,
+        "operation": "slash",
+        "evidence_hash": "69757a855941b7fdd76fdc67a95277b87183538478ed8fb63f8ef69c26711de7",
+        "outcome": "slashed 1000 from 2000 (post=1000, tier=high)",
+        "invariants_checked": [
+          "INV-STAKE-SLASH-DETERMINISTIC",
+          "INV-STAKE-NO-DOUBLE-SLASH",
+          "INV-STAKE-AUDIT-COMPLETE",
+          "INV-STK-DETERMINISTIC-PENALTY",
+          "INV-STK-AUDITABLE-SLASH",
+          "INV-STK-NO-NEGATIVE-BALANCE"
+        ]
+      },
+      {
+        "entry_id": 3,
+        "event_code": "STAKE-003",
+        "timestamp": 1300,
+        "publisher_id": "lifecycle-publisher",
+        "stake_id": 1,
+        "operation": "appeal_filed",
+        "evidence_hash": null,
+        "outcome": "appeal filed for slash 1: False positive test appeal",
+        "invariants_checked": [
+          "INV-STAKE-APPEAL-WINDOW",
+          "INV-STAKE-AUDIT-COMPLETE"
+        ]
+      },
+      {
+        "entry_id": 4,
+        "event_code": "STAKE-004",
+        "timestamp": 1400,
+        "publisher_id": "lifecycle-publisher",
+        "stake_id": 1,
+        "operation": "appeal_resolved",
+        "evidence_hash": null,
+        "outcome": "appeal 1 resolved: reversed",
+        "invariants_checked": [
+          "INV-STAKE-AUDIT-COMPLETE"
+        ]
+      }
+    ],
+    "next_stake_id": 2,
+    "next_slash_id": 2,
+    "next_appeal_id": 2,
+    "next_audit_id": 5
+  },
+  "engine": {
+    "penalty_schedule": {
+      "tiers": {
+        "critical": {
+          "minimum_stake": 1000,
+          "slash_fraction_bps": 10000,
+          "cooldown_secs": 259200,
+          "appeal_window_secs": 172800
+        },
+        "high": {
+          "minimum_stake": 500,
+          "slash_fraction_bps": 5000,
+          "cooldown_secs": 172800,
+          "appeal_window_secs": 129600
+        },
+        "low": {
+          "minimum_stake": 10,
+          "slash_fraction_bps": 1000,
+          "cooldown_secs": 43200,
+          "appeal_window_secs": 43200
+        },
+        "medium": {
+          "minimum_stake": 100,
+          "slash_fraction_bps": 2500,
+          "cooldown_secs": 86400,
+          "appeal_window_secs": 86400
+        }
+      }
+    }
+  },
+  "schema_version": "staking-v1.0"
+}

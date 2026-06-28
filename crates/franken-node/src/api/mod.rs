@@ -313,8 +313,10 @@ mod tests {
         // Test with strings containing replacement characters from malformed UTF-8
         let with_replacement = "valid\u{FFFD}text\u{FFFD}more";
 
-        assert_eq!(utf8_prefix(with_replacement, 3), "valid\u{FFFD}text");
-        assert_eq!(utf8_prefix(with_replacement, 1), "valid");
+        // `utf8_prefix` counts unicode scalars; a U+FFFD replacement char is a
+        // single ordinary scalar, so the first 3 scalars are "val", first 1 "v".
+        assert_eq!(utf8_prefix(with_replacement, 3), "val");
+        assert_eq!(utf8_prefix(with_replacement, 1), "v");
         assert_eq!(utf8_prefix(with_replacement, 0), "");
 
         // Multiple replacement characters in sequence
