@@ -3792,6 +3792,36 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode([0xC7_u8; 32])
     }
 
+    /// A baseline `Config` for the selected profile with the two fail-closed
+    /// security fields that `validate()` now requires (`trust.registry_signing_key`
+    /// and `security.authorized_api_keys`) already populated with valid values,
+    /// so a negative test's deliberately broken field is actually reached by
+    /// validation instead of erroring early on a missing security boundary.
+    fn valid_base_config(profile: Profile) -> Config {
+        let mut config = Config::for_profile(profile);
+        config.trust.registry_signing_key = Some(test_registry_signing_key());
+        config.security.authorized_api_keys = BTreeSet::from(["test-api-key".to_string()]);
+        config
+    }
+
+    /// Write a TOML file carrying only the two fail-closed security fields that
+    /// `validate()` now requires and return its temp dir (kept alive by the
+    /// caller) plus path. Lets env-only resolve fixtures pass validation
+    /// without disturbing the override assertions under test.
+    fn security_baseline_file() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[trust]\nregistry_signing_key = \"{}\"\n\n[security]\nauthorized_api_keys = [\"test-api-key\"]\n",
+                test_registry_signing_key()
+            ),
+        )
+        .unwrap();
+        (dir, path)
+    }
+
     fn map_lookup(map: BTreeMap<String, String>) -> impl Fn(&str) -> Option<String> {
         move |key| map.get(key).cloned()
     }
@@ -3980,7 +4010,13 @@ mod tests {
     fn resolve_precedence_cli_over_env_over_file_profile() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("franken_node.toml");
-        std::fs::write(&path, "profile = \"legacy-risky\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "profile = \"legacy-risky\"\n\
+             [trust]\nregistry_signing_key = \"x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c=\"\n\
+             [security]\nauthorized_api_keys = [\"test-api-key\"]\n",
+        )
+        .unwrap();
 
         let env = BTreeMap::from([("FRANKEN_NODE_PROFILE".to_string(), "strict".to_string())]);
 
@@ -4014,6 +4050,12 @@ minimum_assurance_level = 5
 
 [migration]
 require_lockstep_validation = true
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4049,8 +4091,9 @@ require_lockstep_validation = true
             "balancced",
             "legacy",
             "risky",
-            "strict ",
-            " balanced",
+            // NOTE(bd-o776s): `Profile` parsing now trims surrounding whitespace,
+            // so "strict " / " balanced" legitimately parse to valid profiles and
+            // are no longer "invalid". Genuinely-invalid values remain below.
             "strict-risky",
             "null",
             "undefined",
@@ -4077,8 +4120,8 @@ require_lockstep_validation = true
             if let Err(err) = result {
                 let err_msg = err.to_string();
                 assert!(
-                    err_msg.contains("Invalid profile") && err_msg.contains("No fallback"),
-                    "Error message for '{}' should mention 'Invalid profile' and 'No fallback': {}",
+                    err_msg.contains("Invalid runtime profile") && err_msg.contains("No fallback"),
+                    "Error message for '{}' should mention 'Invalid runtime profile' and 'No fallback': {}",
                     invalid,
                     err_msg
                 );
@@ -4117,6 +4160,7 @@ require_lockstep_validation = true
 profile = "balanced"
 
 [trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
 min_trust_score = 0.61
 decay_factor = 0.91
 
@@ -4131,6 +4175,9 @@ decay_factor = 0.88
 [profiles.strict.thresholds]
 max_failure_rate = 0.02
 min_resilience_score = 0.77
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4174,6 +4221,12 @@ min_throughput_ops = 80000
 summary_path = "artifacts/category_shift/profile_summary.json"
 min_aggregate_score = 88
 min_throughput_ops = 120000
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4230,8 +4283,13 @@ min_throughput_ops = 120000
             ),
         ]);
 
-        let resolved =
-            Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap();
+        let (_security_dir, security_path) = security_baseline_file();
+        let resolved = Config::resolve_with_env(
+            Some(&security_path),
+            CliOverrides::default(),
+            &map_lookup(env),
+        )
+        .unwrap();
 
         assert_eq!(
             resolved.config.benchmark.summary_path,
@@ -4262,6 +4320,12 @@ max_chain_depth = 33
 [profiles.strict.verifier]
 max_capsule_count = 303
 max_chain_depth = 44
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4313,6 +4377,10 @@ max_chain_depth = 44
 profile = "strict"
 [trust]
 quarantine_on_high_risk = false
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4353,6 +4421,12 @@ priority_weight = 111
 queue_limit = 22
 enqueue_timeout_ms = 44
 overflow_policy = "reject"
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4384,11 +4458,15 @@ overflow_policy = "reject"
             r#"
 [security]
 max_merge_decisions = 2
+authorized_api_keys = ["test-api-key"]
 
 [runtime]
 preferred = "bun"
 remote_max_in_flight = 77
 bulkhead_retry_after_ms = 33
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
 "#,
         )
         .unwrap();
@@ -4433,8 +4511,13 @@ bulkhead_retry_after_ms = 33
             ),
         ]);
 
-        let resolved =
-            Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap();
+        let (_security_dir, security_path) = security_baseline_file();
+        let resolved = Config::resolve_with_env(
+            Some(&security_path),
+            CliOverrides::default(),
+            &map_lookup(env),
+        )
+        .unwrap();
 
         assert_eq!(resolved.config.runtime.preferred, PreferredRuntime::Node);
         assert_eq!(resolved.config.runtime.remote_max_in_flight, 66);
@@ -4454,8 +4537,13 @@ bulkhead_retry_after_ms = 33
             ),
         ]);
 
-        let resolved =
-            Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap();
+        let (_security_dir, security_path) = security_baseline_file();
+        let resolved = Config::resolve_with_env(
+            Some(&security_path),
+            CliOverrides::default(),
+            &map_lookup(env),
+        )
+        .unwrap();
 
         assert_eq!(resolved.config.trust.min_trust_score, Some(0.66));
         assert_eq!(resolved.config.trust.decay_factor, Some(0.93));
@@ -4478,6 +4566,9 @@ bulkhead_retry_after_ms = 33
                 r#"
 [trust]
 registry_signing_key = "{key}"
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#
             ),
         )
@@ -4504,8 +4595,13 @@ registry_signing_key = "{key}"
             key.clone(),
         )]);
 
-        let resolved =
-            Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap();
+        let (_security_dir, security_path) = security_baseline_file();
+        let resolved = Config::resolve_with_env(
+            Some(&security_path),
+            CliOverrides::default(),
+            &map_lookup(env),
+        )
+        .unwrap();
 
         assert_eq!(resolved.config.trust.registry_signing_key, Some(key));
         assert!(resolved.decisions.iter().any(|decision| {
@@ -4531,6 +4627,10 @@ idempotency_ttl_secs = 86400
 
 [security]
 max_degraded_duration_secs = 900
+authorized_api_keys = ["test-api-key"]
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
 "#,
         )
         .unwrap();
@@ -4597,6 +4697,12 @@ max_degraded_duration_secs = 900
             r#"
 [engine]
 binary_path = "/opt/from-file/franken-engine"
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4631,6 +4737,12 @@ binary_path = "/opt/from-file/franken-engine"
             r#"
 [fleet]
 state_dir = "from-file/fleet"
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4666,6 +4778,12 @@ state_dir = "from-file/fleet"
 [fleet]
 node_id = "node-from-file"
 poll_interval_seconds = 12
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4710,6 +4828,12 @@ poll_interval_seconds = 12
             r#"
 [registry]
 builder_identity = "builder-from-file"
+
+[trust]
+registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
+
+[security]
+authorized_api_keys = ["test-api-key"]
 "#,
         )
         .unwrap();
@@ -4995,7 +5119,7 @@ state_dir = ""
 
     #[test]
     fn validation_rejects_zero_runtime_lane_enqueue_timeout() {
-        let mut config = Config::for_profile(Profile::Balanced);
+        let mut config = valid_base_config(Profile::Balanced);
         let lane = config
             .runtime
             .lanes
@@ -5013,7 +5137,7 @@ state_dir = ""
 
     #[test]
     fn validation_rejects_invalid_benchmark_config() {
-        let mut empty_path = Config::for_profile(Profile::Balanced);
+        let mut empty_path = valid_base_config(Profile::Balanced);
         empty_path.benchmark.summary_path = "   ".to_string();
         assert!(
             empty_path
@@ -5023,7 +5147,7 @@ state_dir = ""
                 .contains("benchmark.summary_path")
         );
 
-        let mut nul_path = Config::for_profile(Profile::Balanced);
+        let mut nul_path = valid_base_config(Profile::Balanced);
         nul_path.benchmark.summary_path = "artifacts/category_shift\0summary.json".to_string();
         assert!(
             nul_path
@@ -5033,7 +5157,7 @@ state_dir = ""
                 .contains("benchmark.summary_path")
         );
 
-        let mut non_finite_latency = Config::for_profile(Profile::Balanced);
+        let mut non_finite_latency = valid_base_config(Profile::Balanced);
         non_finite_latency.benchmark.max_latency_ms = f64::NAN;
         assert!(
             non_finite_latency
@@ -5043,7 +5167,7 @@ state_dir = ""
                 .contains("benchmark.max_latency_ms")
         );
 
-        let mut zero_latency = Config::for_profile(Profile::Balanced);
+        let mut zero_latency = valid_base_config(Profile::Balanced);
         zero_latency.benchmark.max_latency_ms = 0.0;
         assert!(
             zero_latency
@@ -5053,7 +5177,7 @@ state_dir = ""
                 .contains("benchmark.max_latency_ms")
         );
 
-        let mut zero_throughput = Config::for_profile(Profile::Balanced);
+        let mut zero_throughput = valid_base_config(Profile::Balanced);
         zero_throughput.benchmark.min_throughput_ops = 0;
         assert!(
             zero_throughput
@@ -5066,7 +5190,7 @@ state_dir = ""
 
     #[test]
     fn validation_rejects_invalid_verifier_config() {
-        let mut zero_claims = Config::for_profile(Profile::Balanced);
+        let mut zero_claims = valid_base_config(Profile::Balanced);
         zero_claims.verifier.max_claims_per_request = 0;
         assert!(
             zero_claims
@@ -5076,7 +5200,7 @@ state_dir = ""
                 .contains("verifier.max_claims_per_request")
         );
 
-        let mut zero_capsules = Config::for_profile(Profile::Balanced);
+        let mut zero_capsules = valid_base_config(Profile::Balanced);
         zero_capsules.verifier.max_capsule_count = 0;
         assert!(
             zero_capsules
@@ -5086,7 +5210,7 @@ state_dir = ""
                 .contains("verifier.max_capsule_count")
         );
 
-        let mut zero_chain = Config::for_profile(Profile::Balanced);
+        let mut zero_chain = valid_base_config(Profile::Balanced);
         zero_chain.verifier.max_chain_depth = 0;
         assert!(
             zero_chain
@@ -5176,6 +5300,7 @@ state_dir = ""
         });
         config.trust.registry_signing_key =
             Some(base64::engine::general_purpose::STANDARD.encode([7_u8; 32]));
+        config.security.authorized_api_keys = BTreeSet::from(["test-api-key".to_string()]);
 
         config.validate().expect("valid trust overrides");
     }
@@ -5202,7 +5327,7 @@ state_dir = ""
 
     #[test]
     fn validation_rejects_zero_verifier_claim_cap() {
-        let mut config = Config::for_profile(Profile::Balanced);
+        let mut config = valid_base_config(Profile::Balanced);
         config.verifier.max_claims_per_request = 0;
 
         let err = config.validate().unwrap_err();
@@ -5215,7 +5340,7 @@ state_dir = ""
 
     #[test]
     fn validation_rejects_zero_runtime_lane_limits() {
-        let mut config = Config::for_profile(Profile::Balanced);
+        let mut config = valid_base_config(Profile::Balanced);
         let lane = config
             .runtime
             .lanes
@@ -5306,7 +5431,7 @@ state_dir = ""
 
     #[test]
     fn validation_rejects_zero_runtime_lane_max_concurrent() {
-        let mut config = Config::for_profile(Profile::Balanced);
+        let mut config = valid_base_config(Profile::Balanced);
         let lane = config
             .runtime
             .lanes
@@ -5324,7 +5449,7 @@ state_dir = ""
 
     #[test]
     fn validation_rejects_zero_runtime_lane_priority_weight() {
-        let mut config = Config::for_profile(Profile::Balanced);
+        let mut config = valid_base_config(Profile::Balanced);
         let lane = config
             .runtime
             .lanes
@@ -5558,8 +5683,12 @@ max_merge_decisions = 100
         let config: SecurityConfig = toml::from_str(raw).expect("parse security config");
         assert!(config.authorized_api_keys.is_empty());
 
-        // Full config validation should catch this and error
-        let full_config = Config::for_profile(Profile::Balanced);
+        // Full config validation should catch this and error. A valid signing
+        // key is set so validation advances past the registry_signing_key
+        // fail-closed boundary to the authorized_api_keys boundary under test,
+        // while authorized_api_keys is deliberately left empty.
+        let mut full_config = Config::for_profile(Profile::Balanced);
+        full_config.trust.registry_signing_key = Some(test_registry_signing_key());
         let validation_result = full_config.validate();
         assert!(validation_result.is_err());
         assert!(

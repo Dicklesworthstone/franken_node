@@ -1197,13 +1197,22 @@ mod atc_reciprocity_negative_path_tests {
             // Unicode should be preserved exactly in decision
             assert_eq!(decision.participant_id, *pattern);
 
-            // JSON serialization should handle injection safely
+            // JSON serialization should handle injection safely. serde_json only
+            // escapes `"`, `\`, and control characters (U+0000..U+001F); printable
+            // non-ASCII (directional overrides, BOM, emoji, zero-width) is emitted
+            // verbatim inside the JSON string — which is safe and round-trips
+            // exactly (asserted below). Only assert escaping for chars serde escapes.
             let json = serde_json::to_string(&decision)
                 .expect("unicode injection should serialize safely");
-            assert!(
-                !json.contains(&pattern.replace('\\', "")),
-                "Raw injection pattern should be escaped in JSON"
-            );
+            if pattern
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_control())
+            {
+                assert!(
+                    !json.contains(&pattern.replace('\\', "")),
+                    "Control/quote characters should be escaped in JSON"
+                );
+            }
 
             // Deserialization should preserve exact pattern
             let parsed: AccessDecision =
@@ -1680,14 +1689,26 @@ mod atc_reciprocity_negative_path_tests {
                 contributions_made: (i % 1000) as u64,
                 intelligence_consumed: ((i % 500) + 1) as u64,
                 contribution_quality: (i as f64 / large_batch_size as f64).min(1.0),
-                membership_age_seconds: 86400 * ((i % 365) + 1) as u64,
+                membership_age_seconds: if i % 100 == 0 {
+                    // Exception rows must sit past the grace window so the
+                    // exception path (not the grace path) is exercised.
+                    86400 * 30
+                } else {
+                    86400 * ((i % 365) + 1) as u64
+                },
                 has_exception: i % 100 == 0, // 1% exceptions
                 exception_reason: if i % 100 == 0 {
                     Some("bulk test".to_string())
                 } else {
                     None
                 },
-                exception_expires_at: None,
+                // Prod fails closed unless an exception carries a valid future
+                // expiry, so the 1% exception rows must provide one to count as active.
+                exception_expires_at: if i % 100 == 0 {
+                    Some("2027-01-01T00:00:00Z".to_string())
+                } else {
+                    None
+                },
             });
         }
 
@@ -1954,24 +1975,43 @@ mod atc_reciprocity_negative_path_tests {
                 exception_expires_at: Some(timestamp.to_string()),
             };
 
-            // Should handle malicious timestamps without corruption or crashes
+            // Should handle malicious timestamps without corruption or crashes.
+            // A *well-formed* RFC 3339 expiry in the future is not a manipulation:
+            // it describes a (very) long-lived but still-active exception, which
+            // prod legitimately honors. Only malformed / past / injected expiries
+            // must fail closed.
+            let well_formed_future =
+                matches!(*timestamp, "9999-12-31T23:59:59Z" | "3000-01-01T00:00:00Z");
             let decision = engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z");
-            assert!(
-                !decision.exception_applied,
-                "Malformed exception expiry must not activate the exception path"
-            );
-            assert_eq!(decision.tier, AccessTier::Blocked);
+            if well_formed_future {
+                assert!(
+                    decision.exception_applied,
+                    "A valid future expiry should keep the exception active"
+                );
+                assert_eq!(decision.tier, AccessTier::Standard);
+            } else {
+                assert!(
+                    !decision.exception_applied,
+                    "Malformed exception expiry must not activate the exception path"
+                );
+                assert_eq!(decision.tier, AccessTier::Blocked);
+            }
             assert_eq!(decision.participant_id, format!("timestamp_attack_{}", i));
 
             // JSON round-trip should preserve exact timestamp
             let json =
                 serde_json::to_string(&metrics).expect("malicious timestamp should serialize");
 
-            // Injection patterns should be escaped in JSON
-            if timestamp.contains('"') || timestamp.contains('<') || timestamp.contains('&') {
+            // serde_json only escapes `"`, `\`, and control characters; `<`/`>`/`&`
+            // are valid string content emitted verbatim (still safely inside the
+            // JSON string). Only assert escaping for characters serde escapes.
+            if timestamp
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_control())
+            {
                 assert!(
                     !json.contains(&timestamp.replace('\\', "")),
-                    "Malicious timestamp should be escaped in JSON"
+                    "Control/quote characters should be escaped in JSON"
                 );
             }
 
@@ -2053,17 +2093,21 @@ mod atc_reciprocity_negative_path_tests {
 
         // Test serialization/deserialization with malicious values
         let malicious_tier_values = [
-            json!("blocked"),                              // Lowercase (should fail)
-            json!("FULL"),                                 // Uppercase (should fail)
-            json!("limited_access"),                       // Non-existent variant
-            json!("admin"),                                // Privileged-sounding variant
-            json!(""),                                     // Empty string
-            json!(null),                                   // Null value
-            json!(42),                                     // Number instead of string
-            json!(true),                                   // Boolean instead of string
-            json!(["full"]),                               // Array instead of string
-            json!({"tier": "full"}),                       // Object instead of string
-            json!("full\u{0000}"),                         // Null byte injection
+            // NOTE: bare "blocked"/"limited"/"standard"/"full" are the *canonical*
+            // snake_case wire forms (see AccessTier #[serde(rename_all)]), so they
+            // legitimately deserialize and are covered by the valid-tier section
+            // below. Use a lowercase near-miss here to keep the reject-path intent.
+            json!("block"),          // Truncated variant (should fail)
+            json!("FULL"),           // Uppercase (should fail)
+            json!("limited_access"), // Non-existent variant
+            json!("admin"),          // Privileged-sounding variant
+            json!(""),               // Empty string
+            json!(null),             // Null value
+            json!(42),               // Number instead of string
+            json!(true),             // Boolean instead of string
+            json!(["full"]),         // Array instead of string
+            json!({"tier": "full"}), // Object instead of string
+            json!("full\u{0000}"),   // Null byte injection
             json!("full\"><script>alert('xss')</script>"), // XSS attempt
         ];
 

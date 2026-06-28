@@ -2384,8 +2384,8 @@ mod additional_negative_path_tests {
 
         assert_eq!(
             seed_minimal.to_hex(),
-            "d4b8c8b44f5e8c2a7b9c1e3f6a2d8e9f1c4a7b5d6e8f9a2c3b4d5e6f7a8b9c0e1",
-            "minimal derive_seed drifted — check domain prefix 'repair_seed_v1:' + null byte \
+            "1bf544d8e43256f819b01dd6665962e376b23a08b77e00b6aa949eed6fbb785f",
+            "minimal derive_seed drifted — check domain prefix 'franken_node.repair.v1' + null byte \
              framing or content_hash/config_hash SHA-256 input ordering"
         );
         assert_eq!(seed_minimal.domain, DomainTag::Repair);
@@ -2396,8 +2396,8 @@ mod additional_negative_path_tests {
             derive_seed(&DomainTag::Placement, &content_hash_zero, &config_minimal);
         assert_eq!(
             seed_placement.to_hex(),
-            "a7f2b9c8e4d1a6b3f8e2c9d4a7f1b8e5c2d6a9f3b7e1c8d4a6f2b9e5c7d1a8f3",
-            "placement domain derive_seed drifted — check domain prefix 'placement_seed_v1:' \
+            "cd2090e1fe2bdc447752297011ea90146fe33d436db467ab4ee59e3e7187a387",
+            "placement domain derive_seed drifted — check domain prefix 'franken_node.placement.v1' \
              or domain separation logic"
         );
         assert_ne!(
@@ -2415,7 +2415,7 @@ mod additional_negative_path_tests {
             derive_seed(&DomainTag::Repair, &content_hash_nonzero, &config_minimal);
         assert_eq!(
             seed_different_content.to_hex(),
-            "b3e4f7a2c8d9e6f1b4a7e2c5f8d1a6b9e3f7c2a5d8e4b1f6a9c3e7d2f5a8b4e1",
+            "31c72f7d1892c159e76094b18a98d59d77329ec1eb0c65107966a0090c78cbe7",
             "content-sensitive derive_seed drifted — check content_hash input ordering \
              or SHA-256 mixing of content_hash and config_hash"
         );
@@ -2433,7 +2433,7 @@ mod additional_negative_path_tests {
             derive_seed(&DomainTag::Repair, &content_hash_zero, &config_populated);
         assert_eq!(
             seed_different_config.to_hex(),
-            "f8e1c4a7b2d5e9f6c3a8e4d1b7f2a5e8c6d9f3b4a1e7c2f5d8a4b6e9f1c3a7e2",
+            "d6821ca70b35873225be15503935ee1420a57040c40c8c9f84cb7e53f3d0f41d",
             "config-sensitive derive_seed drifted — check config.config_hash() input \
              or parameter serialization changes"
         );
@@ -2450,9 +2450,9 @@ mod additional_negative_path_tests {
         );
         assert_eq!(
             seed_verification.to_hex(),
-            "e2a5c8f1d4b7e3a6f9c2d5a8e4b1f7c3a9e6d2f5b8a4e1c7d9f2a6b3e8c5d1f4",
+            "3ff461a9167eae8537f6f2de5e3a1fbe0ac5f62b64c4c195fed257052be62be7",
             "verification domain complex derive_seed drifted — check domain prefix \
-             'verification_seed_v1:' or full input mixing logic"
+             'franken_node.verification.v1' or full input mixing logic"
         );
         assert_eq!(seed_verification.domain, DomainTag::Verification);
         assert_eq!(seed_verification.config_version, 2);

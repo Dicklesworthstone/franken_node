@@ -685,15 +685,28 @@ mod tests {
                     expectation: MatrixExpectation::RoundTrip,
                 };
 
-                // Create the same logical row through different construction paths
+                // Build the SAME logical row two ways, differing ONLY in the
+                // order config parameters are inserted. Because ScheduleConfig
+                // stores parameters in a BTreeMap (sorted-key iteration), the
+                // canonical bytes MUST be identical regardless of insertion
+                // order — that is the property under test.
                 let content_hash = content_hash_for(domain, class, case, payload_len);
-                let config = ScheduleConfig::new(config_version);
+
+                // Path 1: Direct construction, with config params inserted in the
+                // REVERSE of `config_for`'s order to exercise order-independence.
+                let config = ScheduleConfig::new(config_version)
+                    .with_param("schema_version_probe", schema_version_probe.to_string())
+                    .with_param("persistence_tier", class.tier().label())
+                    .with_param("persistence_class", class.label())
+                    .with_param("payload_len", payload_len.to_string())
+                    .with_param("domain_prefix", domain.prefix())
+                    .with_param("domain", domain.label())
+                    .with_param("audit_index_probe", audit_index_probe.to_string());
                 let seed = derive_seed(&domain, &content_hash, &config);
 
-                // Path 1: Direct construction
                 let row1 = FrankensqliteCanonicalRow {
-                    requirement_id: format!("req-{}-{}", domain.label(), class.label()),
-                    matrix_row: case.label.to_string(),
+                    requirement_id: "FSA-CANONICAL-ROUNDTRIP-DOMAIN-PERSISTENCE".to_string(),
+                    matrix_row: format!("{}::{}::{}", domain.label(), class.label(), case.label),
                     domain,
                     domain_label: domain.label().to_string(),
                     domain_prefix: domain.prefix().to_string(),
@@ -707,7 +720,7 @@ mod tests {
                     schema_version_probe,
                     audit_index_probe,
                     payload_len,
-                    payload: format!("test-payload-{payload_len}"),
+                    payload: "x".repeat(payload_len),
                 };
 
                 // Path 2: Construction via helper function

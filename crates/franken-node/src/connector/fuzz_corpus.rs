@@ -1976,7 +1976,11 @@ targets = ["directory_scan"]
         adapter
             .add_seed(make_seed(
                 "parser_fuzz",
-                "invalid_but_non_crashing",
+                // bd-o776s: the fixture gate promotes any seed whose input contains the
+                // substring "crash" (run_fixture_gate). "non_crashing" embeds "crash"
+                // (via "crashing"), so the prior input self-triggered a crash. Use an
+                // input with no "crash" marker so the rejected fixture is NOT promoted.
+                "invalid_but_rejected_cleanly",
                 DeterministicSeedOutcome::Rejected,
             ))
             .unwrap();

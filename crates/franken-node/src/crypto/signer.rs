@@ -193,8 +193,11 @@ mod tests {
         let context = "test_struct";
         let signature = signer.sign_structured(&sk, context, &test_data).unwrap();
 
-        // Verify by serializing the same data and checking against the expected domain
-        let serialized = serde_json::to_vec(&test_data).unwrap();
+        // `sign_structured` signs the CANONICAL preimage (object keys sorted
+        // recursively — bd-3eko7 "use canonical bytes for structured Ed25519
+        // signing"), not the struct's declaration-order serialization.
+        // Reconstruct the exact preimage with the prod helper before verifying.
+        let serialized = to_canonical_bytes(&test_data).unwrap();
         let expected_domain = b"franken_node_test_struct:";
         assert!(Ed25519Scheme::verify_with_domain(
             &pk,
@@ -277,6 +280,9 @@ mod tests {
         let sig2 = signer2
             .sign_structured(&sk, "default-equiv", &test_data)
             .unwrap();
-        assert_eq!(sig1, sig2, "new() and default() signers should be equivalent");
+        assert_eq!(
+            sig1, sig2,
+            "new() and default() signers should be equivalent"
+        );
     }
 }

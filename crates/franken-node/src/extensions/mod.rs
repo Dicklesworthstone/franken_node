@@ -7,6 +7,19 @@ mod tests {
         DriftCheckResult, EnforcementEngine, ExtensionArtifact, SCHEMA_VERSION, make_artifact,
         make_contract,
     };
+    // bd-o776s: prod admission now runs a TRUST-REGISTRY availability + revocation check
+    // BEFORE contract/capability validation (artifact_contract::AdmissionGate::evaluate,
+    // the `else` arm that denies with TrustRevoked "Trust registry not available for
+    // validation"). The deliberately-invalid-contract tests below therefore need an
+    // AVAILABLE registry carrying an Active, non-quarantined trust card for the artifact's
+    // extension_id so admission gets PAST the trust precondition and reaches the contract /
+    // capability validation that each test actually exercises.
+    use crate::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
+    use crate::supply_chain::trust_card::{
+        BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+        ExtensionIdentity, ProvenanceSummary, PublisherIdentity, ReputationTrend, RevocationStatus,
+        RiskAssessment, RiskLevel, TrustCardInput, TrustCardRegistry,
+    };
 
     fn capabilities() -> Vec<CapabilityEntry> {
         vec![
@@ -29,6 +42,77 @@ mod tests {
             .with_signer("signer-A")
             .expect("test signer registration should fit");
         AdmissionGate::new(config)
+    }
+
+    /// bd-o776s: a healthy (Active, non-quarantined) trust-card input so the
+    /// admission trust precondition passes and validation proceeds to the
+    /// contract/capability checks under test.
+    fn healthy_card_input(extension_id: &str) -> TrustCardInput {
+        TrustCardInput {
+            extension: ExtensionIdentity {
+                extension_id: extension_id.to_string(),
+                version: "1.0.0".to_string(),
+            },
+            publisher: PublisherIdentity {
+                publisher_id: "pub-test".to_string(),
+                display_name: "Test Publisher".to_string(),
+            },
+            certification_level: CertificationLevel::Gold,
+            capability_declarations: vec![CapabilityDeclaration {
+                name: "fs.read".to_string(),
+                description: "Read filesystem".to_string(),
+                risk: CapabilityRisk::Low,
+            }],
+            behavioral_profile: BehavioralProfile {
+                network_access: false,
+                filesystem_access: true,
+                subprocess_access: false,
+                profile_summary: "test profile".to_string(),
+            },
+            revocation_status: RevocationStatus::Active,
+            provenance_summary: ProvenanceSummary {
+                attestation_level: "slsa-l3".to_string(),
+                source_uri: "fixture://trust-card/test".to_string(),
+                artifact_hashes: vec![format!("sha256:{}", "a".repeat(64))],
+                verified_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            reputation_score_basis_points: 900,
+            reputation_trend: ReputationTrend::Stable,
+            active_quarantine: false,
+            dependency_trust_summary: Vec::new(),
+            last_verified_timestamp: "2026-01-01T00:00:00Z".to_string(),
+            user_facing_risk_assessment: RiskAssessment {
+                level: RiskLevel::Low,
+                summary: "test risk".to_string(),
+            },
+            evidence_refs: vec![VerifiedEvidenceRef {
+                evidence_id: "ev-test-001".to_string(),
+                evidence_type: EvidenceType::ProvenanceChain,
+                verified_at_epoch: 1,
+                verification_receipt_hash: "a".repeat(64),
+            }],
+        }
+    }
+
+    /// bd-o776s: registry seeded with Active, non-quarantined trust cards for the
+    /// extension IDs the admission tests exercise (`ext-alpha`, `ext-beta`), so the
+    /// trust precondition admits past it into contract/capability validation.
+    fn healthy_trust_registry() -> TrustCardRegistry {
+        let mut registry = TrustCardRegistry::default();
+        for extension_id in ["ext-alpha", "ext-beta"] {
+            registry
+                .create(healthy_card_input(extension_id), 0, "test-trust-setup")
+                .expect("healthy trust card registration should succeed");
+        }
+        registry
+    }
+
+    /// bd-o776s: evaluate an artifact through the trusted gate WITH an available,
+    /// healthy trust registry (the precondition prod now requires before contract
+    /// validation). Drop-in for the former `trusted_gate().evaluate(&artifact, None, 0)`.
+    fn evaluate_admission(artifact: &ExtensionArtifact) -> AdmissionOutcome {
+        let mut registry = healthy_trust_registry();
+        trusted_gate().evaluate(artifact, Some(&mut registry), 0)
     }
 
     fn signed_contract() -> super::artifact_contract::CapabilityContract {
@@ -83,7 +167,7 @@ mod tests {
             payload_hash: "0".repeat(64),
         };
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
+        let reason = denial_reason(evaluate_admission(&artifact));
 
         assert!(matches!(reason, AdmissionDenialReason::MissingContract));
     }
@@ -100,7 +184,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-schema", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
+        let reason = denial_reason(evaluate_admission(&artifact));
 
         assert!(matches!(
             reason,
@@ -120,7 +204,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-untrusted", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
+        let reason = denial_reason(evaluate_admission(&artifact));
 
         assert!(matches!(reason, AdmissionDenialReason::SignatureInvalid));
     }
@@ -131,7 +215,7 @@ mod tests {
         contract.capabilities[0].scope = "filesystem:write".to_string();
         let artifact = make_artifact("artifact-tampered", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
+        let reason = denial_reason(evaluate_admission(&artifact));
 
         assert!(matches!(reason, AdmissionDenialReason::SignatureInvalid));
     }
@@ -160,7 +244,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-duplicate", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
+        let reason = denial_reason(evaluate_admission(&artifact));
 
         assert!(matches!(
             reason,
@@ -182,7 +266,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-zero-limit", "ext-alpha", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
+        let reason = denial_reason(evaluate_admission(&artifact));
 
         assert!(matches!(
             reason,
@@ -195,7 +279,7 @@ mod tests {
         let contract = signed_contract();
         let artifact = make_artifact("artifact-mismatch", "ext-beta", contract);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
+        let reason = denial_reason(evaluate_admission(&artifact));
 
         assert!(matches!(
             reason,
@@ -209,7 +293,7 @@ mod tests {
         let mut artifact = make_artifact("artifact-payload", "ext-alpha", contract);
         artifact.payload_hash = "A".repeat(64);
 
-        let reason = denial_reason(trusted_gate().evaluate(&artifact, None, 0));
+        let reason = denial_reason(evaluate_admission(&artifact));
 
         assert!(matches!(
             reason,
@@ -244,10 +328,12 @@ mod tests {
         let contract = signed_contract();
         let artifact = make_artifact("", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "empty artifact_id",
-        );
+        // bd-o776s (classification A): `make_artifact("")` sets BOTH the contract's and the
+        // artifact's `artifact_id` to "", and prod validates the contract-embedded
+        // `artifact_id` first, so the denial detail is "empty contract artifact_id" rather
+        // than the artifact-layer "empty artifact_id". Intent (empty artifact id denied as
+        // InvalidContract) is preserved.
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "empty contract artifact_id");
     }
 
     #[test]
@@ -255,10 +341,7 @@ mod tests {
         let contract = signed_contract();
         let artifact = make_artifact("<unknown>", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "artifact_id is reserved",
-        );
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "artifact_id is reserved");
     }
 
     #[test]
@@ -273,10 +356,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-whitespace-contract", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "contract_id contains",
-        );
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "contract_id contains");
     }
 
     #[test]
@@ -285,10 +365,7 @@ mod tests {
         contract.signature.clear();
         let artifact = make_artifact("artifact-empty-signature", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "empty signature",
-        );
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "empty signature");
     }
 
     #[test]
@@ -305,10 +382,11 @@ mod tests {
         );
         let artifact = make_artifact("artifact-empty-scope", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "empty capability_id or scope",
-        );
+        // bd-o776s (classification A): prod validates the capability scope via
+        // `invalid_token_detail("capability scope", ..)`, so an empty scope is reported as
+        // "empty capability scope" (not "empty capability_id or scope"). Intent (empty
+        // capability scope denied as InvalidCapability) is preserved.
+        assert_invalid_capability_detail(evaluate_admission(&artifact), "empty capability scope");
     }
 
     #[test]
@@ -325,10 +403,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-padded-capability", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "leading or trailing",
-        );
+        assert_invalid_capability_detail(evaluate_admission(&artifact), "leading or trailing");
     }
 
     #[test]
@@ -382,7 +457,7 @@ mod tests {
         let artifact = make_artifact("artifact-empty-contract-extension", "ext-alpha", contract);
 
         assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
+            evaluate_admission(&artifact),
             "empty contract extension_id",
         );
     }
@@ -400,7 +475,7 @@ mod tests {
         let artifact = make_artifact("artifact-padded-contract-extension", "ext-alpha", contract);
 
         assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
+            evaluate_admission(&artifact),
             "contract extension_id contains",
         );
     }
@@ -417,10 +492,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-empty-signer", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "empty signer_id",
-        );
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "empty signer_id");
     }
 
     #[test]
@@ -435,10 +507,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-padded-signer", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "signer_id contains",
-        );
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "signer_id contains");
     }
 
     #[test]
@@ -453,10 +522,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-zero-epoch", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "issued_epoch_ms",
-        );
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "issued_epoch_ms");
     }
 
     #[test]
@@ -471,10 +537,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-empty-capabilities", "ext-alpha", contract);
 
-        assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "capability list",
-        );
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "capability list");
     }
 
     #[test]
@@ -483,7 +546,7 @@ mod tests {
         let mut artifact = make_artifact("artifact-short-payload", "ext-alpha", contract);
         artifact.payload_hash = "a".repeat(63);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "payload_hash");
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "payload_hash");
     }
 
     #[test]
@@ -492,7 +555,7 @@ mod tests {
         let long_id = "x".repeat(1024);
         let artifact = make_artifact(&long_id, "ext-alpha", contract);
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "artifact_id");
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "artifact_id");
     }
 
     #[test]
@@ -509,10 +572,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-null-byte", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "capability_id contains",
-        );
+        assert_invalid_capability_detail(evaluate_admission(&artifact), "capability_id contains");
     }
 
     #[test]
@@ -541,10 +601,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-homograph", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "contains non-ASCII",
-        );
+        assert_invalid_capability_detail(evaluate_admission(&artifact), "contains non-ASCII");
     }
 
     #[test]
@@ -561,10 +618,7 @@ mod tests {
         );
         let artifact = make_artifact("artifact-traversal", "ext-alpha", contract);
 
-        assert_invalid_capability_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "path traversal",
-        );
+        assert_invalid_capability_detail(evaluate_admission(&artifact), "path traversal");
     }
 
     #[test]
@@ -579,10 +633,21 @@ mod tests {
         );
         let artifact = make_artifact("artifact-control-chars", "ext\r\n-alpha", contract);
 
-        assert_invalid_contract_detail(
-            trusted_gate().evaluate(&artifact, None, 0),
-            "contains control",
-        );
+        // bd-o776s (classification A): prod's trust-registry precondition now runs first
+        // and its own `validate_extension_id` rejects control characters in the
+        // artifact.extension_id BEFORE the artifact-contract control-char check is reached,
+        // so the denial reason is now TrustRevoked rather than InvalidContract. The intent
+        // (control characters in the extension id are denied) is preserved and still
+        // asserted via the "control characters" substring.
+        match denial_reason(evaluate_admission(&artifact)) {
+            AdmissionDenialReason::TrustRevoked { detail } => {
+                assert!(
+                    detail.contains("control characters"),
+                    "expected control-character trust rejection, got {detail:?}"
+                );
+            }
+            reason => panic!("expected trust-revoked denial for control chars, got {reason:?}"),
+        }
     }
 
     #[test]
@@ -591,7 +656,7 @@ mod tests {
         let mut artifact = make_artifact("artifact-non-hex", "ext-alpha", contract);
         artifact.payload_hash = "g".repeat(64); // 'g' is not a hex digit
 
-        assert_invalid_contract_detail(trusted_gate().evaluate(&artifact, None, 0), "payload_hash");
+        assert_invalid_contract_detail(evaluate_admission(&artifact), "payload_hash");
     }
 
     #[test]

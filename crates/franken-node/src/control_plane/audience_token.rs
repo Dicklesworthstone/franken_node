@@ -2933,7 +2933,12 @@ mod tests {
 
         assert_eq!(err.code, ERR_ABT_AUDIENCE_MISMATCH);
         assert_eq!(validator.tokens_rejected(), 1);
-        assert_eq!(validator.nonce_count(), 0);
+        // bd-o776s: verify_chain now records EVERY token's nonce (root + child)
+        // BEFORE the audience check, deliberately closing the replay timing window
+        // where a failed verification left nonces unrecorded (see verify_chain's
+        // "immediately record" loop). Both chain nonces are therefore present even
+        // though the chain is ultimately rejected on audience mismatch.
+        assert_eq!(validator.nonce_count(), 2);
     }
 
     #[test]
@@ -2950,13 +2955,16 @@ mod tests {
             "verify_token_signature must use verify_strict for forgery hardening"
         );
 
-        // Ensure we don't have a plain .verify( call on verifying_key
-        // (exclude verify_strict and verify_chain which are legitimate)
+        // Ensure we don't have a plain non-strict verify call on verifying_key
+        // (exclude verify_strict and verify_chain which are legitimate).
+        // bd-o776s: skip comment lines so this meta-test's own explanatory prose
+        // (which necessarily mentions the forbidden pattern) is not flagged as a hit.
         let verify_calls: Vec<_> = source_content
             .lines()
             .enumerate()
             .filter(|(_, line)| {
-                line.contains("verifying_key")
+                !line.trim_start().starts_with("//")
+                    && line.contains("verifying_key")
                     && line.contains(".verify(")
                     && !line.contains(".verify_strict(")
                     && !line.contains(".verify_chain(")

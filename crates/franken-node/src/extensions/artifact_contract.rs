@@ -1040,6 +1040,100 @@ mod tests {
         AdmissionGate::new(cfg)
     }
 
+    // bd-o776s: `AdmissionGate::evaluate` now enforces a mandatory, fail-closed
+    // trust-registry precondition (bd-i3rdt) *before* any contract/capability
+    // validation: a `None` registry — or one missing an active, non-quarantined
+    // trust card for the artifact's `extension_id` — is denied immediately with
+    // `TrustRevoked`, so contract-level assertions never get reached. These
+    // helpers seed a valid trust card so admission proceeds to the logic under
+    // test. (Prod behavior is unchanged; only the test setup was tightened.)
+
+    /// A minimal, valid, active (non-revoked, non-quarantined) trust-card input
+    /// for `extension_id`. Mirrors the proven `sample_input` in `trust_card`.
+    fn active_trust_card_input(
+        extension_id: &str,
+        now_secs: u64,
+    ) -> crate::supply_chain::trust_card::TrustCardInput {
+        use crate::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
+        use crate::supply_chain::trust_card::{
+            BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+            DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
+            ReputationTrend, RiskAssessment, RiskLevel, TrustCardInput,
+        };
+        TrustCardInput {
+            extension: ExtensionIdentity {
+                extension_id: extension_id.to_string(),
+                version: "1.0.0".to_string(),
+            },
+            publisher: PublisherIdentity {
+                publisher_id: "pub-test".to_string(),
+                display_name: "Test".to_string(),
+            },
+            certification_level: CertificationLevel::Gold,
+            capability_declarations: vec![CapabilityDeclaration {
+                name: "plugin.execute".to_string(),
+                description: "Run plugin".to_string(),
+                risk: CapabilityRisk::Medium,
+            }],
+            behavioral_profile: BehavioralProfile {
+                network_access: true,
+                filesystem_access: false,
+                subprocess_access: false,
+                profile_summary: "safe".to_string(),
+            },
+            revocation_status: RevocationStatus::Active,
+            provenance_summary: ProvenanceSummary {
+                attestation_level: "slsa-l3".to_string(),
+                source_uri: "registry://test/plugin".to_string(),
+                artifact_hashes: vec!["sha256:".to_string() + &"e".repeat(64)],
+                verified_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            reputation_score_basis_points: 900,
+            reputation_trend: ReputationTrend::Stable,
+            active_quarantine: false,
+            dependency_trust_summary: vec![DependencyTrustStatus {
+                dependency_id: "dep-a".to_string(),
+                trust_level: "verified".to_string(),
+            }],
+            last_verified_timestamp: "2026-01-01T00:00:00Z".to_string(),
+            user_facing_risk_assessment: RiskAssessment {
+                level: RiskLevel::Low,
+                summary: "low risk".to_string(),
+            },
+            evidence_refs: vec![VerifiedEvidenceRef {
+                evidence_id: "ev-test-prov-001".to_string(),
+                evidence_type: EvidenceType::ProvenanceChain,
+                verified_at_epoch: now_secs,
+                verification_receipt_hash: "c".repeat(64),
+            }],
+        }
+    }
+
+    /// Build an in-memory trust registry pre-seeded with an active trust card for
+    /// `extension_id`. Best-effort: an unregisterable id (empty / surrounding
+    /// whitespace) leaves the registry unseeded, so the trust gate fail-closes —
+    /// exactly matching prod's denial of a malformed artifact extension id.
+    fn admission_test_registry(extension_id: &str, now_secs: u64) -> TrustCardRegistry {
+        let mut registry = TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
+        let _ = registry.create(
+            active_trust_card_input(extension_id, now_secs),
+            now_secs,
+            "artifact-admission-test-seed",
+        );
+        registry
+    }
+
+    /// Evaluate `artifact` against `gate` with a trust registry pre-seeded for the
+    /// artifact's own extension id (the common case for these admission tests).
+    fn evaluate_trusted(
+        gate: &AdmissionGate,
+        artifact: &ExtensionArtifact,
+        now_secs: u64,
+    ) -> AdmissionOutcome {
+        let mut registry = admission_test_registry(&artifact.extension_id, now_secs);
+        gate.evaluate(artifact, Some(&mut registry), now_secs)
+    }
+
     #[test]
     fn trusted_signer_registration_rejects_capacity_overflow_without_eviction() {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
@@ -1088,7 +1182,7 @@ mod tests {
 
         let gate = AdmissionGate::new(cfg);
         let trusted_artifact = make_artifact("a-trusted", "ext-alpha", test_contract());
-        let trusted_outcome = gate.evaluate(&trusted_artifact, None, 0);
+        let trusted_outcome = evaluate_trusted(&gate, &trusted_artifact, 0);
         assert!(matches!(trusted_outcome, AdmissionOutcome::Accepted { .. }));
 
         let overflow_contract = make_contract(
@@ -1100,7 +1194,7 @@ mod tests {
             20_000,
         );
         let overflow_artifact = make_artifact("a-overflow", "ext-alpha", overflow_contract);
-        let overflow_outcome = gate.evaluate(&overflow_artifact, None, 0);
+        let overflow_outcome = evaluate_trusted(&gate, &overflow_artifact, 0);
         assert!(matches!(
             overflow_outcome,
             AdmissionOutcome::Denied {
@@ -1196,7 +1290,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1218,7 +1312,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1240,7 +1334,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1262,7 +1356,7 @@ mod tests {
             0,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1284,7 +1378,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1306,7 +1400,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1330,7 +1424,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1350,7 +1444,7 @@ mod tests {
         let gate = test_gate();
         let contract = test_contract();
         let artifact = make_artifact("a1", "ext-beta", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1367,7 +1461,7 @@ mod tests {
         contract.signer_id.clear();
         contract.signature = compute_contract_signature(&contract);
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1389,7 +1483,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1407,7 +1501,7 @@ mod tests {
         let mut contract = test_contract();
         contract.signature.clear();
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1423,7 +1517,7 @@ mod tests {
         let mut contract = test_contract();
         contract.signature = "not-hex".to_string();
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1439,7 +1533,7 @@ mod tests {
         let mut contract = test_contract();
         contract.signature = "A".repeat(64);
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1463,7 +1557,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1479,7 +1573,7 @@ mod tests {
         let contract = test_contract();
         let mut artifact = make_artifact("a1", "ext-alpha", contract);
         artifact.artifact_id.clear();
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1494,7 +1588,7 @@ mod tests {
         let gate = test_gate();
         let contract = test_contract();
         let artifact = make_artifact(" a1 ", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1512,7 +1606,7 @@ mod tests {
         let contract = test_contract();
         let overlong_id = "a".repeat(MAX_TOKEN_BYTES.saturating_add(1));
         let artifact = make_artifact(&overlong_id, "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1529,7 +1623,7 @@ mod tests {
         let gate = test_gate();
         let contract = test_contract();
         let artifact = make_artifact("<unknown>", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1542,7 +1636,7 @@ mod tests {
 
         let contract = test_contract();
         let artifact = make_artifact(" <unknown> ", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1559,16 +1653,21 @@ mod tests {
         let gate = test_gate();
         let contract = test_contract();
         let artifact = make_artifact("a1", "", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        // bd-o776s: the mandatory trust gate (bd-i3rdt) fail-closes on the empty
+        // extension id (which the registry cannot key on) BEFORE the artifact
+        // extension-id format check runs, so the (still fail-closed) denial now
+        // surfaces as TrustRevoked rather than InvalidContract. Intent preserved:
+        // an empty artifact extension id is denied.
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
-            reason: AdmissionDenialReason::InvalidContract { detail },
+            reason: AdmissionDenialReason::TrustRevoked { detail },
             ..
         } = outcome
         else {
             assert!(false, "expected empty artifact extension_id to be denied");
             return;
         };
-        assert!(detail.contains("empty artifact extension_id"));
+        assert!(detail.contains("empty"));
     }
 
     #[test]
@@ -1576,9 +1675,14 @@ mod tests {
         let gate = test_gate();
         let contract = test_contract();
         let artifact = make_artifact("a1", " ext-alpha ", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        // bd-o776s: the mandatory trust gate (bd-i3rdt) fail-closes on the
+        // whitespace-wrapped extension id (unregisterable) BEFORE the artifact
+        // extension-id format check, so the (still fail-closed) denial now
+        // surfaces as TrustRevoked. Intent preserved: a whitespace-wrapped
+        // artifact extension id is denied, and the denial still cites whitespace.
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
-            reason: AdmissionDenialReason::InvalidContract { detail },
+            reason: AdmissionDenialReason::TrustRevoked { detail },
             ..
         } = outcome
         else {
@@ -1588,15 +1692,18 @@ mod tests {
             );
             return;
         };
-        assert!(detail.contains("artifact extension_id contains"));
+        assert!(detail.contains("whitespace"));
     }
 
     #[test]
     fn admission_rejects_reserved_extension_id() {
         let gate = test_gate();
         let contract = test_contract();
+        // The reserved id "<unknown>" is a registerable id for the trust registry,
+        // so the seeded trust gate clears and admission reaches the artifact
+        // extension-id reserved check (InvalidContract).
         let artifact = make_artifact("a1", "<unknown>", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1607,18 +1714,22 @@ mod tests {
         };
         assert!(detail.contains("reserved"));
 
+        // bd-o776s: the whitespace-wrapped form " <unknown> " is unregisterable,
+        // so the mandatory trust gate (bd-i3rdt) fail-closes on it BEFORE the
+        // reserved check, surfacing TrustRevoked (citing whitespace) instead of
+        // InvalidContract. Intent preserved: it is still denied.
         let contract = test_contract();
         let artifact = make_artifact("a1", " <unknown> ", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
-            reason: AdmissionDenialReason::InvalidContract { detail },
+            reason: AdmissionDenialReason::TrustRevoked { detail },
             ..
         } = outcome
         else {
             assert!(false, "expected reserved extension_id to be denied");
             return;
         };
-        assert!(detail.contains("reserved"));
+        assert!(detail.contains("whitespace"));
     }
 
     #[test]
@@ -1627,7 +1738,7 @@ mod tests {
         let contract = test_contract();
         let mut artifact = make_artifact("a1", "ext-alpha", contract);
         artifact.payload_hash = "not-hex".to_string();
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1643,7 +1754,7 @@ mod tests {
         let contract = test_contract();
         let mut artifact = make_artifact("a1", "ext-alpha", contract);
         artifact.payload_hash = "A".repeat(64);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1659,7 +1770,7 @@ mod tests {
         let contract = test_contract();
         let mut artifact = make_artifact("a1", "ext-alpha", contract);
         artifact.payload_hash = "a".repeat(63);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1683,7 +1794,7 @@ mod tests {
         contract.artifact_id = "a2".to_string();
         contract.signature = compute_contract_signature(contract);
 
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1707,7 +1818,7 @@ mod tests {
         contract.payload_hash = "b".repeat(64);
         contract.signature = compute_contract_signature(contract);
 
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1731,7 +1842,7 @@ mod tests {
         contract.extension_version = "2.0.0".to_string();
         contract.signature = compute_contract_signature(contract);
 
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidContract { detail },
             ..
@@ -1755,7 +1866,7 @@ mod tests {
             .expect("fixture should carry a contract");
         contract.payload_hash = artifact.payload_hash.clone();
 
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1782,7 +1893,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1816,7 +1927,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1843,7 +1954,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1877,7 +1988,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
             reason: AdmissionDenialReason::InvalidCapability { detail },
             ..
@@ -1906,7 +2017,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1928,7 +2039,7 @@ mod tests {
             10_000,
         );
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1942,9 +2053,14 @@ mod tests {
     fn admission_rejects_tampered_signature() {
         let gate = test_gate();
         let mut contract = test_contract();
-        contract.signature = "tampered-sig".to_string();
+        // bd-o776s: use a well-formed (lowercase-hex, 64-char) but cryptographically
+        // wrong signature so admission reaches the signature-verification gate
+        // (SignatureInvalid). The prior value "tampered-sig" is not hex sha256, so
+        // the *format* gate would instead reject it as InvalidContract — which is
+        // the distinct case already covered by admission_rejects_non_hex_signature.
+        contract.signature = "0".repeat(64);
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1960,7 +2076,7 @@ mod tests {
         let mut contract = test_contract();
         contract.capabilities[0].scope = "filesystem:write".to_string();
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1976,7 +2092,7 @@ mod tests {
         let mut contract = test_contract();
         contract.capabilities[0].max_calls_per_epoch = 9_999;
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
             outcome,
             AdmissionOutcome::Denied {
@@ -1991,7 +2107,7 @@ mod tests {
         let gate = test_gate();
         let contract = test_contract();
         let artifact = make_artifact("a1", "ext-alpha", contract);
-        let outcome = gate.evaluate(&artifact, None, 0);
+        let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(outcome, AdmissionOutcome::Accepted { .. }));
     }
 
@@ -2532,7 +2648,7 @@ mod tests {
                 10_000,
             );
             let artifact = make_artifact("boundary-artifact", "ext-alpha", contract);
-            let outcome = gate.evaluate(&artifact, None, 0);
+            let outcome = evaluate_trusted(&gate, &artifact, 0);
             assert!(matches!(outcome, AdmissionOutcome::Accepted { .. }));
         }
 
@@ -2563,7 +2679,7 @@ mod tests {
                     contract.signature = tampered_sig.clone();
                     let artifact = make_artifact("tamper-test", "ext-alpha", contract);
 
-                    let outcome = gate.evaluate(&artifact, None, 0);
+                    let outcome = evaluate_trusted(&gate, &artifact, 0);
                     assert!(
                         matches!(
                             outcome,
@@ -2613,7 +2729,7 @@ mod tests {
             let artifact = make_artifact("injection-artifact", "ext-alpha", contract);
 
             // These should all be rejected due to invalid characters
-            let outcome = gate.evaluate(&artifact, None, 0);
+            let outcome = evaluate_trusted(&gate, &artifact, 0);
             assert!(matches!(
                 outcome,
                 AdmissionOutcome::Denied {
@@ -2747,6 +2863,9 @@ mod tests {
 
             // Test hash collision resistance by creating many similar contracts
             let mut signatures = BTreeSet::new();
+            // bd-o776s: admission now requires an active trust card; seed once and
+            // reuse across all iterations (all artifacts share extension "ext-alpha").
+            let mut registry = admission_test_registry("ext-alpha", 0);
 
             for i in 0..1000 {
                 let epoch_offset = len_to_u64(i);
@@ -2770,7 +2889,7 @@ mod tests {
                 );
 
                 let artifact = make_artifact(&format!("artifact-{i}"), "ext-alpha", contract);
-                let outcome = gate.evaluate(&artifact, None, 0);
+                let outcome = gate.evaluate(&artifact, Some(&mut registry), 0);
                 assert!(matches!(outcome, AdmissionOutcome::Accepted { .. }));
             }
 
@@ -2993,7 +3112,6 @@ mod tests {
     #[test]
     fn test_admission_denies_revoked_trust_card() {
         // Regression test for bd-i3rdt: admission must check trust card status
-        use crate::config::Config;
         use crate::supply_chain::trust_card::{
             ReputationTrend, RevocationStatus, SnapshotSourceContext, TrustCardMutation,
             TrustCardRegistry,
@@ -3006,24 +3124,14 @@ mod tests {
         let now_secs = 1_700_000_000;
 
         // Create registry with trusted extension
-        let mut registry =
-            TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
+        let mut registry = TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
         let extension_id = "test-extension";
 
-        // Initially add extension as trusted
+        // bd-o776s: `update` now requires an existing card (returns NotFound
+        // otherwise), so seed the initial active card with `create`.
         registry
-            .update(
-                extension_id,
-                TrustCardMutation {
-                    certification_level: None,
-                    revocation_status: None, // Initially active
-                    active_quarantine: Some(false),
-                    reputation_score_basis_points: Some(8000),
-                    reputation_trend: Some(ReputationTrend::Stable),
-                    user_facing_risk_assessment: None,
-                    last_verified_timestamp: None,
-                    evidence_refs: None,
-                },
+            .create(
+                active_trust_card_input(extension_id, now_secs),
                 now_secs,
                 "test-setup",
             )
@@ -3051,11 +3159,12 @@ mod tests {
         );
         let artifact = make_artifact("artifact-revoked-test", extension_id, contract);
 
-        // Load registry for admission check
-        let config = Config::default();
-        let mut loaded_registry = TrustCardRegistry::load_authoritative_state_from_config(
+        // Load registry for admission check. bd-o776s: load via the registry's
+        // default signing key (`load_authoritative_state`) instead of the config
+        // path, which now mandates an explicitly configured registry_signing_key.
+        let mut loaded_registry = TrustCardRegistry::load_authoritative_state(
             &registry_path,
-            &config.trust,
+            3600,
             now_secs,
             SnapshotSourceContext::TrustedFile,
         )
@@ -3094,9 +3203,9 @@ mod tests {
             .expect("persist revoked registry");
 
         // Reload registry to get updated state
-        let mut revoked_registry = TrustCardRegistry::load_authoritative_state_from_config(
+        let mut revoked_registry = TrustCardRegistry::load_authoritative_state(
             &registry_path,
-            &config.trust,
+            3600,
             now_secs,
             SnapshotSourceContext::TrustedFile,
         )
@@ -3122,38 +3231,22 @@ mod tests {
     #[test]
     fn test_admission_denies_quarantined_trust_card() {
         // Test quarantined extensions are also denied admission
-        use crate::config::Config;
-        use crate::supply_chain::trust_card::{
-            ReputationTrend, RevocationStatus, SnapshotSourceContext, TrustCardMutation,
-            TrustCardRegistry,
-        };
+        use crate::supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry};
         use tempfile::TempDir;
 
         let tmp = TempDir::new().expect("tempdir");
         let registry_path = tmp.path().join("test_registry.json");
         let now_secs = 1_700_000_000;
 
-        let mut registry =
-            TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
+        let mut registry = TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
         let extension_id = "quarantined-extension";
 
-        // Add extension with active quarantine
+        // bd-o776s: `update` now requires an existing card; create the card
+        // directly in a quarantined state.
+        let mut card_input = active_trust_card_input(extension_id, now_secs);
+        card_input.active_quarantine = true;
         registry
-            .update(
-                extension_id,
-                TrustCardMutation {
-                    certification_level: None,
-                    revocation_status: None, // Not revoked, but quarantined
-                    active_quarantine: Some(true),
-                    reputation_score_basis_points: Some(8000),
-                    reputation_trend: Some(ReputationTrend::Declining),
-                    user_facing_risk_assessment: None,
-                    last_verified_timestamp: None,
-                    evidence_refs: None,
-                },
-                now_secs,
-                "test-quarantine-setup",
-            )
+            .create(card_input, now_secs, "test-quarantine-setup")
             .expect("setup quarantined extension");
 
         registry
@@ -3176,10 +3269,11 @@ mod tests {
         );
         let artifact = make_artifact("artifact-quarantined-test", extension_id, contract);
 
-        let config = Config::default();
-        let mut loaded_registry = TrustCardRegistry::load_authoritative_state_from_config(
+        // bd-o776s: load via the registry's default signing key instead of the
+        // config path, which now mandates a configured registry_signing_key.
+        let mut loaded_registry = TrustCardRegistry::load_authoritative_state(
             &registry_path,
-            &config.trust,
+            3600,
             now_secs,
             SnapshotSourceContext::TrustedFile,
         )
@@ -3207,7 +3301,6 @@ mod tests {
     #[test]
     fn test_admission_denies_missing_trust_card_fail_closed() {
         // Test fail-closed behavior when trust card doesn't exist
-        use crate::config::Config;
         use crate::supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry};
         use tempfile::TempDir;
 
@@ -3216,8 +3309,7 @@ mod tests {
         let now_secs = 1_700_000_000;
 
         // Create empty registry
-        let registry =
-            TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
+        let registry = TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
         registry
             .persist_authoritative_state(&registry_path)
             .expect("persist empty registry");
@@ -3239,10 +3331,11 @@ mod tests {
         );
         let artifact = make_artifact("artifact-missing-trust", extension_id, contract);
 
-        let config = Config::default();
-        let mut loaded_registry = TrustCardRegistry::load_authoritative_state_from_config(
+        // bd-o776s: load via the registry's default signing key instead of the
+        // config path, which now mandates a configured registry_signing_key.
+        let mut loaded_registry = TrustCardRegistry::load_authoritative_state(
             &registry_path,
-            &config.trust,
+            3600,
             now_secs,
             SnapshotSourceContext::TrustedFile,
         )

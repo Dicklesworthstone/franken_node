@@ -1699,13 +1699,22 @@ mod atc_participation_weighting_negative_path_tests {
             // Unicode should be preserved exactly
             assert_eq!(record.weights[0].participant_id, *pattern);
 
-            // JSON serialization should handle injection safely
+            // JSON serialization should handle injection safely. serde_json only
+            // escapes `"`, `\`, and control characters (U+0000..U+001F); printable
+            // non-ASCII (directional overrides, BOM, emoji, zero-width) is emitted
+            // verbatim inside the JSON string — safe, and round-trips exactly
+            // (asserted below). Only assert escaping for chars serde escapes.
             let json =
                 serde_json::to_string(&record).expect("unicode injection should serialize safely");
-            assert!(
-                !json.contains(&pattern.replace('\\', "")),
-                "Raw injection pattern should be escaped in JSON"
-            );
+            if pattern
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_control())
+            {
+                assert!(
+                    !json.contains(&pattern.replace('\\', "")),
+                    "Control/quote characters should be escaped in JSON"
+                );
+            }
 
             // Deserialization should preserve exact pattern
             let parsed: WeightAuditRecord =
@@ -2356,8 +2365,14 @@ mod atc_participation_weighting_negative_path_tests {
                             locked: operation % 2 == 0,
                         }),
                         reputation: Some(ReputationEvidence {
+                            // >= established_interaction_count (100) with tenure at
+                            // the established threshold makes these participants
+                            // "established", so prod's new-participant cap does not
+                            // flatten every final_weight to median*cap_fraction —
+                            // letting the per-stake variety assertion below remain
+                            // meaningful.
                             score: 0.8,
-                            interaction_count: (operation + 10) as u64,
+                            interaction_count: (operation + 100) as u64,
                             tenure_seconds: 86400 * 30,
                             contributions_accepted: (operation + 5) as u64,
                             contributions_rejected: (operation % 3) as u64,

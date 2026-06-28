@@ -986,6 +986,11 @@ mod tests {
         for _ in 0..3 {
             tracker.record_failed_auth("p1").unwrap();
         }
+        // Rejection starts at max+1 (bd-rltwu: record_failed_auth uses `> max`, line 271,
+        // and check_admission auth_ok = count <= max, line 364). The configured maximum is
+        // ALLOWED, so the admission block boundary is the first count over the limit. Drive the
+        // count one past the limit; the 4th record returns Err but still increments to 4.
+        tracker.record_failed_auth("p1").unwrap_err();
 
         let (verdict, records) = tracker.check_admission(&request("p1", 1, 1, 1), "tr", "ts");
 
@@ -1141,6 +1146,9 @@ mod tests {
         for _ in 0..3 {
             tracker.record_failed_auth("p1").unwrap();
         }
+        // Rejection starts at max+1 (bd-rltwu, line 271): the pre-reset state must be a genuine
+        // block, so push the count one past the limit (4th record errors but increments to 4).
+        tracker.record_failed_auth("p1").unwrap_err();
         assert!(
             !tracker
                 .check_admission(&request("p1", 1, 1, 1), "tr-block", "ts-block")
@@ -1438,6 +1446,9 @@ mod tests {
         for _ in 0..3 {
             tracker.record_failed_auth("p-auth-block").unwrap();
         }
+        // Rejection starts at max+1 (bd-rltwu, line 271). Push the count one past the limit so
+        // admission is genuinely blocked by failed_auth; the 4th record errors but increments to 4.
+        tracker.record_failed_auth("p-auth-block").unwrap_err();
 
         let (verdict, _) = tracker.admit(
             &request("p-auth-block", 100, 50, 25),
@@ -1455,7 +1466,7 @@ mod tests {
         assert_eq!(usage.bytes_used, 0);
         assert_eq!(usage.symbols_used, 0);
         assert_eq!(usage.decode_cpu_ms, 0);
-        assert_eq!(usage.failed_auth_count, 3);
+        assert_eq!(usage.failed_auth_count, 4);
     }
 
     #[test]

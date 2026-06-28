@@ -3166,7 +3166,15 @@ mod tests {
 
         let err = serde_json::from_value::<CapabilityRequirement>(value).unwrap_err();
 
-        assert!(err.to_string().contains("mandatory"));
+        // bd-o776s: serde's derived Deserialize reports a present-but-wrong-typed
+        // field as an "invalid type" error WITHOUT the field name (field names
+        // only appear in "missing field" errors). The non-bool `mandatory` is
+        // still rejected (unwrap_err above); assert the actual error shape.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") && msg.contains("boolean"),
+            "expected a boolean type-mismatch error, got: {msg}"
+        );
     }
 
     #[test]
@@ -3183,7 +3191,14 @@ mod tests {
 
         let err = serde_json::from_value::<CapabilityEnvelope>(value).unwrap_err();
 
-        assert!(err.to_string().contains("requirements"));
+        // bd-o776s: an array supplied for the `requirements` map is rejected as a
+        // serde "invalid type" error (expected a map); the field name is not in
+        // the message.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") && msg.contains("map"),
+            "expected a map type-mismatch error, got: {msg}"
+        );
     }
 
     #[test]
@@ -3199,7 +3214,14 @@ mod tests {
 
         let err = serde_json::from_value::<ExtensionArtifact>(value).unwrap_err();
 
-        assert!(err.to_string().contains("envelope"));
+        // bd-o776s: a numeric value for the `envelope` field yields a serde
+        // "invalid type" error (expected struct CapabilityEnvelope), not a
+        // message echoing the lowercase field name.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") && msg.contains("CapabilityEnvelope"),
+            "expected a struct type-mismatch error, got: {msg}"
+        );
     }
 
     #[test]
@@ -3240,7 +3262,14 @@ mod tests {
 
         let err = serde_json::from_value::<AdmissionGate>(value).unwrap_err();
 
-        assert!(err.to_string().contains("allowed_scope"));
+        // bd-o776s: an object supplied for the `allowed_scope` set is rejected as
+        // a serde "invalid type" error (expected a sequence); the field name is
+        // not part of the message.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") && msg.contains("sequence"),
+            "expected a sequence type-mismatch error, got: {msg}"
+        );
     }
 
     #[test]
@@ -3255,7 +3284,14 @@ mod tests {
 
         let err = serde_json::from_value::<EnvelopeEnforcer>(value).unwrap_err();
 
-        assert!(err.to_string().contains("admitted_capabilities"));
+        // bd-o776s: a numeric element inside `admitted_capabilities` is rejected
+        // as a serde "invalid type" error (expected a string); the field name is
+        // not surfaced in the message.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") && msg.contains("string"),
+            "expected a string type-mismatch error, got: {msg}"
+        );
     }
 
     #[test]
@@ -3269,7 +3305,14 @@ mod tests {
 
         let err = serde_json::from_value::<AdmissionReport>(value).unwrap_err();
 
-        assert!(err.to_string().contains("capabilities_declared"));
+        // bd-o776s: a negative integer for the usize `capabilities_declared`
+        // field is rejected by serde as an out-of-range integer error; the field
+        // name itself is not in the message.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid") && msg.contains("-1"),
+            "expected an out-of-range usize rejection, got: {msg}"
+        );
     }
 
     #[test]

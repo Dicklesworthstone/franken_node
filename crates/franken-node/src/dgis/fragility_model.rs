@@ -470,7 +470,12 @@ mod tests {
             total_downloads_per_month: 1_000_000,
             key_recovery_setup: true,
             active_since: 1_000_000_000,
-            last_commit_ts: Some(1_700_000_000),
+            // Keep last_commit_ts inside the STALE_MAINTAINER_DAYS (365) window
+            // relative to the standard test clock (`now = 1_800_000_000`) so the
+            // sample maintainer is genuinely non-stale / non-fragile as the
+            // surrounding tests intend. A hardcoded absolute date here would
+            // drift past the staleness threshold.
+            last_commit_ts: Some(1_800_000_000 - 30 * 86_400),
             bus_factor: 5,
         }
     }

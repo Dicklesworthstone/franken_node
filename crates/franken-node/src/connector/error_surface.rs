@@ -1009,7 +1009,13 @@ mod tests {
             Severity::Transient,
             true,
             Some(250),
-            "                         ",
+            // bd-o776s: the registry now fail-closed-rejects a *purely* whitespace
+            // recovery hint at registration (MissingRecovery, error_code_registry.rs
+            // `register`), so a whitespace-only hint can no longer be seeded here. Use a
+            // whitespace-dominated hint that survives registration (non-empty after
+            // trim) yet is still too short (trimmed len < 20) so `product_error` rejects
+            // it via the `recovery_hint.trim().len() < 20` gate.
+            "                        x",
             "blank recovery hint",
         );
 

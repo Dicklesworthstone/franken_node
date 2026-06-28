@@ -651,7 +651,7 @@ pub fn execute_coordination(
 mod tests {
     use super::*;
     use crate::api::middleware::AuthMethod;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
     fn admin_identity() -> AuthIdentity {
         AuthIdentity {
@@ -679,13 +679,27 @@ mod tests {
 
     fn test_guard() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        // Poison-tolerant: a test that panics while holding this guard must not
+        // cascade-poison every subsequent test (the guard only serializes access).
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("test guard")
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn reset_fleet_lease_state() {
-        let mut state = fleet_lease_state().lock().expect("state lock");
+        // Clearing poison (stable since Rust 1.77) is REQUIRED, not merely
+        // recovering the data: a prior test that panicked while holding either a
+        // direct `fleet_lease_state()` guard or the lock below leaves the Mutex's
+        // poison flag set, and the PRODUCTION accessor (`with_fleet_lease_state`)
+        // fail-closes a poisoned lock to `ApiError::Internal { "fleet lease state
+        // lock poisoned" }`. `PoisonError::into_inner` recovers the *data* but does
+        // NOT clear the flag, so without this every later test that calls a prod fn
+        // cascades. Clear the flag first, then lock (still poison-tolerant) and
+        // reset the data — breaking the cascade at its source.
+        fleet_lease_state().clear_poison();
+        let mut state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         *state = FleetLeaseState::default();
     }
 
@@ -695,7 +709,8 @@ mod tests {
         let _guard = test_guard();
         reset_fleet_lease_state();
 
-        let admin = admin_identity();
+        // Lease endpoints require BearerToken auth (route contract enforced @bd-35cqt).
+        let admin = bearer_admin_identity();
         let trace = test_trace();
 
         // Acquire a lease to have data to list
@@ -890,7 +905,11 @@ mod tests {
 
         let err = execute_fence(&bearer_admin_identity(), &trace, &request).expect_err("fence");
         match err {
-            ApiError::AuthFailed { detail, .. } => assert!(detail.contains("route contract")),
+            // Detail string updated @e44c4f6e3 (info-disclosure hardening): the wrong-auth-method
+            // rejection now reports a generic, non-enumerating message.
+            ApiError::AuthFailed { detail, .. } => {
+                assert!(detail.contains("authentication method not permitted"))
+            }
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -993,7 +1012,9 @@ mod tests {
         let problem = err.to_problem("/v1/fleet/coordinate");
         assert_eq!(problem.status, 400);
         assert!(problem.detail.contains("exceeds limit"));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(state.next_coordination_seq, 1);
     }
 
@@ -1022,7 +1043,8 @@ mod tests {
     fn list_leases_returns_active_lease_after_acquire() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        // Lease endpoints require BearerToken auth (route contract enforced @bd-35cqt).
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let request = LeaseAcquireRequest {
             resource: "control-plane-lock".to_string(),
@@ -1041,7 +1063,7 @@ mod tests {
     fn release_lease_rejects_unknown_id() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
 
         let err = release_lease(&identity, &trace, "lease-missing-0001").expect_err("missing");
@@ -1052,7 +1074,7 @@ mod tests {
     fn acquire_lease_rejects_duplicate_active_resource() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let request = LeaseAcquireRequest {
             resource: "control-plane-lock".to_string(),
@@ -1068,7 +1090,7 @@ mod tests {
     fn acquire_lease_rejects_zero_ttl() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let request = LeaseAcquireRequest {
             resource: "control-plane-lock".to_string(),
@@ -1083,7 +1105,7 @@ mod tests {
     fn acquire_lease_rejects_blank_resource() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let request = LeaseAcquireRequest {
             resource: "   ".to_string(),
@@ -1098,7 +1120,7 @@ mod tests {
     fn release_lease_removes_active_lease() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let request = LeaseAcquireRequest {
             resource: "control-plane-lock".to_string(),
@@ -1216,7 +1238,7 @@ mod tests {
     fn acquire_lease_rejects_padded_duplicate_resource() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let padded = LeaseAcquireRequest {
             resource: "  control-plane-lock  ".to_string(),
@@ -1268,11 +1290,13 @@ mod tests {
     fn release_lease_rejects_expired_lease_after_sweep() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let expired_at = chrono::Utc::now() - chrono::Duration::seconds(1);
         {
-            let mut state = fleet_lease_state().lock().expect("state lock");
+            let mut state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             state.leases.insert(
                 "lease-expired-0001".to_string(),
                 StoredLease {
@@ -1381,7 +1405,7 @@ mod tests {
     fn release_lease_rejects_blank_lease_id_as_bad_request() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
 
         let err = release_lease(&identity, &trace, " \t\n ").expect_err("blank lease id");
@@ -1399,7 +1423,7 @@ mod tests {
     fn release_lease_rejects_trimmed_unknown_lease_id_as_not_found() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
 
         let err = release_lease(&identity, &trace, "  lease-missing-0002  ")
@@ -1623,7 +1647,7 @@ mod tests {
     fn acquire_lease_zero_ttl_does_not_allocate_sequence_or_lease() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let request = LeaseAcquireRequest {
             resource: "control-plane-lock".to_string(),
@@ -1633,7 +1657,9 @@ mod tests {
         let err = acquire_lease(&identity, &trace, &request).expect_err("zero ttl");
 
         assert!(matches!(err, ApiError::BadRequest { .. }));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert!(state.leases.is_empty());
         assert_eq!(state.next_lease_seq, 1);
         assert_eq!(state.next_fencing_seq, 1);
@@ -1643,7 +1669,10 @@ mod tests {
     fn acquire_lease_blank_resource_does_not_allocate_sequence_or_lease() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        // Lease endpoints require BearerToken auth (route contract enforced @bd-35cqt);
+        // with mTLS the handler returns AuthFailed before the blank-resource check is
+        // reached, so the BadRequest assertion below never sees the real rejection path.
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let request = LeaseAcquireRequest {
             resource: "\n\t ".to_string(),
@@ -1653,7 +1682,9 @@ mod tests {
         let err = acquire_lease(&identity, &trace, &request).expect_err("blank resource");
 
         assert!(matches!(err, ApiError::BadRequest { .. }));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert!(state.leases.is_empty());
         assert_eq!(state.next_lease_seq, 1);
         assert_eq!(state.next_fencing_seq, 1);
@@ -1663,7 +1694,7 @@ mod tests {
     fn acquire_lease_duplicate_resource_does_not_allocate_second_sequence() {
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
         let request = LeaseAcquireRequest {
             resource: "control-plane-lock".to_string(),
@@ -1674,7 +1705,9 @@ mod tests {
         let err = acquire_lease(&identity, &trace, &request).expect_err("duplicate resource");
 
         assert!(matches!(err, ApiError::Conflict { .. }));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(state.leases.len(), 1);
         assert_eq!(state.next_lease_seq, 2);
         assert_eq!(state.next_fencing_seq, 2);
@@ -1686,7 +1719,9 @@ mod tests {
         reset_fleet_lease_state();
         let expired_at = chrono::Utc::now() - chrono::Duration::seconds(1);
         {
-            let mut state = fleet_lease_state().lock().expect("state lock");
+            let mut state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             state.leases.insert(
                 "lease-expired-blank-release".to_string(),
                 StoredLease {
@@ -1702,13 +1737,15 @@ mod tests {
                 },
             );
         }
-        let identity = admin_identity();
+        let identity = bearer_admin_identity();
         let trace = test_trace();
 
         let err = release_lease(&identity, &trace, "  ").expect_err("blank lease id");
 
         assert!(matches!(err, ApiError::BadRequest { .. }));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert!(state.leases.contains_key("lease-expired-blank-release"));
     }
 
@@ -1727,7 +1764,9 @@ mod tests {
         let err = execute_fence(&identity, &trace, &request).expect_err("blank target");
 
         assert!(matches!(err, ApiError::BadRequest { .. }));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(state.next_fencing_seq, 1);
     }
 
@@ -1746,7 +1785,9 @@ mod tests {
         let err = execute_fence(&identity, &trace, &request).expect_err("blank reason");
 
         assert!(matches!(err, ApiError::BadRequest { .. }));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(state.next_fencing_seq, 1);
     }
 
@@ -1765,7 +1806,9 @@ mod tests {
         let err = execute_coordination(&identity, &trace, &request).expect_err("empty targets");
 
         assert!(matches!(err, ApiError::BadRequest { .. }));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(state.next_coordination_seq, 1);
     }
 
@@ -1784,7 +1827,9 @@ mod tests {
         let err = execute_coordination(&identity, &trace, &request).expect_err("duplicate");
 
         assert!(matches!(err, ApiError::BadRequest { .. }));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(state.next_coordination_seq, 1);
     }
 
@@ -1880,7 +1925,9 @@ mod tests {
         let err = execute_coordination(&identity, &trace, &request).expect_err("zero timeout");
 
         assert!(matches!(err, ApiError::BadRequest { .. }));
-        let state = fleet_lease_state().lock().expect("state lock");
+        let state = fleet_lease_state()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(state.next_coordination_seq, 1);
         assert!(state.leases.is_empty());
     }
@@ -1890,7 +1937,9 @@ mod tests {
         // Golden JSON test for fleet lease operations edge cases
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let admin = admin_identity();
+        // Lease endpoints require BearerToken; fence/coordinate require mTLS (@bd-35cqt).
+        let admin = bearer_admin_identity();
+        let mtls_admin = admin_identity();
         let trace = test_trace();
 
         // Test empty lease list response (empty resources scenario)
@@ -1913,7 +1962,7 @@ mod tests {
 
         // Verify JSON structure contains all required fields in exact order
         assert!(acquire_json.contains(r#""ok":true"#));
-        assert!(acquire_json.contains(r#""lease_id":"lease-test-trace-0001""#));
+        assert!(acquire_json.contains(r#""lease_id":"lease-test-trace-f-0001""#));
         assert!(acquire_json.contains(r#""holder":"fleet-admin-1""#));
         assert!(acquire_json.contains(r#""resource":"test-resource-golden""#));
         assert!(acquire_json.contains(r#""fencing_token":1"#));
@@ -1925,7 +1974,7 @@ mod tests {
 
         // Verify list response contains single lease with exact structure
         assert!(single_list_json.starts_with(r#"{"ok":true,"data":"#));
-        assert!(single_list_json.contains(r#""lease_id":"lease-test-trace-0001""#));
+        assert!(single_list_json.contains(r#""lease_id":"lease-test-trace-f-0001""#));
         assert!(single_list_json.contains(r#""resource":"test-resource-golden""#));
         assert!(single_list_json.ends_with(r#"}],"page":null}"#));
 
@@ -1946,15 +1995,15 @@ mod tests {
             reason: "golden test isolation".to_string(),
         };
 
-        let fence_response = execute_fence(&admin, &trace, &fence_request).expect("fence");
+        let fence_response = execute_fence(&mtls_admin, &trace, &fence_request).expect("fence");
         let fence_json = serde_json::to_string(&fence_response).unwrap();
 
         assert!(fence_json.contains(r#""ok":true"#));
-        assert!(fence_json.contains(r#""operation_id":"fence-test-trace-1""#));
+        assert!(fence_json.contains(r#""operation_id":"fence-test-trace-f-0002""#));
         assert!(fence_json.contains(r#""target_node":"golden-node-1""#));
         assert!(fence_json.contains(r#""action":"Isolate""#));
         assert!(fence_json.contains(r#""status":"Completed""#));
-        assert!(fence_json.contains(r#""fencing_token":1"#));
+        assert!(fence_json.contains(r#""fencing_token":2"#));
 
         // Test coordination operation JSON structure
         let coord_request = CoordinationRequest {
@@ -1964,11 +2013,11 @@ mod tests {
         };
 
         let coord_response =
-            execute_coordination(&admin, &trace, &coord_request).expect("coordination");
+            execute_coordination(&mtls_admin, &trace, &coord_request).expect("coordination");
         let coord_json = serde_json::to_string(&coord_response).unwrap();
 
         assert!(coord_json.contains(r#""ok":true"#));
-        assert!(coord_json.contains(r#""command_id":"coord-test-trace-0001""#));
+        assert!(coord_json.contains(r#""command_id":"coord-test-trace-f-0001""#));
         assert!(coord_json.contains(r#""command_type":"golden-policy-update""#));
         assert!(coord_json.contains(r#""participating_nodes":["golden-node-1","golden-node-2"]"#));
         assert!(coord_json.contains(r#""ack_count":2"#));
@@ -1981,7 +2030,9 @@ mod tests {
         // Test edge cases for empty resources and boundary conditions
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let admin = admin_identity();
+        // Lease endpoints require BearerToken; coordinate endpoints require mTLS (@bd-35cqt).
+        let admin = bearer_admin_identity();
+        let mtls_admin = admin_identity();
         let trace = test_trace();
 
         // Test empty lease list returns consistent structure
@@ -1992,7 +2043,9 @@ mod tests {
 
         // Test active_leases() optimization with empty collection
         {
-            let state = fleet_lease_state().lock().expect("state lock");
+            let state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             let empty_active = state.active_leases();
             assert!(empty_active.is_empty());
         }
@@ -2010,7 +2063,9 @@ mod tests {
 
         // Test active_leases() optimization with single item
         {
-            let state = fleet_lease_state().lock().expect("state lock");
+            let state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             let single_active = state.active_leases();
             assert_eq!(single_active.len(), 1);
             assert_eq!(single_active[0].resource, "single-edge-case");
@@ -2035,7 +2090,9 @@ mod tests {
 
         // Test active_leases() optimization with multiple items (4 total including single)
         {
-            let state = fleet_lease_state().lock().expect("state lock");
+            let state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             let multi_active = state.active_leases();
             assert_eq!(multi_active.len(), 4);
 
@@ -2062,7 +2119,7 @@ mod tests {
             timeout_seconds: 30,
         };
 
-        let empty_coord_err = execute_coordination(&admin, &trace, &empty_coord_request)
+        let empty_coord_err = execute_coordination(&mtls_admin, &trace, &empty_coord_request)
             .expect_err("empty targets should fail");
         assert!(matches!(empty_coord_err, ApiError::BadRequest { .. }));
 
@@ -2077,7 +2134,7 @@ mod tests {
             timeout_seconds: 30,
         };
 
-        let max_coord_response = execute_coordination(&admin, &trace, &max_coord_request)
+        let max_coord_response = execute_coordination(&mtls_admin, &trace, &max_coord_request)
             .expect("max targets should succeed");
         assert_eq!(
             max_coord_response.data.participating_nodes.len(),
@@ -2127,12 +2184,16 @@ mod tests {
         // Test sequence allocation behavior for edge cases
         let _guard = test_guard();
         reset_fleet_lease_state();
-        let admin = admin_identity();
+        // Lease endpoints require BearerToken; fence/coordinate require mTLS (@bd-35cqt).
+        let admin = bearer_admin_identity();
+        let mtls_admin = admin_identity();
         let trace = test_trace();
 
         // Verify initial sequence state
         {
-            let state = fleet_lease_state().lock().expect("state lock");
+            let state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             assert_eq!(state.next_lease_seq, 1);
             assert_eq!(state.next_fencing_seq, 1);
             assert_eq!(state.next_coordination_seq, 1);
@@ -2155,8 +2216,10 @@ mod tests {
             reason: "sequence test".to_string(),
         };
 
-        let first_fence = execute_fence(&admin, &trace, &fence_request).expect("first fence");
-        assert!(first_fence.data.operation_id.ends_with("-2"));
+        let first_fence = execute_fence(&mtls_admin, &trace, &fence_request).expect("first fence");
+        // operation_id is `fence-{trace_prefix}-{token:04}`; acquire_lease above consumed
+        // fencing token 1, so this fence gets token 2 → suffix "-0002".
+        assert!(first_fence.data.operation_id.ends_with("-0002"));
         assert_eq!(first_fence.data.fencing_token, 2);
 
         // Test coordination sequence allocation
@@ -2167,12 +2230,14 @@ mod tests {
         };
 
         let first_coord =
-            execute_coordination(&admin, &trace, &coord_request).expect("first coord");
+            execute_coordination(&mtls_admin, &trace, &coord_request).expect("first coord");
         assert!(first_coord.data.command_id.ends_with("-0001"));
 
         // Verify sequence state after allocations
         {
-            let state = fleet_lease_state().lock().expect("state lock");
+            let state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             assert_eq!(state.next_lease_seq, 2);
             assert_eq!(state.next_fencing_seq, 3);
             assert_eq!(state.next_coordination_seq, 2);
@@ -2180,7 +2245,9 @@ mod tests {
 
         // Test saturating arithmetic behavior (simulate near-overflow)
         {
-            let mut state = fleet_lease_state().lock().expect("state lock");
+            let mut state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             state.next_lease_seq = u64::MAX - 1;
             state.next_fencing_seq = u64::MAX - 1;
             state.next_coordination_seq = u64::MAX - 1;
@@ -2204,7 +2271,7 @@ mod tests {
         );
 
         let overflow_fence = execute_fence(
-            &admin,
+            &mtls_admin,
             &trace,
             &FencingRequest {
                 target_node: "overflow-node".to_string(),
@@ -2213,11 +2280,15 @@ mod tests {
             },
         )
         .expect("overflow fence");
-        assert_eq!(overflow_fence.data.fencing_token, u64::MAX - 1);
+        // overflow acquire_lease above consumed fencing token (u64::MAX - 1), so this
+        // fence draws u64::MAX (then next_fencing_seq saturates at u64::MAX).
+        assert_eq!(overflow_fence.data.fencing_token, u64::MAX);
 
         // Verify saturating behavior
         {
-            let state = fleet_lease_state().lock().expect("state lock");
+            let state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             assert_eq!(state.next_lease_seq, u64::MAX);
             assert_eq!(state.next_fencing_seq, u64::MAX);
         }
@@ -2227,9 +2298,24 @@ mod tests {
     /// Tests lease management boundaries, fencing operation validation, and coordination limits.
     #[test]
     fn fleet_control_api_boundary_comprehensive() {
+        // Serialize against every other lease-state test AND reset+clear-poison
+        // FIRST. This test mutates the process-global `fleet_lease_state()`; without
+        // `test_guard()` it interleaved with guarded tests under `--test-threads>1`,
+        // breaking their post-reset "empty state" assumptions and (when one of them
+        // asserted while holding a `fleet_lease_state()` guard) poisoning the lock —
+        // the head of the observed poison cascade (bd-o776s).
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        // Route contracts (@bd-35cqt) require mTLS for fence/coordinate but BearerToken for
+        // lease/list endpoints; use the matching identity per endpoint group.
         let admin = AuthIdentity {
             principal: "admin-boundary-test".to_string(),
             method: AuthMethod::MtlsClientCert,
+            roles: vec!["fleet-admin".to_string()],
+        };
+        let lease_admin = AuthIdentity {
+            principal: "admin-boundary-test".to_string(),
+            method: AuthMethod::BearerToken,
             roles: vec!["fleet-admin".to_string()],
         };
         let trace = TraceContext {
@@ -2240,7 +2326,9 @@ mod tests {
 
         // Reset state for clean test
         {
-            let mut state = fleet_lease_state().lock().expect("state lock");
+            let mut state = fleet_lease_state()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             state.leases.clear();
             // NOTE(bd-yom8c): FleetLeaseState no longer stores separate
             // `fencing_operations`/`coordination_history` collections — only `leases`
@@ -2304,7 +2392,7 @@ mod tests {
         let mut failed_leases = Vec::new();
 
         for (i, lease_req) in lease_edge_cases.iter().enumerate() {
-            let result = acquire_lease(&admin, &trace, lease_req);
+            let result = acquire_lease(&lease_admin, &trace, lease_req);
 
             match i {
                 0 | 5 | 6 | 7 => {
@@ -2448,7 +2536,7 @@ mod tests {
         }
 
         // Test list leases functionality with populated state
-        let list_result = list_leases(&admin, &trace);
+        let list_result = list_leases(&lease_admin, &trace);
         assert!(list_result.is_ok(), "Should be able to list leases");
 
         if let Ok(lease_list) = list_result {

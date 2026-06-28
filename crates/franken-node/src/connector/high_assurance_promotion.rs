@@ -1197,8 +1197,12 @@ mod tests {
             })
         ));
 
-        // Verify counters updated correctly despite Unicode attacks
-        assert_eq!(gate.approvals(), 3);
+        // Verify counters updated correctly despite Unicode attacks.
+        // Two evaluate() calls were approved (the BiDi and zero-width artifact ids);
+        // switch_mode is a mode change, not a promotion approval, so it does NOT
+        // increment approvals (high_assurance_promotion.rs:419 vs 447-448). The
+        // path-traversal id with control bytes is the single denial.
+        assert_eq!(gate.approvals(), 2);
         assert_eq!(gate.denials(), 1);
     }
 
@@ -1666,8 +1670,11 @@ mod tests {
             assert_eq!(gate.mode(), target_mode);
         }
 
-        // Verify mode changes counter tracked correctly
-        assert_eq!(gate.mode_changes(), 999); // 1000 switches, but first was HighAssurance->Standard
+        // Verify mode changes counter tracked correctly. The loop toggles the mode
+        // every iteration (mode and target are always opposite at the top of each
+        // pass), so all 1000 switches are real (none is a same-mode no-op) and each
+        // increments mode_changes (high_assurance_promotion.rs:448).
+        assert_eq!(gate.mode_changes(), 1000);
 
         // Test concurrent evaluation during mode switching vulnerability window
         let bundle = ProofBundle::empty();

@@ -1351,9 +1351,31 @@ mod tests {
 
     #[test]
     fn preparsed_verifier_rejects_invalid_public_key() {
-        let invalid_key = [0u8; 32]; // All zeros is not a valid Edwards point
-        let result = Ed25519PreparsedVerifier::from_public_bytes(&invalid_key);
-        assert!(result.is_err(), "all-zero key should fail decompression");
+        // dalek 2.x `VerifyingKey::from_bytes` builds the key by decompressing
+        // the 32-byte compressed Edwards point; only inputs that fail to
+        // decompress are rejected. The all-zero pattern is NOT such an input —
+        // in curve25519-dalek 4.x it decompresses to a low-order point
+        // (y = 0 ⇒ x² = -1, and -1 is a QR mod 2^255-19), so
+        // `from_public_bytes(&[0u8; 32])` returns Ok. Pick a y-coordinate that
+        // genuinely fails decompression (≈ half of all 32-byte strings are
+        // off-curve, so a small y is found immediately) and assert the wrapper
+        // surfaces it as `Err(MalformedKey)` rather than panicking.
+        let mut invalid_result = None;
+        for y in 2u8..=255 {
+            let mut bytes = [0u8; 32];
+            bytes[0] = y;
+            let result = Ed25519PreparsedVerifier::from_public_bytes(&bytes);
+            if result.is_err() {
+                invalid_result = Some(result);
+                break;
+            }
+        }
+        let result =
+            invalid_result.expect("some small y-coordinate must fail Edwards decompression");
+        assert!(
+            matches!(result, Err(Ed25519Error::MalformedKey(_))),
+            "non-decompressable public-key bytes must be rejected as MalformedKey"
+        );
     }
 
     #[test]

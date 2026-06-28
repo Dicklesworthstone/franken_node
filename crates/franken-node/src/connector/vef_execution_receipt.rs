@@ -712,9 +712,16 @@ mod tests {
 
     #[test]
     fn test_receipt_deserialize_rejects_timestamp_overflow() {
-        let mut value = serde_json::to_value(make_receipt()).unwrap();
-        value["timestamp_millis"] = serde_json::json!(18_446_744_073_709_551_616_u128);
-        let json = serde_json::to_string(&value).unwrap();
+        // bd-o776s: serde_json 1.0.150's `From<u128> for Number` truncates via
+        // `N::PosInt(u as u64)` (number.rs `impl_from_unsigned!(u128)`), so injecting
+        // `2^64` through `json!` silently collapses to `0` and deserialization
+        // succeeds. Splice the overflowing value in as a raw JSON integer literal so
+        // deserialization into the `u64` `timestamp_millis` field is genuinely rejected.
+        let base = serde_json::to_string(&make_receipt()).unwrap();
+        let json = base.replace(
+            "\"timestamp_millis\":1745000001000",
+            "\"timestamp_millis\":18446744073709551616",
+        );
 
         let result: Result<ExecutionReceipt, _> = serde_json::from_str(&json);
 

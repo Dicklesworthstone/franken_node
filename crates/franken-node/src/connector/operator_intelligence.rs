@@ -1951,11 +1951,32 @@ mod tests {
     #[test]
     fn test_execute_rollback() {
         let mut engine = make_engine();
-        let proof = RollbackProof {
-            pre_state_hash: [1u8; 32],
-            action_spec: "migrate".into(),
+
+        // INV-OIR-ROLLBACK-SUCCESS-VERIFICATION (operator_intelligence.rs:978-988):
+        // execute_rollback now verifies the post-rollback state hash equals
+        // proof.pre_state_hash, so an arbitrary pre_state_hash can no longer
+        // succeed. Derive a genuine pre_state_hash by driving a reference engine
+        // through the same rollback. "exit_degraded_mode" is a no-op on a fresh
+        // engine, so the only state change at the verification point is the
+        // EVT_ROLLBACK_PROOF_VERIFIED event execute_rollback pushes before
+        // checking the hash. The probe's deliberately-wrong pre_state_hash makes
+        // it Err right after running the spec, leaving the reference in exactly
+        // that post-rollback state for compute_state_hash() to capture.
+        let mut reference = make_engine();
+        let probe = RollbackProof {
+            pre_state_hash: [0u8; 32],
+            action_spec: "exit_degraded_mode".into(),
             post_state_hash: [2u8; 32],
-            rollback_spec: "rollback:migrate".into(),
+            rollback_spec: "rollback:exit_degraded_mode".into(),
+        };
+        assert!(reference.execute_rollback(&probe).is_err());
+        let pre_state_hash = reference.compute_state_hash();
+
+        let proof = RollbackProof {
+            pre_state_hash,
+            action_spec: "exit_degraded_mode".into(),
+            post_state_hash: [2u8; 32],
+            rollback_spec: "rollback:exit_degraded_mode".into(),
         };
         assert!(engine.execute_rollback(&proof).is_ok());
         let has_verified = engine
@@ -2455,13 +2476,20 @@ mod tests {
         engine.missing_sources.push("test-source".to_string());
         let post_state_hash = engine.compute_state_hash();
 
-        // Create a rollback proof that claims to restore to pre-state
-        // but the rollback_spec is INCOMPLETE (won't actually restore the state)
+        // Create a rollback proof that claims to restore to pre-state but whose
+        // rollback_spec is INCOMPLETE (won't actually restore the state).
+        // RollbackProof::verify (operator_intelligence.rs:254-259) requires
+        // rollback_spec == format!("rollback:{action_spec}"), so action_spec must
+        // carry the executed rollback command sequence. This sequence resets only
+        // cumulative_loss and never clears missing_sources, so it passes structural
+        // verification and executes, yet cannot restore the engine to
+        // pre_state_hash — exactly the silent failure the post-execution state
+        // hash check (operator_intelligence.rs:978-988) is meant to detect.
         let malicious_proof = RollbackProof {
             pre_state_hash: expected_pre_state_hash,
-            action_spec: "increase_loss;add_missing_source".to_string(),
+            action_spec: "reset_cumulative_loss".to_string(),
             post_state_hash,
-            rollback_spec: "rollback:reset_cumulative_loss".to_string(), // MISSING: reset missing_sources
+            rollback_spec: "rollback:reset_cumulative_loss".to_string(), // INCOMPLETE: misses missing_sources
         };
 
         // The rollback should fail because the incomplete rollback_spec

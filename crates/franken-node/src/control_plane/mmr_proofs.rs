@@ -2120,7 +2120,10 @@ mod tests {
                     // Single leaf should return that leaf as root
                     assert!(root_result.is_some(), "Single leaf should produce root");
                     if let Some(root) = root_result {
-                        assert!(!root.is_empty(), "Root should not be empty");
+                        // bd-o776s: a single-leaf merkle root is the leaf itself (no
+                        // hashing), so the root mirrors the leaf content — including the
+                        // degenerate empty-leaf case where the root is legitimately empty.
+                        assert_eq!(root, leaves[0], "Single-leaf root should equal the leaf");
                     }
                 }
                 _ => {

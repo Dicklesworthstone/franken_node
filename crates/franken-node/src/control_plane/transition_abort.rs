@@ -973,7 +973,13 @@ mod tests {
             mgr.abort_events().last().expect("should exist").barrier_id,
             format!("abort-{}", MAX_ABORT_EVENTS + 1)
         );
-        assert_eq!(mgr.audit_log()[0].barrier_id, "abort-2");
+        // bd-o776s: the audit log has its OWN (smaller) capacity than the abort-event
+        // ring (MAX_AUDIT_LOG_ENTRIES=MEDIUM vs MAX_ABORT_EVENTS=STANDARD post capacity
+        // migration), so its oldest retained entry is later than the abort ring's.
+        assert_eq!(
+            mgr.audit_log()[0].barrier_id,
+            format!("abort-{}", MAX_ABORT_EVENTS + 2 - MAX_AUDIT_LOG_ENTRIES)
+        );
     }
 
     #[test]
@@ -1000,7 +1006,13 @@ mod tests {
             mgr.force_events().last().expect("should exist").barrier_id,
             format!("force-{}", MAX_FORCE_EVENTS + 1)
         );
-        assert_eq!(mgr.audit_log()[0].barrier_id, "force-2");
+        // bd-o776s: see abort_events_are_bounded_* — audit log capacity
+        // (MAX_AUDIT_LOG_ENTRIES=MEDIUM) is smaller than the force-event ring
+        // (MAX_FORCE_EVENTS=STANDARD), so its oldest retained entry is later.
+        assert_eq!(
+            mgr.audit_log()[0].barrier_id,
+            format!("force-{}", MAX_FORCE_EVENTS + 2 - MAX_AUDIT_LOG_ENTRIES)
+        );
     }
 
     // ---- Force event schema version ----
@@ -1163,7 +1175,16 @@ mod tests {
 
         let err = serde_json::from_value::<ParticipantAbortState>(json).unwrap_err();
 
-        assert!(err.to_string().contains("in_flight_items"));
+        // bd-o776s: serde type/shape-mismatch errors carry the failure CATEGORY
+        // (`invalid type`/`invalid value`), not the offending field name — only
+        // missing-field errors name the field. Reconcile to current serde behavior
+        // while preserving intent: the malformed value is rejected, not silently
+        // coerced.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") || msg.contains("invalid value"),
+            "expected serde to reject non-numeric in_flight_items: {msg}"
+        );
     }
 
     #[test]
@@ -1312,7 +1333,13 @@ mod tests {
 
         let err = serde_json::from_value::<TransitionAbortEvent>(json).unwrap_err();
 
-        assert!(err.to_string().contains("participant_states"));
+        // bd-o776s: a map-where-sequence-expected is a type mismatch, which serde
+        // reports as `invalid type: map, expected a sequence` (no field name).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") || msg.contains("invalid value"),
+            "expected serde to reject non-array participant_states: {msg}"
+        );
     }
 
     #[test]
@@ -1326,7 +1353,14 @@ mod tests {
 
         let err = serde_json::from_value::<ForceTransitionPolicy>(json).unwrap_err();
 
-        assert!(err.to_string().contains("max_skippable"));
+        // bd-o776s: a negative integer for the unsigned `max_skippable` is an
+        // out-of-range VALUE, reported as `invalid value: integer -1, expected usize`
+        // (serde does not echo the field name for value/type errors).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid value") || msg.contains("invalid type"),
+            "expected serde to reject negative max_skippable: {msg}"
+        );
     }
 
     #[test]
@@ -1346,7 +1380,13 @@ mod tests {
 
         let err = serde_json::from_value::<ForceTransitionEvent>(json).unwrap_err();
 
-        assert!(err.to_string().contains("skipped_participants"));
+        // bd-o776s: a string-where-sequence-expected is a type mismatch, reported
+        // as `invalid type: string "svc-c", expected a sequence` (no field name).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") || msg.contains("invalid value"),
+            "expected serde to reject non-array skipped_participants: {msg}"
+        );
     }
 
     #[test]
@@ -1383,6 +1423,13 @@ mod tests {
 
         let err = serde_json::from_value::<AbortAuditRecord>(json).unwrap_err();
 
-        assert!(err.to_string().contains("timestamp_ms"));
+        // bd-o776s: a string-where-u64-expected is a type mismatch, reported as
+        // `invalid type: string "later", expected u64` (serde names the field only
+        // for missing-field errors, not type/value errors).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") || msg.contains("invalid value"),
+            "expected serde to reject non-numeric timestamp_ms: {msg}"
+        );
     }
 }

@@ -1664,9 +1664,13 @@ mod tests {
             mac_with_domain.starts_with("mac:"),
             "MAC should have proper format"
         );
-        assert!(
-            mac_with_domain.len() > 70,
-            "MAC should include domain-separated content"
+        // bd-o776s: compute_mac returns "mac:" + 64 hex chars (SHA-256 digest) = 68
+        // chars. The original `> 70` bound predates the current fixed MAC encoding;
+        // reconcile to the exact domain-separated digest length.
+        assert_eq!(
+            mac_with_domain.len(),
+            "mac:".len() + 64,
+            "MAC should be the domain-separated SHA-256 hex digest"
         );
 
         // Production code should use domain separators like:
@@ -1835,12 +1839,15 @@ mod tests {
 
         // MAC comparison should use constant-time when used in security contexts
         // The EpochTransition::verify() method should use ct_eq for MAC comparison
+        // bd-o776s: the transition's fields MUST match the inputs `mac1` was
+        // computed over (hash1/trace1); otherwise verify() correctly rejects the
+        // mismatched MAC (fail-closed) and this "valid transition" assertion fails.
         let transition = EpochTransition {
             old_epoch: ControlEpoch::new(1),
             new_epoch: ControlEpoch::new(2),
             timestamp: 1000,
-            manifest_hash: "test-hash".to_string(),
-            trace_id: "test-trace".to_string(),
+            manifest_hash: "hash1".to_string(),
+            trace_id: "trace1".to_string(),
             event_mac: mac1,
         };
 

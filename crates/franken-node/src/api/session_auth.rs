@@ -3910,8 +3910,11 @@ mod tests {
     // ── Regression: deserialize_mac rejects malformed hex ──────────
 
     fn session_json_with_mac(mac_hex: &str) -> String {
+        // bd-o776s: `AuthenticatedSession` gained the required `send_seq_exhausted`
+        // / `recv_seq_exhausted` flags (no #[serde(default)]); the template must
+        // carry them or every deserialize fails on a missing field.
         format!(
-            r#"{{"session_id":"s1","state":"Establishing","client_identity":"c","server_identity":"sv","encryption_key_id":"ek","signing_key_id":"sk","established_at":0,"last_activity_at":0,"send_seq":0,"recv_seq":0,"replay_window":0,"epoch":1,"handshake_mac":"{}"}}"#,
+            r#"{{"session_id":"s1","state":"Establishing","client_identity":"c","server_identity":"sv","encryption_key_id":"ek","signing_key_id":"sk","established_at":0,"last_activity_at":0,"send_seq":0,"send_seq_exhausted":false,"recv_seq":0,"recv_seq_exhausted":false,"replay_window":0,"epoch":1,"handshake_mac":"{}"}}"#,
             mac_hex
         )
     }
@@ -4622,7 +4625,13 @@ mod tests {
 
         // Attempt to send a message at the expected sequence - should
         // increment safely using checked arithmetic near the boundary.
-        let mac = sign_msg(&mgr, "seq-test", MessageDirection::Send, current_seq, "test message");
+        let mac = sign_msg(
+            &mgr,
+            "seq-test",
+            MessageDirection::Send,
+            current_seq,
+            "test message",
+        );
         let result = mgr.process_message(
             "seq-test",
             MessageDirection::Send,
@@ -4652,7 +4661,13 @@ mod tests {
         establish_test_session(&mut mgr, "corrupt-sig");
 
         // Get a valid signature and then corrupt it
-        let mut valid_mac = sign_msg(&mgr, "corrupt-sig", MessageDirection::Send, 0, "test message");
+        let mut valid_mac = sign_msg(
+            &mgr,
+            "corrupt-sig",
+            MessageDirection::Send,
+            0,
+            "test message",
+        );
 
         // Corrupt the signature by flipping bits
         if valid_mac.len() > 5 {
@@ -4776,7 +4791,13 @@ mod tests {
         establish_test_session(&mut mgr, "replay-test");
 
         // Send a valid message at the expected sequence.
-        let mac1 = sign_msg(&mgr, "replay-test", MessageDirection::Send, 0, "first message");
+        let mac1 = sign_msg(
+            &mgr,
+            "replay-test",
+            MessageDirection::Send,
+            0,
+            "first message",
+        );
         let result1 = mgr.process_message(
             "replay-test",
             MessageDirection::Send,
@@ -4789,7 +4810,13 @@ mod tests {
         assert!(result1.is_ok());
 
         // Try to replay the same sequence number with different content
-        let mac2 = sign_msg(&mgr, "replay-test", MessageDirection::Send, 0, "different message");
+        let mac2 = sign_msg(
+            &mgr,
+            "replay-test",
+            MessageDirection::Send,
+            0,
+            "different message",
+        );
         let result2 = mgr.process_message(
             "replay-test",
             MessageDirection::Send,
@@ -4800,10 +4827,7 @@ mod tests {
             "trace-2",
         );
 
-        assert!(matches!(
-            result2,
-            Err(SessionError::ReplayDetected { .. })
-        ));
+        assert!(matches!(result2, Err(SessionError::ReplayDetected { .. })));
     }
 
     #[test]
@@ -4814,7 +4838,12 @@ mod tests {
         establish_test_session(&mut mgr, "duplicate-id");
         assert!(mgr.get_session("duplicate-id").is_some());
 
-        // Try to establish another session with the same ID
+        // Try to establish another session with the same ID.
+        // bd-o776s: establish_test_session uses timestamp 1_000_000 and
+        // default_manager's session_timeout_ms is 60_000, so the duplicate attempt
+        // must land WITHIN the timeout window (1_001_000); the original 2_000_000
+        // expired the first session before the duplicate-live-session check could
+        // fire, masking the collision.
         let rs = test_root_secret();
         let epoch = test_epoch();
         let mac = sign_handshake(
@@ -4824,7 +4853,7 @@ mod tests {
             "enc",
             "sign",
             epoch,
-            2_000_000,
+            1_001_000,
             &rs,
         );
         let result = mgr.establish_session(
@@ -4833,7 +4862,7 @@ mod tests {
             "different-server".into(),
             "enc".into(),
             "sign".into(),
-            2_000_000,
+            1_001_000,
             "trace".into(),
             mac,
         );
@@ -5677,7 +5706,8 @@ mod session_auth_boundary_negative_tests {
     #[test]
     fn negative_session_exhaustion_resource_attacks() {
         // Use small session limit for testing
-        let mut mgr = SessionManager::new(default_config(), test_root_secret(), ControlEpoch::new(1));
+        let mut mgr =
+            SessionManager::new(default_config(), test_root_secret(), ControlEpoch::new(1));
 
         // Test session exhaustion attack
         let mut established_sessions = Vec::new();
@@ -6188,7 +6218,10 @@ mod session_auth_boundary_negative_tests {
         // Should either succeed or fail cleanly
         assert!(
             recovery_result.is_ok()
-                || matches!(recovery_result, Err(SessionError::MaxSessionsReached { .. }))
+                || matches!(
+                    recovery_result,
+                    Err(SessionError::MaxSessionsReached { .. })
+                )
         );
     }
 
@@ -6305,9 +6338,12 @@ mod session_auth_boundary_negative_tests {
         let rs = test_root_secret();
         let epoch = test_epoch();
 
-        // Create valid handshake MAC
+        // Create valid handshake MAC.
+        // bd-o776s: the handshake MAC binds the session_id, so it must be signed
+        // for the SAME id that result1 establishes ("sess-timing-1"); the original
+        // "sess-timing" never matched and made the valid path fail closed.
         let valid_mac = sign_handshake(
-            "sess-timing",
+            "sess-timing-1",
             "client",
             "server",
             "enc-key",
@@ -6549,7 +6585,14 @@ mod session_auth_boundary_negative_tests {
                     MessageDirection::Receive
                 };
 
-                // Add entries to replay window
+                // Add entries to replay window.
+                // bd-o776s: establish_test_session uses timestamp 1_000_000 and
+                // session_timeout_ms is 10, so messages MUST be processed in the
+                // same ~ms window as establishment. The original 1000+seq put every
+                // message ~999_000ms "before" establishment, so each newly-created
+                // session's establish (at 1_000_000) expired all the prior sessions
+                // (last activity ~1004) and batch-cleaned their replay windows —
+                // leaving almost none behind.
                 for seq in 0..5 {
                     let mac = sign_msg(&mgr, &session_id, direction, seq, "test-payload");
                     let _ = mgr.process_message(
@@ -6558,7 +6601,7 @@ mod session_auth_boundary_negative_tests {
                         seq,
                         "test-payload",
                         &mac,
-                        1000 + seq,
+                        1_000_000 + seq,
                         &format!("trace-{}-{}", session_id, seq),
                     );
                 }
@@ -6573,8 +6616,11 @@ mod session_auth_boundary_negative_tests {
             "Should have more replay windows than sessions"
         );
 
-        // Now expire all sessions at once (stress test the batch cleanup)
-        let expiry_timestamp = 1000 + 20; // All sessions should expire
+        // Now expire all sessions at once (stress test the batch cleanup).
+        // bd-o776s: sessions are active at ~1_000_000; expire well past the 10ms
+        // timeout so every one is reaped (the old 1_020 was *before* the sessions
+        // even existed and expired nothing).
+        let expiry_timestamp = 1_000_000 + 60_000; // All sessions should expire
         mgr.expire_stale_sessions(expiry_timestamp, "perf-test");
 
         // Verify all sessions expired
@@ -6681,11 +6727,50 @@ mod session_auth_boundary_negative_tests {
             "trace-wrap",
         );
 
-        // Should fail with SequenceExhausted, not accept wrapped sequence
+        // Must reject the wrapped sequence, NOT accept it as a fresh message.
+        // bd-o776s: in strict-monotonicity mode (replay_window == 0) a seq of 0
+        // when the floor is u64::MAX is a sequence REGRESSION, so it is rejected
+        // as SequenceViolation BEFORE the advance/exhaustion path is reached. The
+        // critical security property — the wrap is rejected (never replayed) — is
+        // preserved; only the error variant differs from a naive expectation.
         assert!(result3.is_err());
         match result3.unwrap_err() {
+            SessionError::SequenceViolation {
+                got, expected_min, ..
+            } => {
+                assert_eq!(got, 0, "wrapped sequence value");
+                assert_eq!(expected_min, u64::MAX, "floor pinned at the exhausted max");
+            }
+            other => panic!(
+                "Expected SequenceViolation for the wrap-to-0 attempt, got: {:?}",
+                other
+            ),
+        }
+
+        // And re-sending at the (already-consumed) terminal sequence surfaces the
+        // dedicated exhaustion error — exercising the send_seq_exhausted gate.
+        let mac4 = sign_msg(
+            &mgr,
+            "sess-seq-overflow",
+            MessageDirection::Send,
+            u64::MAX,
+            "hash-exhausted",
+        );
+        let result4 = mgr.process_message(
+            "sess-seq-overflow",
+            MessageDirection::Send,
+            u64::MAX,
+            "hash-exhausted",
+            &mac4,
+            3003,
+            "trace-exhausted",
+        );
+        match result4.unwrap_err() {
             SessionError::SequenceExhausted { .. } => {} // Expected
-            other => panic!("Expected SequenceExhausted, got: {:?}", other),
+            other => panic!(
+                "Expected SequenceExhausted on terminal re-send, got: {:?}",
+                other
+            ),
         }
 
         // Demonstrates why checked_add is critical: raw + 1 would wrap to 0
@@ -6701,10 +6786,13 @@ mod session_auth_boundary_negative_tests {
         // Verify events vector uses push_bounded to prevent memory exhaustion
         let mut mgr = default_manager();
 
-        // Create many sessions to generate events beyond MAX_SESSION_EVENTS
-        let max_events_estimate = 1000; // Approximate MAX_SESSION_EVENTS value
+        // bd-o776s: the events cap is the REAL `MAX_SESSION_EVENTS` (16_384),
+        // not the old hard-coded estimate of 1000. Generate more than the cap so
+        // push_bounded eviction is actually exercised (with only ~1100 events
+        // nothing was ever evicted and the bound went untested).
+        let event_cap = MAX_SESSION_EVENTS;
 
-        for i in 0..max_events_estimate + 100 {
+        for i in 0..event_cap + 100 {
             let session_id = format!("sess-flood-{:04}", i);
             let rs = test_root_secret();
             let epoch = test_epoch();
@@ -6739,12 +6827,17 @@ mod session_auth_boundary_negative_tests {
         // Verify events vector is bounded (push_bounded enforces capacity)
         let events_count = mgr.events().len();
 
-        // With push_bounded, events should be capped at MAX_SESSION_EVENTS
-        // Old events should be evicted to make room for new ones
+        // With push_bounded, events are capped at MAX_SESSION_EVENTS: generating
+        // event_cap + 100 events must leave exactly event_cap behind (the oldest
+        // evicted to make room for the newest).
         assert!(
-            events_count <= max_events_estimate,
+            events_count <= event_cap,
             "Events vector should be bounded by push_bounded, got {} events",
             events_count
+        );
+        assert_eq!(
+            events_count, event_cap,
+            "push_bounded must evict so the vector saturates at exactly the cap"
         );
 
         // Verify push_bounded is working: later events should be present, earlier should be evicted

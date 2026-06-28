@@ -1161,9 +1161,12 @@ mod tests {
 
         assert_eq!(lane, ControlLane::Timed);
         assert_eq!(policy.audit_log().len(), 1);
+        // bd-o776s: assign_task now bumps the assigned lane's run count by one
+        // (saturating) as part of the assignment bookkeeping, so the post-assign
+        // count is one greater than the pre-assign snapshot.
         assert_eq!(
             policy.lane_run_counts.get(&ControlLane::Timed).copied(),
-            Some(timed_before)
+            Some(timed_before.saturating_add(1))
         );
     }
 

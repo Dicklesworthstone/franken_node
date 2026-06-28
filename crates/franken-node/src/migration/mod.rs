@@ -4742,6 +4742,10 @@ mod tests {
     }
 
     fn write_hardened_manifest(project: &Path) {
+        // bd-o776s: prod now rewrites `node`/`bun` package-script runtimes to `franken-node`,
+        // so a `node test.js` script makes the manifest non-noop (an extra rewrites_planned).
+        // The canonical hardened (no-op) form pins engines.node AND already uses `franken-node`,
+        // matching `run_rewrite_preserves_existing_node_engine_without_rollback_entry`.
         write_project_file(
             project,
             "package.json",
@@ -4749,7 +4753,7 @@ mod tests {
               "name":"demo",
               "version":"1.0.0",
               "engines":{"node":">=20 <23"},
-              "scripts":{"test":"node test.js"}
+              "scripts":{"test":"franken-node test.js"}
             }"#,
         );
     }
@@ -5692,10 +5696,14 @@ mod tests {
         let outside_path = temp.path().join("outside.js");
 
         write_hardened_manifest(project);
+        // bd-o776s: a bare `module.exports = fs;` is now (correctly) a non-automatable CommonJS
+        // export assignment that bails the require rewrite (rewrite_count == 0). The symlink
+        // fail-closed invariant under test only needs a source that DOES rewrite, so use a clean
+        // require with a benign usage line (no CommonJS export assignment).
         write_project_file(
             project,
             "index.js",
-            "const fs = require('fs');\nmodule.exports = fs;\n",
+            "const fs = require('fs');\nconsole.log(fs.existsSync('package.json'));\n",
         );
         std::fs::write(&outside_path, "outside-original\n").expect("write outside target");
 
@@ -6334,12 +6342,17 @@ mod tests {
 
     #[test]
     fn negative_findings_vector_growth_without_push_bounded() {
-        // Test unlimited findings growth through Vec::push operations
-        // Lines 682, 700, 774 use findings.push() without bounds checking
+        // Prod now BOUNDS findings collection: per-category caps via
+        // push_capped_script_finding (MAX_FINDINGS_PER_CATEGORY) plus a total cap via
+        // push_bounded (MAX_TOTAL_FINDINGS). This test stresses that bounding with many
+        // problematic manifests and asserts the bounded invariants hold.
         let temp = tempfile::tempdir().expect("tempdir");
         let project = temp.path();
 
-        // Create many problematic package.json files to stress findings collection
+        // Create many problematic package.json files to stress findings collection.
+        // FIXME(bd-o776s): the relative path used to be "../package.json", which collapses
+        // every per-module write onto the single project-root manifest; write each manifest
+        // inside its own module directory so the scan actually processes many manifests.
         for i in 0..200 {
             let dir_path = project.join(format!("module-{:03}", i));
             std::fs::create_dir_all(&dir_path).expect("create module dir");
@@ -6352,7 +6365,7 @@ mod tests {
                 // Invalid JSON to trigger parse errors
                 write_project_file(
                     &dir_path,
-                    "../package.json",
+                    "package.json",
                     r#"{
                     "name": "invalid-module-INVALID_JSON
                 "#,
@@ -6361,7 +6374,7 @@ mod tests {
                 // Valid JSON but with risky script and missing engine
                 write_project_file(
                     &dir_path,
-                    "../package.json",
+                    "package.json",
                     &format!(
                         r#"{{
                     "name": "module-{}",
@@ -6380,33 +6393,51 @@ mod tests {
 
         let report = run_audit(project).expect("audit should succeed");
 
-        // Verify findings were collected (demonstrating Vec growth without bounds)
-        assert!(report.findings.len() > 100, "Should generate many findings");
+        // Many manifests still surface findings, but prod now bounds them: capped categories
+        // stay at their per-category limit while uncapped categories (invalid-JSON Project
+        // findings) keep growing, and the total never exceeds MAX_TOTAL_FINDINGS.
+        assert!(
+            report.findings.len() > MAX_FINDINGS_PER_CATEGORY,
+            "many manifests should surface findings beyond a single category cap"
+        );
+        assert!(
+            report.findings.len() <= MAX_TOTAL_FINDINGS,
+            "total findings must stay within MAX_TOTAL_FINDINGS"
+        );
 
-        // Each package.json should have contributed findings
+        // The per-manifest risky-script and missing-engine findings are bounded at
+        // MAX_FINDINGS_PER_CATEGORY by push_capped_script_finding (matched by their exact
+        // per-manifest messages so the aggregate summary findings are excluded).
+        let capped_risky_script_findings = report
+            .findings
+            .iter()
+            .filter(|f| f.message == "risky install/build script pattern detected in package.json")
+            .count();
+        let capped_missing_engine_findings = report
+            .findings
+            .iter()
+            .filter(|f| f.message == "package.json is missing engines.node version pin")
+            .count();
+        assert_eq!(
+            capped_risky_script_findings, MAX_FINDINGS_PER_CATEGORY,
+            "per-manifest risky-script findings are capped at MAX_FINDINGS_PER_CATEGORY"
+        );
+        assert_eq!(
+            capped_missing_engine_findings, MAX_FINDINGS_PER_CATEGORY,
+            "per-manifest missing-engine findings are capped at MAX_FINDINGS_PER_CATEGORY"
+        );
+
+        // Uncapped invalid-JSON (Project/High) findings push total high-severity findings
+        // past the per-category cap, proving findings still accumulate where unbounded.
         let high_severity_count = report
             .findings
             .iter()
             .filter(|f| matches!(f.severity, MigrationSeverity::High))
             .count();
-        let low_severity_count = report
-            .findings
-            .iter()
-            .filter(|f| matches!(f.severity, MigrationSeverity::Low))
-            .count();
-
         assert!(
-            high_severity_count > 50,
-            "Should have many high-severity findings"
+            high_severity_count > MAX_FINDINGS_PER_CATEGORY,
+            "uncapped invalid-JSON Project findings exceed the per-category cap"
         );
-        assert!(
-            low_severity_count > 50,
-            "Should have many low-severity findings"
-        );
-
-        // The current implementation has no protection against findings explosion
-        // A hardened version might use push_bounded with MAX_FINDINGS_TOTAL
-        // or implement per-category limits more strictly
     }
 
     #[test]
@@ -6439,11 +6470,14 @@ mod tests {
 
         let report = run_audit(project).expect("audit should succeed");
 
-        // Count script-related findings
+        // Count the capped per-manifest risky-script findings. bd-o776s: prod also emits a
+        // single aggregate "detected N risky script(s)" Scripts finding (path: None), so match
+        // the exact per-script message to exclude it and isolate the per-category cap behavior
+        // (mirrors negative_findings_vector_growth_without_push_bounded).
         let script_findings = report
             .findings
             .iter()
-            .filter(|f| matches!(f.category, MigrationCategory::Scripts))
+            .filter(|f| f.message == "risky install/build script pattern detected in package.json")
             .count();
 
         // Should be capped at MAX_FINDINGS_PER_CATEGORY
@@ -6483,10 +6517,12 @@ mod tests {
         );
 
         let exact_report = run_audit(project2).expect("audit should succeed");
+        // bd-o776s: same as above — exclude the aggregate Scripts summary finding by matching
+        // the exact per-manifest message so we assert only the capped per-script findings.
         let exact_script_findings = exact_report
             .findings
             .iter()
-            .filter(|f| matches!(f.category, MigrationCategory::Scripts))
+            .filter(|f| f.message == "risky install/build script pattern detected in package.json")
             .count();
 
         // All MAX_FINDINGS_PER_CATEGORY scripts should be reported
@@ -6503,7 +6539,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let project = temp.path();
 
-        // Create many package.json files that need rewriting
+        // Create many package.json files that need rewriting.
+        // FIXME(bd-o776s): the path used to be "../package.json", which collapses every
+        // per-module write onto the single project-root manifest (yielding only one rollback
+        // entry); write each manifest inside its own module directory instead.
         for i in 0..1000 {
             let module_dir = project.join(format!("module-{:04}", i));
             std::fs::create_dir_all(&module_dir).expect("create module dir");
@@ -6511,7 +6550,7 @@ mod tests {
             // Package without node engine - will need rewriting
             write_project_file(
                 &module_dir,
-                "../package.json",
+                "package.json",
                 &format!(
                     r#"{{
                 "name": "module-{}",
@@ -6566,8 +6605,12 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn signal_runtime_smoke_process_group_fails_with_invalid_pid() {
-        // Test that signal_runtime_smoke_process_group returns error for invalid process group
-        let result = signal_runtime_smoke_process_group(0, "-TERM");
+        // Test that signal_runtime_smoke_process_group returns error for invalid process group.
+        // FIXME(bd-o776s): pid 0 lowers to `kill -- -0`, which targets the CALLER's process
+        // group and SUCCEEDS (it would even SIGTERM the test runner), so it never fails closed.
+        // Use a pid far above the kernel pid_max so the process group genuinely does not exist
+        // and `kill` reports "No such process".
+        let result = signal_runtime_smoke_process_group(2_147_480_000, "-TERM");
 
         assert!(
             result.is_err(),
@@ -6585,8 +6628,11 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn terminate_runtime_smoke_process_group_propagates_signal_errors() {
-        // Test that terminate_runtime_smoke_process_group propagates signal errors
-        let result = terminate_runtime_smoke_process_group(0);
+        // Test that terminate_runtime_smoke_process_group propagates signal errors.
+        // FIXME(bd-o776s): pid 0 lowers to `kill -- -0`, which targets the CALLER's process
+        // group and SUCCEEDS (it would even SIGTERM/SIGKILL the test runner). Use a pid far
+        // above the kernel pid_max so the process group does not exist and `kill` fails closed.
+        let result = terminate_runtime_smoke_process_group(2_147_480_000);
 
         assert!(
             result.is_err(),
@@ -6631,10 +6677,17 @@ mod tests {
                 // Expected for already-dead process
             }
             Err(err) => {
-                // If there's an error, it should contain meaningful context
+                // If there's an error, it should contain meaningful context.
+                // FIXME(bd-o776s): terminate_runtime_smoke_process_tree now performs a
+                // process-GROUP kill first (terminate_runtime_smoke_process_group), which fails
+                // for this child because the test spawns it without its own process group; that
+                // surfaces as "kill command failed ..." before child.kill()/child.wait() run, so
+                // accept that message too.
                 let error_msg = err.to_string();
                 assert!(
-                    error_msg.contains("failed to kill") || error_msg.contains("failed to wait"),
+                    error_msg.contains("failed to kill")
+                        || error_msg.contains("failed to wait")
+                        || error_msg.contains("kill command failed"),
                     "Error should contain context about kill or wait failure: {}",
                     error_msg
                 );

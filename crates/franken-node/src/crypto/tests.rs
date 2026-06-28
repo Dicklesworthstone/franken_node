@@ -13,6 +13,30 @@ struct TestReceiptData {
     metadata: Vec<String>,
 }
 
+/// Reconstruct the canonical (recursively key-sorted) preimage that
+/// `sign_structured` signs (bd-3eko7), matching prod `to_canonical_bytes`
+/// regardless of serde_json's object-ordering feature in this build (bd-o776s).
+fn canonical_preimage<T: serde::Serialize>(data: &T) -> Vec<u8> {
+    fn canonicalize(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                let mut out = serde_json::Map::new();
+                for k in keys {
+                    out.insert(k.clone(), canonicalize(&m[k]));
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(a) => {
+                serde_json::Value::Array(a.iter().map(canonicalize).collect())
+            }
+            _ => v.clone(),
+        }
+    }
+    serde_json::to_vec(&canonicalize(&serde_json::to_value(data).unwrap())).unwrap()
+}
+
 /// Test comprehensive signing and verification workflow.
 #[test]
 fn test_crypto_integration_workflow() {
@@ -31,8 +55,13 @@ fn test_crypto_integration_workflow() {
         .sign_structured(&secret_key, "decision_receipt", &test_data)
         .unwrap();
 
-    // Verify using low-level scheme interface
-    let serialized = serde_json::to_vec(&test_data).unwrap();
+    // Verify using low-level scheme interface. `sign_structured` signs the
+    // CANONICAL JSON encoding (object keys sorted recursively — bd-3eko7),
+    // so reconstruct the same canonical preimage here. Routing through
+    // `serde_json::Value` yields sorted keys (serde_json's default Map is
+    // BTreeMap-backed; no `preserve_order` feature in this workspace) and the
+    // test struct is flat, so this matches the canonical preimage exactly.
+    let serialized = canonical_preimage(&test_data);
     let domain = b"franken_node_decision_receipt:";
 
     assert!(Ed25519Scheme::verify_with_domain(

@@ -1783,9 +1783,12 @@ mod tests {
     fn test_id_counter_wrap_detection() {
         let mut t = make_tracker();
 
-        // Simulate near wrap-around condition
+        // Simulate near wrap-around condition. Prod rejects when `next_id == u64::MAX` BEFORE
+        // generating an id (reserve, line 488), so the last usable counter value is u64::MAX - 1.
+        // Seed at u64::MAX - 2 so exactly two reserves succeed (consuming MAX-2 then MAX-1) and
+        // the third hits the exhaustion boundary.
         t.with_inner_mut(|state| {
-            state.next_id = u64::MAX - 1;
+            state.next_id = u64::MAX - 2;
         });
 
         // These should work
@@ -2138,19 +2141,21 @@ pub mod conformance {
         let mut tracker = ObligationTracker::with_flow_budget(budget);
         let flow = ObligationFlow::Quarantine;
 
-        // Reserve up to budget: should succeed
+        // Reserve up to budget: should succeed. INV-OBL-BUDGET-BOUND is enforced by `try_reserve`
+        // (line 535: rejects when reserved_count_for_flow >= flow_budget); plain `reserve` does
+        // not enforce the per-flow budget, so this test must use the budget-aware entry point.
         let id1 = tracker
-            .reserve(flow.clone(), vec![], 1000, "budget-1")
+            .try_reserve(flow.clone(), vec![], 1000, "budget-1")
             .unwrap();
         let id2 = tracker
-            .reserve(flow.clone(), vec![], 1001, "budget-2")
+            .try_reserve(flow.clone(), vec![], 1001, "budget-2")
             .unwrap();
         assert_eq!(tracker.count_in_state(ObligationState::Reserved), 2);
 
         // Reserve beyond budget: should fail
-        let over_budget = tracker.reserve(flow.clone(), vec![], 1002, "budget-over");
+        let over_budget = tracker.try_reserve(flow.clone(), vec![], 1002, "budget-over");
         assert!(over_budget.is_err());
-        assert!(over_budget.unwrap_err().contains("ERR_OBL_FLOW_BUDGET"));
+        assert!(over_budget.unwrap_err().contains("ERR_OBL_BUDGET_EXCEEDED"));
 
         // Commit one obligation: should free capacity
         tracker.commit(&id1, 1100, "budget-commit").unwrap();
@@ -2158,7 +2163,7 @@ pub mod conformance {
 
         // Now reservation should succeed again
         let id3 = tracker
-            .reserve(flow.clone(), vec![], 1003, "budget-3")
+            .try_reserve(flow.clone(), vec![], 1003, "budget-3")
             .unwrap();
         assert_eq!(tracker.count_in_state(ObligationState::Reserved), 2);
     }
@@ -2823,9 +2828,11 @@ pub mod conformance {
             let mut flow_obligations = Vec::new();
             let mut successful_reserves = 0;
 
-            // Try to exceed the per-flow budget
+            // Try to exceed the per-flow budget. Budget enforcement lives in `try_reserve`
+            // (line 535); plain `reserve` does not cap per-flow reservations, so an adversary
+            // must be held to the budget via the budget-aware entry point.
             for attempt in 0..DEFAULT_FLOW_BUDGET + 100 {
-                let result = tracker.reserve(
+                let result = tracker.try_reserve(
                     flow.clone(),
                     format!("budget-test-{}-{}", flow.as_str(), attempt).into_bytes(),
                     1000 + attempt as u64,
@@ -2869,7 +2876,12 @@ pub mod conformance {
 
         for global_attempt in 0..MAX_OBLIGATIONS + 200 {
             let flow = ObligationFlow::all()[global_attempt % ObligationFlow::all().len()].clone();
-            let result = tracker.reserve(
+            // Route through the budget-aware entry point: per-flow budgets keep concurrent
+            // reservations bounded so the tracker never exceeds global capacity. (Plain `reserve`
+            // is unbounded per-flow and, under capacity eviction/leak-reclaim, lets the cumulative
+            // success count legitimately exceed MAX_OBLIGATIONS even though the concurrent count
+            // never does — which would defeat the cumulative-count assertion below.)
+            let result = tracker.try_reserve(
                 flow,
                 format!("global-{}", global_attempt).into_bytes(),
                 3000 + global_attempt as u64,

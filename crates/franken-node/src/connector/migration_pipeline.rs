@@ -2208,6 +2208,27 @@ mod tests {
         }
     }
 
+    /// Test-isolation guard: serializes this module's tests and clears any
+    /// migration registration leaked by a prior test into the process-global
+    /// `ACTIVE_MIGRATIONS` set. Without this, a test that calls `new()`/`advance()`
+    /// but never drives the pipeline to Complete/Rollback leaks its cohort into the
+    /// global single-migration lock, making every later test panic with
+    /// `ERR_PIPE_CONCURRENT_MIGRATION` when run in the same (parallel) binary.
+    /// The prod single-migration lock is intentional and has its own dedicated tests.
+    fn migration_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let guard = TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Clear any leaked global migration registrations from a prior test (state isolation).
+        super::ACTIVE_MIGRATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        guard
+    }
+
     fn single_ext_cohort(name: &str) -> CohortDefinition {
         single_ext_cohort_with_evidence(name, healthy_evidence())
     }
@@ -2227,18 +2248,21 @@ mod tests {
 
     #[test]
     fn test_new_pipeline_starts_at_intake() {
+        let _guard = migration_test_guard();
         let state = new(&sample_cohort()).expect("should succeed");
         assert_eq!(state.current_stage, PipelineStage::Intake);
     }
 
     #[test]
     fn test_new_pipeline_has_cohort_id() {
+        let _guard = migration_test_guard();
         let state = new(&sample_cohort()).expect("should succeed");
         assert_eq!(state.cohort_id, "cohort-001");
     }
 
     #[test]
     fn test_new_pipeline_has_extensions() {
+        let _guard = migration_test_guard();
         let state = new(&sample_cohort()).expect("should succeed");
         assert_eq!(state.extensions.len(), 2);
         assert!(state.extensions.contains_key("ext_alpha"));
@@ -2247,6 +2271,7 @@ mod tests {
 
     #[test]
     fn test_new_pipeline_has_idempotency_key() {
+        let _guard = migration_test_guard();
         let state = new(&sample_cohort()).expect("should succeed");
         assert!(!state.idempotency_key.is_empty());
         assert_eq!(state.idempotency_key.len(), 64); // SHA-256 hex
@@ -2254,12 +2279,14 @@ mod tests {
 
     #[test]
     fn test_new_pipeline_has_schema_version() {
+        let _guard = migration_test_guard();
         let state = new(&sample_cohort()).expect("should succeed");
         assert_eq!(state.schema_version, SCHEMA_VERSION);
     }
 
     #[test]
     fn test_new_pipeline_empty_history() {
+        let _guard = migration_test_guard();
         let state = new(&sample_cohort()).expect("should succeed");
         assert!(state.stage_history.is_empty());
     }
@@ -2268,6 +2295,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_extension_rejected() {
+        let _guard = migration_test_guard();
         let cohort = CohortDefinition {
             cohort_id: "dup".to_string(),
             extensions: vec![
@@ -2284,6 +2312,7 @@ mod tests {
 
     #[test]
     fn test_advance_intake_to_analysis() {
+        let _guard = migration_test_guard();
         let state = new(&sample_cohort()).expect("should succeed");
         let state = advance(state).unwrap();
         assert_eq!(state.current_stage, PipelineStage::Analysis);
@@ -2291,12 +2320,14 @@ mod tests {
 
     #[test]
     fn test_advance_through_all_stages() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         assert_eq!(state.current_stage, PipelineStage::Complete);
     }
 
     #[test]
     fn test_stage_history_recorded() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         // 7 transitions: Intake->Analysis->PlanGen->PlanReview->Exec->Verif->Receipt->Complete
         assert_eq!(state.stage_history.len(), 7);
@@ -2304,6 +2335,7 @@ mod tests {
 
     #[test]
     fn test_cannot_advance_from_complete() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let err = advance(state).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_PIPE_INVALID_TRANSITION);
@@ -2311,6 +2343,7 @@ mod tests {
 
     #[test]
     fn test_cannot_advance_from_rollback() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).unwrap();
         state = advance(state).unwrap(); // -> Analysis
         state = rollback(state).unwrap(); // -> Rollback
@@ -2322,6 +2355,7 @@ mod tests {
 
     #[test]
     fn test_analysis_produces_report() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).expect("should succeed");
         state = advance(state).expect("should succeed"); // Intake -> Analysis
         state = advance(state).expect("should succeed"); // Analysis -> PlanGeneration (report generated)
@@ -2336,6 +2370,7 @@ mod tests {
 
     #[test]
     fn test_analysis_detects_blockers() {
+        let _guard = migration_test_guard();
         let cohort = single_ext_cohort_with_evidence("needs_real_evidence", high_risk_evidence());
         let mut state = new(&cohort).expect("should succeed");
         state = advance(state).expect("should succeed"); // -> Analysis
@@ -2356,6 +2391,7 @@ mod tests {
 
     #[test]
     fn test_plan_generated() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).expect("should succeed");
         state = advance(state).expect("should succeed"); // -> Analysis
         state = advance(state).expect("should succeed"); // -> PlanGeneration
@@ -2368,6 +2404,7 @@ mod tests {
 
     #[test]
     fn test_plan_generation_without_compatibility_report_rejected() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).expect("should succeed");
         state.current_stage = PipelineStage::PlanGeneration;
         state.compatibility_report = None;
@@ -2380,6 +2417,7 @@ mod tests {
 
     #[test]
     fn test_plan_review_without_migration_plan_rejected() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).expect("should succeed");
         state.current_stage = PipelineStage::PlanReview;
         state.migration_plan = None;
@@ -2392,6 +2430,7 @@ mod tests {
 
     #[test]
     fn test_receipt_issuance_without_verification_report_rejected() {
+        let _guard = migration_test_guard();
         let mut state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         state.current_stage = PipelineStage::ReceiptIssuance;
         state.verification_report = None;
@@ -2405,6 +2444,7 @@ mod tests {
 
     #[test]
     fn test_receipt_issuance_with_failed_verification_report_rejected() {
+        let _guard = migration_test_guard();
         let mut state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let mut failed_report = state
             .verification_report
@@ -2424,6 +2464,7 @@ mod tests {
 
     #[test]
     fn test_receipt_issuance_without_migration_plan_rejected() {
+        let _guard = migration_test_guard();
         let mut state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         state.current_stage = PipelineStage::ReceiptIssuance;
         state.migration_plan = None;
@@ -2437,6 +2478,7 @@ mod tests {
 
     #[test]
     fn test_plan_has_deterministic_rollout_phases_and_certificates() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).expect("should succeed");
         state = advance(state).expect("should succeed");
         state = advance(state).expect("should succeed");
@@ -2461,6 +2503,7 @@ mod tests {
 
     #[test]
     fn test_plan_id_deterministic() {
+        let _guard = migration_test_guard();
         let cohort = sample_cohort();
         let s1 = run_full_pipeline(&cohort).expect("should succeed");
         let s2 = run_full_pipeline(&cohort).expect("should succeed");
@@ -2473,6 +2516,7 @@ mod tests {
     #[test]
     fn test_plan_phase_evidence_artifact_preserves_extension_boundaries()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = migration_test_guard();
         let cohort_a = CohortDefinition {
             cohort_id: "cohort-comma-a".to_string(),
             extensions: vec![
@@ -2484,6 +2528,11 @@ mod tests {
         let state_a = new(&cohort_a).expect("should succeed");
         let report_a = run_analysis(&state_a)?;
         let plan_a = generate_plan(&state_a, &report_a)?;
+        // Release cohort-a's single-active-migration registration before starting
+        // cohort-b; otherwise `new(&cohort_b)` fails-closed with
+        // ERR_PIPE_CONCURRENT_MIGRATION. This test compares two independent plans,
+        // not concurrent execution.
+        super::unregister_migration(&state_a.cohort_id);
 
         let cohort_b = CohortDefinition {
             cohort_id: "cohort-comma-b".to_string(),
@@ -2525,6 +2574,7 @@ mod tests {
 
     #[test]
     fn test_execution_traces_produced() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).unwrap();
         // Advance to Execution, then past it
         for _ in 0..5 {
@@ -2536,6 +2586,7 @@ mod tests {
 
     #[test]
     fn test_execution_trace_has_transitions() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         for trace in &state.execution_traces {
             assert!(!trace.state_transitions.is_empty());
@@ -2548,6 +2599,7 @@ mod tests {
 
     #[test]
     fn test_verification_passes_for_good_cohort() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let report = state
             .verification_report
@@ -2559,6 +2611,7 @@ mod tests {
 
     #[test]
     fn test_verification_threshold_enforced() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = migration_test_guard();
         let cohort = single_ext_cohort_with_evidence(
             "verification_regression",
             verification_failure_evidence(),
@@ -2578,6 +2631,7 @@ mod tests {
     #[test]
     fn test_verification_emits_counterexample_witness_for_failure()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = migration_test_guard();
         let cohort = single_ext_cohort_with_evidence(
             "verification_regression",
             verification_failure_evidence(),
@@ -2598,6 +2652,7 @@ mod tests {
     #[test]
     fn test_verification_without_analysis_finding_fails_closed()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = migration_test_guard();
         let cohort = single_ext_cohort("missing_analysis_finding");
         let mut state = new(&cohort).expect("should succeed");
         state.current_stage = PipelineStage::Verification;
@@ -2625,6 +2680,7 @@ mod tests {
 
     #[test]
     fn test_full_pipeline_rejects_fail_closed_degraded_evidence() {
+        let _guard = migration_test_guard();
         let cohort = single_ext_cohort_with_evidence("degraded_case", degraded_evidence());
 
         let err = run_full_pipeline(&cohort).unwrap_err();
@@ -2635,6 +2691,7 @@ mod tests {
 
     #[test]
     fn test_degraded_mode_is_reported_and_not_green() {
+        let _guard = migration_test_guard();
         let cohort = single_ext_cohort_with_evidence("degraded_case", degraded_evidence());
         let mut state = new(&cohort).expect("should succeed");
         state = advance(state).expect("should succeed");
@@ -2652,6 +2709,7 @@ mod tests {
 
     #[test]
     fn test_verification_report_has_per_extension() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let report = state
             .verification_report
@@ -2663,6 +2721,7 @@ mod tests {
     #[test]
     fn test_blocked_dependency_withholds_dependent_from_canary()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = migration_test_guard();
         let mut dependent_evidence = healthy_evidence();
         dependent_evidence.dependency_edges = vec!["blocked_core".to_string()];
         let cohort = CohortDefinition {
@@ -2717,6 +2776,7 @@ mod tests {
 
     #[test]
     fn test_receipt_issued() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let receipt = state
             .migration_receipt
@@ -2729,6 +2789,7 @@ mod tests {
 
     #[test]
     fn test_receipt_signed() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let receipt = state
             .migration_receipt
@@ -2741,6 +2802,7 @@ mod tests {
 
     #[test]
     fn test_receipt_has_verification_summary() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let receipt = state
             .migration_receipt
@@ -2751,6 +2813,7 @@ mod tests {
 
     #[test]
     fn test_receipt_signature_detects_tampering() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let mut receipt = state
             .migration_receipt
@@ -2764,6 +2827,7 @@ mod tests {
 
     #[test]
     fn test_receipt_signature_rejects_empty_signature() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let mut receipt = state
             .migration_receipt
@@ -2778,6 +2842,7 @@ mod tests {
 
     #[test]
     fn test_receipt_signature_rejects_evidence_id_tampering() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let mut receipt = state
             .migration_receipt
@@ -2794,6 +2859,7 @@ mod tests {
 
     #[test]
     fn test_receipt_signature_rejects_timestamp_tampering() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let mut receipt = state
             .migration_receipt
@@ -2808,6 +2874,7 @@ mod tests {
 
     #[test]
     fn test_receipt_signature_rejects_rollback_proof_tampering() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let mut receipt = state
             .migration_receipt
@@ -2822,6 +2889,7 @@ mod tests {
 
     #[test]
     fn test_receipt_signature_rejects_degraded_summary_tampering() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let mut receipt = state
             .migration_receipt
@@ -2838,6 +2906,7 @@ mod tests {
 
     #[test]
     fn test_rollback_from_analysis() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).unwrap();
         state = advance(state).unwrap(); // -> Analysis
         state = rollback(state).unwrap();
@@ -2846,6 +2915,7 @@ mod tests {
 
     #[test]
     fn test_rollback_from_execution() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).unwrap();
         for _ in 0..4 {
             state = advance(state).expect("should succeed"); // -> Execution
@@ -2857,6 +2927,7 @@ mod tests {
 
     #[test]
     fn test_rollback_from_verification() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).unwrap();
         for _ in 0..5 {
             state = advance(state).expect("should succeed"); // -> Verification
@@ -2868,6 +2939,7 @@ mod tests {
 
     #[test]
     fn test_cannot_rollback_from_intake() {
+        let _guard = migration_test_guard();
         let state = new(&sample_cohort()).expect("should succeed");
         let err = rollback(state).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_PIPE_ROLLBACK_FAILED);
@@ -2875,6 +2947,7 @@ mod tests {
 
     #[test]
     fn test_cannot_rollback_from_complete() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let err = rollback(state).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_PIPE_ROLLBACK_FAILED);
@@ -2882,6 +2955,7 @@ mod tests {
 
     #[test]
     fn test_cannot_rollback_from_rollback() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).unwrap();
         state = advance(state).unwrap();
         state = rollback(state).unwrap();
@@ -2891,6 +2965,7 @@ mod tests {
 
     #[test]
     fn test_rollback_records_transition() {
+        let _guard = migration_test_guard();
         let mut state = new(&sample_cohort()).unwrap();
         state = advance(state).unwrap(); // -> Analysis
         state = rollback(state).unwrap();
@@ -2903,29 +2978,45 @@ mod tests {
 
     #[test]
     fn test_idempotency_same_cohort() {
+        let _guard = migration_test_guard();
         let cohort = sample_cohort();
         let s1 = new(&cohort).unwrap();
+        // Release the first registration before starting the second pipeline:
+        // prod allows only one active migration at a time, so a second `new()`
+        // while `s1` is still registered would fail-closed with
+        // ERR_PIPE_CONCURRENT_MIGRATION. We are exercising idempotency-key
+        // derivation, not the concurrency lock (which has dedicated tests).
+        super::unregister_migration(&s1.cohort_id);
         let s2 = new(&cohort).unwrap();
         assert!(is_idempotent(&s1, &s2));
     }
 
     #[test]
     fn test_idempotency_different_cohort() {
+        let _guard = migration_test_guard();
         let s1 = new(&sample_cohort()).unwrap();
+        // Release the first registration (single-active-migration lock) before
+        // creating the second pipeline; we are testing idempotency, not the lock.
+        super::unregister_migration(&s1.cohort_id);
         let s2 = new(&single_ext_cohort("other")).unwrap();
         assert!(!is_idempotent(&s1, &s2));
     }
 
     #[test]
     fn test_idempotency_key_deterministic() {
+        let _guard = migration_test_guard();
         let cohort = sample_cohort();
         let s1 = new(&cohort).unwrap();
+        // Release the first registration (single-active-migration lock) before
+        // creating the second pipeline; we are testing key determinism here.
+        super::unregister_migration(&s1.cohort_id);
         let s2 = new(&cohort).unwrap();
         assert_eq!(s1.idempotency_key, s2.idempotency_key);
     }
 
     #[test]
     fn test_idempotency_rejects_tampered_key_for_same_state() {
+        let _guard = migration_test_guard();
         let state1 = new(&sample_cohort()).expect("should succeed");
         let mut state2 = state1.clone();
         state2.idempotency_key.push_str("-tampered");
@@ -2935,6 +3026,7 @@ mod tests {
 
     #[test]
     fn test_idempotency_rejects_tampered_extension_version() {
+        let _guard = migration_test_guard();
         let state1 = new(&sample_cohort()).expect("should succeed");
         let mut state2 = state1.clone();
         state2
@@ -2948,6 +3040,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_full_pipeline() {
+        let _guard = migration_test_guard();
         let cohort = sample_cohort();
         let s1 = run_full_pipeline(&cohort).expect("should succeed");
         let s2 = run_full_pipeline(&cohort).expect("should succeed");
@@ -2969,6 +3062,7 @@ mod tests {
 
     #[test]
     fn test_cohort_summary_success_rate() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let summary = compute_cohort_summary(&state);
         assert!((summary.success_rate - 1.0).abs() < f64::EPSILON);
@@ -2976,6 +3070,7 @@ mod tests {
 
     #[test]
     fn test_cohort_summary_rollback_rate() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let summary = compute_cohort_summary(&state);
         assert!((summary.rollback_rate - 0.0).abs() < f64::EPSILON);
@@ -2983,6 +3078,7 @@ mod tests {
 
     #[test]
     fn test_cohort_summary_throughput() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let summary = compute_cohort_summary(&state);
         assert!(summary.throughput > 0.0);
@@ -2990,6 +3086,7 @@ mod tests {
 
     #[test]
     fn test_cohort_summary_mean_time() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let summary = compute_cohort_summary(&state);
         assert!(summary.mean_time_to_migrate_ms > 0);
@@ -2999,11 +3096,13 @@ mod tests {
 
     #[test]
     fn test_pipeline_stage_all() {
+        let _guard = migration_test_guard();
         assert_eq!(PipelineStage::all().len(), 9);
     }
 
     #[test]
     fn test_pipeline_stage_labels() {
+        let _guard = migration_test_guard();
         assert_eq!(PipelineStage::Intake.label(), "INTAKE");
         assert_eq!(PipelineStage::Analysis.label(), "ANALYSIS");
         assert_eq!(PipelineStage::PlanGeneration.label(), "PLAN_GENERATION");
@@ -3017,6 +3116,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_stage_next() {
+        let _guard = migration_test_guard();
         assert_eq!(PipelineStage::Intake.next(), Some(PipelineStage::Analysis));
         assert_eq!(PipelineStage::Complete.next(), None);
         assert_eq!(PipelineStage::Rollback.next(), None);
@@ -3024,6 +3124,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_stage_can_rollback() {
+        let _guard = migration_test_guard();
         assert!(!PipelineStage::Intake.can_rollback());
         assert!(PipelineStage::Analysis.can_rollback());
         assert!(PipelineStage::PlanGeneration.can_rollback());
@@ -3039,6 +3140,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_state_serde_roundtrip() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let json = serde_json::to_string(&state).expect("serialize should succeed");
         let parsed: PipelineState =
@@ -3050,6 +3152,7 @@ mod tests {
 
     #[test]
     fn test_cohort_definition_serde_roundtrip() {
+        let _guard = migration_test_guard();
         let cohort = sample_cohort();
         let json = serde_json::to_string(&cohort).expect("serialize should succeed");
         let parsed: CohortDefinition =
@@ -3059,6 +3162,7 @@ mod tests {
 
     #[test]
     fn test_migration_receipt_serde_roundtrip() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let receipt = state
             .migration_receipt
@@ -3072,6 +3176,7 @@ mod tests {
 
     #[test]
     fn test_verification_report_serde_roundtrip() {
+        let _guard = migration_test_guard();
         let state = run_full_pipeline(&sample_cohort()).expect("should succeed");
         let report = state
             .verification_report
@@ -3118,6 +3223,7 @@ mod tests {
 
     #[test]
     fn test_transform_action_serde_roundtrip() {
+        let _guard = migration_test_guard();
         let action = TransformAction::ApiShim;
         let json = serde_json::to_string(&action).unwrap();
         let parsed: TransformAction = serde_json::from_str(&json).unwrap();
@@ -3128,6 +3234,7 @@ mod tests {
 
     #[test]
     fn test_event_codes_defined() {
+        let _guard = migration_test_guard();
         assert_eq!(event_codes::PIPELINE_STAGE_ENTER, "PIPE-001");
         assert_eq!(event_codes::PIPELINE_STAGE_EXIT, "PIPE-002");
         assert_eq!(event_codes::ANALYSIS_BLOCKER_FOUND, "PIPE-003");
@@ -3147,6 +3254,7 @@ mod tests {
 
     #[test]
     fn test_error_codes_defined() {
+        let _guard = migration_test_guard();
         assert_eq!(
             error_codes::ERR_PIPE_INVALID_TRANSITION,
             "ERR_PIPE_INVALID_TRANSITION"
@@ -3181,6 +3289,7 @@ mod tests {
 
     #[test]
     fn test_invariants_defined() {
+        let _guard = migration_test_guard();
         assert_eq!(invariants::INV_PIPE_DETERMINISTIC, "INV-PIPE-DETERMINISTIC");
         assert_eq!(invariants::INV_PIPE_IDEMPOTENT, "INV-PIPE-IDEMPOTENT");
         assert_eq!(
@@ -3205,6 +3314,7 @@ mod tests {
 
     #[test]
     fn test_schema_version() {
+        let _guard = migration_test_guard();
         assert_eq!(SCHEMA_VERSION, "pipe-v1.0");
     }
 
@@ -3212,6 +3322,7 @@ mod tests {
 
     #[test]
     fn test_types_send_sync() {
+        let _guard = migration_test_guard();
         fn assert_send<T: Send>() {}
         fn assert_sync<T: Sync>() {}
 
@@ -3249,6 +3360,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_display() {
+        let _guard = migration_test_guard();
         let err = PipelineError {
             code: "ERR_TEST".to_string(),
             message: "test error".to_string(),
@@ -3260,6 +3372,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_event_serde() {
+        let _guard = migration_test_guard();
         let evt = PipelineEvent {
             event_code: event_codes::PIPELINE_STAGE_ENTER.to_string(),
             cohort_id: "cohort-001".to_string(),
@@ -3276,6 +3389,7 @@ mod tests {
 
     #[test]
     fn test_empty_cohort() {
+        let _guard = migration_test_guard();
         let cohort = CohortDefinition {
             cohort_id: "empty".to_string(),
             extensions: vec![],
@@ -3287,6 +3401,7 @@ mod tests {
 
     #[test]
     fn test_single_extension_full_pipeline() {
+        let _guard = migration_test_guard();
         let cohort = single_ext_cohort("solo_ext");
         let state = run_full_pipeline(&cohort).unwrap();
         assert_eq!(state.current_stage, PipelineStage::Complete);
@@ -3294,6 +3409,7 @@ mod tests {
 
     #[test]
     fn test_btreemap_ordering() {
+        let _guard = migration_test_guard();
         let cohort = sample_cohort();
         let state = new(&cohort).expect("should succeed");
         let keys: Vec<_> = state.extensions.keys().collect();
@@ -3303,15 +3419,22 @@ mod tests {
 
     #[test]
     fn test_placeholder_prefix_shortcuts_absent_from_source() {
+        let _guard = migration_test_guard();
         let source = include_str!("migration_pipeline.rs");
+        // Scope the scan to the production portion of the file. Test fixtures
+        // (e.g. an extension named `blocked_core`) may legitimately contain
+        // substrings that match these legacy placeholder prefixes; the invariant
+        // being asserted is that *production* code no longer uses them.
+        let prod_source = source.split("#[cfg(test)]").next().unwrap_or(source);
         let legacy_analysis_marker = ["blocked", "_"].concat();
         let legacy_verify_marker = ["fail", "_", "verify", "_"].concat();
-        assert!(!source.contains(&legacy_analysis_marker));
-        assert!(!source.contains(&legacy_verify_marker));
+        assert!(!prod_source.contains(&legacy_analysis_marker));
+        assert!(!prod_source.contains(&legacy_verify_marker));
     }
 
     #[test]
     fn wilson_interval_zero_total_returns_full_range() {
+        let _guard = migration_test_guard();
         let ci = wilson_interval(0, 0, 0.95);
         assert_eq!(ci.lower_bound, 0.0);
         assert_eq!(ci.upper_bound, 1.0);
@@ -3319,6 +3442,7 @@ mod tests {
 
     #[test]
     fn wilson_interval_successes_exceed_total_returns_zero() {
+        let _guard = migration_test_guard();
         let ci = wilson_interval(10, 5, 0.95);
         assert_eq!(ci.lower_bound, 0.0);
         assert_eq!(ci.upper_bound, 0.0);
@@ -3326,6 +3450,7 @@ mod tests {
 
     #[test]
     fn wilson_interval_normal_produces_finite_bounds() {
+        let _guard = migration_test_guard();
         let ci = wilson_interval(80, 100, 0.95);
         assert!(ci.lower_bound.is_finite());
         assert!(ci.upper_bound.is_finite());
@@ -3336,6 +3461,7 @@ mod tests {
 
     #[test]
     fn wilson_interval_all_pass_produces_finite_bounds() {
+        let _guard = migration_test_guard();
         let ci = wilson_interval(100, 100, 0.95);
         assert!(ci.lower_bound.is_finite());
         assert!(ci.upper_bound.is_finite());
@@ -3344,6 +3470,7 @@ mod tests {
 
     #[test]
     fn wilson_interval_all_fail_produces_finite_bounds() {
+        let _guard = migration_test_guard();
         let ci = wilson_interval(0, 100, 0.95);
         assert!(ci.lower_bound.is_finite());
         assert!(ci.upper_bound.is_finite());
@@ -3352,6 +3479,7 @@ mod tests {
 
     #[test]
     fn negative_pipeline_stage_serde_rejects_unknown_variant() {
+        let _guard = migration_test_guard();
         let err = serde_json::from_str::<PipelineStage>(r#""deploy""#).unwrap_err();
 
         assert!(err.to_string().contains("unknown variant"));
@@ -3359,6 +3487,7 @@ mod tests {
 
     #[test]
     fn negative_compatibility_band_serde_rejects_unknown_variant() {
+        let _guard = migration_test_guard();
         let err = serde_json::from_str::<CompatibilityBand>(r#""guarded_mode""#).unwrap_err();
 
         assert!(err.to_string().contains("unknown variant"));
@@ -3366,6 +3495,7 @@ mod tests {
 
     #[test]
     fn negative_transform_action_serde_rejects_unknown_variant() {
+        let _guard = migration_test_guard();
         let err = serde_json::from_str::<TransformAction>(r#""native_rewrite""#).unwrap_err();
 
         assert!(err.to_string().contains("unknown variant"));
@@ -3373,6 +3503,7 @@ mod tests {
 
     #[test]
     fn negative_pipeline_state_serde_rejects_missing_current_stage() {
+        let _guard = migration_test_guard();
         let mut value = serde_json::to_value(new(&sample_cohort()).unwrap()).unwrap();
         value
             .as_object_mut()
@@ -3387,6 +3518,7 @@ mod tests {
 
     #[test]
     fn negative_cohort_definition_serde_rejects_scalar_extensions() {
+        let _guard = migration_test_guard();
         let err = serde_json::from_str::<CohortDefinition>(
             r#"{
                 "cohort_id":"cohort-bad",
@@ -3401,6 +3533,7 @@ mod tests {
 
     #[test]
     fn negative_extension_spec_serde_rejects_missing_name() {
+        let _guard = migration_test_guard();
         let err = serde_json::from_str::<ExtensionSpec>(
             r#"{
                 "source_version":"1.0.0",
@@ -3416,6 +3549,7 @@ mod tests {
 
     #[test]
     fn negative_verification_report_serde_rejects_string_pass_rate() {
+        let _guard = migration_test_guard();
         let err = serde_json::from_str::<VerificationReport>(
             r#"{
                 "pass_rate":"0.95",
@@ -3434,6 +3568,7 @@ mod tests {
 
     #[test]
     fn negative_migration_receipt_serde_rejects_missing_signature() {
+        let _guard = migration_test_guard();
         let err = serde_json::from_str::<MigrationReceipt>(
             r#"{
                 "pre_migration_hash":"pre",
@@ -3455,25 +3590,32 @@ mod tests {
 
     #[test]
     fn test_concurrent_migration_protection_blocks_second_pipeline() {
+        let _guard = migration_test_guard();
         let cohort1 = sample_cohort();
         let mut cohort2 = sample_cohort();
         cohort2.cohort_id = "cohort-2".to_string();
 
         // First migration should succeed
         let state1 = new(&cohort1).expect("first migration should succeed");
-        assert_eq!(state1.cohort_id, "cohort-sample");
+        assert_eq!(state1.cohort_id, "cohort-001");
         assert_eq!(state1.current_stage, PipelineStage::Intake);
 
         // Second migration should be blocked
         let err = new(&cohort2).expect_err("second migration should be blocked");
         assert_eq!(err.code, error_codes::ERR_PIPE_CONCURRENT_MIGRATION);
         assert!(err.message.contains("already in progress"));
-        assert!(err.message.contains("cohort-sample")); // mentions active cohort
+        assert!(err.message.contains("cohort-001")); // mentions active cohort
         assert!(err.message.contains("cohort-2")); // mentions blocked cohort
 
-        // After first migration completes, second should succeed
-        let completed_state1 =
-            run_full_pipeline(&cohort1).expect("first migration should complete");
+        // After the first migration completes, the second should succeed. Drive
+        // state1 itself to Complete (the Complete transition releases the
+        // concurrency lock) rather than starting a fresh pipeline for cohort-001,
+        // which would re-register the still-active cohort and self-conflict (bd-o776s).
+        let mut completed_state1 = state1;
+        while completed_state1.current_stage != PipelineStage::Complete {
+            completed_state1 =
+                advance(completed_state1).expect("advance first migration to completion");
+        }
         assert_eq!(completed_state1.current_stage, PipelineStage::Complete);
 
         let state2 = new(&cohort2).expect("second migration should succeed after first completes");
@@ -3482,6 +3624,7 @@ mod tests {
 
     #[test]
     fn test_migration_rollback_releases_concurrency_lock() {
+        let _guard = migration_test_guard();
         let cohort1 = sample_cohort();
         let mut cohort2 = sample_cohort();
         cohort2.cohort_id = "cohort-rollback-test".to_string();
@@ -3508,6 +3651,7 @@ mod tests {
 
     #[test]
     fn test_verification_rejects_stale_evidence() {
+        let _guard = migration_test_guard();
         let mut cohort = sample_cohort();
 
         // Set old evidence timestamp (more than 1 hour ago)
@@ -3520,8 +3664,11 @@ mod tests {
         let mut state = new(&cohort).expect("pipeline creation should succeed");
         state.started_at = "2020-01-01T02:00:00Z".to_string(); // 2 hours after evidence
 
-        // Advance to verification stage
-        for _ in 0..4 {
+        // Advance to verification stage. The linear stage sequence is
+        // Intake→Analysis→PlanGeneration→PlanReview→Execution→Verification, so
+        // five advances are required to land on Verification (cf. the
+        // fresh-evidence sibling test).
+        for _ in 0..5 {
             state = advance(state).expect("should advance");
         }
         assert_eq!(state.current_stage, PipelineStage::Verification);
@@ -3536,6 +3683,7 @@ mod tests {
 
     #[test]
     fn test_verification_accepts_fresh_evidence() {
+        let _guard = migration_test_guard();
         let mut cohort = sample_cohort();
 
         // Set fresh evidence timestamp (recent)

@@ -308,7 +308,7 @@ mod tests {
 
         let fingerprint = key_material.fingerprint();
         assert!(fingerprint.starts_with("ed25519:"));
-        assert_eq!(fingerprint.len(), 8 + 16 + 1); // "ed25519:" + 16 hex chars
+        assert_eq!(fingerprint.len(), 8 + 16); // "ed25519:" (8 chars) + hex of 8 bytes (16 chars)
 
         // Fingerprint should be deterministic
         let fingerprint2 = key_material.fingerprint();

@@ -631,7 +631,16 @@ mod tests {
                 1000,
             )
             .unwrap_err();
-        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
+        // bd-o776s: persist() runs check_artifact_epoch() first; its artifact_id
+        // validation rejects the empty id as an epoch InvalidArtifactId
+        // (PRA_EPOCH_REJECTED) before the legacy PRA_INVALID_ARTIFACT path.
+        assert_eq!(err.code(), "PRA_EPOCH_REJECTED");
+        match err {
+            PersistenceError::EpochRejected { rejection } => {
+                assert_eq!(rejection.code(), "EPOCH_REJECT_INVALID_ARTIFACT_ID");
+            }
+            other => unreachable!("expected epoch InvalidArtifactId rejection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -647,8 +656,15 @@ mod tests {
                 1000,
             )
             .unwrap_err();
-        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
-        assert!(err.to_string().contains("reserved"));
+        // bd-o776s: epoch-layer artifact_id validation intercepts the reserved
+        // id first, surfacing it as PRA_EPOCH_REJECTED / InvalidArtifactId.
+        assert_eq!(err.code(), "PRA_EPOCH_REJECTED");
+        match err {
+            PersistenceError::EpochRejected { rejection } => {
+                assert_eq!(rejection.code(), "EPOCH_REJECT_INVALID_ARTIFACT_ID");
+            }
+            other => unreachable!("expected epoch InvalidArtifactId rejection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -664,8 +680,15 @@ mod tests {
                 1000,
             )
             .unwrap_err();
-        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
-        assert!(err.to_string().contains("leading or trailing whitespace"));
+        // bd-o776s: epoch-layer artifact_id validation rejects the padded id as
+        // InvalidArtifactId (PRA_EPOCH_REJECTED) before the legacy path.
+        assert_eq!(err.code(), "PRA_EPOCH_REJECTED");
+        match err {
+            PersistenceError::EpochRejected { rejection } => {
+                assert_eq!(rejection.code(), "EPOCH_REJECT_INVALID_ARTIFACT_ID");
+            }
+            other => unreachable!("expected epoch InvalidArtifactId rejection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -872,7 +895,10 @@ mod tests {
             )
             .unwrap_err();
 
-        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
+        // bd-o776s: the leading-newline id is rejected by the epoch-layer
+        // artifact_id check (PRA_EPOCH_REJECTED) before mutation; store state is
+        // still preserved exactly as before.
+        assert_eq!(err.code(), "PRA_EPOCH_REJECTED");
         assert_eq!(store.total_count(), 1);
         assert_eq!(store.count_by_type(ArtifactType::Invoke), 1);
         assert!(store.get("\nart-2").is_none());
@@ -1051,8 +1077,16 @@ mod tests {
             )
             .unwrap_err();
 
-        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
-        assert!(err.to_string().contains("reserved"));
+        // bd-o776s: the epoch-layer artifact_id check rejects the reserved id
+        // (PRA_EPOCH_REJECTED / InvalidArtifactId) before the legacy reserved-id
+        // path; no mutation occurs.
+        assert_eq!(err.code(), "PRA_EPOCH_REJECTED");
+        match err {
+            PersistenceError::EpochRejected { rejection } => {
+                assert_eq!(rejection.code(), "EPOCH_REJECT_INVALID_ARTIFACT_ID");
+            }
+            other => unreachable!("expected epoch InvalidArtifactId rejection, got {other:?}"),
+        }
         assert_eq!(store.total_count(), 0);
         assert!(store.replay_hooks(ArtifactType::Audit).is_empty());
     }
@@ -1082,8 +1116,17 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
-        assert!(err.to_string().contains("must not be empty"));
+        // bd-o776s: the all-whitespace id trims to empty and is rejected by the
+        // epoch-layer artifact_id check (PRA_EPOCH_REJECTED / InvalidArtifactId)
+        // before the legacy empty-id path; the later valid persist still starts
+        // the Approval sequence at 0.
+        assert_eq!(err.code(), "PRA_EPOCH_REJECTED");
+        match err {
+            PersistenceError::EpochRejected { rejection } => {
+                assert_eq!(rejection.code(), "EPOCH_REJECT_INVALID_ARTIFACT_ID");
+            }
+            other => unreachable!("expected epoch InvalidArtifactId rejection, got {other:?}"),
+        }
         assert_eq!(accepted.sequence_number, 0);
         assert_eq!(store.count_by_type(ArtifactType::Approval), 1);
     }
@@ -1268,8 +1311,16 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
-        assert!(err.to_string().contains("null bytes"));
+        // bd-o776s: the null-byte id is rejected by the epoch-layer artifact_id
+        // check (PRA_EPOCH_REJECTED / InvalidArtifactId) before the legacy
+        // null-byte path; sequence is not consumed.
+        assert_eq!(err.code(), "PRA_EPOCH_REJECTED");
+        match err {
+            PersistenceError::EpochRejected { rejection } => {
+                assert_eq!(rejection.code(), "EPOCH_REJECT_INVALID_ARTIFACT_ID");
+            }
+            other => unreachable!("expected epoch InvalidArtifactId rejection, got {other:?}"),
+        }
         assert_eq!(accepted.sequence_number, 0);
         assert!(store.get("artifact\0id").is_none());
     }

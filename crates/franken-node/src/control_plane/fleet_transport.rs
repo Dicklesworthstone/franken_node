@@ -1931,14 +1931,15 @@ mod tests {
     use super::{
         ACTION_LOG_RETENTION_DAYS, FLEET_NODE_DIR, FLEET_SHARED_STATE_SCHEMA, FileFleetTransport,
         FleetAction, FleetActionRecord, FleetSharedState, FleetTargetKind, FleetTransport,
-        FleetTransportError, FleetTransportLayout, LOCK_RETRY_BACKOFF_MILLIS, MAX_ACTION_LOG_ENTRIES,
-        MAX_ACTION_RECORD_BYTES, MAX_ACTION_RECORD_LINE_BYTES, MAX_NODE_ID_LEN, MAX_NODES_CAP,
-        NodeHealth, NodeStatus, RevocationScope, RevocationSeverity, TempFileGuard,
-        canonical_fleet_convergence_receipt_payload, clock, fleet_action_compaction_root_key,
-        fleet_convergence_receipt_verdict, lock_file_with_backoff,
-        lock_fleet_action_compaction_process, lock_retry_backoffs, lock_retry_base_backoffs,
-        parse_jsonl_records, push_bounded, sign_fleet_convergence_receipt_payload, validate_node_id,
-        validate_zone_id, wait_until_fleet_converged_or_timeout,
+        FleetTransportError, FleetTransportLayout, LOCK_RETRY_BACKOFF_MILLIS,
+        MAX_ACTION_LOG_ENTRIES, MAX_ACTION_RECORD_BYTES, MAX_ACTION_RECORD_LINE_BYTES,
+        MAX_NODE_ID_LEN, MAX_NODES_CAP, NodeHealth, NodeStatus, RevocationScope,
+        RevocationSeverity, TempFileGuard, canonical_fleet_convergence_receipt_payload, clock,
+        fleet_action_compaction_root_key, fleet_convergence_receipt_verdict,
+        lock_file_with_backoff, lock_fleet_action_compaction_process, lock_retry_backoffs,
+        lock_retry_base_backoffs, parse_jsonl_records, push_bounded,
+        sign_fleet_convergence_receipt_payload, validate_node_id, validate_zone_id,
+        wait_until_fleet_converged_or_timeout,
     };
     use chrono::{DateTime, Utc};
     use ed25519_dalek::{Signer, SigningKey};
@@ -3399,9 +3400,15 @@ mod tests {
             .iter()
             .map(|action| action.action_id.clone())
             .collect();
-        let expected_ids: Vec<_> = (0..RETAINED_ACTIONS)
+        // bd-o776s: actual_ids was sorted lexicographically by action_id above, so
+        // the expected list must use the same ordering — otherwise the numeric index
+        // order places "fleet-action-new-10"/"-11" after "-9" while the lexicographic
+        // actual order places them right after "-1", failing equality even though the
+        // retained SET is correct.
+        let mut expected_ids: Vec<_> = (0..RETAINED_ACTIONS)
             .map(|index| format!("fleet-action-new-{index}"))
             .collect();
+        expected_ids.sort();
         assert_eq!(actual_ids, expected_ids);
 
         let log = fs::read_to_string(transport.layout().actions_path()).expect("read action log");
@@ -4307,7 +4314,11 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let attempt_counter = Arc::new(AtomicU32::new(0));
-        let timeout = Duration::from_millis(100);
+        // bd-o776s: the convergence loop sleeps one FLEET_CONVERGENCE_POLL_INTERVAL
+        // (100ms) between polls, so reaching the 3rd attempt needs ~2 intervals. A
+        // 100ms timeout only admits a single sleep and deterministically times out at
+        // attempt 2; size the budget to comfortably fit 3 attempts.
+        let timeout = super::FLEET_CONVERGENCE_POLL_INTERVAL * 5;
 
         let result = wait_until_fleet_converged_or_timeout(timeout, {
             let counter = attempt_counter.clone();

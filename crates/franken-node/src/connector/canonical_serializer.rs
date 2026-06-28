@@ -2301,9 +2301,13 @@ mod tests {
         let json_with_real_float = r#"{"value": 1.5}"#;
         assert!(contains_float_marker(json_with_real_float.as_bytes()));
 
-        // Test multiple backslashes before quotes
+        // Test multiple backslashes before quotes.
+        // FIXME(bd-o776s): `\\"` is an ESCAPED backslash followed by a REAL
+        // (unescaped) quote, so the string terminates right after `test \\`,
+        // which places `1.5` OUTSIDE any string → it must be detected as a float.
+        // This matches `test_float_detection_double_backslash_before_quote`.
         let json_complex_escape = r#"{"value": "test \\"1.5\\" text"}"#;
-        assert!(!contains_float_marker(json_complex_escape.as_bytes()));
+        assert!(contains_float_marker(json_complex_escape.as_bytes()));
     }
 
     /// Regression test for modulo operation instead of non-existent is_multiple_of
@@ -2362,7 +2366,10 @@ mod tests {
         // This should evict oldest items safely with saturating arithmetic
         push_bounded(&mut items, 6, cap);
         assert_eq!(items.len(), cap);
-        assert_eq!(items, vec![3, 4, 5, 6]); // Removed first 2, kept last 3, added 1
+        // FIXME(bd-o776s): push_bounded trims an over-full Vec down to `cap-1`
+        // before appending the new item, so [1,2,3,4,5] with cap=3 drains the
+        // first 3 (1,2,3) leaving [4,5], then pushes 6 → [4,5,6] (len == cap).
+        assert_eq!(items, vec![4, 5, 6]); // drained [1,2,3], kept [4,5], added 6
 
         // Test edge case: single item capacity
         let mut single = vec![10];
@@ -2841,14 +2848,34 @@ mod tests {
             let mut serializer = CanonicalSerializer::with_all_schemas();
 
             for obj_type in TrustObjectType::all() {
-                let payload1 = b"data1";
-                let payload2 = b"data2";
+                // `build_preimage` now canonicalizes the payload against the
+                // per-type schema (rejecting non-JSON / unknown / missing
+                // fields), so both payloads must be well-formed trust objects.
+                // Derive a second, still-canonical payload that differs from the
+                // first only in one string field's value — enough to change the
+                // canonical bytes while keeping the same domain tag and version.
+                let payload1 = super::super::sample_payload_for_type(*obj_type);
+                let mut doc: serde_json::Value =
+                    serde_json::from_str(&payload1).expect("sample payload is valid JSON");
+                {
+                    let object = doc
+                        .as_object_mut()
+                        .expect("sample payload is a JSON object");
+                    let key = object
+                        .iter()
+                        .find(|(_, v)| v.is_string())
+                        .map(|(k, _)| k.clone())
+                        .expect("sample payload has a string field");
+                    let mutated = format!("{}-alt", object[&key].as_str().unwrap_or_default());
+                    object[&key] = serde_json::Value::String(mutated);
+                }
+                let payload2 = serde_json::to_string(&doc).expect("payload2 serializes");
 
                 let preimage1 = serializer
-                    .build_preimage(*obj_type, payload1, "trace1")
+                    .build_preimage(*obj_type, payload1.as_bytes(), "trace1")
                     .unwrap();
                 let preimage2 = serializer
-                    .build_preimage(*obj_type, payload2, "trace2")
+                    .build_preimage(*obj_type, payload2.as_bytes(), "trace2")
                     .unwrap();
 
                 // Different payloads should produce different preimages
@@ -3241,15 +3268,23 @@ mod tests {
             let display_output = format!("{}", error);
             let debug_output = format!("{:?}", error);
 
-            // Should contain expected error code prefix
-            assert!(display_output.starts_with("ERR_CAN_"));
+            // Should expose the expected error code prefix.
+            // FIXME(bd-o776s): `Display` renders descriptive prose (e.g.
+            // "non-canonical input for ..."), NOT the error code; the
+            // "ERR_CAN_" prefix lives on `code()`, so assert that instead.
+            assert!(error.code().starts_with("ERR_CAN_"));
 
             // Should not interpret malicious content as code
             assert!(!display_output.contains("(null)"));
             assert!(!display_output.contains("Error"));
 
-            // Debug output should also be safe
-            assert!(debug_output.contains("SerializerError"));
+            // Debug output should also be safe: the derived `Debug` for these
+            // struct-style enum variants prints the VARIANT name (not the enum
+            // name "SerializerError"), and it ESCAPES control bytes rather than
+            // echoing them. FIXME(bd-o776s): the original `contains("SerializerError")`
+            // targeted output the derive never produces; pin the real safety
+            // property — no raw NUL byte leaks into the Debug rendering.
+            assert!(!debug_output.contains('\u{0}'));
 
             // FIXME(bd-yom8c): `SerializerError::FloatingPointRejected` no longer carries
             // a `value: f64` field (now `{ object_type, field }`); the NaN-specific
@@ -3261,8 +3296,13 @@ mod tests {
     #[test]
     fn test_unknown_field_error_sanitizes_control_chars() {
         let mut serializer = CanonicalSerializer::with_all_schemas();
-        let malicious_field = "evil\nFAKE_LOG: injected\x00null";
-        let json = format!(r#"{{"{malicious_field}": "value"}}"#);
+        // FIXME(bd-o776s): the field name must reach the unknown-field path
+        // (which runs `sanitize_for_display`). RAW control bytes (`\n`/`\x00`)
+        // in the JSON SOURCE are rejected by serde_json at PARSE time — that
+        // error never carries U+FFFD. Use JSON-ESCAPED control sequences so the
+        // payload PARSES into a key holding real 0x0A/0x00 bytes, which the
+        // unknown-field error then sanitizes to U+FFFD.
+        let json = r#"{"evil\nFAKE_LOG: injected\u0000null": "value"}"#;
         let result = serializer.serialize(
             TrustObjectType::PolicyCheckpoint,
             json.as_bytes(),
@@ -3725,7 +3765,11 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             ),
             // Boundary condition attacks
             (b"".to_vec(), b"\x00".to_vec()),
-            (b"a".to_vec(), b"\x61".to_vec()),
+            // FIXME(bd-o776s): `b"\x61"` IS byte 0x61 == `b"a"`; the original pair
+            // was byte-identical, so the assert_ne! on their hashes always fired.
+            // Use a genuinely distinct single byte (0x41 == 'A') to keep this a
+            // real two-distinct-payloads boundary case.
+            (b"a".to_vec(), b"A".to_vec()),
             // Domain separator confusion
             (
                 b"canonical_serializer_hash_v1:data".to_vec(),
@@ -5453,18 +5497,23 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
 
             for modified_tag in modified_tags {
                 if modified_tag != domain_tag {
-                    // Modified tags should not match any legitimate domain tag
-                    let mut is_legitimate = false;
+                    // Domain tags are assigned consecutively (0x1001..=0x1006),
+                    // so the 2-byte tag space is densely packed and a single
+                    // bit-flip / increment perturbation may coincide with
+                    // ANOTHER type's legitimate tag. That is not a forgery (tags
+                    // are derived from the object type, not attacker-controlled).
+                    // The genuine invariant is that a perturbation can never
+                    // reproduce the SOURCE type's own domain separation: any
+                    // legitimate tag it lands on belongs to a different type.
                     for legitimate_type in TrustObjectType::all() {
-                        if constant_time::ct_eq_bytes(&modified_tag, &legitimate_type.domain_tag()) {
-                            is_legitimate = true;
-                            break;
+                        if constant_time::ct_eq_bytes(&modified_tag, &legitimate_type.domain_tag())
+                        {
+                            assert_ne!(
+                                legitimate_type, object_type,
+                                "Modified domain tag must not alias its own type's separation"
+                            );
                         }
                     }
-                    assert!(
-                        !is_legitimate || modified_tag == domain_tag,
-                        "Modified domain tag should not match legitimate tag"
-                    );
                 }
             }
 
@@ -6582,10 +6631,12 @@ mod canonical_serializer_comprehensive_attack_vector_and_boundary_tests {
             "a": {"b": {"c": {"d": [1, 2, 3]}}},
         });
         let bytes = canonical_bytes(&value);
-        // The canonical form is `{"a":{"b":{"c":{"d":[1,2,3]}}}}` — 27
+        // The canonical form is `{"a":{"b":{"c":{"d":[1,2,3]}}}}` — 31
         // bytes. Pin this so a regression that wrapped the inner
         // structure in extra braces would surface here.
-        assert_eq!(bytes.len(), 27);
+        // FIXME(bd-o776s): the original `27` was a hand-count error (the
+        // string literal pinned just below is 31 bytes).
+        assert_eq!(bytes.len(), 31);
         assert_eq!(
             std::str::from_utf8(&bytes).unwrap(),
             r#"{"a":{"b":{"c":{"d":[1,2,3]}}}}"#
