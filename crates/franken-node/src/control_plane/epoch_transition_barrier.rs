@@ -1175,7 +1175,7 @@ mod tests {
     use super::{
         AbortReason, BarrierCommitOutcome, BarrierConfig, BarrierError, BarrierPhase,
         DEFAULT_BARRIER_TIMEOUT_MS, DEFAULT_DRAIN_TIMEOUT_MS, DrainAck, EpochTransitionBarrier,
-        MAX_TRANSCRIPT_ENTRIES, SCHEMA_VERSION, error_codes, event_codes,
+        MAX_TRANSCRIPT_ENTRIES, SCHEMA_VERSION, error_codes, event_codes, push_bounded,
     };
     use crate::control_plane::control_epoch::ControlEpoch;
     use crate::security::constant_time;
@@ -2320,7 +2320,8 @@ mod tests {
 mod epoch_transition_barrier_comprehensive_negative_tests {
     use super::{
         AbortReason, BarrierCommitOutcome, BarrierConfig, BarrierError, BarrierPhase, DrainAck,
-        EpochTransitionBarrier, error_codes,
+        EpochTransitionBarrier, MAX_BARRIER_HISTORY, MAX_TRANSCRIPT_ENTRIES, SCHEMA_VERSION,
+        error_codes, event_codes, push_bounded,
     };
     use std::collections::HashMap;
 
@@ -2811,6 +2812,7 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
         assert!(ack_result.is_ok(), "Should handle JSON-breaking content");
 
         // Test JSONL export integrity
+        let transcript = b.transcript().unwrap();
         let jsonl_export = transcript.export_jsonl();
         assert!(!jsonl_export.is_empty(), "JSONL export should not be empty");
 

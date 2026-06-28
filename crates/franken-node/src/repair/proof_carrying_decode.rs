@@ -4484,7 +4484,7 @@ mod tests {
 
         // Verify each fragment produces a deterministic, unique hash
         for (i, fragment) in collision_fragments.iter().enumerate() {
-            let individual_hash = fragment_hash_hex(&fragment.fragment_id, &fragment.data);
+            let individual_hash = hex::encode(fragment.hash());
             assert_eq!(individual_hash, proof.input_fragment_hashes[i]);
             assert_eq!(individual_hash.len(), 64);
         }
@@ -4511,8 +4511,7 @@ mod tests {
                     data: data.clone(),
                 };
 
-                let computed_hash =
-                    fragment_hash_hex(&test_fragment.fragment_id, &test_fragment.data);
+                let computed_hash = hex::encode(test_fragment.hash());
 
                 // Extremely unlikely to match target (should be cryptographically impossible)
                 assert_ne!(

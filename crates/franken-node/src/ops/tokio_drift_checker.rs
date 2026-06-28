@@ -1600,10 +1600,18 @@ mod tokio_drift_checker_boundary_negative_tests {
     use super::*;
     use std::fs;
 
+    // FIXME(bd-yom8c): targets removed API `TokioDriftChecker` (the checker struct,
+    // its fallible `check_directory`/`check_file` methods, and the `DriftCheckError`
+    // enum were replaced by the infallible free fns `check_tokio_drift` /
+    // `collect_source_files`); gated until rewritten against the current API.
+    #[cfg(any())]
     fn malicious_checker() -> TokioDriftChecker {
         TokioDriftChecker::new()
     }
 
+    // FIXME(bd-yom8c): targets removed API `TokioDriftChecker::check_directory` /
+    // `DriftCheckError`; the directory check is now the infallible `check_tokio_drift`.
+    #[cfg(any())]
     #[test]
     fn negative_checker_rejects_nonexistent_directory_path() {
         let checker = malicious_checker();
@@ -1618,6 +1626,9 @@ mod tokio_drift_checker_boundary_negative_tests {
         }
     }
 
+    // FIXME(bd-yom8c): targets removed API `TokioDriftChecker::check_file` /
+    // `DriftCheckError`; there is no public single-file fallible check on the current API.
+    #[cfg(any())]
     #[test]
     fn negative_checker_handles_file_with_invalid_utf8_encoding() {
         let checker = malicious_checker();
@@ -1643,10 +1654,10 @@ mod tokio_drift_checker_boundary_negative_tests {
     fn negative_exception_parsing_rejects_malformed_bead_id_format() {
         let malicious_line = "// TOKIO_DRIFT_EXCEPTION(not-a-bead): some justification";
 
-        let exception = parse_exception_marker(malicious_line);
+        let is_valid = is_valid_exception(Some(malicious_line));
 
         assert!(
-            exception.is_none(),
+            !is_valid,
             "malformed bead ID should not parse as valid exception"
         );
     }
@@ -1655,10 +1666,10 @@ mod tokio_drift_checker_boundary_negative_tests {
     fn negative_exception_parsing_rejects_missing_closing_parenthesis() {
         let malicious_line = "// TOKIO_DRIFT_EXCEPTION(bd-1234: unclosed exception";
 
-        let exception = parse_exception_marker(malicious_line);
+        let is_valid = is_valid_exception(Some(malicious_line));
 
         assert!(
-            exception.is_none(),
+            !is_valid,
             "unclosed parenthesis should not parse as valid exception"
         );
     }
@@ -1667,10 +1678,10 @@ mod tokio_drift_checker_boundary_negative_tests {
     fn negative_exception_parsing_rejects_empty_bead_id_field() {
         let malicious_line = "// TOKIO_DRIFT_EXCEPTION(): empty bead ID";
 
-        let exception = parse_exception_marker(malicious_line);
+        let is_valid = is_valid_exception(Some(malicious_line));
 
         assert!(
-            exception.is_none(),
+            !is_valid,
             "empty bead ID field should not parse as valid exception"
         );
     }
@@ -1679,15 +1690,18 @@ mod tokio_drift_checker_boundary_negative_tests {
     fn negative_exception_parsing_rejects_whitespace_only_justification() {
         let malicious_line = "// TOKIO_DRIFT_EXCEPTION(bd-1234):   \t  ";
 
-        let exception = parse_exception_marker(malicious_line);
+        let is_valid = is_valid_exception(Some(malicious_line));
 
         // Should reject whitespace-only justification as insufficient
         assert!(
-            exception.is_none(),
+            !is_valid,
             "whitespace-only justification should not be valid"
         );
     }
 
+    // FIXME(bd-yom8c): targets removed API `TokioDriftChecker::check_file`;
+    // there is no public single-file check on the current API.
+    #[cfg(any())]
     #[test]
     fn negative_check_file_handles_extremely_long_lines_without_panic() {
         let checker = malicious_checker();
@@ -1754,6 +1768,9 @@ mod tokio_drift_checker_boundary_negative_tests {
         }
     }
 
+    // FIXME(bd-yom8c): targets removed API `TokioDriftChecker::check_directory`;
+    // the directory check is now the infallible free fn `check_tokio_drift`.
+    #[cfg(any())]
     #[test]
     fn negative_check_directory_with_circular_symlinks_terminates() {
         let checker = malicious_checker();
@@ -1783,6 +1800,9 @@ mod tokio_drift_checker_boundary_negative_tests {
         }
     }
 
+    // FIXME(bd-yom8c): targets removed API `DriftCheckError` (the error enum was
+    // removed; `check_tokio_drift` is now infallible); gated until rewritten.
+    #[cfg(any())]
     #[test]
     fn negative_serde_rejects_unknown_drift_check_error_variant() {
         let result: Result<DriftCheckError, _> = serde_json::from_str(r#""UnknownError""#);

@@ -2251,55 +2251,52 @@ mod tests {
             state.next_coordination_seq = 1;
         }
 
-        // Test lease request validation with edge case inputs
+        // Test lease request validation with edge case inputs.
+        // NOTE(bd-yom8c): the request type is now `LeaseAcquireRequest { resource, ttl_seconds }`
+        // — the holder is sourced from the authenticated identity (`admin`), not the request body,
+        // and `duration_seconds: u64` is now `ttl_seconds: u32`. The former "empty holder" case
+        // (which can no longer be expressed) is repurposed to a whitespace-only resource, which is
+        // trimmed to empty and rejected — preserving the original "should be rejected" intent.
         let lease_edge_cases = [
             // Valid minimal lease
-            LeaseRequest {
-                holder: "valid-holder".to_string(),
+            LeaseAcquireRequest {
                 resource: "valid-resource".to_string(),
-                duration_seconds: 60,
+                ttl_seconds: 60,
             },
-            // Empty holder (should be rejected)
-            LeaseRequest {
-                holder: "".to_string(),
-                resource: "resource-1".to_string(),
-                duration_seconds: 60,
+            // Whitespace-only resource (trimmed to empty; should be rejected)
+            LeaseAcquireRequest {
+                resource: "   ".to_string(),
+                ttl_seconds: 60,
             },
             // Empty resource (should be rejected)
-            LeaseRequest {
-                holder: "holder-1".to_string(),
+            LeaseAcquireRequest {
                 resource: "".to_string(),
-                duration_seconds: 60,
+                ttl_seconds: 60,
             },
             // Zero duration (should be rejected)
-            LeaseRequest {
-                holder: "holder-1".to_string(),
+            LeaseAcquireRequest {
                 resource: "resource-1".to_string(),
-                duration_seconds: 0,
+                ttl_seconds: 0,
             },
-            // Excessive duration (should be clamped)
-            LeaseRequest {
-                holder: "holder-1".to_string(),
+            // Excessive duration (should be clamped or accepted)
+            LeaseAcquireRequest {
                 resource: "resource-1".to_string(),
-                duration_seconds: u64::MAX,
+                ttl_seconds: u32::MAX,
             },
-            // Unicode characters in holder/resource
-            LeaseRequest {
-                holder: "用户-🔒".to_string(),
+            // Unicode characters in resource
+            LeaseAcquireRequest {
                 resource: "资源-💾".to_string(),
-                duration_seconds: 300,
+                ttl_seconds: 300,
             },
-            // Long holder/resource names
-            LeaseRequest {
-                holder: "x".repeat(1000),
+            // Long resource name
+            LeaseAcquireRequest {
                 resource: "y".repeat(1000),
-                duration_seconds: 120,
+                ttl_seconds: 120,
             },
             // Special characters that might cause issues
-            LeaseRequest {
-                holder: "holder\n\r\t".to_string(),
+            LeaseAcquireRequest {
                 resource: "resource\"'\\".to_string(),
-                duration_seconds: 180,
+                ttl_seconds: 180,
             },
         ];
 

@@ -1279,10 +1279,11 @@ mod tests {
     use super::{
         InclusionProof, MAX_LEAF_HASHES, MMR_ROOT_REATTESTATION_SCHEMA_VERSION, MmrCheckpoint,
         MmrRoot, MmrRootReattestationChain, PrefixProof, ProofError, audit_path_len_limit,
-        hash_pair_legacy, marker_leaf_hash, merkle_audit_path, merkle_audit_path_legacy,
+        hash_pair, hash_pair_legacy, marker_leaf_hash, merkle_audit_path, merkle_audit_path_legacy,
         merkle_root_from_leaf_hashes, merkle_root_from_leaf_hashes_legacy, mmr_inclusion_proof,
-        mmr_prefix_proof, mmr_root_reattestation, raw_hash_from_lower_hex, verify_inclusion,
-        verify_prefix, verify_root_reattestation, verify_root_reattestation_chain,
+        mmr_prefix_proof, mmr_root_reattestation, raw_hash_from_lower_hex, retained_leaf_hashes,
+        sha256_hex, verify_inclusion, verify_prefix, verify_root_reattestation,
+        verify_root_reattestation_chain,
     };
     use crate::control_plane::marker_stream::MarkerEventType;
     use crate::control_plane::marker_stream::MarkerStream;
@@ -2198,11 +2199,12 @@ mod tests {
     #[test]
     fn negative_concurrent_hash_computation_consistency() {
         // Test hash consistency under various inputs that might cause issues
+        let very_long_input = "very-long-input-".repeat(100);
         let test_inputs = vec![
             "normal-input",
             "input-with-unicode-🔥",
             "input\0with\0nulls",
-            "very-long-input-".repeat(100).as_str(),
+            very_long_input.as_str(),
             "",
             " ",
             "\n\r\t",

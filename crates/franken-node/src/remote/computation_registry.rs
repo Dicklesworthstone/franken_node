@@ -1692,7 +1692,7 @@ mod tests {
         assert!(matches!(
             &err,
             ComputationRegistryError::DispatchDenied {
-                compatibility_code: Some(ref alias),
+                compatibility_code: Some(alias),
                 ..
             } if alias == "ERR_REMOTE_CAP_REQUIRED"
         ));

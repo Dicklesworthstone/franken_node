@@ -429,7 +429,10 @@ impl RevocationRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{RevocationAudit, RevocationError, RevocationHead, RevocationRegistry};
+    use super::{
+        MAX_LOG_ENTRIES, MAX_REVOKED_PER_ZONE, RevocationAudit, RevocationError, RevocationHead,
+        RevocationRegistry, push_bounded,
+    };
 
     fn head(zone: &str, seq: u64, artifact: &str) -> RevocationHead {
         RevocationHead {
@@ -1179,7 +1182,10 @@ mod tests {
 
 #[cfg(test)]
 mod revocation_registry_comprehensive_negative_tests {
-    use super::{RevocationError, RevocationHead, RevocationRegistry};
+    use super::{
+        MAX_AUDIT_ENTRIES, MAX_LOG_ENTRIES, MAX_REVOKED_PER_ZONE, RevocationError, RevocationHead,
+        RevocationRegistry, push_bounded,
+    };
     use std::collections::HashMap;
 
     /// Negative test: Unicode injection and encoding attacks in zone IDs and artifact names

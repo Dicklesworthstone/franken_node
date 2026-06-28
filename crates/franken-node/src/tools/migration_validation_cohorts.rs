@@ -1088,11 +1088,15 @@ mod tests {
         // 4. coverage.len()
         // 5. cat.len() (for each category in coverage)
 
+        // Hoisted (bd-yom8c): a temporary String cannot be borrowed inside an
+        // otherwise-&str array; bind the long values first and use `.as_str()`.
+        let long_schema_version = "long".repeat(1000);
+        let long_cohort_name = "long_cohort".repeat(1000);
         let test_cases = vec![
             // (schema_version, cohort_name, project_count)
             ("short", "short_cohort", 1),
             ("medium_schema_version", "medium_cohort_name", 3),
-            (&"long".repeat(1000), &"long_cohort".repeat(1000), 5),
+            (long_schema_version.as_str(), long_cohort_name.as_str(), 5),
             ("", "empty_schema_test", 2),
             ("incremental", "a", 0), // No projects (empty flagged)
         ];

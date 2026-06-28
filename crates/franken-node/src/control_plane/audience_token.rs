@@ -1557,11 +1557,14 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        ActionScope, AudienceBoundToken, ERR_ABT_ATTENUATION_VIOLATION, ERR_ABT_AUDIENCE_MISMATCH,
-        ERR_ABT_REPLAY_DETECTED, ERR_ABT_SIGNATURE_INVALID, ERR_ABT_TOKEN_EXPIRED,
-        ERR_ABT_TOKEN_TOO_LARGE, TokenChain, TokenError, TokenId, TokenValidator, len_to_u64,
+        ABT_001, ABT_002, ABT_003, ABT_004, ActionScope, AudienceBoundToken,
+        ERR_ABT_ATTENUATION_VIOLATION, ERR_ABT_AUDIENCE_MISMATCH, ERR_ABT_REPLAY_DETECTED,
+        ERR_ABT_SIGNATURE_INVALID, ERR_ABT_TOKEN_EXPIRED, ERR_ABT_TOKEN_TOO_LARGE,
+        INV_ABT_ATTENUATION, INV_ABT_AUDIENCE, INV_ABT_EXPIRY, INV_ABT_REPLAY, TokenChain,
+        TokenError, TokenEvent, TokenId, TokenValidator, insert_nonce_bounded, len_to_u64,
+        push_bounded,
     };
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, VecDeque};
 
     // -- Helpers --
 

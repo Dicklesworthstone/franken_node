@@ -3402,32 +3402,39 @@ mod tests {
     #[test]
     fn test_proof_max_age_exact_boundary_rejection() {
         // Regression test for bd-3hqpz: proof exactly at max age (3600_000ms) should be rejected
-        let mut ctrl = ChallengeController::new();
-        let challenge_type = "boundary_test";
-        let challenger = "test_challenger";
-
-        // Issue challenge at time 0
-        let challenge_result = ctrl.issue_challenge(challenge_type, challenger, 0);
-        assert!(challenge_result.is_ok());
-
-        let challenge_id = challenge_result.unwrap();
-
-        // Submit proof exactly 1 hour (3600_000ms) later - should be rejected
-        let proof = ChallengeProof {
-            challenge_id: challenge_id.clone(),
-            response_data: vec![1, 2, 3],
-            submitted_at_ms: 0, // Proof submitted at time 0
+        // (fail-closed `>=` on proof age). `deny_on_timeout: false` keeps the challenge-level
+        // timeout from auto-denying first, so verify_proof reaches the proof-age boundary check.
+        let config = ChallengeConfig {
+            timeout_ms: 3_600_000,
+            deny_on_timeout: false,
         };
+        let mut ctrl =
+            ChallengeFlowController::with_proof_verifier(config, |artifact_id, proof| {
+                let expected = ChallengeFlowController::compute_expected_proof_hash(
+                    artifact_id,
+                    &proof.proof_type,
+                )?;
+                if proof_data_hash_matches_constant_time(&proof.data_hash, &expected) {
+                    Ok(())
+                } else {
+                    Err(ChallengeError::new(ERR_PROOF_INVALID, "proof digest mismatch"))
+                }
+            });
 
-        // Verify at exactly 3600_000ms later (exact boundary)
-        let result = ctrl.verify_proof(proof, challenge_type, 3600_000);
+        // Issue challenge at time 0 and submit a valid proof at time 0.
+        let challenge_id = issue_basic(&mut ctrl, 0);
+        ctrl.submit_proof(&challenge_id, make_proof(0), "prover", 0)
+            .unwrap();
+
+        // Verify at exactly 3600_000ms later (exact boundary) - should be rejected.
+        let result = ctrl.verify_proof(&challenge_id, "verifier", 3_600_000);
 
         // Should be rejected due to >= comparison (fail-closed expiry)
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.error_code(), ERR_PROOF_INVALID);
-        assert!(err.message().contains("too old"));
-        assert!(err.message().contains("3600000ms")); // age should be exactly 3600000ms
+        assert_eq!(err.code, ERR_PROOF_INVALID);
+        assert!(err.message.contains("too old"));
+        assert!(err.message.contains("3600000ms")); // age should be exactly 3600000ms
     }
 
     // Frozen SHA-256 hex outputs of the public method

@@ -1931,13 +1931,14 @@ mod tests {
     use super::{
         ACTION_LOG_RETENTION_DAYS, FLEET_NODE_DIR, FLEET_SHARED_STATE_SCHEMA, FileFleetTransport,
         FleetAction, FleetActionRecord, FleetSharedState, FleetTargetKind, FleetTransport,
-        FleetTransportError, FleetTransportLayout, MAX_ACTION_LOG_ENTRIES, MAX_ACTION_RECORD_BYTES,
-        MAX_ACTION_RECORD_LINE_BYTES, MAX_NODE_ID_LEN, MAX_NODES_CAP, NodeHealth, NodeStatus,
-        TempFileGuard, canonical_fleet_convergence_receipt_payload,
-        fleet_action_compaction_root_key, fleet_convergence_receipt_verdict,
-        lock_fleet_action_compaction_process, lock_retry_base_backoffs, parse_jsonl_records,
-        push_bounded, sign_fleet_convergence_receipt_payload, validate_node_id, validate_zone_id,
-        wait_until_fleet_converged_or_timeout,
+        FleetTransportError, FleetTransportLayout, LOCK_RETRY_BACKOFF_MILLIS, MAX_ACTION_LOG_ENTRIES,
+        MAX_ACTION_RECORD_BYTES, MAX_ACTION_RECORD_LINE_BYTES, MAX_NODE_ID_LEN, MAX_NODES_CAP,
+        NodeHealth, NodeStatus, RevocationScope, RevocationSeverity, TempFileGuard,
+        canonical_fleet_convergence_receipt_payload, clock, fleet_action_compaction_root_key,
+        fleet_convergence_receipt_verdict, lock_file_with_backoff,
+        lock_fleet_action_compaction_process, lock_retry_backoffs, lock_retry_base_backoffs,
+        parse_jsonl_records, push_bounded, sign_fleet_convergence_receipt_payload, validate_node_id,
+        validate_zone_id, wait_until_fleet_converged_or_timeout,
     };
     use chrono::{DateTime, Utc};
     use ed25519_dalek::{Signer, SigningKey};
@@ -3521,9 +3522,10 @@ mod tests {
     #[cfg(test)]
     mod fleet_transport_comprehensive_negative_tests {
         use super::{
-            DateTime, FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind,
-            FleetTransport, FleetTransportError, NodeHealth, NodeStatus, Utc, fs, node_status,
-            release_action_record, tempdir,
+            ACTION_LOG_RETENTION_DAYS, DateTime, Duration, FileFleetTransport, FleetAction,
+            FleetActionRecord, FleetTargetKind, FleetTransport, FleetTransportError,
+            FleetTransportLayout, MAX_ACTION_RECORD_BYTES, MAX_NODE_ID_LEN, NodeHealth, NodeStatus,
+            Utc, clock, fs, node_status, release_action_record, tempdir,
         };
 
         #[test]
@@ -4147,9 +4149,10 @@ mod tests {
             let layout = FleetTransportLayout::new(tempdir.path());
             layout.initialize().expect("initialize layout");
 
+            let max_len_node_id = "b".repeat(MAX_NODE_ID_LEN);
             let boundary_node_ids = vec![
                 "a",                             // Minimum length
-                &"b".repeat(MAX_NODE_ID_LEN),    // Maximum length
+                max_len_node_id.as_str(),        // Maximum length
                 "node-with-all.valid_chars-123", // All valid characters
             ];
 

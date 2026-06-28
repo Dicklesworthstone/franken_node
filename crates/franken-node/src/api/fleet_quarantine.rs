@@ -7944,7 +7944,24 @@ mod tests {
     /// Boundary testing for fleet quarantine capacity limits and edge cases.
     /// Tests the invariant INV-FLEET-BOUNDED: all collections are bounded with capacity eviction.
     mod boundary_tests {
+        #[allow(unused_imports)]
         use super::*;
+
+        // FIXME(bd-yom8c): the following boundary tests target the REMOVED
+        // `FleetQuarantineApi` facade — FleetQuarantineApi::new(transport, key) -> Result,
+        // .quarantine(QuarantineRequest), .get_status(StatusRequest),
+        // .reconcile(ReconcileRequest { target_convergence, timeout_seconds }) returning a
+        // response carrying convergence_progress / estimated_completion_seconds, plus a
+        // `fleet.state` Mutex holding `fleet_events`, and DEFAULT_SIGNING_KEY /
+        // test_transport_dir helpers. None of these exist in the current prod surface, which
+        // is FleetControlManager (identity/trace-plumbed; status(zone_id) -> FleetStatus;
+        // reconcile(&identity, &trace) -> FleetActionResult; events/zone_status/incidents
+        // held directly, no `state` field and no convergence-response shape). The test intent
+        // (convergence-progress / completion-ETA assertions) cannot be mapped to any current
+        // API, so the cohort is gated verbatim until rewritten against FleetControlManager.
+        #[cfg(any())]
+        mod removed_fleet_quarantine_api_tests {
+            use super::*;
 
         #[test]
         fn fleet_events_boundary_at_max_capacity() {
@@ -8320,6 +8337,7 @@ mod tests {
                 "test should complete within reasonable time"
             );
         }
+        } // end #[cfg(any())] mod removed_fleet_quarantine_api_tests (bd-yom8c)
 
         #[test]
         fn test_poison_recovery_in_concurrent_quarantine_threads() {

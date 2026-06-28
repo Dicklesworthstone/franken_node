@@ -1966,7 +1966,7 @@ mod tests {
     /// Test proof verification timing consistency and side-channel resistance
     #[test]
     fn test_proof_verification_timing_consistency() {
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
 
         let (fragments, proof) = valid_proof();
         let fragment_digests = fragment_digests(&fragments);

@@ -10,6 +10,7 @@
 use crate::capacity_defaults::aliases::{
     MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS, MAX_RECEIPTS, MAX_SCHEMA_VERSIONS,
 };
+use crate::push_bounded;
 use crate::storage::frankensqlite_adapter::*;
 use crate::storage::models::*;
 use crate::storage::retrievability_gate::*;
@@ -84,7 +85,7 @@ mod push_bounded_edge_tests {
         }
 
         // Set small capacity to trigger large drain
-        push_bounded(&mut items, "final_item", 5);
+        push_bounded(&mut items, "final_item".to_string(), 5);
         assert_eq!(items.len(), 5);
         assert_eq!(items[4], "final_item");
         // Should contain the last few items plus the new one

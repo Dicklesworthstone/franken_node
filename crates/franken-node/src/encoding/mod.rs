@@ -1412,7 +1412,7 @@ mod encoding_root_negative_tests {
                 description
             );
 
-            deterministic_seed::push_bounded(
+            super::deterministic_seed::push_bounded(
                 &mut derived_seeds,
                 (seed.bytes.to_vec(), description),
                 20,

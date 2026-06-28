@@ -2148,6 +2148,13 @@ mod atc_extreme_adversarial_negative_tests {
     use super::*;
     use crate::security::constant_time;
 
+    fn assert_fingerprint_eq(left: &str, right: &str) {
+        assert!(constant_time::ct_eq_bytes(
+            left.as_bytes(),
+            right.as_bytes()
+        ));
+    }
+
     fn assert_fingerprint_ne(left: &str, right: &str) {
         assert!(!constant_time::ct_eq_bytes(
             left.as_bytes(),

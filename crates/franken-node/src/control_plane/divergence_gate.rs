@@ -1386,11 +1386,7 @@ impl Default for ControlPlaneDivergenceGate {
 mod tests {
     use crate::lock_utils::try_lock;
 
-    use super::{
-        ActiveDivergence, ControlPlaneDivergenceGate, DetectionResult, DivergenceGateError,
-        GateState, MutationKind, OperatorAuthorization, OperatorAuthorizationKeyRecord,
-        StateVector, event_codes,
-    };
+    use super::*;
 
     fn make_sv(epoch: u64, state: &str, parent: &str, node: &str) -> StateVector {
         StateVector {
@@ -3132,10 +3128,10 @@ mod tests {
             MAX_BLOCKED_MUTATIONS
         );
         assert!(
-            gate.events().len() <= MAX_EVENTS,
+            gate.events().len() <= MAX_EVENT_CODES,
             "Events should respect capacity limit: {} <= {}",
             gate.events().len(),
-            MAX_EVENTS
+            MAX_EVENT_CODES
         );
         assert!(
             gate.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES,
@@ -3452,10 +3448,10 @@ mod tests {
             MAX_ALERTS
         );
         assert!(
-            final_gate.events().len() <= MAX_EVENTS,
+            final_gate.events().len() <= MAX_EVENT_CODES,
             "Events should respect limit: {} <= {}",
             final_gate.events().len(),
-            MAX_EVENTS
+            MAX_EVENT_CODES
         );
         assert!(
             final_gate.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES,
@@ -3583,6 +3579,7 @@ mod tests {
             ),
         ];
 
+        let serialization_targets_count = serialization_targets.len();
         for (target_name, original_json) in serialization_targets {
             let tampering_attacks = vec![
                 // Field injection attacks
@@ -3819,7 +3816,7 @@ mod tests {
 
         println!(
             "Serialization tampering resistance test completed: {} targets tested with {} attack vectors each",
-            serialization_targets.len(),
+            serialization_targets_count,
             15
         ); // 15 different tampering attack types
     }
@@ -3854,6 +3851,7 @@ mod tests {
             ("alternating", "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"),
         ];
 
+        let hash_manipulation_attacks_count = hash_manipulation_attacks.len();
         for (attack_name, malicious_hash) in hash_manipulation_attacks {
             // Test hash comparisons using constant_time_eq
             let legitimate_hash = "1234567890abcdef1234567890abcdef12345678";
@@ -3920,6 +3918,7 @@ mod tests {
             b"timing-key",
         );
 
+        let signature_timing_attacks_count = signature_timing_attacks.len();
         for (attack_name, malicious_signature) in signature_timing_attacks {
             let mut timing_auth = test_auth_base.clone();
             timing_auth.signature = malicious_signature.to_string();
@@ -3968,6 +3967,7 @@ mod tests {
             ("newline_state", "state\r\ninjection"),
         ];
 
+        let state_hash_attacks_count = state_hash_attacks.len();
         for (attack_name, state_content) in state_hash_attacks {
             // Measure hash computation timing
             let timing_samples = 1000;
@@ -4044,6 +4044,7 @@ mod tests {
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 13000, "error-disclosure-setup");
 
+        let error_disclosure_attacks_count = error_disclosure_attacks.len();
         for (malicious_auth, attack_name) in error_disclosure_attacks {
             let recovery_result = gate.respond_recover(
                 &malicious_auth,
@@ -4101,6 +4102,7 @@ mod tests {
             ("sequential_key", (0..32).map(|i| i as u8).collect()),
         ];
 
+        let key_handling_attacks_count = key_handling_attacks.len();
         for (attack_name, test_key) in key_handling_attacks {
             // Test key handling in authorization creation and verification
             let auth_result =
@@ -4141,11 +4143,11 @@ mod tests {
 
         println!(
             "Cryptographic timing and side-channel resistance test completed: {} hash attacks, {} signature attacks, {} state hash attacks, {} error disclosure tests, {} key handling attacks",
-            hash_manipulation_attacks.len(),
-            signature_timing_attacks.len(),
-            state_hash_attacks.len(),
-            error_disclosure_attacks.len(),
-            key_handling_attacks.len()
+            hash_manipulation_attacks_count,
+            signature_timing_attacks_count,
+            state_hash_attacks_count,
+            error_disclosure_attacks_count,
+            key_handling_attacks_count
         );
     }
 

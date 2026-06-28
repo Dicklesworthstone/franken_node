@@ -30,7 +30,7 @@ mod tests {
     }
 
     fn arb_proof_mode() -> impl Strategy<Value = ProofMode> {
-        prop_oneof![Just(ProofMode::Mandatory), Just(ProofMode::Optional),]
+        prop_oneof![Just(ProofMode::Mandatory), Just(ProofMode::Advisory),]
     }
 
     impl Arbitrary for Fragment {
@@ -51,6 +51,15 @@ mod tests {
         }
     }
 
+    impl Arbitrary for ProofMode {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_: ()) -> Self::Strategy {
+            arb_proof_mode().boxed()
+        }
+    }
+
     #[test]
     fn mr_equivalence_fragment_order_independence() {
         // MR1: For order-independent algorithms, fragment order shouldn't affect decode result
@@ -68,8 +77,8 @@ mod tests {
                 fragment.fragment_id = format!("frag-{}", i);
             }
 
-            let mut decoder1 = ProofCarryingDecoder::new(ProofMode::Optional, "signer", "secret");
-            let mut decoder2 = ProofCarryingDecoder::new(ProofMode::Optional, "signer", "secret");
+            let mut decoder1 = ProofCarryingDecoder::new(ProofMode::Advisory, "signer", "secret");
+            let mut decoder2 = ProofCarryingDecoder::new(ProofMode::Advisory, "signer", "secret");
 
             let object_id = "test-object";
             let original_fragments = fragments.clone();
@@ -116,25 +125,36 @@ mod tests {
                 fragment.fragment_id = format!("unique-frag-{}", i);
             }
 
-            let mut decoder = ProofCarryingDecoder::new(ProofMode::Optional, "signer", "secret");
+            let mut decoder = ProofCarryingDecoder::new(ProofMode::Advisory, "signer", "secret");
             let verifier = ProofVerificationApi::new("secret", vec![algorithm.clone()]);
 
             let object_id = "roundtrip-test";
             let decode_result = decoder.decode(object_id, &unique_fragments, &algorithm, epoch, &trace_id);
 
             if let Ok(decoded) = decode_result {
-                // Verify the proof we got back
-                let verification_result = verifier.verify_repair_proof(&decoded.proof, &unique_fragments);
+                if let Some(proof) = &decoded.proof {
+                    // Verify the proof we got back. `verify` now takes the original
+                    // fragment hashes (mirrors prod test helper) and the recomputed
+                    // output hash (bound into the proof as `output_hash`).
+                    let original_fragment_hashes: Vec<String> = unique_fragments
+                        .iter()
+                        .map(|fragment| hex::encode(fragment.hash()))
+                        .collect();
+                    let verification_result =
+                        verifier.verify(proof, &original_fragment_hashes, &proof.output_hash);
 
-                prop_assert!(
-                    matches!(verification_result, VerificationResult::Valid),
-                    "Decode->verify roundtrip should produce valid proof"
-                );
+                    prop_assert!(
+                        matches!(verification_result, VerificationResult::Valid),
+                        "Decode->verify roundtrip should produce valid proof"
+                    );
 
-                // The decoded result should contain information derivable from original fragments
-                prop_assert!(decoded.object_id == object_id, "Object ID should be preserved");
-                prop_assert!(decoded.algorithm_id == algorithm, "Algorithm ID should be preserved");
-                prop_assert!(decoded.epoch == epoch, "Epoch should be preserved");
+                    // The decoded result should contain information derivable from original
+                    // fragments. `algorithm_id`/`epoch` are no longer fields of DecodeResult;
+                    // they are bound into the proof (epoch as `timestamp_epoch_secs`).
+                    prop_assert!(decoded.object_id == object_id, "Object ID should be preserved");
+                    prop_assert!(proof.algorithm_id == algorithm, "Algorithm ID should be preserved");
+                    prop_assert!(proof.timestamp_epoch_secs == epoch, "Epoch should be preserved");
+                }
             }
         });
     }
@@ -166,8 +186,8 @@ mod tests {
             let mut extended_fragments = unique_base.clone();
             extended_fragments.push(extra_frag);
 
-            let mut decoder1 = ProofCarryingDecoder::new(ProofMode::Optional, "signer", "secret");
-            let mut decoder2 = ProofCarryingDecoder::new(ProofMode::Optional, "signer", "secret");
+            let mut decoder1 = ProofCarryingDecoder::new(ProofMode::Advisory, "signer", "secret");
+            let mut decoder2 = ProofCarryingDecoder::new(ProofMode::Advisory, "signer", "secret");
 
             let base_result = decoder1.decode("test", &unique_base, &algorithm, epoch, &trace_id);
             let extended_result = decoder2.decode("test", &extended_fragments, &algorithm, epoch, &trace_id);
@@ -223,9 +243,13 @@ mod tests {
 
             // If both succeed, basic properties should be the same
             if let (Ok(decode1), Ok(decode2)) = (&result1, &result2) {
-                prop_assert_eq!(decode1.object_id, decode2.object_id, "Object ID should be deterministic");
-                prop_assert_eq!(decode1.algorithm_id, decode2.algorithm_id, "Algorithm ID should be deterministic");
-                prop_assert_eq!(decode1.epoch, decode2.epoch, "Epoch should be deterministic");
+                prop_assert_eq!(&decode1.object_id, &decode2.object_id, "Object ID should be deterministic");
+                // `algorithm_id`/`epoch` are no longer fields of DecodeResult; they are
+                // bound into the proof (epoch as `timestamp_epoch_secs`).
+                if let (Some(p1), Some(p2)) = (&decode1.proof, &decode2.proof) {
+                    prop_assert_eq!(&p1.algorithm_id, &p2.algorithm_id, "Algorithm ID should be deterministic");
+                    prop_assert_eq!(p1.timestamp_epoch_secs, p2.timestamp_epoch_secs, "Epoch should be deterministic");
+                }
             }
         });
     }
@@ -251,7 +275,7 @@ mod tests {
             let lenient_algo = AlgorithmId::new("simple_concat");
             let strict_algo = AlgorithmId::new("verified_concat"); // Hypothetically stricter
 
-            let mut decoder1 = ProofCarryingDecoder::new(ProofMode::Optional, "signer", "secret");
+            let mut decoder1 = ProofCarryingDecoder::new(ProofMode::Advisory, "signer", "secret");
             let mut decoder2 = ProofCarryingDecoder::new(ProofMode::Mandatory, "signer", "secret"); // Stricter mode
 
             let lenient_result = decoder1.decode("test", &unique_fragments, &lenient_algo, epoch, &trace_id);

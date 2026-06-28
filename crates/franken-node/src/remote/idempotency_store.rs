@@ -1877,6 +1877,17 @@ mod tests {
             // Property: saturating_add counter operations never panic and correctly saturate
             // Tests the 8+ saturating_add sites in idempotency store operations
 
+            // Local counter container: the former `IdempotencyStatistics` struct was
+            // refactored into private fields on `IdempotencyDedupeStore` with no public
+            // constructor accepting arbitrary initial counts, so this saturating-add
+            // property test holds its own equivalent counters.
+            #[allow(dead_code)]
+            struct IdempotencyStatistics {
+                total_new: u64,
+                total_expired: u64,
+                total_conflict: u64,
+                total_duplicate: u64,
+            }
             let mut stats = IdempotencyStatistics {
                 total_new: initial_total_new,
                 total_expired: initial_total_expired,

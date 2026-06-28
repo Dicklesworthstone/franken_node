@@ -1122,7 +1122,7 @@ mod tests {
         );
     }
 
-    fn test_sdk() -> VerifierSdk {
+    pub(super) fn test_sdk() -> VerifierSdk {
         VerifierSdk::with_defaults()
     }
 
@@ -1150,7 +1150,7 @@ mod tests {
         })
     }
 
-    fn valid_request() -> VerificationRequest {
+    pub(super) fn valid_request() -> VerificationRequest {
         let artifact_id = "artifact-001".to_string();
         let artifact_hash = deterministic_hash(&artifact_id);
         VerificationRequest {
@@ -1160,7 +1160,7 @@ mod tests {
         }
     }
 
-    fn valid_capsule() -> ReplayCapsule {
+    pub(super) fn valid_capsule() -> ReplayCapsule {
         let inputs = vec![
             CapsuleInput {
                 seq: 0,
@@ -1187,7 +1187,7 @@ mod tests {
         .expect("valid test capsule")
     }
 
-    fn failed_checks(report: &VerificationReport) -> Vec<&str> {
+    pub(super) fn failed_checks(report: &VerificationReport) -> Vec<&str> {
         report
             .evidence
             .iter()
@@ -3222,7 +3222,13 @@ mod tests {
 mod verifier_sdk_boundary_negative_tests {
     use crate::lock_utils::try_lock;
 
+    use super::super::replay_capsule::*;
+    use super::tests::{failed_checks, valid_capsule, valid_request};
     use super::*;
+    // Byte-content artifact hash helper: the prod `artifact_content_hash`
+    // (SHA-256 -> hex) is exactly what these tests exercise.
+    use super::artifact_content_hash as compute_artifact_hash;
+    use std::cmp::min;
 
     fn malicious_request(artifact_id: &str, hash: &str, claims: Vec<&str>) -> VerificationRequest {
         VerificationRequest {
@@ -6579,6 +6585,7 @@ mod verifier_sdk_boundary_negative_tests {
 mod verifier_sdk_comprehensive_attack_vector_tests {
     use crate::lock_utils::try_lock;
 
+    use super::tests::{failed_checks, test_sdk, valid_request};
     use super::*;
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::{Arc, Mutex};

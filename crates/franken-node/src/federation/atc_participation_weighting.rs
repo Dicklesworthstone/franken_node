@@ -1648,6 +1648,7 @@ mod tests {
 #[cfg(test)]
 mod atc_participation_weighting_negative_path_tests {
     use super::*;
+    use crate::lock_utils::try_lock;
     use std::collections::BTreeSet;
 
     #[test]

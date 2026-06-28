@@ -2113,7 +2113,7 @@ mod tests {
             ];
 
             // Add observations with boundary epochs
-            for (epoch, description) in epoch_boundaries {
+            for &(epoch, description) in &epoch_boundaries {
                 for (i, candidate) in candidates.iter().enumerate() {
                     let adjusted_epoch = epoch.saturating_add(u64::try_from(i).unwrap_or(u64::MAX));
                     let obs = Observation::new(candidate.clone(), adjusted_epoch % 2 == 0, epoch);

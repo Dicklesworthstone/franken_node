@@ -774,8 +774,7 @@ mod security_extreme_adversarial_negative_tests {
         let boundary_ports = vec![
             0,        // Invalid port
             65535,    // Maximum valid port
-            65536,    // Overflow attempt
-            u16::MAX, // Maximum u16
+            u16::MAX, // Maximum u16 (ports above 65535 are unrepresentable in u16)
         ];
 
         for port in boundary_ports {
@@ -791,10 +790,6 @@ mod security_extreme_adversarial_negative_tests {
                 0 => {
                     // Port 0 should be denied
                     assert!(result.is_err());
-                }
-                65536.. => {
-                    // Ports above 65535 should be handled gracefully
-                    // (Note: Rust's type system prevents this at compile time with u16)
                 }
                 _ => {
                     // Other ports may be allowed or denied based on policy

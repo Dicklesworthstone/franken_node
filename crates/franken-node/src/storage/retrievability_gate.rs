@@ -2627,6 +2627,10 @@ mod storage_migration_integration_tests {
         TrajectorySnapshot, evaluate_admission, evaluate_rollout_health,
     };
 
+    fn make_gate() -> RetrievabilityGate {
+        RetrievabilityGate::new(RetrievabilityConfig::default())
+    }
+
     fn aid(s: &str) -> ArtifactId {
         ArtifactId(s.to_string())
     }

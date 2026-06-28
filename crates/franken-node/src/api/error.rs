@@ -803,6 +803,7 @@ mod api_error_marker_additional_negative_tests {
 #[cfg(test)]
 mod problem_detail_schema_negative_tests {
     use super::*;
+    use crate::connector::error_code_registry::RecoveryInfo;
 
     #[test]
     fn negative_problem_detail_missing_type_field_is_rejected() {

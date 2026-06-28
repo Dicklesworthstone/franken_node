@@ -407,7 +407,7 @@ mod tests {
             let err = mgr
                 .start_saga(invalid_id, RemoteCapLookup::Granted, "test")
                 .unwrap_err();
-            assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+            assert!(err.contains("ERR_INVALID_ARTIFACT_ID"));
         }
 
         // Test valid artifact ID with Unicode

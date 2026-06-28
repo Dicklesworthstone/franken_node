@@ -828,8 +828,9 @@ impl Default for DporExplorer {
 mod tests {
     use super::{
         Counterexample, CounterexampleStep, DEFAULT_BUDGET_SECONDS, DEFAULT_MEMORY_BUDGET,
-        DporError, DporExplorer, ExplorationBudget, Operation, ProtocolModel, ProtocolModelId,
-        SCHEMA_VERSION, SafetyProperty, ScheduleResult, error_codes, event_codes,
+        DporError, DporExplorer, ExplorationBudget, MAX_MATERIALIZED_SCHEDULES, Operation,
+        ProtocolModel, ProtocolModelId, SCHEMA_VERSION, SafetyProperty, ScheduleResult,
+        error_codes, event_codes, schedule_pruning_key,
     };
 
     fn make_explorer() -> DporExplorer {

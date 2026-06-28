@@ -600,9 +600,10 @@ fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        InclusionProof, LogRoot, ProofFailure, ProofReceipt, TransparencyError, TransparencyPolicy,
-        audit_path_len_limit, build_test_tree, hash_pair, leaf_hash, recompute_root,
-        recompute_root_bytes, verify_inclusion,
+        InclusionProof, LogRoot, MAX_PROOF_ID_BYTES, MAX_PROOF_RECEIPT_FIELD_BYTES, ProofFailure,
+        ProofReceipt, RESERVED_ARTIFACT_ID, TransparencyError, TransparencyPolicy,
+        audit_path_len_limit, build_test_tree, hash_pair, hash_pair_bytes, leaf_hash,
+        recompute_root, recompute_root_bytes, verify_inclusion,
     };
 
     fn test_policy(root: &str, tree_size: u64) -> TransparencyPolicy {

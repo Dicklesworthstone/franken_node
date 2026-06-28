@@ -463,9 +463,12 @@ impl EvidenceReplayGate {
 #[cfg(test)]
 mod tests {
     use super::{
-        CapturedEvidence, DecisionType, EvidenceReplayGate, GateDecision, RPL_001_REPLAY_INITIATED,
-        RPL_002_REPRODUCED, RPL_004_ERROR, RPL_005_GATE_DECISION, ReplayVerdict,
+        CapturedEvidence, DecisionType, EvidenceReplayGate, GateDecision, GateResult,
+        RPL_001_REPLAY_INITIATED, RPL_002_REPRODUCED, RPL_003_DIVERGED, RPL_004_ERROR,
+        RPL_005_GATE_DECISION, ReplayLogEntry, ReplayResult, ReplayVerdict, compute_diff_hash,
+        push_bounded,
     };
+    use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
 
     fn make_evidence(id: &str, dtype: DecisionType, action: &str) -> CapturedEvidence {

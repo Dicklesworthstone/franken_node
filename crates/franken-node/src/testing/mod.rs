@@ -246,6 +246,7 @@ mod testing_module_negative_tests {
     use super::scenario_builder::{
         NodeRole, Scenario, ScenarioAssertion, ScenarioBuilder, ScenarioBuilderError,
     };
+    use super::virtual_transport::VirtualTransportLayer;
 
     #[test]
     fn negative_lab_config_rejects_zero_seed() {
@@ -1439,7 +1440,7 @@ mod testing_module_negative_tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ScenarioBuilderError>(())
         });
 
         assert!(
@@ -1485,7 +1486,7 @@ mod testing_module_negative_tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -1529,7 +1530,7 @@ mod testing_module_negative_tests {
                 // Test fault config validation
                 let validation_result = fault_config.validate();
                 if validation_result.is_err() {
-                    return Ok(()); // Invalid probability - skip
+                    return Ok::<(), ScenarioBuilderError>(()); // Invalid probability - skip
                 }
 
                 let scenario = ScenarioBuilder::new(&format!("precision_test_{}", test_name))
@@ -1758,7 +1759,7 @@ mod testing_module_negative_tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -1882,7 +1883,7 @@ mod testing_module_negative_tests {
                 "Link count should be reasonable"
             );
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -2418,7 +2419,7 @@ mod testing_module_negative_tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -2727,7 +2728,7 @@ mod testing_module_negative_tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -2974,7 +2975,7 @@ mod testing_module_negative_tests {
                     "Clock advance causing overflow should be rejected"
                 );
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -3148,7 +3149,7 @@ mod testing_module_negative_tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(

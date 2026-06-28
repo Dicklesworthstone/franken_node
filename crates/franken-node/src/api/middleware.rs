@@ -1681,7 +1681,7 @@ mod tests {
         assert_ne!(span_id, SPAN_ID_MIX);
     }
 
-    fn get_test_keys() -> std::collections::BTreeSet<String> {
+    fn setup_keys() -> std::collections::BTreeSet<String> {
         let mut keys = std::collections::BTreeSet::new();
         keys.insert("test-key-123".to_string());
         keys.insert("mytoken-abc".to_string());
@@ -1694,7 +1694,7 @@ mod tests {
 
     #[test]
     fn contains_authorized_key_constant_time_matches_and_misses() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         assert!(contains_authorized_key_constant_time(&keys, "test-key-123"));
         assert!(contains_authorized_key_constant_time(
             &keys,
@@ -1712,7 +1712,7 @@ mod tests {
 
     #[test]
     fn authenticate_none_method() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(None, &AuthMethod::None, "t-1", &keys);
         let identity = result.expect("auth none");
         assert_eq!(identity.principal, "anonymous");
@@ -1720,7 +1720,7 @@ mod tests {
 
     #[test]
     fn authenticate_api_key() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(
             Some("ApiKey test-key-123"),
             &AuthMethod::ApiKey,
@@ -1737,7 +1737,7 @@ mod tests {
 
     #[test]
     fn authenticate_bearer_token() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(
             Some("Bearer mytoken-abc"),
             &AuthMethod::BearerToken,
@@ -1754,7 +1754,7 @@ mod tests {
 
     #[test]
     fn authenticate_api_key_handles_unicode_without_panicking() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(
             Some("ApiKey 🔐鍵🙂abc123"),
             &AuthMethod::ApiKey,
@@ -1770,7 +1770,7 @@ mod tests {
 
     #[test]
     fn authenticate_bearer_handles_unicode_without_panicking() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(
             Some("Bearer 令牌🙂abcXYZ"),
             &AuthMethod::BearerToken,
@@ -1786,7 +1786,7 @@ mod tests {
 
     #[test]
     fn authenticate_mtls_identity() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(
             Some("fleet-service-cert"),
             &AuthMethod::MtlsClientCert,
@@ -1802,35 +1802,35 @@ mod tests {
 
     #[test]
     fn authenticate_missing_header() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(None, &AuthMethod::ApiKey, "t-4", &keys);
         assert!(result.is_err());
     }
 
     #[test]
     fn authenticate_wrong_prefix() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(Some("Basic abc"), &AuthMethod::BearerToken, "t-5", &keys);
         assert!(result.is_err());
     }
 
     #[test]
     fn authenticate_mtls_rejects_empty_identity() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(Some(""), &AuthMethod::MtlsClientCert, "t-5m", &keys);
         assert!(result.is_err());
     }
 
     #[test]
     fn authenticate_mtls_rejects_whitespace_only_identity() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(Some("   "), &AuthMethod::MtlsClientCert, "t-5mw", &keys);
         assert!(result.is_err());
     }
 
     #[test]
     fn authenticate_mtls_trims_propagated_identity() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(
             Some("  fleet-service-cert  "),
             &AuthMethod::MtlsClientCert,
@@ -1846,7 +1846,7 @@ mod tests {
 
     #[test]
     fn authenticate_mtls_rejects_unknown_identity() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let result = authenticate(
             Some("rogue-service-cert"),
             &AuthMethod::MtlsClientCert,
@@ -2171,7 +2171,7 @@ mod tests {
         };
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
-        let keys = get_test_keys();
+        let keys = setup_keys();
 
         let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
@@ -2206,7 +2206,7 @@ mod tests {
         };
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let invalid_traceparent = "00-00000000000000000000000000000000-b7ad6b7169203331-01";
 
         let mut auth_limiter = AuthFailureLimiter::new();
@@ -2242,7 +2242,7 @@ mod tests {
         };
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let incoming_traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
 
         let mut auth_limiter = AuthFailureLimiter::new();
@@ -2278,7 +2278,7 @@ mod tests {
         };
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
-        let keys = get_test_keys();
+        let keys = setup_keys();
 
         let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
@@ -2314,7 +2314,7 @@ mod tests {
         };
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
-        let keys = get_test_keys();
+        let keys = setup_keys();
 
         let mut auth_limiter = AuthFailureLimiter::new();
         let (result, log) = execute_middleware_chain(
@@ -2364,7 +2364,7 @@ mod tests {
 
     #[test]
     fn negative_authenticate_api_key_rejects_empty_key() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let err = authenticate(
             Some("ApiKey "),
             &AuthMethod::ApiKey,
@@ -2384,7 +2384,7 @@ mod tests {
 
     #[test]
     fn negative_authenticate_bearer_rejects_case_mismatched_scheme() {
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let err = authenticate(
             Some("bearer mytoken-abc"),
             &AuthMethod::BearerToken,
@@ -2550,7 +2550,7 @@ mod tests {
             burst_size: 0,
             fail_closed: true,
         });
-        let keys = get_test_keys();
+        let keys = setup_keys();
         let mut handler_called = false;
 
         let mut auth_limiter = AuthFailureLimiter::new();
@@ -3821,7 +3821,7 @@ mod api_middleware_advanced_security_edge_tests {
         });
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
-        let keys = get_test_keys();
+        let keys = setup_keys();
 
         // First two attempts should be allowed (burst_size = 2)
         for attempt in 1..=2 {
@@ -3884,7 +3884,7 @@ mod api_middleware_advanced_security_edge_tests {
         });
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
-        let keys = get_test_keys();
+        let keys = setup_keys();
 
         for _ in 0..2 {
             let (result, log) = execute_middleware_chain(
@@ -3955,7 +3955,7 @@ mod api_middleware_advanced_security_edge_tests {
         });
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
-        let keys = get_test_keys();
+        let keys = setup_keys();
 
         // Should succeed because auth failure limiting is skipped for AuthMethod::None
         let (result, log) = execute_middleware_chain(

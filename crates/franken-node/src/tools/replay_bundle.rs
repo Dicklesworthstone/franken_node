@@ -3928,6 +3928,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "compression")]
     fn test_negative_bundle_compression_with_adversarial_payloads() {
         // Test with highly compressible payload (zip bomb potential)
         let repetitive_payload = serde_json::json!({
@@ -4492,7 +4493,7 @@ mod tests {
     // Persistent regressions land at
     // crates/franken-node/proptest-regressions/replay_bundle/byte_counter.txt.
 
-    fn json_leaf_strategy() -> proptest::strategy::BoxedStrategy<serde_json::Value> {
+    pub(super) fn json_leaf_strategy() -> proptest::strategy::BoxedStrategy<serde_json::Value> {
         use proptest::prelude::*;
         prop_oneof![
             Just(serde_json::Value::Null),
@@ -4573,6 +4574,7 @@ mod tests {
 #[cfg(test)]
 mod proptest_replay_bundle_invariants {
     use super::*;
+    use super::tests::json_leaf_strategy;
     use proptest::prelude::*;
 
     fn raw_event_strategy() -> impl Strategy<Value = RawEvent> {

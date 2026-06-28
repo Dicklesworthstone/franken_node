@@ -1,6 +1,6 @@
 //! Test to verify canonical encoding optimization preserves exact output
 
-use super::trust_card::to_canonical_json;
+use super::to_canonical_json;
 use hex;
 use serde_json::{Map, Value};
 use sha2::Digest;

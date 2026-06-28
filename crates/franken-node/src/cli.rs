@@ -2917,7 +2917,7 @@ mod tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -2967,10 +2967,13 @@ mod tests {
             }
 
             // Test many small arguments
+            let env_args: Vec<String> = (0..10000)
+                .map(|i| format!("KEY_{}=VALUE_{}", i, i))
+                .collect();
             let mut many_args = vec!["franken-node", "run", "script.js"];
-            for i in 0..10000 {
+            for env_arg in &env_args {
                 many_args.push("--env");
-                many_args.push(&format!("KEY_{}=VALUE_{}", i, i));
+                many_args.push(env_arg.as_str());
             }
 
             let many_args_result = Cli::try_parse_from(&many_args);
@@ -3006,7 +3009,7 @@ mod tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -3118,7 +3121,7 @@ mod tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -3263,7 +3266,7 @@ mod tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -3377,10 +3380,11 @@ mod tests {
                 );
 
                 // Test subcommand help safety
+                let mut init_cmd = Cli::command();
                 let init_help = format!(
                     "{}",
-                    Cli::command()
-                        .find_subcommand("init")
+                    init_cmd
+                        .find_subcommand_mut("init")
                         .unwrap()
                         .render_help()
                 );
@@ -3396,7 +3400,7 @@ mod tests {
                 );
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -3555,7 +3559,9 @@ mod tests {
             }
 
             // Test option value boundaries
-            let option_value_cases = vec!["", "short", &"x".repeat(1000), &"x".repeat(100000)];
+            let long_value_1k = "x".repeat(1000);
+            let long_value_100k = "x".repeat(100000);
+            let option_value_cases = vec!["", "short", long_value_1k.as_str(), long_value_100k.as_str()];
 
             for value in option_value_cases {
                 if value.is_empty() {
@@ -3582,7 +3588,7 @@ mod tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(

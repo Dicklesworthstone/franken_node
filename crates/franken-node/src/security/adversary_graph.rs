@@ -308,6 +308,7 @@ fn project_posterior(principal_id: &str, node: &AdversaryNode) -> AdversaryPoste
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::constant_time;
     use std::collections::{BTreeMap, BTreeSet};
 
     fn obs(

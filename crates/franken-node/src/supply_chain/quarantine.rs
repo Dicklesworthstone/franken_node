@@ -1484,15 +1484,7 @@ fn parse_audit_timestamp(raw: &str) -> Result<QuarantineAuditTimestamp, Quaranti
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ERR_AUDIT_CHAIN_BROKEN, ERR_LIFT_REQUIRES_CLEARANCE, ERR_QUARANTINE_ALREADY_ACTIVE,
-        ERR_QUARANTINE_INVALID_ID, ERR_QUARANTINE_NOT_FOUND, MAX_AUDIT_TRAIL,
-        MAX_PROPAGATION_STATUS, MAX_STATE_HISTORY, QuarantineAuditEntry, QuarantineAuditId,
-        QuarantineAuditTimestamp, QuarantineClearance, QuarantineError, QuarantineImpactReport,
-        QuarantineMode, QuarantineOrder, QuarantineReason, QuarantineRecord, QuarantineRegistry,
-        QuarantineScope, QuarantineSeverity, QuarantineState, RecallOrder, RecallReceipt,
-        constant_time,
-    };
+    use super::*;
 
     const QUARANTINE_ORDER_FIXTURE_SIGNATURE: &str =
         "sha256:4516c63acce5f11fe6b750c98e1ea51c8fe384e5c211c829ea9894962ba928cb";
@@ -2517,9 +2509,10 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     mod quarantine_comprehensive_negative_tests {
+        use super::super::*;
         use super::{
-            QuarantineMode, QuarantineOrder, QuarantineReason, QuarantineRegistry, QuarantineScope,
-            QuarantineSeverity,
+            make_clearance, make_order, make_order_for_extension, make_recall,
+            setup_recall_registry,
         };
 
         #[test]
@@ -3437,7 +3430,7 @@ mod tests {
                 ];
 
                 for tampered_hash in tampered_hashes {
-                    tampered_entry.entry_hash = tampered_hash;
+                    tampered_entry.entry_hash = tampered_hash.clone();
 
                     let start_time = std::time::Instant::now();
                     let computed_hash = compute_entry_hash(&tampered_entry);

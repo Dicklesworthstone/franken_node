@@ -695,8 +695,9 @@ impl MarkerProofVerifier {
 #[cfg(test)]
 mod tests {
     use super::{
-        DetectionResult, DivergenceDetector, MarkerProofVerifier, ReconciliationSuggestion,
-        RollbackDetector, RollbackProof, StateVector, event_codes,
+        DetectionResult, DivergenceDetector, DivergenceLogEvent, ForkDetectionError,
+        MarkerProofVerifier, ReconciliationSuggestion, RollbackDetector, RollbackProof, StateVector,
+        event_codes, push_bounded,
     };
     use crate::control_plane::marker_stream::{MarkerEventType, MarkerStream};
     use crate::security::constant_time;
@@ -2074,7 +2075,10 @@ mod tests {
         // Test that u64::MAX timestamp from clock errors affects downstream validation
         // This verifies the security impact of the fix for bd-9l4xk
 
-        let vectors = create_test_vectors();
+        // bd-yom8c: `create_test_vectors()` helper was removed from prod; the resulting
+        // `vectors` binding is unused by this test's assertions, so reconcile against the
+        // existing `make_chain` test-vector helper to preserve intent.
+        let _vectors = make_chain(3, "node");
 
         // Test that compare() with normal time works
         let normal_time = std::time::SystemTime::now()

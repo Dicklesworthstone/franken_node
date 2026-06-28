@@ -883,8 +883,9 @@ impl Default for CancellationInjectionFramework {
 mod tests {
     use super::{
         AwaitPoint, CancelError, CancelInjectionMatrix, CancelMatrixEntry, CancelTestOutcome,
-        CancellationInjectionFramework, ResourceDelta, ResourceSnapshot, StateSnapshot, WorkflowId,
-        WorkflowRegistration, error_codes,
+        CancellationInjectionFramework, MIN_MATRIX_CASES, ResourceDelta, ResourceSnapshot,
+        SCHEMA_VERSION, StateSnapshot, WorkflowId, WorkflowRegistration, error_codes, event_codes,
+        push_bounded,
     };
 
     fn make_framework() -> CancellationInjectionFramework {

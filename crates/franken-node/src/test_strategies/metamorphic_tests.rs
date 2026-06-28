@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::*;
     use proptest::prelude::*;
     use std::collections::HashSet;
 
@@ -22,20 +22,29 @@ mod tests {
         buf
     }
 
+    /// Build a deterministic `TestRunner` seeded from a `u64`.
+    ///
+    /// `Strategy::new_tree` takes a `&mut TestRunner` (not a bare `TestRng`), so we
+    /// wrap the ChaCha-seeded `TestRng` in a runner with default config. Equal seeds
+    /// yield equal runners → identical generation streams (the metamorphic invariant).
+    fn seeded_runner(seed: u64) -> proptest::test_runner::TestRunner {
+        proptest::test_runner::TestRunner::new_with_rng(
+            proptest::test_runner::Config::default(),
+            proptest::test_runner::TestRng::from_seed(
+                proptest::test_runner::RngAlgorithm::ChaCha,
+                &chacha_seed_bytes(seed),
+            ),
+        )
+    }
+
     #[test]
     fn mr_equivalence_generator_determinism() {
         // MR1: Same seed should produce same generated values across runs
         proptest!(|(seed: u64, max_len: usize)| {
             prop_assume!(max_len > 0 && max_len < 1000);
 
-            let mut rng1 = proptest::test_runner::TestRng::from_seed(
-                proptest::test_runner::RngAlgorithm::ChaCha,
-                &chacha_seed_bytes(seed),
-            );
-            let mut rng2 = proptest::test_runner::TestRng::from_seed(
-                proptest::test_runner::RngAlgorithm::ChaCha,
-                &chacha_seed_bytes(seed),
-            );
+            let mut rng1 = seeded_runner(seed);
+            let mut rng2 = seeded_runner(seed);
 
             let strategy = bounded_text(max_len);
             let val1 = strategy.new_tree(&mut rng1).unwrap().current();
@@ -62,14 +71,8 @@ mod tests {
             let mut large_samples = Vec::new();
 
             for seed in 0..20u64 {
-                let mut rng_small = proptest::test_runner::TestRng::from_seed(
-                    proptest::test_runner::RngAlgorithm::ChaCha,
-                    &chacha_seed_bytes(seed),
-                );
-                let mut rng_large = proptest::test_runner::TestRng::from_seed(
-                    proptest::test_runner::RngAlgorithm::ChaCha,
-                    &chacha_seed_bytes(seed),
-                );
+                let mut rng_small = seeded_runner(seed);
+                let mut rng_large = seeded_runner(seed);
 
                 if let Ok(tree) = small_strategy.new_tree(&mut rng_small) {
                     small_samples.push(tree.current());
@@ -107,14 +110,8 @@ mod tests {
             let mut doubled_outputs = HashSet::new();
 
             for seed in 0..100u64 {
-                let mut rng_base = proptest::test_runner::TestRng::from_seed(
-                    proptest::test_runner::RngAlgorithm::ChaCha,
-                    &chacha_seed_bytes(seed),
-                );
-                let mut rng_doubled = proptest::test_runner::TestRng::from_seed(
-                    proptest::test_runner::RngAlgorithm::ChaCha,
-                    &chacha_seed_bytes(seed),
-                );
+                let mut rng_base = seeded_runner(seed);
+                let mut rng_doubled = seeded_runner(seed);
 
                 if let Ok(tree) = base_strategy.new_tree(&mut rng_base) {
                     base_outputs.insert(tree.current());
@@ -145,10 +142,7 @@ mod tests {
 
             // Test multiple generations
             for seed in 0..50u64 {
-                let mut rng = proptest::test_runner::TestRng::from_seed(
-                    proptest::test_runner::RngAlgorithm::ChaCha,
-                    &chacha_seed_bytes(seed),
-                );
+                let mut rng = seeded_runner(seed);
 
                 if let Ok(tree) = strategy.new_tree(&mut rng) {
                     let identifier = tree.current();
@@ -182,10 +176,7 @@ mod tests {
 
         // Test multiple timestamp generations
         for seed in 0..30u64 {
-            let mut rng = proptest::test_runner::TestRng::from_seed(
-                proptest::test_runner::RngAlgorithm::ChaCha,
-                &chacha_seed_bytes(seed),
-            );
+            let mut rng = seeded_runner(seed);
 
             if let Ok(tree) = strategy.new_tree(&mut rng) {
                 let timestamp = tree.current();
@@ -222,10 +213,7 @@ mod tests {
         let strategy = sha256_hash();
 
         for seed in 0..20u64 {
-            let mut rng = proptest::test_runner::TestRng::from_seed(
-                proptest::test_runner::RngAlgorithm::ChaCha,
-                &chacha_seed_bytes(seed),
-            );
+            let mut rng = seeded_runner(seed);
 
             if let Ok(tree) = strategy.new_tree(&mut rng) {
                 let hash = tree.current();
@@ -266,10 +254,7 @@ mod tests {
             let strategy = hex_bytes(target_len);
 
             for seed in 0..10u64 {
-                let mut rng = proptest::test_runner::TestRng::from_seed(
-                    proptest::test_runner::RngAlgorithm::ChaCha,
-                    &chacha_seed_bytes(seed),
-                );
+                let mut rng = seeded_runner(seed);
 
                 if let Ok(tree) = strategy.new_tree(&mut rng) {
                     let hex_string = tree.current();

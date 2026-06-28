@@ -2113,6 +2113,7 @@ fn generate_real_moonshot_bets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::clock;
     #[cfg(feature = "advanced-features")]
     use crate::observability::evidence_ledger::{LedgerCapacity, test_entry};
 

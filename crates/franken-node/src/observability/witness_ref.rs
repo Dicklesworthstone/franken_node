@@ -1697,8 +1697,8 @@ mod tests {
             ];
 
             for pattern in &malicious_witness_patterns {
-                let witness_id = WitnessId::new(pattern);
-                let witness = WitnessRef::new(pattern, WitnessKind::ExternalSignal, make_hash(42))
+                let witness_id = WitnessId::new(*pattern);
+                let witness = WitnessRef::new(*pattern, WitnessKind::ExternalSignal, make_hash(42))
                     .with_locator("test/replay.jsonl");
 
                 // Basic operations should work
@@ -1769,7 +1769,7 @@ mod tests {
 
             for malicious_locator in &malicious_locators {
                 let witness = WitnessRef::new("WIT-001", WitnessKind::ProofArtifact, make_hash(1))
-                    .with_locator(malicious_locator);
+                    .with_locator(*malicious_locator);
 
                 // Basic locator access should work
                 assert_eq!(

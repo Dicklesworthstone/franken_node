@@ -819,9 +819,9 @@ mod tests {
     use crate::lock_utils::try_lock;
 
     use super::{
-        CancelPhase, CancelProtocolError, CancellationProtocol, CancellationRecord,
-        DEFAULT_DRAIN_TIMEOUT_MS, DrainConfig, MIN_DRAIN_TIMEOUT_MS, ResourceTracker,
-        SCHEMA_VERSION, cancellation_readiness_check, error_codes, event_codes,
+        CancelAuditEvent, CancelPhase, CancelProtocolError, CancellationProtocol,
+        CancellationRecord, DEFAULT_DRAIN_TIMEOUT_MS, DrainConfig, MIN_DRAIN_TIMEOUT_MS,
+        ResourceTracker, SCHEMA_VERSION, cancellation_readiness_check, error_codes, event_codes,
         generate_timing_report,
     };
 

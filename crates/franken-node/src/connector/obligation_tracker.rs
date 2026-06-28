@@ -2074,6 +2074,7 @@ mod tests {
 #[cfg(test)]
 pub mod conformance {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     /// Conformance: INV-OBL-TWO-PHASE protocol enforcement
     #[test]

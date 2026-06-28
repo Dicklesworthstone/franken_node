@@ -1,8 +1,7 @@
 //! Manual performance test for canonical encoding optimization
 
-use super::trust_card::to_canonical_json;
+use super::to_canonical_json;
 use serde_json::{Map, Value};
-use std::time::{Duration, Instant};
 
 /// Generate complex nested JSON for performance testing
 fn generate_complex_trust_card() -> Value {
@@ -15,7 +14,7 @@ fn generate_complex_trust_card() -> Value {
             "metadata": {
                 "version": "1.0.0",
                 "created_at": "2026-04-22T10:00:00Z",
-                "hash": format!("{:064x}", i * 0x123456789ABCDEF0)
+                "hash": format!("{:064x}", (i as u64) * 0x123456789ABCDEF0_u64)
             }
         }));
     }
@@ -54,6 +53,7 @@ fn generate_complex_trust_card() -> Value {
 #[cfg(test)]
 mod perf_tests {
     use super::{generate_complex_trust_card, to_canonical_json};
+    use std::time::Instant;
 
     #[test]
     fn manual_performance_comparison() {

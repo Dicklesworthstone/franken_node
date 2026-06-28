@@ -947,7 +947,7 @@ mod tests {
             // Periodic verification that earlier accounts still exist
             if i % 100 == 0 && i > 0 {
                 let check_idx = i / 2;
-                if let Some((ref check_publisher, check_stake)) =
+                if let Some((check_publisher, check_stake)) =
                     created_stakes.get(check_idx as usize)
                 {
                     let account = ledger.get_account(check_publisher);
@@ -965,7 +965,7 @@ mod tests {
         );
 
         // Test that operations still work on existing accounts
-        if let Some((ref publisher, stake_id)) = created_stakes.first() {
+        if let Some((publisher, stake_id)) = created_stakes.first() {
             let gate = CapabilityStakeGate::new(StakePolicy::default_policy());
             let (allowed, _, _) =
                 gate.check_stake(&ledger, publisher, &RiskTier::Low, account_count + 1000);
@@ -996,7 +996,7 @@ mod tests {
         for vtype in violation_types {
             // Test serialization round-trip
             let evidence = SlashEvidence::new(
-                vtype,
+                vtype.clone(),
                 "serialization test",
                 "test payload",
                 "test-collector",
@@ -1021,7 +1021,7 @@ mod tests {
             ViolationType::SupplyChainCompromise,
         ] {
             let evidence = SlashEvidence::new(
-                vtype,
+                vtype.clone(),
                 "variant test",
                 "test payload",
                 "variant-collector",

@@ -2425,6 +2425,7 @@ mod tests {
 
     mod conformance {
         use super::*;
+        use crate::security::constant_time;
         use serde_json::Value;
         use std::collections::BTreeSet;
 

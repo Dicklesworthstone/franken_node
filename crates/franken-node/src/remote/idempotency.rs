@@ -876,6 +876,8 @@ mod tests {
 
     #[test]
     fn test_negative_request_bytes_with_malicious_collision_attempts() {
+        use crate::security::constant_time;
+
         let computation_name = "test.compute";
         let epoch = 1234567890;
 
@@ -900,7 +902,7 @@ mod tests {
             nonzero_request_10mb.as_slice(), // 10MB non-zero request
         ];
 
-        let mut derived_keys = Vec::new();
+        let mut derived_keys: Vec<IdempotencyKey> = Vec::new();
 
         for (i, request_bytes) in collision_attempts.iter().enumerate() {
             let key = derive_idempotency_key(computation_name, epoch, request_bytes);
@@ -957,6 +959,8 @@ mod tests {
 
     #[test]
     fn test_negative_epoch_manipulation_for_key_separation() {
+        use crate::security::constant_time;
+
         let computation_name = "test.compute";
         let request_bytes = b"test request";
 
@@ -974,7 +978,7 @@ mod tests {
             0x5555555555555555u64, // Inverse alternating pattern
         ];
 
-        let mut epoch_keys = Vec::new();
+        let mut epoch_keys: Vec<(u64, IdempotencyKey)> = Vec::new();
 
         for epoch in epoch_values {
             let key = derive_idempotency_key(computation_name, epoch, request_bytes);
@@ -1296,6 +1300,8 @@ mod tests {
 
     #[test]
     fn test_negative_domain_separation_bypass_attempts() {
+        use crate::security::constant_time;
+
         let request_bytes = b"shared request data";
         let epoch = 1234567890;
 
@@ -1372,6 +1378,8 @@ mod tests {
 
     #[test]
     fn test_negative_derivation_input_length_prefix_attack() {
+        use crate::security::constant_time;
+
         let epoch = 1234567890;
 
         // Test length prefix confusion attacks
@@ -1405,7 +1413,7 @@ mod tests {
             (x_65535.as_str(), y_65535.as_slice()),
         ];
 
-        let mut derived_keys = Vec::new();
+        let mut derived_keys: Vec<(&str, Vec<u8>, IdempotencyKey)> = Vec::new();
 
         for (computation_name, request_bytes) in length_confusion_tests {
             let key = derive_idempotency_key(computation_name, epoch, request_bytes);

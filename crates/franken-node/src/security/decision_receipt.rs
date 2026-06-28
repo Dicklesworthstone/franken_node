@@ -2104,7 +2104,7 @@ mod tests {
         // Correct audience should pass
         let result = verify_receipt_with_audience(
             &signed,
-            &demo_verifying_key(),
+            &demo_public_key(),
             None,
             Some("franken-node-control-plane"),
         );
@@ -2113,7 +2113,7 @@ mod tests {
         // Wrong audience should fail with AudienceMismatch error
         let err = verify_receipt_with_audience(
             &signed,
-            &demo_verifying_key(),
+            &demo_public_key(),
             None,
             Some("different-context"),
         )
@@ -2126,7 +2126,7 @@ mod tests {
         ));
 
         // No expected audience (legacy mode) should pass
-        let result = verify_receipt_with_audience(&signed, &demo_verifying_key(), None, None);
+        let result = verify_receipt_with_audience(&signed, &demo_public_key(), None, None);
         assert!(result.is_ok() && result.unwrap());
     }
 

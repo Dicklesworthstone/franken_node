@@ -752,6 +752,18 @@ mod perf_module_extreme_adversarial_negative_tests {
     };
     use std::collections::BTreeMap;
 
+    fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+        if cap == 0 {
+            items.clear();
+            return;
+        }
+        if items.len() >= cap {
+            let overflow = items.len().saturating_sub(cap).saturating_add(1);
+            items.drain(0..overflow.min(items.len()));
+        }
+        items.push(item);
+    }
+
     #[test]
     fn extreme_adversarial_unicode_injection_proposal_id_resistance() {
         let mut gate = GovernorGate::with_defaults();

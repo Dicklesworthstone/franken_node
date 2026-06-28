@@ -1863,7 +1863,8 @@ impl Drop for TempFileGuard {
 mod tests {
     use super::*;
     use crate::ops::validation_broker::{
-        EnvironmentPolicy, FallbackPolicy, OutputPolicy, RchMode, RchReceipt, ReceiptArtifacts,
+        DigestRef, EnvironmentPolicy, FallbackPolicy, OutputPolicy, RchMode, RchReceipt,
+        ReceiptArtifacts,
         ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy,
         TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind, ValidationPriority,
         ValidationTiming,

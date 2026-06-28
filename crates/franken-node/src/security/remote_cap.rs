@@ -2712,6 +2712,7 @@ fn token_id_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::{Ed25519Scheme, SignatureScheme};
     use ed25519_dalek::{Signer as _, SigningKey};
     use proptest::prelude::*;
     use std::collections::BTreeSet;
@@ -4984,6 +4985,19 @@ mod remote_cap_comprehensive_negative_tests {
     use super::*;
     use crate::security::constant_time;
     use std::collections::HashMap;
+
+    fn scope() -> RemoteScope {
+        RemoteScope::new(
+            vec![
+                RemoteOperation::TelemetryExport,
+                RemoteOperation::FederationSync,
+            ],
+            vec![
+                "https://telemetry.example.com".to_string(),
+                "https://federation.example.com".to_string(),
+            ],
+        )
+    }
 
     /// Negative test: Unicode injection and encoding attacks in capability tokens
     #[test]

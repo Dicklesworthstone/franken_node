@@ -1800,6 +1800,7 @@ mod tests {
 #[cfg(test)]
 mod sybil_defense_negative_path_tests {
     use super::*;
+    use crate::lock_utils::try_lock;
 
     fn signal(id: &str, source: &str, value: f64) -> TrustSignal {
         TrustSignal {

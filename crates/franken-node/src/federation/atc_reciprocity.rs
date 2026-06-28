@@ -1163,6 +1163,7 @@ mod tests {
 #[cfg(test)]
 mod atc_reciprocity_negative_path_tests {
     use super::*;
+    use crate::lock_utils::try_lock;
     use std::collections::BTreeSet;
 
     #[test]

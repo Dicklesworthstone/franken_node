@@ -34,10 +34,10 @@ mod tests {
 
     fn arb_predicted_metrics() -> impl Strategy<Value = PredictedMetrics> {
         (
-            1u32..2000,   // latency_ms
-            1u32..10000,  // throughput_rps
+            1u64..2000,   // latency_ms
+            1u64..10000,  // throughput_rps
             0.0f64..5.0,  // error_rate_pct
-            100u32..8192, // memory_mb
+            100u64..8192, // memory_mb
         )
             .prop_map(|(lat, thr, err, mem)| PredictedMetrics {
                 latency_ms: lat,
@@ -50,10 +50,10 @@ mod tests {
     fn arb_runtime_knob() -> impl Strategy<Value = RuntimeKnob> {
         prop_oneof![
             Just(RuntimeKnob::ConcurrencyLimit),
-            Just(RuntimeKnob::BatchSizeLimit),
-            Just(RuntimeKnob::TimeoutMs),
-            Just(RuntimeKnob::RetryLimit),
-            Just(RuntimeKnob::MemoryBudgetMb),
+            Just(RuntimeKnob::BatchSize),
+            Just(RuntimeKnob::DrainTimeoutMs),
+            Just(RuntimeKnob::RetryBudget),
+            Just(RuntimeKnob::CacheCapacity),
         ]
     }
 
@@ -63,6 +63,15 @@ mod tests {
 
         fn arbitrary_with(_: ()) -> Self::Strategy {
             arb_runtime_knob().boxed()
+        }
+    }
+
+    impl Arbitrary for OptimizationProposal {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_: ()) -> Self::Strategy {
+            arb_optimization_proposal().boxed()
         }
     }
 
@@ -173,18 +182,20 @@ mod tests {
                 max_memory_mb: 4096,
             };
 
-            let mut loose_governor = OptimizationGovernor::with_envelope(loose_envelope);
-            let mut strict_governor = OptimizationGovernor::with_envelope(strict_envelope);
+            let mut loose_governor = OptimizationGovernor::with_defaults();
+            loose_governor.update_envelope(loose_envelope);
+            let mut strict_governor = OptimizationGovernor::with_defaults();
+            strict_governor.update_envelope(strict_envelope);
 
             let loose_decision = loose_governor.submit(proposal.clone());
             let strict_decision = strict_governor.submit(proposal.clone());
 
             // If strict rejects, loose must not accept (contrapositive)
             match (&loose_decision, &strict_decision) {
-                (GovernorDecision::Accepted(_), GovernorDecision::Rejected(_)) => {
+                (GovernorDecision::Approved, GovernorDecision::Rejected(_)) => {
                     // This is allowed - loose accepts what strict rejects
                 }
-                (GovernorDecision::Rejected(_), GovernorDecision::Accepted(_)) => {
+                (GovernorDecision::Rejected(_), GovernorDecision::Approved) => {
                     prop_assert!(false, "Strict envelope cannot accept what loose envelope rejects");
                 }
                 _ => {

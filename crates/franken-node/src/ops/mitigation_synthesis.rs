@@ -1504,7 +1504,7 @@ mod tests {
                 i,
                 "x".repeat(1000)
             );
-            let value = format!("{}", i.saturating_mul(100i64));
+            let value = format!("{}", (i as i64).saturating_mul(100i64));
             massive_diff.insert(key, value);
         }
 

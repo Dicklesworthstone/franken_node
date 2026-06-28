@@ -2978,7 +2978,7 @@ mod tests {
                 assert!(json.len() > 0);
 
                 // Test deserialization
-                let deserialization: Result<OracleReport, _> = serde_json::from_str(&json);
+                let deserialization: Result<DivergenceReport, _> = serde_json::from_str(&json);
                 match deserialization {
                     Ok(recovered_report) => {
                         assert_eq!(recovered_report.divergences.len(), report.divergences.len());

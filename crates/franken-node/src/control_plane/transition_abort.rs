@@ -579,9 +579,10 @@ fn push_bounded<T>(entries: &mut Vec<T>, entry: T, max_entries: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AbortError, ForceTransitionPolicy, ParticipantAbortState, SCHEMA_VERSION,
-        TransitionAbortEvent, TransitionAbortManager, TransitionAbortReason, error_codes,
-        event_codes,
+        AbortAuditRecord, AbortError, ForceTransitionEvent, ForceTransitionPolicy,
+        MAX_ABORT_EVENTS, MAX_AUDIT_LOG_ENTRIES, MAX_FORCE_EVENTS, ParticipantAbortState,
+        SCHEMA_VERSION, TransitionAbortEvent, TransitionAbortManager, TransitionAbortReason,
+        error_codes, event_codes, push_bounded,
     };
     use std::collections::BTreeSet;
 

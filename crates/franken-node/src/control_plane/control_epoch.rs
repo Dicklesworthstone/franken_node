@@ -584,8 +584,8 @@ impl Default for EpochStore {
 mod tests {
     use super::{
         ControlEpoch, EpochArtifactEvent, EpochError, EpochRejectionReason, EpochStore,
-        EpochTransition, RESERVED_ARTIFACT_ID, ValidityWindowPolicy, check_artifact_epoch,
-        event_codes,
+        EpochTransition, MAX_TRANSITIONS, RESERVED_ARTIFACT_ID, ValidityWindowPolicy,
+        check_artifact_epoch, constant_time, event_codes, push_bounded,
     };
     // bd-yom8c: nested test mod does not inherit the file-level `use sha2::Digest`;
     // re-import so `sha2::Sha256::new()` (a Digest trait fn) resolves.

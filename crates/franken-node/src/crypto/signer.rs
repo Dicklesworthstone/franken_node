@@ -263,10 +263,20 @@ mod tests {
         let signer1 = Ed25519Signer::new();
         let signer2 = Ed25519Signer::default();
 
-        // Both should be equivalent
-        assert_eq!(
-            std::mem::discriminant(&signer1),
-            std::mem::discriminant(&signer2)
-        );
+        // Both constructors should yield behaviorally identical signers: signing the same
+        // data with the same key must produce identical (deterministic Ed25519) signatures.
+        let (_, sk) = Ed25519Scheme::generate_keypair().unwrap();
+        let test_data = TestData {
+            id: 789,
+            name: "default-equiv".to_string(),
+            active: true,
+        };
+        let sig1 = signer1
+            .sign_structured(&sk, "default-equiv", &test_data)
+            .unwrap();
+        let sig2 = signer2
+            .sign_structured(&sk, "default-equiv", &test_data)
+            .unwrap();
+        assert_eq!(sig1, sig2, "new() and default() signers should be equivalent");
     }
 }
