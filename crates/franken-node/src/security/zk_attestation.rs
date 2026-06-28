@@ -2027,12 +2027,11 @@ mod tests {
 
         for (i, malicious_id) in malicious_ids.iter().enumerate() {
             let proof_result = ledger.generate_proof(
-                malicious_id,
+                malicious_id.to_string(),
                 &policy,
-                PrivateMetadata {
-                    sensitive_data: format!("test-data-{}", i),
-                    compliance_threshold: 100.0,
-                },
+                format!("commit-unicode-{}", i),
+                "deadbeef".to_string(),
+                PredicateOutcome::Pass,
                 1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
                 format!("trace-unicode-{}", i),
             );
@@ -2040,7 +2039,7 @@ mod tests {
             assert!(proof_result.is_ok());
 
             // Verify we can retrieve with exact ID
-            assert!(ledger.attestations.contains_key(malicious_id));
+            assert!(ledger.attestations.contains_key(*malicious_id));
         }
     }
 
@@ -2092,35 +2091,40 @@ mod tests {
         let collision_policies = vec![
             ZkPolicy {
                 policy_id: "policy-1".to_string(),
-                predicate_name: "test_predicate".to_string(),
-                predicate_version: "v1.0".to_string(),
-                verifier_keys: vec!["key1".to_string()],
-                validity_window_ms: DEFAULT_VALIDITY_MS,
+                predicate_description: "test_predicate".to_string(),
+                issuer: "key1".to_string(),
+                validity_ms: DEFAULT_VALIDITY_MS,
+                schema_version: SCHEMA_VERSION.to_string(),
+                active: true,
+                registered_at_ms: 1_000_000,
             },
             ZkPolicy {
                 policy_id: "policy\u{200b}1".to_string(), // Zero-width space
-                predicate_name: "test_predicate".to_string(),
-                predicate_version: "v1.0".to_string(),
-                verifier_keys: vec!["key1".to_string()],
-                validity_window_ms: DEFAULT_VALIDITY_MS,
+                predicate_description: "test_predicate".to_string(),
+                issuer: "key1".to_string(),
+                validity_ms: DEFAULT_VALIDITY_MS,
+                schema_version: SCHEMA_VERSION.to_string(),
+                active: true,
+                registered_at_ms: 1_000_000,
             },
             ZkPolicy {
                 policy_id: "policy-1\u{0000}".to_string(), // Null terminator
-                predicate_name: "test_predicate".to_string(),
-                predicate_version: "v1.0".to_string(),
-                verifier_keys: vec!["key1".to_string()],
-                validity_window_ms: DEFAULT_VALIDITY_MS,
+                predicate_description: "test_predicate".to_string(),
+                issuer: "key1".to_string(),
+                validity_ms: DEFAULT_VALIDITY_MS,
+                schema_version: SCHEMA_VERSION.to_string(),
+                active: true,
+                registered_at_ms: 1_000_000,
             },
         ];
 
         for (i, policy) in collision_policies.iter().enumerate() {
             let proof_result = ledger.generate_proof(
-                &format!("collision-test-{}", i),
+                format!("collision-test-{}", i),
                 policy,
-                PrivateMetadata {
-                    sensitive_data: format!("data-{}", i),
-                    compliance_threshold: 100.0,
-                },
+                format!("commit-collision-{}", i),
+                "deadbeef".to_string(),
+                PredicateOutcome::Pass,
                 1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
                 format!("trace-collision-{}", i),
             );
@@ -2147,12 +2151,11 @@ mod tests {
 
         for (i, timestamp) in overflow_timestamps.iter().enumerate() {
             let proof_result = ledger.generate_proof(
-                &format!("timestamp-test-{}", i),
+                format!("timestamp-test-{}", i),
                 &policy,
-                PrivateMetadata {
-                    sensitive_data: format!("data-{}", i),
-                    compliance_threshold: 100.0,
-                },
+                format!("commit-timestamp-{}", i),
+                "deadbeef".to_string(),
+                PredicateOutcome::Pass,
                 *timestamp,
                 format!("trace-timestamp-{}", i),
             );
@@ -2172,12 +2175,11 @@ mod tests {
 
         // Generate legitimate attestation
         let legit_result = ledger.generate_proof(
-            "legit-attestation",
+            "legit-attestation".to_string(),
             &policy,
-            PrivateMetadata {
-                sensitive_data: "legitimate-data".to_string(),
-                compliance_threshold: 100.0,
-            },
+            "commit-legitimate-data".to_string(),
+            "deadbeef".to_string(),
+            PredicateOutcome::Pass,
             1_000_000,
             "trace-legit".to_string(),
         );
@@ -2226,12 +2228,11 @@ mod tests {
         let mut attestations = Vec::new();
         for i in 0..(MAX_BATCH_SIZE + 10) {
             let proof_result = ledger.generate_proof(
-                &format!("batch-test-{}", i),
+                format!("batch-test-{}", i),
                 &policy,
-                PrivateMetadata {
-                    sensitive_data: format!("data-{}", i),
-                    compliance_threshold: 100.0,
-                },
+                format!("commit-batch-{}", i),
+                "deadbeef".to_string(),
+                PredicateOutcome::Pass,
                 1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
                 format!("trace-batch-{}", i),
             );
@@ -2277,12 +2278,11 @@ mod tests {
 
         for malicious_trace in malicious_trace_ids {
             let proof_result = ledger.generate_proof(
-                "audit-injection-test",
+                "audit-injection-test".to_string(),
                 &policy,
-                PrivateMetadata {
-                    sensitive_data: "test-data".to_string(),
-                    compliance_threshold: 100.0,
-                },
+                format!("commit-audit-{}", malicious_trace),
+                "deadbeef".to_string(),
+                PredicateOutcome::Pass,
                 1_000_000,
                 malicious_trace.to_string(),
             );
@@ -2372,12 +2372,11 @@ mod tests {
                             .expect("zk attestation ledger mutex should not be poisoned");
 
                     let proof_result = ledger_guard.generate_proof(
-                        &attestation_id,
+                        attestation_id.clone(),
                         &policy,
-                        PrivateMetadata {
-                            sensitive_data: format!("data-{}-{}", thread_id, i),
-                            compliance_threshold: 100.0,
-                        },
+                        format!("commit-{}-{}", thread_id, i),
+                        "deadbeef".to_string(),
+                        PredicateOutcome::Pass,
                         1_000_000 + u64::try_from(thread_id * 1000 + i).unwrap_or(u64::MAX),
                         format!("trace-{}-{}", thread_id, i),
                     );
@@ -2409,12 +2408,11 @@ mod tests {
 
         // Generate legitimate attestation
         let legit_result = ledger.generate_proof(
-            "timing-legit",
+            "timing-legit".to_string(),
             &policy,
-            PrivateMetadata {
-                sensitive_data: "legitimate-data".to_string(),
-                compliance_threshold: 100.0,
-            },
+            "commit-timing-legit".to_string(),
+            "deadbeef".to_string(),
+            PredicateOutcome::Pass,
             1_000_000,
             "trace-timing-legit".to_string(),
         );
@@ -2502,12 +2500,11 @@ mod tests {
         // Generate many attestations to overflow audit trail capacity
         for i in 0..1000 {
             let proof_result = ledger.generate_proof(
-                &format!("overflow-test-{}", i),
+                format!("overflow-test-{}", i),
                 &policy,
-                PrivateMetadata {
-                    sensitive_data: format!("data-{}", i),
-                    compliance_threshold: 100.0,
-                },
+                format!("commit-overflow-{}", i),
+                "deadbeef".to_string(),
+                PredicateOutcome::Pass,
                 1_000_000 + u64::try_from(i).unwrap_or(u64::MAX),
                 format!("trace-overflow-{}", i),
             );
@@ -2535,7 +2532,7 @@ mod tests {
         );
 
         // All remaining records should maintain invariants
-        for record in &ledger.audit_trail {
+        for record in ledger.audit_trail.values() {
             assert!(invariants::check_audit_trail(record));
         }
     }

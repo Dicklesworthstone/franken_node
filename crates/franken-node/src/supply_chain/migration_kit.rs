@@ -1876,8 +1876,8 @@ mod tests {
             )
             .unwrap();
 
-        let hash1 = &eco.kits().get(&kit_id1).unwrap().content_hash;
-        let hash2 = &eco.kits().get(&kit_id2).unwrap().content_hash;
+        let hash1 = eco.kits().get(&kit_id1).unwrap().content_hash.clone();
+        let hash2 = eco.kits().get(&kit_id2).unwrap().content_hash.clone();
 
         // Should produce different hashes due to proper serialization
         assert_ne!(

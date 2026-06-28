@@ -1226,13 +1226,14 @@ mod tests {
         #[test]
         fn timing_attack_resistance_in_lookup_operations() {
             // Test that lookup time is consistent regardless of input
+            let long_similar_prefix = "lane_scheduler".to_string() + &"x".repeat(1000);
             let test_cases = vec![
-                "lane_scheduler",                     // Valid, exists
-                "nonexistent_scheduler",              // Valid format, doesn't exist
-                "lane_scheduler" + &"x".repeat(1000), // Long but similar prefix
-                "zzzzzzzzzz_scheduler",               // Different prefix
-                "",                                   // Empty
-                "a",                                  // Very short
+                "lane_scheduler",             // Valid, exists
+                "nonexistent_scheduler",      // Valid format, doesn't exist
+                long_similar_prefix.as_str(), // Long but similar prefix
+                "zzzzzzzzzz_scheduler",       // Different prefix
+                "",                           // Empty
+                "a",                          // Very short
             ];
 
             let mut timings = Vec::new();

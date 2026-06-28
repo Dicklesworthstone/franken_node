@@ -692,6 +692,7 @@ mod tests {
         let authorized_api_keys = std::collections::BTreeSet::new();
         let config = SecurityConfig {
             max_degraded_duration_secs: 42,
+            max_merge_decisions: crate::config::DEFAULT_MAX_MERGE_DECISIONS,
             authorized_api_keys,
             decision_receipt_signing_key_path: None,
             network_policy: crate::config::NetworkPolicyConfig::default(),
@@ -1848,28 +1849,28 @@ mod tests {
         }
 
         // Verify only one activation succeeded (fail-closed behavior)
-        let engine = try_lock(
+        let inspect_guard = try_lock(
             &engine,
             "inspect degraded mode policy engine after activation concurrency",
         )
         .expect("degraded mode policy engine mutex should not be poisoned");
         assert!(
             matches!(
-                engine.state(),
+                inspect_guard.state(),
                 DegradedModeState::Degraded | DegradedModeState::Normal
             ),
             "State should be consistent after concurrent access"
         );
 
         // Verify audit log is coherent (no corruption)
-        let audit_count = engine.audit_log().len();
+        let audit_count = inspect_guard.audit_log().len();
         assert!(
             audit_count <= 20,
             "Audit log should not exceed reasonable bounds"
         );
 
         // Verify all audit events are serializable (no corruption)
-        for event in engine.audit_log() {
+        for event in inspect_guard.audit_log() {
             assert!(
                 serde_json::to_string(event).is_ok(),
                 "Audit events should remain valid"
@@ -1877,7 +1878,7 @@ mod tests {
         }
 
         // Test concurrent action evaluations
-        drop(engine);
+        drop(inspect_guard);
         let mut eval_handles = vec![];
 
         for i in 0..20 {

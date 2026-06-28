@@ -2228,24 +2228,27 @@ mod tests {
     #[test]
     fn fleet_control_api_boundary_comprehensive() {
         let admin = AuthIdentity {
-            identity_id: "admin-boundary-test".to_string(),
-            method: AuthMethod::Internal,
+            principal: "admin-boundary-test".to_string(),
+            method: AuthMethod::MtlsClientCert,
+            roles: vec!["fleet-admin".to_string()],
         };
         let trace = TraceContext {
-            request_id: "fleet-boundary-test".to_string(),
-            client_ip: "127.0.0.1".to_string(),
-            user_agent: "boundary-test".to_string(),
-            trace_flags: BTreeSet::new(),
+            trace_id: "fleet-boundary-test".to_string(),
+            span_id: "0000000000000004".to_string(),
+            trace_flags: 0,
         };
 
         // Reset state for clean test
         {
             let mut state = fleet_lease_state().lock().expect("state lock");
             state.leases.clear();
-            state.fencing_operations.clear();
-            state.coordination_history.clear();
+            // NOTE(bd-yom8c): FleetLeaseState no longer stores separate
+            // `fencing_operations`/`coordination_history` collections — only `leases`
+            // plus the sequence counters remain. Resetting the counters preserves the
+            // original "clean state" intent.
             state.next_lease_seq = 1;
             state.next_fencing_seq = 1;
+            state.next_coordination_seq = 1;
         }
 
         // Test lease request validation with edge case inputs

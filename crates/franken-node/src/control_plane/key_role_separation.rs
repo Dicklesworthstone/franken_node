@@ -640,8 +640,10 @@ impl Default for KeyRoleRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        KeyRole, KeyRoleBinding, KeyRoleRegistry, KeyRoleSeparationError, MAX_ACTIVE_BINDINGS,
+        KeyRole, KeyRoleBinding, KeyRoleEvent, KeyRoleRegistry, KeyRoleSeparationError,
+        MAX_ACTIVE_BINDINGS, MAX_KEY_ROLE_EVENTS, event_codes,
     };
+    use crate::push_bounded;
 
     // Helpers
     fn pub_key(seed: u8) -> Vec<u8> {
@@ -2311,7 +2313,15 @@ mod tests {
             };
 
             // Bind with unique roles to avoid conflicts
-            let result = reg.bind_key_to_role(&key_id, role, 100 + i as u64, 3600, &tid(i as u64));
+            let result = reg.bind(
+                &key_id,
+                role,
+                pub_key(1),
+                "auth",
+                100 + i as u64,
+                3600,
+                &tid(i as u32),
+            );
 
             if result.is_ok() {
                 // Should use saturating arithmetic for internal counters
@@ -2324,7 +2334,7 @@ mod tests {
 
         // Verify registry remains in valid state
         assert!(reg.active_count() <= MAX_ACTIVE_BINDINGS);
-        assert!(reg.events().len() <= MAX_EVENTS);
+        assert!(reg.events().len() <= MAX_KEY_ROLE_EVENTS);
     }
 
     #[test]
@@ -2384,9 +2394,11 @@ mod tests {
         let max_validity = 3600_u64;
 
         // Bind key with specific timing
-        reg.bind_key_to_role(
+        reg.bind(
             "expiry-boundary-key",
             KeyRole::Signing,
+            pub_key(1),
+            "auth",
             bind_time,
             max_validity,
             &tid(1),
@@ -2394,11 +2406,10 @@ mod tests {
         .unwrap();
 
         // Test at exact expiry boundary - should be considered expired (fail-closed)
-        let result_at_boundary = reg.verify_key_for_role(
+        let result_at_boundary = reg.verify_role(
             "expiry-boundary-key",
             KeyRole::Signing,
             exact_expiry_time,
-            max_validity,
             &tid(2),
         );
 
@@ -2409,21 +2420,19 @@ mod tests {
         );
 
         // Test just before expiry - should not be expired
-        let result_before = reg.verify_key_for_role(
+        let result_before = reg.verify_role(
             "expiry-boundary-key",
             KeyRole::Signing,
             exact_expiry_time - 1,
-            max_validity,
             &tid(3),
         );
         assert!(result_before.is_ok(), "Key should be valid before expiry");
 
         // Test after expiry - should definitely be expired
-        let result_after = reg.verify_key_for_role(
+        let result_after = reg.verify_role(
             "expiry-boundary-key",
             KeyRole::Signing,
             exact_expiry_time + 1,
-            max_validity,
             &tid(4),
         );
         assert!(
@@ -2442,12 +2451,14 @@ mod tests {
             let key_id = format!("length-test-key-{}", i);
             let role = KeyRole::all()[i % 4];
 
-            let result = reg.bind_key_to_role(
+            let result = reg.bind(
                 &key_id,
                 role,
+                pub_key(1),
+                "auth",
                 1_700_000_000 + i as u64,
                 3600,
-                &tid(i as u64),
+                &tid(i as u32),
             );
 
             if result.is_err() {
@@ -2556,32 +2567,34 @@ mod tests {
         assert_eq!(reg.events().len(), 0);
 
         // Generate many events to test event log bounding
-        for i in 0..(MAX_EVENTS + 20) {
+        for i in 0..(MAX_KEY_ROLE_EVENTS + 20) {
             let key_id = format!("event-test-key-{}", i);
             let role = KeyRole::all()[i % 4];
 
-            let result = reg.bind_key_to_role(
+            let result = reg.bind(
                 &key_id,
                 role,
+                pub_key(1),
+                "auth",
                 1_700_000_000 + i as u64,
                 3600,
-                &tid(i as u64),
+                &tid(i as u32),
             );
 
             if result.is_ok() {
                 // Event log should be bounded using push_bounded pattern
                 assert!(
-                    reg.events().len() <= MAX_EVENTS,
+                    reg.events().len() <= MAX_KEY_ROLE_EVENTS,
                     "Event log should be bounded at iteration {}, got len {}",
                     i,
                     reg.events().len()
                 );
 
                 // Try to revoke the key to generate another event
-                let _ = reg.revoke_key(&key_id, 1_700_001_000 + i as u64, &tid(i as u64 + 1000));
+                let _ = reg.revoke(&key_id, "auth", &tid(i as u32 + 1000));
 
                 assert!(
-                    reg.events().len() <= MAX_EVENTS,
+                    reg.events().len() <= MAX_KEY_ROLE_EVENTS,
                     "Event log should remain bounded after revocation"
                 );
             } else {
@@ -2591,10 +2604,10 @@ mod tests {
         }
 
         // Verify final event log size is properly bounded
-        assert!(reg.events().len() <= MAX_EVENTS);
+        assert!(reg.events().len() <= MAX_KEY_ROLE_EVENTS);
 
         // Verify oldest events are evicted when capacity exceeded
-        if reg.events().len() == MAX_EVENTS {
+        if reg.events().len() == MAX_KEY_ROLE_EVENTS {
             let oldest_event = &reg.events()[0];
             // Should not contain very early event IDs if they were evicted
             assert!(

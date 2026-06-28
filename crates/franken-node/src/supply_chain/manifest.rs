@@ -1497,10 +1497,10 @@ mod tests {
 
         // Test near-overflow threshold values
         let overflow_cases = vec![
-            (u32::MAX, u32::MAX),     // Both at max
-            (u32::MAX - 1, u32::MAX), // Threshold one below max
-            (1, u32::MAX),            // Threshold 1, signers at max
-            (u32::MAX / 2, u32::MAX), // Threshold at half max
+            (u8::MAX, u8::MAX),     // Both at max
+            (u8::MAX - 1, u8::MAX), // Threshold one below max
+            (1, u8::MAX),           // Threshold 1, signers at max
+            (u8::MAX / 2, u8::MAX), // Threshold at half max
         ];
 
         for (threshold, total_signers) in overflow_cases {
@@ -1666,7 +1666,7 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), "EMS_EMPTY_CAPABILITIES");
 
         // Reset and test empty attestation chain
-        manifest.capabilities = vec![frankenengine_extension_host::Capability::FileSystemRead];
+        manifest.capabilities = vec![cap("fs_read")];
         manifest.provenance.attestation_chain.clear();
         let result = validate_signed_manifest(&manifest);
         // May or may not require attestations - implementation dependent

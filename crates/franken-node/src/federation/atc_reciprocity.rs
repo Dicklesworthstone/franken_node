@@ -1622,8 +1622,8 @@ mod atc_reciprocity_negative_path_tests {
         for i in 0..overflow_count {
             let metrics = ContributionMetrics {
                 participant_id: format!("overflow_test_{}", i),
-                contributions_made: i % 100,
-                intelligence_consumed: (i % 100) + 1,
+                contributions_made: (i % 100) as u64,
+                intelligence_consumed: ((i % 100) + 1) as u64,
                 contribution_quality: 0.8,
                 membership_age_seconds: 86400 * 30,
                 has_exception: false,
@@ -1882,8 +1882,9 @@ mod atc_reciprocity_negative_path_tests {
         };
 
         // Should handle deeply nested content without stack overflow
-        let result =
-            std::panic::catch_unwind(|| engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z"));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.evaluate_access(&metrics, "2026-04-17T00:00:00Z")
+        }));
 
         assert!(
             result.is_ok(),
@@ -1976,10 +1977,7 @@ mod atc_reciprocity_negative_path_tests {
             // Deserialization should recover exact timestamp
             let parsed: ContributionMetrics =
                 serde_json::from_str(&json).expect("should deserialize malicious timestamp");
-            assert_eq!(
-                parsed.exception_expires_at.as_deref(),
-                Some(timestamp.as_str())
-            );
+            assert_eq!(parsed.exception_expires_at.as_deref(), Some(*timestamp));
         }
     }
 

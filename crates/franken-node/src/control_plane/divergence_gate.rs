@@ -2507,7 +2507,7 @@ mod tests {
             let mut expected_final_state = GateState::Diverged;
 
             for (step_idx, action) in sequence.iter().enumerate() {
-                match action.as_str() {
+                match *action {
                     "quarantine" => {
                         let result = test_gate.respond_quarantine(
                             format!("attack-partition-{}", step_idx),
@@ -2605,73 +2605,96 @@ mod tests {
         gate.check_propagation(&local, &remote, 4000, "crypto-setup");
 
         // Test 1: Authorization signature bypass attacks
-        let signature_bypass_attacks = vec![
+        type AuthTamper = Box<dyn Fn(OperatorAuthorization) -> OperatorAuthorization>;
+        let signature_bypass_attacks: Vec<(&str, AuthTamper)> = vec![
             // Signature manipulation attacks
-            ("signature_truncation", |mut auth: OperatorAuthorization| {
-                auth.signature = auth.signature[..auth.signature.len() - 2].to_string();
-                auth
-            }),
-            ("signature_extension", |mut auth: OperatorAuthorization| {
-                auth.signature.push_str("00");
-                auth
-            }),
+            (
+                "signature_truncation",
+                Box::new(|mut auth: OperatorAuthorization| {
+                    auth.signature = auth.signature[..auth.signature.len() - 2].to_string();
+                    auth
+                }),
+            ),
+            (
+                "signature_extension",
+                Box::new(|mut auth: OperatorAuthorization| {
+                    auth.signature.push_str("00");
+                    auth
+                }),
+            ),
             (
                 "signature_case_manipulation",
-                |mut auth: OperatorAuthorization| {
+                Box::new(|mut auth: OperatorAuthorization| {
                     auth.signature = auth.signature.to_uppercase();
                     auth
-                },
+                }),
             ),
             (
                 "signature_nullbyte_injection",
-                |mut auth: OperatorAuthorization| {
+                Box::new(|mut auth: OperatorAuthorization| {
                     auth.signature = auth.signature.replace("a", "\x00a");
                     auth
-                },
+                }),
             ),
             // Hash manipulation attacks
-            ("hash_prefix_attack", |mut auth: OperatorAuthorization| {
-                auth.authorization_hash = "00".to_string() + &auth.authorization_hash;
-                auth
-            }),
-            ("hash_suffix_attack", |mut auth: OperatorAuthorization| {
-                auth.authorization_hash.push_str("ff");
-                auth
-            }),
+            (
+                "hash_prefix_attack",
+                Box::new(|mut auth: OperatorAuthorization| {
+                    auth.authorization_hash = "00".to_string() + &auth.authorization_hash;
+                    auth
+                }),
+            ),
+            (
+                "hash_suffix_attack",
+                Box::new(|mut auth: OperatorAuthorization| {
+                    auth.authorization_hash.push_str("ff");
+                    auth
+                }),
+            ),
             (
                 "hash_collision_attempt",
-                |mut auth: OperatorAuthorization| {
+                Box::new(|mut auth: OperatorAuthorization| {
                     auth.authorization_hash = "a".repeat(64); // Invalid length/format
                     auth
-                },
+                }),
             ),
-            ("hash_encoding_attack", |mut auth: OperatorAuthorization| {
-                auth.authorization_hash = auth.authorization_hash.replace("a", "\u{202E}a\u{202D}"); // BiDi override
-                auth
-            }),
+            (
+                "hash_encoding_attack",
+                Box::new(|mut auth: OperatorAuthorization| {
+                    auth.authorization_hash =
+                        auth.authorization_hash.replace("a", "\u{202E}a\u{202D}"); // BiDi override
+                    auth
+                }),
+            ),
             // Field tampering attacks
             (
                 "operator_id_injection",
-                |mut auth: OperatorAuthorization| {
+                Box::new(|mut auth: OperatorAuthorization| {
                     auth.operator_id = "admin\x00".to_string() + &auth.operator_id;
                     auth
-                },
+                }),
             ),
             (
                 "timestamp_manipulation",
-                |mut auth: OperatorAuthorization| {
+                Box::new(|mut auth: OperatorAuthorization| {
                     auth.timestamp = auth.timestamp.saturating_add(1000000); // Far future
                     auth
-                },
+                }),
             ),
-            ("epoch_overflow", |mut auth: OperatorAuthorization| {
-                auth.resync_checkpoint_epoch = u64::MAX;
-                auth
-            }),
-            ("reason_injection", |mut auth: OperatorAuthorization| {
-                auth.reason = "legitimate\"; DROP TABLE authorizations; --".to_string();
-                auth
-            }),
+            (
+                "epoch_overflow",
+                Box::new(|mut auth: OperatorAuthorization| {
+                    auth.resync_checkpoint_epoch = u64::MAX;
+                    auth
+                }),
+            ),
+            (
+                "reason_injection",
+                Box::new(|mut auth: OperatorAuthorization| {
+                    auth.reason = "legitimate\"; DROP TABLE authorizations; --".to_string();
+                    auth
+                }),
+            ),
         ];
 
         for (attack_name, attack_fn) in signature_bypass_attacks {
@@ -2907,6 +2930,8 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("injection-test-node");
 
         // Test 1: Node ID and trace ID injection attacks
+        let long_node_input = "x".repeat(100000);
+        let long_trace_input = "y".repeat(100000);
         let injection_attack_vectors = vec![
             // Control character injection
             ("node\x00\r\ninjection", "trace\x00injection"),
@@ -2924,7 +2949,7 @@ mod tests {
             ("../../../node", "../../trace"),
             ("node\\..\\..\\windows", "trace/etc/passwd"),
             // Very long inputs
-            ("x".repeat(100000), "y".repeat(100000)),
+            (long_node_input.as_str(), long_trace_input.as_str()),
             // Empty and whitespace
             ("", ""),
             (" ", "\t"),
@@ -2944,7 +2969,7 @@ mod tests {
             );
             assert!(proof.is_none(), "Should not have proof for basic fork");
             assert!(
-                !log_event.local_hash.is_empty(),
+                !log_event.local_state_hash.is_empty(),
                 "Log event should have valid local hash despite injection"
             );
 
@@ -3195,11 +3220,11 @@ mod tests {
 
             // Verify detection results are meaningful
             assert!(
-                !log_event.local_hash.is_empty() || attack_local.state_hash.is_empty(),
+                !log_event.local_state_hash.is_empty() || attack_local.state_hash.is_empty(),
                 "Log should have valid local hash unless input was empty"
             );
             assert!(
-                !log_event.remote_hash.is_empty() || attack_remote.state_hash.is_empty(),
+                !log_event.remote_state_hash.is_empty() || attack_remote.state_hash.is_empty(),
                 "Log should have valid remote hash unless input was empty"
             );
 
@@ -3260,7 +3285,7 @@ mod tests {
 
                         let detection_result = {
                             let mut gate_guard =
-                                try_lock(&gate_clone).expect("divergence gate mutex should lock");
+                                try_lock(&gate_clone, "divergence gate").expect("divergence gate mutex should lock");
                             gate_guard.check_propagation(
                                 &local,
                                 &remote,
@@ -3272,7 +3297,7 @@ mod tests {
                         thread_results.push((thread_id, iteration, detection_result.0));
                     }
 
-                    try_lock(&results_clone)
+                    try_lock(&results_clone, "detection results")
                         .expect("divergence detection results mutex should lock")
                         .extend(thread_results);
                 })
@@ -3285,7 +3310,7 @@ mod tests {
         }
 
         let detection_results =
-            try_lock(&results).expect("divergence detection results mutex should lock");
+            try_lock(&results, "detection results").expect("divergence detection results mutex should lock");
         assert!(
             !detection_results.is_empty(),
             "Should have detection results"
@@ -3303,7 +3328,7 @@ mod tests {
                         match response_type {
                             0 => {
                                 let _ = {
-                                    let mut gate_guard = try_lock(&gate_clone)
+                                    let mut gate_guard = try_lock(&gate_clone, "divergence gate")
                                         .expect("divergence gate mutex should lock");
                                     gate_guard.respond_halt(
                                         10000 + attempt,
@@ -3313,7 +3338,7 @@ mod tests {
                             }
                             1 => {
                                 let _ = {
-                                    let mut gate_guard = try_lock(&gate_clone)
+                                    let mut gate_guard = try_lock(&gate_clone, "divergence gate")
                                         .expect("divergence gate mutex should lock");
                                     gate_guard.respond_quarantine(
                                         format!("concurrent-partition-{}-{}", thread_id, attempt),
@@ -3325,7 +3350,7 @@ mod tests {
                             }
                             2 => {
                                 let _ = {
-                                    let mut gate_guard = try_lock(&gate_clone)
+                                    let mut gate_guard = try_lock(&gate_clone, "divergence gate")
                                         .expect("divergence gate mutex should lock");
                                     gate_guard.respond_alert(
                                         10000 + attempt,
@@ -3342,7 +3367,7 @@ mod tests {
                                     b"concurrent-key",
                                 );
                                 let _ = {
-                                    let mut gate_guard = try_lock(&gate_clone)
+                                    let mut gate_guard = try_lock(&gate_clone, "divergence gate")
                                         .expect("divergence gate mutex should lock");
                                     gate_guard.respond_recover(
                                         &auth,
@@ -3385,7 +3410,7 @@ mod tests {
                         let kind = &mutation_kinds[memory_iteration % mutation_kinds.len()];
                         let _ = {
                             let mut gate_guard =
-                                try_lock(&gate_clone).expect("divergence gate mutex should lock");
+                                try_lock(&gate_clone, "divergence gate").expect("divergence gate mutex should lock");
                             gate_guard.check_mutation(
                                 kind,
                                 11000 + memory_iteration as u64,
@@ -3405,7 +3430,7 @@ mod tests {
         }
 
         // Verify final state consistency after concurrent attacks
-        let final_gate = try_lock(&gate).expect("divergence gate mutex should lock");
+        let final_gate = try_lock(&gate, "divergence gate").expect("divergence gate mutex should lock");
 
         // Verify capacity constraints were maintained
         assert!(
@@ -3804,10 +3829,13 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("crypto-timing-test");
 
         // Test 1: Hash manipulation and collision resistance attacks
+        let long_hash_input = "a".repeat(10000);
+        let all_zeros_hash = "0".repeat(64);
+        let all_ones_hash = "f".repeat(64);
         let hash_manipulation_attacks = vec![
             // Hash length attacks
             ("short_hash", "abc123"),
-            ("long_hash", "a".repeat(10000)),
+            ("long_hash", long_hash_input.as_str()),
             ("empty_hash", ""),
             // Hash format attacks
             ("non_hex_hash", "gghhiijjkkll"),
@@ -3821,8 +3849,8 @@ mod tests {
             ("control_chars", "hash\x00\r\n\tcontrol"),
             ("bidi_override", "hash\u{202E}spoofed\u{202D}"),
             // Hash with special patterns
-            ("all_zeros", "0".repeat(64)),
-            ("all_ones", "f".repeat(64)),
+            ("all_zeros", all_zeros_hash.as_str()),
+            ("all_ones", all_ones_hash.as_str()),
             ("alternating", "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"),
         ];
 
@@ -3859,11 +3887,13 @@ mod tests {
         }
 
         // Test 2: Authorization signature timing attacks
+        let correct_length_sig = "a".repeat(64);
+        let long_sig_input = "a".repeat(128);
         let signature_timing_attacks = vec![
             // Signature length variations
             ("short_sig", "abc"),
-            ("correct_length", "a".repeat(64)),
-            ("long_sig", "a".repeat(128)),
+            ("correct_length", correct_length_sig.as_str()),
+            ("long_sig", long_sig_input.as_str()),
             // Signature with timing-sensitive patterns
             (
                 "early_diff",
@@ -3923,14 +3953,17 @@ mod tests {
         }
 
         // Test 3: State hash computation and manipulation attacks
+        let medium_state_input = "state".repeat(100);
+        let long_state_input = "state".repeat(10000);
+        let binary_state_input = String::from_utf8_lossy(&[0xFF; 1000]).into_owned();
         let state_hash_attacks = vec![
             // Input variations that could cause timing differences
             ("empty_state", ""),
             ("short_state", "a"),
-            ("medium_state", "state".repeat(100)),
-            ("long_state", "state".repeat(10000)),
+            ("medium_state", medium_state_input.as_str()),
+            ("long_state", long_state_input.as_str()),
             ("unicode_state", "état🔒secure"),
-            ("binary_state", String::from_utf8_lossy(&[0xFF; 1000])),
+            ("binary_state", binary_state_input.as_str()),
             ("null_state", "state\x00hidden"),
             ("newline_state", "state\r\ninjection"),
         ];
@@ -4118,7 +4151,7 @@ mod tests {
 
     #[test]
     fn update_len_prefixed_text_uses_safe_length_casting() {
-        use sha2::Sha256;
+        use sha2::{Digest, Sha256};
 
         // Test that update_len_prefixed_text uses u128::try_from instead of direct casting
         let mut hasher = Sha256::new();

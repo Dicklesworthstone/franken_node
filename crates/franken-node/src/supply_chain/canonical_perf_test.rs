@@ -1,6 +1,6 @@
 //! Manual performance test for canonical encoding optimization
 
-use super::trust_card::canonicalize_value;
+use super::trust_card::to_canonical_json;
 use serde_json::{Map, Value};
 use std::time::{Duration, Instant};
 
@@ -53,7 +53,7 @@ fn generate_complex_trust_card() -> Value {
 
 #[cfg(test)]
 mod perf_tests {
-    use super::{canonicalize_value, generate_complex_trust_card};
+    use super::{generate_complex_trust_card, to_canonical_json};
 
     #[test]
     fn manual_performance_comparison() {
@@ -62,13 +62,13 @@ mod perf_tests {
 
         // Warm up
         for _ in 0..10 {
-            let _ = canonicalize_value(test_data.clone());
+            let _ = to_canonical_json(&test_data);
         }
 
         // Measure current implementation
         let start = Instant::now();
         for _ in 0..iterations {
-            let _ = canonicalize_value(test_data.clone());
+            let _ = to_canonical_json(&test_data);
         }
         let duration = start.elapsed();
 
@@ -86,8 +86,7 @@ mod perf_tests {
         // Test with serialization (full pipeline)
         let start = Instant::now();
         for _ in 0..iterations {
-            let canonical = canonicalize_value(test_data.clone());
-            let _ = serde_json::to_string(&canonical).unwrap();
+            let _ = to_canonical_json(&test_data).unwrap();
         }
         let duration_full = start.elapsed();
 
@@ -107,8 +106,7 @@ mod perf_tests {
         println!("Test data size: {} bytes", json_size);
 
         // Verify correctness
-        let canonical = canonicalize_value(test_data.clone());
-        let canonical_json = serde_json::to_string(&canonical).unwrap();
+        let canonical_json = to_canonical_json(&test_data).expect("canonical json");
 
         // Basic correctness check - object keys should be sorted
         assert!(canonical_json.contains(r#""capability_declarations":"#));

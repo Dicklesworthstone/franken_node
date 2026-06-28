@@ -1526,7 +1526,7 @@ mod tests {
                 category: CampaignCategory::PolicyEvasion,
                 version: "1.0.0".to_string(),
                 title: format!("Unicode attack test {}", i),
-                attack_vector: attack_vector.clone(),
+                attack_vector: attack_vector.to_string(),
                 target_component: "unicode_processor".to_string(),
                 expected_defense: "Unicode normalization should prevent bypass".to_string(),
                 severity: CampaignSeverity::Medium,
@@ -1584,9 +1584,9 @@ mod tests {
                 campaign_id: format!("CAMP-CONTROL-{:03}", i),
                 category: CampaignCategory::CredentialExfiltration,
                 version: "1.0.0".to_string(),
-                title: input.clone(),
+                title: input.to_string(),
                 attack_vector: format!("Control char test: {}", input),
-                target_component: input.clone(),
+                target_component: input.to_string(),
                 expected_defense: format!("Should handle: {}", input),
                 severity: CampaignSeverity::Low,
                 success_criteria: SuccessCriteria {
@@ -1598,13 +1598,13 @@ mod tests {
                     let mut payload = BTreeMap::new();
                     payload.insert(
                         "control_test".to_string(),
-                        serde_json::Value::String(input.clone()),
+                        serde_json::Value::String(input.to_string()),
                     );
                     payload
                 },
                 mutations_applied: Vec::new(),
-                parent_campaign_id: Some(input.clone()),
-                created_at: input.clone(),
+                parent_campaign_id: Some(input.to_string()),
+                created_at: input.to_string(),
             };
 
             // Should handle control characters without corruption
@@ -1817,14 +1817,14 @@ mod tests {
     #[test]
     fn negative_defense_decision_component_boundary_testing() {
         let boundary_components = vec![
-            "",                       // Empty component
-            "x".repeat(10000),        // Massive component name
-            "component\0null",        // Null byte
-            "comp\r\nonent",          // Line break
-            "🔥component🔥",          // Unicode emoji
-            "component.with.dots",    // Dot notation
-            "component/with/slashes", // Path-like
-            "component:with:colons",  // Colon separated
+            "".to_string(),                       // Empty component
+            "x".repeat(10000),                    // Massive component name
+            "component\0null".to_string(),        // Null byte
+            "comp\r\nonent".to_string(),          // Line break
+            "🔥component🔥".to_string(),          // Unicode emoji
+            "component.with.dots".to_string(),    // Dot notation
+            "component/with/slashes".to_string(), // Path-like
+            "component:with:colons".to_string(),  // Colon separated
         ];
 
         for (i, component) in boundary_components.iter().enumerate() {

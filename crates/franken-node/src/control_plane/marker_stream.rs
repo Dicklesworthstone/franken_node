@@ -675,6 +675,9 @@ mod tests {
         MarkerStreamError, find_divergence_point, len_to_u64,
     };
     use crate::security::constant_time;
+    // bd-yom8c: nested test mod does not inherit the file-level `use sha2::Digest`;
+    // re-import so `sha2::Sha256::new()` (a Digest trait fn) resolves.
+    use sha2::Digest;
 
     fn trace(n: u32) -> String {
         format!("trace-{n:04}")

@@ -570,10 +570,9 @@ mod federation_root_negative_tests {
         assert!(!audit_entries.is_empty());
         assert!(
             audit_entries[0]
-                .notes
-                .as_ref()
-                .unwrap_or(&"".to_string())
-                .contains('\u{202E}')
+                .weights
+                .iter()
+                .any(|w| w.participant_id.contains('\u{202E}'))
         );
     }
 
@@ -719,9 +718,8 @@ mod federation_root_negative_tests {
         let audit_entries = reciprocity.audit_log();
         assert!(!audit_entries.is_empty());
         for entry in audit_entries {
-            if let Some(notes) = &entry.notes {
-                assert!(notes.len() < 50_000); // Reasonable bound on log entry size
-            }
+            // Reasonable bound on log entry size despite large input
+            assert!(entry.decision.reason.len() < 50_000);
         }
     }
 
@@ -817,9 +815,9 @@ mod federation_root_negative_tests {
         assert!(!final_log.is_empty());
         // All audit entries should have valid structure
         for entry in final_log {
-            assert!(!entry.session_id.is_empty());
+            assert!(!entry.entry_id.is_empty());
             assert!(!entry.participant_id.is_empty());
-            assert!(entry.event_code >= 0);
+            assert!(!entry.event_code.is_empty());
         }
     }
 }

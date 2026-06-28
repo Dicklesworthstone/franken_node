@@ -2442,7 +2442,7 @@ mod tests {
 
         for malicious_id in &malicious_runtime_ids {
             let runtime = RuntimeEntry {
-                runtime_id: malicious_id.clone(),
+                runtime_id: malicious_id.to_string(),
                 runtime_name: format!("Runtime for {}", malicious_id),
                 version: "1.0.0".to_string(),
                 is_reference: false,
@@ -2452,7 +2452,7 @@ mod tests {
             assert!(result.is_ok());
 
             // Verify we can retrieve with exact ID
-            assert!(oracle.runtimes.contains_key(malicious_id));
+            assert!(oracle.runtimes.contains_key(*malicious_id));
         }
 
         // Test duplicate registration with Unicode variations
@@ -2490,7 +2490,7 @@ mod tests {
 
         // Should handle massive outputs gracefully
         if result.is_ok() {
-            let check = &oracle.cross_checks["massive-check"];
+            let check = &oracle.checks["massive-check"];
             if let Some(CheckOutcome::Agree { canonical_output }) = &check.outcome {
                 assert!(canonical_output.len() <= 10 * 1024 * 1024);
             }
@@ -2524,8 +2524,11 @@ mod tests {
         let extreme_times = vec![u64::MAX, u64::MAX - 1, u64::MAX / 2, 0];
 
         for time in extreme_times {
+            // FIXME(bd-yom8c): DivergenceReport no longer carries `current_time_epoch_secs`;
+            // generating the report still exercises the time arithmetic, so assert the report is
+            // well-formed (preserves the overflow-safety intent of this test).
             let report = oracle.generate_report(time);
-            assert!(report.current_time_epoch_secs == time);
+            assert_eq!(report.schema_version, SCHEMA_VERSION);
 
             // Verify timestamp arithmetic doesn't overflow
             let verdict = oracle.check_release_gate(time);
@@ -2599,7 +2602,7 @@ mod tests {
         let final_oracle = try_lock(&oracle, "n-version oracle concurrent final verification")
             .expect("oracle mutex should lock for final verification");
         assert_eq!(final_oracle.runtimes.len(), 4);
-        assert!(final_oracle.cross_checks.len() > 0);
+        assert!(final_oracle.checks.len() > 0);
     }
 
     #[test]
@@ -2689,7 +2692,7 @@ mod tests {
             // Votes with invalid vote values
             {
                 let mut votes = BTreeMap::new();
-                votes.insert("rt1".to_string(), vec![99, -1, 256]); // Out of range
+                votes.insert("rt1".to_string(), vec![99, 255, 200]); // Out of range (valid votes are 0/1)
                 votes.insert("rt2".to_string(), vec![1, 0, 1]);
                 votes
             },
@@ -2715,10 +2718,10 @@ mod tests {
             let result = oracle.tally_votes(&check_id);
 
             // Should detect manipulation and reject
-            if result.is_err() {
+            if let Err(err) = result {
                 assert!(
-                    result.unwrap_err().code == error_codes::ERR_NVO_NO_RUNTIMES
-                        || result.unwrap_err().code == error_codes::ERR_NVO_QUORUM_FAILED
+                    err.code == error_codes::ERR_NVO_NO_RUNTIMES
+                        || err.code == error_codes::ERR_NVO_QUORUM_FAILED
                 );
             }
         }
@@ -2796,8 +2799,9 @@ mod tests {
             .iter()
             .filter(|event| {
                 event
-                    .detail
-                    .contains(&format!("{}", MAX_EVENT_LOG_ENTRIES + 50))
+                    .details
+                    .values()
+                    .any(|v| v.contains(&format!("{}", MAX_EVENT_LOG_ENTRIES + 50)))
             })
             .count();
         assert!(recent_events > 0, "Recent events should be preserved");

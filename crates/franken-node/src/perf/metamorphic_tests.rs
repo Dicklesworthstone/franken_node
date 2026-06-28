@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::optimization_governor::*;
+    use crate::perf::optimization_governor::*;
     use proptest::prelude::*;
 
     // Helper to generate valid optimization proposals

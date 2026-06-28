@@ -1184,6 +1184,10 @@ mod tests {
         let state = sample_state();
         let handle = std::thread::spawn({
             let path = path.clone();
+            // Clone into the thread so the original `state` remains available for
+            // the post-join equality assertion below (the `move` closure would
+            // otherwise consume it — E0382).
+            let state = state.clone();
             move || {
                 started_tx.send(()).expect("signal persist started");
                 persist(&state, &path)

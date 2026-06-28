@@ -3477,7 +3477,7 @@ mod tests {
             ("record", b"anti_entropy_record_v1:".to_vec()),
         ];
 
-        let mut digests = Vec::new();
+        let mut digests: Vec<[u8; 32]> = Vec::new();
         for (i, (id, payload)) in collision_attempts.iter().enumerate() {
             let record = TrustRecord {
                 id: id.to_string(),
@@ -3508,7 +3508,7 @@ mod tests {
     fn negative_trust_state_capacity_boundary_enforcement() {
         // Test trust state behavior at and beyond MAX_TRUST_RECORDS capacity
         let mut state = TrustState::new(1);
-        let mut successful_inserts = 0;
+        let mut successful_inserts = 0u32;
 
         // Fill state beyond maximum capacity
         for i in 0..(MAX_TRUST_RECORDS + 100) {

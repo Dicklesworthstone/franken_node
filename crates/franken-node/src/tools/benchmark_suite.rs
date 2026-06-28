@@ -3591,17 +3591,18 @@ mod tests {
     #[test]
     fn negative_default_scoring_with_problematic_scenario_names() {
         // Test default_scoring with various problematic input strings
+        let long_name = "very_".to_string() + &"long_".repeat(1000) + "scenario";
         let problematic_names = vec![
-            "",                                                       // Empty string
-            "   ",                                                    // Whitespace only
-            "\0null_terminated",                                      // Null byte
-            "scenario\nwith\nnewlines",                               // Multiline
-            "🚀emoji_scenario🔥",                                     // Unicode emoji
-            "\u{FFFF}max_unicode",                                    // Max BMP character
-            "very_".to_string() + &"long_".repeat(1000) + "scenario", // Very long name
-            "../../../etc/passwd",                                    // Path traversal
-            "<script>alert('xss')</script>",                          // XSS attempt
-            "{\"json\": \"injection\"}",                              // JSON injection
+            "",                             // Empty string
+            "   ",                          // Whitespace only
+            "\0null_terminated",            // Null byte
+            "scenario\nwith\nnewlines",     // Multiline
+            "🚀emoji_scenario🔥",           // Unicode emoji
+            "\u{FFFF}max_unicode",          // Max BMP character
+            long_name.as_str(),             // Very long name
+            "../../../etc/passwd",          // Path traversal
+            "<script>alert('xss')</script>", // XSS attempt
+            "{\"json\": \"injection\"}",    // JSON injection
         ];
 
         for name in problematic_names {
@@ -3659,23 +3660,23 @@ mod tests {
         let problematic_profiles = vec![
             HardwareProfile {
                 cpu: "\0Intel\x01Core\x7fi7".to_string(),
-                memory_gb: 32,
-                disk_type: "control\nchars".to_string(),
+                memory_mb: 32,
+                os: "control\nchars".to_string(),
             },
             HardwareProfile {
                 cpu: "🚀Quantum🔥Processor💀".to_string(),
-                memory_gb: 128,
-                disk_type: "\u{FFFF}\u{10FFFF}".to_string(),
+                memory_mb: 128,
+                os: "\u{FFFF}\u{10FFFF}".to_string(),
             },
             HardwareProfile {
-                cpu: "".to_string(),          // Empty CPU
-                memory_gb: 0,                 // Zero memory
-                disk_type: "   ".to_string(), // Whitespace disk type
+                cpu: "".to_string(),  // Empty CPU
+                memory_mb: 0,         // Zero memory
+                os: "   ".to_string(), // Whitespace os
             },
             HardwareProfile {
                 cpu: "../../../proc/cpuinfo".to_string(), // Path traversal
-                memory_gb: u32::MAX,                      // Maximum memory
-                disk_type: "<script>alert('hardware')</script>".to_string(), // XSS
+                memory_mb: u64::from(u32::MAX),           // Maximum memory
+                os: "<script>alert('hardware')</script>".to_string(), // XSS
             },
         ];
 
@@ -3690,8 +3691,8 @@ mod tests {
                 match deserialized {
                     Ok(restored) => {
                         assert_eq!(restored.cpu, profile.cpu);
-                        assert_eq!(restored.memory_gb, profile.memory_gb);
-                        assert_eq!(restored.disk_type, profile.disk_type);
+                        assert_eq!(restored.memory_mb, profile.memory_mb);
+                        assert_eq!(restored.os, profile.os);
                     }
                     Err(_) => {
                         // Some characters might not survive JSON round-trip, which is acceptable

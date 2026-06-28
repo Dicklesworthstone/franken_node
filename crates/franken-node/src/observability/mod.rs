@@ -675,6 +675,7 @@ mod tests {
                 }),
                 size_bytes: usize::MAX, // Maximum size hint
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             // Control character injection attack
             EvidenceEntry {
@@ -689,6 +690,7 @@ mod tests {
                 payload: serde_json::json!("\x00\x01\x02\x03binary-payload"),
                 size_bytes: 0, // Under-reported size hint
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
             // Unicode normalization attack
             EvidenceEntry {
@@ -703,6 +705,7 @@ mod tests {
                 payload: serde_json::json!({"unicode": "mixed\u{0301}"}),
                 size_bytes: 1024,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             },
         ];
 
@@ -765,6 +768,8 @@ mod tests {
         let mut strict_validator = WitnessValidator::strict();
 
         // Locator injection attack vectors targeting resource access
+        let long_path_locator = format!("file:///{}", "A".repeat(10_000));
+        let long_hostname_locator = format!("http://{}.com/witness.json", "x".repeat(1000));
         let locator_injection_attacks = [
             // File system traversal attacks
             ("file:///../../../etc/passwd", "Path traversal to passwd"),
@@ -801,11 +806,8 @@ mod tests {
             ),
             ("file:///tmp/witnesѕ.jsonl", "Cyrillic character spoofing"),
             // Buffer overflow attempts
-            ("file:///" + &"A".repeat(10_000), "Extremely long path"),
-            (
-                "http://".to_string() + &"x".repeat(1000) + ".com/witness.json",
-                "Long hostname",
-            ),
+            (long_path_locator.as_str(), "Extremely long path"),
+            (long_hostname_locator.as_str(), "Long hostname"),
             // Encoding bypass attempts
             (
                 "file:///%2e%2e%2f%2e%2e%2fetc%2fpasswd",
@@ -1094,6 +1096,7 @@ mod tests {
                 payload: serde_json::Value::Null,
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
 
             let witnesses = obs_single_witness_set(obs_witness(
@@ -1156,6 +1159,7 @@ mod tests {
                 payload: serde_json::Value::Null,
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
 
             if let Some(ref prev) = previous_entry {
@@ -1274,6 +1278,7 @@ mod tests {
                 payload: malicious_payload.clone(),
                 size_bytes: 1024,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
 
             let witnesses = obs_single_witness_set(obs_witness(
@@ -1338,6 +1343,7 @@ mod tests {
             payload: massive_payload,
             size_bytes: 1_000_000,
             signature: String::new(),
+            prev_entry_hash: String::new(),
         };
 
         let size_witnesses =
@@ -1445,7 +1451,7 @@ mod tests {
         let mut validator = WitnessValidator::strict();
 
         // Algorithmic complexity attack via pathological witness arrangements
-        let complexity_scenarios = [
+        let complexity_scenarios: [(&str, fn(u32) -> String); 4] = [
             ("Sequential IDs", |i| format!("witness-{:04}", i)),
             ("Reverse IDs", |i| format!("witness-{:04}", 9999 - i)),
             ("Hash-like IDs", |i| {

@@ -1751,9 +1751,11 @@ mod tests {
 
                 let entry = ReceiptChainEntry {
                     index: i,
+                    prev_chain_hash: format!("prev_massive_{i}"),
+                    receipt_hash: format!("rcpt_massive_{i}"),
                     chain_hash: "h".repeat(10_000_000), // 10MB chain hash
                     receipt,
-                    timestamp_millis: 1_702_000_000_000 + i,
+                    appended_at_millis: 1_702_000_000_000 + i,
                     trace_id: format!("trace_massive_{i}"),
                 };
                 massive_entries.push(entry);
@@ -2260,6 +2262,7 @@ mod tests {
             #[test]
             fn negative_proof_backend_with_malicious_name_injection_patterns() {
                 // Test proof backend names with various injection patterns
+                let extremely_long_name = format!("backend{}", "x".repeat(100000));
                 let malicious_backend_names = [
                     "backend\x00null_injection",
                     "backend\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html",
@@ -2274,7 +2277,7 @@ mod tests {
                     "",                              // Empty name
                     " ",                             // Whitespace only
                     "\t\n\r",                        // Control characters
-                    "backend" + &"x".repeat(100000), // Extremely long
+                    extremely_long_name.as_str(),    // Extremely long
                 ];
 
                 for malicious_name in malicious_backend_names {
@@ -2408,28 +2411,34 @@ mod tests {
                     // Pattern 1: Index overflow boundaries
                     ReceiptChainEntry {
                         index: u64::MAX,
+                        prev_chain_hash: "prev_max_index".to_string(),
+                        receipt_hash: "rcpt_max_index".to_string(),
                         chain_hash: "max_index_hash".to_string(),
                         receipt: receipt(ExecutionActionType::NetworkAccess, 0),
-                        timestamp_millis: u64::MAX,
+                        appended_at_millis: u64::MAX,
                         trace_id: "trace_max_index".to_string(),
                     },
                     // Pattern 2: Zero index
                     ReceiptChainEntry {
                         index: 0,
+                        prev_chain_hash: "".to_string(),
+                        receipt_hash: "".to_string(),
                         chain_hash: "".to_string(), // Empty hash
                         receipt: receipt(ExecutionActionType::SecretAccess, u64::MAX),
-                        timestamp_millis: 0,
+                        appended_at_millis: 0,
                         trace_id: "".to_string(), // Empty trace
                     },
                     // Pattern 3: Binary data in hash
                     ReceiptChainEntry {
                         index: u64::MAX / 2,
+                        prev_chain_hash: "prev_binary".to_string(),
+                        receipt_hash: "rcpt_binary".to_string(),
                         chain_hash: String::from_utf8_lossy(&[
                             0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD, 0xFC,
                         ])
                         .to_string(),
-                        receipt: receipt(ExecutionActionType::PolicyQuery, 12345),
-                        timestamp_millis: u64::MAX / 2,
+                        receipt: receipt(ExecutionActionType::PolicyTransition, 12345),
+                        appended_at_millis: u64::MAX / 2,
                         trace_id: format!(
                             "trace{}binary{}",
                             '\0',
@@ -2439,9 +2448,11 @@ mod tests {
                     // Pattern 4: Unicode attacks in hash
                     ReceiptChainEntry {
                         index: 999999,
+                        prev_chain_hash: "prev_unicode".to_string(),
+                        receipt_hash: "rcpt_unicode".to_string(),
                         chain_hash: "hash\u{202E}rtl\u{202D}normal\u{FEFF}".to_string(),
-                        receipt: receipt(ExecutionActionType::RuntimeExit, 54321),
-                        timestamp_millis: 1_702_000_000_000,
+                        receipt: receipt(ExecutionActionType::ProcessSpawn, 54321),
+                        appended_at_millis: 1_702_000_000_000,
                         trace_id: "trace\u{200B}invisible\u{034F}".to_string(),
                     },
                 ];
@@ -2633,8 +2644,8 @@ mod tests {
                         start_index: 1000,
                         end_index: 999, // Invalid: end < start
                         entry_count: 0, // Inconsistent count
-                        aligned_checkpoint_id: Some("checkpoint\x00null".to_string()),
-                        tier: WorkloadTier::Low,
+                        aligned_checkpoint_id: Some(0),
+                        tier: WorkloadTier::Background,
                         created_at_millis: 0,
                         trace_id: "trace_inverted".to_string(),
                     },
@@ -2643,9 +2654,9 @@ mod tests {
                         window_id: "overflow_mismatch".to_string(),
                         start_index: 0,
                         end_index: 3,
-                        entry_count: usize::MAX, // Doesn't match actual range
-                        aligned_checkpoint_id: Some("".to_string()), // Empty checkpoint
-                        tier: WorkloadTier::Medium,
+                        entry_count: u64::MAX, // Doesn't match actual range
+                        aligned_checkpoint_id: Some(0), // Empty checkpoint
+                        tier: WorkloadTier::Standard,
                         created_at_millis: u64::MAX / 2,
                         trace_id: "trace\u{202E}unicode\u{202D}".to_string(),
                     },
@@ -2730,9 +2741,11 @@ mod tests {
                     vec![
                         ReceiptChainEntry {
                             index: 0,
+                            prev_chain_hash: "identical_prev".to_string(),
+                            receipt_hash: "identical_rcpt".to_string(),
                             chain_hash: "identical".to_string(),
                             receipt: receipt(ExecutionActionType::NetworkAccess, 0),
-                            timestamp_millis: 1_702_000_000_000,
+                            appended_at_millis: 1_702_000_000_000,
                             trace_id: "identical".to_string(),
                         };
                         100
@@ -2741,9 +2754,11 @@ mod tests {
                     (0..50)
                         .map(|i| ReceiptChainEntry {
                             index: i,
+                            prev_chain_hash: format!("prev_{:02}", i % 10),
+                            receipt_hash: format!("rcpt_{:02}", i % 10),
                             chain_hash: format!("pattern_{:02}", i % 10), // Limited variation
-                            receipt: receipt(ExecutionActionType::PolicyQuery, i),
-                            timestamp_millis: 1_702_000_000_000 + i,
+                            receipt: receipt(ExecutionActionType::PolicyTransition, i),
+                            appended_at_millis: 1_702_000_000_000 + i,
                             trace_id: format!("trace_{:02}", i % 5), // Limited variation
                         })
                         .collect(),
@@ -2751,9 +2766,11 @@ mod tests {
                     (0..10)
                         .map(|i| ReceiptChainEntry {
                             index: i,
+                            prev_chain_hash: format!("prev_{:08b}", i),
+                            receipt_hash: format!("rcpt_{:08b}", i),
                             chain_hash: format!("{:08b}", i).repeat(100), // Binary patterns
                             receipt: receipt(ExecutionActionType::SecretAccess, i),
-                            timestamp_millis: 1_702_000_000_000 + i,
+                            appended_at_millis: 1_702_000_000_000 + i,
                             trace_id: format!("binary_{:08b}", i),
                         })
                         .collect(),
@@ -3068,7 +3085,7 @@ mod tests {
                 for (i, malicious_trace) in malicious_trace_ids.iter().enumerate() {
                     let mut window = sample_window();
                     window.window_id = format!("unicode_test_{}", i);
-                    window.trace_id = malicious_trace.clone();
+                    window.trace_id = malicious_trace.to_string();
 
                     let result = generator.submit_request(
                         &window,
@@ -3198,7 +3215,7 @@ mod tests {
                     // Attempt 1: Modify proof data but keep hash
                     {
                         let mut tampered = legitimate_proof.clone();
-                        tampered.proof_data = "tampered_data".to_string();
+                        tampered.proof_data = b"tampered_data".to_vec();
                         tampered
                     },
                     // Attempt 2: Modify hash but keep proof data
@@ -3260,13 +3277,15 @@ mod tests {
 
                 // Test with completely fabricated proof
                 let fabricated_proof = ComplianceProof {
+                    proof_id: "fabricated_proof_id".to_string(),
                     format_version: PROOF_FORMAT_VERSION.to_string(),
                     backend_name: "test".to_string(),
                     receipt_window_ref: "fabricated_window".to_string(),
                     generated_at_millis: 1_702_000_000_000,
-                    proof_data: "fabricated_proof_data".to_string(),
+                    proof_data: b"fabricated_proof_data".to_vec(),
                     proof_data_hash: "sha256:fabricated_hash".to_string(),
                     metadata: BTreeMap::new(),
+                    trace_id: "trace_fabricated".to_string(),
                 };
 
                 let fabricated_verification = backend.verify(&fabricated_proof, &entries);
@@ -3478,7 +3497,7 @@ mod tests {
                     let requests = generator.requests();
                     if let Some(request_state) = requests.get(request_id) {
                         // Verify timestamp preservation
-                        assert_eq!(request_state.request.created_at_millis, *original_timestamp);
+                        assert_eq!(request_state.created_at_millis, *original_timestamp);
 
                         // Verify timeout calculation safety
                         let timeout_at = original_timestamp.saturating_add(60_000);

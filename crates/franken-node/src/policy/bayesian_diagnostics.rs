@@ -1563,9 +1563,9 @@ mod tests {
             let deserialized: DiagnosticConfidence = serde_json::from_str(&serialized).unwrap();
             assert_eq!(confidence, deserialized);
 
-            // Should be orderable
-            let ordering = confidence.cmp(&confidence);
-            assert_eq!(ordering, std::cmp::Ordering::Equal);
+            // Equality is reflexive (Ord was removed from DiagnosticConfidence; Eq-only now).
+            let same = confidence;
+            assert_eq!(confidence, same);
         }
 
         // Test deserialization with invalid enum values
@@ -2130,7 +2130,7 @@ mod tests {
             }
 
             // Should handle all epoch boundaries gracefully
-            assert_eq!(diagnostics.total_observations(), epoch_boundaries.len() * 2);
+            assert_eq!(diagnostics.total_observations(), epoch_boundaries.len() as u64 * 2);
 
             let ranked = diagnostics.rank_candidates(&candidates, &[]);
             assert_eq!(ranked.len(), 2);

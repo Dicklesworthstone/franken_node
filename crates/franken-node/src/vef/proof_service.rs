@@ -1080,7 +1080,7 @@ mod tests {
     use super::super::connector::vef_execution_receipt::{
         ExecutionActionType, ExecutionReceipt, RECEIPT_SCHEMA_VERSION,
     };
-    use super::super::proof_scheduler::{SchedulerPolicy, VefProofScheduler};
+    use super::super::proof_scheduler::{ProofJobStatus, SchedulerPolicy, VefProofScheduler};
     use super::super::receipt_chain::{ReceiptChain, ReceiptChainConfig};
     use super::*;
     use crate::runtime::effect_receipt::{EffectKind, EffectReceipt};
@@ -1828,24 +1828,33 @@ mod tests {
                 window_id: "extreme-1".to_string(),
                 start_index: u64::MAX - 100,
                 end_index: u64::MAX - 50,
-                tier: WorkloadTier::Emergency,
+                entry_count: 51,
                 aligned_checkpoint_id: None,
+                tier: WorkloadTier::Critical,
+                created_at_millis: 1_705_000_000_000,
+                trace_id: "trace-overflow".to_string(),
             },
             // Adjacent to max value
             ProofWindow {
                 window_id: "extreme-2".to_string(),
                 start_index: u64::MAX - 1,
                 end_index: u64::MAX,
-                tier: WorkloadTier::Emergency,
+                entry_count: 2,
                 aligned_checkpoint_id: None,
+                tier: WorkloadTier::Critical,
+                created_at_millis: 1_705_000_000_000,
+                trace_id: "trace-overflow".to_string(),
             },
             // Zero range but potentially problematic
             ProofWindow {
                 window_id: "extreme-3".to_string(),
                 start_index: u64::MAX,
                 end_index: u64::MAX,
-                tier: WorkloadTier::Emergency,
+                entry_count: 1,
                 aligned_checkpoint_id: None,
+                tier: WorkloadTier::Critical,
+                created_at_millis: 1_705_000_000_000,
+                trace_id: "trace-overflow".to_string(),
             },
         ];
 
@@ -1854,9 +1863,15 @@ mod tests {
                 job_id: format!("job-{}", window.window_id),
                 window_id: window.window_id.clone(),
                 tier: window.tier,
-                trace_id: "trace-overflow".to_string(),
-                queued_at_millis: 1_705_000_000_000,
+                priority_score: window.tier.priority_score(),
                 deadline_millis: 1_705_000_100_000,
+                estimated_compute_millis: 1_000,
+                estimated_memory_mib: 256,
+                status: ProofJobStatus::Pending,
+                created_at_millis: 1_705_000_000_000,
+                dispatched_at_millis: None,
+                completed_at_millis: None,
+                trace_id: "trace-overflow".to_string(),
             };
 
             // This should fail gracefully due to no matching entries, not due to arithmetic overflow
@@ -1956,6 +1971,7 @@ mod tests {
         let (mut input, window, job) = sample_request();
 
         // Test with various problematic hash formats that could cause unicode issues
+        let long_repeated_hash = "sha256:0123456789abcdef".repeat(10);
         let problematic_hashes = vec![
             // Unicode in hex position (invalid but test boundary behavior)
             "sha256:🔒bcdefghijklmnopqrstuvwxyz1234567890abcdef1234567890abcdef12345",
@@ -1964,7 +1980,7 @@ mod tests {
             // Truncated hash
             "sha256:abc123",
             // Extra long hash-like string
-            "sha256:0123456789abcdef".repeat(10),
+            long_repeated_hash.as_str(),
             // Hash with emoji in prefix area (first 16 chars after sha256:)
             "sha256:🚨🔥💀☠️🚨🔥💀☠️abcdef1234567890abcdef1234567890abcdef",
             // Null bytes in hash area
@@ -2033,7 +2049,7 @@ mod tests {
             // Very long schema string
             "wrong-schema".repeat(1000),
             // Schema with unicode characters
-            "vef-proof-service-v1-🔒-extended",
+            "vef-proof-service-v1-🔒-extended".to_string(),
         ];
 
         for test_schema in schema_variants {

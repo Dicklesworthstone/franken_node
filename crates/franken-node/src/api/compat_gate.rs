@@ -2999,6 +2999,8 @@ mod compat_gate_malformed_payload_tests {
             .unwrap();
 
         // Test various injection patterns in request fields
+        // Hoist the Regex-DoS String so the vec stays homogeneous `Vec<&str>`.
+        let regex_dos_pattern = "pkg".to_string() + &"a?".repeat(10000) + &"a".repeat(10000);
         let injection_patterns = vec![
             // LDAP injection
             "pkg*)(uid=*",
@@ -3025,7 +3027,7 @@ mod compat_gate_malformed_payload_tests {
             "pkg\": {\"evil\": true}, \"dummy\": \"",
             "pkg\\n---\\nevil: true",
             // Regex DoS patterns
-            "pkg" + &"a?".repeat(10000) + "a".repeat(10000),
+            regex_dos_pattern.as_str(),
             // Unicode attacks
             "\u{202E}reverse\u{202D}normal", // BiDi override
             "\u{FEFF}bom",                   // Byte Order Mark

@@ -2380,7 +2380,7 @@ mod hardware_planner_comprehensive_negative_tests {
                     // Should handle Unicode patterns and extreme values correctly
                     let profile = profile_result.expect("Should accept valid risk levels");
                     assert_eq!(profile.profile_id, profile_id);
-                    assert_eq!(profile.description, description);
+                    assert_eq!(profile.name, description);
                     assert_eq!(profile.risk_level, risk);
                     assert_eq!(profile.total_slots, slots);
                     assert_eq!(profile.used_slots, 0);
@@ -2401,14 +2401,15 @@ mod hardware_planner_comprehensive_negative_tests {
         let massive_capabilities: BTreeSet<String> =
             (0..10000).map(|i| format!("capability_{:06}", i)).collect();
 
-        let policy = PlacementPolicy {
-            policy_id: "massive_policy".to_string(),
-            description: "Policy with massive capability requirements".to_string(),
-            max_risk: 50,
-            required_capabilities: massive_capabilities.clone(),
-            preferred_capabilities: caps(&["preferred_1", "preferred_2"]),
-            schema_version: SCHEMA_VERSION.to_string(),
-        };
+        let mut policy = PlacementPolicy::new(
+            "massive_policy",
+            "Policy with massive capability requirements",
+            50,
+        );
+        // Capabilities now live on WorkloadRequest, not PlacementPolicy. Map the
+        // massive required-capability collection onto the current policy's
+        // required_metadata_keys so the test still exercises a massive on-policy set.
+        policy.required_metadata_keys = massive_capabilities.clone();
 
         // Should handle large policies without memory exhaustion
         let register_result = planner.register_policy(policy.clone(), 1000, "trace-massive");
@@ -2423,11 +2424,12 @@ mod hardware_planner_comprehensive_negative_tests {
 
         let profile = HardwareProfile {
             profile_id: "hw-massive".to_string(),
-            description: "Hardware with massive capabilities".to_string(),
+            name: "Hardware with massive capabilities".to_string(),
             capabilities: subset_capabilities,
             risk_level: 25,
             total_slots: 100,
             used_slots: 0,
+            metadata: BTreeMap::new(),
             schema_version: SCHEMA_VERSION.to_string(),
         };
 
@@ -2655,19 +2657,13 @@ mod hardware_planner_comprehensive_negative_tests {
             .unwrap();
 
         // Register policy with malformed characteristics
-        let malformed_policy = PlacementPolicy {
-            policy_id: "policy\r\n\tmalformed".to_string(),
-            description: "\u{202E}Malformed\x00policy\u{200B}description".to_string(),
-            max_risk: MAX_RISK_LEVEL,
-            required_capabilities: caps(&[
-                "normal_cap",
-                "", // Empty (should be filtered)
-                "cap\x00with\nnull",
-                "🚀emoji_capability",
-            ]),
-            preferred_capabilities: caps(&["\u{FEFF}preferred_with_bom", "preferred\ttab"]),
-            schema_version: SCHEMA_VERSION.to_string(),
-        };
+        // Capabilities/preferences moved off PlacementPolicy onto WorkloadRequest;
+        // the policy still carries the malformed id/description under test.
+        let malformed_policy = PlacementPolicy::new(
+            "policy\r\n\tmalformed",
+            "\u{202E}Malformed\x00policy\u{200B}description",
+            MAX_RISK_LEVEL,
+        );
 
         planner
             .register_policy(malformed_policy, 1001, "trace-malformed-policy")
@@ -2696,8 +2692,17 @@ mod hardware_planner_comprehensive_negative_tests {
         // Evidence should be generated despite malformed inputs
         let evidence = placement_result.unwrap();
         assert_eq!(evidence.workload_id, extreme_workload.workload_id);
-        assert_eq!(evidence.policy_id, extreme_workload.policy_id);
-        assert_eq!(evidence.trace_id, extreme_workload.trace_id);
+        // policy_id now lives on the decision's PolicyEvidence chain.
+        assert_eq!(evidence.evidence.policy_id, extreme_workload.policy_id);
+        // The decision no longer carries trace_id directly; the trace is preserved
+        // in the audit log (HWP-003 placement-requested event).
+        assert!(
+            planner
+                .audit_log()
+                .iter()
+                .any(|e| e.trace_id == extreme_workload.trace_id),
+            "trace_id should be preserved in the audit log"
+        );
 
         // Schema version should be preserved
         assert_eq!(evidence.schema_version, SCHEMA_VERSION);
@@ -2752,14 +2757,13 @@ mod hardware_planner_comprehensive_negative_tests {
             .unwrap();
 
         // Create policy that requires specific capabilities and low risk
-        let strict_policy = PlacementPolicy {
-            policy_id: "strict_fallback".to_string(),
-            description: "Strict policy for fallback testing".to_string(),
-            max_risk: 30,
-            required_capabilities: caps(&["gpu", "compute"]),
-            preferred_capabilities: caps(&["high_performance"]),
-            schema_version: SCHEMA_VERSION.to_string(),
-        };
+        // Required capabilities are matched via the WorkloadRequest below; the
+        // policy carries the risk tolerance (max_risk_tolerance) under test.
+        let strict_policy = PlacementPolicy::new(
+            "strict_fallback",
+            "Strict policy for fallback testing",
+            30,
+        );
 
         planner
             .register_policy(strict_policy, 1002, "trace-strict-policy")
@@ -2780,7 +2784,7 @@ mod hardware_planner_comprehensive_negative_tests {
 
         let evidence = placement_result.unwrap();
         assert_eq!(
-            evidence.selected_profile_id,
+            evidence.target_profile_id,
             Some("hw-valid-fallback".to_string())
         );
 
@@ -2848,15 +2852,15 @@ mod hardware_planner_comprehensive_negative_tests {
 
         // Audit trail should be bounded to prevent memory exhaustion
         assert!(
-            planner.audit_trail.len() <= MAX_AUDIT_LOG_ENTRIES,
+            planner.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES,
             "Audit trail should be bounded"
         );
 
         // Latest events should be preserved
-        if !planner.audit_trail.is_empty() {
-            let latest_event = planner.audit_trail.last().unwrap();
+        if !planner.audit_log().is_empty() {
+            let latest_event = planner.audit_log().last().unwrap();
             assert!(
-                latest_event.timestamp >= 2000,
+                latest_event.timestamp_ms >= 2000,
                 "Latest events should be preserved"
             );
         }
@@ -2906,11 +2910,12 @@ mod hardware_planner_comprehensive_negative_tests {
         for (i, schema_version) in schema_test_cases.iter().enumerate() {
             let profile = HardwareProfile {
                 profile_id: format!("hw-schema-{}", i),
-                description: format!("Hardware with schema {}", i),
+                name: format!("Hardware with schema {}", i),
                 capabilities: caps(&["compute"]),
                 risk_level: 25,
                 total_slots: 10,
                 used_slots: 0,
+                metadata: BTreeMap::new(),
                 schema_version: schema_version.to_string(),
             };
 
@@ -2951,14 +2956,9 @@ mod hardware_planner_comprehensive_negative_tests {
         }
 
         // Test policy evidence generation with various schema patterns
-        let policy = PlacementPolicy {
-            policy_id: "schema_test_policy".to_string(),
-            description: "Policy for schema testing".to_string(),
-            max_risk: 50,
-            required_capabilities: caps(&["compute"]),
-            preferred_capabilities: BTreeSet::new(),
-            schema_version: "policy-v-test\u{200B}".to_string(), // Unicode zero-width space
-        };
+        let mut policy = PlacementPolicy::new("schema_test_policy", "Policy for schema testing", 50);
+        // Preserve the unicode/zero-width-space schema version exercised by this test.
+        policy.schema_version = "policy-v-test\u{200B}".to_string();
 
         planner
             .register_policy(policy, 2000, "trace-schema-policy")

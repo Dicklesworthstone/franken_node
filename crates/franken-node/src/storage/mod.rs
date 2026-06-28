@@ -68,13 +68,21 @@ mod negative_path_tests {
     #[test]
     fn duplicate_audit_write_does_not_increment_successful_writes() {
         let mut adapter = FrankensqliteAdapter::default();
-        adapter
-            .write(PersistenceClass::AuditLog, "audit-key", b"first")
-            .expect("initial write should succeed");
+        FrankensqliteTestCallerExt::write(
+            &mut adapter,
+            PersistenceClass::AuditLog,
+            "audit-key",
+            b"first",
+        )
+        .expect("initial write should succeed");
 
-        let err = adapter
-            .write(PersistenceClass::AuditLog, "audit-key", b"second")
-            .unwrap_err();
+        let err = FrankensqliteTestCallerExt::write(
+            &mut adapter,
+            PersistenceClass::AuditLog,
+            "audit-key",
+            b"second",
+        )
+        .unwrap_err();
 
         assert!(matches!(err, AdapterError::WriteFailure { .. }));
         assert_eq!(adapter.summary().total_writes, 1);
@@ -89,7 +97,8 @@ mod negative_path_tests {
     fn missing_cache_read_returns_no_value() {
         let mut adapter = FrankensqliteAdapter::default();
 
-        let result = adapter.read(PersistenceClass::Cache, "missing-cache-key");
+        let result =
+            FrankensqliteTestCallerExt::read(&mut adapter, PersistenceClass::Cache, "missing-cache-key");
 
         assert!(!result.found);
         assert!(result.value.is_none());

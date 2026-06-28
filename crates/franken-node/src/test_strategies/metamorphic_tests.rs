@@ -9,17 +9,33 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::HashSet;
 
+    /// Derive a deterministic 32-byte ChaCha seed from a `u64`.
+    ///
+    /// `TestRng::set_seed` is `pub(crate)` in proptest, so seeding now goes
+    /// through the public `TestRng::from_seed`, which requires a 32-byte seed
+    /// for `RngAlgorithm::ChaCha`. Encoding the `u64` into the low 8 bytes keeps
+    /// the metamorphic invariant intact: equal `u64` seeds yield equal seed
+    /// bytes (so identical RNG streams), and distinct seeds stay distinct.
+    fn chacha_seed_bytes(seed: u64) -> [u8; 32] {
+        let mut buf = [0u8; 32];
+        buf[..8].copy_from_slice(&seed.to_le_bytes());
+        buf
+    }
+
     #[test]
     fn mr_equivalence_generator_determinism() {
         // MR1: Same seed should produce same generated values across runs
         proptest!(|(seed: u64, max_len: usize)| {
             prop_assume!(max_len > 0 && max_len < 1000);
 
-            let mut rng1 = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
-            let mut rng2 = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
-
-            rng1.set_seed(seed);
-            rng2.set_seed(seed);
+            let mut rng1 = proptest::test_runner::TestRng::from_seed(
+                proptest::test_runner::RngAlgorithm::ChaCha,
+                &chacha_seed_bytes(seed),
+            );
+            let mut rng2 = proptest::test_runner::TestRng::from_seed(
+                proptest::test_runner::RngAlgorithm::ChaCha,
+                &chacha_seed_bytes(seed),
+            );
 
             let strategy = bounded_text(max_len);
             let val1 = strategy.new_tree(&mut rng1).unwrap().current();
@@ -46,11 +62,14 @@ mod tests {
             let mut large_samples = Vec::new();
 
             for seed in 0..20u64 {
-                let mut rng_small = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
-                let mut rng_large = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
-
-                rng_small.set_seed(seed);
-                rng_large.set_seed(seed);
+                let mut rng_small = proptest::test_runner::TestRng::from_seed(
+                    proptest::test_runner::RngAlgorithm::ChaCha,
+                    &chacha_seed_bytes(seed),
+                );
+                let mut rng_large = proptest::test_runner::TestRng::from_seed(
+                    proptest::test_runner::RngAlgorithm::ChaCha,
+                    &chacha_seed_bytes(seed),
+                );
 
                 if let Ok(tree) = small_strategy.new_tree(&mut rng_small) {
                     small_samples.push(tree.current());
@@ -88,11 +107,14 @@ mod tests {
             let mut doubled_outputs = HashSet::new();
 
             for seed in 0..100u64 {
-                let mut rng_base = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
-                let mut rng_doubled = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
-
-                rng_base.set_seed(seed);
-                rng_doubled.set_seed(seed);
+                let mut rng_base = proptest::test_runner::TestRng::from_seed(
+                    proptest::test_runner::RngAlgorithm::ChaCha,
+                    &chacha_seed_bytes(seed),
+                );
+                let mut rng_doubled = proptest::test_runner::TestRng::from_seed(
+                    proptest::test_runner::RngAlgorithm::ChaCha,
+                    &chacha_seed_bytes(seed),
+                );
 
                 if let Ok(tree) = base_strategy.new_tree(&mut rng_base) {
                     base_outputs.insert(tree.current());
@@ -123,8 +145,10 @@ mod tests {
 
             // Test multiple generations
             for seed in 0..50u64 {
-                let mut rng = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
-                rng.set_seed(seed);
+                let mut rng = proptest::test_runner::TestRng::from_seed(
+                    proptest::test_runner::RngAlgorithm::ChaCha,
+                    &chacha_seed_bytes(seed),
+                );
 
                 if let Ok(tree) = strategy.new_tree(&mut rng) {
                     let identifier = tree.current();
@@ -158,10 +182,10 @@ mod tests {
 
         // Test multiple timestamp generations
         for seed in 0..30u64 {
-            let mut rng = proptest::test_runner::TestRng::deterministic_rng(
+            let mut rng = proptest::test_runner::TestRng::from_seed(
                 proptest::test_runner::RngAlgorithm::ChaCha,
+                &chacha_seed_bytes(seed),
             );
-            rng.set_seed(seed);
 
             if let Ok(tree) = strategy.new_tree(&mut rng) {
                 let timestamp = tree.current();
@@ -198,10 +222,10 @@ mod tests {
         let strategy = sha256_hash();
 
         for seed in 0..20u64 {
-            let mut rng = proptest::test_runner::TestRng::deterministic_rng(
+            let mut rng = proptest::test_runner::TestRng::from_seed(
                 proptest::test_runner::RngAlgorithm::ChaCha,
+                &chacha_seed_bytes(seed),
             );
-            rng.set_seed(seed);
 
             if let Ok(tree) = strategy.new_tree(&mut rng) {
                 let hash = tree.current();
@@ -242,8 +266,10 @@ mod tests {
             let strategy = hex_bytes(target_len);
 
             for seed in 0..10u64 {
-                let mut rng = proptest::test_runner::TestRng::deterministic_rng(proptest::test_runner::RngAlgorithm::ChaCha);
-                rng.set_seed(seed);
+                let mut rng = proptest::test_runner::TestRng::from_seed(
+                    proptest::test_runner::RngAlgorithm::ChaCha,
+                    &chacha_seed_bytes(seed),
+                );
 
                 if let Ok(tree) = strategy.new_tree(&mut rng) {
                     let hex_string = tree.current();

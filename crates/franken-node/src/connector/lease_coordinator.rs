@@ -1197,7 +1197,7 @@ mod tests {
         let cands = vec![
             CoordinatorCandidate {
                 node_id: "node-a".to_string(),
-                weight: u32::MAX,
+                weight: u64::MAX,
             },
             CoordinatorCandidate {
                 node_id: "node-b".to_string(),
@@ -1265,7 +1265,7 @@ mod tests {
         let cands = vec![
             CoordinatorCandidate {
                 node_id: "node-a".to_string(),
-                weight: u32::MAX,
+                weight: u64::MAX,
             },
             CoordinatorCandidate {
                 node_id: "node-b".to_string(),

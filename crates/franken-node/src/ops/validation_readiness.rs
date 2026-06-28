@@ -4454,57 +4454,141 @@ pub fn known_check_codes(report: &ValidationReadinessReport) -> BTreeSet<String>
 #[cfg(test)]
 mod fail_closed_boundary_tests {
     use super::*;
-    use crate::ops::validation_readiness::validation_proof_capabilities::ValidationProofCapabilitySnapshot;
+
+    // bd-yom8c reconciliation: these helpers build *current-API* fixtures so the
+    // fail-closed boundary tests below exercise the same `>=` semantics they always
+    // did, against the present `ProofLaneReadinessInput` / `classify_proof_lane_decision`
+    // / `ProofLaneWorkerCapability` shapes (which drifted from the originals).
+    fn ts(secs: u64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(i64::try_from(secs).unwrap_or(i64::MAX), 0)
+            .expect("valid unix timestamp")
+    }
+
+    // A fully-valid input (passes `invalid_proof_lane_input`) whose only varying
+    // axis is `freshness_expires_at`, so the staleness branch is the one under test.
+    fn valid_readiness_input(freshness_expires_at: DateTime<Utc>) -> ProofLaneReadinessInput {
+        ProofLaneReadinessInput {
+            capsule_id: "capsule-boundary".to_string(),
+            trace_id: "test_trace_boundary".to_string(),
+            bead_id: "bd-jlt7p".to_string(),
+            thread_id: "thread-boundary".to_string(),
+            created_at: ts(0),
+            freshness_expires_at,
+            producer: ProofLaneReadinessProducer {
+                name: "validation-readiness".to_string(),
+                agent_name: "test-agent".to_string(),
+                git_commit: "deadbeef".to_string(),
+                dirty_worktree: false,
+            },
+            command: ProofLaneCommandIntent {
+                program: "cargo".to_string(),
+                argv: vec!["test".to_string()],
+                cwd: "/data/projects/franken_node".to_string(),
+                digest: DigestRef::sha256(b"boundary-command"),
+            },
+            rch: ProofLaneRchSnapshot {
+                daemon_source: "rch".to_string(),
+                daemon_version: "1.0.0".to_string(),
+                socket_path: "/run/rch.sock".to_string(),
+                require_remote: false,
+                local_fallback_allowed: true,
+                local_fallback_refused: false,
+            },
+            worker_selection: ProofLaneWorkerSelection {
+                requested_workers: Vec::new(),
+                selected_worker: None,
+                override_effective: false,
+                selection_source: "auto".to_string(),
+                selection_observed_at: None,
+            },
+            toolchain: ProofLaneToolchainRequirement {
+                local_rustc: "rustc 1.0.0".to_string(),
+                required_toolchain: "nightly".to_string(),
+            },
+            worker_capabilities: BTreeMap::new(),
+            observed_validation_error_class: None,
+        }
+    }
+
+    fn toolchain_snapshot() -> ProofLaneToolchainSnapshot {
+        ProofLaneToolchainSnapshot {
+            local_rustc: "rustc 1.0.0".to_string(),
+            required_toolchain: "nightly".to_string(),
+            selected_worker_rustc: "rustc 1.0.0".to_string(),
+            same_toolchain: true,
+        }
+    }
+
+    fn worker_access_snapshot() -> ProofLaneWorkerAccessSnapshot {
+        ProofLaneWorkerAccessSnapshot {
+            auth_status: ProofLaneWorkerAuthStatus::Ok,
+            capability_status: ProofLaneCapabilityStatus::Fresh,
+            pressure_status: ProofLanePressureStatus::Healthy,
+            detail: "ok".to_string(),
+        }
+    }
 
     #[test]
     fn test_freshness_expires_at_boundary_fail_closed() {
         // Test the fix for bd-jlt7p: freshness_expires_at check should use >= for fail-closed semantics
-        let trace_id = "test_trace_boundary";
-        let expires_at = 1000u64;
+        let expires_at = ts(1000);
+        let input_at_expiry = valid_readiness_input(expires_at);
+        let toolchain = toolchain_snapshot();
+        let worker_access = worker_access_snapshot();
 
         // Test case 1: exactly at expiry time should FAIL (fail-closed)
-        let input_at_expiry = ProofLaneReadinessInput {
-            schema_version: PROOF_LANE_READINESS_INPUT_SCHEMA_VERSION.to_string(),
-            freshness_expires_at: expires_at,
-        };
-
-        let decision_at_expiry =
-            classify_proof_lane_decision(&input_at_expiry, expires_at, trace_id);
+        let decision_at_expiry = classify_proof_lane_decision(
+            &input_at_expiry,
+            expires_at,
+            None,
+            None,
+            &toolchain,
+            &worker_access,
+        );
         assert_eq!(
-            decision_at_expiry.kind,
+            decision_at_expiry.decision,
             ProofLaneReadinessDecisionKind::FailClosed,
-            "At exactly expiry time t={}, should fail closed",
-            expires_at
+            "At exactly expiry time t={expires_at}, should fail closed",
         );
         assert_eq!(
             decision_at_expiry.reason_code,
             proof_lane_reason_codes::STALE_READINESS_CAPSULE
         );
 
-        // Test case 2: one nanosecond before expiry should PASS
-        let now_before_expiry = expires_at - 1;
-        let decision_before_expiry =
-            classify_proof_lane_decision(&input_at_expiry, now_before_expiry, trace_id);
+        // Test case 2: one tick before expiry should PASS the staleness gate
+        let now_before_expiry = ts(999);
+        let decision_before_expiry = classify_proof_lane_decision(
+            &input_at_expiry,
+            now_before_expiry,
+            None,
+            None,
+            &toolchain,
+            &worker_access,
+        );
         assert_ne!(
-            decision_before_expiry.kind,
+            decision_before_expiry.decision,
             ProofLaneReadinessDecisionKind::FailClosed,
-            "At t={} (1 before expiry), should not fail closed",
-            now_before_expiry
+            "At t={now_before_expiry} (before expiry), should not fail closed",
         );
         assert_ne!(
             decision_before_expiry.reason_code,
             proof_lane_reason_codes::STALE_READINESS_CAPSULE
         );
 
-        // Test case 3: one after expiry should definitely FAIL
-        let now_after_expiry = expires_at + 1;
-        let decision_after_expiry =
-            classify_proof_lane_decision(&input_at_expiry, now_after_expiry, trace_id);
+        // Test case 3: one tick after expiry should definitely FAIL
+        let now_after_expiry = ts(1001);
+        let decision_after_expiry = classify_proof_lane_decision(
+            &input_at_expiry,
+            now_after_expiry,
+            None,
+            None,
+            &toolchain,
+            &worker_access,
+        );
         assert_eq!(
-            decision_after_expiry.kind,
+            decision_after_expiry.decision,
             ProofLaneReadinessDecisionKind::FailClosed,
-            "At t={} (1 after expiry), should fail closed",
-            now_after_expiry
+            "At t={now_after_expiry} (after expiry), should fail closed",
         );
         assert_eq!(
             decision_after_expiry.reason_code,
@@ -4515,13 +4599,18 @@ mod fail_closed_boundary_tests {
     #[test]
     fn test_capability_freshness_expires_at_boundary_fail_closed() {
         // Test the fix for bd-jlt7p: capability freshness check should use >= for fail-closed semantics
-        let expires_at = 2000u64;
+        let expires_at = ts(2000);
 
-        let capability_with_expiry = ValidationProofCapabilitySnapshot {
-            capability_name: "test_capability".to_string(),
-            status: "active".to_string(),
-            observed_at: Some(expires_at - 100), // Observed before expiry
+        // A capability that is otherwise fresh/observed, so only its expiry drives staleness.
+        let capability_with_expiry = ProofLaneWorkerCapability {
+            auth_status: ProofLaneWorkerAuthStatus::Ok,
+            capability_status: ProofLaneCapabilityStatus::Fresh,
+            pressure_status: ProofLanePressureStatus::Healthy,
+            observed_at: Some(ts(1900)), // Observed before expiry
             freshness_expires_at: Some(expires_at),
+            rustc: None,
+            observed_toolchains: Vec::new(),
+            detail: None,
         };
 
         // Test case 1: exactly at expiry time should be STALE (fail-closed)
@@ -4529,36 +4618,37 @@ mod fail_closed_boundary_tests {
             capability_snapshot_unknown_or_stale(&capability_with_expiry, expires_at);
         assert!(
             is_stale_at_expiry,
-            "At exactly expiry time t={}, capability should be stale (fail-closed)",
-            expires_at
+            "At exactly expiry time t={expires_at}, capability should be stale (fail-closed)",
         );
 
-        // Test case 2: one nanosecond before expiry should NOT be stale
-        let now_before_expiry = expires_at - 1;
+        // Test case 2: one tick before expiry should NOT be stale
+        let now_before_expiry = ts(1999);
         let is_stale_before_expiry =
             capability_snapshot_unknown_or_stale(&capability_with_expiry, now_before_expiry);
         assert!(
             !is_stale_before_expiry,
-            "At t={} (1 before expiry), capability should not be stale",
-            now_before_expiry
+            "At t={now_before_expiry} (before expiry), capability should not be stale",
         );
 
-        // Test case 3: one after expiry should definitely be STALE
-        let now_after_expiry = expires_at + 1;
+        // Test case 3: one tick after expiry should definitely be STALE
+        let now_after_expiry = ts(2001);
         let is_stale_after_expiry =
             capability_snapshot_unknown_or_stale(&capability_with_expiry, now_after_expiry);
         assert!(
             is_stale_after_expiry,
-            "At t={} (1 after expiry), capability should be stale",
-            now_after_expiry
+            "At t={now_after_expiry} (after expiry), capability should be stale",
         );
 
         // Test case 4: None expiry should be stale (always fail-closed when no expiry)
-        let capability_no_expiry = ValidationProofCapabilitySnapshot {
-            capability_name: "test_capability".to_string(),
-            status: "active".to_string(),
+        let capability_no_expiry = ProofLaneWorkerCapability {
+            auth_status: ProofLaneWorkerAuthStatus::Ok,
+            capability_status: ProofLaneCapabilityStatus::Fresh,
+            pressure_status: ProofLanePressureStatus::Healthy,
             observed_at: Some(expires_at),
             freshness_expires_at: None,
+            rustc: None,
+            observed_toolchains: Vec::new(),
+            detail: None,
         };
         let is_stale_no_expiry =
             capability_snapshot_unknown_or_stale(&capability_no_expiry, expires_at);

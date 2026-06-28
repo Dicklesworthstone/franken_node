@@ -759,7 +759,7 @@ mod checkpoint_guard_comprehensive_negative_tests {
         ];
 
         for (orch, trace) in orchestration_patterns.iter().zip(trace_patterns.iter()) {
-            let mut guard = CheckpointGuard::new(orch, trace, malicious_config());
+            let mut guard = CheckpointGuard::new(*orch, *trace, malicious_config());
 
             // Should handle malicious IDs without panic
             guard.checkpoint(1);

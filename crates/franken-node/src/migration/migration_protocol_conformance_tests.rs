@@ -422,15 +422,15 @@ impl MigrationProtocolHarness {
 
         // This test would need a gate decision function to be implemented
         // For now, test the data structures are deterministic
-        let verdict1 = GateVerdict::Allow;
-        let verdict2 = GateVerdict::Allow;
+        let verdict1 = super::bpet_migration_gate::GateVerdict::Allow;
+        let verdict2 = super::bpet_migration_gate::GateVerdict::Allow;
 
         self.assert_eq(
             "BPET-DETERMINISM-001",
             "BPET Gate Verdict",
             "identical inputs produce identical verdicts",
-            verdict1,
-            verdict2,
+            format!("{verdict1:?}"),
+            format!("{verdict2:?}"),
         );
 
         // Test serialization determinism
@@ -462,8 +462,8 @@ impl MigrationProtocolHarness {
                 &format!("BPET-PHASE-{:03}", i + 1),
                 "BPET Rollout Phase",
                 &format!("phase {} serialization", i),
-                phase,
-                phase, // Identity test for now
+                format!("{phase:?}"),
+                format!("{phase:?}"), // Identity test for now
             );
         }
     }
@@ -533,8 +533,8 @@ impl MigrationProtocolHarness {
     /// Test rejection reason generation
     fn test_dgis_rejection_reason_generation(&mut self) {
         let reason = RejectionReason {
-            code: "DGIS-REJECT-CASCADE-RISK",
-            detail: "Cascade risk delta 0.15 exceeds threshold 0.12",
+            code: "DGIS-REJECT-CASCADE-RISK".to_string(),
+            detail: "Cascade risk delta 0.15 exceeds threshold 0.12".to_string(),
         };
 
         self.assert_true(

@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::proof_carrying_decode::*;
+    use crate::repair::proof_carrying_decode::*;
     use proptest::prelude::*;
     use std::collections::HashMap;
 

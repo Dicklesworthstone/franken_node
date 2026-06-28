@@ -874,7 +874,8 @@ mod tests {
     use super::{
         ArtifactSigningError, ArtifactVerificationResult, AuditLogEntry, ChecksumManifest, KeyId,
         KeyRing, KeyTransitionRecord, ManifestEntry, PartialSignature, VerificationReport,
-        demo_signing_key, demo_signing_key_2, sha256_hex, sign_manifest, verify_checksums,
+        build_and_sign_manifest, demo_signing_key, demo_signing_key_2, sha256_hex, sign_bytes,
+        verify_signature,
     };
     use ed25519_dalek::{SigningKey, VerifyingKey};
 

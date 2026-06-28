@@ -2964,7 +2964,7 @@ mod tests {
                 signature_bytes: sig_bytes,
                 signed_at: Utc::now().to_rfc3339(),
             },
-            &valid_provenance(now),
+            &valid_provenance(&sk, now),
             None,
             "test-ext",
             now,
@@ -2997,7 +2997,7 @@ mod tests {
         let r1 = kernel.evaluate(
             manifest1,
             &sig(sig1),
-            &valid_provenance(now),
+            &valid_provenance(&sk, now),
             None,
             "ext-1",
             now,
@@ -3006,7 +3006,7 @@ mod tests {
         let r2 = kernel.evaluate(
             manifest2,
             &sig(sig2),
-            &valid_provenance(now),
+            &valid_provenance(&sk, now),
             None,
             "ext-2",
             now,
@@ -3022,7 +3022,8 @@ mod tests {
     #[test]
     fn admission_digest_deterministic() {
         let manifest = b"test-manifest";
-        let prov = valid_provenance(1000);
+        let (sk, _vk) = test_keypair();
+        let prov = valid_provenance(&sk, 1000);
         let d1 = compute_admission_digest(manifest, "key-1", &prov);
         let d2 = compute_admission_digest(manifest, "key-1", &prov);
         assert_eq!(d1, d2);
@@ -3031,7 +3032,8 @@ mod tests {
     #[test]
     fn admission_digest_changes_with_key_id() {
         let manifest = b"test-manifest";
-        let prov = valid_provenance(1000);
+        let (sk, _vk) = test_keypair();
+        let prov = valid_provenance(&sk, 1000);
         let d1 = compute_admission_digest(manifest, "key-1", &prov);
         let d2 = compute_admission_digest(manifest, "key-2", &prov);
         assert_ne!(d1, d2);
@@ -3039,7 +3041,8 @@ mod tests {
 
     #[test]
     fn admission_digest_changes_with_manifest() {
-        let prov = valid_provenance(1000);
+        let (sk, _vk) = test_keypair();
+        let prov = valid_provenance(&sk, 1000);
         let d1 = compute_admission_digest(b"manifest-a", "key-1", &prov);
         let d2 = compute_admission_digest(b"manifest-b", "key-1", &prov);
         assert_ne!(d1, d2);
@@ -3047,7 +3050,8 @@ mod tests {
 
     #[test]
     fn admission_digest_changes_with_vcs_commit_tamper() {
-        let mut prov = valid_provenance(1000);
+        let (sk, _vk) = test_keypair();
+        let mut prov = valid_provenance(&sk, 1000);
         let original = compute_admission_digest(b"manifest", "key-1", &prov);
         prov.vcs_commit_sha.push_str("-tampered");
         let changed = compute_admission_digest(b"manifest", "key-1", &prov);
@@ -3057,7 +3061,8 @@ mod tests {
 
     #[test]
     fn admission_digest_changes_with_build_system_tamper() {
-        let mut prov = valid_provenance(1000);
+        let (sk, _vk) = test_keypair();
+        let mut prov = valid_provenance(&sk, 1000);
         let original = compute_admission_digest(b"manifest", "key-1", &prov);
         prov.build_system_identifier = "local-shell".to_string();
         let changed = compute_admission_digest(b"manifest", "key-1", &prov);
@@ -3067,7 +3072,8 @@ mod tests {
 
     #[test]
     fn admission_digest_changes_with_output_hash_tamper() {
-        let mut prov = valid_provenance(1000);
+        let (sk, _vk) = test_keypair();
+        let mut prov = valid_provenance(&sk, 1000);
         let original = compute_admission_digest(b"manifest", "key-1", &prov);
         prov.output_hash = "0".repeat(64);
         let changed = compute_admission_digest(b"manifest", "key-1", &prov);
@@ -3077,7 +3083,8 @@ mod tests {
 
     #[test]
     fn admission_digest_length_prefix_blocks_field_boundary_collision() {
-        let prov = valid_provenance(1000);
+        let (sk, _vk) = test_keypair();
+        let prov = valid_provenance(&sk, 1000);
         let first = compute_admission_digest(b"ab", "c", &prov);
         let second = compute_admission_digest(b"a", "bc", &prov);
 
@@ -3247,7 +3254,7 @@ mod tests {
                 output_hash: output.to_string(),
                 slsa_level_claim: 0,
                 envelope_format:
-                    crate::supply_chain::provenance::AttestationEnvelopeFormat::default(),
+                    crate::supply_chain::provenance::AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
                 links: Vec::new(),
                 custom_claims: std::collections::BTreeMap::new(),
             }

@@ -700,6 +700,9 @@ mod tests {
     };
     use crate::control_plane::marker_stream::{MarkerEventType, MarkerStream};
     use crate::security::constant_time;
+    // bd-yom8c: nested test mod does not inherit the file-level `use sha2::Digest`;
+    // re-import so `sha2::Sha256::new()` (a Digest trait fn) resolves.
+    use sha2::Digest;
 
     fn make_sv(epoch: u64, hash_seed: &str, parent_seed: &str, node: &str) -> StateVector {
         StateVector {

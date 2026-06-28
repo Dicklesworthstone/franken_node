@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(decision.tier, SafetyTier::Standard);
         assert_eq!(decision.revocation_age_secs, stale_age);
         assert_eq!(decision.max_age_secs, None);
-        assert_eq!(decision.override_receipt, None);
+        assert!(decision.override_receipt.is_none());
     }
 
     #[test]

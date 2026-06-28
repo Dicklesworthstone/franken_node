@@ -5378,7 +5378,13 @@ mod tests {
 
     #[test]
     fn test_boundary_zone_prefix_requires_separator() {
-        let boundary = make_boundary("b-prefix", "internal", "external", &["PII"]);
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let mut sentinel = ExfiltrationSentinel::new(config);
+        sentinel
+            .add_boundary(make_boundary("b-prefix", "internal", "external", &["PII"]))
+            .unwrap();
+
         let mut taint = TaintSet::new();
         taint.insert("PII");
         let edge = FlowEdge {
@@ -5390,14 +5396,13 @@ mod tests {
             timestamp_ms: 1,
             quarantined: false,
         };
+        graph.append_edge(edge.clone()).unwrap();
 
-        assert_eq!(
-            invariants::evaluate_edge_pure(
-                &edge,
-                &BTreeMap::from([("b-prefix".to_string(), boundary)])
-            ),
-            FlowVerdict::Pass
-        );
+        // The boundary is defined for zone "internal" -> "external"; the edge source
+        // zone "internality-service" must NOT match "internal" (prefix requires a
+        // separator), so the flow is not a boundary crossing and passes.
+        let verdict = sentinel.evaluate_edge(&edge, &mut graph).unwrap();
+        assert_eq!(verdict, FlowVerdict::Pass);
     }
 
     #[test]
@@ -5594,6 +5599,7 @@ mod tests {
         assert!(!taint_set.is_empty());
 
         // Test with problematic label IDs
+        let long_label = "x".repeat(1_000);
         let problematic_ids = vec![
             "",                        // Empty
             "\0null_terminated",       // Null byte
@@ -5601,7 +5607,7 @@ mod tests {
             "🚀emoji_label",           // Unicode
             "\u{FFFF}",                // Max BMP
             "../../../sensitive/data", // Path traversal
-            "x".repeat(1_000),         // Very long label
+            long_label.as_str(),       // Very long label
         ];
 
         for id in problematic_ids {

@@ -1859,8 +1859,8 @@ mod tests {
             let cloned = outcome.clone();
             assert_eq!(*outcome, cloned);
 
-            // Should work in collections
-            let mut map = BTreeMap::new();
+            // Should work in collections (AppealOutcome is Hash + Eq, not Ord)
+            let mut map = std::collections::HashMap::new();
             map.insert(*outcome, "test");
             assert_eq!(map.get(outcome), Some(&"test"));
         }

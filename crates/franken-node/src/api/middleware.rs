@@ -3307,12 +3307,12 @@ mod api_middleware_advanced_security_edge_tests {
         }
 
         // Test with completely random strings of various lengths
-        let random_candidates = [
-            &"a".repeat(100),
-            &"b".repeat(200),
-            &"c".repeat(500),
-            "🔐".repeat(50).as_str(),
-            "😀".repeat(25).as_str(),
+        let random_candidates: [String; 5] = [
+            "a".repeat(100),
+            "b".repeat(200),
+            "c".repeat(500),
+            "🔐".repeat(50),
+            "😀".repeat(25),
         ];
 
         for candidate in &random_candidates {
@@ -3595,7 +3595,7 @@ mod api_middleware_advanced_security_edge_tests {
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
         let keys = setup_keys();
-        let mut handler_call_count = 0;
+        let mut handler_call_count = 0u32;
 
         // Execute multiple requests with various attack vectors
         let request_variations = [

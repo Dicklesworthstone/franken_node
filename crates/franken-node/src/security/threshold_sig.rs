@@ -3876,7 +3876,7 @@ mod tests {
 
         // Test concurrent modification of artifacts (should be isolated)
         let mut modification_handles = vec![];
-        let shared_counter = Arc::new(Mutex::new(0));
+        let shared_counter = Arc::new(Mutex::new(0u32));
 
         for i in 0..20 {
             let config_clone = Arc::clone(&config);
@@ -4431,12 +4431,13 @@ mod tests {
         };
 
         // Test multiple content hashes
+        let large_hash = "x".repeat(1000);
         let test_hashes = vec![
             "content-hash-1",
             "different-content",
             "special-chars-!@#$%^&*()",
-            "",               // Edge case: empty hash
-            "x".repeat(1000), // Large hash
+            "",                   // Edge case: empty hash
+            large_hash.as_str(), // Large hash
         ];
 
         for content_hash in test_hashes {

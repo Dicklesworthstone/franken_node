@@ -595,19 +595,20 @@ mod tests {
         let (mut ledger, stake_id) = low_stake_ledger();
 
         // Test various potentially malicious payloads
+        let long_payload = "A".repeat(10_000); // Very long payload (hoisted to keep vec homogeneous)
         let malicious_payloads = vec![
-            "\x00\x01\x02\x03\x04",            // Null bytes and control characters
-            "javascript:alert('xss')",         // Potential XSS
-            "<script>eval(payload)</script>",  // Script injection
-            "../../etc/passwd",                // Path traversal
-            "\u{FFFD}\u{FFFD}",                // Replacement characters
-            "\u{202E}spoofed\u{202D}",         // BiDi override
-            format!("{}", "A".repeat(10_000)), // Very long payload
+            "\x00\x01\x02\x03\x04",           // Null bytes and control characters
+            "javascript:alert('xss')",        // Potential XSS
+            "<script>eval(payload)</script>", // Script injection
+            "../../etc/passwd",               // Path traversal
+            "\u{FFFD}\u{FFFD}",               // Replacement characters
+            "\u{202E}spoofed\u{202D}",        // BiDi override
+            long_payload.as_str(),            // Very long payload
         ];
 
         for (idx, payload) in malicious_payloads.iter().enumerate() {
             let malicious_evidence = SlashEvidence::new(
-                ViolationType::SecurityViolation,
+                ViolationType::MaliciousCode,
                 "malicious evidence test",
                 payload,
                 &format!("collector-{}", idx),
@@ -884,7 +885,7 @@ mod tests {
             (u64::MAX - 1, "near-max timestamp"),
         ];
 
-        for (timestamp, description) in timestamp_tests {
+        for &(timestamp, description) in &timestamp_tests {
             // Only the first resolution should succeed
             let result = ledger.resolve_appeal(appeal.appeal_id, true, timestamp);
 
@@ -946,7 +947,9 @@ mod tests {
             // Periodic verification that earlier accounts still exist
             if i % 100 == 0 && i > 0 {
                 let check_idx = i / 2;
-                if let Some((ref check_publisher, check_stake)) = created_stakes.get(check_idx) {
+                if let Some((ref check_publisher, check_stake)) =
+                    created_stakes.get(check_idx as usize)
+                {
                     let account = ledger.get_account(check_publisher);
                     assert!(account.is_some(), "Earlier account should still exist");
                     let stake = ledger.get_stake(*check_stake);
@@ -986,8 +989,8 @@ mod tests {
         // Test that ViolationType can handle unknown variants gracefully during deserialization
         let violation_types = vec![
             ViolationType::PolicyViolation,
-            ViolationType::SecurityViolation,
-            ViolationType::PerformanceViolation,
+            ViolationType::MaliciousCode,
+            ViolationType::SupplyChainCompromise,
         ];
 
         for vtype in violation_types {
@@ -1014,8 +1017,8 @@ mod tests {
         let (mut ledger, stake_id) = low_stake_ledger();
 
         for vtype in [
-            ViolationType::SecurityViolation,
-            ViolationType::PerformanceViolation,
+            ViolationType::MaliciousCode,
+            ViolationType::SupplyChainCompromise,
         ] {
             let evidence = SlashEvidence::new(
                 vtype,
@@ -1144,8 +1147,8 @@ mod tests {
                             Ok(_) => {
                                 // If accepted, should be separate account
                                 assert_ne!(
-                                    ledger.get_account("café").unwrap().stakes.len(),
-                                    ledger.get_account("cafe\u{0301}").unwrap().stakes.len()
+                                    ledger.get_account("café").unwrap().publisher_id,
+                                    ledger.get_account("cafe\u{0301}").unwrap().publisher_id
                                 );
                             }
                             Err(_) => {
@@ -1222,7 +1225,7 @@ mod tests {
         }
 
         // Verify all created stakes are still accessible and unique
-        assert_eq!(created_stakes.len(), test_iterations);
+        assert_eq!(created_stakes.len(), test_iterations as usize);
 
         // Test operations on stakes created throughout the process
         for (idx, &stake_id) in created_stakes.iter().enumerate() {
@@ -1296,6 +1299,8 @@ mod tests {
         let (mut ledger, stake_id) = low_stake_ledger();
 
         // Test various collector ID bypass attempts
+        let long_collector = "x".repeat(1000); // Very long collector ID (hoisted)
+        let emoji_collector = "\u{1F4A9}".repeat(10); // Unicode emoji spam (hoisted)
         let malicious_collector_ids = vec![
             "",                                // Empty collector
             " ",                               // Whitespace only
@@ -1305,15 +1310,15 @@ mod tests {
             "collector;rm -rf /",              // Command injection attempt
             "../../system",                    // Path traversal
             "collector\u{202E}system\u{202D}", // BiDi override
-            "x".repeat(1000),                  // Very long collector ID
-            "\u{1F4A9}".repeat(10),            // Unicode emoji spam
+            long_collector.as_str(),           // Very long collector ID
+            emoji_collector.as_str(),          // Unicode emoji spam
         ];
 
         let mut slash_attempts = 0;
 
         for collector_id in malicious_collector_ids {
             let malicious_evidence = SlashEvidence::new(
-                ViolationType::SecurityViolation,
+                ViolationType::MaliciousCode,
                 "collector bypass test",
                 &format!("payload_{}", slash_attempts),
                 collector_id,
@@ -1364,16 +1369,17 @@ mod tests {
             .unwrap();
 
         // Test various injection attack vectors in appeal justification
+        let long_justification = format!("justified {}", "A".repeat(10000)); // Buffer overflow attempt (hoisted)
         let injection_justifications = vec![
             "<script>alert('xss')</script>",
             "'; DROP TABLE stakes; --",
             "$(rm -rf /)",
             "javascript:alert(document.cookie)",
-            "\x00\x01\x02\x03",                         // Binary data
-            "\u{202E}justified\u{202D}",                // BiDi override
-            "justified\nSELECT * FROM passwords",       // SQL injection with newline
-            "justified\"; system(\"rm -rf /\")",        // Command injection
-            format!("justified {}", "A".repeat(10000)), // Buffer overflow attempt
+            "\x00\x01\x02\x03",                   // Binary data
+            "\u{202E}justified\u{202D}",          // BiDi override
+            "justified\nSELECT * FROM passwords", // SQL injection with newline
+            "justified\"; system(\"rm -rf /\")",  // Command injection
+            long_justification.as_str(),          // Buffer overflow attempt
         ];
 
         let mut successful_appeals = 0;

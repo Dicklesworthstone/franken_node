@@ -2806,23 +2806,39 @@ mod tests {
             .expect("should succeed");
 
             // Attempt invalid state transitions and verify rejections
-            let invalid_transitions = [
+            #[allow(clippy::type_complexity)]
+            let invalid_transitions: [(
+                &str,
+                Box<dyn Fn(&mut QuarantineRegistry) -> Result<(), QuarantineError> + '_>,
+            ); 4] = [
                 // Try to start drain without enforcement
-                ("start_drain", |reg: &mut QuarantineRegistry| {
-                    reg.start_drain(order_id, "2026-01-15T00:03:00Z")
-                }),
+                (
+                    "start_drain",
+                    Box::new(|reg: &mut QuarantineRegistry| {
+                        reg.start_drain(order_id, "2026-01-15T00:03:00Z")
+                    }),
+                ),
                 // Try to complete drain without starting
-                ("complete_drain", |reg: &mut QuarantineRegistry| {
-                    reg.complete_drain(order_id, "2026-01-15T00:04:00Z")
-                }),
+                (
+                    "complete_drain",
+                    Box::new(|reg: &mut QuarantineRegistry| {
+                        reg.complete_drain(order_id, "2026-01-15T00:04:00Z")
+                    }),
+                ),
                 // Try to trigger recall without isolation
-                ("trigger_recall", |reg: &mut QuarantineRegistry| {
-                    reg.trigger_recall(make_recall(order_id))
-                }),
+                (
+                    "trigger_recall",
+                    Box::new(|reg: &mut QuarantineRegistry| {
+                        reg.trigger_recall(make_recall(order_id))
+                    }),
+                ),
                 // Try to lift quarantine without isolation
-                ("lift_quarantine", |reg: &mut QuarantineRegistry| {
-                    reg.lift_quarantine(make_clearance(order_id))
-                }),
+                (
+                    "lift_quarantine",
+                    Box::new(|reg: &mut QuarantineRegistry| {
+                        reg.lift_quarantine(make_clearance(order_id))
+                    }),
+                ),
             ];
 
             for (transition_name, transition_fn) in invalid_transitions {
@@ -3167,6 +3183,7 @@ mod tests {
 
         #[test]
         fn serialization_format_injection_resistance_in_structured_data() {
+            let long_content = "very long content that could cause buffer issues".repeat(1000);
             let injection_payloads = [
                 "normal content",
                 "content\nwith\nnewlines",
@@ -3179,7 +3196,7 @@ mod tests {
                 "content with xml </tag><script>alert(1)</script><tag>",
                 "content with sql '; DROP TABLE quarantine; --",
                 "content with shell && rm -rf /",
-                "very long content that could cause buffer issues".repeat(1000),
+                long_content.as_str(),
                 "\\/\\/comment injection attempt",
                 "\\x41\\x42\\x43 hex escape attempt",
             ];
@@ -3411,9 +3428,9 @@ mod tests {
 
                 // Test various hash tampering attempts
                 let tampered_hashes = [
-                    "",                                                 // Empty hash
-                    "a",                                                // Short hash
-                    "wrong_hash",                                       // Wrong content
+                    String::new(),                                      // Empty hash
+                    "a".to_string(),                                    // Short hash
+                    "wrong_hash".to_string(),                           // Wrong content
                     entry.entry_hash.chars().rev().collect::<String>(), // Reversed
                     format!("{}x", entry.entry_hash),                   // Extended
                     entry.entry_hash.to_uppercase(),                    // Case change
@@ -3433,7 +3450,10 @@ mod tests {
                     );
 
                     // Should not match the tampered hash (except by coincidence)
-                    if crate::security::constant_time::ct_eq_bytes(&computed_hash, &tampered_hash) {
+                    if crate::security::constant_time::ct_eq_bytes(
+                        computed_hash.as_bytes(),
+                        tampered_hash.as_bytes(),
+                    ) {
                         // This would be an extremely unlikely hash collision
                         tracing::warn!(
                             computed_hash = %hex::encode(&computed_hash),
@@ -3750,10 +3770,13 @@ mod tests {
 
             let order = QuarantineOrder {
                 order_id: "test-order-123".to_string(),
-                scope: QuarantineScope::SingleNode("test-node".to_string()),
+                scope: QuarantineScope::Version {
+                    extension_id: "test-node".to_string(),
+                    version: "1.0.0".to_string(),
+                },
                 mode: QuarantineMode::Soft,
                 severity: QuarantineSeverity::Medium,
-                reason: QuarantineReason::VulnerabilityDisclosed,
+                reason: QuarantineReason::VulnerabilityDisclosure,
                 justification: "Test quarantine justification".to_string(),
                 issued_by: "test-operator".to_string(),
                 issued_at: "2024-01-01T00:00:00Z".to_string(),

@@ -1115,29 +1115,64 @@ mod problem_detail_schema_negative_tests {
     fn negative_problem_detail_with_extreme_field_lengths() {
         // Test with extremely long field values
         let huge_string = "x".repeat(100_000);
-        let empty_string = "";
+        let empty_string = String::new();
 
         let extreme_cases = vec![
-            ("huge_code", huge_string.clone(), "", "", "", ""),
-            ("huge_title", "", huge_string.clone(), "", "", ""),
-            ("huge_detail", "", "", huge_string.clone(), "", ""),
-            ("huge_instance", "", "", "", huge_string.clone(), ""),
-            ("huge_trace_id", "", "", "", "", huge_string.clone()),
+            (
+                "huge_code",
+                huge_string.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            (
+                "huge_title",
+                String::new(),
+                huge_string.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            (
+                "huge_detail",
+                String::new(),
+                String::new(),
+                huge_string.clone(),
+                String::new(),
+                String::new(),
+            ),
+            (
+                "huge_instance",
+                String::new(),
+                String::new(),
+                String::new(),
+                huge_string.clone(),
+                String::new(),
+            ),
+            (
+                "huge_trace_id",
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                huge_string.clone(),
+            ),
             (
                 "all_empty",
-                empty_string,
-                empty_string,
-                empty_string,
-                empty_string,
-                empty_string,
+                empty_string.clone(),
+                empty_string.clone(),
+                empty_string.clone(),
+                empty_string.clone(),
+                empty_string.clone(),
             ),
             (
                 "mixed_huge",
                 huge_string.clone(),
-                empty_string,
+                empty_string.clone(),
                 huge_string.clone(),
-                empty_string,
-                "trace",
+                empty_string.clone(),
+                "trace".to_string(),
             ),
         ];
 
@@ -1190,6 +1225,7 @@ mod problem_detail_schema_negative_tests {
     #[test]
     fn negative_code_to_status_with_malformed_and_adversarial_codes() {
         // Test has_code_marker and code_to_status with adversarial inputs
+        let long_adversarial_code = "x".repeat(10000);
         let adversarial_codes = vec![
             "",                                 // Empty string
             "_AUTH_FAIL",                       // Leading underscore
@@ -1197,7 +1233,7 @@ mod problem_detail_schema_negative_tests {
             "__AUTH_FAIL__",                    // Multiple underscores
             "PREFIX_AUTH_FAIL_SUFFIX",          // Suffix after marker
             "AUTH_FAIL_AUTH_FAIL",              // Repeated markers
-            "x".repeat(10000),                  // Extremely long code
+            long_adversarial_code.as_str(),     // Extremely long code
             "\0AUTH_FAIL",                      // Null byte
             "AUTH\nFAIL",                       // Newline in code
             "AUTH\u{FFFF}FAIL",                 // Unicode characters
@@ -1247,6 +1283,7 @@ mod problem_detail_schema_negative_tests {
     #[test]
     fn negative_api_error_display_with_malicious_details_formats_safely() {
         // Test ApiError Display implementation with malicious detail content
+        let long_malicious_detail = "a".repeat(10000);
         let malicious_details = vec![
             "",                              // Empty
             "\0null\x01control",             // Control characters
@@ -1256,7 +1293,7 @@ mod problem_detail_schema_negative_tests {
             "<script>alert('xss')</script>", // XSS payload
             "%s%d%x%p",                      // Format specifiers
             "detail\nwith\nmultiple\nlines", // Multiline content
-            "a".repeat(10000),               // Extremely long
+            long_malicious_detail.as_str(),  // Extremely long
             "{\"json\": \"injection\"}",     // JSON-like content
             "../../etc/passwd",              // Path traversal
             "\u{FFFF}\u{10FFFF}",            // Max Unicode
@@ -1499,9 +1536,10 @@ mod problem_detail_schema_negative_tests {
     #[test]
     fn negative_api_error_to_problem_with_extreme_trace_ids() {
         // Test with various problematic trace ID values
+        let long_trace_id = format!("trace-{}", "x".repeat(10000));
         let problematic_trace_ids = vec![
             "",                                      // Empty trace ID
-            "trace-" + &"x".repeat(10000),           // Extremely long
+            long_trace_id.as_str(),                  // Extremely long
             "trace\0null\x01control",                // Control characters
             "trace\r\nHTTP/1.1 200 OK",              // HTTP injection
             "trace<script>alert('xss')</script>",    // XSS payload
@@ -1755,7 +1793,7 @@ mod problem_detail_schema_negative_tests {
             },
             ApiError::BadRequest {
                 detail: "x".repeat(100000),
-                trace_id: "",
+                trace_id: String::new(),
             },
             #[cfg(any(test, feature = "control-plane"))]
             ApiError::RateLimited {

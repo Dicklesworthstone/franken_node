@@ -1276,7 +1276,8 @@ mod negative_path_tests {
             .map(|i| {
                 let name = format!("bucket-{i}-with-long-name-to-increase-memory-pressure");
                 // Use Box to avoid moving large strings
-                (Box::leak(name.into_boxed_str()), base::SMALL + i)
+                let leaked: &str = Box::leak(name.into_boxed_str());
+                (leaked, base::SMALL + i)
             })
             .collect();
 
@@ -1447,7 +1448,7 @@ mod negative_path_tests {
             (f64::MAX, 1.0, "Maximum dividend"),
             (f64::MIN_POSITIVE, f64::MAX, "Min/Max ratio"),
             (1.0 / 3.0, 2.0 / 3.0, "Repeating decimal ratio"),
-            (f64::consts::PI, f64::consts::E, "Transcendental ratio"),
+            (std::f64::consts::PI, std::f64::consts::E, "Transcendental ratio"),
             (0.1 + 0.2, 0.3, "Classic floating-point precision"),
         ];
 
@@ -1553,12 +1554,12 @@ mod negative_path_tests {
 
             // Test in bucket hierarchy validation
             let buckets1 = vec![
-                (name1, base::SMALL),
+                (*name1, base::SMALL),
                 ("middle", base::MEDIUM),
                 ("large", base::LARGE),
             ];
             let buckets2 = vec![
-                (name2, base::SMALL),
+                (*name2, base::SMALL),
                 ("middle", base::MEDIUM),
                 ("large", base::LARGE),
             ];
@@ -1587,7 +1588,8 @@ mod negative_path_tests {
         let deep_buckets: Vec<(&str, usize)> = (0..1000)
             .map(|i| {
                 let name = format!("level-{i}");
-                (Box::leak(name.into_boxed_str()), base::SMALL + i)
+                let leaked: &str = Box::leak(name.into_boxed_str());
+                (leaked, base::SMALL + i)
             })
             .collect();
 

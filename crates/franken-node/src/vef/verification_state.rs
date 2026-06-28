@@ -381,6 +381,40 @@ impl Default for VerificationStateManager {
 mod tests {
     use super::*;
 
+    /// Test shim bridging the historical
+    /// `initialize_entity(id, risk, proof, epoch) -> Result<(), VefStateError>`
+    /// API onto the current `register_entity` + state-field primitives. The
+    /// `registered_at_epoch` argument is now inert (registration no longer
+    /// records an epoch), but is retained so existing call sites compile.
+    trait InitializeEntityTestExt {
+        fn initialize_entity(
+            &mut self,
+            entity_id: &str,
+            risk_level: RiskLevel,
+            proof: Option<ProofStatus>,
+            registered_at_epoch: u64,
+        ) -> Result<(), VefStateError>;
+    }
+
+    impl InitializeEntityTestExt for VerificationStateManager {
+        fn initialize_entity(
+            &mut self,
+            entity_id: &str,
+            risk_level: RiskLevel,
+            proof: Option<ProofStatus>,
+            _registered_at_epoch: u64,
+        ) -> Result<(), VefStateError> {
+            self.register_entity(entity_id);
+            let state = self
+                .states
+                .get_mut(entity_id)
+                .expect("entity was just registered");
+            state.current_risk_level = risk_level;
+            state.proof = proof;
+            Ok(())
+        }
+    }
+
     fn fresh_proof() -> ProofStatus {
         ProofStatus {
             proof_id: "proof-1".into(),
@@ -1113,9 +1147,9 @@ mod tests {
             .unwrap();
 
         let malicious_actions = vec![
-            "deploy\u{202e}reverse\u{200b}",
-            "execute\u{0000}null\u{0001}control",
-            "modify\u{feff}bom\u{2028}break",
+            "deploy\u{202e}reverse\u{200b}".to_string(),
+            "execute\u{0000}null\u{0001}control".to_string(),
+            "modify\u{feff}bom\u{2028}break".to_string(),
             "action".repeat(1000), // Extremely long action name
         ];
 
@@ -1600,8 +1634,6 @@ mod tests {
                                 .expect("verification state manager mutex should not be poisoned");
                         mgr_guard.request_transition(&transition_request)
                     };
-
-                    thread_results.push((thread_id, operation, result));
 
                     // Also test concurrent action authorization
                     let action_request = ActionRequest {

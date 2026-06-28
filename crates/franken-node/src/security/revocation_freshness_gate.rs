@@ -1607,7 +1607,8 @@ mod tests {
         let mut mid_byte_diff = proof(SafetyTier::Advisory, 100, "timing-test");
         let mut mid_chars: Vec<char> = valid_sig.chars().collect();
         if mid_chars.len() > 2 {
-            mid_chars[mid_chars.len() / 2] = if mid_chars[mid_chars.len() / 2] == '0' {
+            let mid_idx = mid_chars.len() / 2;
+            mid_chars[mid_idx] = if mid_chars[mid_idx] == '0' {
                 '1'
             } else {
                 '0'
@@ -1674,7 +1675,7 @@ mod tests {
             "nonce\0collision\0a", // Null byte injection
         ];
 
-        let mut successful_nonces = 0;
+        let mut successful_nonces: usize = 0;
         for pattern in &collision_patterns {
             let p = proof(SafetyTier::Advisory, 100, pattern);
             if g.check(&p, 100, true, false, "telemetry_config", "tr-collision")
@@ -2346,7 +2347,7 @@ mod tests {
 
         // Test memory exhaustion through massive field values
         let massive_fields = [
-            ("massive_nonce", "x".repeat(1_000_000)),
+            ("massive_nonce", vec!["x".repeat(1_000_000)]),
             ("massive_credential", vec!["y".repeat(1_000_000)]),
             (
                 "many_credentials",
@@ -2485,12 +2486,12 @@ mod tests {
 
                 let test_proof = proof(tier, 100, &nonce);
 
-                let mut gate =
-                    try_lock(&gate_clone).expect("revocation freshness gate mutex should lock");
+                let mut gate = try_lock(&gate_clone, "revocation freshness gate")
+                    .expect("revocation freshness gate mutex should lock");
                 let result =
                     gate.check(&test_proof, 100, true, false, action, &format!("tr-{}", i));
 
-                let mut results = try_lock(&results_clone)
+                let mut results = try_lock(&results_clone, "revocation freshness results")
                     .expect("revocation freshness results mutex should lock");
                 results.push((i, nonce, result.is_ok()));
             });
@@ -2503,7 +2504,8 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let results = try_lock(&results).expect("revocation freshness results mutex should lock");
+        let results = try_lock(&results, "revocation freshness results")
+            .expect("revocation freshness results mutex should lock");
         assert_eq!(results.len(), 100);
 
         // Verify all operations completed successfully (no race conditions)
@@ -2514,20 +2516,21 @@ mod tests {
         );
 
         // Verify nonce consumption state is consistent
-        let gate = try_lock(&gate_mutex).expect("revocation freshness gate mutex should lock");
-        assert_eq!(gate.consumed_nonce_count(), 100);
+        let gate_guard = try_lock(&gate_mutex, "revocation freshness gate")
+            .expect("revocation freshness gate mutex should lock");
+        assert_eq!(gate_guard.consumed_nonce_count(), 100);
 
         // Verify no duplicate nonces were processed
         for (_, nonce, _) in results.iter() {
             assert!(
-                gate.is_nonce_consumed(nonce),
+                gate_guard.is_nonce_consumed(nonce),
                 "Nonce {} should be consumed",
                 nonce
             );
         }
 
         // Test concurrent replay attack detection
-        drop(gate);
+        drop(gate_guard);
         drop(results);
 
         let replay_gate = Arc::new(Mutex::new(gate()));
@@ -2544,7 +2547,7 @@ mod tests {
                     let shared_nonce = format!("shared-nonce-{}", nonce_id);
                     let test_proof = proof(SafetyTier::Advisory, 100, &shared_nonce);
 
-                    let mut gate = try_lock(&gate_clone)
+                    let mut gate = try_lock(&gate_clone, "revocation freshness replay gate")
                         .expect("revocation freshness replay gate mutex should lock");
                     let result = gate.check(
                         &test_proof,
@@ -2555,7 +2558,7 @@ mod tests {
                         &format!("tr-{}-{}", thread_id, nonce_id),
                     );
 
-                    let mut results = try_lock(&results_clone)
+                    let mut results = try_lock(&results_clone, "revocation freshness replay results")
                         .expect("revocation freshness replay results mutex should lock");
                     results.push((thread_id, nonce_id, shared_nonce, result.is_ok()));
                 }
@@ -2568,12 +2571,12 @@ mod tests {
             handle.join().unwrap();
         }
 
-        let replay_results = try_lock(&replay_results)
+        let replay_results = try_lock(&replay_results, "revocation freshness replay results")
             .expect("revocation freshness replay results mutex should lock");
 
         // Verify that each nonce was only accepted once across all threads
-        let gate =
-            try_lock(&replay_gate).expect("revocation freshness replay gate mutex should lock");
+        let gate = try_lock(&replay_gate, "revocation freshness replay gate")
+            .expect("revocation freshness replay gate mutex should lock");
         for nonce_id in 0..10 {
             let nonce = format!("shared-nonce-{}", nonce_id);
             assert!(

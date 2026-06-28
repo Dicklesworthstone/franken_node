@@ -1017,9 +1017,12 @@ mod tests {
         let meta2 = make_metadata("ext-2", "pub-2", "shared-key");
 
         let result = reg.register_extension(meta2, &ts(2), "trace-sybil");
+        // `register_extension` now returns `Result<&ExtensionRecord, _>`, so the
+        // borrow of `reg` held by `result` must be released (via this Err check)
+        // before the second `&mut reg` borrow in `take_events()`.
+        assert!(matches!(result, Err(RegistryError::SybilDuplicate(_))));
         let events = reg.take_events();
 
-        assert!(matches!(result, Err(RegistryError::SybilDuplicate(_))));
         assert_eq!(reg.extension_count(), 1);
         assert_eq!(reg.audit_trail_len(), 1);
         assert!(!reg.extensions.contains_key("ext-2"));
@@ -1486,7 +1489,7 @@ mod tests {
         // Fill the audit trail to capacity
         for i in 0..MAX_AUDIT_LOG_ENTRIES {
             let test_meta = make_metadata(&format!("ext-{}", i), "pub-1", "key-1");
-            reg.register_extension(test_meta, &ts(i as u64), "t")
+            reg.register_extension(test_meta, &ts(i as u32), "t")
                 .unwrap();
         }
 
@@ -1495,7 +1498,7 @@ mod tests {
 
         // Add one more entry to trigger overflow with saturating arithmetic
         let overflow_meta = make_metadata("overflow-ext", "pub-1", "key-1");
-        reg.register_extension(overflow_meta, &ts(MAX_AUDIT_LOG_ENTRIES as u64), "t")
+        reg.register_extension(overflow_meta, &ts(MAX_AUDIT_LOG_ENTRIES as u32), "t")
             .unwrap();
 
         // Should still be at capacity, with oldest entry evicted and chain anchor updated

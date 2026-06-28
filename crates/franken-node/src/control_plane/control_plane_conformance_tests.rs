@@ -9,15 +9,15 @@
 //! - Thread safety and poison recovery
 
 use super::cancellation_protocol::{
-    AbortReason, CancellationProtocol, DrainConfig, ResourceTracker,
-    error_codes as cancel_error_codes,
+    CancellationProtocol, DrainConfig, ResourceTracker, error_codes as cancel_error_codes,
 };
 use super::control_epoch::{
     ControlEpoch, EpochError, EpochRejectionReason, EpochStore, ValidityWindowPolicy,
     check_artifact_epoch,
 };
+// bd-yom8c: `AbortReason` moved from `cancellation_protocol` to `epoch_transition_barrier`.
 use super::epoch_transition_barrier::{
-    BarrierConfig, BarrierError, BarrierPhase, DrainAck, EpochTransitionBarrier,
+    AbortReason, BarrierConfig, BarrierError, BarrierPhase, DrainAck, EpochTransitionBarrier,
     error_codes as barrier_error_codes,
 };
 use super::fork_detection::{

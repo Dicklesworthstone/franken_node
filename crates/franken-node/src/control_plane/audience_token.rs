@@ -1715,7 +1715,9 @@ mod tests {
 
         // Get hash via hash() method and decode hex (original approach)
         let hash_string = token.hash();
-        let hash_decoded = Vec::<u8>::from_hex(&hash_string).unwrap_or_else(|error| {
+        // bd-yom8c: `Vec::<u8>::from_hex` needs `hex::FromHex` in scope (not inherited by
+        // this nested test mod); use the equivalent free fn `hex::decode` instead.
+        let hash_decoded = hex::decode(&hash_string).unwrap_or_else(|error| {
             assert!(false, "hash() must produce valid hex: {error}");
             Vec::new()
         });

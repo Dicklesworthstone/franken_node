@@ -587,6 +587,9 @@ mod tests {
         EpochTransition, RESERVED_ARTIFACT_ID, ValidityWindowPolicy, check_artifact_epoch,
         event_codes,
     };
+    // bd-yom8c: nested test mod does not inherit the file-level `use sha2::Digest`;
+    // re-import so `sha2::Sha256::new()` (a Digest trait fn) resolves.
+    use sha2::Digest;
 
     fn mhash(n: u32) -> String {
         format!("manifest-hash-{n:016x}")

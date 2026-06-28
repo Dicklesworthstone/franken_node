@@ -4,7 +4,9 @@ mod tests {
         ContentHash, DeterministicSeed, DomainTag, ScheduleConfig, derive_seed,
     };
     use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_SCHEMA_VERSIONS};
-    use crate::storage::frankensqlite_adapter::{FrankensqliteAdapter, PersistenceClass};
+    use crate::storage::frankensqlite_adapter::{
+        CallerContext, FrankensqliteAdapter, PersistenceClass,
+    };
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeSet, HashMap};
     use std::hash::RandomState;
@@ -75,11 +77,12 @@ mod tests {
         adapter: &mut FrankensqliteAdapter,
         reserved_audit_rows: usize,
     ) -> usize {
+        let caller = CallerContext::system("canonical-serializer-test", "audit-prefill");
         let prefill_count = MAX_AUDIT_LOG_ENTRIES.saturating_sub(reserved_audit_rows);
         for index in 0..prefill_count {
             let key = format!("prefill-audit-{index:04}");
             adapter
-                .write(PersistenceClass::AuditLog, &key, b"prefill")
+                .write(&caller, PersistenceClass::AuditLog, &key, b"prefill")
                 .expect("audit prefill should succeed");
         }
         prefill_count
@@ -246,6 +249,7 @@ mod tests {
     #[test]
     fn frankensqlite_adapter_canonical_roundtrip_matrix_covers_domain_tag_by_persistence_class() {
         let mut adapter = FrankensqliteAdapter::default();
+        let caller = CallerContext::system("canonical-serializer-test", "matrix-roundtrip");
         let schema_limit = fill_schema_versions_to_limit(&mut adapter);
         let pair_count = DomainTag::all()
             .len()
@@ -331,13 +335,15 @@ mod tests {
 
                     let key = format!("canonical-{}", row.matrix_row.replace("::", "-"));
                     let write = adapter
-                        .write(*class, &key, &first)
+                        .write(&caller, *class, &key, &first)
                         .expect("matrix row write should succeed");
                     assert!(write.success);
                     assert_eq!(write.persistence_class, *class);
                     assert_eq!(write.tier, class.tier());
 
-                    let read = adapter.read(*class, &key);
+                    let read = adapter
+                        .read(&caller, *class, &key)
+                        .expect("matrix row read should succeed");
                     assert!(read.found, "matrix row should be readable: {key}");
                     assert_eq!(read.value.as_deref(), Some(first.as_slice()));
                     assert_eq!(read.persistence_class, *class);
@@ -456,9 +462,9 @@ mod tests {
         fn domain_tag_strategy() -> impl Strategy<Value = DomainTag> {
             prop_oneof![
                 Just(DomainTag::Verification),
-                Just(DomainTag::CapabilityGate),
-                Just(DomainTag::Supply),
-                Just(DomainTag::Observatory),
+                Just(DomainTag::Encoding),
+                Just(DomainTag::Repair),
+                Just(DomainTag::Scheduling),
             ]
         }
 
@@ -466,9 +472,9 @@ mod tests {
         fn persistence_class_strategy() -> impl Strategy<Value = PersistenceClass> {
             prop_oneof![
                 Just(PersistenceClass::Snapshot),
-                Just(PersistenceClass::Telemetry),
+                Just(PersistenceClass::ControlState),
                 Just(PersistenceClass::AuditLog),
-                Just(PersistenceClass::TemporaryData),
+                Just(PersistenceClass::Cache),
             ]
         }
 
@@ -682,7 +688,7 @@ mod tests {
                 // Create the same logical row through different construction paths
                 let content_hash = content_hash_for(domain, class, case, payload_len);
                 let config = ScheduleConfig::new(config_version);
-                let seed = derive_seed(&content_hash, &config);
+                let seed = derive_seed(&domain, &content_hash, &config);
 
                 // Path 1: Direct construction
                 let row1 = FrankensqliteCanonicalRow {
@@ -696,7 +702,7 @@ mod tests {
                     persistence_tier_label: class.tier().label().to_string(),
                     content_hash: content_hash.clone(),
                     config: config.clone(),
-                    config_hash_hex: config.hash_hex().to_string(),
+                    config_hash_hex: config.config_hash_hex(),
                     seed: seed.clone(),
                     schema_version_probe,
                     audit_index_probe,
@@ -752,7 +758,7 @@ mod tests {
                     .expect("should deserialize");
 
                 // Content hash should be preserved
-                prop_assert_eq!(original_hash, deserialized.content_hash,
+                prop_assert_eq!(original_hash.clone(), deserialized.content_hash,
                     "Content hash must be preserved across serialization");
 
                 // Regenerate content hash and verify consistency

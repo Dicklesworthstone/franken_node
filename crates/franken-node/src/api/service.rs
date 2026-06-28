@@ -1585,9 +1585,9 @@ mod service_recent_commit_gap_tests {
 mod integration_tests {
     use super::*;
     use crate::api::middleware::{
-        AuthIdentity, AuthMethod, AuthzDecision, EndpointGroup, EndpointLifecycle, PolicyHook,
-        RateLimitConfig, RateLimiter, RouteMetadata, authorize, check_rate_limit,
-        default_rate_limit, execute_middleware_chain,
+        AuthFailureLimiter, AuthIdentity, AuthMethod, AuthzDecision, EndpointGroup,
+        EndpointLifecycle, PerformanceRateLimiter, PolicyHook, RateLimitConfig, RateLimiter,
+        RouteMetadata, authorize, check_rate_limit, default_rate_limit, execute_middleware_chain,
     };
     use crate::security::intent_firewall::{
         EffectsFirewall, FirewallVerdict, IntentClassification, IntentClassifier, RemoteEffect,
@@ -1680,7 +1680,9 @@ mod integration_tests {
     #[test]
     fn authenticated_request_reaches_firewall_and_allows_safe_traffic() {
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = make_firewall();
         let keys = get_test_keys();
 
@@ -1688,7 +1690,9 @@ mod integration_tests {
             &route,
             None, // no auth needed
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 let effect = make_effect("e-safe", "ext-001");
@@ -1708,7 +1712,9 @@ mod integration_tests {
     #[test]
     fn unauthenticated_request_rejected_before_firewall() {
         let route = fleet_admin_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::FleetControl));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut firewall_called = false;
         let keys = get_test_keys();
 
@@ -1716,7 +1722,9 @@ mod integration_tests {
             &route,
             None, // missing required auth
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 firewall_called = true;
@@ -1735,14 +1743,18 @@ mod integration_tests {
     #[test]
     fn wrong_auth_prefix_rejected_before_firewall() {
         let route = fleet_admin_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::FleetControl));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let keys = get_test_keys();
 
         let (result, log) = execute_middleware_chain(
             &route,
             Some("ApiKey my-key"), // route requires propagated mTLS identity
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| Ok("should not reach"),
         );
@@ -1754,7 +1766,9 @@ mod integration_tests {
     #[test]
     fn authorized_mtls_identity_can_reach_firewall() {
         let route = fleet_admin_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::FleetControl));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = make_firewall();
         let keys = get_test_keys();
 
@@ -1762,7 +1776,9 @@ mod integration_tests {
             &route,
             Some("fleet-service-cert"),
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |identity, _ctx| {
                 assert!(identity.roles.contains(&"fleet-admin".to_string()));
@@ -1786,7 +1802,9 @@ mod integration_tests {
         // Real quarantine/reconcile routes are mTLS-only. This synthetic route
         // isolates the authorization-deny branch for bearer identities.
         let route = synthetic_bearer_admin_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::FleetControl));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut firewall_called = false;
         let keys = get_test_keys();
 
@@ -1794,7 +1812,9 @@ mod integration_tests {
             &route,
             Some("Bearer valid-token-abc"),
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 firewall_called = true;
@@ -1865,23 +1885,38 @@ mod integration_tests {
             burst_size: 1,
             fail_closed: false,
         };
-        let mut limiter = RateLimiter::new(config);
+        let mut perf_limiter = PerformanceRateLimiter::with_config(config);
+        let mut auth_limiter = AuthFailureLimiter::new();
         let keys = get_test_keys();
 
         // Exhaust the burst
-        let (first, _) =
-            execute_middleware_chain(&route, None, None, &mut limiter, &keys, |_id, _ctx| {
-                Ok("first")
-            });
+        let (first, _) = execute_middleware_chain(
+            &route,
+            None,
+            None,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
+            &keys,
+            |_id, _ctx| Ok("first"),
+        );
         assert!(first.is_ok());
 
         // Second request hits rate limit
         let mut firewall_called = false;
-        let (second, log) =
-            execute_middleware_chain(&route, None, None, &mut limiter, &keys, |_id, _ctx| {
+        let (second, log) = execute_middleware_chain(
+            &route,
+            None,
+            None,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
+            &keys,
+            |_id, _ctx| {
                 firewall_called = true;
                 Ok("should not reach")
-            });
+            },
+        );
 
         assert!(second.is_err());
         assert_eq!(log.status, 429);
@@ -1921,7 +1956,9 @@ mod integration_tests {
     #[test]
     fn trace_context_propagated_to_firewall_handler() {
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
         let keys = get_test_keys();
 
@@ -1929,7 +1966,9 @@ mod integration_tests {
             &route,
             None,
             Some(traceparent),
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, ctx| {
                 assert_eq!(ctx.trace_id, "0af7651916cd43dd8448eb211c80319c");
@@ -1945,14 +1984,18 @@ mod integration_tests {
     #[test]
     fn generated_trace_context_when_no_traceparent() {
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let keys = get_test_keys();
 
         let (result, log) = execute_middleware_chain(
             &route,
             None,
             None, // no traceparent
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, ctx| {
                 assert!(!ctx.trace_id.is_empty());
@@ -1970,7 +2013,9 @@ mod integration_tests {
     #[test]
     fn full_pipeline_denies_exfiltration_intent() {
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = make_firewall();
         let keys = get_test_keys();
 
@@ -1978,7 +2023,9 @@ mod integration_tests {
             &route,
             None,
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 let mut effect = make_effect("e-exfil", "ext-001");
@@ -2000,7 +2047,9 @@ mod integration_tests {
     #[test]
     fn full_pipeline_denies_credential_forward() {
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = make_firewall();
         let keys = get_test_keys();
 
@@ -2008,7 +2057,9 @@ mod integration_tests {
             &route,
             None,
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 let mut effect = make_effect("e-cred-fwd", "ext-001");
@@ -2032,7 +2083,9 @@ mod integration_tests {
     #[test]
     fn full_pipeline_allows_health_check_intent() {
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = make_firewall();
         let keys = get_test_keys();
 
@@ -2040,7 +2093,9 @@ mod integration_tests {
             &route,
             None,
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 let mut effect = make_effect("e-health", "ext-001");
@@ -2066,7 +2121,9 @@ mod integration_tests {
         super::operator_routes::clear_process_start_override_for_tests();
         let mut service = ControlPlaneService::default();
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = make_firewall();
         let keys = get_test_keys();
 
@@ -2074,7 +2131,9 @@ mod integration_tests {
             &route,
             None,
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 let effect = make_effect("e-metric", "ext-001");
@@ -2100,14 +2159,18 @@ mod integration_tests {
         super::operator_routes::clear_process_start_override_for_tests();
         let mut service = ControlPlaneService::default();
         let route = fleet_admin_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::FleetControl));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let keys = get_test_keys();
 
         let (_result, log) = execute_middleware_chain(
             &route,
             None, // missing auth
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| Ok("unreachable"),
         );
@@ -2130,7 +2193,9 @@ mod integration_tests {
     #[test]
     fn pipeline_with_unregistered_extension_returns_firewall_error() {
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = EffectsFirewall::with_default_policy();
         let keys = get_test_keys();
         // Do NOT register the extension
@@ -2139,7 +2204,9 @@ mod integration_tests {
             &route,
             None,
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 let effect = make_effect("e-unreg", "ext-unknown");
@@ -2166,7 +2233,9 @@ mod integration_tests {
         super::operator_routes::clear_process_start_override_for_tests();
         let mut service = ControlPlaneService::default();
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = make_firewall();
         let keys = get_test_keys();
 
@@ -2176,7 +2245,9 @@ mod integration_tests {
                 &route,
                 None,
                 None,
-                &mut limiter,
+                "127.0.0.1",
+                &mut auth_limiter,
+                &mut perf_limiter,
                 &keys,
                 |_identity, _ctx| {
                     let effect = make_effect(&effect_id, "ext-001");
@@ -2202,7 +2273,9 @@ mod integration_tests {
     #[test]
     fn classifier_result_matches_firewall_decision_intent() {
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = make_firewall();
         let keys = get_test_keys();
 
@@ -2210,7 +2283,9 @@ mod integration_tests {
             &route,
             None,
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 let effect = make_effect("e-classify", "ext-001");
@@ -2232,7 +2307,9 @@ mod integration_tests {
     #[test]
     fn node_internal_traffic_bypasses_firewall_via_pipeline() {
         let route = operator_status_route();
-        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let mut perf_limiter =
+            PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::Operator));
+        let mut auth_limiter = AuthFailureLimiter::new();
         let mut fw = make_firewall();
         let keys = get_test_keys();
 
@@ -2240,7 +2317,9 @@ mod integration_tests {
             &route,
             None,
             None,
-            &mut limiter,
+            "127.0.0.1",
+            &mut auth_limiter,
+            &mut perf_limiter,
             &keys,
             |_identity, _ctx| {
                 let effect = RemoteEffect {

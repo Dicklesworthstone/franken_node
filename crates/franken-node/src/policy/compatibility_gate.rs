@@ -1009,6 +1009,7 @@ impl GateEngine {
                     vec!["malformed=scope".to_string()],
                     vec!["invalid:transition".to_string()],
                     vec!["MALFORMED_CODE".to_string()],
+                    Vec::new(),
                 ),
             };
             engine
@@ -1086,6 +1087,7 @@ impl GateEngine {
                     vec!["scope=expired.scope".to_string()],
                     vec!["transition:expired".to_string()],
                     vec!["POLICY_COMPAT_SCOPE_MODE_SET".to_string()],
+                    Vec::new(),
                 ),
             };
             engine
@@ -1226,10 +1228,11 @@ impl GateEngine {
                 expires_at: "2099-12-31T23:59:59Z".to_string(),
                 proof: build_proof_metadata(
                     CompatibilitySignatureAlgorithm::HmacSha256,
-                    Some(vec!["massive".to_string()]),
+                    Some("massive".to_string()),
                     vec!["scope=attenuation.scope".to_string()],
                     vec!["attenuation:massive".to_string()],
                     vec!["POLICY_COMPAT_PREDICATE_ATTACHED".to_string()],
+                    Vec::new(),
                 ),
             };
 
@@ -1246,6 +1249,7 @@ impl GateEngine {
                     vec!["scope=attenuation.scope".to_string()],
                     vec!["mode:unset->legacy_risky".to_string()],
                     vec!["POLICY_COMPAT_SCOPE_MODE_SET".to_string()],
+                    Vec::new(),
                 ),
             };
             engine
@@ -1263,6 +1267,10 @@ impl GateEngine {
                 result.is_ok(),
                 "Massive attenuation should be handled without memory issues"
             );
+
+            // Yield the gate_check return type so this inline #[cfg(test)] tail block
+            // type-checks against the fn signature (the block is unreachable code).
+            result
         }
     }
 

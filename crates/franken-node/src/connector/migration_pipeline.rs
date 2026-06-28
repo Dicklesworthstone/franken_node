@@ -2129,6 +2129,7 @@ mod tests {
             validation_samples: 24,
             validation_failures: 0,
             evidence_sources,
+            collected_at: "2026-02-21T00:00:00Z".to_string(),
         }
     }
 
@@ -2571,10 +2572,12 @@ mod tests {
         // Try to advance past Verification -- should fail
         let err = advance(state).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_PIPE_THRESHOLD_NOT_MET);
+        Ok(())
     }
 
     #[test]
-    fn test_verification_emits_counterexample_witness_for_failure() {
+    fn test_verification_emits_counterexample_witness_for_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
         let cohort = single_ext_cohort_with_evidence(
             "verification_regression",
             verification_failure_evidence(),

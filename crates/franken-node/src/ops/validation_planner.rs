@@ -3068,27 +3068,21 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::validation_input::ValidationInput;
-    use std::path::PathBuf;
 
     #[test]
     fn test_rch_command_count_saturating_arithmetic() {
-        let input = ValidationInput {
-            package: "test-package".to_string(),
-            changed_files: vec![],
-            workspace_root: PathBuf::from("/tmp"),
-            workdir: PathBuf::from("/tmp"),
-        };
+        // `ValidationInput`/`ValidationPlanner` were replaced by `PlannerInput`/`PlanBuilder`;
+        // reconciled to the current API while preserving the saturating-arithmetic intent.
+        let input = PlannerInput::new("bd-overflow", vec!["test-file.rs".to_string()], Vec::new());
 
-        let mut planner = ValidationPlanner::new(input);
+        let mut planner = PlanBuilder::new(&input, vec!["test-file.rs".to_string()]);
 
         // Set counter near usize::MAX to test saturation
         planner.rch_command_count = usize::MAX - 1;
 
         // These should saturate instead of wrapping
-        planner.add_cargo_test_named(
+        planner.add_cargo_check_tests(
             "overflow-test",
-            "test-module",
             "Testing saturating arithmetic",
             vec!["test-file.rs".to_string()],
         );

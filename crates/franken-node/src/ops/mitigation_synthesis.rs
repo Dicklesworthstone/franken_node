@@ -1504,7 +1504,7 @@ mod tests {
                 i,
                 "x".repeat(1000)
             );
-            let value = format!("{}", i.saturating_mul(100));
+            let value = format!("{}", i.saturating_mul(100i64));
             massive_diff.insert(key, value);
         }
 
@@ -1830,15 +1830,15 @@ mod tests {
             let trace_clone = Arc::clone(&trace);
 
             let handle = thread::spawn(move || {
-                let operations = [
+                let operations: [Box<dyn Fn() + '_>; 3] = [
                     // Load trace operations
-                    || {
+                    Box::new(|| {
                         let mut l = try_lock(&lab_clone, "mitigation lab concurrent trace load")
                             .expect("lab mutex should lock for trace load");
                         let _ = l.load_trace(&trace_clone);
-                    },
+                    }),
                     // Synthesis operations
-                    || {
+                    Box::new(|| {
                         let mut l = try_lock(&lab_clone, "mitigation lab concurrent synthesis")
                             .expect("lab mutex should lock for synthesis");
                         let mut diff = BTreeMap::new();
@@ -1848,14 +1848,14 @@ mod tests {
                             &format!("mit-{thread_id}"),
                             diff,
                         );
-                    },
+                    }),
                     // Replay operations
-                    || {
+                    Box::new(|| {
                         let mut l =
                             try_lock(&lab_clone, "mitigation lab concurrent baseline replay")
                                 .expect("lab mutex should lock for baseline replay");
                         let _ = l.replay_baseline(&trace_clone);
-                    },
+                    }),
                 ];
 
                 // Perform multiple operations in this thread

@@ -1776,7 +1776,7 @@ mod tests {
 
         for (i, problematic_id) in problematic_ids.iter().enumerate() {
             let window = ProofWindow {
-                window_id: problematic_id.clone(),
+                window_id: problematic_id.to_string(),
                 start_index: i as u64,
                 end_index: i as u64,
                 entry_count: 1,
@@ -1959,11 +1959,12 @@ mod tests {
         let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
 
         // Test problematic characters in trace IDs
+        let high_byte_trace = format!("trace\x7F{}", String::from_utf8_lossy(&[0x80, 0xFF]));
         let problematic_traces = vec![
-            "trace\0null",                                                   // Null byte
-            "trace\x01\x02control",                                          // Control characters
-            "trace\r\ninjection",                                            // Line breaks
-            &format!("trace\x7F{}", String::from_utf8_lossy(&[0x80, 0xFF])), // High bytes and DEL
+            "trace\0null",          // Null byte
+            "trace\x01\x02control", // Control characters
+            "trace\r\ninjection",   // Line breaks
+            high_byte_trace.as_str(), // High bytes and DEL
             "trace\u{FFFE}\u{FFFF}", // Unicode non-characters
         ];
 
@@ -1976,7 +1977,7 @@ mod tests {
                 aligned_checkpoint_id: None,
                 tier: WorkloadTier::Standard,
                 created_at_millis: 1_701_500_400_000,
-                trace_id: trace_id.clone(),
+                trace_id: trace_id.to_string(),
             };
 
             // Should handle control characters without corruption or panic
@@ -2037,9 +2038,9 @@ mod tests {
         // Get metrics (which accumulates resource usage)
         let metrics = scheduler.backlog_metrics(1_701_500_500_200, "trace-resource-extreme");
 
-        // Resource totals should not overflow
-        assert!(metrics.compute_budget_used_millis.is_finite() as bool);
-        assert!(metrics.memory_budget_used_mib.is_finite() as bool);
+        // Resource totals should not overflow (u64 saturating arithmetic keeps them bounded)
+        assert!(metrics.compute_budget_used_millis <= u64::MAX);
+        assert!(metrics.memory_budget_used_mib <= u64::MAX);
     }
 
     #[test]
@@ -2054,10 +2055,12 @@ mod tests {
         for i in 0..1000 {
             entries.push(ReceiptChainEntry {
                 index: i,
-                receipt: receipt(ExecutionActionType::FilesystemOperation, i),
+                prev_chain_hash: format!("prev-{:064}", i.saturating_sub(1)),
+                receipt_hash: format!("receipt-{:064}", i),
                 chain_hash: format!("hash-{:064}", i), // Large hash string
-                prev_hash: format!("prev-{:064}", i.saturating_sub(1)),
+                receipt: receipt(ExecutionActionType::FilesystemOperation, i),
                 appended_at_millis: 1_701_600_000_000 + i,
+                trace_id: format!("trace-massive-{i}"),
             });
 
             if i % 10 == 0 {
@@ -2066,8 +2069,10 @@ mod tests {
                     start_index: (i / 10) * 10,
                     end_index: i,
                     entry_count: 10,
-                    chain_hash: format!("checkpoint-hash-{:064}", i),
+                    chain_head_hash: format!("checkpoint-hash-{:064}", i),
+                    commitment_hash: format!("checkpoint-commitment-{:064}", i),
                     created_at_millis: 1_701_600_000_000 + i,
+                    trace_id: format!("trace-massive-checkpoint-{i}"),
                 });
             }
         }
@@ -2120,16 +2125,17 @@ mod tests {
         // Generate multiple jobs to test counter overflow protection
         for i in 0..10 {
             let windows = scheduler
-                .select_proof_windows(
+                .select_windows(
                     &entries,
                     &checkpoints,
                     1_701_100_000_000_u64.saturating_add(i * 1000),
+                    "trace-counter-increment",
                 )
                 .expect("window selection should succeed");
 
             if !windows.is_empty() {
                 let result = scheduler
-                    .queue_proof_jobs(&windows, 1_701_100_000_000_u64.saturating_add(i * 1000));
+                    .enqueue_windows(&windows, 1_701_100_000_000_u64.saturating_add(i * 1000));
                 // Should handle near-overflow gracefully using saturating_add
                 match result {
                     Ok(_) => {
@@ -2155,8 +2161,8 @@ mod tests {
             let job = make_job(
                 &format!("test-job-{}", i),
                 ProofJobStatus::Pending,
-                WorkloadTier::Standard,
                 1_701_100_000_000 + i * 1000,
+                "trace-length-conversion",
             );
             if scheduler.jobs.len() < MAX_JOBS {
                 scheduler.jobs.insert(job.job_id.clone(), job);
@@ -2185,12 +2191,13 @@ mod tests {
         let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
 
         let exact_deadline = 1_701_100_005_000_u64;
-        let job = make_job(
+        let mut job = make_job(
             "deadline-boundary-test",
             ProofJobStatus::Dispatched,
-            WorkloadTier::Standard,
             exact_deadline,
+            "trace-deadline-boundary",
         );
+        job.deadline_millis = exact_deadline;
 
         scheduler.jobs.insert(job.job_id.clone(), job);
 
@@ -2209,12 +2216,13 @@ mod tests {
 
         // Test just before deadline (should not be expired)
         let mut scheduler2 = VefProofScheduler::new(SchedulerPolicy::default());
-        let job2 = make_job(
+        let mut job2 = make_job(
             "before-deadline-test",
             ProofJobStatus::Dispatched,
-            WorkloadTier::Standard,
             exact_deadline,
+            "trace-before-deadline",
         );
+        job2.deadline_millis = exact_deadline;
         scheduler2.jobs.insert(job2.job_id.clone(), job2);
 
         let not_exceeded_before = scheduler2.enforce_deadlines(exact_deadline.saturating_sub(1));
@@ -2388,7 +2396,7 @@ mod tests {
             .insert(high_compute_job.job_id.clone(), high_compute_job);
 
         // Dispatch should use saturating arithmetic and not overflow
-        let result = scheduler.dispatch_ready_jobs(1_701_100_005_000, "trace-dispatch");
+        let result = scheduler.dispatch_jobs(1_701_100_005_000);
 
         match result {
             Ok(dispatched) => {

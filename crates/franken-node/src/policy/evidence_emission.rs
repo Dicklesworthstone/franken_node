@@ -2281,6 +2281,9 @@ mod tests {
                 DecisionKind::Deny => DecisionKind::Admit,
                 DecisionKind::Quarantine => DecisionKind::Release,
                 DecisionKind::Release => DecisionKind::Quarantine,
+                DecisionKind::Rollback => DecisionKind::Admit,
+                DecisionKind::Throttle => DecisionKind::Admit,
+                DecisionKind::Escalate => DecisionKind::Admit,
             };
 
             let mut invalid_evidence = build_evidence_entry(

@@ -1783,7 +1783,7 @@ mod tests {
         ];
 
         for malicious_cap in malicious_capabilities {
-            let capability_name = CapabilityName::new(&malicious_cap);
+            let capability_name = CapabilityName::new(malicious_cap);
 
             // Should store name literally but mark as invalid since not in taxonomy
             assert_eq!(capability_name.as_str(), malicious_cap);
@@ -1792,7 +1792,7 @@ mod tests {
 
             // Test in capability profile
             let mut profile = CapabilityProfile::new("test_sub", "1.0.0", RiskLevel::Low);
-            profile.add_capability(&malicious_cap, "malicious capability test");
+            profile.add_capability(malicious_cap, "malicious capability test");
 
             // Should store literally but validation should catch it
             assert!(profile.has_capability(&malicious_cap));
@@ -1997,10 +1997,10 @@ mod tests {
             // (description, modifications, expected_added, expected_removed)
             (
                 "capability substitution",
-                |p: &mut CapabilityProfile| {
+                (|p: &mut CapabilityProfile| {
                     p.capabilities.remove("cap:fs:write");
                     p.add_capability("cap:fs:temp", "temp files");
-                },
+                }) as fn(&mut CapabilityProfile),
                 vec!["cap:fs:temp"],
                 vec!["cap:fs:write"],
             ),
@@ -2102,6 +2102,7 @@ mod tests {
         guard.register_profile(profile).unwrap();
 
         // Test various malformed timestamp formats
+        let long_nines = "9".repeat(1000);
         let malformed_timestamps = vec![
             "",                                     // Empty
             "not-a-timestamp",                      // Invalid format
@@ -2109,7 +2110,7 @@ mod tests {
             "2026\x0002\x0021T00:00:00Z",           // Null bytes
             "2026-02-21T00:00:00Z\n<script>",       // Injection attempt
             "\u{202E}Z00:00:00T12-20-6202\u{202D}", // BiDi override
-            "9".repeat(1000),                       // Extremely long
+            long_nines.as_str(),                    // Extremely long
             "\u{1F4A9}2026-02-21T00:00:00Z",        // Emoji prefix
         ];
 

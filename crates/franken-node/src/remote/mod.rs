@@ -376,30 +376,41 @@ mod remote_module_negative_tests {
     fn negative_counter_overflow_requires_saturating_add() {
         // Test that counters use saturating_add instead of raw addition
         // Raw addition can cause integer overflow leading to security bypass
-        let mut harness = VirtualTransportFaultHarness::new(valid_config());
+        let mut harness = VirtualTransportFaultHarness::new(0);
 
-        // Simulate counter overflow scenario
-        let large_fault_count = u32::MAX - 1;
+        // Run a fault campaign to exercise the harness counters under load.
+        // Internally these counters must use saturating_add to prevent
+        // overflow-based bypass.
+        let stats = harness.run_campaign(
+            "counter_overflow",
+            &FaultConfig {
+                drop_probability: 0.15,
+                reorder_probability: 0.15,
+                reorder_max_depth: 5,
+                corrupt_probability: 0.10,
+                corrupt_bit_count: 2,
+                max_faults: 5000,
+            },
+            100,
+            "trace-counter-overflow",
+        );
 
-        // Create many scheduled faults to test counter overflow protection
-        for i in 0..10 {
-            let fault = ScheduledFault {
-                fault_class: FaultClass::Drop,
-                delay_millis: 100 + i * 10,
-                event_code: event_codes::SCHEDULED_FAULT,
-            };
-
-            // This should use saturating_add internally to prevent overflow
-            harness.schedule_fault(fault);
-        }
-
-        // Verify harness remains stable despite potential counter overflow
-        let stats = harness.get_statistics();
-
-        // Check that counters don't wrap around to 0 (overflow protection)
-        assert!(
-            stats.faults_applied <= stats.faults_scheduled,
+        // Check that applied fault counters stay consistent (overflow protection):
+        // the per-class counts must exactly sum to the total, and the total
+        // applied faults must never exceed the number of processed messages.
+        assert_eq!(
+            stats.drops + stats.reorders + stats.corruptions,
+            stats.total_faults,
             "Applied faults should not exceed scheduled due to overflow"
+        );
+        assert!(
+            stats.total_faults <= stats.total_messages,
+            "Applied faults should never exceed processed messages"
+        );
+        assert_eq!(
+            harness.fault_count(),
+            stats.total_faults,
+            "Harness fault log count must match campaign total"
         );
 
         // Test boundary condition with maximum counter values
@@ -474,7 +485,7 @@ mod remote_module_negative_tests {
         fault_checksums.insert(hash_bytes2, "config2");
 
         // Verify different configs produce different hashes (no collision)
-        if config1 != config2 {
+        if serialized1 != serialized2 {
             assert_ne!(
                 hash1, hash2,
                 "Different configs should produce different hashes"
@@ -499,7 +510,7 @@ mod remote_module_negative_tests {
         let similar_hash = similar_hasher.finalize();
 
         // Even tiny differences should be detectable
-        if similar_config != config1 {
+        if similar_serialized != serialized1 {
             assert_ne!(
                 similar_hash.as_slice(),
                 hash_bytes1,
@@ -531,10 +542,13 @@ mod remote_module_negative_tests {
         ];
 
         for (test_time, description) in &expiry_test_cases {
-            let fault = ScheduledFault {
-                fault_class: FaultClass::Corrupt,
-                delay_millis: *test_time, // Using as expiry time for this test
-                event_code: event_codes::SCHEDULED_FAULT,
+            // Constructed against the current ScheduledFault shape; the expiry
+            // logic under test uses `test_time` directly below.
+            let _fault = ScheduledFault {
+                message_index: usize::try_from(*test_time).unwrap_or(0),
+                fault: FaultClass::Corrupt {
+                    bit_positions: vec![0],
+                },
             };
 
             // In a proper implementation, expiry should be:
@@ -595,9 +609,8 @@ mod remote_module_negative_tests {
 
         // Test with small collections (safe conversion)
         let small_schedule = vec![ScheduledFault {
-            fault_class: FaultClass::Drop,
-            delay_millis: 100,
-            event_code: event_codes::SCHEDULED_FAULT,
+            message_index: 0,
+            fault: FaultClass::Drop,
         }];
 
         // Safe conversion should succeed
@@ -611,9 +624,8 @@ mod remote_module_negative_tests {
         // Test with medium-sized collection
         let medium_schedule: Vec<ScheduledFault> = (0..1000)
             .map(|i| ScheduledFault {
-                fault_class: FaultClass::Reorder,
-                delay_millis: i as u64,
-                event_code: event_codes::SCHEDULED_FAULT,
+                message_index: i,
+                fault: FaultClass::Reorder { depth: 1 },
             })
             .collect();
 
@@ -691,9 +703,8 @@ mod remote_module_negative_tests {
 
         // Test domain separation prevents collision between different data types
         let fault_schedule = ScheduledFault {
-            fault_class: FaultClass::Drop,
-            delay_millis: 0, // Same numeric values as in config
-            event_code: event_codes::SCHEDULED_FAULT,
+            message_index: 0, // Same numeric values as in config
+            fault: FaultClass::Drop,
         };
 
         // Hash fault config with domain separator
@@ -847,35 +858,43 @@ mod remote_module_negative_tests {
         }
 
         // Test that operations remain consistent across boundary conditions
-        let stats_before = {
-            let harness = VirtualTransportFaultHarness::new(valid_config());
-            harness.get_statistics()
+        let faults_before = {
+            let harness = VirtualTransportFaultHarness::new(0);
+            harness.fault_count()
         };
 
         let stats_after = {
-            let mut harness = VirtualTransportFaultHarness::new(valid_config());
+            let mut harness = VirtualTransportFaultHarness::new(0);
 
-            // Apply boundary operations
-            for j in 0..10 {
-                let fault = ScheduledFault {
-                    fault_class: FaultClass::Drop,
-                    delay_millis: j * 100,
-                    event_code: event_codes::SCHEDULED_FAULT,
-                };
-                harness.schedule_fault(fault);
-            }
-
-            harness.get_statistics()
+            // Apply boundary operations via a deterministic fault campaign.
+            harness.run_campaign(
+                "boundary",
+                &FaultConfig {
+                    drop_probability: 0.15,
+                    reorder_probability: 0.15,
+                    reorder_max_depth: 5,
+                    corrupt_probability: 0.10,
+                    corrupt_bit_count: 2,
+                    max_faults: 5000,
+                },
+                100,
+                "trace-boundary",
+            )
         };
 
         // Verify statistics remain consistent (no overflow or corruption)
         assert!(
-            stats_after.faults_scheduled >= stats_before.faults_scheduled,
+            stats_after.total_faults >= faults_before,
             "Fault count should increase monotonically"
         );
+        assert_eq!(
+            stats_after.drops + stats_after.reorders + stats_after.corruptions,
+            stats_after.total_faults,
+            "Applied faults must equal the sum of fault classes"
+        );
         assert!(
-            stats_after.faults_applied <= stats_after.faults_scheduled,
-            "Applied faults should never exceed scheduled faults"
+            stats_after.total_faults <= stats_after.total_messages,
+            "Applied faults should never exceed processed messages"
         );
     }
 }

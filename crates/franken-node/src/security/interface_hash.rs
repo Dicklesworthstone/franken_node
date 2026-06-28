@@ -1368,7 +1368,7 @@ mod interface_hash_comprehensive_negative_tests {
     fn negative_verify_hash_with_malicious_hex_patterns() {
         // Test with hex patterns that might bypass validation
         let malicious_patterns = [
-            "0x" + &"a".repeat(62),                    // Hex prefix
+            "0x".to_string() + &"a".repeat(62),        // Hex prefix
             "a".repeat(32) + "G" + &"a".repeat(31),    // Invalid hex char in middle
             "a".repeat(32) + "\x00" + &"a".repeat(31), // Null byte in middle
             "a".repeat(32) + "\n" + &"a".repeat(31),   // Newline in middle
@@ -1665,14 +1665,14 @@ mod interface_hash_advanced_negative_tests {
     fn negative_hash_hex_homograph_attack_patterns() {
         // Test with various homograph attack patterns in hex strings
         let homograph_patterns = [
-            "0" + &"О".repeat(63), // Cyrillic capital O instead of zero
-            "1" + &"l".repeat(63), // Lowercase L instead of one
-            "a" + &"а".repeat(63), // Cyrillic 'а' instead of Latin 'a'
-            "b" + &"Ь".repeat(63), // Cyrillic soft sign instead of 'b'
-            "c" + &"с".repeat(63), // Cyrillic 'с' instead of Latin 'c'
-            "d" + &"ԁ".repeat(63), // Cyrillic 'd' lookalike
-            "e" + &"е".repeat(63), // Cyrillic 'е' instead of Latin 'e'
-            "f" + &"𝒇".repeat(63), // Mathematical italic f instead of ASCII f
+            "0".to_string() + &"О".repeat(63), // Cyrillic capital O instead of zero
+            "1".to_string() + &"l".repeat(63), // Lowercase L instead of one
+            "a".to_string() + &"а".repeat(63), // Cyrillic 'а' instead of Latin 'a'
+            "b".to_string() + &"Ь".repeat(63), // Cyrillic soft sign instead of 'b'
+            "c".to_string() + &"с".repeat(63), // Cyrillic 'с' instead of Latin 'c'
+            "d".to_string() + &"ԁ".repeat(63), // Cyrillic 'd' lookalike
+            "e".to_string() + &"е".repeat(63), // Cyrillic 'е' instead of Latin 'e'
+            "f".to_string() + &"𝒇".repeat(63), // Mathematical italic f instead of ASCII f
         ];
 
         for homograph_hex in homograph_patterns {
@@ -1760,7 +1760,7 @@ mod interface_hash_advanced_negative_tests {
                 .map(|x| x as u8)
                 .collect::<Vec<_>>(), // Repeating pattern
             vec![0xAA, 0x55].repeat(500000), // Alternating bit pattern
-            b"interface_hash_v1:".repeat(100000).into_bytes(), // Separator repeated
+            b"interface_hash_v1:".repeat(100000), // Separator repeated
         ];
 
         for (i, adversarial_data) in adversarial_data_patterns.iter().enumerate() {

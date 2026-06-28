@@ -3565,8 +3565,8 @@ mod tests {
                     for malicious_action in &malicious_action_ids {
                         // Test node status validation
                         let node_result = transport.upsert_node_status(&NodeStatus {
-                            zone_id: malicious_zone.clone(),
-                            node_id: malicious_node.clone(),
+                            zone_id: malicious_zone.to_string(),
+                            node_id: malicious_node.to_string(),
                             last_seen: clock::wall_now(),
                             quarantine_version: 1,
                             health: NodeHealth::Healthy,
@@ -3582,10 +3582,10 @@ mod tests {
 
                         // Test action validation
                         let action_result = transport.publish_action(&FleetActionRecord {
-                            action_id: malicious_action.clone(),
+                            action_id: malicious_action.to_string(),
                             emitted_at: clock::wall_now(),
                             action: FleetAction::Release {
-                                zone_id: malicious_zone.clone(),
+                                zone_id: malicious_zone.to_string(),
                                 incident_id: "inc-test".to_string(),
                                 reason: None,
                             },
@@ -4178,16 +4178,17 @@ mod tests {
     fn compact_action_log_if_needed_releases_lock_on_error() {
         let tmp = tempdir().expect("temp dir");
         let layout = FleetTransportLayout::new(tmp.path());
-        let transport = FleetTransport::new(layout.clone()).expect("transport");
+        let transport = FileFleetTransport::new(tmp.path());
 
         // Initialize with a large action log that will trigger compaction
         let large_action = FleetActionRecord {
             action_id: "large-action".to_string(),
-            node_id: "node-1".to_string(),
-            action_type: FleetActionType::Start,
-            requested_at: clock::wall_now(),
             emitted_at: clock::wall_now(),
-            timeout_secs: 30,
+            action: FleetAction::Release {
+                zone_id: "prod".to_string(),
+                incident_id: "inc-1".to_string(),
+                reason: None,
+            },
         };
 
         // Write enough actions to exceed the threshold
@@ -4198,7 +4199,7 @@ mod tests {
 
         // Create a read-only compaction lock file to simulate a file system error
         // that would occur during compaction but before the lock is released
-        let compaction_lock_path = layout.compaction_lock_path();
+        let compaction_lock_path = transport.action_compaction_lock_path();
         fs::create_dir_all(compaction_lock_path.parent().unwrap()).expect("create dir");
 
         // First, make the actions file inaccessible to force an error during compaction
@@ -4208,7 +4209,7 @@ mod tests {
         fs::set_permissions(layout.actions_path(), permissions).expect("set readonly");
 
         // Attempt compaction - this should fail but not leave locks hanging
-        let result = transport.compact_action_log_if_needed(100, 1); // Small size to force compaction
+        let result = transport.compact_action_log_if_needed(100, 1, clock::wall_now()); // Small size to force compaction
 
         // The compaction should fail due to permissions
         assert!(
@@ -4224,7 +4225,7 @@ mod tests {
 
         // Now verify that we can immediately run another compaction without deadlocking
         // If the lock was leaked, this would hang or fail
-        let second_result = transport.compact_action_log_if_needed(100, 1);
+        let second_result = transport.compact_action_log_if_needed(100, 1, clock::wall_now());
 
         // The second attempt should also handle the error gracefully and not deadlock
         // The key assertion is that this doesn't hang - the Result is less important
@@ -4471,8 +4472,8 @@ mod tests {
         // is the sorted order from canonicalize_json_value.
         let mut keys: Vec<&String> = canonical_map.keys().collect();
         keys.sort();
-        assert_eq!(keys.first().map(String::as_str), Some("k_0000"));
-        assert_eq!(keys.last().map(String::as_str), Some("k_0499"));
+        assert_eq!(keys.first().map(|s| s.as_str()), Some("k_0000"));
+        assert_eq!(keys.last().map(|s| s.as_str()), Some("k_0499"));
     }
 
     // ── bd-98xo5.7.3: property tests ──

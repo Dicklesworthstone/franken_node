@@ -1985,23 +1985,23 @@ mod atc_participation_weighting_negative_path_tests {
             "0123456789abcdef".repeat(4),          // Valid hex pattern
             format!("cluster:{}", "b".repeat(32)), // Prefixed hash
             // JSON injection attempts
-            "hint\",\"injected\":true,\"cluster\":\"",
-            "null}\"evil\":\"payload\",\"cluster\":\"normal",
+            "hint\",\"injected\":true,\"cluster\":\"".to_string(),
+            "null}\"evil\":\"payload\",\"cluster\":\"normal".to_string(),
             // Control character injection
-            "cluster\x00null\r\n",
-            "cluster\x1b[31mred\x1b[0m",
+            "cluster\x00null\r\n".to_string(),
+            "cluster\x1b[31mred\x1b[0m".to_string(),
             // Unicode injection
-            "cluster\u{202E}injection",
-            "cluster\u{FEFF}bom",
+            "cluster\u{202E}injection".to_string(),
+            "cluster\u{FEFF}bom".to_string(),
             // Path-like strings that could cause issues
-            "../../../etc/passwd",
-            "..\\..\\windows\\system32",
+            "../../../etc/passwd".to_string(),
+            "..\\..\\windows\\system32".to_string(),
             // Extremely long hint
             "long_cluster_hint_".repeat(10000),
             // Empty and whitespace
-            "",
-            "   ",
-            "\t\n\r",
+            "".to_string(),
+            "   ".to_string(),
+            "\t\n\r".to_string(),
         ];
 
         let mut participants = Vec::new();
@@ -2489,9 +2489,9 @@ mod atc_participation_weighting_negative_path_tests {
         };
 
         // Should handle deeply nested content without stack overflow
-        let result = std::panic::catch_unwind(|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             engine.compute_weights(&[participant], "deep_test", "2026-04-17T00:00:00Z")
-        });
+        }));
 
         assert!(
             result.is_ok(),
@@ -2643,14 +2643,14 @@ mod atc_participation_weighting_negative_path_tests {
             "a".repeat(32),
             "b".repeat(32),
             // Similar but different strings
-            "cluster_group_alpha",
-            "cluster_group_beta",
+            "cluster_group_alpha".to_string(),
+            "cluster_group_beta".to_string(),
             // Strings that could hash to similar values
-            "subnet_192_168_1",
-            "subnet_192_168_2",
+            "subnet_192_168_1".to_string(),
+            "subnet_192_168_2".to_string(),
             // Unicode variations that look similar
-            "café_network",
-            "cafe\u{0301}_network",
+            "café_network".to_string(),
+            "cafe\u{0301}_network".to_string(),
         ];
 
         let mut participants = Vec::new();

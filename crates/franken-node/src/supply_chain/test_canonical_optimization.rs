@@ -1,6 +1,6 @@
 //! Test to verify canonical encoding optimization preserves exact output
 
-use super::trust_card::canonicalize_value;
+use super::trust_card::to_canonical_json;
 use hex;
 use serde_json::{Map, Value};
 use sha2::Digest;
@@ -33,7 +33,8 @@ fn canonicalize_value_optimized(value: Value) -> Value {
 
 #[cfg(test)]
 mod optimization_tests {
-    use super::{canonicalize_value, canonicalize_value_optimized};
+    use super::{canonicalize_value_optimized, to_canonical_json};
+    use sha2::Digest;
 
     #[test]
     fn test_canonical_optimization_isomorphism() {
@@ -64,10 +65,9 @@ mod optimization_tests {
         ];
 
         for (i, test_case) in test_cases.into_iter().enumerate() {
-            let current = canonicalize_value(test_case.clone());
+            let current_json = to_canonical_json(&test_case).expect("canonical json");
             let optimized = canonicalize_value_optimized(test_case);
 
-            let current_json = serde_json::to_string(&current).unwrap();
             let optimized_json = serde_json::to_string(&optimized).unwrap();
 
             assert_eq!(

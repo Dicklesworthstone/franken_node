@@ -559,7 +559,7 @@ mod edge_case_tests {
 
     #[test]
     fn push_bounded_zero_capacity() {
-        use super::super::evidence_replay_validator::push_bounded;
+        use crate::push_bounded;
 
         let mut items = vec![1, 2, 3];
         push_bounded(&mut items, 4, 0);
@@ -569,7 +569,7 @@ mod edge_case_tests {
 
     #[test]
     fn push_bounded_exact_capacity() {
-        use super::super::evidence_replay_validator::push_bounded;
+        use crate::push_bounded;
 
         let mut items = vec![1, 2, 3];
         push_bounded(&mut items, 4, 3); // Exactly at capacity
@@ -581,7 +581,7 @@ mod edge_case_tests {
 
     #[test]
     fn push_bounded_massive_overflow() {
-        use super::super::evidence_replay_validator::push_bounded;
+        use crate::push_bounded;
 
         let mut items: Vec<u32> = (0..10000).collect(); // Large collection
         push_bounded(&mut items, 99999, 5);

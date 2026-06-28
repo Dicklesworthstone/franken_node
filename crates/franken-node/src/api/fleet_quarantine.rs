@@ -7228,7 +7228,7 @@ mod tests {
             Err(err) => {
                 // Should fail with capacity/validation error, not panic
                 assert!(matches!(
-                    err.error_code().as_str(),
+                    err.error_code(),
                     FLEET_SCOPE_INVALID
                         | FLEET_INCIDENT_CAPACITY_EXCEEDED
                         | FLEET_ZONE_STATUS_CAPACITY_EXCEEDED
@@ -7722,11 +7722,11 @@ mod tests {
 
         // 4. Test status queries for zones that could corrupt state
         let malicious_zones = vec![
-            "../zone-traversal",
-            "/absolute/path/zone",
-            "zone\0null",
-            "zone\r\nheader-injection",
-            "zone" + &"x".repeat(10000), // Very long zone name
+            "../zone-traversal".to_string(),
+            "/absolute/path/zone".to_string(),
+            "zone\0null".to_string(),
+            "zone\r\nheader-injection".to_string(),
+            "zone".to_string() + &"x".repeat(10000), // Very long zone name
         ];
 
         for malicious_zone in malicious_zones {
@@ -7956,9 +7956,12 @@ mod tests {
             for i in 0..MAX_FLEET_EVENTS {
                 let result = fleet.quarantine(QuarantineRequest {
                     extension_id: format!("test-ext-{}", i),
-                    zone_id: "test-zone".to_string(),
-                    tenant_id: Some("test-tenant".to_string()),
-                    reason: format!("boundary test event {}", i),
+                    scope: QuarantineScope {
+                        zone_id: "test-zone".to_string(),
+                        tenant_id: Some("test-tenant".to_string()),
+                        affected_nodes: 1,
+                        reason: format!("boundary test event {}", i),
+                    },
                 });
                 assert!(
                     result.is_ok(),
@@ -7977,9 +7980,12 @@ mod tests {
             // Add one more event to trigger eviction
             let overflow_result = fleet.quarantine(QuarantineRequest {
                 extension_id: "overflow-ext".to_string(),
-                zone_id: "test-zone".to_string(),
-                tenant_id: Some("test-tenant".to_string()),
-                reason: "overflow event to test capacity eviction".to_string(),
+                scope: QuarantineScope {
+                    zone_id: "test-zone".to_string(),
+                    tenant_id: Some("test-tenant".to_string()),
+                    affected_nodes: 1,
+                    reason: "overflow event to test capacity eviction".to_string(),
+                },
             });
 
             assert!(
@@ -8007,16 +8013,18 @@ mod tests {
             for i in 0..MAX_ZONE_STATUS {
                 let result = fleet.quarantine(QuarantineRequest {
                     extension_id: "test-ext".to_string(),
-                    zone_id: format!("zone-{}", i),
-                    tenant_id: Some("test-tenant".to_string()),
-                    reason: "zone status boundary test".to_string(),
+                    scope: QuarantineScope {
+                        zone_id: format!("zone-{}", i),
+                        tenant_id: Some("test-tenant".to_string()),
+                        affected_nodes: 1,
+                        reason: "zone status boundary test".to_string(),
+                    },
                 });
                 assert!(result.is_ok(), "quarantine for zone {} should succeed", i);
 
                 // Check status to force zone status creation
                 let status_result = fleet.get_status(StatusRequest {
                     zone_id: format!("zone-{}", i),
-                    tenant_id: Some("test-tenant".to_string()),
                 });
                 assert!(
                     status_result.is_ok(),
@@ -8035,9 +8043,12 @@ mod tests {
             // Add more zones to test eviction
             let overflow_result = fleet.quarantine(QuarantineRequest {
                 extension_id: "test-ext".to_string(),
-                zone_id: "overflow-zone".to_string(),
-                tenant_id: Some("test-tenant".to_string()),
-                reason: "zone status overflow test".to_string(),
+                scope: QuarantineScope {
+                    zone_id: "overflow-zone".to_string(),
+                    tenant_id: Some("test-tenant".to_string()),
+                    affected_nodes: 1,
+                    reason: "zone status overflow test".to_string(),
+                },
             });
 
             assert!(
@@ -8057,9 +8068,12 @@ mod tests {
                 // Limit to 100 for test speed
                 let quarantine_result = fleet.quarantine(QuarantineRequest {
                     extension_id: format!("ext-{}", i),
-                    zone_id: format!("zone-{}", i % 10), // Cycle through zones
-                    tenant_id: Some(format!("tenant-{}", i % 5)), // Cycle through tenants
-                    reason: format!("incident boundary test {}", i),
+                    scope: QuarantineScope {
+                        zone_id: format!("zone-{}", i % 10), // Cycle through zones
+                        tenant_id: Some(format!("tenant-{}", i % 5)), // Cycle through tenants
+                        affected_nodes: 1,
+                        reason: format!("incident boundary test {}", i),
+                    },
                 });
                 assert!(
                     quarantine_result.is_ok(),
@@ -8091,9 +8105,12 @@ mod tests {
             // Test minimum valid request
             let minimal_result = fleet.quarantine(QuarantineRequest {
                 extension_id: "a".to_string(),
-                zone_id: "z".to_string(),
-                tenant_id: None,
-                reason: "x".to_string(),
+                scope: QuarantineScope {
+                    zone_id: "z".to_string(),
+                    tenant_id: None,
+                    affected_nodes: 1,
+                    reason: "x".to_string(),
+                },
             });
             assert!(minimal_result.is_ok(), "minimal request should succeed");
 
@@ -8101,27 +8118,36 @@ mod tests {
             let large_reason = "x".repeat(8192); // 8KB reason
             let large_result = fleet.quarantine(QuarantineRequest {
                 extension_id: "test-large-ext".to_string(),
-                zone_id: "test-large-zone".to_string(),
-                tenant_id: Some("test-large-tenant".to_string()),
-                reason: large_reason,
+                scope: QuarantineScope {
+                    zone_id: "test-large-zone".to_string(),
+                    tenant_id: Some("test-large-tenant".to_string()),
+                    affected_nodes: 1,
+                    reason: large_reason,
+                },
             });
             assert!(large_result.is_ok(), "large request should succeed");
 
             // Test empty fields boundary
             let empty_ext_result = fleet.quarantine(QuarantineRequest {
                 extension_id: "".to_string(),
-                zone_id: "test-zone".to_string(),
-                tenant_id: Some("test-tenant".to_string()),
-                reason: "empty extension test".to_string(),
+                scope: QuarantineScope {
+                    zone_id: "test-zone".to_string(),
+                    tenant_id: Some("test-tenant".to_string()),
+                    affected_nodes: 1,
+                    reason: "empty extension test".to_string(),
+                },
             });
             // Should fail validation for empty extension_id
             assert!(empty_ext_result.is_err(), "empty extension_id should fail");
 
             let empty_zone_result = fleet.quarantine(QuarantineRequest {
                 extension_id: "test-ext".to_string(),
-                zone_id: "".to_string(),
-                tenant_id: Some("test-tenant".to_string()),
-                reason: "empty zone test".to_string(),
+                scope: QuarantineScope {
+                    zone_id: "".to_string(),
+                    tenant_id: Some("test-tenant".to_string()),
+                    affected_nodes: 1,
+                    reason: "empty zone test".to_string(),
+                },
             });
             // Should fail validation for empty zone_id
             assert!(empty_zone_result.is_err(), "empty zone_id should fail");
@@ -8150,9 +8176,12 @@ mod tests {
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let result = fleet_guard.quarantine(QuarantineRequest {
                             extension_id: format!("concurrent-ext-{}-{}", i, j),
-                            zone_id: format!("concurrent-zone-{}", i),
-                            tenant_id: Some(format!("concurrent-tenant-{}", i)),
-                            reason: format!("concurrent test {}-{}", i, j),
+                            scope: QuarantineScope {
+                                zone_id: format!("concurrent-zone-{}", i),
+                                tenant_id: Some(format!("concurrent-tenant-{}", i)),
+                                affected_nodes: 1,
+                                reason: format!("concurrent test {}-{}", i, j),
+                            },
                         });
                         drop(fleet_guard);
 
@@ -8202,9 +8231,12 @@ mod tests {
             for i in 0..50 {
                 let result = fleet.quarantine(QuarantineRequest {
                     extension_id: format!("pending-ext-{}", i),
-                    zone_id: format!("pending-zone-{}", i % 5),
-                    tenant_id: Some(format!("pending-tenant-{}", i % 3)),
-                    reason: format!("pending reconcile test {}", i),
+                    scope: QuarantineScope {
+                        zone_id: format!("pending-zone-{}", i % 5),
+                        tenant_id: Some(format!("pending-tenant-{}", i % 3)),
+                        affected_nodes: 1,
+                        reason: format!("pending reconcile test {}", i),
+                    },
                 });
                 assert!(result.is_ok(), "pending quarantine {} should succeed", i);
             }
@@ -8255,9 +8287,12 @@ mod tests {
             for i in 0..100 {
                 let result = fleet.quarantine(QuarantineRequest {
                     extension_id: format!("rate-test-ext-{}", i),
-                    zone_id: "rate-test-zone".to_string(),
-                    tenant_id: Some("rate-test-tenant".to_string()),
-                    reason: format!("rate limiting test {}", i),
+                    scope: QuarantineScope {
+                        zone_id: "rate-test-zone".to_string(),
+                        tenant_id: Some("rate-test-tenant".to_string()),
+                        affected_nodes: 1,
+                        reason: format!("rate limiting test {}", i),
+                    },
                 });
 
                 match result {

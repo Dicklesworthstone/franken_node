@@ -1746,11 +1746,11 @@ mod tests {
         // Add some test audit entries with trace IDs
         let key1 = test_key(42);
         let payload1 = b"test-payload-42";
-        let _result1 = store.process(&key1, hash_payload(payload1), 1000);
+        let _result1 = store.check_or_insert(key1, payload1, 1000, "trace-1");
 
         let key2 = test_key(43);
         let payload2 = b"test-payload-43";
-        let _result2 = store.process(&key2, hash_payload(payload2), 1000);
+        let _result2 = store.check_or_insert(key2, payload2, 1000, "trace-2");
 
         let debug_output = format!("{:?}", store);
 
@@ -1828,8 +1828,9 @@ mod tests {
 
     #[test]
     fn dedupe_entry_debug_redacts_payload_hash() {
+        let key = test_key(42);
         let entry = DedupeEntry {
-            key: IdempotencyKey::new("test_key".to_string()),
+            key,
             payload_hash: "sensitive_payload_hash_xyz789".to_string(),
             status: EntryStatus::Complete,
             outcome: None,
@@ -1847,7 +1848,7 @@ mod tests {
 
         // Verify safe fields are shown
         assert!(
-            debug_output.contains("test_key"),
+            debug_output.contains(&format!("{key:?}")),
             "Debug should show idempotency key"
         );
         assert!(

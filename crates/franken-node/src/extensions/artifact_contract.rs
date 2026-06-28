@@ -1088,7 +1088,7 @@ mod tests {
 
         let gate = AdmissionGate::new(cfg);
         let trusted_artifact = make_artifact("a-trusted", "ext-alpha", test_contract());
-        let trusted_outcome = gate.evaluate(&trusted_artifact);
+        let trusted_outcome = gate.evaluate(&trusted_artifact, None, 0);
         assert!(matches!(trusted_outcome, AdmissionOutcome::Accepted { .. }));
 
         let overflow_contract = make_contract(
@@ -1100,7 +1100,7 @@ mod tests {
             20_000,
         );
         let overflow_artifact = make_artifact("a-overflow", "ext-alpha", overflow_contract);
-        let overflow_outcome = gate.evaluate(&overflow_artifact);
+        let overflow_outcome = gate.evaluate(&overflow_artifact, None, 0);
         assert!(matches!(
             overflow_outcome,
             AdmissionOutcome::Denied {
@@ -2479,7 +2479,7 @@ mod tests {
                 SCHEMA_VERSION,
                 10_000,
             );
-            let artifact = make_artifact("memory-artifact", "ext-alpha", contract);
+            let artifact = make_artifact("memory-artifact", "ext-alpha", contract.clone());
 
             let outcome = gate.evaluate(&artifact, None, 0);
             assert!(matches!(outcome, AdmissionOutcome::Denied { .. }));
@@ -2996,7 +2996,7 @@ mod tests {
         use crate::config::Config;
         use crate::supply_chain::trust_card::{
             ReputationTrend, RevocationStatus, SnapshotSourceContext, TrustCardMutation,
-            TrustCardRegistry, rfc3339_timestamp_from_secs,
+            TrustCardRegistry,
         };
         use std::fs;
         use tempfile::TempDir;
@@ -3006,7 +3006,8 @@ mod tests {
         let now_secs = 1_700_000_000;
 
         // Create registry with trusted extension
-        let mut registry = TrustCardRegistry::new("test-registry".to_string());
+        let mut registry =
+            TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
         let extension_id = "test-extension";
 
         // Initially add extension as trusted
@@ -3020,10 +3021,8 @@ mod tests {
                     reputation_score_basis_points: Some(8000),
                     reputation_trend: Some(ReputationTrend::Stable),
                     user_facing_risk_assessment: None,
-                    provenance_summary: None,
                     last_verified_timestamp: None,
-                    capability_declarations: None,
-                    trust_card_version: None,
+                    evidence_refs: None,
                 },
                 now_secs,
                 "test-setup",
@@ -3074,16 +3073,16 @@ mod tests {
                     certification_level: None,
                     revocation_status: Some(RevocationStatus::Revoked {
                         reason: "Security vulnerability discovered".to_string(),
-                        revoked_at: rfc3339_timestamp_from_secs(now_secs),
+                        revoked_at: chrono::DateTime::from_timestamp(now_secs as i64, 0)
+                            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string()),
                     }),
                     active_quarantine: Some(true),
                     reputation_score_basis_points: None,
                     reputation_trend: Some(ReputationTrend::Declining),
                     user_facing_risk_assessment: None,
-                    provenance_summary: None,
                     last_verified_timestamp: None,
-                    capability_declarations: None,
-                    trust_card_version: None,
+                    evidence_refs: None,
                 },
                 now_secs,
                 "revoke-for-test",
@@ -3134,7 +3133,8 @@ mod tests {
         let registry_path = tmp.path().join("test_registry.json");
         let now_secs = 1_700_000_000;
 
-        let mut registry = TrustCardRegistry::new("test-registry".to_string());
+        let mut registry =
+            TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
         let extension_id = "quarantined-extension";
 
         // Add extension with active quarantine
@@ -3148,10 +3148,8 @@ mod tests {
                     reputation_score_basis_points: Some(8000),
                     reputation_trend: Some(ReputationTrend::Declining),
                     user_facing_risk_assessment: None,
-                    provenance_summary: None,
                     last_verified_timestamp: None,
-                    capability_declarations: None,
-                    trust_card_version: None,
+                    evidence_refs: None,
                 },
                 now_secs,
                 "test-quarantine-setup",
@@ -3218,7 +3216,8 @@ mod tests {
         let now_secs = 1_700_000_000;
 
         // Create empty registry
-        let registry = TrustCardRegistry::new("empty-registry".to_string());
+        let registry =
+            TrustCardRegistry::new(3600, b"franken-node-trust-card-registry-key-v1");
         registry
             .persist_authoritative_state(&registry_path)
             .expect("persist empty registry");

@@ -1973,9 +1973,9 @@ mod tests {
             let policy_clone = Arc::clone(&policy);
 
             let handle = thread::spawn(move || {
-                let operations = [
+                let operations: [Box<dyn Fn() + '_>; 3] = [
                     // Mix of allowlist additions and SSRF checks
-                    || {
+                    Box::new(|| {
                         let mut p = try_lock(&policy_clone, "ssrf policy concurrent allowlist add")
                             .expect("ssrf policy allowlist mutex should not be poisoned");
                         let _ = p.add_allowlist(
@@ -1985,8 +1985,8 @@ mod tests {
                             &format!("trace-{thread_id}"),
                             "ts",
                         );
-                    },
-                    || {
+                    }),
+                    Box::new(|| {
                         let mut p = try_lock(&policy_clone, "ssrf policy concurrent check")
                             .expect("ssrf policy check mutex should not be poisoned");
                         let _ = p.check_ssrf(
@@ -1996,12 +1996,12 @@ mod tests {
                             &format!("trace-check-{thread_id}"),
                             "ts",
                         );
-                    },
-                    || {
+                    }),
+                    Box::new(|| {
                         let p = try_lock(&policy_clone, "ssrf policy concurrent validate")
                             .expect("ssrf policy validate mutex should not be poisoned");
                         let _ = p.validate();
-                    },
+                    }),
                 ];
 
                 // Perform multiple operations in this thread

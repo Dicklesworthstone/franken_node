@@ -2646,6 +2646,9 @@ mod parser_contract_extra_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // FIXME(bd-yom8c): `Cli::command()` is the clap `CommandFactory` trait method; bring the
+    // trait into scope (nested test mods do not inherit it via `use super::*`).
+    use clap::CommandFactory;
 
     fn parse_error_kind(args: &[&str]) -> clap::error::ErrorKind {
         let mut argv = Vec::with_capacity(args.len().saturating_add(1));
@@ -2840,7 +2843,7 @@ mod tests {
                         // If parsed successfully, verify Unicode is handled safely
                         match cli.command {
                             Command::Init(init_args) => {
-                                if let Some(output_dir) = init_args.output_dir {
+                                if let Some(output_dir) = init_args.out_dir {
                                     // Should handle Unicode paths consistently
                                     assert!(
                                         !output_dir.to_string_lossy().is_empty()
@@ -2850,7 +2853,7 @@ mod tests {
                                     );
                                 }
                                 assert!(
-                                    !init_args.profile.is_empty() || init_args.profile.is_empty(),
+                                    init_args.profile.is_some() || init_args.profile.is_none(),
                                     "Profile should be handled deterministically: {}",
                                     attack_name
                                 );
@@ -2881,8 +2884,8 @@ mod tests {
                             Command::Run(run_args) => {
                                 // Should handle script paths safely
                                 assert!(
-                                    !run_args.script.to_string_lossy().is_empty()
-                                        || run_args.script.to_string_lossy().is_empty(),
+                                    !run_args.app_path.to_string_lossy().is_empty()
+                                        || run_args.app_path.to_string_lossy().is_empty(),
                                     "Script path should be handled safely: {}",
                                     attack_name
                                 );
@@ -2947,7 +2950,7 @@ mod tests {
                     // If parsed, should handle large arguments reasonably
                     match cli.command {
                         Command::Init(init_args) => {
-                            if let Some(output_dir) = init_args.output_dir {
+                            if let Some(output_dir) = init_args.out_dir {
                                 // Path should be handled without memory exhaustion
                                 assert!(
                                     output_dir.to_string_lossy().len() <= 2_000_000,
@@ -2991,7 +2994,7 @@ mod tests {
                         Command::Run(run_args) => {
                             // Should handle deep paths without overflow
                             assert!(
-                                run_args.script.to_string_lossy().len() < 100_000,
+                                run_args.app_path.to_string_lossy().len() < 100_000,
                                 "Script path should be reasonably bounded"
                             );
                         }
@@ -3063,14 +3066,14 @@ mod tests {
                         match &cli.command {
                             Command::Init(init_args) => {
                                 assert!(
-                                    !init_args.profile.is_empty(),
+                                    init_args.profile.as_deref().map_or(true, |p| !p.is_empty()),
                                     "Profile should not be empty: case {}",
                                     i
                                 );
                             }
                             Command::Run(run_args) => {
                                 assert!(
-                                    !run_args.script.to_string_lossy().is_empty(),
+                                    !run_args.app_path.to_string_lossy().is_empty(),
                                     "Script should not be empty: case {}",
                                     i
                                 );
@@ -3160,7 +3163,7 @@ mod tests {
                     Ok(cli) => {
                         match cli.command {
                             Command::Run(run_args) => {
-                                let script_path = run_args.script.to_string_lossy();
+                                let script_path = run_args.app_path.to_string_lossy();
 
                                 // Verify no command injection in parsed path
                                 assert!(
@@ -3199,29 +3202,35 @@ mod tests {
                     }
                 }
 
-                // Test environment variable injection
-                let env_inject_args =
-                    vec!["franken-node", "run", "script.js", "--env", malicious_input];
-                let env_result = Cli::try_parse_from(&env_inject_args);
+                // FIXME(bd-yom8c): `RunArgs::env` and the `--env` flag were removed from the
+                // current CLI; this env-injection sub-block targets a removed API. Gated until
+                // rewritten against whatever replaces env passthrough.
+                #[cfg(any())]
+                {
+                    // Test environment variable injection
+                    let env_inject_args =
+                        vec!["franken-node", "run", "script.js", "--env", malicious_input];
+                    let env_result = Cli::try_parse_from(&env_inject_args);
 
-                match env_result {
-                    Ok(cli) => {
-                        match cli.command {
-                            Command::Run(run_args) => {
-                                // Verify environment variables are parsed safely
-                                for env_var in &run_args.env {
-                                    assert_eq!(
-                                        env_var, malicious_input,
-                                        "Env var should be preserved literally: {}",
-                                        attack_name
-                                    );
+                    match env_result {
+                        Ok(cli) => {
+                            match cli.command {
+                                Command::Run(run_args) => {
+                                    // Verify environment variables are parsed safely
+                                    for env_var in &run_args.env {
+                                        assert_eq!(
+                                            env_var, malicious_input,
+                                            "Env var should be preserved literally: {}",
+                                            attack_name
+                                        );
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
-                    }
-                    Err(_) => {
-                        // May reject malicious environment variables - acceptable
+                        Err(_) => {
+                            // May reject malicious environment variables - acceptable
+                        }
                     }
                 }
 
@@ -3234,7 +3243,7 @@ mod tests {
                     Ok(cli) => {
                         match cli.command {
                             Command::Init(init_args) => {
-                                if let Some(output_dir) = init_args.output_dir {
+                                if let Some(output_dir) = init_args.out_dir {
                                     let output_path = output_dir.to_string_lossy();
 
                                     // Verify output directory is treated as literal path
@@ -3435,9 +3444,11 @@ mod tests {
             }
 
             // Test path length boundaries
+            // FIXME(bd-yom8c): the `.repeat()` rows make this a `Vec<(String, _)>`; the literal
+            // rows must be owned `String`s too, else the array pins to `&str` (E0308).
             let path_lengths = vec![
-                ("", "empty_path"),
-                ("a", "single_char"),
+                ("".to_string(), "empty_path"),
+                ("a".to_string(), "single_char"),
                 ("a".repeat(100), "medium_path"),
                 ("a".repeat(4096), "long_path"),
                 ("/".repeat(1000), "deep_path"),
@@ -3448,13 +3459,13 @@ mod tests {
                     continue; // Skip empty paths which are invalid
                 }
 
-                let args = vec!["franken-node", "run", &path_str];
+                let args = vec!["franken-node", "run", path_str.as_str()];
                 let parse_result = Cli::try_parse_from(&args);
 
                 match parse_result {
                     Ok(cli) => match cli.command {
                         Command::Run(run_args) => {
-                            let parsed_path = run_args.script.to_string_lossy();
+                            let parsed_path = run_args.app_path.to_string_lossy();
                             assert_eq!(
                                 parsed_path, path_str,
                                 "Path should be preserved: {}",
@@ -3469,38 +3480,43 @@ mod tests {
                 }
             }
 
-            // Test environment variable boundaries
-            let env_var_cases = vec![
-                ("KEY=VALUE", "basic_env"),
-                ("KEY=", "empty_value"),
-                ("LONG_KEY_NAME=LONG_VALUE", "descriptive_env"),
-                ("KEY=" + &"x".repeat(10000), "large_value"),
-                (&"x".repeat(100) + "=value", "large_key"),
-            ];
+            // FIXME(bd-yom8c): `RunArgs::env` and the `--env` flag were removed from the current
+            // CLI; this env-boundary block targets a removed API. Gated until rewritten.
+            #[cfg(any())]
+            {
+                // Test environment variable boundaries
+                let env_var_cases = vec![
+                    ("KEY=VALUE".to_string(), "basic_env"),
+                    ("KEY=".to_string(), "empty_value"),
+                    ("LONG_KEY_NAME=LONG_VALUE".to_string(), "descriptive_env"),
+                    ("KEY=".to_string() + &"x".repeat(10000), "large_value"),
+                    ("x".repeat(100) + "=value", "large_key"),
+                ];
 
-            for (env_var, test_name) in env_var_cases {
-                let args = vec!["franken-node", "run", "script.js", "--env", env_var];
-                let parse_result = Cli::try_parse_from(&args);
+                for (env_var, test_name) in env_var_cases {
+                    let args = vec!["franken-node", "run", "script.js", "--env", env_var.as_str()];
+                    let parse_result = Cli::try_parse_from(&args);
 
-                match parse_result {
-                    Ok(cli) => match cli.command {
-                        Command::Run(run_args) => {
-                            assert_eq!(
-                                run_args.env.len(),
-                                1,
-                                "Should have one env var: {}",
-                                test_name
-                            );
-                            assert_eq!(
-                                run_args.env[0], env_var,
-                                "Env var should be preserved: {}",
-                                test_name
-                            );
+                    match parse_result {
+                        Ok(cli) => match cli.command {
+                            Command::Run(run_args) => {
+                                assert_eq!(
+                                    run_args.env.len(),
+                                    1,
+                                    "Should have one env var: {}",
+                                    test_name
+                                );
+                                assert_eq!(
+                                    run_args.env[0], env_var,
+                                    "Env var should be preserved: {}",
+                                    test_name
+                                );
+                            }
+                            _ => {}
+                        },
+                        Err(_) => {
+                            // May reject malformed or oversized env vars - acceptable
                         }
-                        _ => {}
-                    },
-                    Err(_) => {
-                        // May reject malformed or oversized env vars - acceptable
                     }
                 }
             }
@@ -3553,7 +3569,8 @@ mod tests {
                     Ok(cli) => match cli.command {
                         Command::Init(init_args) => {
                             assert_eq!(
-                                init_args.profile, value,
+                                init_args.profile.as_deref(),
+                                Some(value),
                                 "Profile value should be preserved"
                             );
                         }

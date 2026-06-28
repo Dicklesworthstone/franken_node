@@ -2018,6 +2018,7 @@ mod tests {
                 doctor_readiness: "green".to_string(),
                 ci_consumable: true,
             },
+            flight_recorder_ref: None,
         }
     }
 

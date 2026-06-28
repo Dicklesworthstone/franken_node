@@ -602,7 +602,7 @@ mod tests {
     use super::{
         InclusionProof, LogRoot, ProofFailure, ProofReceipt, TransparencyError, TransparencyPolicy,
         audit_path_len_limit, build_test_tree, hash_pair, leaf_hash, recompute_root,
-        recompute_root_bytes, verify_inclusion, verify_inclusion_proof,
+        recompute_root_bytes, verify_inclusion,
     };
 
     fn test_policy(root: &str, tree_size: u64) -> TransparencyPolicy {

@@ -2288,8 +2288,8 @@ pub mod conformance {
 
         // Verify leak oracle report generation
         let oracle_report = tracker.generate_leak_oracle_report();
-        assert!(oracle_report.scan_count > 0);
-        assert!(oracle_report.total_leaked > 0);
+        assert!(oracle_report.total_scans > 0);
+        assert!(oracle_report.total_leaks > 0);
     }
 
     /// Conformance: State transition validation matrix
@@ -2476,7 +2476,7 @@ pub mod conformance {
         );
         if let Ok(id) = result {
             // Verify Unicode doesn't break state queries
-            assert!(tracker.get_obligation(&id).is_ok());
+            assert!(tracker.get_obligation(&id).is_some());
             let _ = tracker.rollback(&id, 2100, "unicode-cleanup");
         }
     }
@@ -2543,8 +2543,7 @@ pub mod conformance {
         }
 
         // Verify bounded memory usage despite stress test
-        let status = tracker.get_status();
-        assert!(status.reserved_count <= MAX_OBLIGATIONS);
+        assert!(tracker.count_in_state(ObligationState::Reserved) <= MAX_OBLIGATIONS);
     }
 
     /// Negative test: Timing attacks in obligation state queries and leak detection
@@ -2558,7 +2557,7 @@ pub mod conformance {
                 tracker
                     .reserve(
                         ObligationFlow::Publish,
-                        vec![i],
+                        vec![i as u8],
                         1000 + i,
                         &format!("timing-{}", i),
                     )
@@ -2571,7 +2570,7 @@ pub mod conformance {
                 let id = tracker
                     .reserve(
                         ObligationFlow::Revoke,
-                        vec![i + 10],
+                        vec![(i + 10) as u8],
                         1100 + i,
                         &format!("committed-{}", i),
                     )
@@ -2588,7 +2587,7 @@ pub mod conformance {
                 let id = tracker
                     .reserve(
                         ObligationFlow::Quarantine,
-                        vec![i + 20],
+                        vec![(i + 20) as u8],
                         1300 + i,
                         &format!("rolled-{}", i),
                     )
@@ -2734,15 +2733,16 @@ pub mod conformance {
         // Verify tracker state is consistent after concurrent access
         let final_tracker = try_lock(&tracker, "inspect obligation tracker final state")
             .expect("obligation tracker mutex should not be poisoned");
-        let status = final_tracker.get_status();
+        let reserved_count = final_tracker.count_in_state(ObligationState::Reserved);
+        let total_count = final_tracker.total_obligations();
 
         // All operations should have completed successfully or failed cleanly
-        assert!(status.reserved_count <= MAX_OBLIGATIONS);
-        assert!(status.total_count <= MAX_OBLIGATIONS);
+        assert!(reserved_count <= MAX_OBLIGATIONS);
+        assert!(total_count <= MAX_OBLIGATIONS);
 
         // Verify no obligations are stuck in Reserved state after concurrent operations
         // (some may still be Reserved if they hit budget limits, which is acceptable)
-        assert!(status.reserved_count <= DEFAULT_FLOW_BUDGET * 5); // 5 flows max
+        assert!(reserved_count <= DEFAULT_FLOW_BUDGET * 5); // 5 flows max
     }
 
     /// Negative test: Arithmetic overflow in timestamps and sequence numbers
@@ -2779,23 +2779,23 @@ pub mod conformance {
             assert!(commit_result.is_ok() || rollback_result.is_ok());
 
             // Verify obligations are in expected states
-            if let Ok(obligation1) = tracker.get_obligation(&id1) {
+            if let Some(obligation1) = tracker.get_obligation(&id1) {
                 assert_ne!(obligation1.state, ObligationState::Reserved);
             }
-            if let Ok(obligation2) = tracker.get_obligation(&id2) {
+            if let Some(obligation2) = tracker.get_obligation(&id2) {
                 assert_ne!(obligation2.state, ObligationState::Reserved);
             }
         }
 
         // Test potential overflow in leak timeout calculations
-        let leak_tracker = ObligationTracker::with_leak_timeout(u64::MAX); // Maximum timeout
+        let mut leak_tracker = ObligationTracker::with_leak_timeout(u64::MAX); // Maximum timeout
         let result = leak_tracker.run_leak_scan(u64::MAX, "overflow-scan");
 
         // Should handle overflow gracefully without panic
         assert!(result.scanned == 0); // No obligations to scan
 
         // Test timestamp arithmetic in duration calculations
-        let overflow_tracker = ObligationTracker::with_leak_timeout(DEFAULT_LEAK_TIMEOUT_SECS);
+        let mut overflow_tracker = ObligationTracker::with_leak_timeout(DEFAULT_LEAK_TIMEOUT_SECS);
         let id = overflow_tracker
             .reserve(
                 ObligationFlow::Fencing,
@@ -2902,7 +2902,7 @@ pub mod conformance {
         for manipulation_cycle in 0..50 {
             let id = match tracker.reserve(
                 ObligationFlow::Migration,
-                vec![manipulation_cycle],
+                vec![manipulation_cycle as u8],
                 4000 + manipulation_cycle,
                 &format!("manipulation-{}", manipulation_cycle),
             ) {
@@ -2919,8 +2919,7 @@ pub mod conformance {
         }
 
         // Verify tracker remains in consistent state after manipulation attempts
-        let final_status = tracker.get_status();
-        assert!(final_status.total_count <= MAX_OBLIGATIONS);
+        assert!(tracker.total_obligations() <= MAX_OBLIGATIONS);
     }
 
     /// Negative test: State corruption through malformed audit records
@@ -2929,11 +2928,12 @@ pub mod conformance {
         let mut tracker = ObligationTracker::new();
 
         // Test operations that generate audit records with edge case data
+        let long_trace = "trace".repeat(10000); // Extremely long trace ID
         let malicious_trace_ids = vec![
             "trace\u{202e}reversed\u{200b}",
             "trace\x00null\x01control",
             "trace\u{feff}bom\u{2028}newline",
-            "trace".repeat(10000), // Extremely long trace ID
+            long_trace.as_str(),
         ];
 
         for (i, malicious_trace) in malicious_trace_ids.iter().enumerate() {
@@ -2971,7 +2971,7 @@ pub mod conformance {
         }
 
         // Test audit trail integrity after malicious operations
-        let audit_report = tracker.get_audit_summary("audit-integrity-test");
+        let audit_report = tracker.export_audit_log_jsonl();
 
         // Audit trail should remain functional
         assert!(audit_report.contains("OBL-") || audit_report.is_empty());
@@ -3028,8 +3028,7 @@ pub mod conformance {
         }
 
         // Verify bounded resource usage despite flooding
-        let status = tracker.get_status();
-        assert!(status.reserved_count <= MAX_OBLIGATIONS);
+        assert!(tracker.count_in_state(ObligationState::Reserved) <= MAX_OBLIGATIONS);
         assert!(flood_obligations.len() <= MAX_OBLIGATIONS);
 
         // Test state consistency under rapid state transitions
@@ -3042,25 +3041,24 @@ pub mod conformance {
         }
 
         // Verify final state consistency
-        let final_status = tracker.get_status();
         let committed_count = flood_obligations
             .iter()
-            .filter_map(|id| tracker.get_obligation(id).ok())
+            .filter_map(|id| tracker.get_obligation(id))
             .filter(|obl| obl.state == ObligationState::Committed)
             .count();
 
         let rolled_back_count = flood_obligations
             .iter()
-            .filter_map(|id| tracker.get_obligation(id).ok())
+            .filter_map(|id| tracker.get_obligation(id))
             .filter(|obl| obl.state == ObligationState::RolledBack)
             .count();
 
         // All obligations should be in terminal states
         assert_eq!(committed_count + rolled_back_count, flood_obligations.len());
-        assert_eq!(final_status.reserved_count, 0);
+        assert_eq!(tracker.count_in_state(ObligationState::Reserved), 0);
 
         // Test memory efficiency after flooding
         let oracle_report = tracker.generate_leak_oracle_report();
-        assert!(oracle_report.scan_count >= 0); // Should remain functional
+        assert!(oracle_report.total_scans >= 0); // Should remain functional
     }
 }

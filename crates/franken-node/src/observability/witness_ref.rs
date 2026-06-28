@@ -673,6 +673,7 @@ mod tests {
             payload: serde_json::json!({}),
             size_bytes: 0,
             signature: String::new(),
+            prev_entry_hash: String::new(),
         }
     }
 
@@ -1677,6 +1678,8 @@ mod tests {
         #[test]
         fn negative_witness_id_with_extreme_unicode_and_control_patterns() {
             // Test witness IDs with problematic Unicode and control character patterns
+            // Hoisted (bd-yom8c): a String cannot live in an otherwise-&str array.
+            let long_witness_id = "WIT".repeat(10000);
             let malicious_witness_patterns = [
                 "WIT\u{202E}spoofed",                         // Right-to-left override
                 "WIT\u{200B}\u{FEFF}\u{034F}",                // Zero-width/invisible chars
@@ -1685,7 +1688,7 @@ mod tests {
                 "WIT\u{FFFF}\u{10FFFF}",                      // Max Unicode codepoints
                 "\u{0301}\u{0300}WIT\u{0302}",                // Combining diacritical marks
                 "WIT\u{1D11E}\u{1D122}",                      // Musical symbols (outside BMP)
-                "WIT".repeat(10000),                          // Extremely long identifier
+                long_witness_id.as_str(),                     // Extremely long identifier
                 "",                                           // Empty witness ID
                 "WIT\"/><script>alert('xss')</script>",       // XSS injection attempt
                 "WIT\":{\"injected\":true,\"evil\":\"",       // JSON injection attempt
@@ -1742,6 +1745,9 @@ mod tests {
         #[test]
         fn negative_replay_bundle_locator_injection_and_traversal_attacks() {
             // Test replay bundle locators with various injection and traversal attacks
+            // Hoisted (bd-yom8c): `&str + &String` does not compile and a String cannot
+            // live in an otherwise-&str array; build the long path up front.
+            let long_file_locator = format!("file://{}", "A".repeat(100000));
             let malicious_locators = [
                 "file:///../../../etc/passwd",                  // Path traversal
                 "file:///C:\\Windows\\System32\\config\\sam",   // Windows system files
@@ -1757,7 +1763,7 @@ mod tests {
                 "file:///replay.jsonl\r\nHost: evil.com",       // HTTP header injection
                 "file:///replay.jsonl#fragment<script>",        // Fragment injection
                 "file:///replay.jsonl?param=<script>alert(1)</script>", // Query injection
-                "file://" + &"A".repeat(100000),                // Extremely long path
+                long_file_locator.as_str(),                     // Extremely long path
                 "file://\u{202E}normal.jsonl\u{202D}evil.exe",  // Bidirectional text attack
             ];
 
@@ -2024,7 +2030,7 @@ mod tests {
                     mixed_set.add(WitnessRef::new(
                         format!("MIXED-{:02}-{}", i, kind.label()),
                         *kind,
-                        make_hash(((i as u8) ^ (kind.label().as_bytes()[0])) % 256),
+                        make_hash((i as u8) ^ (kind.label().as_bytes()[0])),
                     ));
                 }
                 entries_with_witnesses.push((make_entry(DecisionKind::Escalate), mixed_set));
@@ -2652,7 +2658,7 @@ mod tests {
                 sorted_suffixes.sort();
 
                 prop_assert_eq!(
-                    suffixes, sorted_suffixes,
+                    &suffixes, &sorted_suffixes,
                     "Witness codes should be defined in sequential order: {:?}",
                     suffixes
                 );

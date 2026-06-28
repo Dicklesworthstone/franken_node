@@ -2806,7 +2806,7 @@ mod tests {
                         .assign_task(task_class, 10_000 + idx as u64, &format!("trace-{idx}"))
                         .unwrap();
                     (
-                        assignment.task_id,
+                        assignment.task_id.to_string(),
                         assignment.task_class.to_string(),
                         assignment.lane,
                     )
@@ -3210,6 +3210,7 @@ mod tests {
         }
 
         // Test: Trace ID injection attacks
+        let long_trace_id = "t".repeat(100_000);
         let trace_id_attacks = vec![
             "",                                      // Empty trace ID
             "\x00trace\x01id\x02",                   // Null bytes and control chars
@@ -3219,7 +3220,7 @@ mod tests {
             "'; DELETE FROM traces; --",             // SQL injection style
             "trace\u{200B}id",                       // Zero-width space
             "trace\u{202E}di_ecar\u{202D}t",         // BIDI override
-            &"t".repeat(100_000),                    // Memory exhaustion
+            long_trace_id.as_str(),                  // Memory exhaustion
             "../../../var/log/system.log",           // Path traversal
             "trace\ttab\nline\rreturn",              // Mixed whitespace/control
         ];

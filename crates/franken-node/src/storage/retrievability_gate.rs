@@ -3195,11 +3195,11 @@ mod storage_migration_integration_tests {
 
             // Verify Unicode doesn't create privileged identifiers
             assert!(
-                !constant_time::ct_eq(artifact_id.0.as_bytes(), b"admin"),
+                !constant_time::ct_eq_bytes(artifact_id.0.as_bytes(), b"admin"),
                 "Unicode injection should not create admin artifacts"
             );
             assert!(
-                !constant_time::ct_eq(segment_id.0.as_bytes(), b"admin"),
+                !constant_time::ct_eq_bytes(segment_id.0.as_bytes(), b"admin"),
                 "Unicode injection should not create admin segments"
             );
 
@@ -3261,7 +3261,7 @@ mod storage_migration_integration_tests {
             // Extended hash
             format!("{}00", legitimate_hash),
             // Invalid hex characters
-            legitimate_hash.replace('a', 'g'),
+            legitimate_hash.replace('a', "g"),
             // Empty hash
             "".to_string(),
             // Non-hex hash
@@ -3490,7 +3490,7 @@ mod storage_migration_integration_tests {
             999,      // Just under limit (should pass)
             1000,     // At limit (boundary test)
             1001,     // Just over limit (should fail)
-            u32::MAX, // Extreme latency
+            u64::MAX, // Extreme latency
             0,        // Zero latency (suspicious)
         ];
 
@@ -4042,7 +4042,7 @@ mod storage_migration_integration_tests {
         // Hash collision attack vectors
         let collision_vectors = vec![
             // Empty hash bypass attempt
-            ("", "empty hash"),
+            ("".to_string(), "empty hash"),
             // Hex case manipulation
             (legitimate_hash.to_uppercase(), "case manipulation"),
             // Length extension without proper hex

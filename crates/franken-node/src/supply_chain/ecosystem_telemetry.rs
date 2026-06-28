@@ -2660,9 +2660,9 @@ mod tests {
             let pipeline_clone = Arc::clone(&pipeline);
 
             let handle = thread::spawn(move || {
-                let operations = [
+                let operations: [Box<dyn Fn() + '_>; 3] = [
                     // Ingestion operations
-                    || {
+                    Box::new(|| {
                         let mut p =
                             try_lock(&pipeline_clone, "ecosystem telemetry concurrent ingestion")
                                 .expect("telemetry pipeline mutex should not be poisoned");
@@ -2676,9 +2676,9 @@ mod tests {
                             labels: BTreeMap::new(),
                         };
                         let _ = p.ingest(point);
-                    },
+                    }),
                     // Query operations
-                    || {
+                    Box::new(|| {
                         let p = try_lock(&pipeline_clone, "ecosystem telemetry concurrent query")
                             .expect("telemetry pipeline mutex should not be poisoned");
                         let query = TelemetryQuery {
@@ -2692,9 +2692,9 @@ mod tests {
                             limit: Some(5),
                         };
                         let _ = p.query(&query);
-                    },
+                    }),
                     // Anomaly detection operations
-                    || {
+                    Box::new(|| {
                         let mut p = try_lock(
                             &pipeline_clone,
                             "ecosystem telemetry concurrent anomaly detection",
@@ -2706,7 +2706,7 @@ mod tests {
                             0.5,
                         );
                         let _ = p.detect_anomalies(&baseline);
-                    },
+                    }),
                 ];
 
                 // Perform multiple operations in this thread

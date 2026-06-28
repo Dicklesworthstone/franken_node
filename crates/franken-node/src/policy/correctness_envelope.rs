@@ -1655,11 +1655,11 @@ mod correctness_envelope_comprehensive_negative_tests {
             },
         ];
 
-        for change in extreme_changes {
+        for change in &extreme_changes {
             // Test serialization with extreme values
-            let json = serde_json::to_string(&change).unwrap();
+            let json = serde_json::to_string(change).unwrap();
             let deserialized: PolicyChange = serde_json::from_str(&json).unwrap();
-            assert_eq!(deserialized, change);
+            assert_eq!(deserialized, *change);
         }
 
         // Test proposal with extreme changes
@@ -1680,12 +1680,13 @@ mod correctness_envelope_comprehensive_negative_tests {
     #[test]
     fn negative_section_id_and_invariant_id_edge_cases() {
         // Test edge cases with SectionId and InvariantId
+        let big_section = "x".repeat(1000000); // 1MB section ID
         let edge_case_sections = vec![
             "",
             "\x00",
             "\u{FEFF}",
             "\u{200B}\u{200C}\u{200D}",
-            "x".repeat(1000000), // 1MB section ID
+            big_section.as_str(),
             "10.14\r\n<script>alert('section')</script>",
             "10.14' OR '1'='1' --",
         ];
@@ -2344,7 +2345,7 @@ mod correctness_envelope_additional_negative_path_tests {
 
         // Test dependency chain simulation
         let mut dependent_changes = Vec::new();
-        for i in 0..100 {
+        for i in 0..100u64 {
             dependent_changes.push(PolicyChange {
                 field: format!("chain.level_{}.param", i),
                 old_value: serde_json::json!(i),

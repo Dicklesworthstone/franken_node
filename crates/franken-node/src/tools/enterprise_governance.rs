@@ -579,6 +579,7 @@ impl EnterpriseGovernance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn trace() -> String {
         Uuid::now_v7().to_string()
@@ -1537,6 +1538,7 @@ mod tests {
             total_rules: 2,
             compliant: 1,
             non_compliant: 1,
+            partially_compliant: 0,
             not_assessed: 0,
             compliance_rate: 0.5,
         }];
@@ -1583,6 +1585,7 @@ mod tests {
             total_rules: 1,
             compliant: 1,
             non_compliant: 0,
+            partially_compliant: 0,
             not_assessed: 0,
             compliance_rate: 1.0,
         };
@@ -1619,10 +1622,11 @@ mod tests {
 
         // Normal inputs
         let normal_categories = vec![CategoryCompliance {
-            category: RuleCategory::DataProtection,
+            category: RuleCategory::DataRetention,
             total_rules: 1,
             compliant: 1,
             non_compliant: 0,
+            partially_compliant: 0,
             not_assessed: 0,
             compliance_rate: 1.0,
         }];
@@ -1638,10 +1642,11 @@ mod tests {
 
         // Large inputs that would trigger saturation
         let large_categories = vec![CategoryCompliance {
-            category: RuleCategory::DataProtection,
+            category: RuleCategory::DataRetention,
             total_rules: 1,
             compliant: 1,
             non_compliant: 0,
+            partially_compliant: 0,
             not_assessed: 0,
             compliance_rate: 1.0,
         }];
@@ -1675,15 +1680,17 @@ mod tests {
             total_rules: 1,
             compliant: 1,
             non_compliant: 0,
+            partially_compliant: 0,
             not_assessed: 0,
             compliance_rate: 1.0,
         }];
 
         let case2_categories = vec![CategoryCompliance {
-            category: RuleCategory::DataProtection,
+            category: RuleCategory::DataRetention,
             total_rules: 1,
             compliant: 1,
             non_compliant: 0,
+            partially_compliant: 0,
             not_assessed: 0,
             compliance_rate: 1.0,
         }];
@@ -1725,15 +1732,17 @@ mod tests {
                 total_rules: 10,
                 compliant: 8,
                 non_compliant: 2,
-                not_assessed: 0,
+                partially_compliant: 0,
+            not_assessed: 0,
                 compliance_rate: 0.8,
             },
             CategoryCompliance {
-                category: RuleCategory::DataProtection,
+                category: RuleCategory::DataRetention,
                 total_rules: 15,
                 compliant: 12,
                 non_compliant: 3,
-                not_assessed: 0,
+                partially_compliant: 0,
+            not_assessed: 0,
                 compliance_rate: 0.8,
             },
             CategoryCompliance {
@@ -1741,7 +1750,8 @@ mod tests {
                 total_rules: 5,
                 compliant: 5,
                 non_compliant: 0,
-                not_assessed: 0,
+                partially_compliant: 0,
+            not_assessed: 0,
                 compliance_rate: 1.0,
             },
         ];
@@ -1820,7 +1830,8 @@ mod tests {
                 total_rules: 1,
                 compliant: 1,
                 non_compliant: 0,
-                not_assessed: 0,
+                partially_compliant: 0,
+            not_assessed: 0,
                 compliance_rate: 1.0,
             }],
             GateAction::Allow,
@@ -1847,13 +1858,14 @@ mod tests {
             let schema_version = "x".repeat(schema_len);
             let categories = (0..num_categories).map(|i| CategoryCompliance {
                 category: if i % 4 == 0 { RuleCategory::AccessControl }
-                         else if i % 4 == 1 { RuleCategory::DataProtection }
+                         else if i % 4 == 1 { RuleCategory::DataRetention }
                          else if i % 4 == 2 { RuleCategory::IncidentResponse }
                          else { RuleCategory::AccessControl },
                 total_rules: 1,
                 compliant: 1,
                 non_compliant: 0,
-                not_assessed: 0,
+                partially_compliant: 0,
+            not_assessed: 0,
                 compliance_rate: 1.0,
             }).collect::<Vec<_>>();
 

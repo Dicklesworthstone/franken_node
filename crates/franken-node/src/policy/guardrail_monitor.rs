@@ -2149,7 +2149,10 @@ mod tests {
             };
 
             let test_telemetries = [
-                (Some(denormal_telemetry), Some(edge_case_reliability)),
+                (
+                    Some(denormal_telemetry.clone()),
+                    Some(edge_case_reliability.clone()),
+                ),
                 (Some(zero_variance_telemetry), Some(all_errors_reliability)),
                 (None, Some(edge_case_reliability)),
                 (Some(denormal_telemetry), None),
@@ -2435,6 +2438,7 @@ mod tests {
         #[test]
         fn serialization_format_injection_resistance_in_verdict_generation() {
             // Test verdict formatting with various injection attempts
+            let long_reason = "very long reason that exceeds typical buffer sizes".repeat(1000);
             let injection_attempts = [
                 "normal reason",
                 "reason\nwith\nnewlines",
@@ -2443,7 +2447,7 @@ mod tests {
                 "reason with \u{0000} null bytes",
                 "reason with \u{001F} control chars \u{007F}",
                 "reason with unicode \u{202E} direction \u{202D} overrides",
-                "very long reason that exceeds typical buffer sizes".repeat(1000),
+                long_reason.as_str(),
             ];
 
             let budget_id = BudgetId::new("test_budget\u{200B}hidden");

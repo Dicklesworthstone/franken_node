@@ -641,6 +641,7 @@ mod tests {
                 require_hash_match: true,
                 strict_claims: false,
                 extensions: BTreeMap::new(),
+                ..VerifierConfig::default()
             },
             VerifierConfig {
                 verifier_identity: "\x00null\r\ninjection".to_string(), // Control chars in identity
@@ -652,12 +653,14 @@ mod tests {
                     ext.insert("normal".to_string(), "\x00null_value".to_string()); // Null in value
                     ext
                 },
+                ..VerifierConfig::default()
             },
             VerifierConfig {
                 verifier_identity: "🚀".repeat(10000), // Massive unicode identity
                 require_hash_match: true,
                 strict_claims: true,
                 extensions: BTreeMap::new(),
+                ..VerifierConfig::default()
             },
         ];
 
@@ -800,12 +803,12 @@ mod tests {
         // Test version handling near floating-point precision boundaries
         let mut capsule = valid_capsule();
 
-        // Test versions at JavaScript safe integer limits (could cause precision loss in JSON)
+        // Test versions at u32 boundaries (format_version is u32; exercise precision/overflow edges)
         let edge_versions = [
-            1u64,                    // Minimal version
-            9007199254740991u64,     // 2^53 - 1 (max safe integer in JavaScript)
-            9007199254740992u64,     // 2^53 (precision loss boundary)
-            18446744073709551615u64, // u64::MAX
+            1u32,             // Minimal version
+            65_535u32,        // u16 boundary
+            4_294_967_294u32, // u32::MAX - 1
+            u32::MAX,         // Maximum representable format_version
         ];
 
         for &version in &edge_versions {
@@ -920,6 +923,7 @@ mod tests {
                                     trace_id: format!("trace_t{}_o{}_1", thread_id, operation),
                                     verdict: VerifyVerdict::Pass,
                                     evidence: Vec::new(),
+                                    api_version: super::verifier_sdk::API_VERSION.to_string(),
                                 };
 
                                 let report2 = VerificationReport {
@@ -933,6 +937,7 @@ mod tests {
                                     trace_id: format!("trace_t{}_o{}_2", thread_id, operation),
                                     verdict: VerifyVerdict::Pass,
                                     evidence: Vec::new(),
+                                    api_version: super::verifier_sdk::API_VERSION.to_string(),
                                 };
 
                                 let result = sdk.verify_report_set_uniqueness(&[report1, report2]);
@@ -1171,7 +1176,7 @@ mod tests {
             total_nanos as f64 / timings.len() as f64
         }
 
-        let mean_timings: Vec<(&&str, f64)> = timing_results
+        let mean_timings: Vec<(&&String, f64)> = timing_results
             .iter()
             .map(|(pattern, timings)| (pattern, calculate_mean(timings)))
             .collect();
@@ -1245,6 +1250,15 @@ mod tests {
                                     // If verification passes, the capsule might actually be valid
                                     // (our error scenario might not be invalid after all)
                                 }
+                                VerifyVerdict::Inconclusive(reason) => {
+                                    // Inconclusive is a valid deterministic outcome; it must
+                                    // still carry a descriptive reason.
+                                    assert!(
+                                        !reason.is_empty(),
+                                        "Inconclusive verdict should carry a reason for: {}",
+                                        error_description
+                                    );
+                                }
                             }
                         }
                         Err(sdk_error) => {
@@ -1256,8 +1270,16 @@ mod tests {
                                 SdkError::InvalidArtifact(msg) => {
                                     assert!(!msg.is_empty(), "Error message should be descriptive");
                                 }
-                                SdkError::InvalidReportSet(msg) => {
+                                SdkError::InvalidReportSet(msg)
+                                | SdkError::InvalidClaim(msg)
+                                | SdkError::ConfigError(msg) => {
                                     assert!(!msg.is_empty(), "Error message should be descriptive");
+                                }
+                                SdkError::HashMismatch { expected, actual } => {
+                                    assert!(
+                                        !expected.is_empty() || !actual.is_empty(),
+                                        "Hash mismatch error should be descriptive"
+                                    );
                                 }
                             }
                         }
@@ -1299,6 +1321,7 @@ mod tests {
                 trace_id: format!("trace_{}", i),
                 verdict: VerifyVerdict::Pass,
                 evidence: Vec::new(),
+                api_version: super::verifier_sdk::API_VERSION.to_string(),
             };
 
             // Create circular dependency in trace IDs
@@ -1315,6 +1338,7 @@ mod tests {
             trace_id: "self_ref".to_string(), // References itself
             verdict: VerifyVerdict::Pass,
             evidence: Vec::new(),
+            api_version: super::verifier_sdk::API_VERSION.to_string(),
         };
         circular_reports.push(self_ref_report);
 
@@ -1334,6 +1358,10 @@ mod tests {
                     VerifyVerdict::Fail(failures) => {
                         // May detect circular dependencies as an issue
                         assert!(!failures.is_empty());
+                    }
+                    VerifyVerdict::Inconclusive(reason) => {
+                        // Inconclusive handling of circular dependencies is acceptable.
+                        assert!(!reason.is_empty());
                     }
                 }
             }

@@ -206,6 +206,7 @@ mod tests {
         ActionableError, MAX_HELP_URLS, bounded_read, bounded_reader_limit, lock_utils,
         push_bounded, read_len_exceeds_limit,
     };
+    use proptest::prelude::*;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -579,7 +580,7 @@ mod tests {
         ];
 
         for (malicious_message, description) in &unicode_attack_vectors {
-            let err = ActionableError::new(malicious_message, "fix-command");
+            let err = ActionableError::new(*malicious_message, "fix-command");
             let rendered = err.to_string();
 
             // Verify Unicode injection doesn't corrupt output format
@@ -619,7 +620,7 @@ mod tests {
         ];
 
         for (malicious_fix, description) in &null_injection_cases {
-            let err = ActionableError::new("test error", malicious_fix);
+            let err = ActionableError::new("test error", *malicious_fix);
             let rendered = err.to_string();
 
             // Verify null bytes don't cause string truncation
@@ -727,10 +728,10 @@ mod tests {
 
         for (injection_payload, description) in &injection_cases {
             // Test injection in different fields
-            let err_msg = ActionableError::new(injection_payload, "safe-fix");
-            let err_fix = ActionableError::new("safe error", injection_payload);
+            let err_msg = ActionableError::new(*injection_payload, "safe-fix");
+            let err_fix = ActionableError::new("safe error", *injection_payload);
             let err_help =
-                ActionableError::new("safe error", "safe-fix").with_help_url(injection_payload);
+                ActionableError::new("safe error", "safe-fix").with_help_url(*injection_payload);
 
             let rendered_msg = err_msg.to_string();
             let rendered_fix = err_fix.to_string();
@@ -851,8 +852,8 @@ mod tests {
         ];
 
         for (variant1, variant2, description) in &collision_test_cases {
-            let err1 = ActionableError::new(variant1, "fix1").with_help_url("help1");
-            let err2 = ActionableError::new(variant2, "fix2").with_help_url("help2");
+            let err1 = ActionableError::new(*variant1, "fix1").with_help_url("help1");
+            let err2 = ActionableError::new(*variant2, "fix2").with_help_url("help2");
 
             // Verify different errors are not equal (no collision)
             if variant1 != variant2 {
@@ -1002,10 +1003,10 @@ mod tests {
         // Test configuration boundary attacks through extreme field values
         // Edge cases could bypass validation or cause system instability
         let boundary_test_cases = [
-            ("", "empty message"),
+            (String::new(), "empty message"),
             (" ".repeat(10000), "very long whitespace message"),
             ("x".repeat(1000000), "extremely long message"),
-            ("fix", "minimal fix command"),
+            ("fix".to_string(), "minimal fix command"),
             ("fix ".repeat(1000), "repeated fix command"),
             (
                 "https://".repeat(100) + "example.com",
@@ -1015,8 +1016,8 @@ mod tests {
 
         for (boundary_value, description) in &boundary_test_cases {
             // Test boundary values in different fields
-            let err_msg = ActionableError::new(boundary_value, "normal-fix");
-            let err_fix = ActionableError::new("normal error", boundary_value);
+            let err_msg = ActionableError::new(boundary_value.as_str(), "normal-fix");
+            let err_fix = ActionableError::new("normal error", boundary_value.as_str());
 
             // Should handle extreme values without panicking
             let rendered_msg = err_msg.to_string();
@@ -1052,7 +1053,7 @@ mod tests {
             if boundary_value.len() < 100000 {
                 // Avoid excessive memory usage in tests
                 let err_help = ActionableError::new("normal error", "normal fix")
-                    .with_help_url(boundary_value);
+                    .with_help_url(boundary_value.as_str());
                 let rendered_help = err_help.to_string();
                 assert!(
                     rendered_help.contains(&format!("help_url={}", boundary_value)),
@@ -1431,8 +1432,10 @@ mod tests {
 
         assert!(result1.is_ok());
         assert!(result2.is_ok());
-        assert_eq!(result1.unwrap(), result2.unwrap());
-        assert_eq!(result2.unwrap(), content);
+        let value1 = result1.unwrap();
+        let value2 = result2.unwrap();
+        assert_eq!(value1, value2);
+        assert_eq!(value2, content);
     }
 
     #[test]

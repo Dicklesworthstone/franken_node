@@ -262,7 +262,7 @@ mod tests {
     use super::*;
     use crate::policy::bayesian_diagnostics::CandidateRef;
     use crate::policy::guardrail_monitor::{
-        GuardrailMonitorSet, MemoryBudgetGuardrail, SystemState,
+        GuardrailMonitorSet, MemoryBudgetGuardrail, MemoryTailRiskTelemetry, SystemState,
     };
     use crate::policy::hardening_state_machine::HardeningLevel;
 
@@ -974,7 +974,7 @@ mod tests {
         ];
 
         for malicious_id in malicious_ids {
-            let guardrail_id = GuardrailId::new(&malicious_id);
+            let guardrail_id = GuardrailId::new(malicious_id);
 
             // Should store the ID literally without sanitization
             assert_eq!(guardrail_id.as_str(), malicious_id);
@@ -1032,27 +1032,45 @@ mod tests {
     #[test]
     fn negative_system_state_with_extreme_and_invalid_floating_point_values() {
         // Test SystemState with various problematic floating point values
-        let extreme_states = vec![
-            ("positive_infinity_memory", |s: &mut SystemState| {
-                s.memory_used_bytes = u64::MAX;
-                s.memory_budget_bytes = u64::MAX;
-                s.durability_level = f64::INFINITY;
-            }),
-            ("negative_infinity_durability", |s: &mut SystemState| {
-                s.durability_level = f64::NEG_INFINITY;
-            }),
-            ("nan_durability", |s: &mut SystemState| {
-                s.durability_level = f64::NAN;
-            }),
-            ("subnormal_durability", |s: &mut SystemState| {
-                s.durability_level = f64::MIN_POSITIVE * 0.5; // Subnormal
-            }),
-            ("negative_zero_durability", |s: &mut SystemState| {
-                s.durability_level = -0.0;
-            }),
-            ("extreme_precision_loss", |s: &mut SystemState| {
-                s.durability_level = 1.0 + f64::EPSILON / 2.0; // Precision boundary
-            }),
+        let extreme_states: Vec<(&str, Box<dyn Fn(&mut SystemState)>)> = vec![
+            (
+                "positive_infinity_memory",
+                Box::new(|s: &mut SystemState| {
+                    s.memory_used_bytes = u64::MAX;
+                    s.memory_budget_bytes = u64::MAX;
+                    s.durability_level = f64::INFINITY;
+                }),
+            ),
+            (
+                "negative_infinity_durability",
+                Box::new(|s: &mut SystemState| {
+                    s.durability_level = f64::NEG_INFINITY;
+                }),
+            ),
+            (
+                "nan_durability",
+                Box::new(|s: &mut SystemState| {
+                    s.durability_level = f64::NAN;
+                }),
+            ),
+            (
+                "subnormal_durability",
+                Box::new(|s: &mut SystemState| {
+                    s.durability_level = f64::MIN_POSITIVE * 0.5; // Subnormal
+                }),
+            ),
+            (
+                "negative_zero_durability",
+                Box::new(|s: &mut SystemState| {
+                    s.durability_level = -0.0;
+                }),
+            ),
+            (
+                "extreme_precision_loss",
+                Box::new(|s: &mut SystemState| {
+                    s.durability_level = 1.0 + f64::EPSILON / 2.0; // Precision boundary
+                }),
+            ),
         ];
 
         let candidates = vec![ranked("test_candidate", 0.5, false)];
@@ -1138,7 +1156,7 @@ mod tests {
                 blocked: (0..1000)
                     .map(|i| BlockedCandidate {
                         candidate: c(&format!("candidate_{}", i)),
-                        blocked_by: vec![GuardrailId::new(&format!("guardrail_{}", i))],
+                        blocked_by: vec![GuardrailId::new(format!("guardrail_{}", i))],
                         bayesian_rank: i,
                         reasons: vec![format!("Reason {}", i)],
                     })
@@ -1354,20 +1372,21 @@ mod tests {
     #[test]
     fn negative_guardrail_id_consistency_under_various_string_operations() {
         // Test GuardrailId behavior with various string manipulation edge cases
+        let long_string = "test".repeat(1000); // Very long string
         let test_strings = vec![
-            "",                  // Empty string
-            " ",                 // Single space
-            "\t\n\r",            // Whitespace only
-            "\0",                // Null character
-            "\u{FEFF}BOM",       // BOM character
-            "a\u{0308}",         // Combining character
-            "𝕊𝕡𝕖𝕔𝕚𝕒𝕝",           // Mathematical alphanumeric symbols
-            "🦀🚀💥",            // Multiple emoji
-            "test".repeat(1000), // Very long string
+            "",                   // Empty string
+            " ",                  // Single space
+            "\t\n\r",             // Whitespace only
+            "\0",                 // Null character
+            "\u{FEFF}BOM",        // BOM character
+            "a\u{0308}",          // Combining character
+            "𝕊𝕡𝕖𝕔𝕚𝕒𝕝",            // Mathematical alphanumeric symbols
+            "🦀🚀💥",             // Multiple emoji
+            long_string.as_str(), // Very long string
         ];
 
         for test_string in test_strings {
-            let id1 = GuardrailId::new(&test_string);
+            let id1 = GuardrailId::new(test_string);
             let id2 = GuardrailId::new(test_string.clone());
 
             // Should maintain string consistency
@@ -1426,7 +1445,7 @@ mod tests {
                 if let Some(chosen) = &decision.chosen {
                     // Chosen candidate should not be manipulated by Unicode normalization
                     assert!(
-                        !constant_time::ct_eq(chosen.as_str().as_bytes(), b"malicious"),
+                        !constant_time::ct_eq_bytes(chosen.0.as_bytes(), b"malicious"),
                         "Unicode injection should not create malicious candidates"
                     );
                 }
@@ -1439,7 +1458,7 @@ mod tests {
         // Blocked candidates should preserve original references
         for blocked in &decision.blocked {
             assert!(
-                !blocked.candidate.as_str().contains('\0'),
+                !blocked.candidate.0.contains('\0'),
                 "Null bytes should not appear in candidate references"
             );
             assert!(
@@ -1450,7 +1469,7 @@ mod tests {
             // Guardrail IDs should not be manipulated
             for guardrail_id in &blocked.blocked_by {
                 assert!(
-                    !constant_time::ct_eq(guardrail_id.as_str().as_bytes(), b"bypass"),
+                    !constant_time::ct_eq_bytes(guardrail_id.as_str().as_bytes(), b"bypass"),
                     "Unicode injection should not create bypass guardrails"
                 );
             }
@@ -1478,9 +1497,9 @@ mod tests {
         }
 
         // Should either handle gracefully or reject
-        let decision_result = std::panic::catch_unwind(|| {
+        let decision_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             engine.decide(&large_candidate_set, &monitors, &system_state)
-        });
+        }));
 
         match decision_result {
             Ok(decision) => {
@@ -1549,7 +1568,7 @@ mod tests {
                 if let Some(chosen) = &decision.chosen {
                     // Verify chosen candidate has reasonable properties
                     for candidate in &extreme_candidates {
-                        if candidate.candidate_ref.as_str() == chosen.as_str() {
+                        if candidate.candidate_ref.0 == chosen.0 {
                             assert!(
                                 candidate.posterior_prob.is_finite()
                                     || candidate.posterior_prob.is_infinite()
@@ -1608,7 +1627,12 @@ mod tests {
                 hardening_level: HardeningLevel::Standard,
                 proposed_hardening_level: Some(HardeningLevel::Standard),
                 evidence_emission_active: true,
-                memory_tail_risk: Some(0.99), // High tail risk
+                memory_tail_risk: Some(MemoryTailRiskTelemetry {
+                    sample_count: 64,
+                    mean_utilization: 0.99,
+                    variance_utilization: 0.0,
+                    peak_utilization: 0.99,
+                }), // High tail risk
                 reliability_telemetry: None,
                 epoch_id: 0, // Zero epoch
             },
@@ -1708,7 +1732,7 @@ mod tests {
 
         // Verify candidate references are preserved but safe
         if let Some(chosen) = &decision.chosen {
-            assert_eq!(chosen.as_str(), parsed.chosen.as_ref().unwrap().as_str());
+            assert_eq!(chosen.0, parsed.chosen.as_ref().unwrap().0);
         }
     }
 
@@ -1799,7 +1823,12 @@ mod tests {
             hardening_level: HardeningLevel::Standard,
             proposed_hardening_level: None,
             evidence_emission_active: true,
-            memory_tail_risk: Some(1.0),
+            memory_tail_risk: Some(MemoryTailRiskTelemetry {
+                sample_count: 64,
+                mean_utilization: 1.0,
+                variance_utilization: 0.0,
+                peak_utilization: 1.0,
+            }),
             reliability_telemetry: None,
             epoch_id: u64::MAX, // Maximum epoch
         };
@@ -1813,7 +1842,7 @@ mod tests {
                     candidate_ref: c(&format!("candidate_{}", i)),
                     posterior_prob: 0.5,
                     prior_prob: 0.5,
-                    observation_count: usize::MAX, // Extreme observation count
+                    observation_count: u64::MAX, // Extreme observation count
                     confidence_interval: (0.0, 1.0),
                     guardrail_filtered: false,
                 },
@@ -1873,7 +1902,12 @@ mod tests {
                 hardening_level: HardeningLevel::Standard,
                 proposed_hardening_level: None,
                 evidence_emission_active: true,
-                memory_tail_risk: Some(f64::NAN), // NaN risk
+                memory_tail_risk: Some(MemoryTailRiskTelemetry {
+                    sample_count: 64,
+                    mean_utilization: f64::NAN,
+                    variance_utilization: f64::NAN,
+                    peak_utilization: f64::NAN,
+                }), // NaN risk
                 reliability_telemetry: None,
                 epoch_id: 42,
             },
@@ -1884,16 +1918,21 @@ mod tests {
                 hardening_level: HardeningLevel::Standard,
                 proposed_hardening_level: None,
                 evidence_emission_active: true,
-                memory_tail_risk: Some(-1.0), // Negative risk
+                memory_tail_risk: Some(MemoryTailRiskTelemetry {
+                    sample_count: 64,
+                    mean_utilization: -1.0,
+                    variance_utilization: -1.0,
+                    peak_utilization: -1.0,
+                }), // Negative risk
                 reliability_telemetry: None,
                 epoch_id: 42,
             },
         ];
 
         for manipulated_state in manipulated_states {
-            let decision_result = std::panic::catch_unwind(|| {
+            let decision_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 engine.decide(&candidates, &monitors, &manipulated_state)
-            });
+            }));
 
             match decision_result {
                 Ok(decision) => {

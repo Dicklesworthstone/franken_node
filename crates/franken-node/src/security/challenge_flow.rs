@@ -2755,16 +2755,17 @@ mod tests {
             ChallengeState::Promoted
         );
 
-        // Test invalid operations on terminal state
-        let terminal_operations = vec![
-            || ctrl.submit_proof(&cid2, make_proof(7000), "late_prover", 7000),
-            || ctrl.verify_proof(&cid2, "late_verifier", 8000),
-            || ctrl.promote(&cid2, "late_promoter", 9000),
-            || ctrl.deny(&cid2, "late_denier", 10000, "too late"),
+        // Test invalid operations on terminal state. Each call borrows `ctrl`
+        // mutably, so they are evaluated sequentially into an array of results
+        // (a Vec of distinct closures cannot hold four `&mut ctrl` borrows at once).
+        let terminal_results = [
+            ctrl.submit_proof(&cid2, make_proof(7000), "late_prover", 7000),
+            ctrl.verify_proof(&cid2, "late_verifier", 8000),
+            ctrl.promote(&cid2, "late_promoter", 9000),
+            ctrl.deny(&cid2, "late_denier", 10000, "too late"),
         ];
 
-        for operation in terminal_operations {
-            let result = operation();
+        for result in terminal_results {
             assert!(result.is_err(), "Operation on terminal state should fail");
             assert_eq!(result.unwrap_err().code, ERR_INVALID_TRANSITION);
         }

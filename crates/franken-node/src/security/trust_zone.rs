@@ -2009,7 +2009,7 @@ mod tests {
             "\u{FEFF}", // Zero-width non-breaking space (BOM)
         ];
 
-        for proof in whitespace_proofs {
+        for &proof in &whitespace_proofs {
             let req = CrossZoneRequest::new("prod", "staging", "test-action", "test-user", proof);
 
             let result = engine.authorize_cross_zone(&req);
@@ -2719,19 +2719,21 @@ mod tests {
             .unwrap();
 
         // Test different proof lengths/patterns that could reveal timing differences
+        let long_a = "a".repeat(1024);
+        let long_b = "b".repeat(1024);
         let timing_test_proofs = vec![
             "",                                // Empty - should fail fast
             " ",                               // Whitespace - should fail after trim
             "a",                               // Single char
             "short-proof",                     // Short proof
-            "a".repeat(1024),                  // Long proof - same first char as "a"
-            "b".repeat(1024),                  // Long proof - different first char
+            long_a.as_str(),                   // Long proof - same first char as "a"
+            long_b.as_str(),                   // Long proof - different first char
             "valid-authorization-proof-12345", // Realistic proof
             "\x00invalid-proof-with-null",     // Proof with null bytes
             "proof\nwith\nnewlines",           // Multi-line proof
         ];
 
-        for (i, proof) in timing_test_proofs.iter().enumerate() {
+        for (i, &proof) in timing_test_proofs.iter().enumerate() {
             let req = CrossZoneRequest::new(
                 "source",
                 "target",
@@ -2786,7 +2788,7 @@ mod tests {
         // Test with various zone ID lengths that could cause issues in length calculations
         let test_zone_ids = vec![
             // Normal length
-            "normal-zone",
+            "normal-zone".to_string(),
             // Very long zone ID
             "z".repeat(4096),
             // Unicode zone ID with multi-byte characters
@@ -2798,7 +2800,7 @@ mod tests {
         ];
 
         for (i, zone_id) in test_zone_ids.iter().enumerate() {
-            let policy = ZonePolicy::new(zone_id, 80, 5, IsolationLevel::Strict);
+            let policy = ZonePolicy::new(zone_id.as_str(), 80, 5, IsolationLevel::Strict);
             let register_result = engine.register_zone(policy);
 
             // Very long or problematic zone IDs should register successfully
@@ -2814,7 +2816,7 @@ mod tests {
                 assert!(engine.get_zone(zone_id).is_some());
 
                 // Test operations that might involve length calculations
-                engine.bind_key_to_zone("test-key", zone_id);
+                engine.bind_key_to_zone("test-key", zone_id.as_str());
                 assert!(engine.is_key_bound_to_zone("test-key", zone_id));
 
                 // Clean up for next iteration

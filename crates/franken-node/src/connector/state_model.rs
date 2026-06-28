@@ -660,7 +660,7 @@ mod tests {
         let mut root = StateRoot::new("conn-1".into(), StateModelType::Document, json!({"k": "v"}));
         let canonical = serde_json::to_string(&root.head).expect("head should serialize");
         let digest = Sha256::digest(canonical.as_bytes());
-        root.root_hash = format!("{digest:064x}");
+        root.root_hash = hex::encode(digest);
 
         assert!(!root.verify_integrity());
     }

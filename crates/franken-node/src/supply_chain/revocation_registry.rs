@@ -1242,11 +1242,11 @@ mod revocation_registry_comprehensive_negative_tests {
         clean_reg.init_zone("test-zone").unwrap();
 
         let malicious_artifacts = vec![
-            "artifact\x00injection", // Null byte
-            &format!("artifact{}", String::from_utf8_lossy(&[0x7f, 0x80, 0x9f])), // Control characters
-            "artifact\u{202e}reverse",   // Text direction manipulation
-            "artifact\u{034f}combining", // Combining grapheme joiner
-            "artifact\u{180e}mongolian", // Mongolian vowel separator
+            "artifact\x00injection".to_string(), // Null byte
+            format!("artifact{}", String::from_utf8_lossy(&[0x7f, 0x80, 0x9f])), // Control characters
+            "artifact\u{202e}reverse".to_string(), // Text direction manipulation
+            "artifact\u{034f}combining".to_string(), // Combining grapheme joiner
+            "artifact\u{180e}mongolian".to_string(), // Mongolian vowel separator
         ];
 
         for malicious_artifact in malicious_artifacts {

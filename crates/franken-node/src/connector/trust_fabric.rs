@@ -1517,12 +1517,13 @@ mod tests {
     /// Negative path: malformed node IDs and empty identifiers
     #[test]
     fn test_trust_fabric_handles_malformed_node_identifiers() {
+        let long_id = "a".repeat(100_000); // Very long ID (100KB)
         let problematic_ids = [
-            "",                  // Empty string
-            " ",                 // Whitespace only
-            "\x00",              // Null byte
-            "\t\n\r",            // Control characters
-            "a".repeat(100_000), // Very long ID (100KB)
+            "",       // Empty string
+            " ",      // Whitespace only
+            "\x00",   // Null byte
+            "\t\n\r", // Control characters
+            long_id.as_str(),
         ];
 
         for node_id in &problematic_ids {

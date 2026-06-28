@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn negative_remote_cap_issue_requires_operator_authorization() {
-        let provider = CapabilityProvider::new("negative-secret");
+        let provider = CapabilityProvider::new("negative-secret").expect("provider should construct");
 
         let err = provider
             .issue(
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn negative_remote_cap_issue_rejects_zero_ttl() {
-        let provider = CapabilityProvider::new("negative-secret");
+        let provider = CapabilityProvider::new("negative-secret").expect("provider should construct");
 
         let err = provider
             .issue(
@@ -120,7 +120,8 @@ mod tests {
 
     #[test]
     fn negative_remote_cap_gate_denies_missing_capability() {
-        let mut gate = CapabilityGate::new("negative-secret");
+        let mut gate =
+            CapabilityGate::new("negative-secret").expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -244,7 +245,8 @@ mod security_root_additional_negative_tests {
     }
 
     fn issued_cap(scope: RemoteScope, ttl_secs: u64, single_use: bool) -> RemoteCap {
-        let provider = CapabilityProvider::new("additional-secret");
+        let provider =
+            CapabilityProvider::new("additional-secret").expect("provider should construct");
         provider
             .issue(
                 "operator-additional",
@@ -287,7 +289,7 @@ mod security_root_additional_negative_tests {
             60,
             false,
         );
-        let mut gate = CapabilityGate::new("additional-secret");
+        let mut gate = CapabilityGate::new("additional-secret").expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -318,7 +320,7 @@ mod security_root_additional_negative_tests {
             10,
             false,
         );
-        let mut gate = CapabilityGate::new("additional-secret");
+        let mut gate = CapabilityGate::new("additional-secret").expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -349,7 +351,7 @@ mod security_root_additional_negative_tests {
             60,
             true,
         );
-        let mut gate = CapabilityGate::new("additional-secret");
+        let mut gate = CapabilityGate::new("additional-secret").expect("gate should construct");
 
         gate.authorize_network(
             Some(&cap),
@@ -382,7 +384,8 @@ mod security_root_additional_negative_tests {
             60,
             false,
         );
-        let mut gate = CapabilityGate::with_mode("additional-secret", ConnectivityMode::LocalOnly);
+        let mut gate = CapabilityGate::with_mode("additional-secret", ConnectivityMode::LocalOnly)
+            .expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -530,7 +533,8 @@ mod security_extreme_adversarial_negative_tests {
 
     #[test]
     fn extreme_adversarial_remote_capability_memory_exhaustion_attack() {
-        let provider = CapabilityProvider::new("memory-attack-secret");
+        let provider =
+            CapabilityProvider::new("memory-attack-secret").expect("provider should construct");
 
         // Massive endpoint list in scope (potential memory exhaustion)
         let mut massive_endpoints = Vec::new();
@@ -576,7 +580,8 @@ mod security_extreme_adversarial_negative_tests {
 
     #[test]
     fn extreme_adversarial_remote_capability_endpoint_confusion_attack() {
-        let provider = CapabilityProvider::new("confusion-secret");
+        let provider =
+            CapabilityProvider::new("confusion-secret").expect("provider should construct");
 
         // Crafted endpoints designed to confuse URL parsing
         let confusing_endpoints = vec![
@@ -602,7 +607,8 @@ mod security_extreme_adversarial_negative_tests {
         );
 
         if let Ok((cap, _)) = cap_result {
-            let mut gate = CapabilityGate::new("confusion-secret");
+            let mut gate =
+                CapabilityGate::new("confusion-secret").expect("gate should construct");
 
             // Test various malformed endpoint access attempts
             let malicious_attempts = vec![
@@ -731,7 +737,7 @@ mod security_extreme_adversarial_negative_tests {
             let result = template.check_ssrf(
                 malicious_host,
                 443,
-                Protocol::Https,
+                Protocol::Http,
                 &format!("trace-injection-{i}"),
                 "2026-01-01T00:00:00Z",
             );
@@ -800,7 +806,8 @@ mod security_extreme_adversarial_negative_tests {
 
     #[test]
     fn extreme_adversarial_capability_concurrent_single_use_race_condition() {
-        let provider = CapabilityProvider::new("race-condition-secret");
+        let provider =
+            CapabilityProvider::new("race-condition-secret").expect("provider should construct");
         let scope = RemoteScope::new(
             vec![RemoteOperation::NetworkEgress],
             vec!["https://api.example.com".to_string()],
@@ -821,9 +828,9 @@ mod security_extreme_adversarial_negative_tests {
 
         // Simulate concurrent access attempts to single-use capability
         let mut gates = vec![
-            CapabilityGate::new("race-condition-secret"),
-            CapabilityGate::new("race-condition-secret"),
-            CapabilityGate::new("race-condition-secret"),
+            CapabilityGate::new("race-condition-secret").expect("gate should construct"),
+            CapabilityGate::new("race-condition-secret").expect("gate should construct"),
+            CapabilityGate::new("race-condition-secret").expect("gate should construct"),
         ];
 
         let mut results = Vec::new();
@@ -889,7 +896,7 @@ mod security_extreme_adversarial_negative_tests {
                 action_id: format!("timing-action-{i}"),
                 actor: "operator".to_string(),
                 reason: "emergency override".to_string(),
-                timestamp: malicious_timestamp.clone(),
+                timestamp: (*malicious_timestamp).to_string(),
                 trace_id: format!("trace-override-timing-{i}"),
             };
 

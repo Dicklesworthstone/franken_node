@@ -1582,6 +1582,16 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // FIXME(bd-yom8c): targets removed API surface — the `Claim` struct (with `asserted_at` /
+    // `evidence_refs` fields), 0-arg `VerifierToolkit::new()`, the single-claim fallible
+    // `validate_claim(claim) -> Result<ValidationReport, _>`, string-valued `overall_verdict`,
+    // and `audit_records` / `validation_reports` fields. Current prod API is `VerifiableClaim`
+    // (source_bead/evidence_hash/metric_values/thresholds) validated via the INFALLIBLE
+    // `validate_claims(&[VerifiableClaim], trace_id) -> ValidationReport`, an enum
+    // `ValidationVerdict`, and `audit_log()` / `reports()` accessors. The test's semantics
+    // (Err on invalid claim, timestamp/evidence-ref validation) have no 1:1 mapping onto the
+    // current metric-threshold validation model; gated until rewritten against the current API.
+    #[cfg(any())]
     /// Comprehensive boundary testing for verifier toolkit validation edge cases and invariant verification.
     /// Tests schema validation boundaries, evidence chain integrity, and deterministic report generation.
     #[test]

@@ -950,6 +950,47 @@ impl EffectsFirewall {
 mod tests {
     use super::*;
 
+    // bd-yom8c: the legacy "security" stress tests below were written against an
+    // older `EffectsFirewall` surface whose entry point was `process_request`,
+    // whose rule mutator was `update_policy_rule`, and whose introspection was
+    // `get_policy_summary`. Reconcile them to the current API via a thin
+    // test-only adapter that forwards to `evaluate` / direct policy-rule
+    // insertion / `generate_report`, preserving the original test intent and
+    // assertions verbatim.
+    trait FirewallTestExt {
+        /// Adapter for the old single-arg request entry point. Synthesizes a
+        /// deterministic trace id + timestamp and forwards to `evaluate`.
+        fn process_request(
+            &mut self,
+            effect: RemoteEffect,
+        ) -> Result<FirewallDecision, FirewallError>;
+        /// Adapter for the old rule mutator: insert/update a rule keyed by its
+        /// priority (matching the BTreeMap rule ordering used by the policy).
+        fn update_policy_rule(&mut self, rule: TrafficPolicyRule) -> Result<(), FirewallError>;
+        /// Adapter for the old summary accessor: render `generate_report` as a
+        /// string so callers can assert on its contents (e.g. "policy_id").
+        fn get_policy_summary(&self) -> String;
+    }
+
+    impl FirewallTestExt for EffectsFirewall {
+        fn process_request(
+            &mut self,
+            effect: RemoteEffect,
+        ) -> Result<FirewallDecision, FirewallError> {
+            let trace_id = format!("trace-{}", effect.effect_id);
+            self.evaluate(&effect, &trace_id, "2026-01-01T00:00:00Z")
+        }
+
+        fn update_policy_rule(&mut self, rule: TrafficPolicyRule) -> Result<(), FirewallError> {
+            self.policy.rules.insert(rule.priority, rule);
+            Ok(())
+        }
+
+        fn get_policy_summary(&self) -> String {
+            format!("{:?}", self.generate_report())
+        }
+    }
+
     fn make_effect(effect_id: &str, ext_id: &str) -> RemoteEffect {
         RemoteEffect {
             effect_id: effect_id.into(),
@@ -2183,7 +2224,7 @@ mod tests {
 
                 // Target host should not be manipulated by Unicode
                 assert!(
-                    !constant_time::ct_eq(effect.target_host.as_bytes(), b"api.example.com"),
+                    !constant_time::ct_eq_bytes(effect.target_host.as_bytes(), b"api.example.com"),
                     "Host parsing vulnerable to Unicode normalization"
                 );
             }
@@ -2366,7 +2407,7 @@ mod tests {
         let effect = make_effect("test", "ext-001");
 
         let decision = firewall.process_request(effect).expect("should process");
-        let receipt_json = decision.to_json().expect("should serialize");
+        let receipt_json = serde_json::to_string(&decision).expect("should serialize");
 
         // Attempt to forge receipt components
         let malicious_json_variants = vec![
@@ -2380,12 +2421,12 @@ mod tests {
         ];
 
         for malicious_json in malicious_json_variants {
-            let parse_result: Result<DecisionReceipt, _> = serde_json::from_str(&malicious_json);
+            let parse_result: Result<FirewallDecision, _> = serde_json::from_str(&malicious_json);
 
             if let Ok(forged_receipt) = parse_result {
                 // Verify receipt integrity checks would catch forgery
                 assert!(
-                    !constant_time::ct_eq(
+                    !constant_time::ct_eq_bytes(
                         forged_receipt.receipt_id.as_bytes(),
                         decision.receipt_id.as_bytes()
                     ) || forged_receipt == decision,
@@ -2442,14 +2483,14 @@ mod tests {
             match result {
                 Ok(decision) => {
                     // If processed, should not be treated as legitimate extension
-                    if let TrafficOrigin::Extension { extension_id } = &decision.effect_origin {
+                    if let TrafficOrigin::Extension { extension_id } = &decision.origin {
                         assert!(
-                            !constant_time::ct_eq(extension_id.as_bytes(), b"legitimate-ext"),
+                            !constant_time::ct_eq_bytes(extension_id.as_bytes(), b"legitimate-ext"),
                             "Spoofed extension ID should not match legitimate extension"
                         );
                     }
                 }
-                Err(FirewallError::ExtensionUnknown { .. }) => {
+                Err(FirewallError::ExtensionUnknown(_)) => {
                     // Expected behavior for unregistered extensions
                 }
                 Err(_) => {
@@ -2461,21 +2502,24 @@ mod tests {
 
     #[test]
     fn test_security_json_serialization_injection_prevention() {
-        let decision = DecisionReceipt {
+        let decision = FirewallDecision {
             receipt_id: "test\";alert('xss');//".to_string(), // JS injection
+            trace_id: "trace-json-injection".to_string(),
             effect_id: "normal</script><script>alert('xss')</script>".to_string(), // HTML injection
-            effect_origin: TrafficOrigin::Extension {
+            origin: TrafficOrigin::Extension {
                 extension_id: "\\\"; rm -rf / #".to_string(), // Command injection attempt
             },
-            classification: Some(IntentClassification::DataFetch),
+            intent: Some(IntentClassification::DataFetch),
             verdict: FirewallVerdict::Deny,
+            event_code: FW_003.to_string(),
             matched_rule_priority: Some(0),
             rationale: "test\ninjection\r\nattack".to_string(), // Newline injection
             timestamp: "2026-04-17T10:00:00Z\u{0000}".to_string(), // Null injection
+            schema_version: SCHEMA_VERSION.into(),
         };
 
         // JSON serialization should escape all injection attempts
-        let json = decision.to_json().expect("serialization should succeed");
+        let json = serde_json::to_string(&decision).expect("serialization should succeed");
         assert!(
             !json.contains("alert('xss')"),
             "JavaScript injection should be escaped"
@@ -2496,9 +2540,9 @@ mod tests {
         assert!(!json.contains("\0"), "Null injection should be escaped");
 
         // Roundtrip should preserve structure but escape content
-        let parsed: DecisionReceipt =
+        let parsed: FirewallDecision =
             serde_json::from_str(&json).expect("deserialization should succeed");
-        assert_eq!(decision.classification, parsed.classification);
+        assert_eq!(decision.intent, parsed.intent);
         assert_eq!(decision.verdict, parsed.verdict);
         assert_eq!(decision.matched_rule_priority, parsed.matched_rule_priority);
     }
@@ -2526,8 +2570,9 @@ mod tests {
                     results.push("registered".to_string());
                 } else if i % 4 == 1 {
                     // Process requests
-                    let fw = try_lock(&fw_clone, "intent firewall concurrent request processing")
-                        .expect("intent firewall mutex should not be poisoned");
+                    let mut fw =
+                        try_lock(&fw_clone, "intent firewall concurrent request processing")
+                            .expect("intent firewall mutex should not be poisoned");
                     let effect = make_effect(&format!("effect-{}", i), "ext-001");
                     let _ = fw.process_request(effect);
                     results.push("processed".to_string());
@@ -2645,7 +2690,7 @@ mod tests {
                 origin: TrafficOrigin::Extension {
                     extension_id: "ext-001".to_string(),
                 },
-                target_host: malicious_host.clone(),
+                target_host: malicious_host.to_string(),
                 target_port: 443,
                 method: "GET".to_string(),
                 path: "/data".to_string(),

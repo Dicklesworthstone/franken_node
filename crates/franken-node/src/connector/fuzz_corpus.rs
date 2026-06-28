@@ -1584,8 +1584,13 @@ targets = []
 
     #[test]
     fn dispatch_target_rejects_unknown_truthful_target() {
-        let error = dispatch_target("unknown_truthful_target", b"{}")
-            .expect_err("unknown target must fail closed");
+        // `dispatch_target` returns `Result<TargetDispatch, String>` and
+        // `TargetDispatch` is not `Debug`, so `expect_err` is unavailable; match
+        // explicitly to extract the error string while preserving fail-closed intent.
+        let error = match dispatch_target("unknown_truthful_target", b"{}") {
+            Ok(_) => panic!("unknown target must fail closed"),
+            Err(error) => error,
+        };
 
         assert!(error.contains("unsupported truthful fuzz target"));
         assert!(error.contains("unknown_truthful_target"));

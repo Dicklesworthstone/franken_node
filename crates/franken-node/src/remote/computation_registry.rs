@@ -731,8 +731,8 @@ impl ComputationRegistry {
             let mut registry = ComputationRegistry::new(1, "test-capabilities");
             let all_capabilities = vec![
                 RemoteOperation::NetworkEgress,
-                RemoteOperation::FileSystemRead,
-                RemoteOperation::FileSystemWrite,
+                RemoteOperation::FederationSync,
+                RemoteOperation::TelemetryExport,
                 RemoteOperation::RemoteComputation,
             ];
             let capability_entry = ComputationEntry {
@@ -794,6 +794,8 @@ impl ComputationRegistry {
                 preserved_entry.description, "Original computation",
                 "Original entry should be preserved"
             );
+
+            Ok(())
         }
     }
 
@@ -1166,7 +1168,7 @@ mod tests {
         registry
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("register");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1188,7 +1190,7 @@ mod tests {
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("register");
 
-        let provider = CapabilityProvider::new("registry-secret");
+        let provider = CapabilityProvider::new("registry-secret").expect("provider");
         let (cap, _) = provider
             .issue(
                 "ops-control-plane",
@@ -1203,7 +1205,7 @@ mod tests {
                 "trace-issue",
             )
             .expect("issue capability");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
 
         let entry = registry
             .authorize_dispatch(
@@ -1237,7 +1239,7 @@ mod tests {
             )
             .expect("register");
 
-        let provider = CapabilityProvider::new("registry-secret");
+        let provider = CapabilityProvider::new("registry-secret").expect("provider");
         let (cap, _) = provider
             .issue(
                 "ops-control-plane",
@@ -1252,7 +1254,7 @@ mod tests {
                 "trace-issue",
             )
             .expect("issue capability");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1295,7 +1297,7 @@ mod tests {
             )
             .expect("register");
 
-        let provider = CapabilityProvider::new("registry-secret");
+        let provider = CapabilityProvider::new("registry-secret").expect("provider");
         let (cap, _) = provider
             .issue(
                 "ops-control-plane",
@@ -1313,7 +1315,7 @@ mod tests {
                 "trace-issue",
             )
             .expect("issue capability");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
 
         let entry = registry
             .authorize_dispatch(
@@ -1506,7 +1508,7 @@ mod tests {
     #[test]
     fn dispatch_rejects_malformed_name_before_capability_authorization() {
         let mut registry = ComputationRegistry::new(1, "trace-load");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1644,7 +1646,7 @@ mod tests {
     #[test]
     fn dispatch_unknown_name_does_not_touch_capability_gate() {
         let mut registry = ComputationRegistry::new(1, "trace-load");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1674,7 +1676,7 @@ mod tests {
         registry
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("register");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1856,7 +1858,7 @@ mod tests {
         registry
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("registration should succeed");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret").expect("gate");
 
         let err = registry
             .authorize_dispatch(

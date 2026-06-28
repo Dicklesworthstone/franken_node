@@ -5200,8 +5200,8 @@ mod tests {
             name: "test-verifier".to_string(),
             contact: "sensitive-contact-info@example.com".to_string(),
             public_key: "sensitive-verifier-public-key-data".to_string(),
-            capabilities: vec![VerificationDimension::Compliance],
-            tier: VerifierTier::Enterprise,
+            capabilities: vec![VerificationDimension::Conformance],
+            tier: VerifierTier::Advanced,
         };
 
         let debug_output = format!("{:?}", registration);

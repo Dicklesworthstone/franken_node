@@ -1252,13 +1252,17 @@ fn emit_event(
 
         // Test: pathological string content should be preserved without corruption
         let mut pathological_events = Vec::new();
+        let pathological_x = "x".repeat(100000);
+        let pathological_y = "y".repeat(50000);
+        let pathological_z = "z".repeat(75000);
+        let pathological_w = "w".repeat(25000);
         let pathological_strings = [
             ("", "", "", ""),
             (
-                "x".repeat(100000).as_str(),
-                "y".repeat(50000).as_str(),
-                "z".repeat(75000).as_str(),
-                "w".repeat(25000).as_str(),
+                pathological_x.as_str(),
+                pathological_y.as_str(),
+                pathological_z.as_str(),
+                pathological_w.as_str(),
             ),
             (
                 "event\x00null",
@@ -2349,9 +2353,10 @@ mod bounded_mask_comprehensive_negative_tests {
         let mut cancellation = CancellationState::new();
         let policy = MaskPolicy::new(Duration::from_millis(10), "trace-panic-patterns");
 
+        let long_panic_message = "panic! with extremely long message: ".to_owned() + &"x".repeat(100000);
         let panic_patterns = [
             "panic!() with empty message",
-            "panic! with extremely long message: ".to_owned() + &"x".repeat(100000),
+            long_panic_message.as_str(),
             "panic!\x00with\nnull\tbytes",
             "panic!\u{202E}with\u{200B}unicode",
         ];
@@ -2508,10 +2513,11 @@ mod bounded_mask_comprehensive_negative_tests {
         }
 
         // Test event emission with pathological data
+        let pathological_massive = "x".repeat(100000);
         let pathological_events = [
             ("", "empty_operation", "empty_trace", "empty_cx"),
             (
-                "x".repeat(100000).as_str(),
+                pathological_massive.as_str(),
                 "massive_operation",
                 "massive_trace",
                 "massive_cx",
@@ -2552,7 +2558,7 @@ mod bounded_mask_comprehensive_negative_tests {
                 );
 
                 // Add more memory pressure during emission
-                memory_pressure.push(vec![(i + event_iteration) as u8; 5000]);
+                memory_pressure.push(vec![(i + event_iteration as usize) as u8; 5000]);
             }
         }
 
