@@ -1024,7 +1024,9 @@ mod tests {
         clear_process_start_override_for_tests();
         let err = get_status(&bearer_reader_identity(), &test_trace()).expect_err("status fails");
         match err {
-            ApiError::AuthFailed { detail, .. } => assert!(detail.contains("route contract")),
+            ApiError::AuthFailed { detail, .. } => {
+                assert!(detail.contains("authentication method not permitted"))
+            }
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -1084,7 +1086,7 @@ mod tests {
     #[test]
     fn status_read_seeds_process_start_without_service_bootstrap() {
         let _lock = process_start_test_lock();
-        clear_process_start_override_for_tests();
+        reset_operator_route_state_for_tests();
         let before = process_start_init_call_count_for_tests();
 
         let identity = test_identity();
@@ -1215,7 +1217,7 @@ mod tests {
     #[test]
     fn service_bootstrap_updates_status_policy_profile() {
         let _lock = process_start_test_lock();
-        clear_process_start_override_for_tests();
+        reset_operator_route_state_for_tests();
         let identity = test_identity();
         let trace = test_trace();
 

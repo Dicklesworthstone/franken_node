@@ -344,7 +344,7 @@ mod tests {
 
         // Valid request with inconsistencies field should deserialize successfully
         let valid_json = r#"{
-            "reason": "TrustStateInconsistency",
+            "reason": "TrustCorruption",
             "operator_id": "test-operator",
             "timestamp": "2024-01-01T00:00:00Z",
             "trust_state_hash": "abc123",
@@ -358,7 +358,7 @@ mod tests {
 
         // Request missing inconsistencies field should fail deserialization (fail-closed)
         let invalid_json = r#"{
-            "reason": "TrustStateInconsistency",
+            "reason": "TrustCorruption",
             "operator_id": "test-operator",
             "timestamp": "2024-01-01T00:00:00Z",
             "trust_state_hash": "abc123"

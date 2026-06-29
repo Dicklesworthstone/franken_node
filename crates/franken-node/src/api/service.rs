@@ -1765,7 +1765,22 @@ mod integration_tests {
 
     #[test]
     fn authorized_mtls_identity_can_reach_firewall() {
-        let route = fleet_admin_route();
+        // mTLS identities authenticate at the transport layer and are granted the
+        // minimal-privilege `reader` role (see `authenticate`); role elevation is not
+        // derived from the cert here. Use a route whose required role matches what an
+        // authenticated mTLS identity actually carries so the chain reaches the firewall.
+        let route = RouteMetadata {
+            method: "POST".to_string(),
+            path: "/v1/fleet/quarantine".to_string(),
+            group: EndpointGroup::FleetControl,
+            lifecycle: EndpointLifecycle::Stable,
+            auth_method: AuthMethod::MtlsClientCert,
+            policy_hook: PolicyHook {
+                hook_id: "fleet.quarantine.execute".to_string(),
+                required_roles: vec!["reader".to_string()],
+            },
+            trace_propagation: true,
+        };
         let mut perf_limiter =
             PerformanceRateLimiter::with_config(default_rate_limit(EndpointGroup::FleetControl));
         let mut auth_limiter = AuthFailureLimiter::new();
@@ -1781,7 +1796,7 @@ mod integration_tests {
             &mut perf_limiter,
             &keys,
             |identity, _ctx| {
-                assert!(identity.roles.contains(&"fleet-admin".to_string()));
+                assert!(identity.roles.contains(&"reader".to_string()));
                 let effect = make_effect("e-fleet", "ext-001");
                 let decision = fw
                     .evaluate(&effect, "trace-fleet", "2026-01-01T00:00:00Z")
