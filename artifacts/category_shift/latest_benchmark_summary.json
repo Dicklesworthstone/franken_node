@@ -1,1 +1,84 @@
-{"timestamp":1714723200,"aggregate_score":85,"scenarios":[{"name":"cold_start_latency","dimension":"PerformanceUnderHardening","raw_value":150.0,"score":80,"unit":"ms"}],"provenance_hash":"test123"}
+{
+  "timestamp": 1782691200,
+  "aggregate_score": 82,
+  "scenarios": [
+    {
+      "name": "secure-extension-heavy",
+      "dimension": "PerformanceUnderHardening",
+      "raw_value": 3.5457113999999996,
+      "score": 100,
+      "unit": "ms"
+    },
+    {
+      "name": "cold_start_latency",
+      "dimension": "PerformanceUnderHardening",
+      "raw_value": 0.883377,
+      "score": 100,
+      "unit": "ms"
+    },
+    {
+      "name": "p99_request_latency",
+      "dimension": "PerformanceUnderHardening",
+      "raw_value": 0.2218254,
+      "score": 100,
+      "unit": "ms"
+    },
+    {
+      "name": "extension_overhead_ratio",
+      "dimension": "PerformanceUnderHardening",
+      "raw_value": 1.4919110236262503,
+      "score": 2,
+      "unit": "ratio"
+    },
+    {
+      "name": "migration_scanner_throughput",
+      "dimension": "MigrationSpeed",
+      "raw_value": 11049.911203405749,
+      "score": 100,
+      "unit": "fixtures/s"
+    },
+    {
+      "name": "lockstep_harness_throughput",
+      "dimension": "CompatibilityCorrectness",
+      "raw_value": 14996.751329006434,
+      "score": 100,
+      "unit": "fixtures/s"
+    },
+    {
+      "name": "quarantine_propagation_latency",
+      "dimension": "ContainmentLatency",
+      "raw_value": 1.1604392,
+      "score": 100,
+      "unit": "ms"
+    },
+    {
+      "name": "trust_card_materialization",
+      "dimension": "ContainmentLatency",
+      "raw_value": 0.7309732,
+      "score": 100,
+      "unit": "ms"
+    },
+    {
+      "name": "replay_bit_identity_rate",
+      "dimension": "ReplayDeterminism",
+      "raw_value": 100.0,
+      "score": 100,
+      "unit": "percent"
+    },
+    {
+      "name": "adversarial_pass_rate",
+      "dimension": "AdversarialResilience",
+      "raw_value": 100.0,
+      "score": 100,
+      "unit": "percent"
+    },
+    {
+      "name": "migration_success_rate",
+      "dimension": "MigrationSpeed",
+      "raw_value": 66.66666666666666,
+      "score": 0,
+      "unit": "percent"
+    }
+  ],
+  "provenance_hash": "sha256:a132e5a5eb44a2fe3b0b59e0082f97908092f52fa5e7d7c55a8b438acec7dd70"
+}
