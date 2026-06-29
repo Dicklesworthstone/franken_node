@@ -244,6 +244,8 @@ pub struct HighImpactActionRegistry {
 pub enum ReceiptError {
     #[error("failed to serialize canonical JSON: {0}")]
     CanonicalJson(serde_json::Error),
+    #[error("canonical JSON nesting depth exceeds the maximum of {limit}")]
+    CanonicalJsonTooDeep { limit: usize },
     #[error("failed to encode receipts as JSON: {0}")]
     JsonEncode(serde_json::Error),
     #[error("failed to encode receipts as CBOR: {0}")]
@@ -1188,9 +1190,96 @@ fn hash_canonical_json(value: &impl Serialize) -> Result<String, ReceiptError> {
 }
 
 fn canonical_json(value: &impl Serialize) -> Result<String, ReceiptError> {
+    // bd-0u14n: bound nesting depth FAIL-CLOSED before the recursive serialization runs.
+    // `serde_json::to_value` and `canonicalize_value` both descend once per nesting level with
+    // no depth bound, so an adversarial deeply-nested (or self-referential-shaped) payload
+    // would overflow the stack and abort the whole process (SIGABRT). The guard rejects such
+    // input with a clean error first; once it passes, the payload is <= MAX_CANONICAL_JSON_DEPTH
+    // deep and the bounded recursion below cannot overflow.
+    ensure_canonical_json_depth(value)?;
     let serialized = serde_json::to_value(value).map_err(ReceiptError::CanonicalJson)?;
     let canonicalized = canonicalize_value(serialized);
     serde_json::to_string(&canonicalized).map_err(ReceiptError::CanonicalJson)
+}
+
+/// Maximum nesting depth permitted in canonical-JSON receipt payloads.
+///
+/// Receipt input/output payloads are shallow decision records; `128` mirrors serde_json's own
+/// default deserialization recursion limit and sits far above any legitimate payload. Inputs
+/// deeper than this are rejected fail-closed (bd-0u14n) rather than serialized, since the
+/// recursive `to_value`/canonicalization would otherwise overflow the stack on adversarial
+/// deeply-nested JSON.
+const MAX_CANONICAL_JSON_DEPTH: usize = 128;
+
+/// `serde_json` formatter that aborts serialization once nesting exceeds
+/// [`MAX_CANONICAL_JSON_DEPTH`]. Because it returns an error at the limit, the driving
+/// serialization recursion only descends `limit`-deep before unwinding — it cannot overflow
+/// the stack the way an unbounded `to_value` over a 10k-deep input does.
+struct DepthGuardFormatter {
+    depth: usize,
+    limit: usize,
+}
+
+impl DepthGuardFormatter {
+    fn new(limit: usize) -> Self {
+        Self { depth: 0, limit }
+    }
+
+    fn enter(&mut self) -> std::io::Result<()> {
+        self.depth = self.depth.saturating_add(1);
+        if self.depth > self.limit {
+            return Err(std::io::Error::other(
+                "canonical JSON nesting depth exceeded",
+            ));
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+}
+
+impl serde_json::ser::Formatter for DepthGuardFormatter {
+    fn begin_array<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.enter()?;
+        writer.write_all(b"[")
+    }
+
+    fn end_array<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.leave();
+        writer.write_all(b"]")
+    }
+
+    fn begin_object<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.enter()?;
+        writer.write_all(b"{")
+    }
+
+    fn end_object<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.leave();
+        writer.write_all(b"}")
+    }
+}
+
+/// Reject input whose nesting depth exceeds [`MAX_CANONICAL_JSON_DEPTH`] before the recursive
+/// canonicalization runs (bd-0u14n). Serializes through [`DepthGuardFormatter`] to a sink, so
+/// the only error this pass can raise is the depth abort (mapped to a clean typed error);
+/// genuine serialization failures are propagated faithfully.
+fn ensure_canonical_json_depth(value: &impl Serialize) -> Result<(), ReceiptError> {
+    let mut serializer = serde_json::Serializer::with_formatter(
+        std::io::sink(),
+        DepthGuardFormatter::new(MAX_CANONICAL_JSON_DEPTH),
+    );
+    value.serialize(&mut serializer).map_err(|err| {
+        if err.is_io() {
+            ReceiptError::CanonicalJsonTooDeep {
+                limit: MAX_CANONICAL_JSON_DEPTH,
+            }
+        } else {
+            ReceiptError::CanonicalJson(err)
+        }
+    })
 }
 
 fn canonicalize_value(value: Value) -> Value {
@@ -2502,49 +2591,62 @@ mod tests {
         assert!(matches!(err, ReceiptError::InvalidConfidence { .. }));
     }
 
-    /// Negative path: circular reference in input/output serialization
-    // FIXME(bd-o776s): prod stack-overflows on deeply-nested JSON input. `Receipt::new`
-    // -> hash_canonical_json -> canonical_json (decision_receipt.rs:1190-1194) calls
-    // serde_json serialization and `canonicalize_value` (decision_receipt.rs:1196-1211),
-    // both of which recurse once per nesting level with no depth bound. A ~10k-deep
-    // input overflows the stack and ABORTS the whole test process (class B prod gap;
-    // not a test artifact — the `fold` construction is iterative). Gated so it cannot
-    // crash the lane; re-enable once canonicalize_value enforces a recursion-depth
-    // limit. See B report.
-    #[cfg(any())]
+    /// Negative path: pathologically deep JSON must be rejected fail-closed, not overflow the
+    /// stack and abort the process.
+    ///
+    /// bd-0u14n (fixed): canonical-JSON hashing now bounds nesting depth via
+    /// `ensure_canonical_json_depth` (`MAX_CANONICAL_JSON_DEPTH`) BEFORE the recursive
+    /// `serde_json::to_value` / `canonicalize_value` run, so adversarial deeply-nested input
+    /// returns a clean `CanonicalJsonTooDeep` error instead of a SIGABRT stack overflow. The
+    /// over-limit fixture is kept modestly deep on purpose: `serde_json::Value`'s own `Drop` is
+    /// recursive, so a 10k-deep value would overflow merely on drop — 256 exceeds the 128-deep
+    /// limit while staying safe to construct and drop.
     #[test]
-    fn receipt_creation_with_self_referential_json_value_handled_gracefully() {
-        // Create a JSON value that would cause issues in naive serialization
-        let problematic_input = json!({
+    fn receipt_creation_with_pathologically_nested_json_is_rejected_not_aborted() {
+        let shallow = json!({
             "data": "test",
-            "nested": {
-                "recursive": null  // Not actually recursive, but simulating the pattern
-            }
+            "nested": { "ok": true }
         });
 
-        // Self-referential structures can't be created directly in serde_json::Value,
-        // but we can test with deeply nested structures that might cause stack overflow
-        let deeply_nested =
-            (0..10000).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
-
+        // A within-limit nesting hashes cleanly.
+        let within_limit =
+            (0..64).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
         let receipt = Receipt::new(
             "test_action",
             "test_actor",
             "franken-node-control-plane",
-            &deeply_nested,
-            &problematic_input,
+            &within_limit,
+            &shallow,
             Decision::Approved,
-            "Testing deeply nested structure handling during hash computation",
+            "within-limit nested input must hash without error",
             vec!["test-evidence".to_string()],
             vec!["test-rule".to_string()],
             0.95,
             "test rollback command",
         )
-        .expect("deeply nested input should be handled without stack overflow");
-
+        .expect("within-limit nested input should hash without error");
         assert!(!receipt.input_hash.is_empty());
         assert!(!receipt.output_hash.is_empty());
         assert_ne!(receipt.input_hash, receipt.output_hash);
+
+        // A nesting deeper than MAX_CANONICAL_JSON_DEPTH is rejected fail-closed — no abort.
+        let too_deep =
+            (0..256).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
+        let err = Receipt::new(
+            "test_action",
+            "test_actor",
+            "franken-node-control-plane",
+            &too_deep,
+            &shallow,
+            Decision::Approved,
+            "deeply nested input must be rejected, not crash the process",
+            vec!["test-evidence".to_string()],
+            vec!["test-rule".to_string()],
+            0.95,
+            "test rollback command",
+        )
+        .expect_err("over-limit nested input must be rejected fail-closed");
+        assert!(matches!(err, ReceiptError::CanonicalJsonTooDeep { .. }));
     }
 
     /// Negative path: timestamp parsing edge cases with malformed formats
