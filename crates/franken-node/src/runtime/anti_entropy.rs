@@ -673,12 +673,19 @@ pub fn verify_mmr_proof(record: &TrustRecord, root: &MmrRoot) -> Result<(), Reco
         .as_ref()
         .ok_or_else(|| ReconciliationError::ProofInvalid("missing inclusion proof".into()))?;
 
-    // SECURITY: Compute marker hash from record envelope instead of trusting supplied value
-    // This prevents attackers from providing malicious marker_hash that doesn't correspond
-    // to the actual record content
-    let computed_marker_hash = hex::encode(record.digest());
-
-    mmr_proofs::verify_inclusion(proof, root, &computed_marker_hash).map_err(|e| {
+    // The record's `marker_hash` is the marker-stream identity committed to the MMR
+    // (`Marker::compute_hash`, see control_plane::marker_stream), NOT the record's content
+    // digest. Verify the inclusion proof against that marker via the canonical
+    // `verify_inclusion`, which binds marker_hash -> leaf -> root with constant-time checks.
+    //
+    // bd-1jap1: a previous revision passed `hex(record.digest())` here to "bind to content",
+    // but `TrustRecord::digest()` folds in the inclusion proof's own `leaf_hash`. That made a
+    // valid proof require `proof.leaf_hash == marker_leaf_hash(hex(digest(..leaf_hash..)))` — a
+    // SHA-256 fixed point unsatisfiable for ANY proof-carrying record, so the entire
+    // proof-verified accept path was dead (it rejected every record). A tampered `marker_hash`
+    // is still rejected: the proof's leaf binds to the original marker, and the locally trusted
+    // `root` — not the attacker — is the security boundary the inclusion proof is checked against.
+    mmr_proofs::verify_inclusion(proof, root, &record.marker_hash).map_err(|e| {
         ReconciliationError::ProofInvalid(format!("record {} proof failed: {e}", record.id))
     })
 }
@@ -1482,13 +1489,9 @@ mod tests {
 
     // -- MMR proof verification (canonical) --
 
-    // FIXME(bd-o776s): KNOWN-FAILING — genuine prod regression (case B), left failing by
-    // design. verify_mmr_proof derives the leaf marker from `hex(record.digest())`
-    // (701df9905), but TrustRecord::digest() includes the inclusion proof's leaf_hash
-    // (bd77f46e5). That makes proof.leaf_hash == marker_leaf_hash(hex(digest(..leaf_hash..)))
-    // a SHA-256 fixed point — unsatisfiable for any proof-carrying record. No test-only
-    // change can produce an accepted valid proof; needs a prod fix (envelope digest that
-    // excludes the inclusion proof). See report.
+    // bd-1jap1 (fixed): verify_mmr_proof now verifies the proof against `record.marker_hash`
+    // (the marker-stream identity committed to the MMR) instead of the circular
+    // `hex(record.digest())`, so a record carrying a valid inclusion proof is accepted.
     #[test]
     fn test_valid_proof_accepted() {
         let (rec, root) = make_record("r1", 1);
@@ -1803,16 +1806,12 @@ mod tests {
         let mut remote = TrustState::new(1);
         let (record, root) = make_record("r1", 1);
         assert!(remote.insert(record));
-        // bd-o776s: this test exercises reconciliation IDEMPOTENCE, not MMR proof
-        // verification. The default config's proof path is currently broken in prod (see
-        // B-report: verify_mmr_proof vs digest() circular dependency), so disable
-        // proof_required to isolate the
-        // idempotence invariant; proof acceptance is covered by test_valid_proof_accepted.
-        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
-            proof_required: false,
-            ..ReconciliationConfig::default()
-        })
-        .expect("should succeed");
+        // bd-1jap1 (fixed): the default config's proof path works again, so this idempotence
+        // test runs under the real default (proof_required=true). `make_record` returns a
+        // (record, root) pair whose inclusion proof verifies, so the record is accepted on the
+        // first reconciliation and the second is a no-op.
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default())
+            .expect("should succeed");
         let cancel = no_cancel();
 
         let first = reconciler
@@ -2255,10 +2254,8 @@ mod tests {
         assert!(!local.contains("above-limit"));
     }
 
-    // FIXME(bd-o776s): KNOWN-FAILING — same genuine prod regression (case B) as
-    // test_valid_proof_accepted: proof_required=true gates acceptance on verify_mmr_proof,
-    // which is unsatisfiable because digest() commits to the proof's own leaf_hash. Left
-    // failing by design (this test's whole purpose is the proof-verified accept path).
+    // bd-1jap1 (fixed): the proof-verified accept path is live again — proof_required=true
+    // gates acceptance on verify_mmr_proof, which now keys off `record.marker_hash`.
     #[test]
     fn test_reconcile_with_proof_verification() {
         let mut reconciler =
