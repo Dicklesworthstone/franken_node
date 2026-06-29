@@ -2302,8 +2302,15 @@ mod tests {
                 {
                     let mut s = healthy_state();
                     s.reliability_telemetry = Some(ReliabilityTelemetry {
-                        sample_count: 50,
-                        nonconforming_count: 75, // Inconsistent: errors > samples
+                        // Inconsistent: errors > samples. The window must also
+                        // clear the conformal guard's minimum-sample floor (64)
+                        // before that guard will make an anytime-valid claim — a
+                        // sub-floor window is correctly ignored (see
+                        // `conformal_guard_ignores_small_sample_window`). 100
+                        // samples crosses the floor and the >=100% clamped
+                        // nonconformance ratio drives a block.
+                        sample_count: 100,
+                        nonconforming_count: 150,
                     });
                     s
                 },

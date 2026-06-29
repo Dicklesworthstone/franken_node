@@ -2035,12 +2035,34 @@ mod tests {
             let ranked = diagnostics.rank_candidates(&json_injection_candidates, &[]);
             assert_eq!(ranked.len(), json_injection_candidates.len());
 
-            // Verify ranking serialization is safe
+            // Verify ranking serialization is safe. As documented above, JSON
+            // safety is achieved by ESCAPING structural metacharacters, NOT by
+            // stripping payload text: an opaque candidate name such as
+            // `<script>` is preserved verbatim as inert data (angle brackets are
+            // not JSON metacharacters) and must survive a lossless round-trip.
+            // The structural defense asserted here is that no raw control byte
+            // (NUL/CR/LF, < 0x20) is ever emitted unescaped, so a payload cannot
+            // break out of its JSON token.
             for candidate in &ranked {
                 let candidate_json = serde_json::to_string(candidate);
                 match candidate_json {
                     Ok(json) => {
-                        assert!(!json.contains("<script>"), "Candidate JSON should be safe");
+                        assert!(
+                            !json.chars().any(|c| (c as u32) < 0x20),
+                            "raw control bytes must be escaped, not emitted literally"
+                        );
+                        let round_trip: Result<RankedCandidate, _> =
+                            serde_json::from_str(&json);
+                        assert!(
+                            round_trip.is_ok(),
+                            "serialized candidate must deserialize safely"
+                        );
+                        if let Ok(rt) = round_trip {
+                            assert_eq!(
+                                rt.candidate_ref, candidate.candidate_ref,
+                                "candidate name must survive a lossless round-trip"
+                            );
+                        }
                     }
                     Err(_) => {
                         // Acceptable to reject unsafe serialization
