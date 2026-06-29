@@ -558,9 +558,19 @@ mod tests {
     }
 
     fn egress_scope() -> RemoteScope {
+        // Prod's RemoteScope issuance now rejects bare-scheme prefixes
+        // ("http://", "tcp://") because they fail URL validation (empty host /
+        // non-network scheme). Enumerate the exact http hosts these guard tests
+        // exercise so the capability layer ALLOWS each request and the egress
+        // POLICY remains the sole decider of allow/deny (preserving every test's
+        // policy-level ALLOW/DENY intent).
         RemoteScope::new(
             vec![RemoteOperation::NetworkEgress],
-            vec!["http://".to_string(), "tcp://".to_string()],
+            vec![
+                "http://api.example.com".to_string(),
+                "http://unknown.com".to_string(),
+                "http://evil.com".to_string(),
+            ],
         )
     }
 
@@ -1196,7 +1206,11 @@ mod tests {
             )
             .expect_err("null byte host must not match allow rule");
 
-        assert!(matches!(err, GuardError::EgressDenied { .. }));
+        // The embedded NUL makes the request endpoint fail the capability
+        // layer's URL validation (control characters are rejected), so the
+        // request is denied earlier — at the cap scope check — than the policy
+        // layer. Either way the null-byte host is hard-denied and audited.
+        assert!(matches!(err, GuardError::RemoteCapDenied { .. }));
         assert_eq!(guard.audit_events().len(), 1);
         assert_eq!(guard.audit_events()[0].action, Action::Deny);
         assert_eq!(guard.audit_events()[0].rule_matched, None);
@@ -1267,7 +1281,10 @@ mod tests {
                 "network-guard-tests",
                 RemoteScope::new(
                     vec![RemoteOperation::TelemetryExport],
-                    vec!["http://".into()],
+                    // Valid URL prefix (prod rejects bare "http://"); the denial
+                    // under test comes from the wrong OPERATION (TelemetryExport,
+                    // not NetworkEgress), not from the endpoint.
+                    vec!["http://api.example.com".into()],
                 ),
                 1_700_000_000,
                 3_600,

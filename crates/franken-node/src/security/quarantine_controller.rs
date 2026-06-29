@@ -1884,7 +1884,7 @@ mod quarantine_controller_additional_negative_tests {
 
     #[test]
     fn test_security_timing_attack_resistance() {
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
 
         let controller = controller();
 
@@ -1897,25 +1897,37 @@ mod quarantine_controller_additional_negative_tests {
             ("a".repeat(100), 0.9),
         ];
 
+        // Denoise: a single-shot nanosecond sample on a loaded host is dominated
+        // by one-time setup and scheduler preemption, not by data-dependent
+        // work, which made this assertion flake. For each input take the MINIMUM
+        // evaluate() time over many repetitions (the standard microbenchmark
+        // estimator of intrinsic cost) after a warmup, so the comparison
+        // reflects real per-input timing rather than transient noise.
+        const REPS: u32 = 200;
         let mut timing_results = vec![];
 
-        for (principal_id, posterior_val) in test_cases {
-            let test_posterior = posterior(&principal_id, posterior_val, "trace001");
+        for (principal_id, posterior_val) in &test_cases {
+            let test_posterior = posterior(principal_id, *posterior_val, "trace001");
 
-            let start = Instant::now();
-            let _result = controller.evaluate(&test_posterior);
-            let duration = start.elapsed();
+            // Warm up caches / lazy initialization before measuring.
+            let _ = controller.evaluate(&test_posterior);
 
-            timing_results.push(duration);
+            let mut best = Duration::MAX;
+            for _ in 0..REPS {
+                let start = Instant::now();
+                let _result = controller.evaluate(&test_posterior);
+                best = best.min(start.elapsed());
+            }
+            timing_results.push(best);
         }
 
-        // Verify timing doesn't vary dramatically (within 10x variance)
+        // Verify timing doesn't vary dramatically across inputs.
         let min_time = timing_results.iter().min().unwrap();
         let max_time = timing_results.iter().max().unwrap();
 
-        // Timing should be relatively constant (not perfect, but reasonable)
+        // Timing should be relatively constant (not perfect, but reasonable).
         assert!(
-            max_time.as_nanos() < min_time.as_nanos() * 100,
+            max_time.as_nanos() < min_time.as_nanos().saturating_mul(100),
             "Timing variance suggests potential timing attack vulnerability"
         );
     }

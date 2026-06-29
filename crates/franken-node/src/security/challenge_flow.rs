@@ -2851,13 +2851,17 @@ mod tests {
                 )
                 .unwrap();
 
-            // Perform full flow to generate maximum audit entries
-            let stress_proof = ProofSubmission {
-                proof_type: RequiredProofType::IntegrityProof,
-                data_hash: format!("stress_hash_{}", i),
-                submitter_id: format!("stress_prover_{}", i),
-                submitted_at_ms: 11_000 + i as u64,
-            };
+            // Perform full flow to generate maximum audit entries. data_hash
+            // must be valid hex AND match the injected verifier's expected hash
+            // (prod tightened both submit-time format validation and
+            // verify-time hash matching), so build it via make_valid_proof,
+            // which derives the expected hash for this artifact + proof type.
+            let stress_proof = make_valid_proof(
+                &ArtifactId::new(&format!("audit_stress_artifact_{}", i)),
+                RequiredProofType::IntegrityProof,
+                &format!("stress_prover_{}", i),
+                11_000 + i as u64,
+            );
 
             ctrl.submit_proof(
                 &stress_cid,

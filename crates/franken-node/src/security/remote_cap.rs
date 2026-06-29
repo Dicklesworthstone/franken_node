@@ -3880,8 +3880,14 @@ mod tests {
     #[test]
     fn issued_caps_preserve_endpoint_prefix_boundaries() {
         let provider = CapabilityProvider::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("valid provider");
-        let lhs_scope = scope_with_endpoint_prefixes(&["alpha,beta", "gamma"]);
-        let rhs_scope = scope_with_endpoint_prefixes(&["alpha", "beta,gamma"]);
+        // Prod now requires endpoint prefixes to be valid URLs, so the
+        // comma-boundary entries are carried in the URL path. The two scopes
+        // remain distinct sets (the comma sits at a different boundary), which
+        // the length-prefixed scope encoding must keep separable.
+        let lhs_scope =
+            scope_with_endpoint_prefixes(&["https://boundary.example/alpha,beta", "https://boundary.example/gamma"]);
+        let rhs_scope =
+            scope_with_endpoint_prefixes(&["https://boundary.example/alpha", "https://boundary.example/beta,gamma"]);
 
         assert_ne!(scope_fingerprint(&lhs_scope), scope_fingerprint(&rhs_scope));
 
@@ -3915,8 +3921,12 @@ mod tests {
     #[test]
     fn issuing_identical_endpoint_prefix_scopes_is_deterministic() {
         let provider = CapabilityProvider::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("valid provider");
-        let lhs_scope = scope_with_endpoint_prefixes(&["alpha,beta", "gamma"]);
-        let rhs_scope = scope_with_endpoint_prefixes(&["alpha,beta", "gamma"]);
+        // Identical valid-URL prefix sets must issue identically (prod requires
+        // valid-URL prefixes; bare comma-delimited entries no longer parse).
+        let lhs_scope =
+            scope_with_endpoint_prefixes(&["https://boundary.example/alpha,beta", "https://boundary.example/gamma"]);
+        let rhs_scope =
+            scope_with_endpoint_prefixes(&["https://boundary.example/alpha,beta", "https://boundary.example/gamma"]);
 
         let (lhs, _) = provider
             .issue(
@@ -5228,10 +5238,13 @@ mod remote_cap_comprehensive_negative_tests {
 
         // Authorization check should complete efficiently even with large scope
         let start = std::time::Instant::now();
+        // MAX_TEST_ENDPOINTS bounds the generated scope to endpoints 0..=499
+        // (two prefixes per loop iteration), so query one that is actually in
+        // the scope; endpoint-5000 was never generated.
         let auth_result = gate.authorize_network(
             Some(&cap),
             RemoteOperation::NetworkEgress,
-            "https://endpoint-5000.example.com/api",
+            "https://endpoint-100.example.com/api",
             1_700_000_100,
             "trace-massive-scope-auth",
         );
@@ -6117,7 +6130,10 @@ mod remote_cap_comprehensive_negative_tests {
                 scope,
                 1000,
                 60,
-                false,
+                // operator_authorized: prod now gates issuance on operator
+                // approval; this Debug-redaction test needs a successfully
+                // issued cap, so authorize it.
+                true,
                 false,
                 "debug-test",
             )

@@ -1945,8 +1945,12 @@ mod tests {
         for malicious_host in collision_attempts {
             let found = policy.find_allowlist(malicious_host, 443);
 
-            // Most should not match due to normalization
-            if malicious_host.ends_with('\u{006d}') {
+            // Most should not match due to normalization. Only the pure-ASCII
+            // verification host ("api.example.co\u{006d}" == "api.example.com")
+            // must match — the earlier `ends_with('m')` heuristic also caught
+            // Cyrillic homographs ("api.еxample.com", "АPI.example.com"), which
+            // prod correctly DENIES, so identify the legitimate host exactly.
+            if malicious_host == "api.example.com" {
                 assert!(found.is_some(), "Normal host should match");
             } else {
                 // Unicode variants should not bypass allowlist matching, EXCEPT
