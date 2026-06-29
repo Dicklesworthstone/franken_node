@@ -1810,8 +1810,8 @@ mod tests {
         // test runs under the real default (proof_required=true). `make_record` returns a
         // (record, root) pair whose inclusion proof verifies, so the record is accepted on the
         // first reconciliation and the second is a no-op.
-        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default())
-            .expect("should succeed");
+        let mut reconciler =
+            AntiEntropyReconciler::new(ReconciliationConfig::default()).expect("should succeed");
         let cancel = no_cancel();
 
         let first = reconciler

@@ -2609,8 +2609,7 @@ mod tests {
         });
 
         // A within-limit nesting hashes cleanly.
-        let within_limit =
-            (0..64).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
+        let within_limit = (0..64).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
         let receipt = Receipt::new(
             "test_action",
             "test_actor",
@@ -2630,8 +2629,7 @@ mod tests {
         assert_ne!(receipt.input_hash, receipt.output_hash);
 
         // A nesting deeper than MAX_CANONICAL_JSON_DEPTH is rejected fail-closed — no abort.
-        let too_deep =
-            (0..256).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
+        let too_deep = (0..256).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
         let err = Receipt::new(
             "test_action",
             "test_actor",
