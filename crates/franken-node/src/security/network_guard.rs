@@ -88,8 +88,11 @@ impl EgressRule {
 /// Null bytes in hostnames are rejected to prevent C-string truncation bypass
 /// where the policy sees "evil.com\0.safe.com" but DNS resolves "evil.com".
 fn host_matches(pattern: &str, host: &str) -> bool {
-    // Reject null bytes in the host to prevent truncation-based bypass.
-    if host.contains('\0') {
+    // Reject control characters in the host. Null bytes enable C-string truncation bypass
+    // ("evil.com\0.safe.com"); CR/LF (and other C0/C1 controls, TAB, DEL) enable HTTP
+    // request-smuggling / header-injection when the host is later framed into a request line
+    // or `Host:` header (bd-17thg). A control-bearing host is never a legitimate DNS name.
+    if host_has_control_chars(host) {
         return false;
     }
     let p = normalize_host_for_match(pattern);
@@ -113,6 +116,16 @@ fn host_matches(pattern: &str, host: &str) -> bool {
 
 fn has_empty_dns_label(host: &str) -> bool {
     host.split('.').any(str::is_empty)
+}
+
+/// Whether `host` contains any control character (C0 incl. NUL/CR/LF/TAB, DEL, or C1).
+///
+/// A legitimate DNS hostname never contains control characters; embedded CR/LF in particular
+/// is an HTTP request-smuggling / `Host:`-header-injection vector. Such hosts are rejected
+/// structurally (fail-closed) before allow/deny matching so they can never fall through to a
+/// permissive `default_action` (bd-17thg).
+fn host_has_control_chars(host: &str) -> bool {
+    host.chars().any(char::is_control)
 }
 
 fn normalize_host_for_match(host: &str) -> String {
@@ -204,6 +217,12 @@ impl EgressPolicy {
     /// Evaluate a request against the policy. Returns the action and
     /// the index of the matching rule (None if default).
     pub fn evaluate(&self, host: &str, port: u16, protocol: Protocol) -> (Action, Option<usize>) {
+        // Structurally reject control-bearing hosts (CR/LF/NUL/TAB/DEL/...) before any rule or
+        // default-action evaluation. Otherwise a CRLF-injection host that matches no rule would
+        // fall through to a permissive `default_action`, reaching default-Allow (bd-17thg).
+        if host_has_control_chars(host) {
+            return (Action::Deny, None);
+        }
         let normalized_host = normalize_host_for_match(host);
         if normalized_host.is_empty()
             || normalized_host.contains('\0')
