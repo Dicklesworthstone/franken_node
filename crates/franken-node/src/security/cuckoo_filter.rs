@@ -99,16 +99,20 @@ impl CuckooFilter {
     fn hash_and_fingerprint(&self, key: &str) -> (u64, u16) {
         let hash = self.hash_builder.hash_one(key);
 
-        // Truncate to FINGERPRINT_BITS, then remap 0 → 1 so the empty-bucket
-        // marker is never produced. The previous implementation used
-        // `| 1`, which forced the LSB to 1 unconditionally and collapsed
-        // the 4096-value fingerprint space into 2048 odd values — halving
-        // the entropy and **doubling the false-positive rate** reported by
-        // `false_positive_rate()` (which assumes the full
-        // `1 << FINGERPRINT_BITS` space). Preserving 4095 distinct
-        // non-zero fingerprints restores the documented
-        // `2 * BUCKET_SIZE / 2^FINGERPRINT_BITS` base FPR.
-        let raw = (hash & FINGERPRINT_MASK as u64) as u16;
+        // bd-9f5cm: derive the fingerprint from the HIGH bits of the hash, disjoint from the LOW
+        // bits the primary bucket index uses (`i1 = hash % bucket_count`, and `bucket_count` is
+        // always a power of two, so that is exactly the low `log2(bucket_count)` bits). When the
+        // fingerprint was taken from the low bits too, it was correlated with the bucket: two
+        // keys colliding in a bucket also shared the overlapping low fingerprint bits, leaving
+        // only a few high bits to distinguish them. That inflated the observed false-positive
+        // rate ~130x over the modeled `2 * BUCKET_SIZE / 2^FINGERPRINT_BITS`. SipHash's high and
+        // low output bits are independent, so the top `FINGERPRINT_BITS` decouple cleanly.
+        //
+        // Then remap 0 → 1 so the empty-bucket marker is never produced. (Using `| 1` here would
+        // force the LSB and collapse the 4096-value fingerprint space into 2048 odd values,
+        // halving entropy and doubling the modeled FPR; the conditional preserves 4095 distinct
+        // non-zero fingerprints.)
+        let raw = ((hash >> (u64::BITS - FINGERPRINT_BITS)) as u16) & FINGERPRINT_MASK;
         let fingerprint = if raw == 0 { 1 } else { raw };
         (hash, fingerprint)
     }
