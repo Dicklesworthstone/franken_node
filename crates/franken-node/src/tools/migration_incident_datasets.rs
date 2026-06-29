@@ -1230,7 +1230,14 @@ mod tests {
 
         let err = serde_json::from_value::<DatasetEntry>(value).unwrap_err();
 
-        assert!(err.to_string().contains("record_count"));
+        // `record_count: usize` rejects a JSON string. `serde_json::from_value`
+        // type-mismatch errors do not carry the field name (only unknown-field /
+        // unknown-variant errors do); the rejection reason is the type mismatch.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") || msg.contains("invalid value"),
+            "expected a type/value rejection for record_count, got: {msg}"
+        );
     }
 
     #[test]
@@ -1244,7 +1251,13 @@ mod tests {
 
         let err = serde_json::from_value::<ReplayInstructions>(value).unwrap_err();
 
-        assert!(err.to_string().contains("commands"));
+        // `commands: Vec<String>` rejects a non-array (string) value. The
+        // `from_value` error reports the type mismatch, not the field name.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") || msg.contains("invalid value"),
+            "expected a type rejection for commands, got: {msg}"
+        );
     }
 
     #[test]
@@ -1257,7 +1270,13 @@ mod tests {
 
         let err = serde_json::from_value::<DatasetConfig>(value).unwrap_err();
 
-        assert!(err.to_string().contains("min_records_per_dataset"));
+        // `min_records_per_dataset: usize` rejects a negative integer. The
+        // `from_value` error reports the value mismatch, not the field name.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") || msg.contains("invalid value"),
+            "expected a value rejection for min_records_per_dataset, got: {msg}"
+        );
     }
 
     #[test]
@@ -1273,6 +1292,12 @@ mod tests {
 
         let err = serde_json::from_value::<DatasetBundle>(value).unwrap_err();
 
-        assert!(err.to_string().contains("total_records"));
+        // `total_records: usize` rejects a JSON string. The `from_value` error
+        // reports the type mismatch, not the field name.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") || msg.contains("invalid value"),
+            "expected a type rejection for total_records, got: {msg}"
+        );
     }
 }

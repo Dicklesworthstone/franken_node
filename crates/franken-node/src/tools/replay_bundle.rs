@@ -3565,8 +3565,11 @@ mod tests {
     /// Test event sequence numbering with maximum index values
     #[test]
     fn event_sequence_numbering_saturates_safely() {
-        // Create an event with extremely large original index
-        let large_original_index = usize::MAX - 10;
+        // Create an event with the maximum possible original index, so that the
+        // `+ 1` genuinely engages the saturating clamp (on a 64-bit target usize
+        // and u64 are the same width, so `u64::try_from` never overflows — only
+        // `saturating_add` itself can clamp here).
+        let large_original_index = usize::MAX;
 
         // Simulate the sequence number calculation from the timeline generation
         let sequence_number =
@@ -3579,8 +3582,10 @@ mod tests {
     /// Test that overflow protection works in id_to_index mapping
     #[test]
     fn id_to_index_mapping_uses_saturating_arithmetic() {
-        // Test the pattern used in generate_replay_bundle_from_evidence
-        let large_idx = usize::MAX - 5;
+        // Test the pattern used in generate_replay_bundle_from_evidence with the
+        // maximum index, so the `+ 1` genuinely engages the saturating clamp
+        // (u64::try_from cannot overflow a usize on a 64-bit target).
+        let large_idx = usize::MAX;
 
         // This pattern is used in the id_to_index calculation
         let mapped_index = u64::try_from(large_idx.saturating_add(1)).unwrap_or(u64::MAX);
@@ -3592,8 +3597,10 @@ mod tests {
     /// Test current_index calculation with large event log lengths
     #[test]
     fn current_index_calculation_saturates_safely() {
-        // Test with large event log length that could cause overflow
-        let large_log_length = usize::MAX - 100;
+        // Test with the maximum event log length so the `+ 1` genuinely engages
+        // the saturating clamp (u64::try_from cannot overflow a usize on a 64-bit
+        // target).
+        let large_log_length = usize::MAX;
 
         // This pattern is used in the causal parent validation
         let current_index = u64::try_from(large_log_length.saturating_add(1)).unwrap_or(u64::MAX);
@@ -3617,8 +3624,10 @@ mod tests {
         // Test edge case where parent is 0
         let zero_parent = 0u64;
         let zero_result = usize::try_from(zero_parent.saturating_sub(1));
-        // saturating_sub(1) on 0 should give u64::MAX, which won't fit in usize
-        assert!(zero_result.is_err());
+        // Unsigned `saturating_sub(1)` on 0 floors at 0 (it does NOT wrap to
+        // u64::MAX — that would be `wrapping_sub`), so the conversion succeeds
+        // with 0. This is exactly the safe, non-underflowing behavior intended.
+        assert_eq!(zero_result, Ok(0usize));
     }
 
     #[test]
@@ -3679,8 +3688,10 @@ mod tests {
     /// Test that chunk size calculations use saturating arithmetic
     #[test]
     fn chunk_size_calculations_use_saturating_arithmetic() {
-        // Test the saturating arithmetic used in chunk_timeline function
-        let large_size = usize::MAX - 1000;
+        // Test the saturating arithmetic used in chunk_timeline function. Use the
+        // maximum base size so the chained additions genuinely engage the
+        // saturating clamp rather than landing below MAX.
+        let large_size = usize::MAX;
         let delimiter = 1usize;
         let event_size = 500usize;
 
