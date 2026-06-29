@@ -3537,6 +3537,13 @@ mod tests {
         {
             let mut spill = LabSpillMode::with_file(LedgerCapacity::new(100, 100_000), &spill_path)
                 .expect("should succeed");
+            // bd-o776s: pin the disk-pressure circuit breaker threshold to 1.0 so this
+            // spill-write test is independent of host disk fullness. The default 0.95
+            // threshold opens the breaker (skipping JSONL spill writes) on a >95%-full
+            // host, which is environment-dependent — not what this test exercises.
+            spill
+                .set_disk_threshold(1.0)
+                .expect("threshold pin should be accepted");
             spill
                 .append(make_entry("DEC-001", 1))
                 .expect("should succeed");
@@ -3564,6 +3571,12 @@ mod tests {
         let acknowledged_id = {
             let mut spill = LabSpillMode::with_file(LedgerCapacity::new(100, 100_000), &spill_path)
                 .expect("spill file should open");
+            // bd-o776s: pin the disk-pressure circuit breaker threshold to 1.0 so this
+            // durability test is independent of host disk fullness. The default 0.95
+            // threshold opens the breaker (skipping the spill write) on a >95%-full host.
+            spill
+                .set_disk_threshold(1.0)
+                .expect("threshold pin should be accepted");
             let id = spill
                 .append(make_entry("DEC-DURABLE", 7))
                 .expect("file-backed spill append should acknowledge buffered write");
@@ -5358,7 +5371,11 @@ mod tests {
                     "CRLF wrapping",
                 ),
                 // Empty and special cases
-                ("", "empty string"),
+                // NOTE (bd-o776s): an EMPTY prev_entry_hash is the "absent" sentinel, NOT
+                // malformed hex. Prod gates its hash-chain check on `!prev_entry_hash.is_empty()`
+                // (see EvidenceLedger::append), so an empty value means "client omitted the chain
+                // link" and the ledger fills in its own expected hash — a legitimate accept, not a
+                // rejection. Only NON-empty malformed inputs belong in this rejection vector.
                 ("   ", "only whitespace"),
                 ("\t\n\r", "only control chars"),
                 // Wrong length but valid hex

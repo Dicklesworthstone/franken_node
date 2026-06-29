@@ -952,15 +952,21 @@ mod tests {
     #[test]
     fn enqueue_windows_reclaims_oldest_terminal_job_before_live_job() {
         let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
-        scheduler.jobs.insert(
-            "aaa-live-dispatched".to_string(),
-            make_job(
-                "aaa-live-dispatched",
-                ProofJobStatus::Dispatched,
-                1_701_300_000_000,
-                "trace-terminal-reclaim",
-            ),
+        let mut live_dispatched = make_job(
+            "aaa-live-dispatched",
+            ProofJobStatus::Dispatched,
+            1_701_300_000_000,
+            "trace-terminal-reclaim",
         );
+        // The live job stays the globally-oldest entry (created_at 1_701_300_000_000)
+        // so the reclaim path is proven to skip it despite being oldest, because it is
+        // not terminal. Its deadline, however, tracks the dispatch/now clock
+        // (1_701_300_100_000 + 10_000), not make_job's stale created_at-derived window,
+        // so the freshly-dispatched job remains completable at 1_701_300_100_010.
+        live_dispatched.deadline_millis = 1_701_300_110_000;
+        scheduler
+            .jobs
+            .insert("aaa-live-dispatched".to_string(), live_dispatched);
         scheduler.jobs.insert(
             "mmm-terminal-newer".to_string(),
             make_job(

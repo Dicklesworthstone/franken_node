@@ -81,12 +81,18 @@ mod tests {
                 }
             }
 
-            // Every sample from small generator should be valid for large generator
+            // Every sample from small generator should be valid for large generator.
+            // `bounded_text` caps the number of *input bytes* at `max_len`, then runs
+            // `String::from_utf8_lossy`, which replaces each invalid byte with U+FFFD
+            // (3 output bytes) — so the output *byte* length can exceed `max_len`.
+            // The character count, however, is bounded by the input byte budget
+            // (each source byte yields at most one char), so that is the invariant
+            // that actually encodes the small-subset-of-large containment relation.
             for small_sample in &small_samples {
                 prop_assert!(
-                    small_sample.len() <= max_len_large,
+                    small_sample.chars().count() <= max_len_large,
                     "Small generator sample exceeds large generator's bound: {} > {}",
-                    small_sample.len(),
+                    small_sample.chars().count(),
                     max_len_large
                 );
             }
