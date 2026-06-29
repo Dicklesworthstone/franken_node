@@ -29,14 +29,32 @@ const MAX_SANITIZED_DISPLAY_LENGTH: usize = 256;
 /// - Format string injection: Escapes % characters to prevent format specifier interpretation
 /// - Length bounds: Truncates oversized input to prevent log flooding
 /// - PII/secret leakage: Redacts potential secret patterns (base64, hex tokens)
+/// Largest byte index at or below `max_byte` that lies on a UTF-8 character boundary of `s`.
+///
+/// `str::floor_char_boundary` is still unstable, so this is the stable equivalent: it never
+/// panics and never splits a multibyte character (bd-oonyu). A raw byte slice `&s[..n]` panics
+/// with "byte index is not a char boundary" when `n` falls inside a multibyte character.
+fn floor_char_boundary(s: &str, max_byte: usize) -> usize {
+    let mut cut = max_byte.min(s.len());
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    cut
+}
+
 fn sanitize_for_display(s: &str) -> String {
-    // Length bound: prevent log flooding attacks
+    // Length bound: prevent log flooding attacks.
+    // bd-oonyu: slice at the nearest UTF-8 char boundary at or below the cut point. An
+    // adversarial computation name could place a multibyte character across the byte cut, and a
+    // raw byte slice would panic and abort the process (DoS) via this Display path. The reserved
+    // budget is the ACTUAL marker width (which depends on the decimal width of `s.len()`), not a
+    // fixed 16-byte guess that overflowed the bound for 5+ digit lengths (`"[TRUNCATED-10000]"`
+    // is 17 bytes), so the truncated prefix + marker stays within MAX_SANITIZED_DISPLAY_LENGTH.
     let truncated = if s.len() > MAX_SANITIZED_DISPLAY_LENGTH {
-        format!(
-            "{}[TRUNCATED-{}]",
-            &s[..MAX_SANITIZED_DISPLAY_LENGTH.saturating_sub(16)],
-            s.len()
-        )
+        let marker = format!("[TRUNCATED-{}]", s.len());
+        let budget = MAX_SANITIZED_DISPLAY_LENGTH.saturating_sub(marker.len());
+        let cut = floor_char_boundary(s, budget);
+        format!("{}{marker}", &s[..cut])
     } else {
         s.to_string()
     };
@@ -46,13 +64,12 @@ fn sanitize_for_display(s: &str) -> String {
 
     while let Some(c) = chars.next() {
         match c {
-            // Control characters: replace with replacement char to prevent injection
-            c if c.is_control() => result.push('\u{FFFD}'),
-
-            // BIDI override protection: strip directional override characters
-            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => result.push('\u{FFFD}'),
-
-            // ANSI escape protection: detect and neutralize ESC sequences
+            // ANSI escape protection: detect and neutralize ESC sequences. This MUST precede the
+            // general control-character arm below: ESC (U+001B) is itself a control character, so
+            // when `c if c.is_control()` came first it shadowed this arm — the ESC byte was
+            // replaced but the trailing CSI bytes (e.g. "[31m") passed through as literal text,
+            // leaving the ANSI sequence only partially neutralized (bd-oonyu hardening; caught by
+            // sanitize_for_display_hardening_comprehensive_injection_protection).
             '\u{001B}' => {
                 result.push('\u{FFFD}'); // Replace ESC with replacement char
                 // Skip potential ANSI sequence chars that follow ESC
@@ -66,11 +83,24 @@ fn sanitize_for_display(s: &str) -> String {
                 }
             }
 
+            // Control characters: replace with replacement char to prevent injection
+            c if c.is_control() => result.push('\u{FFFD}'),
+
+            // BIDI override protection: strip directional override characters
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => result.push('\u{FFFD}'),
+
             // Format string injection protection: escape % characters
             '%' => result.push_str("%%"),
 
-            // PII/secret leakage protection: redact potential tokens
-            c if result.len() >= 8 && is_potential_secret_pattern(&result[result.len() - 8..]) => {
+            // PII/secret leakage protection: redact potential tokens.
+            // bd-oonyu: guard the trailing byte slice on a char boundary — `result` can hold
+            // multibyte characters, so `result[result.len() - 8..]` would otherwise panic when
+            // the 8-byte window splits one. A secret pattern is 8 ASCII chars, so a non-boundary
+            // window is never a secret and is correctly skipped.
+            c if result.len() >= 8
+                && result.is_char_boundary(result.len() - 8)
+                && is_potential_secret_pattern(&result[result.len() - 8..]) =>
+            {
                 result.truncate(result.len() - 8);
                 result.push_str("[REDACTED]");
                 result.push(c);
@@ -2190,9 +2220,13 @@ mod tests {
             sanitized.contains("%%x"),
             "% should be escaped in all format specs"
         );
+        // Every `%` must be escaped as `%%` — i.e. no LONE unescaped `%` remains. (Asserting
+        // `!contains("%s")` is wrong: the correctly-escaped form "%%s" still contains the
+        // substring "%s", so that check is logically unsatisfiable. Verify the real property by
+        // removing the escaped pairs and confirming no stray `%` is left.)
         assert!(
-            !sanitized.contains("%s"),
-            "Original % should not remain unescaped"
+            !sanitized.replace("%%", "").contains('%'),
+            "no lone unescaped % should remain after escaping"
         );
 
         // Test 5: Length bounds protection (log flooding attack)
@@ -2305,5 +2339,39 @@ mod tests {
             "\u{FFFD}".repeat(7),
             "All control chars should become replacement chars"
         );
+    }
+
+    /// bd-oonyu regression: an adversarial computation name whose truncation cut point lands
+    /// inside a multibyte UTF-8 character must be sanitized without panicking. A raw byte slice
+    /// at a non-char-boundary index aborts the process (DoS); the boundary-safe truncation must
+    /// return a bounded, truncation-marked string instead.
+    #[test]
+    fn sanitize_for_display_truncates_on_utf8_boundary_without_panicking() {
+        let cut = super::MAX_SANITIZED_DISPLAY_LENGTH - 16;
+
+        // 239 ASCII bytes then 2-byte 'é' chars: the 240-byte cut lands INSIDE the first 'é'.
+        let mut adversarial = "a".repeat(cut.saturating_sub(1));
+        adversarial.push_str(&"é".repeat(20)); // 239 + 40 = 279 bytes, > MAX (256)
+        assert!(adversarial.len() > super::MAX_SANITIZED_DISPLAY_LENGTH);
+        assert!(
+            !adversarial.is_char_boundary(cut),
+            "test fixture must straddle the byte cut point"
+        );
+
+        // Must NOT panic (a raw byte slice here would abort the process).
+        let sanitized = super::sanitize_for_display(&adversarial);
+        assert!(
+            sanitized.contains("[TRUNCATED-"),
+            "truncation should still be marked"
+        );
+        assert!(
+            sanitized.contains("279]"),
+            "original byte length should be preserved in the marker"
+        );
+
+        // Also exercise the trailing-window secret check against multibyte content: a long run
+        // of 2-byte characters must not panic on the `result[len - 8..]` slice either.
+        let multibyte_run = "é".repeat(64);
+        let _ = super::sanitize_for_display(&multibyte_run);
     }
 }
