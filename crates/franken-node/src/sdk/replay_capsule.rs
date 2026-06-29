@@ -3009,9 +3009,12 @@ mod tests {
                     // Invalid sequences should be rejected with appropriate errors
                     match err {
                         CapsuleError::NonMonotonicInputSequence => {
-                            // Expected for descending or duplicate sequences
+                            // Expected for the non-strictly-increasing cases:
+                            // idx 3 wraparound [MAX, 0, 1], idx 4 descending,
+                            // idx 5 duplicate. (idx 2 is the near-MAX ASCENDING
+                            // case, which is valid.)
                             assert!(
-                                test_idx == 4 || test_idx == 5 || test_idx == 2,
+                                test_idx == 3 || test_idx == 4 || test_idx == 5,
                                 "Non-monotonic error should only occur for invalid sequences"
                             );
                         }

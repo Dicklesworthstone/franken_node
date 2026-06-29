@@ -4811,9 +4811,13 @@ mod verifier_sdk_boundary_negative_tests {
 
         // Test with various hash collision attempt patterns
         let collision_patterns = vec![
-            // Identical data with different IDs
-            (b"collision_data".to_vec(), "artifact_a"),
-            (b"collision_data".to_vec(), "artifact_b"), // Same data, different ID
+            // Near-identical but genuinely DISTINCT content. The artifact hash
+            // is a content-addressed SHA-256 of the bytes only (it does not
+            // incorporate the artifact_id), so identical bytes correctly yield
+            // identical hashes. To exercise collision resistance we must vary a
+            // hashed field (the content), not just the ID.
+            (b"collision_data_a".to_vec(), "artifact_a"),
+            (b"collision_data_b".to_vec(), "artifact_b"),
             // Length extension attack patterns
             (b"original_data".to_vec(), "length_ext_1"),
             (
