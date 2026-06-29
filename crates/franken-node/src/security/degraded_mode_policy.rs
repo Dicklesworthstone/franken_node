@@ -132,6 +132,34 @@ impl DegradedModePolicy {
         actions.sort_unstable();
         actions
     }
+
+    /// Whether `action_name` is on the deny-list, matched fail-closed.
+    ///
+    /// bd-bobea: the deny-list was previously consulted with an exact
+    /// `denied_actions.contains(action_name)`, so case/whitespace variants of a denied
+    /// action (`"Policy.Change"`, `"POLICY.CHANGE"`, `" policy.change"`, `"policy.change "`)
+    /// missed the set and fell through to the Degraded-mode default-ALLOW — a fail-open
+    /// deny-list circumvention. Canonicalize (trim surrounding whitespace + case-fold) both
+    /// the query and each stored entry before comparing, mirroring the dispatch layer, so a
+    /// surface-variant of a denied action can never be permitted.
+    #[must_use]
+    pub fn is_action_denied(&self, action_name: &str) -> bool {
+        // Fast path: canonical exact match (the common, already-normalized case).
+        if self.denied_actions.contains(action_name) {
+            return true;
+        }
+        let canonical = canonical_action(action_name);
+        self.denied_actions
+            .iter()
+            .any(|denied| canonical_action(denied) == canonical)
+    }
+}
+
+/// Canonical form used to match action names against the deny-list: surrounding (Unicode)
+/// whitespace trimmed and case-folded. Internal structure is preserved so genuinely distinct
+/// actions are not collapsed together.
+fn canonical_action(action: &str) -> String {
+    action.trim().to_lowercase()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -436,7 +464,7 @@ impl DegradedModePolicyEngine {
         let (permitted, degraded_annotation, denial_reason) = match self.state {
             DegradedModeState::Normal => (true, false, None),
             DegradedModeState::Degraded => {
-                if self.policy.denied_actions.contains(action_name) {
+                if self.policy.is_action_denied(action_name) {
                     (false, true, Some(format!("denied_actions.{action_name}")))
                 } else {
                     (true, true, None)
@@ -1707,14 +1735,10 @@ mod tests {
         );
 
         // Attempt to bypass denied actions through case manipulation.
-        // bd-o776s NOTE: in Degraded state prod is default-ALLOW with an
-        // EXACT-match deny-list (`denied_actions.contains(action_name)`, no
-        // canonicalization). These case/whitespace variants of a denied action
-        // are therefore currently PERMITTED — a fail-open deny-list circumvention
-        // that this test correctly catches. Left failing as a genuine prod gap
-        // (Class B): the Degraded-mode deny-list should canonicalize (trim +
-        // case-fold) action names before the exact-match, mirroring the dispatch
-        // layer. Do NOT relax these assertions to bless the bypass.
+        // bd-bobea (fixed): the Degraded-mode deny-list now canonicalizes (trim + case-fold)
+        // action names before matching (`DegradedModePolicy::is_action_denied`), mirroring the
+        // dispatch layer, so these case/whitespace variants of a denied action are correctly
+        // denied instead of falling through to the default-ALLOW. Do NOT relax these assertions.
         let decision1 = engine.evaluate_action("Policy.Change", "attacker", 1_001, "trace-1");
         assert!(
             !decision1.permitted,
