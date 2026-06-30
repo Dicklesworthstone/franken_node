@@ -19,7 +19,7 @@
       "cdn.example.com"
     ]
   },
-  "minimum_runtime_version": "1.0.0",
+  "minimum_runtime_version": "0.1.0",
   "provenance": {
     "build_system": "GitHub Actions",
     "source_repository": "https://github.com/example/example-extension",

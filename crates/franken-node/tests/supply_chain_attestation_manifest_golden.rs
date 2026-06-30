@@ -39,7 +39,7 @@ fn create_deterministic_manifest() -> SignedExtensionManifest {
                 "cdn.example.com".to_string(),
             ],
         },
-        minimum_runtime_version: "1.0.0".to_string(),
+        minimum_runtime_version: "0.1.0".to_string(),
         provenance: ProvenanceEnvelope {
             build_system: "GitHub Actions".to_string(),
             source_repository: "https://github.com/example/example-extension".to_string(),

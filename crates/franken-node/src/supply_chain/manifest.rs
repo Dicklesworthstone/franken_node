@@ -7,14 +7,14 @@
 
 #![cfg(feature = "engine")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use base64::Engine as _;
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::{
-    Capability, ExtensionManifest, ManifestValidationError,
-    validate_manifest as validate_engine_manifest, with_computed_content_hash,
+    Capability, ExtensionHostConfig, ExtensionManifest, ManifestValidationError,
+    validate_manifest_with_config, with_computed_content_hash,
 };
 use serde::{Deserialize, Serialize};
 
@@ -159,28 +159,52 @@ pub struct ManifestAuditEvent {
 }
 
 impl SignedExtensionManifest {
+    /// Full engine projection carrying `publisher_signature`, `trust_chain_ref`,
+    /// and `min_engine_version` for engine-level cryptographic supply-chain
+    /// (trust admission) checks.
     pub fn to_engine_manifest(&self) -> Result<ExtensionManifest, ManifestSchemaError> {
+        self.project_engine_manifest(true)
+    }
+
+    /// Structural engine projection that omits `publisher_signature` and
+    /// `trust_chain_ref`. The engine infers `Development` trust for this
+    /// projection and validates only structural invariants (field presence,
+    /// length bounds, capability lattice, engine-version compatibility) without
+    /// requiring a configured trusted-publisher registry or a cryptographic
+    /// signature. Schema validation uses this projection; trust admission uses
+    /// the full projection plus a trusted-publisher key registry.
+    fn to_structural_engine_manifest(&self) -> Result<ExtensionManifest, ManifestSchemaError> {
+        self.project_engine_manifest(false)
+    }
+
+    fn project_engine_manifest(
+        &self,
+        include_provenance: bool,
+    ) -> Result<ExtensionManifest, ManifestSchemaError> {
         // Build through serde to avoid compile-time coupling to extension-host
         // manifest field drift while still projecting required core fields.
-        // Projects publisher_signature, trust_chain_ref, and min_engine_version
-        // for engine-level supply-chain checks.
         validate_signature(&self.signature)?;
         validate_entrypoint_path(&self.entrypoint)?;
-        let sig_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&self.signature.signature)
-            .map_err(|e| ManifestSchemaError::EngineManifestProjection {
-                reason: format!("signature base64 decode failed: {e}"),
-            })?;
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "name": self.package.name.clone(),
             "version": self.package.version.clone(),
             "entrypoint": self.entrypoint.clone(),
             "capabilities": self.capabilities.clone(),
-            "publisher_signature": sig_bytes,
-            "trust_chain_ref": self.trust.trust_card_reference.clone(),
             "min_engine_version": self.minimum_runtime_version.clone(),
         });
+
+        if include_provenance {
+            // Projects publisher_signature and trust_chain_ref so the engine can
+            // resolve the trust chain and verify the publisher signature.
+            let sig_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&self.signature.signature)
+                .map_err(|e| ManifestSchemaError::EngineManifestProjection {
+                    reason: format!("signature base64 decode failed: {e}"),
+                })?;
+            payload["publisher_signature"] = serde_json::json!(sig_bytes);
+            payload["trust_chain_ref"] = serde_json::json!(self.trust.trust_card_reference.clone());
+        }
 
         let manifest: ExtensionManifest = serde_json::from_value(payload).map_err(|error| {
             ManifestSchemaError::EngineManifestProjection {
@@ -220,8 +244,46 @@ impl SignedExtensionManifest {
     }
 }
 
+/// Schema-validate a signed extension manifest.
+///
+/// This is *structural* validation only: every node-level schema check plus the
+/// engine's structural manifest checks (field presence, length bounds,
+/// capability lattice, engine-version compatibility). It deliberately does NOT
+/// resolve `trust.trust_card_reference` against a trusted-publisher registry or
+/// cryptographically verify the publisher signature — trust admission depends on
+/// operator-supplied trust roots, which are a runtime input rather than a
+/// property of the manifest schema. For the admission path that resolves trust
+/// chains and verifies signatures, use
+/// [`validate_signed_manifest_with_trusted_publishers`].
 pub fn validate_signed_manifest(
     manifest: &SignedExtensionManifest,
+) -> Result<(), ManifestSchemaError> {
+    validate_signed_manifest_inner(manifest, None)
+}
+
+/// Admission-validate a signed extension manifest against a trusted-publisher
+/// key registry (bd-dl6gw).
+///
+/// Runs every check [`validate_signed_manifest`] performs, and additionally
+/// projects the publisher signature and trust chain reference into the engine,
+/// requiring that the manifest's `trust.trust_card_reference` resolve to an
+/// entry in `trusted_publisher_keys` whose hex-encoded Ed25519 verification key
+/// validates the publisher signature. The map is keyed by the manifest's
+/// `trust.trust_card_reference` (the engine `trust_chain_ref` lookup key); each
+/// value is the hex-encoded Ed25519 publisher verification key. An unresolved
+/// reference fails closed as `EMS_ENGINE_REJECTED` (engine `FE-MANIFEST-0013`),
+/// and a signature that does not verify fails closed as `EMS_ENGINE_REJECTED`
+/// (engine invalid-publisher-signature).
+pub fn validate_signed_manifest_with_trusted_publishers(
+    manifest: &SignedExtensionManifest,
+    trusted_publisher_keys: &BTreeMap<String, String>,
+) -> Result<(), ManifestSchemaError> {
+    validate_signed_manifest_inner(manifest, Some(trusted_publisher_keys))
+}
+
+fn validate_signed_manifest_inner(
+    manifest: &SignedExtensionManifest,
+    trusted_publisher_keys: Option<&BTreeMap<String, String>>,
 ) -> Result<(), ManifestSchemaError> {
     // Validate schema_version BEFORE using it in error messages to prevent log injection.
     // schema_version comes from untrusted manifest JSON and could contain control characters.
@@ -322,11 +384,33 @@ pub fn validate_signed_manifest(
     // paths fail before the engine projection clones attacker-controlled text.
     validate_entrypoint_path(&manifest.entrypoint)?;
 
-    // Required by bd-1gx AC(7): map into franken_engine ExtensionManifest and
-    // reuse engine-level validation as part of admission checks.
-    let engine_manifest = manifest.to_engine_manifest()?;
-    validate_engine_manifest(&engine_manifest)
-        .map_err(ManifestSchemaError::EngineManifestRejected)?;
+    // Reuse engine-level manifest validation (bd-1gx AC(7)). Schema validation
+    // runs the engine's *structural* checks via a Development-trust projection
+    // (no publisher_signature / trust_chain_ref), so it never requires
+    // configured trust roots. Admission validation (bd-dl6gw) supplies a
+    // trusted-publisher key registry and projects the full signed manifest so
+    // the engine resolves trust_chain_ref and cryptographically verifies the
+    // publisher signature.
+    match trusted_publisher_keys {
+        None => {
+            let engine_manifest = manifest.to_structural_engine_manifest()?;
+            let config = ExtensionHostConfig {
+                allow_development_trust: true,
+                ..ExtensionHostConfig::default()
+            };
+            validate_manifest_with_config(&engine_manifest, &config)
+                .map_err(ManifestSchemaError::EngineManifestRejected)?;
+        }
+        Some(trusted_publisher_keys) => {
+            let engine_manifest = manifest.to_engine_manifest()?;
+            let config = ExtensionHostConfig {
+                trusted_publisher_keys: trusted_publisher_keys.clone(),
+                ..ExtensionHostConfig::default()
+            };
+            validate_manifest_with_config(&engine_manifest, &config)
+                .map_err(ManifestSchemaError::EngineManifestRejected)?;
+        }
+    }
 
     Ok(())
 }
@@ -730,6 +814,53 @@ mod tests {
     fn valid_manifest_passes() {
         let manifest = valid_manifest();
         assert_eq!(validate_signed_manifest(&manifest), Ok(()));
+    }
+
+    #[test]
+    fn admission_validation_rejects_untrusted_trust_chain_ref() {
+        // Schema validation accepts the manifest, but admission validation
+        // against an empty trusted-publisher registry must fail closed because
+        // trust.trust_card_reference resolves to no configured key
+        // (engine FE-MANIFEST-0013).
+        let manifest = valid_manifest();
+        assert_eq!(validate_signed_manifest(&manifest), Ok(()));
+
+        let error = validate_signed_manifest_with_trusted_publishers(
+            &manifest,
+            &std::collections::BTreeMap::new(),
+        )
+        .expect_err("admission with no trusted publishers must fail closed");
+        assert_eq!(error.code(), "EMS_ENGINE_REJECTED");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::EngineManifestRejected(
+                ManifestValidationError::UntrustedTrustChainRef
+            )
+        ));
+    }
+
+    #[test]
+    fn admission_validation_resolves_trusted_ref_then_verifies_signature() {
+        // A trust_card_reference present in the registry resolves past the
+        // trust-chain gate; the placeholder publisher signature then fails
+        // cryptographic verification. This proves the config seam threads the
+        // trusted-publisher keys through to the engine (it gets past
+        // FE-MANIFEST-0013 to the signature check).
+        let manifest = valid_manifest();
+        let trusted = std::collections::BTreeMap::from([(
+            manifest.trust.trust_card_reference.clone(),
+            "ab".repeat(32), // 32-byte hex placeholder verification key
+        )]);
+
+        let error = validate_signed_manifest_with_trusted_publishers(&manifest, &trusted)
+            .expect_err("placeholder publisher signature must fail verification");
+        assert_eq!(error.code(), "EMS_ENGINE_REJECTED");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::EngineManifestRejected(
+                ManifestValidationError::InvalidPublisherSignature
+            )
+        ));
     }
 
     #[test]
