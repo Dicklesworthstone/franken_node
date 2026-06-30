@@ -923,12 +923,24 @@ mod tests {
         assert!(sigmoid.iter().all(|v| v.is_finite()));
         assert!((sigmoid[0] - sigmoid_floor).abs() < 1e-9);
         assert!((0.0..=1.0).contains(&sigmoid[(n - 1) as usize]));
-        // Middle samples should differ across non-trivial curves so that
-        // the harness can actually distinguish ramp styles.
-        let mid = (n / 2) as usize;
-        assert!((linear[mid] - exp[mid]).abs() > 1e-3);
-        assert!((linear[mid] - sigmoid[mid]).abs() > 1e-3);
-        assert!((exp[mid] - sigmoid[mid]).abs() > 1e-3);
+        // The curves must produce DISTINCT sequences so the harness can
+        // actually distinguish ramp styles. Comparing a single sample is
+        // fragile: the logistic sigmoid and the linear ramp coincide at the
+        // exact campaign midpoint (both evaluate to 0.5), so assert the full
+        // sequences differ somewhere instead of at the coincidental center.
+        let differs = |a: &[f64], b: &[f64]| a.iter().zip(b).any(|(x, y)| (x - y).abs() > 1e-3);
+        assert!(
+            differs(&linear, &exp),
+            "linear and exponential ramps must differ"
+        );
+        assert!(
+            differs(&linear, &sigmoid),
+            "linear and sigmoid ramps must differ"
+        );
+        assert!(
+            differs(&exp, &sigmoid),
+            "exponential and sigmoid ramps must differ"
+        );
         // Stepped should plateau: at least two consecutive samples must be
         // exactly equal.
         let any_repeat = stepped.windows(2).any(|w| (w[0] - w[1]).abs() < 1e-12);
