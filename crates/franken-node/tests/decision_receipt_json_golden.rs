@@ -63,18 +63,28 @@ fn decision_receipt_json_export_format_golden() {
     let json_output =
         serde_json::to_string_pretty(&receipt).expect("Decision receipt should serialize to JSON");
 
-    let golden_path = Path::new("artifacts/golden/decision_receipt.json");
+    // Resolve goldens relative to the workspace root, not the test's CWD.
+    // `cargo test -p frankenengine-node` runs the binary with CWD = the package
+    // dir (crates/franken-node/), but this golden lives at the workspace root
+    // under artifacts/golden/. A bare relative path silently resolved into the
+    // package dir, so the test always failed "Golden file missing" on the
+    // default lane. CARGO_MANIFEST_DIR's grandparent is the workspace root.
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("CARGO_MANIFEST_DIR should have a workspace-root grandparent");
+    let golden_path = workspace_root.join("artifacts/golden/decision_receipt.json");
 
     // Check if we're in update mode
     if std::env::var("UPDATE_GOLDENS").is_ok() {
         fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
-        fs::write(golden_path, &json_output).unwrap();
+        fs::write(&golden_path, &json_output).unwrap();
         eprintln!("[GOLDEN] Updated: {}", golden_path.display());
         return;
     }
 
     // Read expected golden output
-    let expected_json = fs::read_to_string(golden_path).unwrap_or_else(|_| {
+    let expected_json = fs::read_to_string(&golden_path).unwrap_or_else(|_| {
         panic!(
             "Golden file missing: {}\n\
              Run with UPDATE_GOLDENS=1 to create it\n\
@@ -85,8 +95,8 @@ fn decision_receipt_json_export_format_golden() {
 
     // Compare byte-for-byte
     if json_output != expected_json {
-        let actual_path = Path::new("artifacts/golden/decision_receipt.actual.json");
-        fs::write(actual_path, &json_output).unwrap();
+        let actual_path = workspace_root.join("artifacts/golden/decision_receipt.actual.json");
+        fs::write(&actual_path, &json_output).unwrap();
 
         panic!(
             "GOLDEN MISMATCH: Decision receipt JSON format changed\n\n\

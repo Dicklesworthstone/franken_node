@@ -2,10 +2,10 @@
   "contract_version": "bd-1a1j",
   "catalog_version": "1.0.0",
   "generated_at": "2026-04-21T12:00:00Z",
-  "total_classes": 21,
+  "total_classes": 24,
   "tier_distribution": {
     "tier_1": 11,
-    "tier_2": 9,
+    "tier_2": 12,
     "tier_3": 1
   },
   "classes": [
@@ -254,6 +254,39 @@
       ],
       "replay_support": true,
       "replay_strategy": "tiered_conflict_resolution_replay"
+    },
+    {
+      "domain": "incident_bundle_retention",
+      "owner_module": "crates/franken-node/src/connector/incident_bundle_retention.rs",
+      "safety_tier": "Tier2",
+      "durability_mode": "WalNormal",
+      "tables": [
+        "incident_bundle_retention_state"
+      ],
+      "replay_support": true,
+      "replay_strategy": "retention_policy_replay"
+    },
+    {
+      "domain": "migration_artifact",
+      "owner_module": "crates/franken-node/src/connector/migration_artifact.rs",
+      "safety_tier": "Tier2",
+      "durability_mode": "WalNormal",
+      "tables": [
+        "migration_artifact_state"
+      ],
+      "replay_support": true,
+      "replay_strategy": "migration_artifact_replay"
+    },
+    {
+      "domain": "migration_pipeline",
+      "owner_module": "crates/franken-node/src/connector/migration_pipeline.rs",
+      "safety_tier": "Tier2",
+      "durability_mode": "WalNormal",
+      "tables": [
+        "migration_pipeline_state"
+      ],
+      "replay_support": true,
+      "replay_strategy": "migration_pipeline_replay"
     },
     {
       "domain": "lifecycle_transition_cache",

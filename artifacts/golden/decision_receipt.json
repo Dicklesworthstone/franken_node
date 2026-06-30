@@ -4,6 +4,7 @@
   "actor_identity": "security-admin@franken-node.prod",
   "timestamp": "2026-01-01T00:00:00Z",
   "signature_version": "ed25519-v1",
+  "crypto_suite": "ed25519-v1",
   "nonce": "abcdef0123456789abcdef0123456789",
   "audience": "franken-node-control-plane",
   "input_hash": "31649fb432998b8ee5f377ab7687c1d07a7bb993702799450c6f29af56a717aa",
@@ -20,7 +21,7 @@
     "policy:behavioral-reputation-gate",
     "policy:quarantine-on-threat-match"
   ],
-  "confidence": 4615482049018511565,
+  "confidence": 4605831338911806259,
   "rollback_command": "franken-node trust release --extension npm:@malware/data-stealer --audit-id AUD-2026-001",
   "previous_receipt_hash": "previous-receipt-hash-abc123def456"
 }

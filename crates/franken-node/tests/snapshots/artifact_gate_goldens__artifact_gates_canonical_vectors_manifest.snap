@@ -184,7 +184,7 @@ source: crates/franken-node/tests/artifact_gate_goldens.rs
         ]
       },
       "schema_version": "zk-attestation-v1.0",
-      "scrubbed_sha256": "de6ef206a02ab91299efadcd22d19fbcdd0a23543e66ea0e835a63ac3a121d38",
+      "scrubbed_sha256": "a13f09028462353650ed3bafa9b1efaba0e27c05adff3cdabc63303b5fe3d4f3",
       "section": "10.17",
       "status": "pass",
       "top_level_keys": [

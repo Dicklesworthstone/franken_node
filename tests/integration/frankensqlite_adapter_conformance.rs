@@ -1739,10 +1739,18 @@ mod tests {
         use std::fs;
         use std::path::Path;
 
-        // Load golden catalog to verify against contract
+        // Load golden catalog to verify against contract. CARGO_MANIFEST_DIR is
+        // the package dir (crates/franken-node); the golden catalog lives at the
+        // workspace root (two levels up), so resolving the path directly under
+        // the manifest dir failed "No such file or directory" on the default lane.
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-        let catalog_path = Path::new(&manifest_dir)
-            .join("tests/goldens/frankensqlite/persistence_class_catalog.json");
+        let workspace_root = Path::new(&manifest_dir)
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| Path::new(&manifest_dir).to_path_buf());
+        let catalog_path =
+            workspace_root.join("tests/goldens/frankensqlite/persistence_class_catalog.json");
         let catalog_content = fs::read_to_string(&catalog_path)?;
         let catalog: serde_json::Value = serde_json::from_str(&catalog_content)?;
 
