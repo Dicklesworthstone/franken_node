@@ -3450,7 +3450,14 @@ impl FleetControlManager {
     /// deterministically from the incident's operation slot so each incarnation of
     /// an action (each quarantine) has a distinct epoch and validations cannot be
     /// replayed across re-quarantines.
-    fn expected_control_epoch(incident_id: &str) -> u64 {
+    /// Deterministic control epoch a release validation must bind to for
+    /// `incident_id`. This is the exact epoch [`Self::submit_release_validation`]
+    /// checks `PositiveValidation::control_epoch` against, so it is exposed for
+    /// external conformance harnesses (which can only reach the public API) that
+    /// need to mint a correctly-bound positive validation to satisfy the
+    /// release-validation quorum (bd-o776s).
+    #[must_use]
+    pub fn expected_control_epoch(incident_id: &str) -> u64 {
         incident_operation_slot(incident_id)
             .map(|slot| slot.epoch)
             .unwrap_or(0)
