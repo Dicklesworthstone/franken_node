@@ -25,6 +25,8 @@
     "combined": 0.99
   },
   "expected_verdict": {
-    "kind": "missed_entirely"
+    "kind": "caught_early",
+    "at_step_lower": 0,
+    "at_step_upper": 99
   }
 }

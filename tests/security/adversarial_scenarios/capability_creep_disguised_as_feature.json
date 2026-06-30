@@ -25,8 +25,8 @@
     "combined": 0.55
   },
   "expected_verdict": {
-    "kind": "caught_late",
-    "at_step_lower": 40,
-    "at_step_upper": 60
+    "kind": "caught_early",
+    "at_step_lower": 0,
+    "at_step_upper": 39
   }
 }
