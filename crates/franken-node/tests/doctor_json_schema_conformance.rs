@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 #[path = "doctor_policy_activation_golden_vectors_conformance.rs"]
 mod doctor_policy_activation_golden_vectors_conformance;
@@ -168,12 +169,55 @@ fn doctor_command(repo: &Path) -> Command {
     }
 }
 
+/// Fixed, non-secret config for the doctor harness.
+///
+/// Since bd-khzgd (commit 9abf48dd8) and bd-2nptp (commits c7dec062b /
+/// f6916d153) the config loader is fail-closed: `trust.registry_signing_key`
+/// and `security.authorized_api_keys` must be explicitly configured or any
+/// config-validating command — including `doctor` — refuses to run. These are
+/// fixed test values (base64 of 32×`0xA5`) so the CLI reaches the JSON-report
+/// path this harness asserts.
+const DOCTOR_TEST_CONFIG_TOML: &str = "profile = \"balanced\"\n\n\
+[trust]\n\
+registry_signing_key = \"paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=\"\n\n\
+[security]\n\
+authorized_api_keys = [\"fnode-fixture-doctor-json-schema\"]\n";
+
+fn doctor_test_config_path() -> PathBuf {
+    static CONFIG_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let dir = CONFIG_DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("create doctor test config dir");
+        std::fs::write(
+            dir.path().join("franken_node.toml"),
+            DOCTOR_TEST_CONFIG_TOML,
+        )
+        .expect("write doctor test config");
+        dir
+    });
+    dir.path().join("franken_node.toml")
+}
+
+/// Splice `--config <fixture>` immediately after the leading `doctor`
+/// subcommand so the fail-closed config validation is satisfied for every
+/// invocation, without disturbing the trailing subcommand/flags.
+fn args_with_test_config(args: &[String]) -> Vec<String> {
+    let mut spliced = Vec::with_capacity(args.len() + 2);
+    let mut rest = args.iter();
+    if let Some(first) = rest.next() {
+        spliced.push(first.clone());
+        spliced.push("--config".to_string());
+        spliced.push(doctor_test_config_path().display().to_string());
+        spliced.extend(rest.cloned());
+    }
+    spliced
+}
+
 fn run_doctor(args: &[String]) -> Output {
     let repo = repo_root();
     let mut command = doctor_command(&repo);
     command.env_remove(POLICY_ACTIVATION_INPUT_ENV);
     command
-        .args(args)
+        .args(args_with_test_config(args))
         .output()
         .expect("run franken-node doctor")
 }
@@ -188,7 +232,7 @@ fn run_doctor_with_env(args: &[String], env_pairs: &[(&str, String)]) -> Output 
         command.env(key, value);
     }
     command
-        .args(args)
+        .args(args_with_test_config(args))
         .output()
         .expect("run franken-node doctor with env")
 }
@@ -227,8 +271,51 @@ fn canonicalize_doctor_runtime_metadata(value: &mut Value) {
     }
 }
 
+/// Neutralize the DR-WORKSPACE-001 workspace-pressure check.
+///
+/// That check (bd-p9mpd.5) is a *live* probe: its status and message embed
+/// current free disk, `.franken-node` target-dir size, active build count,
+/// RCH slots, reservation count, and Agent Mail coordination health — all of
+/// which legitimately change from one process spawn to the next under active
+/// multi-agent build load. The metamorphic invariant this harness enforces is
+/// that env-var *ordering* must not alter output, not that live machine load is
+/// frozen; so we neutralize this probe (and the `status_counts`/`overall_status`
+/// aggregates it feeds) the same way `canonicalize_doctor_runtime_metadata`
+/// already neutralizes timestamps and durations.
+fn neutralize_live_workspace_pressure(report: &mut Value) {
+    const LIVE: &str = "[LIVE_WORKSPACE_PRESSURE]";
+    if let Some(checks) = report.get_mut("checks").and_then(Value::as_array_mut) {
+        for check in checks.iter_mut() {
+            if check.get("code").and_then(Value::as_str) == Some("DR-WORKSPACE-001") {
+                for field in ["status", "message", "remediation"] {
+                    if let Some(value) = check.get_mut(field) {
+                        *value = Value::String(LIVE.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if let Some(logs) = report.get_mut("structured_logs").and_then(Value::as_array_mut) {
+        for log in logs.iter_mut() {
+            if log.get("check_code").and_then(Value::as_str) == Some("DR-WORKSPACE-001") {
+                if let Some(value) = log.get_mut("status") {
+                    *value = Value::String(LIVE.to_string());
+                }
+            }
+        }
+    }
+    // The aggregates cascade from the (now-neutralized) workspace-pressure status.
+    if let Some(value) = report.get_mut("overall_status") {
+        *value = Value::String(LIVE.to_string());
+    }
+    if let Some(value) = report.get_mut("status_counts") {
+        *value = Value::String(LIVE.to_string());
+    }
+}
+
 fn canonical_doctor_stdout_bytes(output: &Output) -> Vec<u8> {
     let mut report = parse_report(output);
+    neutralize_live_workspace_pressure(&mut report);
     canonicalize_doctor_runtime_metadata(&mut report);
     serde_json::to_vec(&report).expect("canonical doctor JSON should serialize")
 }

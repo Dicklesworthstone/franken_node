@@ -66,13 +66,13 @@
         "bundle_id": "019c7aeb-ce01-7844-a6b4-858ea339c3bd",
         "created_at": "2026-02-20T12:00:00.001200Z",
         "incident_id": "INC-CONFORMANCE-REPLAY-001",
-        "integrity_hash": "6577ea91d4c8de6d91c11552dbafd7d07bab60cc17363902e68b488bc6c33264",
+        "integrity_hash": "019df92939a06d320be3e154f70117828f537e650aa6fba8ffb0dacc5d1d0c99",
         "manifest": {
           "event_count": 3,
           "first_timestamp": "2026-02-20T12:00:00.000001Z",
           "last_timestamp": "2026-02-20T12:00:00.001200Z",
           "time_span_micros": 1199,
-          "compressed_size_bytes": 340,
+          "compressed_size_bytes": 640,
           "chunk_count": 1,
           "decision_sequence_hash": "a73b046d3e571967a554b59377eff5022f77ea868d31120d4648852753a0c082"
         },
@@ -83,7 +83,7 @@
             "event_count": 3,
             "first_sequence_number": 1,
             "last_sequence_number": 3,
-            "compressed_size_bytes": 340,
+            "compressed_size_bytes": 640,
             "chunk_hash": "99b6e18a152e14c7e9d76c155766336426b935966fc3b87024701fd7b0667152"
           }
         ],

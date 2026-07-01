@@ -6483,13 +6483,13 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
 }
 
 fn collect_workspace_pressure_inputs() -> Result<WorkspacePressureInputs> {
+    // Intentionally does NOT print a coordination-degraded warning to stderr.
+    // This helper feeds the DR-WORKSPACE-001 check inside the machine-readable
+    // `doctor` report, whose output already surfaces `coordination=<healthy|
+    // degraded>`. A plain-text stderr warning here would corrupt the pure-JSONL
+    // stderr stream emitted under `doctor --structured-logs-jsonl` (the SIEM
+    // ingestion contract asserted by doctor_json_schema_conformance).
     let coordination_report = collect_coordination_health();
-    if !coordination_report.is_healthy() {
-        eprintln!(
-            "Warning: Agent coordination degraded: {}",
-            coordination_report.reason
-        );
-    }
     collect_workspace_pressure_inputs_with_coordination(coordination_report.is_healthy())
 }
 
@@ -13435,6 +13435,9 @@ mod registry_command_tests {
             stored.manifest.artifact_sha256,
             compute_registry_artifact_sha256(payload)
         );
+        // The version lineage stores the bare 64-hex content hash; the manifest's
+        // `artifact_sha256` carries the `sha256:` digest-URI prefix. They match
+        // modulo that prefix.
         assert_eq!(
             stored
                 .manifest
@@ -13442,7 +13445,7 @@ mod registry_command_tests {
                 .versions
                 .last()
                 .map(|version| version.content_hash.as_str()),
-            Some(stored.manifest.artifact_sha256.as_str())
+            stored.manifest.artifact_sha256.strip_prefix("sha256:")
         );
     }
 
@@ -18009,9 +18012,18 @@ fn persist_local_registry_artifact(
 ) -> Result<StoredRegistryArtifact> {
     ensure_registry_storage_root(project_root)?;
     let expected_hash = compute_registry_artifact_sha256(package_bytes);
+    // `content_hash` in the registry version lineage is the bare 64-hex digest,
+    // while `artifact_sha256`/`expected_hash` carry the `sha256:` digest-URI prefix;
+    // compare the two representations modulo that prefix.
+    let expected_content_hash = expected_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(expected_hash.as_str());
     anyhow::ensure!(
-        security::constant_time::ct_eq(&request.initial_version.content_hash, &expected_hash),
-        "registry publish artifact hash mismatch: request={} actual={expected_hash}",
+        security::constant_time::ct_eq(
+            &request.initial_version.content_hash,
+            expected_content_hash
+        ),
+        "registry publish artifact hash mismatch: request={} actual={expected_content_hash}",
         request.initial_version.content_hash
     );
 
@@ -18198,7 +18210,14 @@ fn inspect_local_registry_artifact(
         };
     };
 
-    if !security::constant_time::ct_eq(version_hash, &artifact.manifest.artifact_sha256) {
+    // `version_hash` is the bare 64-hex content hash from the version lineage;
+    // `artifact_sha256` is the `sha256:`-prefixed digest URI. Compare modulo prefix.
+    let manifest_content_hash = artifact
+        .manifest
+        .artifact_sha256
+        .strip_prefix("sha256:")
+        .unwrap_or(artifact.manifest.artifact_sha256.as_str());
+    if !security::constant_time::ct_eq(version_hash, manifest_content_hash) {
         return RegistryArtifactVerification {
             status: RegistryArtifactIntegrityStatus::InvalidMetadata,
             detail: format!(
@@ -18848,10 +18867,17 @@ fn build_registry_publish_request_with_context(
         build_timestamp_epoch,
     } = provenance_context;
     let publisher_id = builder_identity.clone();
+    // The registry's canonical `VersionEntry.content_hash` is a bare 64-char
+    // lowercase SHA-256 digest (validated by `register_version`), whereas
+    // `compute_registry_artifact_sha256` yields the `sha256:`-prefixed digest URI
+    // used for the manifest's `artifact_sha256` and human-facing display. Strip the
+    // prefix here so the CLI publish path conforms to the registry content-address
+    // format instead of being rejected as a 71-char non-hex value.
+    let version_content_hash = content_hash.strip_prefix("sha256:").unwrap_or(content_hash);
     let initial_version = VersionEntry {
         version: version.to_string(),
         parent_version: None,
-        content_hash: content_hash.to_string(),
+        content_hash: version_content_hash.to_string(),
         registered_at: chrono::Utc::now().to_rfc3339(),
         compatible_with: vec!["franken-node".to_string()],
     };

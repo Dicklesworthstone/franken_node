@@ -106,19 +106,29 @@ fn registry_publish_search_verify_gc_wire_conforms_to_contract() -> Result<(), S
     )
     .to_string();
 
-    let missing_key = registry_cmd(&workspace, &["publish", "plugin.fnext"])?
-        .assert()
-        .failure()
-        .get_output()
-        .stderr
-        .clone();
+    // `--version` is a required clap arg, so it must be supplied to reach the
+    // custom `--signing-key` validation this assertion targets.
+    let missing_key = registry_cmd(
+        &workspace,
+        &["publish", "plugin.fnext", "--version", "1.0.0"],
+    )?
+    .assert()
+    .failure()
+    .get_output()
+    .stderr
+    .clone();
     let missing_key_stderr = String::from_utf8_lossy(&missing_key);
     assert!(
         missing_key_stderr.contains("registry publish requires --signing-key"),
         "missing-key error must name required signing key flag: {missing_key_stderr}"
     );
 
-    let first_publish = publish_plugin(&workspace, &signing_key_arg, b"first registry payload")?;
+    let first_publish = publish_plugin(
+        &workspace,
+        &signing_key_arg,
+        "1.0.0",
+        b"first registry payload",
+    )?;
     assert_eq!(
         first_publish.fields.get("status"),
         Some(&"active".to_string())
@@ -184,7 +194,12 @@ fn registry_publish_search_verify_gc_wire_conforms_to_contract() -> Result<(), S
         "verified",
     )?;
 
-    let _second_publish = publish_plugin(&workspace, &signing_key_arg, b"second registry payload")?;
+    let _second_publish = publish_plugin(
+        &workspace,
+        &signing_key_arg,
+        "2.0.0",
+        b"second registry payload",
+    )?;
     let gc_stdout = registry_cmd(&workspace, &["gc", "--keep", "1"])?
         .assert()
         .success()
@@ -293,6 +308,7 @@ fn write_signing_key(path: &Path) -> Result<(), String> {
 fn publish_plugin(
     workspace: &TempDir,
     signing_key_arg: &str,
+    version: &str,
     payload: &[u8],
 ) -> Result<ParsedFields, String> {
     fs::write(workspace.path().join("plugin.fnext"), payload)
@@ -302,7 +318,14 @@ fn publish_plugin(
 
     let output = registry_cmd(
         workspace,
-        &["publish", "plugin.fnext", "--signing-key", signing_key_arg],
+        &[
+            "publish",
+            "plugin.fnext",
+            "--version",
+            version,
+            "--signing-key",
+            signing_key_arg,
+        ],
     )?
     .assert()
     .success()
