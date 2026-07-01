@@ -23,7 +23,7 @@ fn reconcile_action_idempotent_all_divergence_types() {
     ];
 
     for (divergence_type, expected_action) in test_cases {
-        let check = create_divergence_check(divergence_type, 1, 2, "hash1", "hash2");
+        let check = create_divergence_check(divergence_type.clone(), 1, 2, "hash1", "hash2");
 
         // First application
         let action1 = reconcile_action(&check);

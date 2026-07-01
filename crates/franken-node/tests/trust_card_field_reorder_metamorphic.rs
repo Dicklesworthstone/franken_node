@@ -125,7 +125,7 @@ proptest! {
 
             // Metamorphic invariant: canonical JSON must be identical
             prop_assert_eq!(
-                original_canonical,
+                original_canonical.clone(),
                 reordered_canonical,
                 "Canonical JSON changed after field reordering with seed {}", seed
             );

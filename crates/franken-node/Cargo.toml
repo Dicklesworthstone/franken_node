@@ -1512,3 +1512,15 @@ required-features = ["advanced-features"]
 [[test]]
 name = "ambient_authority_gate"
 path = "tests/ambient_authority_gate.rs"
+
+# bd-rjc2m .C* re-registration: restore de-registered default-lane metamorphic
+# coverage holes surfaced by the .G2 orphan census (bd-romfp). Self-validating
+# (no golden/snapshot fixtures), default features, correct crate name. Verified
+# to compile AND run green via rch before registration.
+[[test]]
+name = "connector_reconcile_idempotence_metamorphic"
+path = "tests/connector_reconcile_idempotence_metamorphic.rs"
+
+[[test]]
+name = "trust_card_field_reorder_metamorphic"
+path = "tests/trust_card_field_reorder_metamorphic.rs"

@@ -7,10 +7,10 @@
 //! 4. Schema-driven canonicalization idempotence
 
 use frankenengine_node::connector::canonical_serializer::{
-    CanonicalSerializer, TrustObjectType, SignaturePreimage, SerializerError,
+    CanonicalSerializer, TrustObjectType, SignaturePreimage,
 };
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 // === ORACLE PROBLEM AREAS ===
 //
@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 mod field_order_invariance_tests {
     use super::*;
 
-    fn reorder_json_fields(value: &Value) -> Value {
+    pub(crate) fn reorder_json_fields(value: &Value) -> Value {
         match value {
             Value::Object(map) => {
                 // Create new object with fields in different (but still deterministic) order
@@ -292,7 +292,7 @@ mod round_trip_consistency_tests {
             })
         ];
 
-        for (i, edge_case) in edge_cases.iter().enumerate() {
+        for edge_case in edge_cases.iter() {
             test_roundtrip_consistency(
                 TrustObjectType::SessionTicket,
                 edge_case
