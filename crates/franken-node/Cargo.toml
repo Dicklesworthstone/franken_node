@@ -1555,6 +1555,16 @@ name = "bd_sddz_correctness_envelope_conformance"
 path = "tests/bd_sddz_correctness_envelope_conformance.rs"
 required-features = ["policy-engine"]
 
+[[test]]
+name = "bd_1daz_retroactive_hardening_conformance"
+path = "tests/bd_1daz_retroactive_hardening_conformance.rs"
+required-features = ["policy-engine"]
+
+[[test]]
+name = "bd_sh3_approval_workflow_conformance"
+path = "tests/bd_sh3_approval_workflow_conformance.rs"
+required-features = ["policy-engine"]
+
 # bd-rjc2m .C5 BATCH 3 (trust-card cluster, bd-dnv23): ungated supply_chain
 # conformance reconciled to the redesigned ProvenanceSummary/RiskAssessment/
 # EvidenceType shapes. Verified to compile + RUN green via rch before registration.

@@ -20,7 +20,7 @@
 //! - SHOULD: 3/3 (100%) ✓
 //! - Total: 13/13 (100%) ✓
 
-use franken_node::policy::approval_workflow::{
+use frankenengine_node::policy::approval_workflow::{
     ApprovalSignature, ChangeEvidencePackage, PolicyChangeEngine, PolicyChangeProposal,
     PolicyDiffEntry, ProposalRecord, ProposalState, RiskAssessment,
     POLICY_CHANGE_PROPOSED, POLICY_CHANGE_REVIEWED, POLICY_CHANGE_APPROVED,
@@ -159,13 +159,20 @@ fn state_transition_validation() -> ConformanceResult {
     let proposal = create_test_proposal("test-003", "charlie");
     engine.propose(proposal).unwrap();
 
-    // Approve to get to Approved state
-    let approval = create_approval_signature("alice");
-    engine.approve("test-003", approval).unwrap();
+    // Drive to Approved. The proposal's required_approvers are [alice, bob], so
+    // BOTH must sign before quorum is met and the state transitions to Approved;
+    // a single approval only advances Proposed -> UnderReview under the current
+    // multi-signature model.
+    engine
+        .approve("test-003", create_approval_signature("alice"))
+        .unwrap();
+    engine
+        .approve("test-003", create_approval_signature("bob"))
+        .unwrap();
 
-    // Try to approve again after already approved - should fail
-    let approval2 = create_approval_signature("bob");
-    let result = engine.approve("test-003", approval2);
+    // Try to approve again after the proposal is already Approved - should fail
+    // with an invalid-state-transition error.
+    let result = engine.approve("test-003", create_approval_signature("dave"));
 
     if let Err(err) = result {
         if err.to_string().contains(ERR_INVALID_STATE_TRANSITION) {
@@ -283,7 +290,7 @@ fn rejection_workflow() -> ConformanceResult {
     }
 
     // Verify state changed to Rejected
-    let proposal_record = engine.proposals.get("test-006").unwrap();
+    let proposal_record = engine.get_proposal("test-006").unwrap();
     if proposal_record.state != ProposalState::Rejected {
         return ConformanceResult::Fail {
             reason: format!("Expected Rejected state, got {:?}", proposal_record.state),
@@ -438,9 +445,9 @@ fn proposal_statistics_tracking() -> ConformanceResult {
     engine.propose(proposal).unwrap();
 
     // Check that total proposals incremented
-    if engine.total_proposals != 1 {
+    if engine.total_proposals() != 1 {
         return ConformanceResult::Fail {
-            reason: format!("Expected total_proposals = 1, got {}", engine.total_proposals),
+            reason: format!("Expected total_proposals = 1, got {}", engine.total_proposals()),
         };
     }
 
@@ -448,9 +455,9 @@ fn proposal_statistics_tracking() -> ConformanceResult {
     let proposal2 = create_test_proposal("test-012", "jane");
     engine.propose(proposal2).unwrap();
 
-    if engine.total_proposals != 2 {
+    if engine.total_proposals() != 2 {
         return ConformanceResult::Fail {
-            reason: format!("Expected total_proposals = 2, got {}", engine.total_proposals),
+            reason: format!("Expected total_proposals = 2, got {}", engine.total_proposals()),
         };
     }
 
@@ -743,7 +750,7 @@ mod tests {
     #[test] fn justification_length() { justification_length_validation().unwrap_pass(); }
     #[test] fn proposal_not_found() { proposal_not_found_handling().unwrap_pass(); }
     #[test] fn proposal_submission() { proposal_submission_events().unwrap_pass(); }
-    #[test] fn rejection_workflow() { rejection_workflow().unwrap_pass(); }
+    #[test] fn rejection_workflow() { super::rejection_workflow().unwrap_pass(); }
     #[test] fn duplicate_approval() { duplicate_approval_prevention().unwrap_pass(); }
     #[test] fn required_approvers() { required_approvers_validation().unwrap_pass(); }
     #[test] fn case_insensitive() { case_insensitive_identity_matching().unwrap_pass(); }
