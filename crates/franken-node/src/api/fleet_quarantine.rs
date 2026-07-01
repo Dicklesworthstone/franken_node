@@ -3372,6 +3372,13 @@ impl FleetControlManager {
     /// Verify convergence rollback receipt exists and is valid for incident release.
     /// Enforces INV-FLEET-ROLLBACK gate: release must NOT succeed if rollback receipt
     /// is absent, stale, or fails verification.
+    ///
+    /// NOTE: the live `release` path no longer calls this — it was deliberately
+    /// replaced by `validate_quarantine_resolution` (see `release`, which notes
+    /// the receipt check "could be bypassed"). Retained for the underlying
+    /// `_at`/`_for_tests` verification surface; the real-clock wrapper currently
+    /// has no caller (bd-saj9c).
+    #[allow(dead_code)]
     fn verify_convergence_rollback_receipt(
         &self,
         incident_id: &str,

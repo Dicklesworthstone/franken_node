@@ -281,9 +281,7 @@ impl CuckooFilter {
     /// Clear all items from the filter, resetting to empty state.
     pub fn clear(&mut self) {
         let cleared_count = self.num_items;
-        for bucket in &mut self.buckets {
-            *bucket = [0u16; BUCKET_SIZE];
-        }
+        self.buckets.fill([0u16; BUCKET_SIZE]);
         self.num_items = 0;
         if cleared_count > 0 {
             self.emit_gauge_delta(-(cleared_count as isize));

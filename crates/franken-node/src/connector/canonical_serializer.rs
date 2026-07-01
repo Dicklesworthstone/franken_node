@@ -721,7 +721,11 @@ fn default_schema(object_type: TrustObjectType) -> CanonicalSchema {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+// Canonical-JSON fixture generator for each `TrustObjectType`. Private and only
+// used by this module's inline `#[cfg(test)]` tests, so it is test-gated (not
+// `test-support`, which would compile it into the non-test lib and leave it
+// dead) (bd-saj9c).
+#[cfg(test)]
 fn sample_payload_for_type(object_type: TrustObjectType) -> String {
     match object_type {
         TrustObjectType::PolicyCheckpoint => {

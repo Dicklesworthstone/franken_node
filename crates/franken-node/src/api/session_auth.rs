@@ -305,7 +305,7 @@ fn deserialize_mac<'de, D: serde::Deserializer<'de>>(
         )));
     }
     let mut arr = [0u8; SIGNATURE_LEN];
-    for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (i, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let hi = hex_nibble(chunk[0]).ok_or_else(|| {
             serde::de::Error::custom(format!("invalid hex char at position {}", i * 2))
         })?;

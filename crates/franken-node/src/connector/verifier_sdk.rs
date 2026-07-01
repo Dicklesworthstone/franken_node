@@ -378,6 +378,22 @@ fn is_sha256_hex(value: &str) -> bool {
     normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+// Trace-commitment / capsule-integrity primitives.
+//
+// These implement this module's own signed-capsule commitment scheme
+// (trace-chunk Merkle root + length-prefixed integrity hash + signature
+// payload, see `replay_capsule_signature_payload`). The module's public
+// `replay_capsule` is intentionally `STRUCTURAL_ONLY_REPLAY_HELPER_POSTURE`
+// (a deterministic smoke-check, not replacement-critical), and the canonical
+// signed path lives in `connector::universal_verifier_sdk`. These primitives
+// are therefore exercised only by this module's inline tests today; they are
+// retained (not test-gated) because they are production-shaped and referenced
+// by the sibling `replay_capsule_signature_payload` staging. `dead_code` is
+// allowed so the non-test lib build (how integration targets compile the lib)
+// stays clippy-clean. Reconciliation vs `universal_verifier_sdk` (remove as
+// redundant, or wire and document why two schemes coexist) is tracked in
+// bd-2qan9.
+#[allow(dead_code)]
 fn normalize_sha256_prefixed(value: &str) -> Option<String> {
     if !is_sha256_hex(value) {
         return None;
@@ -388,6 +404,7 @@ fn normalize_sha256_prefixed(value: &str) -> Option<String> {
     })
 }
 
+#[allow(dead_code)] // see `normalize_sha256_prefixed` note (staged capsule-integrity primitive)
 fn hash_trace_commitment_pair(left: &str, right: &str) -> String {
     let mut payload = Vec::new();
     payload.extend_from_slice(b"connector_trace_commitment_v1:");
@@ -403,6 +420,7 @@ pub(crate) struct TraceCommitmentProofStep {
     pub sibling_on_left: bool,
 }
 
+#[allow(dead_code)] // see `normalize_sha256_prefixed` note (staged capsule-integrity primitive)
 pub(crate) fn compute_trace_commitment_root(trace_chunk_hashes: &[String]) -> Option<String> {
     if trace_chunk_hashes.is_empty() {
         return None;
@@ -414,7 +432,7 @@ pub(crate) fn compute_trace_commitment_root(trace_chunk_hashes: &[String]) -> Op
         .collect::<Option<Vec<_>>>()?;
 
     while level.len() > 1 {
-        let mut next_level = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next_level = Vec::with_capacity(level.len().div_ceil(2));
         let mut index = 0;
         while index < level.len() {
             let left = &level[index];
@@ -455,7 +473,7 @@ pub(crate) fn build_trace_commitment_proof(
             sibling_on_left: sibling_index < index,
         });
 
-        let mut next_level = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next_level = Vec::with_capacity(level.len().div_ceil(2));
         let mut pair_index = 0;
         while pair_index < level.len() {
             let left = &level[pair_index];
@@ -501,6 +519,7 @@ pub(crate) fn verify_trace_commitment_proof(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // see `normalize_sha256_prefixed` note (staged capsule-integrity primitive)
 pub(crate) fn compute_capsule_integrity_hash(
     capsule_id: &str,
     schema_version: &str,

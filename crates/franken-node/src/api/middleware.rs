@@ -489,7 +489,10 @@ pub fn enforce_policy(
     }
 }
 
+// Human-readable label for an auth method. Currently unwired (no telemetry/log
+// call site references it); retained under the control-plane surface (bd-saj9c).
 #[cfg(any(test, feature = "control-plane"))]
+#[allow(dead_code)]
 fn auth_method_name(method: &AuthMethod) -> &'static str {
     match method {
         AuthMethod::MtlsClientCert => "mTLS client certificate",
@@ -723,6 +726,13 @@ pub struct AuthFailureLimiter {
 }
 
 #[cfg(any(test, feature = "control-plane"))]
+impl Default for AuthFailureLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(test, feature = "control-plane"))]
 impl AuthFailureLimiter {
     /// Create a new authentication failure rate limiter.
     ///
@@ -902,6 +912,9 @@ impl AuthFailureLimiter {
         state.failure_count
     }
 
+    // Redundant convenience wrapper over the live static `ensure_source_state_in`
+    // (used by `increment_source_failure_count`). No callers; retained (bd-saj9c).
+    #[allow(dead_code)]
     fn ensure_source_state(&mut self, source_ip: &str) -> &mut AuthFailureSourceState {
         Self::ensure_source_state_in(&mut self.source_states, &self.config, source_ip)
     }
@@ -922,6 +935,9 @@ impl AuthFailureLimiter {
         }
     }
 
+    // Redundant convenience wrapper over the live static
+    // `evict_lowest_priority_source_from`. No callers; retained (bd-saj9c).
+    #[allow(dead_code)]
     fn evict_lowest_priority_source(&mut self) {
         Self::evict_lowest_priority_source_from(&mut self.source_states);
     }
@@ -1000,6 +1016,13 @@ impl PerformanceSourceState {
 }
 
 #[cfg(any(test, feature = "control-plane"))]
+impl Default for PerformanceRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(test, feature = "control-plane"))]
 impl PerformanceRateLimiter {
     /// Create a new performance rate limiter.
     ///
@@ -1045,6 +1068,9 @@ impl PerformanceRateLimiter {
         }
     }
 
+    // Redundant convenience wrapper over the live static `ensure_source_state_in`.
+    // No callers; retained (bd-saj9c).
+    #[allow(dead_code)]
     fn ensure_source_state(&mut self, source_ip: &str) -> &mut PerformanceSourceState {
         Self::ensure_source_state_in(&mut self.source_states, &self.config, source_ip)
     }
@@ -1379,6 +1405,7 @@ pub type MiddlewareResult<T> = Result<T, ApiError>;
 ///
 /// Chain order: trace → auth failure limit → auth → authz → rate limit → handler
 #[cfg(any(test, feature = "control-plane"))]
+#[allow(clippy::too_many_arguments)] // middleware chain threads the full request context; a params struct would only relocate the arity
 pub fn execute_middleware_chain<F, T>(
     route: &RouteMetadata,
     auth_header: Option<&str>,
@@ -1408,11 +1435,11 @@ where
     // Step 2: Authentication failure rate limiting (SECURITY PROTECTION)
     // Applied before authentication to prevent brute force attacks.
     // Skip for routes with AuthMethod::None (no credentials to brute force).
-    if !matches!(route.auth_method, AuthMethod::None) {
-        if let Err(err) = auth_failure_limiter.check_auth_attempt(&trace_id, source_ip) {
-            let log = build_request_log(route, 429, start, &trace_id, "anonymous");
-            return (Err(err), log);
-        }
+    if !matches!(route.auth_method, AuthMethod::None)
+        && let Err(err) = auth_failure_limiter.check_auth_attempt(&trace_id, source_ip)
+    {
+        let log = build_request_log(route, 429, start, &trace_id, "anonymous");
+        return (Err(err), log);
     }
 
     // Step 3: Authentication
