@@ -312,11 +312,23 @@ where
     assert_value_round_trip(parse_fixture_value(raw, fixture_name), fixture_name)
 }
 
-fn is_lower_hex_digest(value: &str) -> bool {
-    value.len() == 64
+fn is_lower_hex(value: &str) -> bool {
+    !value.is_empty()
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64 && is_lower_hex(value)
+}
+
+/// A detached Ed25519 signature is 64 bytes, i.e. 128 lowercase-hex chars.
+/// Since bd-3pu8m (commit 689fc91fe, "replace hash-based verifier_signature
+/// with detached Ed25519 attestation") the live-path `verifier_signature` is a
+/// real Ed25519 signature over the result payload, not a 32-byte hash digest.
+fn is_lower_hex_ed25519_signature(value: &str) -> bool {
+    value.len() == 128 && is_lower_hex(value)
 }
 
 fn assert_rfc3339_timestamp(value: &str, context: &str) {
@@ -673,7 +685,7 @@ fn sdk_verifier_public_api_live_contract_invariants() {
     assert_eq!(result.verifier_identity, "verifier://shape-test");
     assert_eq!(result.sdk_version, SDK_VERSION);
     assert!(is_lower_hex_digest(&result.artifact_binding_hash));
-    assert!(is_lower_hex_digest(&result.verifier_signature));
+    assert!(is_lower_hex_ed25519_signature(&result.verifier_signature));
     assert_rfc3339_timestamp(
         &result.execution_timestamp,
         "live result execution_timestamp",
