@@ -1524,3 +1524,44 @@ path = "tests/connector_reconcile_idempotence_metamorphic.rs"
 [[test]]
 name = "trust_card_field_reorder_metamorphic"
 path = "tests/trust_card_field_reorder_metamorphic.rs"
+
+# bd-rjc2m .C* re-registration BATCH 1 (CrimsonCrane 2026-07-01): crate-local
+# orphaned conformance/contract tests surfaced by the .G2 orphan census
+# (bd-romfp). Pure-assertion (no golden/snapshot fixtures), ungated modules
+# (default features). Each verified to COMPILE + RUN green via rch before this
+# registration was committed. Preserves all MUST/SHOULD assertions.
+[[test]]
+name = "bd_1m8r_revocation_freshness_gate_conformance"
+path = "tests/bd_1m8r_revocation_freshness_gate_conformance.rs"
+
+[[test]]
+name = "challenge_response_conformance"
+path = "tests/challenge_response_conformance.rs"
+
+[[test]]
+name = "runtime_checkpoint_conformance"
+path = "tests/runtime_checkpoint_conformance.rs"
+
+[[test]]
+name = "state_migration_contract"
+path = "tests/state_migration_contract.rs"
+
+# bd-rjc2m .C5 BATCH 2 (policy cluster): crate-local orphans importing the
+# policy-engine-gated `policy` module. required-features gates them off the
+# plain default lane (they run under --features policy-engine). Verified to
+# compile + RUN green via rch before registration.
+[[test]]
+name = "bd_sddz_correctness_envelope_conformance"
+path = "tests/bd_sddz_correctness_envelope_conformance.rs"
+required-features = ["policy-engine"]
+
+# bd-rjc2m .C5 BATCH 3 (trust-card cluster, bd-dnv23): ungated supply_chain
+# conformance reconciled to the redesigned ProvenanceSummary/RiskAssessment/
+# EvidenceType shapes. Verified to compile + RUN green via rch before registration.
+[[test]]
+name = "trust_card_extension_id_length_boundary_conformance"
+path = "tests/trust_card_extension_id_length_boundary_conformance.rs"
+
+[[test]]
+name = "trust_card_admission_conformance"
+path = "tests/trust_card_admission_conformance.rs"

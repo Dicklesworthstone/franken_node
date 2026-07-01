@@ -46,9 +46,10 @@ fn create_valid_baseline_input() -> TrustCardInput {
         },
         revocation_status: RevocationStatus::Active,
         provenance_summary: ProvenanceSummary {
-            verified_sources: vec!["test-source".to_string()],
-            verification_timestamp: "2026-04-23T06:30:00Z".to_string(),
-            chain_integrity_score: 95,
+            attestation_level: "verified".to_string(),
+            source_uri: "test-source".to_string(),
+            artifact_hashes: vec!["sha256:".to_string() + &"a".repeat(64)],
+            verified_at: "2026-04-23T06:30:00Z".to_string(),
         },
         reputation_score_basis_points: 8500,
         reputation_trend: ReputationTrend::Stable,
@@ -56,14 +57,13 @@ fn create_valid_baseline_input() -> TrustCardInput {
         dependency_trust_summary: vec![],
         last_verified_timestamp: "2026-04-23T06:30:00Z".to_string(),
         user_facing_risk_assessment: RiskAssessment {
-            overall_risk: RiskLevel::Low,
-            risk_factors: vec!["filesystem access".to_string()],
-            mitigation_suggestions: vec!["Review file patterns".to_string()],
+            level: RiskLevel::Low,
+            summary: "filesystem access; mitigation: review file patterns".to_string(),
         },
         evidence_refs: vec![
             VerifiedEvidenceRef {
                 evidence_id: "test-evidence-001".to_string(),
-                evidence_type: EvidenceType::StaticAnalysis,
+                evidence_type: EvidenceType::AuditReport,
                 verified_at_epoch: BASE_TIMESTAMP,
                 verification_receipt_hash: "sha256:".to_string() + &"a".repeat(64),
             }
@@ -148,14 +148,15 @@ fn trust_card_extension_id_significantly_exceeding_max_length_is_rejected() {
 
     // Create extension ID significantly exceeding the boundary (300 characters)
     input.extension.extension_id = "npm:@malicious-package/".to_string() + &"x".repeat(275);
-    assert!(input.extension.extension_id.len() > MAX_EXTENSION_ID_LEN + 40);
+    let oversized_len = input.extension.extension_id.len();
+    assert!(oversized_len > MAX_EXTENSION_ID_LEN + 40);
 
     let result = registry.create(input, BASE_TIMESTAMP + 3, "trace-boundary-large");
 
     assert!(
         result.is_err(),
         "Trust card with significantly large extension ID ({} chars) must be rejected",
-        input.extension.extension_id.len()
+        oversized_len
     );
 }
 

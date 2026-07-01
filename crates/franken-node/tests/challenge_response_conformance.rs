@@ -112,6 +112,21 @@ fn create_valid_message(
     }
 }
 
+/// Build a validly-signed message with a nonce derived from the sequence
+/// number, so repeated valid messages carry distinct nonces and are not
+/// rejected by the channel's nonce-replay gate (`seen_nonces`).
+fn create_message(
+    id: &str,
+    dir: Direction,
+    seq: u64,
+    config: &ChannelConfig,
+    secret: &RootSecret,
+) -> ChannelMessage {
+    let mut nonce = [0u8; 16];
+    nonce[..8].copy_from_slice(&seq.to_le_bytes());
+    create_message_with_nonce(id, dir, seq, nonce, config, secret)
+}
+
 fn create_message_with_nonce(
     id: &str,
     dir: Direction,
@@ -466,8 +481,11 @@ fn conformance_adversarial_comprehensive() -> TestResult {
     let mut channel = ControlChannel::new(config.clone(), secret.clone())
         .map_err(|e| format!("Channel creation failed: {e}"))?;
 
-    // Valid baseline
-    let msg1 = create_valid_message("baseline", Direction::Send, 1, &config, &secret);
+    // Valid baseline. It must consume the SAME nonce ([0x42; 16]) that the
+    // nonce_reuse attack below replays, so the channel's seen-nonce gate has a
+    // prior occurrence to reject against; otherwise attack2 is just a fresh
+    // validly-signed message and is (correctly) accepted.
+    let msg1 = create_message_with_nonce("baseline", Direction::Send, 1, [0x42; 16], &config, &secret);
     channel.process_message(&msg1, "ts1")
         .map_err(|e| format!("Baseline message should succeed: {e}"))?;
 

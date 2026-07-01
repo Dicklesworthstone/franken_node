@@ -480,7 +480,7 @@ fn task_id_uniqueness_and_collision_resistance() {
     let mut seen_task_ids = HashSet::new();
 
     // Generate many tasks to test ID uniqueness
-    for i in 0..1000 {
+    for i in 0u64..1000 {
         let task_class = if i.is_multiple_of(2) {
             task_classes::epoch_transition()
         } else {

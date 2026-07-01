@@ -56,7 +56,9 @@ pub enum TestResult {
     ExpectedFailure { reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// NOTE: no Serialize/Deserialize — `test_fn` is a function pointer, which serde
+// cannot (de)serialize. The serializable projection is `ConformanceRecord`.
+#[derive(Debug, Clone)]
 pub struct ConformanceCase {
     pub id: &'static str,
     pub section: &'static str,
@@ -90,6 +92,9 @@ pub struct ConformanceStats {
 pub struct ConformanceReport {
     pub results: BTreeMap<String, ConformanceRecord>,
     pub stats: ConformanceStats,
+    /// Serialized compliance ratio (0.0–1.0) so JSON reports expose the score
+    /// directly. Mirrors the `compliance_score()` method, populated at build.
+    pub compliance_score: f64,
 }
 
 impl ConformanceReport {
@@ -1188,7 +1193,13 @@ pub fn run_bd_1m8r_conformance_tests() -> ConformanceReport {
         results.insert(case.id.to_string(), record);
     }
 
-    ConformanceReport { results, stats }
+    let mut report = ConformanceReport {
+        results,
+        stats,
+        compliance_score: 0.0,
+    };
+    report.compliance_score = report.compliance_score();
+    report
 }
 
 #[cfg(test)]

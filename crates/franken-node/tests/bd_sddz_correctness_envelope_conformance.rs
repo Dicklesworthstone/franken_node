@@ -24,7 +24,7 @@
 
 use serde_json::json;
 
-use franken_node::policy::correctness_envelope::{
+use frankenengine_node::policy::correctness_envelope::{
     CorrectnessEnvelope, EnforcementMode, EnvelopeViolation, Invariant, InvariantId,
     PolicyChange, PolicyProposal, SectionId,
 };
@@ -466,7 +466,10 @@ fn json_manifest_export_format() -> ConformanceResult {
     }
 
     // Verify invariants array structure
-    let invariants = manifest["invariants"].as_array().unwrap_or(&vec![]);
+    let empty_invariants = vec![];
+    let invariants = manifest["invariants"]
+        .as_array()
+        .unwrap_or(&empty_invariants);
     if invariants.len() != envelope.len() {
         return ConformanceResult::Fail {
             reason: format!(
@@ -490,7 +493,10 @@ fn json_manifest_export_format() -> ConformanceResult {
     }
 
     // Verify immutable fields structure
-    let immutable_fields = manifest["immutable_fields"].as_array().unwrap_or(&vec![]);
+    let empty_immutable = vec![];
+    let immutable_fields = manifest["immutable_fields"]
+        .as_array()
+        .unwrap_or(&empty_immutable);
     for (i, field_json) in immutable_fields.iter().enumerate() {
         let required_field_attrs = ["field_prefix", "invariant_id"];
         for attr in &required_field_attrs {

@@ -29,7 +29,7 @@ const REGISTRY_KEY: &str = "admission-conformance-test-key-v1";
 const BASE_TIMESTAMP: u64 = 1745000000;
 
 /// Conformance test requirement levels from bd-2yh specification
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum RequirementLevel {
     Must,
     Should,
@@ -37,7 +37,7 @@ enum RequirementLevel {
 }
 
 /// Conformance test categories for trust card admission
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum AdmissionTestCategory {
     ModelValidation,
     AdmissionLogic,
@@ -107,9 +107,10 @@ fn valid_baseline_input() -> TrustCardInput {
         },
         revocation_status: RevocationStatus::Active,
         provenance_summary: ProvenanceSummary {
-            verified_sources: vec!["test-source".to_string()],
-            verification_timestamp: "2026-04-23T06:30:00Z".to_string(),
-            chain_integrity_score: 95,
+            attestation_level: "verified".to_string(),
+            source_uri: "test-source".to_string(),
+            artifact_hashes: vec!["sha256:".to_string() + &"a".repeat(64)],
+            verified_at: "2026-04-23T06:30:00Z".to_string(),
         },
         reputation_score_basis_points: 8500, // 85.00%
         reputation_trend: ReputationTrend::Stable,
@@ -117,14 +118,13 @@ fn valid_baseline_input() -> TrustCardInput {
         dependency_trust_summary: vec![],
         last_verified_timestamp: "2026-04-23T06:30:00Z".to_string(),
         user_facing_risk_assessment: RiskAssessment {
-            overall_risk: RiskLevel::Low,
-            risk_factors: vec!["filesystem access".to_string()],
-            mitigation_suggestions: vec!["Review file access patterns".to_string()],
+            level: RiskLevel::Low,
+            summary: "filesystem access; mitigation: review file access patterns".to_string(),
         },
         evidence_refs: vec![
             VerifiedEvidenceRef {
                 evidence_id: "conformance-test-evidence-001".to_string(),
-                evidence_type: EvidenceType::StaticAnalysis,
+                evidence_type: EvidenceType::AuditReport,
                 verified_at_epoch: BASE_TIMESTAMP,
                 verification_receipt_hash: "sha256:".to_string() + &"a".repeat(64),
             }
