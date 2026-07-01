@@ -217,6 +217,7 @@ def find_orphans(repo_root: str, crate_dir: str) -> List[dict]:
         registered = parse_registered_targets(fh.read())
     seed = [_norm(crate_dir, path) for _name, path in registered]
     reachable = compute_reachable(seed)
+    registered_names = {name for name, _path in registered}
 
     tests_dir = os.path.join(crate_dir, "tests")
     orphans: List[dict] = []
@@ -227,7 +228,15 @@ def find_orphans(repo_root: str, crate_dir: str) -> List[dict]:
         if abs_path in reachable:
             continue
         name = entry[:-3]
-        category, flagged = classify(name)
+        # A default `[[test]]` name is the file basename. If that name is ALREADY
+        # a registered target (at a different path — a workspace-root twin), this
+        # crate-local file is a stale/divergent DUPLICATE: registering it would
+        # error `duplicate test name`. It must be reconciled/removed, NOT
+        # registered — so it is not a "register-me" coverage hole.
+        if name in registered_names:
+            category, flagged = "stale-duplicate", False
+        else:
+            category, flagged = classify(name)
         rel = os.path.relpath(abs_path, repo_root)
         orphans.append({"target": name, "path": rel, "category": category, "flagged": flagged})
     return orphans

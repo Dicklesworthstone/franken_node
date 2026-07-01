@@ -130,6 +130,24 @@ def test_find_orphans_end_to_end():
         assert "wrapper" not in names, "the registered target itself is not an orphan"
 
 
+def test_find_orphans_name_collision_is_stale_duplicate():
+    # A crate-local orphan whose basename matches an already-registered target
+    # (at a different, workspace-root path) is a stale duplicate, NOT a hole.
+    with tempfile.TemporaryDirectory() as repo:
+        crate = os.path.join(repo, "crates", "franken-node")
+        tests = os.path.join(crate, "tests")
+        _write(os.path.join(crate, "Cargo.toml"),
+               '[package]\nname = "frankenengine-node"\n'
+               '[[test]]\nname = "foo_conformance"\n'
+               'path = "../../tests/conformance/foo_conformance.rs"\n')
+        # crate-local same-basename divergent copy (would collide on register)
+        _write(os.path.join(tests, "foo_conformance.rs"), "#[test] fn t() {}\n")
+        orphans = g.find_orphans(repo, crate)
+        foo = {o["target"]: o for o in orphans}["foo_conformance"]
+        assert foo["category"] == "stale-duplicate"
+        assert foo["flagged"] is False
+
+
 def test_gate_exit_codes():
     with tempfile.TemporaryDirectory() as repo:
         crate = os.path.join(repo, "crates", "franken-node")
