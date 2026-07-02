@@ -344,6 +344,10 @@ pub enum RuntimeLaneCommand {
 
 #[derive(Debug, Parser)]
 pub struct RuntimeLaneStatusArgs {
+    /// Deterministic timestamp override in milliseconds.
+    #[arg(long)]
+    pub timestamp_ms: Option<u64>,
+
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,

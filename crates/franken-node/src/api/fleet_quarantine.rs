@@ -696,7 +696,12 @@ pub fn canonical_decision_receipt_payload_hash(
     hex::encode(Sha256::digest(&payload))
 }
 
-fn decision_receipt_payload_bytes(receipt: &DecisionReceipt) -> Vec<u8> {
+/// Canonical, length-prefixed byte encoding of a decision receipt's signed
+/// payload. This is the exact preimage over which the receipt signature is
+/// computed, so external verifiers (and golden-vector conformance tests) can
+/// reconstruct it deterministically. Exposed publicly as part of the receipt's
+/// verifiable contract; the internal `append_framed` framing stays private.
+pub fn decision_receipt_payload_bytes(receipt: &DecisionReceipt) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(b"franken_node_fleet_decision_receipt_v1:");
     for field in [

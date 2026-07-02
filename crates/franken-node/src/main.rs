@@ -5912,7 +5912,8 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 let policy = runtime::lane_scheduler::default_policy();
                 let scheduler = runtime::lane_scheduler::LaneScheduler::new(policy.clone())
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-                let telemetry = scheduler.telemetry_snapshot(runtime_cli_timestamp_ms(None));
+                let telemetry =
+                    scheduler.telemetry_snapshot(runtime_cli_timestamp_ms(args.timestamp_ms));
                 let report = RuntimeLaneStatusReport {
                     schema_version: runtime::lane_scheduler::SCHEMA_VERSION,
                     command: "runtime.lane.status",

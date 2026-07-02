@@ -192,7 +192,12 @@ fn generate_validation_vectors() -> Vec<ValidationVector> {
             vec!["https://api.example.com/v1".to_string()],
             RemoteOperation::NetworkEgress,
             "https://api.example.com/v1evil",
-            ExpectedResult::Allow, // This should be allowed as v1 is a prefix of v1evil
+            // Path-segment (not raw-substring) matching: `/v1evil` must NOT match a
+            // scope granting `/v1`. Prod fail-closes with ScopeDenied — the hardened,
+            // correct behavior (vector description already says "should be prevented").
+            ExpectedResult::DenyScope {
+                endpoint: "https://api.example.com/v1evil".to_string(),
+            },
         ),
 
         ValidationVector::new(
@@ -334,8 +339,8 @@ fn test_scope_validation_comprehensive() {
                 scope,
                 vector.issue_time,
                 vector.duration_secs,
-                vector.single_use,
-                true,
+                true,               // operator_authorized (prod gates issuance on operator approval)
+                vector.single_use,  // single_use: honor the vector's flag
                 &format!("trace-{}", vector.name),
             )
             .expect("Token issuance should succeed");
@@ -388,8 +393,8 @@ fn test_expiry_validation_boundaries() {
                 scope,
                 vector.issue_time,
                 vector.duration_secs,
-                vector.single_use,
-                true,
+                true,               // operator_authorized (prod gates issuance on operator approval)
+                vector.single_use,  // single_use: honor the vector's flag
                 &format!("trace-{}", vector.name),
             )
             .expect("Token issuance should succeed");
@@ -444,8 +449,8 @@ fn test_replay_protection_comprehensive() {
                 scope,
                 BASE_EPOCH,
                 VALID_DURATION_SECS,
-                true, // single-use
-                true,
+                true, // operator_authorized (prod gates issuance on operator approval)
+                true, // single_use
                 "trace-replay-single-use",
             )
             .expect("Token issuance should succeed");
@@ -495,8 +500,8 @@ fn test_replay_protection_comprehensive() {
                 scope,
                 BASE_EPOCH,
                 VALID_DURATION_SECS,
-                false, // multi-use
-                true,
+                true,  // operator_authorized (prod gates issuance on operator approval)
+                false, // multi-use (single_use = false)
                 "trace-multi-use",
             )
             .expect("Token issuance should succeed");
@@ -646,8 +651,8 @@ fn test_durable_replay_store_fsync() {
             scope,
             BASE_EPOCH,
             VALID_DURATION_SECS,
-            true, // single-use to test replay store
-            true,
+            true, // operator_authorized (prod gates issuance on operator approval)
+            true, // single_use to test replay store
             "trace-durable-replay",
         )
         .expect("Token issuance should succeed");
@@ -812,8 +817,8 @@ fn test_golden_reference_validation() {
                 ),
                 1_700_000_000,
                 3600,
-                false, // multi-use for denial testing
-                true,
+                true,  // operator_authorized (prod gates issuance on operator approval)
+                false, // multi-use for denial testing (single_use = false)
                 &format!("golden-denial-{}", i),
             )
             .expect("Denial test token issuance should succeed");

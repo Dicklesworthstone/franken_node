@@ -28,10 +28,7 @@ use frankenengine_node::policy::{
         BlockedCandidate, DecisionEngine, DecisionOutcome, DecisionReason, GuardrailId,
         EVD_DECIDE_001, EVD_DECIDE_002, EVD_DECIDE_003, EVD_DECIDE_004,
     },
-    guardrail_monitor::{
-        BudgetId, GuardrailMonitorCertificate, GuardrailMonitorFinding, GuardrailMonitorSet,
-        GuardrailVerdict, SystemState,
-    },
+    guardrail_monitor::{BudgetId, GuardrailMonitorSet, GuardrailVerdict, SystemState},
     hardening_state_machine::HardeningLevel,
 };
 
@@ -145,7 +142,7 @@ fn inv_decide_precedence_guardrail_override() -> ConformanceResult {
 
     // Verify the guardrail-filtered candidate was blocked despite best posterior
     if let Some(ref chosen) = outcome.chosen {
-        if chosen.as_str() != "good" {
+        if chosen.0.as_str() != "good" {
             return ConformanceResult::Fail {
                 reason: format!("Expected 'good' to be chosen, got {:?}", chosen),
             };
@@ -158,7 +155,7 @@ fn inv_decide_precedence_guardrail_override() -> ConformanceResult {
 
     // Verify the best candidate was blocked
     let blocked_best = outcome.blocked.iter()
-        .find(|b| b.candidate.as_str() == "best");
+        .find(|b| b.candidate.0.as_str() == "best");
 
     if blocked_best.is_none() {
         return ConformanceResult::Fail {
@@ -312,7 +309,7 @@ fn system_level_guardrail_blocking() -> ConformanceResult {
 
         if !has_system_block {
             return ConformanceResult::Fail {
-                reason: format!("Expected system-level block for candidate {}", blocked.candidate.as_str()),
+                reason: format!("Expected system-level block for candidate {}", blocked.candidate.0.as_str()),
             };
         }
     }
@@ -337,9 +334,9 @@ fn top_candidate_acceptance() -> ConformanceResult {
 
     // Verify the top candidate was chosen
     if let Some(ref chosen) = outcome.chosen {
-        if chosen.as_str() != "perfect" {
+        if chosen.0.as_str() != "perfect" {
             return ConformanceResult::Fail {
-                reason: format!("Expected 'perfect' to be chosen, got {}", chosen.as_str()),
+                reason: format!("Expected 'perfect' to be chosen, got {}", chosen.0.as_str()),
             };
         }
     } else {
@@ -423,9 +420,9 @@ fn blocked_candidate_details() -> ConformanceResult {
     let blocked = &outcome.blocked[0];
 
     // Verify blocked candidate details
-    if blocked.candidate.as_str() != "filtered" {
+    if blocked.candidate.0.as_str() != "filtered" {
         return ConformanceResult::Fail {
-            reason: format!("Expected 'filtered' to be blocked, got {}", blocked.candidate.as_str()),
+            reason: format!("Expected 'filtered' to be blocked, got {}", blocked.candidate.0.as_str()),
         };
     }
 
@@ -506,9 +503,9 @@ fn fallback_rank_accuracy() -> ConformanceResult {
 
     // Verify rank2 candidate was chosen
     if let Some(ref chosen) = outcome.chosen {
-        if chosen.as_str() != "rank2" {
+        if chosen.0.as_str() != "rank2" {
             return ConformanceResult::Fail {
-                reason: format!("Expected 'rank2' to be chosen, got {}", chosen.as_str()),
+                reason: format!("Expected 'rank2' to be chosen, got {}", chosen.0.as_str()),
             };
         }
     } else {
@@ -573,11 +570,18 @@ fn mixed_blocking_scenarios() -> ConformanceResult {
     }
 
     // Verify the mixed blocked candidate has both system and per-candidate blocks
-    let mixed_blocked = outcome.blocked.iter()
-        .find(|b| b.candidate.as_str() == "sys_and_per")
-        .ok_or_else(|| ConformanceResult::Fail {
-            reason: "Could not find 'sys_and_per' in blocked candidates".to_string(),
-        })?;
+    let mixed_blocked = match outcome
+        .blocked
+        .iter()
+        .find(|b| b.candidate.0.as_str() == "sys_and_per")
+    {
+        Some(blocked) => blocked,
+        None => {
+            return ConformanceResult::Fail {
+                reason: "Could not find 'sys_and_per' in blocked candidates".to_string(),
+            };
+        }
+    };
 
     if mixed_blocked.blocked_by.len() < 2 {
         return ConformanceResult::Fail {

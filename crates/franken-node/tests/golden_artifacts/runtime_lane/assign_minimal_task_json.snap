@@ -1,0 +1,64 @@
+---
+source: crates/franken-node/tests/runtime_lane_golden_artifacts.rs
+---
+{
+  "schema_version": "ls-v1.0",
+  "command": "runtime.lane.assign",
+  "assignment": {
+    "task_id": "[TASK_ID]",
+    "task_class": "epoch_transition",
+    "lane": "ControlCritical",
+    "assigned_at_ms": 1698768000000,
+    "trace_id": "runtime-lane-cli"
+  },
+  "telemetry": {
+    "counters": [
+      {
+        "lane": "Background",
+        "active_count": 0,
+        "queued_count": 0,
+        "first_queued_at_ms": null,
+        "completed_total": 0,
+        "rejected_total": 0,
+        "starvation_events": 0,
+        "starvation_active": false,
+        "last_completion_ms": null
+      },
+      {
+        "lane": "ControlCritical",
+        "active_count": 1,
+        "queued_count": 0,
+        "first_queued_at_ms": null,
+        "completed_total": 0,
+        "rejected_total": 0,
+        "starvation_events": 0,
+        "starvation_active": false,
+        "last_completion_ms": null
+      },
+      {
+        "lane": "Maintenance",
+        "active_count": 0,
+        "queued_count": 0,
+        "first_queued_at_ms": null,
+        "completed_total": 0,
+        "rejected_total": 0,
+        "starvation_events": 0,
+        "starvation_active": false,
+        "last_completion_ms": null
+      },
+      {
+        "lane": "RemoteEffect",
+        "active_count": 0,
+        "queued_count": 0,
+        "first_queued_at_ms": null,
+        "completed_total": 0,
+        "rejected_total": 0,
+        "starvation_events": 0,
+        "starvation_active": false,
+        "last_completion_ms": null
+      }
+    ],
+    "timestamp_ms": 1698768000000,
+    "schema_version": "ls-v1.0"
+  }
+}

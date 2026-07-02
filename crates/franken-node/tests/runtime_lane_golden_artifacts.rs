@@ -94,7 +94,11 @@ fn runtime_lane_status_json_golden() -> Result<(), Box<dyn std::error::Error>> {
     let mut command = Command::cargo_bin("franken-node")?;
     let output = command
         .current_dir(&temp_dir)
-        .args(["runtime", "lane", "status", "--json"])
+        .args([
+            "runtime", "lane", "status",
+            "--json",
+            "--timestamp-ms", "1698768000000"
+        ])
         .assert()
         .success()
         .get_output()
@@ -120,7 +124,8 @@ fn runtime_lane_assign_minimal_task_json_golden() -> Result<(), Box<dyn std::err
         .args([
             "runtime", "lane", "assign",
             "epoch_transition",
-            "--json"
+            "--json",
+            "--timestamp-ms", "1698768000000"
         ])
         .assert()
         .success()

@@ -41,16 +41,19 @@ fn saturating_arithmetic_prevents_counter_overflow() {
     let mut scheduler = LaneScheduler::new(minimal_policy()).unwrap();
 
     // Manipulate internal counter to near-max values to test overflow protection
-    let assignment = scheduler
+    let mut current = scheduler
         .assign_task(&task_classes::log_rotation(), 1000, "overflow-test")
         .unwrap();
 
-    // Complete many tasks to test completed_total overflow protection
+    // Complete many tasks to test completed_total overflow protection.
+    // Each completion retires the *currently active* task (a task cannot be
+    // completed twice — a second completion of the same id now correctly
+    // returns TaskNotFound), so we complete the freshest assignment each pass.
     for i in 0..10 {
         scheduler
-            .complete_task(&assignment.task_id, 1001 + i, "test")
+            .complete_task(&current.task_id, 1001 + i, "test")
             .unwrap();
-        let _fresh_assignment = scheduler
+        current = scheduler
             .assign_task(
                 &task_classes::log_rotation(),
                 1002 + i,
@@ -158,22 +161,29 @@ fn fail_closed_capacity_enforcement_under_concurrent_load_simulation() {
     assert_eq!(counters.rejected_total, 1);
     assert_eq!(counters.first_queued_at_ms, Some(1002));
 
-    // Complete one task and verify queue admission
+    // Complete one task: the queued task is auto-promoted into the freed slot
+    // (INV-LANE-CAP-ENFORCE + FIFO promotion), so the lane stays at capacity and
+    // the queue drains via promotion rather than admitting a fresh assignment.
     scheduler
         .complete_task(&task1.task_id, 1003, "complete-1")
-        .unwrap();
-
-    // Now another assignment should succeed (queue slot available)
-    let task4 = scheduler
-        .assign_task(&task_classes::epoch_transition(), 1004, "post-completion")
         .unwrap();
 
     let counters = scheduler
         .lane_counter(SchedulerLane::ControlCritical)
         .unwrap();
-    assert_eq!(counters.active_count, 2); // Still at capacity
-    assert_eq!(counters.queued_count, 0); // Queue drained
+    assert_eq!(counters.active_count, 2); // Still at capacity (queued task promoted)
+    assert_eq!(counters.queued_count, 0); // Queue drained via promotion
     assert_eq!(counters.first_queued_at_ms, None); // No more queued items
+
+    // Fail-closed: with the lane still at capacity, a further assignment is
+    // rejected rather than silently over-committing the lane.
+    let result4 =
+        scheduler.assign_task(&task_classes::epoch_transition(), 1004, "post-completion");
+    assert!(result4.is_err());
+    assert_eq!(
+        result4.unwrap_err().code(),
+        error_codes::ERR_LANE_CAP_EXCEEDED
+    );
 }
 
 #[test]
@@ -352,37 +362,32 @@ fn starvation_detection_algorithm_accuracy_across_complex_scenarios() {
     let check2 = scheduler.check_starvation(1650, "check-2");
     assert_eq!(check2.len(), 1);
 
-    // Complete the initial task, admit new work
+    // Complete the initial task: the head of the FIFO queue is auto-promoted
+    // into the freed slot (INV-LANE-CAP-ENFORCE), so the lane immediately holds
+    // its next active task while the backlog is still non-empty.
     scheduler
         .complete_task(&initial_task.task_id, 1700, "complete-initial")
-        .unwrap();
-    let new_task = scheduler
-        .assign_task(&task_classes::log_rotation(), 1750, "new-after-complete")
         .unwrap();
 
     // Starvation should persist (queue not empty)
     let check3 = scheduler.check_starvation(1800, "check-3");
     assert_eq!(check3.len(), 1);
 
-    // Complete all remaining work
-    scheduler
-        .complete_task(&new_task.task_id, 1850, "complete-new")
-        .unwrap();
-
-    // Continue admitting until queue is drained
-    for i in 0..2 {
-        // Should admit 2 more tasks to clear the queue
-        if let Ok(task) = scheduler.assign_task(
-            &task_classes::log_rotation(),
-            1900 + i * 10,
-            &format!("drain-{}", i),
-        ) {
-            let _ = scheduler.complete_task(
-                &task.task_id,
-                1910 + i * 10,
-                &format!("drain-complete-{}", i),
-            );
-        }
+    // Drain the remaining backlog. With a cap of 1 the lane holds exactly one
+    // active task at a time and each completion auto-promotes the next queued
+    // task, so completing whatever task is currently active repeatedly clears
+    // the queue. (Assigning new work here would only re-queue behind the
+    // backlog and never drain it, since the lane is already at capacity.)
+    let mut drain_ts = 1850;
+    while let Some(active_id) = scheduler
+        .active_task_ids(SchedulerLane::Background)
+        .into_iter()
+        .next()
+    {
+        scheduler
+            .complete_task(&active_id, drain_ts, "drain")
+            .unwrap();
+        drain_ts += 10;
     }
 
     // Now starvation should clear

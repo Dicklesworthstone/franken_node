@@ -1,0 +1,97 @@
+---
+source: crates/franken-node/tests/runtime_lane_golden_artifacts.rs
+---
+{
+  "schema_version": "ls-v1.0",
+  "command": "runtime.lane.status",
+  "policy": {
+    "lane_configs": {
+      "background": {
+        "lane": "Background",
+        "priority_weight": 10,
+        "concurrency_cap": 2,
+        "starvation_window_ms": 5000
+      },
+      "control_critical": {
+        "lane": "ControlCritical",
+        "priority_weight": 100,
+        "concurrency_cap": 8,
+        "starvation_window_ms": 5000
+      },
+      "maintenance": {
+        "lane": "Maintenance",
+        "priority_weight": 20,
+        "concurrency_cap": 4,
+        "starvation_window_ms": 5000
+      },
+      "remote_effect": {
+        "lane": "RemoteEffect",
+        "priority_weight": 50,
+        "concurrency_cap": 32,
+        "starvation_window_ms": 5000
+      }
+    },
+    "mapping_rules": {
+      "artifact_eviction": "RemoteEffect",
+      "artifact_upload": "RemoteEffect",
+      "barrier_coordination": "ControlCritical",
+      "compaction": "Maintenance",
+      "epoch_transition": "ControlCritical",
+      "garbage_collection": "Maintenance",
+      "log_rotation": "Background",
+      "marker_write": "ControlCritical",
+      "remote_computation": "RemoteEffect",
+      "telemetry_export": "Background"
+    }
+  },
+  "telemetry": {
+    "counters": [
+      {
+        "lane": "Background",
+        "active_count": 0,
+        "queued_count": 0,
+        "first_queued_at_ms": null,
+        "completed_total": 0,
+        "rejected_total": 0,
+        "starvation_events": 0,
+        "starvation_active": false,
+        "last_completion_ms": null
+      },
+      {
+        "lane": "ControlCritical",
+        "active_count": 0,
+        "queued_count": 0,
+        "first_queued_at_ms": null,
+        "completed_total": 0,
+        "rejected_total": 0,
+        "starvation_events": 0,
+        "starvation_active": false,
+        "last_completion_ms": null
+      },
+      {
+        "lane": "Maintenance",
+        "active_count": 0,
+        "queued_count": 0,
+        "first_queued_at_ms": null,
+        "completed_total": 0,
+        "rejected_total": 0,
+        "starvation_events": 0,
+        "starvation_active": false,
+        "last_completion_ms": null
+      },
+      {
+        "lane": "RemoteEffect",
+        "active_count": 0,
+        "queued_count": 0,
+        "first_queued_at_ms": null,
+        "completed_total": 0,
+        "rejected_total": 0,
+        "starvation_events": 0,
+        "starvation_active": false,
+        "last_completion_ms": null
+      }
+    ],
+    "timestamp_ms": 1698768000000,
+    "schema_version": "ls-v1.0"
+  }
+}

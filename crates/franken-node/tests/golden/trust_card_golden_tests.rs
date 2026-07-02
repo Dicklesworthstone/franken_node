@@ -80,7 +80,7 @@ fn create_test_trust_card() -> TrustCard {
         evidence_refs: vec![
             VerifiedEvidenceRef {
                 evidence_id: "evidence-1".to_string(),
-                evidence_type: EvidenceType::ProvenanceAttestation,
+                evidence_type: EvidenceType::ProvenanceChain,
                 verified_at_epoch: now_secs,
                 verification_receipt_hash: "receipt-hash-1".to_string(),
             },
@@ -106,14 +106,14 @@ fn test_trust_card_json_export_golden() {
 #[test]
 fn test_trust_card_registry_snapshot_golden() {
     let registry = create_test_registry();
-    let snapshot = registry.snapshot();
+    let snapshot = registry.snapshot().expect("snapshot registry");
     let json = serde_json::to_value(&snapshot).unwrap();
     assert_scrubbed_json_golden("trust_card_registry_snapshot", &json);
 }
 
 #[test]
 fn test_trust_card_list_all_golden() {
-    let registry = create_test_registry();
+    let mut registry = create_test_registry();
     let cards = registry.list(
         &TrustCardListFilter::empty(),
         "test-trace",
@@ -152,7 +152,7 @@ fn test_trust_card_list_all_golden() {
 
 #[test]
 fn test_trust_card_list_filtered_golden() {
-    let registry = create_test_registry();
+    let mut registry = create_test_registry();
     let filter = TrustCardListFilter {
         certification_level: Some(CertificationLevel::Gold),
         publisher_id: Some("pub-acme".to_string()),
@@ -166,7 +166,7 @@ fn test_trust_card_list_filtered_golden() {
 
 #[test]
 fn test_trust_card_comparison_golden() {
-    let registry = create_test_registry();
+    let mut registry = create_test_registry();
     let cards = registry.list(
         &TrustCardListFilter::empty(),
         "test-trace",
@@ -177,6 +177,8 @@ fn test_trust_card_comparison_golden() {
         let comparison = registry.compare(
             &cards[0].extension.extension_id,
             &cards[1].extension.extension_id,
+            1000,
+            "test-trace",
         ).expect("compare cards");
 
         let json = serde_json::to_value(&comparison).unwrap();
@@ -186,7 +188,7 @@ fn test_trust_card_comparison_golden() {
 
 #[test]
 fn test_trust_card_diff_golden() {
-    let registry = create_test_registry();
+    let mut registry = create_test_registry();
 
     // Get a card that has version history
     let cards = registry.list(
@@ -197,10 +199,12 @@ fn test_trust_card_diff_golden() {
 
     for card in &cards {
         if card.trust_card_version > 1 {
-            let diff = registry.diff(
+            let diff = registry.compare_versions(
                 &card.extension.extension_id,
                 1,
                 card.trust_card_version,
+                1000,
+                "test-trace",
             );
 
             if let Ok(diff_result) = diff {
@@ -233,7 +237,7 @@ fn test_trust_card_derivation_metadata_golden() {
 
 #[test]
 fn test_trust_card_sync_report_golden() {
-    let registry = create_test_registry();
+    let mut registry = create_test_registry();
 
     // Simulate a sync operation to get sync report data
     let _cards = registry.list(

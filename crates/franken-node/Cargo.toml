@@ -1679,3 +1679,69 @@ required-features = ["test-support"]
 # DR-BENCH-015 (benchmark thresholds) — passes only on an idle machine; (C) the
 # pass-report snapshot needs a clean-machine re-bless for new merge_decisions /
 # merge_decision_count fields. Register once (A)-(C) resolve. See bd-86wc3.
+
+# bd-d5wo9 .C5 BATCH 6 (session 2026-07-02): re-bless cluster — deterministic
+# goldens where prod output legitimately drifted (benign field additions /
+# ordering). Diff-reviewed then accepted; verified green under the no-engine build.
+[[test]]
+name = "decision_receipt_signed_golden_conformance"
+path = "tests/decision_receipt_signed_golden_conformance.rs"
+required-features = ["extended-surfaces"]
+
+# bd_15u3_decision_engine_conformance (bd-2pbtu) compiles now (guardrail_monitor
+# drift reconciled) but is RUNTIME-RED: 9 pass / 3 fail — the test mock
+# mock_monitor_set_with_violations() is a no-op stub that never injects blocks, so
+# system-level-blocking assertions can't pass. Needs the mock implemented (semantic,
+# not drift). Compile-progress kept unregistered. See bd-2pbtu.
+
+# --- batch-6 runtime-semantic capture wave (registered locally to capture failures;
+#     only the ones that verify GREEN are kept) ---
+[[test]]
+name = "metamorphic_supply_chain"
+path = "tests/metamorphic_supply_chain.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "storage_crash_recovery_persistence_conformance"
+path = "tests/storage_crash_recovery_persistence_conformance.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "security_remote_cap_validation_conformance"
+path = "tests/security_remote_cap_validation_conformance.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "runtime_lane_scheduler_conformance"
+path = "tests/runtime_lane_scheduler_conformance.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "bd_91gg_repair_controller_conformance"
+path = "tests/bd_91gg_repair_controller_conformance.rs"
+required-features = ["extended-surfaces"]
+
+# metamorphic_canonical_serializer (bd-x3mjo) in progress: strict-schema fixture
+# reconcile took it 1/13 -> 6/13; remaining 7 relations assume JSON-text output but
+# prod emits a length-prefixed binary frame — round-trip/UTF-8 assertions being
+# reconciled to the binary contract. Registered once green. See bd-x3mjo.
+
+[[test]]
+name = "decision_receipt_golden_vectors_conformance"
+path = "tests/decision_receipt_golden_vectors_conformance.rs"
+required-features = ["extended-surfaces"]
+
+# trust_card_cross_version_conformance (bd-tb7e3) is NOT a re-bless: prod now signs
+# schema_version (schema-downgrade defense), so the test's post-signing schema
+# override invalidates the signature (2 semantic fails). Needs a re-sign seam or an
+# inverted assertion. Deferred; compile clean. See bd-tb7e3.
+
+[[test]]
+name = "runtime_lane_golden_artifacts"
+path = "tests/runtime_lane_golden_artifacts.rs"
+required-features = ["extended-surfaces"]
+
+# supply_chain_attestation_manifest_golden (bd-nb0i6) is ENGINE-DEPENDENT (imports
+# frankenengine_extension_host) — cannot be verified via the no-engine build while
+# rch workers are offline. Deferred; re-bless artifacts/golden/supply_chain_attestation_manifest.json
+# via UPDATE_GOLDENS once rch recovers.
