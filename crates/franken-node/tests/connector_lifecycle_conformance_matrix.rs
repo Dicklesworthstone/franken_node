@@ -585,11 +585,30 @@ pub fn test_scenario_compatibility(scenario: &CompatibilityScenario) -> Conforma
         discovered_limitations.push(format!("Frame parser compatibility below threshold: {:.2}", frame_compatibility));
     }
 
-    // Add protocol negotiation limitations if applicable
-    if let Some(ref protocol_result) = protocol_negotiation {
-        if !protocol_result.success {
-            discovered_limitations.push(format!("Protocol negotiation failed: {}", protocol_result.error));
-        }
+    // Add protocol negotiation limitations under the intersection-based model.
+    // The redesigned `ProtocolNegotiationResult` no longer carries a
+    // `success`/`error` pair; a failed negotiation is now signalled by an
+    // `INCOMPATIBLE` negotiated version (no common version within a family) or by
+    // an empty endpoint intersection (no shared connector endpoints).
+    let mut incompatible_families = Vec::new();
+    if protocol_negotiation.negotiated_lifecycle_version == "INCOMPATIBLE" {
+        incompatible_families.push("lifecycle");
+    }
+    if protocol_negotiation.negotiated_api_version == "INCOMPATIBLE" {
+        incompatible_families.push("api");
+    }
+    if protocol_negotiation.negotiated_session_version == "INCOMPATIBLE" {
+        incompatible_families.push("session");
+    }
+    if !incompatible_families.is_empty() {
+        discovered_limitations.push(format!(
+            "Protocol negotiation failed: no common version for {}",
+            incompatible_families.join(", ")
+        ));
+    }
+    if protocol_negotiation.endpoint_intersection.is_empty() {
+        discovered_limitations
+            .push("Protocol negotiation failed: no shared connector endpoints".to_string());
     }
 
     let actual_result = if compatibility_score >= 0.95 {
