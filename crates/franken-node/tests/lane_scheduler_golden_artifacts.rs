@@ -51,7 +51,7 @@ fn golden_telemetry_snapshot_minimal_scheduler() {
     // Scrub dynamic values for deterministic golden comparison
     settings.add_filter(r"\d{13,}", "[TIMESTAMP]");
     settings.add_filter(r"golden-test-\d+", "[TASK_ID]");
-    settings.add_filter(r"trace_id[\":]?\s*[\"'][^\"']+[\"']", "trace_id: \"[TRACE_ID]\"");
+    settings.add_filter(r#"trace_id[":]?\s*["'][^"']+["']"#, "trace_id: \"[TRACE_ID]\"");
 
     settings.bind(|| {
         let mut scheduler = LaneScheduler::new(minimal_policy()).unwrap();
@@ -76,7 +76,7 @@ fn golden_telemetry_snapshot_multi_lane_scheduler() {
     // Scrub dynamic values
     settings.add_filter(r"\d{13,}", "[TIMESTAMP]");
     settings.add_filter(r"(epoch|remote|log)-task-\d+", "[TASK_ID]");
-    settings.add_filter(r"trace_id[\":]?\s*[\"'][^\"']+[\"']", "trace_id: \"[TRACE_ID]\"");
+    settings.add_filter(r#"trace_id[":]?\s*["'][^"']+["']"#, "trace_id: \"[TRACE_ID]\"");
 
     settings.bind(|| {
         let mut scheduler = LaneScheduler::new(multi_lane_policy()).unwrap();

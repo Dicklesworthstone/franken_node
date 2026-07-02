@@ -635,7 +635,7 @@ fn canonicalize_json_value(value: &Value) -> Value {
 // Canonical persistence classes (from bd-1a1j matrix)
 // ---------------------------------------------------------------------------
 
-fn canonical_classes() -> Vec<PersistenceClass> {
+pub fn canonical_classes() -> Vec<PersistenceClass> {
     vec![
         PersistenceClass {
             domain: "fencing_token_state".into(),

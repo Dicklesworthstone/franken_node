@@ -58,7 +58,8 @@ pub enum TestStatus {
 /// Golden file loaders with scrubbing support
 
 fn load_golden_catalog() -> PersistenceClassCatalog {
-    let path = Path::new("tests/goldens/frankensqlite/persistence_class_catalog.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/goldens/frankensqlite/persistence_class_catalog.json");
     let content = fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("Failed to load golden catalog: {}", e));
     serde_json::from_str(&content)
@@ -66,7 +67,8 @@ fn load_golden_catalog() -> PersistenceClassCatalog {
 }
 
 fn load_golden_tier_matrix() -> TierMatrix {
-    let path = Path::new("tests/goldens/frankensqlite/tier_matrix.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/goldens/frankensqlite/tier_matrix.json");
     let content = fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("Failed to load golden tier matrix: {}", e));
     serde_json::from_str(&content)
@@ -370,7 +372,7 @@ fn test_adapter_behavior() -> Vec<ConformanceTestResult> {
         } else {
             TestStatus::Fail
         },
-        details: Some(format!("registered classes: {}", loaded_adapter.summary().registered_classes)),
+        details: Some(format!("registered classes: {}", loaded_adapter.summary().total_classes)),
     });
 
     results

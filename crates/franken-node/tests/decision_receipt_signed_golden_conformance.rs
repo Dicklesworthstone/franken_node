@@ -200,7 +200,7 @@ fn compute_chain_hash(previous_hash: Option<&str>, payload: &str) -> String {
 fn materialize_signed_vectors() -> Result<Vec<(GoldenVector, SignedReceipt)>, String> {
     let signing_key = conformance_signing_key();
     let mut vectors = live_vectors();
-    let mut signed = Vec::with_capacity(vectors.len());
+    let mut signed: Vec<SignedReceipt> = Vec::with_capacity(vectors.len());
 
     for index in 0..vectors.len() {
         if index > 0 {

@@ -147,7 +147,7 @@ fn incident_replay_malformed_bundle_fails() {
     let mut cmd = incident_cmd();
     cmd.arg("replay")
        .arg("--bundle")
-       .arg(malformed_bundle.to_string_lossy())
+       .arg(&malformed_bundle)
        .arg("--json")
        .current_dir(workspace.path());
 
