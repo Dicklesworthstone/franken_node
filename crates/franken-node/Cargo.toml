@@ -1590,10 +1590,11 @@ path = "tests/trust_card_admission_conformance.rs"
 #                   supply_chain_attestation_manifest_golden=bd-nb0i6,
 #                   decision_receipt_signed_golden_conformance=bd-8uv6i (prod added crypto_suite field)
 #   cli-drift    -> incident_replay_counterfactual_cli_e2e=bd-1qq5m (asserts incident replay --json/--verbose)
-#   verified-RED under test-support(,policy-engine) — compile+run but assertions fail (session 2026-07-02 Run B):
-#                  migrate_audit_goldens=bd-9buhn (snapshot scrubber over-scrubs prose install/build->install[PATH]),
-#                  migrate_validate_goldens=bd-di42u (risky=same scrubber; hardened=`migrate validate` now exits 1),
+#   verified-RED under test-support(,policy-engine) — compile+run but assertions fail (session 2026-07-02):
+#                  migrate_validate_goldens=bd-di42u (risky=STALE GOLDEN: prod added check mig-validate-005
+#                    "runtime smoke test skipped..." -> re-bless; hardened=`migrate validate` now exits 1 on the fixture),
 #                  doctor_policy_activation_e2e=bd-86wc3 (14/19 "failed resolving configuration for doctor" + 5 downstream)
+#   (migrate_audit_goldens=bd-9buhn was in this list but is now FIXED + re-registered green — see block below)
 [[test]]
 name = "security_adversary_graph_conformance"
 path = "tests/security_adversary_graph_conformance.rs"
@@ -1605,3 +1606,15 @@ path = "tests/supply_chain_registry_attestation_receipt_conformance.rs"
 [[test]]
 name = "frankensqlite_conformance_harness"
 path = "tests/frankensqlite_conformance_harness.rs"
+
+# bd-9buhn CLOSED (session 2026-07-02): re-registered VERIFIED-GREEN (2/2) after
+# fixing the over-greedy path scrubber in tests/migrate_golden_helpers.rs (it was
+# rewriting prose like "install/build" -> "install[PATH]"). No re-bless needed.
+# Verified via `cargo test -p frankenengine-node --no-default-features
+# --features test-support,http-client,external-commands --test migrate_audit_goldens`
+# (rch workers offline -> local no-engine build; migrate audit is static JS analysis,
+# engine-independent). required-features=[test-support] => skipped in the default lane.
+[[test]]
+name = "migrate_audit_goldens"
+path = "tests/migrate_audit_goldens.rs"
+required-features = ["test-support"]
