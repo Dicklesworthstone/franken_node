@@ -1590,8 +1590,10 @@ path = "tests/trust_card_admission_conformance.rs"
 #                   supply_chain_attestation_manifest_golden=bd-nb0i6,
 #                   decision_receipt_signed_golden_conformance=bd-8uv6i (prod added crypto_suite field)
 #   cli-drift    -> incident_replay_counterfactual_cli_e2e=bd-1qq5m (asserts incident replay --json/--verbose)
-#   feature-gated (pending features-lane verify) -> doctor_policy_activation_e2e, migrate_audit_goldens,
-#                  migrate_validate_goldens
+#   verified-RED under test-support(,policy-engine) — compile+run but assertions fail (session 2026-07-02 Run B):
+#                  migrate_audit_goldens=bd-9buhn (snapshot scrubber over-scrubs prose install/build->install[PATH]),
+#                  migrate_validate_goldens=bd-di42u (risky=same scrubber; hardened=`migrate validate` now exits 1),
+#                  doctor_policy_activation_e2e=bd-86wc3 (14/19 "failed resolving configuration for doctor" + 5 downstream)
 [[test]]
 name = "security_adversary_graph_conformance"
 path = "tests/security_adversary_graph_conformance.rs"
