@@ -27421,11 +27421,22 @@ fn main() -> Result<()> {
             }
 
             let profile_override = parse_profile_override(args.profile.as_deref())?;
-            let resolved = config::Config::resolve(
+            // `doctor` is a read-only diagnostic that only READS merged config
+            // fields to build its report (it reports on config state via the
+            // DR-CONFIG/DR-TRUST checks rather than enforcing it). Resolve WITHOUT
+            // running full `Config::validate()`, whose fail-closed boundaries
+            // (`trust.registry_signing_key`, `security.authorized_api_keys`) only
+            // matter for `run`. Validating here made `doctor` abort with a
+            // misleading "failed resolving configuration" error on any workspace
+            // that had not yet run `franken-node init`, defeating the purpose of a
+            // diagnostic meant to run anywhere. Mirrors the receipt-export probe
+            // (bd-3c2ie) which uses the same lenient entry point for the same reason.
+            let resolved = config::Config::resolve_without_validation_with_env(
                 args.config.as_deref(),
                 CliOverrides {
                     profile: profile_override,
                 },
+                &|key| std::env::var(key).ok(),
             )
             .context("failed resolving configuration for doctor")?;
             let report = build_doctor_report_with_policy_input(

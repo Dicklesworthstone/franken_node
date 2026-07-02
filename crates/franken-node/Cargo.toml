@@ -1666,3 +1666,16 @@ required-features = ["advanced-features"]
 name = "migrate_validate_goldens"
 path = "tests/migrate_validate_goldens.rs"
 required-features = ["test-support"]
+
+# bd-86wc3: doctor_policy_activation_e2e stays UN-registered. Its primary root
+# cause — `doctor` aborting with "failed resolving configuration" on any workspace
+# that had not run `franken-node init` — is FIXED in prod (main.rs now uses the
+# lenient resolve_without_validation_with_env; doctor is a read-only diagnostic).
+# But the file has THREE further independent failures, so it is not green: (A)
+# debug_trace `--policy <abs temp path>` is rejected by the content-path guard
+# ("Absolute paths not allowed for user content") — real prod-vs-test conflict;
+# (B) overall_status=fail is driven by LIVE environmental checks DR-WORKSPACE-001
+# (workspace pressure CRITICAL under the concurrent build swarm + rch offline) and
+# DR-BENCH-015 (benchmark thresholds) — passes only on an idle machine; (C) the
+# pass-report snapshot needs a clean-machine re-bless for new merge_decisions /
+# merge_decision_count fields. Register once (A)-(C) resolve. See bd-86wc3.
