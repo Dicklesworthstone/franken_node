@@ -6,7 +6,7 @@
 //! - DecodeVerdict and GuardrailViolation canonical forms
 //! - Frame validation audit trails and error handling
 
-use super::super::golden;
+use crate::golden;
 use frankenengine_node::connector::frame_parser::{
     DecodeAuditEntry, DecodeVerdict, FrameInput, GuardrailViolation, ParserConfig, ParserError,
     ResourceUsage, check_batch, check_frame, validate_config,

@@ -10,7 +10,7 @@
 
 use frankenengine_node::runtime::lane_scheduler::{
     LaneConfig, LaneMappingPolicy, LaneScheduler, LaneSchedulerError,
-    SchedulerLane, TaskClass, task_classes,
+    SchedulerLane, task_classes,
 };
 use insta::Settings;
 
@@ -57,12 +57,14 @@ fn golden_telemetry_snapshot_minimal_scheduler() {
         let mut scheduler = LaneScheduler::new(minimal_policy()).unwrap();
 
         // Admit a single task for deterministic state
-        let _assignment = scheduler
+        let assignment = scheduler
             .assign_task(&task_classes::log_rotation(), 1000000, "golden-test-1")
             .unwrap();
 
         // Mark task as completed for deterministic telemetry
-        scheduler.mark_task_completed("golden-test-1", 1000100).unwrap();
+        scheduler
+            .complete_task(assignment.task_id.as_ref(), 1000100, "golden-test-1")
+            .unwrap();
 
         let snapshot = scheduler.telemetry_snapshot(1000200);
         insta::assert_json_snapshot!(snapshot);
@@ -82,7 +84,7 @@ fn golden_telemetry_snapshot_multi_lane_scheduler() {
         let mut scheduler = LaneScheduler::new(multi_lane_policy()).unwrap();
 
         // Admit tasks across different lanes for comprehensive telemetry
-        let _assignment1 = scheduler
+        let assignment1 = scheduler
             .assign_task(&task_classes::epoch_transition(), 2000000, "epoch-task-1")
             .unwrap();
 
@@ -90,13 +92,17 @@ fn golden_telemetry_snapshot_multi_lane_scheduler() {
             .assign_task(&task_classes::remote_computation(), 2000100, "remote-task-1")
             .unwrap();
 
-        let _assignment3 = scheduler
+        let assignment3 = scheduler
             .assign_task(&task_classes::log_rotation(), 2000200, "log-task-1")
             .unwrap();
 
         // Complete some tasks to show different lane states
-        scheduler.mark_task_completed("epoch-task-1", 2000300).unwrap();
-        scheduler.mark_task_completed("log-task-1", 2000400).unwrap();
+        scheduler
+            .complete_task(assignment1.task_id.as_ref(), 2000300, "epoch-task-1")
+            .unwrap();
+        scheduler
+            .complete_task(assignment3.task_id.as_ref(), 2000400, "log-task-1")
+            .unwrap();
 
         let snapshot = scheduler.telemetry_snapshot(2000500);
         insta::assert_json_snapshot!(snapshot);
@@ -169,7 +175,7 @@ fn golden_scheduler_policy_validation_errors() {
     for (name, result) in invalid_policies {
         validation_results.push(serde_json::json!({
             "policy_type": name,
-            "validation_result": result.map(|_| "valid").unwrap_or_else(|e| e.as_str()),
+            "validation_result": result.as_ref().map(|_| "valid").unwrap_or_else(|e| e.as_str()),
             "is_valid": result.is_ok()
         }));
     }

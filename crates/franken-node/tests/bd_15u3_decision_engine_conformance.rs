@@ -22,7 +22,7 @@
 //! - SHOULD: 4/4 (100%) ✓
 //! - Total: 11/11 (100%) ✓
 
-use franken_node::policy::{
+use frankenengine_node::policy::{
     bayesian_diagnostics::{CandidateRef, RankedCandidate},
     decision_engine::{
         BlockedCandidate, DecisionEngine, DecisionOutcome, DecisionReason, GuardrailId,

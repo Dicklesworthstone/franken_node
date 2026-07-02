@@ -8,7 +8,7 @@ use frankenengine_node::sdk::replay_capsule::{
 };
 use frankenengine_node::supply_chain::trust_card::{
     TrustCard, ExtensionIdentity, PublisherIdentity, CertificationLevel, BehavioralProfile,
-    RevocationStatus, ProvenanceSummary, ReputationTrend, RiskAssessment,
+    RevocationStatus, ProvenanceSummary, ReputationTrend, RiskAssessment, RiskLevel,
 };
 use frankenengine_node::supply_chain::certification::DerivationMetadata;
 use insta::{assert_json_snapshot, assert_snapshot};
@@ -33,36 +33,37 @@ fn test_trust_card_canonical_json_snapshot() {
             publisher_id: "pub-example-corp".to_string(),
             display_name: "Example Corporation".to_string(),
         },
-        certification_level: CertificationLevel::Basic,
+        certification_level: CertificationLevel::Bronze,
         capability_declarations: vec![],
         behavioral_profile: BehavioralProfile {
             network_access: false,
-            file_system_access: false,
-            external_process_spawn: false,
-            privilege_escalation_risk: false,
+            filesystem_access: false,
+            subprocess_access: false,
+            profile_summary: "no elevated behaviors observed".to_string(),
         },
-        revocation_status: RevocationStatus {
-            is_revoked: false,
-            revocation_reason: None,
-            revoked_at: None,
-        },
+        revocation_status: RevocationStatus::Active,
         provenance_summary: ProvenanceSummary {
-            source_hash: "sha256:deadbeef".to_string(),
-            build_environment: "secure-ci-v1".to_string(),
-            supply_chain_verified: true,
+            attestation_level: "verified".to_string(),
+            source_uri: "https://example.com/example-ext/v1.0.0".to_string(),
+            artifact_hashes: vec!["sha256:deadbeef".to_string()],
+            verified_at: "2026-05-08T12:00:00Z".to_string(),
         },
         reputation_score_basis_points: 8500, // 85%
         reputation_trend: ReputationTrend::Stable,
         active_quarantine: false,
         dependency_trust_summary: vec![],
         last_verified_timestamp: "2026-05-08T12:00:00Z".to_string(),
-        user_facing_risk_assessment: RiskAssessment::Low,
+        user_facing_risk_assessment: RiskAssessment {
+            level: RiskLevel::Low,
+            summary: "low user-facing risk".to_string(),
+        },
         audit_history: vec![],
         derivation_evidence: Some(DerivationMetadata {
-            evidence_bundle_hash: "sha256:evidence123".to_string(),
-            verification_timestamp: "2026-05-08T12:00:00Z".to_string(),
-            verifier_identity: "verifier-alpha".to_string(),
+            evidence_refs: vec![],
+            derived_at_epoch: 1_746_705_600,
+            derivation_chain_hash: "sha256:evidence123".to_string(),
         }),
+        camouflage_hints: vec![],
         card_hash: "sha256:cardhash123".to_string(),
         registry_signature: "sig-fixture-trust-card-v1".to_string(),
     };
@@ -88,9 +89,6 @@ fn test_replay_capsule_canonical_json_snapshot() {
     input_metadata_2.insert("type".to_string(), "file".to_string());
     input_metadata_2.insert("filename".to_string(), "data.json".to_string());
 
-    let mut output_metadata = BTreeMap::new();
-    output_metadata.insert("type".to_string(), "result".to_string());
-
     let replay_capsule = ReplayCapsule {
         capsule_id: "capsule-fixture-v1-001".to_string(),
         format_version: CURRENT_FORMAT_VERSION,
@@ -110,7 +108,7 @@ fn test_replay_capsule_canonical_json_snapshot() {
             CapsuleOutput {
                 seq: 1,
                 data: b"PASS:0.95".to_vec(),
-                metadata: output_metadata,
+                output_hash: "sha256:passoutput123".to_string(),
             },
         ],
         environment: EnvironmentSnapshot {

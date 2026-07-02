@@ -13,11 +13,17 @@ use rand::rngs::OsRng;
 use frankenengine_node::supply_chain::trust_card::{
     TrustCard, TrustCardInput, TrustCardMutation, TrustCardRegistry,
     CertificationLevel, RevocationStatus, ExtensionIdentity, PublisherIdentity,
-    BehavioralProfile, ProvenanceSummary, ReputationTrend, RiskAssessment,
-    CapabilityDeclaration, DependencyTrustStatus, AuditRecord,
+    BehavioralProfile, ProvenanceSummary, ReputationTrend, RiskAssessment, RiskLevel,
+    CapabilityDeclaration, CapabilityRisk, DependencyTrustStatus, AuditRecord,
     verify_card_signature, compute_card_hash,
 };
 use frankenengine_node::supply_chain::certification::{VerifiedEvidenceRef, EvidenceType};
+
+/// Fixed timestamp (2024-01-01T00:00:00Z) so metamorphic comparisons stay deterministic
+/// and cached reads (TTL 3600s) never go stale within a single test.
+const TEST_NOW_SECS: u64 = 1_704_067_200;
+/// Operator-visible correlation ID recorded in trust-card telemetry for these tests.
+const TEST_TRACE_ID: &str = "metamorphic-supply-chain-test";
 
 // Real cryptographic helper for tests with ed25519-dalek signing
 fn generate_test_signing_key() -> SigningKey {
@@ -41,28 +47,28 @@ fn create_minimal_trust_card_input(
         },
         publisher: PublisherIdentity {
             publisher_id: "test_publisher".to_string(),
-            name: "Test Publisher".to_string(),
-            verification_level: "unverified".to_string(),
+            display_name: "Test Publisher".to_string(),
         },
         certification_level: level,
         capability_declarations: vec![
             CapabilityDeclaration {
                 name: "test_capability".to_string(),
                 description: "Test capability for metamorphic testing".to_string(),
-                required_permissions: vec!["test:read".to_string()],
+                risk: CapabilityRisk::Low,
             }
         ],
         behavioral_profile: BehavioralProfile {
-            network_access_pattern: "none".to_string(),
-            file_system_access_pattern: "read_only".to_string(),
-            runtime_execution_pattern: "sandboxed".to_string(),
+            network_access: false,
+            filesystem_access: true,
+            subprocess_access: false,
+            profile_summary: "no network, read-only filesystem, sandboxed execution".to_string(),
         },
         revocation_status,
         provenance_summary: ProvenanceSummary {
-            source_code_integrity_score: 85,
-            build_reproducibility_score: 90,
-            dependency_audit_score: 75,
-            static_analysis_findings: vec![],
+            attestation_level: "verified".to_string(),
+            source_uri: "https://registry.example/test_publisher".to_string(),
+            artifact_hashes: vec![],
+            verified_at: "2024-01-01T00:00:00Z".to_string(),
         },
         reputation_score_basis_points: 8500, // 85%
         reputation_trend: ReputationTrend::Stable,
@@ -70,15 +76,14 @@ fn create_minimal_trust_card_input(
         dependency_trust_summary: vec![],
         last_verified_timestamp: "2024-01-01T00:00:00Z".to_string(),
         user_facing_risk_assessment: RiskAssessment {
-            overall_risk_level: "low".to_string(),
-            specific_risks: vec![],
-            mitigation_suggestions: vec![],
+            level: RiskLevel::Low,
+            summary: "low risk".to_string(),
         },
         evidence_refs: vec![
             // Create minimal evidence reference to satisfy validation
             VerifiedEvidenceRef {
                 evidence_id: format!("test_evidence_{}", extension_id),
-                evidence_type: EvidenceType::StaticAnalysis,
+                evidence_type: EvidenceType::ProvenanceChain,
                 verified_at_epoch: 1704067200, // 2024-01-01
                 verification_receipt_hash: "test_receipt_hash".to_string(),
             }
@@ -121,7 +126,7 @@ mod trust_card_commutativity_tests {
             evidence_refs: Some(vec![
                 VerifiedEvidenceRef {
                     evidence_id: format!("revocation_evidence_{}", extension_id),
-                    evidence_type: EvidenceType::SecurityAudit,
+                    evidence_type: EvidenceType::AuditReport,
                     verified_at_epoch: 1704067200, // 2024-01-01
                     verification_receipt_hash: "revocation_receipt_hash".to_string(),
                 }
@@ -130,21 +135,21 @@ mod trust_card_commutativity_tests {
 
         // Path 1: Add then Revoke
         let input1 = create_minimal_trust_card_input(extension_id, CertificationLevel::Bronze, RevocationStatus::Active);
-        let result1 = registry1.create_card(input1)
+        let result1 = registry1.create(input1, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("create should succeed");
 
         // Verify the card has real cryptographic signature
         verify_card_signature(&result1, &registry_key1)
             .expect("created card should have valid signature");
 
-        let updated1 = registry1.update_card(extension_id, revoke_mutation.clone())
+        let updated1 = registry1.update(extension_id, revoke_mutation.clone(), TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("revoke should succeed");
 
         // Path 2: Create already-revoked (simulate revoke during creation)
         let input2 = create_minimal_trust_card_input(extension_id, CertificationLevel::Bronze, RevocationStatus::Active);
-        let _result2 = registry2.create_card(input2)
+        let _result2 = registry2.create(input2, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("create should succeed");
-        let updated2 = registry2.update_card(extension_id, revoke_mutation.clone())
+        let updated2 = registry2.update(extension_id, revoke_mutation.clone(), TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("revoke should succeed");
 
         // MR assertion: both paths lead to equivalent revoked state
@@ -188,9 +193,9 @@ mod trust_card_commutativity_tests {
         let input1 = create_minimal_trust_card_input(extension_id, CertificationLevel::Bronze, RevocationStatus::Active);
         let input2 = create_minimal_trust_card_input(extension_id, CertificationLevel::Bronze, RevocationStatus::Active);
 
-        registry1.create_card(input1)
+        registry1.create(input1, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("create should succeed");
-        registry2.create_card(input2)
+        registry2.create(input2, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("create should succeed");
 
         // Path 1: Upgrade then Revoke
@@ -205,14 +210,14 @@ mod trust_card_commutativity_tests {
             evidence_refs: Some(vec![
                 VerifiedEvidenceRef {
                     evidence_id: format!("upgrade_evidence_{}", extension_id),
-                    evidence_type: EvidenceType::CertificationAudit,
+                    evidence_type: EvidenceType::AuditReport,
                     verified_at_epoch: 1704067200,
                     verification_receipt_hash: "upgrade_receipt_hash".to_string(),
                 }
             ]),
         };
 
-        let upgraded1 = registry1.update_card(extension_id, upgrade_mutation)
+        let upgraded1 = registry1.update(extension_id, upgrade_mutation, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("upgrade should succeed");
 
         // Verify upgraded card signature
@@ -233,18 +238,18 @@ mod trust_card_commutativity_tests {
             evidence_refs: Some(vec![
                 VerifiedEvidenceRef {
                     evidence_id: format!("revocation_evidence_{}", extension_id),
-                    evidence_type: EvidenceType::SecurityAudit,
+                    evidence_type: EvidenceType::AuditReport,
                     verified_at_epoch: 1704067200,
                     verification_receipt_hash: "revocation_receipt_hash".to_string(),
                 }
             ]),
         };
 
-        let final1 = registry1.update_card(extension_id, revoke_mutation.clone())
+        let final1 = registry1.update(extension_id, revoke_mutation.clone(), TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("revoke should succeed");
 
         // Path 2: Revoke then attempt upgrade (should fail due to monotonic revocation)
-        registry2.update_card(extension_id, revoke_mutation)
+        registry2.update(extension_id, revoke_mutation, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("revoke should succeed");
 
         // Attempting to upgrade revoked card should fail
@@ -259,14 +264,14 @@ mod trust_card_commutativity_tests {
             evidence_refs: Some(vec![
                 VerifiedEvidenceRef {
                     evidence_id: format!("upgrade_after_revoke_{}", extension_id),
-                    evidence_type: EvidenceType::CertificationAudit,
+                    evidence_type: EvidenceType::AuditReport,
                     verified_at_epoch: 1704067300,
                     verification_receipt_hash: "upgrade_after_revoke_hash".to_string(),
                 }
             ]),
         };
 
-        let upgrade_result = registry2.update_card(extension_id, upgrade_mutation2);
+        let upgrade_result = registry2.update(extension_id, upgrade_mutation2, TEST_NOW_SECS, TEST_TRACE_ID);
 
         // MR assertion: revoke is always final, regardless of operation order
         assert!(upgrade_result.is_err(), "Cannot upgrade revoked card");
@@ -297,7 +302,7 @@ mod registry_idempotence_tests {
 
         // First admission
         let input1 = create_minimal_trust_card_input(extension_id, CertificationLevel::Bronze, RevocationStatus::Active);
-        let result1 = registry.create_card(input1);
+        let result1 = registry.create(input1, TEST_NOW_SECS, TEST_TRACE_ID);
         assert!(result1.is_ok(), "First admission should succeed");
         let card1 = result1.unwrap();
 
@@ -305,18 +310,18 @@ mod registry_idempotence_tests {
         verify_card_signature(&card1, &registry_key)
             .expect("first card should have valid signature");
 
-        let initial_snapshot = registry.snapshot();
+        let initial_snapshot = registry.snapshot().expect("snapshot should succeed");
         let initial_count = initial_snapshot.cards_by_extension.get(extension_id)
             .map(|cards| cards.len())
             .unwrap_or(0);
 
         // Second admission should fail (duplicate)
         let input2 = create_minimal_trust_card_input(extension_id, CertificationLevel::Silver, RevocationStatus::Active);
-        let result2 = registry.create_card(input2);
+        let result2 = registry.create(input2, TEST_NOW_SECS, TEST_TRACE_ID);
         assert!(result2.is_err(), "Duplicate admission should fail");
 
         // MR assertion: registry state unchanged by failed duplicate admission
-        let final_snapshot = registry.snapshot();
+        let final_snapshot = registry.snapshot().expect("snapshot should succeed");
         let final_count = final_snapshot.cards_by_extension.get(extension_id)
             .map(|cards| cards.len())
             .unwrap_or(0);
@@ -324,8 +329,10 @@ mod registry_idempotence_tests {
         assert_eq!(final_count, initial_count,
             "Registry card count should not change on duplicate admission");
 
-        let existing_cards = registry.get_cards(extension_id, None)
-            .expect("Should get existing cards");
+        let existing_cards: Vec<_> = registry.read(extension_id, TEST_NOW_SECS, TEST_TRACE_ID)
+            .expect("Should get existing cards")
+            .into_iter()
+            .collect();
         assert!(!existing_cards.is_empty(), "Original card should still exist");
 
         let existing_card = &existing_cards[0];
@@ -353,7 +360,7 @@ mod registry_idempotence_tests {
 
         // Set up: create card
         let input = create_minimal_trust_card_input(extension_id, CertificationLevel::Bronze, RevocationStatus::Active);
-        let initial_card = registry.create_card(input)
+        let initial_card = registry.create(input, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("Initial create should succeed");
 
         verify_card_signature(&initial_card, &registry_key)
@@ -374,14 +381,14 @@ mod registry_idempotence_tests {
             evidence_refs: Some(vec![
                 VerifiedEvidenceRef {
                     evidence_id: format!("eviction_evidence_{}", extension_id),
-                    evidence_type: EvidenceType::SecurityAudit,
+                    evidence_type: EvidenceType::AuditReport,
                     verified_at_epoch: 1704067200,
                     verification_receipt_hash: "eviction_receipt_hash".to_string(),
                 }
             ]),
         };
 
-        let revoked1 = registry.update_card(extension_id, revoke_mutation.clone())
+        let revoked1 = registry.update(extension_id, revoke_mutation.clone(), TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("First revocation should succeed");
 
         // Verify revoked card has valid signature
@@ -391,7 +398,7 @@ mod registry_idempotence_tests {
         let version_after_first = revoked1.trust_card_version;
 
         // Second "eviction" attempt (redundant revocation)
-        let revoked2 = registry.update_card(extension_id, revoke_mutation)
+        let revoked2 = registry.update(extension_id, revoke_mutation, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("Second revocation should succeed idempotently");
 
         // MR assertion: idempotent operation preserves revoked state
@@ -417,7 +424,7 @@ mod registry_idempotence_tests {
 
         // Set up: create card
         let input = create_minimal_trust_card_input(extension_id, CertificationLevel::Bronze, RevocationStatus::Active);
-        registry.create_card(input)
+        registry.create(input, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("Initial create should succeed");
 
         let revoke_mutation = TrustCardMutation {
@@ -434,7 +441,7 @@ mod registry_idempotence_tests {
             evidence_refs: Some(vec![
                 VerifiedEvidenceRef {
                     evidence_id: format!("revocation_evidence_{}", extension_id),
-                    evidence_type: EvidenceType::SecurityAudit,
+                    evidence_type: EvidenceType::AuditReport,
                     verified_at_epoch: 1704067200,
                     verification_receipt_hash: "revocation_receipt_hash".to_string(),
                 }
@@ -442,7 +449,7 @@ mod registry_idempotence_tests {
         };
 
         // First revocation
-        let result1 = registry.update_card(extension_id, revoke_mutation.clone())
+        let result1 = registry.update(extension_id, revoke_mutation.clone(), TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("First revocation should succeed");
 
         // Verify first revoked card has valid signature
@@ -452,7 +459,7 @@ mod registry_idempotence_tests {
         let version_after_first = result1.trust_card_version;
 
         // Second revocation (idempotent due to monotonic revocation)
-        let result2 = registry.update_card(extension_id, revoke_mutation.clone());
+        let result2 = registry.update(extension_id, revoke_mutation.clone(), TEST_NOW_SECS, TEST_TRACE_ID);
 
         // MR assertion: second revocation should be handled gracefully
         // (Either succeed idempotently or fail predictably)
@@ -470,8 +477,10 @@ mod registry_idempotence_tests {
             }
             Err(_) => {
                 // If it fails, the original revocation should be preserved
-                let existing_cards = registry.get_cards(extension_id, None)
-                    .expect("Should get existing cards after failed re-revoke");
+                let existing_cards: Vec<_> = registry.read(extension_id, TEST_NOW_SECS, TEST_TRACE_ID)
+                    .expect("Should get existing cards after failed re-revoke")
+                    .into_iter()
+                    .collect();
                 assert!(!existing_cards.is_empty(), "Card should still exist after failed re-revoke");
 
                 let existing = &existing_cards[0];
@@ -551,7 +560,7 @@ mod trust_card_roundtrip_tests {
             CertificationLevel::Gold,
             RevocationStatus::Active
         );
-        let active_card = registry.create_card(active_input)
+        let active_card = registry.create(active_input, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("should create active card");
         test_trust_card_roundtrip_invariance(&active_card, &registry_key);
 
@@ -561,7 +570,7 @@ mod trust_card_roundtrip_tests {
             CertificationLevel::Bronze,
             RevocationStatus::Active
         );
-        let revoked_initial = registry.create_card(revoked_input)
+        let revoked_initial = registry.create(revoked_input, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("should create card for revocation");
 
         let revoke_mutation = TrustCardMutation {
@@ -578,13 +587,13 @@ mod trust_card_roundtrip_tests {
             evidence_refs: Some(vec![
                 VerifiedEvidenceRef {
                     evidence_id: "revocation_evidence".to_string(),
-                    evidence_type: EvidenceType::SecurityAudit,
+                    evidence_type: EvidenceType::AuditReport,
                     verified_at_epoch: 1672531200, // 2023-01-01
                     verification_receipt_hash: "revocation_receipt_hash".to_string(),
                 }
             ]),
         };
-        let revoked_card = registry.update_card("npm:@test/revoked-roundtrip", revoke_mutation)
+        let revoked_card = registry.update("npm:@test/revoked-roundtrip", revoke_mutation, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("should revoke card");
         test_trust_card_roundtrip_invariance(&revoked_card, &registry_key);
 
@@ -594,7 +603,7 @@ mod trust_card_roundtrip_tests {
             CertificationLevel::Unknown,
             RevocationStatus::Active
         );
-        let minimal_card = registry.create_card(minimal_input)
+        let minimal_card = registry.create(minimal_input, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("should create minimal card");
         test_trust_card_roundtrip_invariance(&minimal_card, &registry_key);
 
@@ -609,14 +618,10 @@ mod trust_card_roundtrip_tests {
         complex_input.capability_declarations.push(CapabilityDeclaration {
             name: "enterprise_capability".to_string(),
             description: "Complex enterprise capability with unicode: 🔒🛡️⚡".to_string(),
-            required_permissions: vec![
-                "enterprise:read".to_string(),
-                "enterprise:write".to_string(),
-                "enterprise:admin".to_string(),
-            ],
+            risk: CapabilityRisk::High,
         });
 
-        let complex_initial = registry.create_card(complex_input)
+        let complex_initial = registry.create(complex_input, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("should create complex card");
 
         let complex_revoke_mutation = TrustCardMutation {
@@ -633,16 +638,18 @@ mod trust_card_roundtrip_tests {
             evidence_refs: Some(vec![
                 VerifiedEvidenceRef {
                     evidence_id: "complex_revocation_evidence".to_string(),
-                    evidence_type: EvidenceType::SecurityAudit,
+                    evidence_type: EvidenceType::AuditReport,
                     verified_at_epoch: 1704067200, // 2024-01-01
                     verification_receipt_hash: "complex_revocation_receipt_hash".to_string(),
                 }
             ]),
         };
 
-        let complex_card = registry.update_card(
+        let complex_card = registry.update(
             "npm:@enterprise/very-long-extension-name-with-special-chars_123",
-            complex_revoke_mutation
+            complex_revoke_mutation,
+            TEST_NOW_SECS,
+            TEST_TRACE_ID,
         ).expect("should revoke complex card");
 
         test_trust_card_roundtrip_invariance(&complex_card, &registry_key);
@@ -664,7 +671,7 @@ mod trust_card_roundtrip_tests {
                 evidence_refs: Some(vec![
                     VerifiedEvidenceRef {
                         evidence_id: "upgrade_evidence".to_string(),
-                        evidence_type: EvidenceType::CertificationAudit,
+                        evidence_type: EvidenceType::AuditReport,
                         verified_at_epoch: 1704153600,
                         verification_receipt_hash: "upgrade_receipt_hash".to_string(),
                     }
@@ -685,7 +692,7 @@ mod trust_card_roundtrip_tests {
                 evidence_refs: Some(vec![
                     VerifiedEvidenceRef {
                         evidence_id: "revocation_evidence".to_string(),
-                        evidence_type: EvidenceType::SecurityAudit,
+                        evidence_type: EvidenceType::AuditReport,
                         verified_at_epoch: 1704153600,
                         verification_receipt_hash: "revocation_receipt_hash".to_string(),
                     }
@@ -703,7 +710,7 @@ mod trust_card_roundtrip_tests {
                 evidence_refs: Some(vec![
                     VerifiedEvidenceRef {
                         evidence_id: "combined_evidence".to_string(),
-                        evidence_type: EvidenceType::CertificationAudit,
+                        evidence_type: EvidenceType::AuditReport,
                         verified_at_epoch: 1704153600,
                         verification_receipt_hash: "combined_receipt_hash".to_string(),
                     }
@@ -762,7 +769,7 @@ mod composite_metamorphic_tests {
 
         // Path 1: Standard sequence (Bronze → Silver → Revoked → New Bronze)
         let input1 = create_minimal_trust_card_input(extension_id, CertificationLevel::Bronze, RevocationStatus::Active);
-        let card1 = registry1.create_card(input1)
+        let card1 = registry1.create(input1, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("create should succeed");
 
         verify_card_signature(&card1, &registry_key1)
@@ -779,14 +786,14 @@ mod composite_metamorphic_tests {
             evidence_refs: Some(vec![
                 VerifiedEvidenceRef {
                     evidence_id: "upgrade_evidence_1".to_string(),
-                    evidence_type: EvidenceType::CertificationAudit,
+                    evidence_type: EvidenceType::AuditReport,
                     verified_at_epoch: 1704067200,
                     verification_receipt_hash: "upgrade_receipt_1".to_string(),
                 }
             ]),
         };
 
-        let upgraded1 = registry1.update_card(extension_id, upgrade_mutation1)
+        let upgraded1 = registry1.update(extension_id, upgrade_mutation1, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("upgrade should succeed");
 
         verify_card_signature(&upgraded1, &registry_key1)
@@ -797,7 +804,7 @@ mod composite_metamorphic_tests {
 
         // Path 2: Different sequence (Direct Silver creation → versioning)
         let input2 = create_minimal_trust_card_input(extension_id, CertificationLevel::Silver, RevocationStatus::Active);
-        let card2 = registry2.create_card(input2)
+        let card2 = registry2.create(input2, TEST_NOW_SECS, TEST_TRACE_ID)
             .expect("create should succeed");
 
         verify_card_signature(&card2, &registry_key2)

@@ -1,0 +1,44 @@
+---
+source: crates/franken-node/tests/lane_scheduler_golden_artifacts.rs
+assertion_line: 108
+expression: snapshot
+---
+{
+  "counters": [
+    {
+      "lane": "Background",
+      "active_count": 0,
+      "queued_count": 0,
+      "first_queued_at_ms": null,
+      "completed_total": 1,
+      "rejected_total": 0,
+      "starvation_events": 0,
+      "starvation_active": false,
+      "last_completion_ms": 2000400
+    },
+    {
+      "lane": "ControlCritical",
+      "active_count": 0,
+      "queued_count": 0,
+      "first_queued_at_ms": null,
+      "completed_total": 1,
+      "rejected_total": 0,
+      "starvation_events": 0,
+      "starvation_active": false,
+      "last_completion_ms": 2000300
+    },
+    {
+      "lane": "RemoteEffect",
+      "active_count": 1,
+      "queued_count": 0,
+      "first_queued_at_ms": null,
+      "completed_total": 0,
+      "rejected_total": 0,
+      "starvation_events": 0,
+      "starvation_active": false,
+      "last_completion_ms": null
+    }
+  ],
+  "timestamp_ms": 2000500,
+  "schema_version": "ls-v1.0"
+}

@@ -6,7 +6,7 @@
 //! - CapabilityGate authorization decisions and audit events
 //! - RemoteScope normalization and validation logic
 
-use super::super::golden;
+use crate::golden;
 use frankenengine_node::security::remote_cap::{
     CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteCap, RemoteCapAuditEvent,
     RemoteOperation, RemoteScope,
@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 #[test]
 fn test_remote_capability_envelope_basic_structure() {
     // Test basic RemoteCap structure serialization
-    let provider = CapabilityProvider::new("test-signing-secret".to_string());
+    let provider =
+        CapabilityProvider::new("test-signing-secret").expect("Should create provider");
 
     let scope = RemoteScope::new(
         vec![
@@ -30,14 +31,15 @@ fn test_remote_capability_envelope_basic_structure() {
         ],
     );
 
-    let cap = provider
-        .issue_capability(
-            "test-token-001",
+    let (cap, _issue_event) = provider
+        .issue(
             "test-issuer",
-            1234567890, // Fixed issued_at timestamp
-            1234571490, // Fixed expires_at timestamp (1 hour later)
             scope,
-            false, // Not single-use
+            1234567890, // Fixed issued_at timestamp
+            3600,       // TTL seconds (1 hour)
+            true,       // operator authorized
+            false,      // Not single-use
+            "trace-issue-basic",
         )
         .expect("Should issue capability successfully");
 
@@ -118,31 +120,30 @@ fn test_remote_scope_validation_patterns() {
 
 #[test]
 fn test_capability_provider_issuance_patterns() {
-    let provider = CapabilityProvider::new("test-signing-secret".to_string());
+    let provider =
+        CapabilityProvider::new("test-signing-secret").expect("Should create provider");
 
     // Test different issuance patterns
     let test_cases = vec![
         (
             "single_use_capability",
-            provider.issue_capability(
-                "single-use-token",
+            provider.issue(
                 "test-issuer",
-                1234567890,
-                1234571490,
                 RemoteScope::new(
                     vec![RemoteOperation::RemoteComputation],
                     vec!["https://compute.example.com/single-use".to_string()],
                 ),
+                1234567890,
+                3600,
+                true, // operator authorized
                 true, // Single-use
+                "trace-issuance-single",
             ),
         ),
         (
             "multi_use_capability",
-            provider.issue_capability(
-                "multi-use-token",
+            provider.issue(
                 "test-issuer",
-                1234567890,
-                1234654890, // 24 hours later
                 RemoteScope::new(
                     vec![
                         RemoteOperation::NetworkEgress,
@@ -153,28 +154,33 @@ fn test_capability_provider_issuance_patterns() {
                         "https://telemetry.example.com/".to_string(),
                     ],
                 ),
+                1234567890,
+                87000, // 24 hours later
+                true,  // operator authorized
                 false, // Multi-use
+                "trace-issuance-multi",
             ),
         ),
         (
             "short_lived_capability",
-            provider.issue_capability(
-                "short-lived-token",
+            provider.issue(
                 "ephemeral-issuer",
-                1234567890,
-                1234567950, // 1 minute later
                 RemoteScope::new(
                     vec![RemoteOperation::RevocationFetch],
                     vec!["https://revocation.example.com/".to_string()],
                 ),
+                1234567890,
+                60, // 1 minute later
+                true,
                 false,
+                "trace-issuance-short",
             ),
         ),
     ];
 
     for (test_name, capability_result) in test_cases {
         match capability_result {
-            Ok(cap) => {
+            Ok((cap, _)) => {
                 let cap_json = serde_json::to_value(&cap).expect("Should serialize capability");
                 golden::assert_scrubbed_json_golden(
                     &format!("remote_capability_envelope/issuance_patterns/{}", test_name),
@@ -201,8 +207,9 @@ fn test_capability_provider_issuance_patterns() {
 
 #[test]
 fn test_capability_gate_authorization_decisions() {
-    let provider = CapabilityProvider::new("gate-test-secret".to_string());
-    let mut gate = CapabilityGate::new(ConnectivityMode::Connected);
+    let provider =
+        CapabilityProvider::new("gate-test-secret").expect("Should create provider");
+    let mut gate = CapabilityGate::new("gate-test-secret").expect("Should create gate");
 
     // Create test capability
     let scope = RemoteScope::new(
@@ -213,14 +220,15 @@ fn test_capability_gate_authorization_decisions() {
         vec!["https://allowed.example.com/".to_string()],
     );
 
-    let cap = provider
-        .issue_capability(
-            "gate-test-token",
+    let (cap, _issue_event) = provider
+        .issue(
             "gate-issuer",
-            1234567890,
-            1234654890,
             scope,
+            1234567890,
+            87000,
+            true,
             false,
+            "trace-gate-issue",
         )
         .expect("Should issue capability");
 
@@ -229,7 +237,7 @@ fn test_capability_gate_authorization_decisions() {
         (
             "allowed_operation_and_endpoint",
             gate.authorize_network(
-                &cap,
+                Some(&cap),
                 RemoteOperation::NetworkEgress,
                 "https://allowed.example.com/api",
                 1234567900,
@@ -239,7 +247,7 @@ fn test_capability_gate_authorization_decisions() {
         (
             "allowed_operation_different_endpoint",
             gate.authorize_network(
-                &cap,
+                Some(&cap),
                 RemoteOperation::TelemetryExport,
                 "https://allowed.example.com/metrics",
                 1234567900,
@@ -249,7 +257,7 @@ fn test_capability_gate_authorization_decisions() {
         (
             "disallowed_operation",
             gate.authorize_network(
-                &cap,
+                Some(&cap),
                 RemoteOperation::RemoteComputation,
                 "https://allowed.example.com/api",
                 1234567900,
@@ -259,7 +267,7 @@ fn test_capability_gate_authorization_decisions() {
         (
             "disallowed_endpoint",
             gate.authorize_network(
-                &cap,
+                Some(&cap),
                 RemoteOperation::NetworkEgress,
                 "https://malicious.example.com/api",
                 1234567900,
@@ -269,7 +277,7 @@ fn test_capability_gate_authorization_decisions() {
         (
             "expired_capability",
             gate.authorize_network(
-                &cap,
+                Some(&cap),
                 RemoteOperation::NetworkEgress,
                 "https://allowed.example.com/api",
                 1234654900,
@@ -303,42 +311,44 @@ fn test_capability_gate_authorization_decisions() {
 
 #[test]
 fn test_capability_gate_audit_events() {
-    let provider = CapabilityProvider::new("audit-test-secret".to_string());
-    let mut gate = CapabilityGate::new(ConnectivityMode::Connected);
+    let provider =
+        CapabilityProvider::new("audit-test-secret").expect("Should create provider");
+    let mut gate = CapabilityGate::new("audit-test-secret").expect("Should create gate");
 
     let scope = RemoteScope::new(
         vec![RemoteOperation::NetworkEgress],
         vec!["https://api.example.com/".to_string()],
     );
 
-    let cap = provider
-        .issue_capability(
-            "audit-token",
+    let (cap, _issue_event) = provider
+        .issue(
             "audit-issuer",
-            1234567890,
-            1234654890,
             scope,
+            1234567890,
+            87000,
+            true,
             false,
+            "trace-audit-issue",
         )
         .expect("Should issue capability");
 
     // Generate various authorization attempts to create audit events
     let _ = gate.authorize_network(
-        &cap,
+        Some(&cap),
         RemoteOperation::NetworkEgress,
         "https://api.example.com/data",
         1234567900,
         "trace-audit-001",
     );
     let _ = gate.authorize_network(
-        &cap,
+        Some(&cap),
         RemoteOperation::FederationSync,
         "https://api.example.com/sync",
         1234567910,
         "trace-audit-002",
     ); // Should fail
     let _ = gate.authorize_network(
-        &cap,
+        Some(&cap),
         RemoteOperation::NetworkEgress,
         "https://unauthorized.com/",
         1234567920,
@@ -346,7 +356,7 @@ fn test_capability_gate_audit_events() {
     ); // Should fail
 
     // Capture audit events
-    let audit_events = gate.audit_events();
+    let audit_events = gate.audit_log();
     let audit_json = serde_json::to_value(audit_events).expect("Should serialize audit events");
 
     golden::assert_scrubbed_json_golden("remote_capability_envelope/audit_events", &audit_json);
@@ -354,65 +364,70 @@ fn test_capability_gate_audit_events() {
 
 #[test]
 fn test_remote_capability_envelope_boundary_conditions() {
-    let provider = CapabilityProvider::new("boundary-test-secret".to_string());
+    let provider =
+        CapabilityProvider::new("boundary-test-secret").expect("Should create provider");
 
     // Test boundary conditions
     let boundary_test_cases = vec![
         (
             "extremely_long_token_id",
-            provider.issue_capability(
-                &"x".repeat(1000), // Very long token ID
-                "issuer",
-                1234567890,
-                1234654890,
+            provider.issue(
+                &"x".repeat(1000), // Very long issuer identity
                 RemoteScope::new(
                     vec![RemoteOperation::NetworkEgress],
                     vec!["https://example.com/".to_string()],
                 ),
+                1234567890,
+                87000,
+                true,
                 false,
+                "trace-boundary-long",
             ),
         ),
         (
             "empty_endpoint_list",
-            provider.issue_capability(
-                "empty-endpoints",
+            provider.issue(
                 "issuer",
-                1234567890,
-                1234654890,
                 RemoteScope::new(vec![RemoteOperation::NetworkEgress], vec![]),
+                1234567890,
+                87000,
+                true,
                 false,
+                "trace-boundary-empty-endpoints",
             ),
         ),
         (
             "empty_operations_list",
-            provider.issue_capability(
-                "empty-operations",
+            provider.issue(
                 "issuer",
-                1234567890,
-                1234654890,
                 RemoteScope::new(vec![], vec!["https://example.com/".to_string()]),
+                1234567890,
+                87000,
+                true,
                 false,
+                "trace-boundary-empty-operations",
             ),
         ),
         (
             "zero_expiry_time",
-            provider.issue_capability(
-                "zero-expiry",
+            provider.issue(
                 "issuer",
-                1234567890,
-                0, // Zero expiry
                 RemoteScope::new(
                     vec![RemoteOperation::NetworkEgress],
                     vec!["https://example.com/".to_string()],
                 ),
+                1234567890,
+                0, // Zero TTL (invalid) exercises fail-closed path
+                true,
                 false,
+                "trace-boundary-zero",
             ),
         ),
     ];
 
     for (test_name, capability_result) in boundary_test_cases {
         let result_json = match capability_result {
-            Ok(cap) => {
+            Ok((cap, _)) => {
                 let cap_value = serde_json::to_value(&cap).expect("Should serialize");
                 json!({
                     "success": true,
@@ -439,21 +454,23 @@ fn test_remote_capability_envelope_boundary_conditions() {
 
 #[test]
 fn test_connectivity_mode_impact() {
-    let provider = CapabilityProvider::new("connectivity-test-secret".to_string());
+    let provider =
+        CapabilityProvider::new("connectivity-test-secret").expect("Should create provider");
 
     let scope = RemoteScope::new(
         vec![RemoteOperation::NetworkEgress],
         vec!["https://example.com/".to_string()],
     );
 
-    let cap = provider
-        .issue_capability(
-            "connectivity-test",
+    let (cap, _issue_event) = provider
+        .issue(
             "issuer",
-            1234567890,
-            1234654890,
             scope,
+            1234567890,
+            87000,
+            true,
             false,
+            "trace-connectivity-issue",
         )
         .expect("Should issue capability");
 
@@ -461,10 +478,11 @@ fn test_connectivity_mode_impact() {
     let connectivity_modes = vec![ConnectivityMode::Connected, ConnectivityMode::LocalOnly];
 
     for mode in connectivity_modes {
-        let mut gate = CapabilityGate::new(mode);
+        let mut gate = CapabilityGate::with_mode("connectivity-test-secret", mode)
+            .expect("Should create gate");
 
         let auth_result = gate.authorize_network(
-            &cap,
+            Some(&cap),
             RemoteOperation::NetworkEgress,
             "https://example.com/api",
             1234567900,

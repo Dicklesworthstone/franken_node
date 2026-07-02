@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 use frankenengine_node::security::remote_cap::{
-    CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteCap, RemoteCapError,
+    CapabilityGate, CapabilityProvider, RemoteCap, RemoteCapError,
     RemoteOperation, RemoteScope,
 };
 
@@ -341,7 +341,7 @@ fn test_scope_validation_comprehensive() {
             .expect("Token issuance should succeed");
 
         let temp_dir = TempDir::new().expect("Temp directory creation should succeed");
-        let mut gate = CapabilityGate::new(temp_dir.path(), ConnectivityMode::Connected)
+        let mut gate = CapabilityGate::with_durable_replay_store(TEST_SECRET_MATERIAL, temp_dir.path())
             .expect("Gate creation should succeed");
 
         let result = gate.authorize_network(
@@ -395,7 +395,7 @@ fn test_expiry_validation_boundaries() {
             .expect("Token issuance should succeed");
 
         let temp_dir = TempDir::new().expect("Temp directory creation should succeed");
-        let mut gate = CapabilityGate::new(temp_dir.path(), ConnectivityMode::Connected)
+        let mut gate = CapabilityGate::with_durable_replay_store(TEST_SECRET_MATERIAL, temp_dir.path())
             .expect("Gate creation should succeed");
 
         let result = gate.authorize_network(
@@ -450,7 +450,7 @@ fn test_replay_protection_comprehensive() {
             )
             .expect("Token issuance should succeed");
 
-        let mut gate = CapabilityGate::new(temp_dir.path(), ConnectivityMode::Connected)
+        let mut gate = CapabilityGate::with_durable_replay_store(TEST_SECRET_MATERIAL, temp_dir.path())
             .expect("Gate creation should succeed");
 
         // First use should succeed
@@ -501,7 +501,7 @@ fn test_replay_protection_comprehensive() {
             )
             .expect("Token issuance should succeed");
 
-        let mut gate = CapabilityGate::new(temp_dir.path(), ConnectivityMode::Connected)
+        let mut gate = CapabilityGate::with_durable_replay_store(TEST_SECRET_MATERIAL, temp_dir.path())
             .expect("Gate creation should succeed");
 
         // First use should succeed
@@ -553,11 +553,11 @@ fn test_audit_logging_comprehensive() {
             .expect("Token issuance should succeed");
 
         // Verify issue event
-        assert_eq!(issue_event.event_code, "RCAP-ISSUE");
+        assert_eq!(issue_event.event_code, "REMOTECAP_ISSUED");
         assert!(issue_event.allowed);
         assert_eq!(issue_event.issuer_identity.unwrap(), TEST_ISSUER);
 
-        let mut gate = CapabilityGate::new(temp_dir.path(), ConnectivityMode::Connected)
+        let mut gate = CapabilityGate::with_durable_replay_store(TEST_SECRET_MATERIAL, temp_dir.path())
             .expect("Gate creation should succeed");
 
         let result = gate.authorize_network(
@@ -570,13 +570,13 @@ fn test_audit_logging_comprehensive() {
         assert!(result.is_ok(), "Authorization should succeed");
 
         // Check audit log contains both issue and authorize events
-        let audit_events = gate.audit_events();
+        let audit_events = gate.audit_log();
         assert!(audit_events.len() >= 1, "Should have at least one audit event");
 
         let authorize_events: Vec<_> = audit_events.iter()
-            .filter(|e| e.event_code.contains("AUTHORIZE"))
+            .filter(|e| e.event_code.contains("CONSUMED"))
             .collect();
-        assert!(!authorize_events.is_empty(), "Should have authorize events");
+        assert!(!authorize_events.is_empty(), "Should have consume (authorize) events");
 
         let last_event = authorize_events.last().unwrap();
         assert!(last_event.allowed, "Last authorize event should show allowed");
@@ -602,7 +602,7 @@ fn test_audit_logging_comprehensive() {
             )
             .expect("Token issuance should succeed");
 
-        let mut gate = CapabilityGate::new(temp_dir.path(), ConnectivityMode::Connected)
+        let mut gate = CapabilityGate::with_durable_replay_store(TEST_SECRET_MATERIAL, temp_dir.path())
             .expect("Gate creation should succeed");
 
         let result = gate.authorize_network(
@@ -615,7 +615,7 @@ fn test_audit_logging_comprehensive() {
         assert!(result.is_err(), "Authorization should be denied");
 
         // Check audit log contains denial event
-        let audit_events = gate.audit_events();
+        let audit_events = gate.audit_log();
         let denial_events: Vec<_> = audit_events.iter()
             .filter(|e| !e.allowed)
             .collect();
@@ -652,7 +652,7 @@ fn test_durable_replay_store_fsync() {
         )
         .expect("Token issuance should succeed");
 
-    let mut gate = CapabilityGate::new(temp_dir.path(), ConnectivityMode::Connected)
+    let mut gate = CapabilityGate::with_durable_replay_store(TEST_SECRET_MATERIAL, temp_dir.path())
         .expect("Gate creation should succeed");
 
     // First use - should create durable marker
@@ -682,11 +682,11 @@ fn test_durable_replay_store_fsync() {
         .expect("Should read marker file");
 
     assert!(marker_content.contains("token_id"), "Marker should contain token_id");
-    assert!(marker_content.contains("issuer_identity"), "Marker should contain issuer_identity");
+    assert!(marker_content.contains("issuer_len"), "Marker should contain issuer_len");
     assert!(marker_content.contains(TEST_ISSUER), "Marker should contain issuer name");
 
     // Create new gate to simulate restart and verify replay protection persists
-    let mut gate2 = CapabilityGate::new(temp_dir.path(), ConnectivityMode::Connected)
+    let mut gate2 = CapabilityGate::with_durable_replay_store(TEST_SECRET_MATERIAL, temp_dir.path())
         .expect("Second gate creation should succeed");
 
     let replay_result = gate2.authorize_network(
@@ -748,7 +748,7 @@ fn test_golden_reference_validation() {
         (RemoteOperation::RevocationFetch, "https://control.example.com/admin/revocations"),
     ];
 
-    let mut gate = CapabilityGate::new(temp_dir.path(), ConnectivityMode::Connected)
+    let mut gate = CapabilityGate::with_durable_replay_store(TEST_SECRET_MATERIAL, temp_dir.path())
         .expect("Gate creation should succeed");
 
     let mut golden_results = HashMap::new();

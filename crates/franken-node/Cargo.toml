@@ -1618,3 +1618,51 @@ path = "tests/frankensqlite_conformance_harness.rs"
 name = "migrate_audit_goldens"
 path = "tests/migrate_audit_goldens.rs"
 required-features = ["test-support"]
+
+# bd-d5wo9 .C5 BATCH 5 (session 2026-07-02): engine-independent orphans triaged via
+# no-engine build (rch workers offline): `cargo test -p frankenengine-node
+# --no-default-features --features test-support,extended-surfaces,http-client,external-commands
+# --test <name>`. Only the 6 VERIFIED-GREEN below are registered. The 16 that still fail
+# (compile drift or runtime/semantic drift) stay UN-registered with compile-progress kept
+# in-tree and precise findings on their child beads of bd-d5wo9:
+#   metamorphic_canonical_serializer=bd-x3mjo (strict-schema "unknown field" 12f);
+#   decision_receipt_golden_vectors=bd-qtciw (append_framed private); decision_receipt_signed=bd-8uv6i
+#   (crypto_suite signed-golden); metamorphic_supply_chain=bd-s9rbi (trust_card redesign fixed,
+#   2 append-only MR-semantics fails); trust_card_cross_version=bd-tb7e3 (CardHashMismatch + 2 snaps);
+#   security_remote_cap_validation=bd-t4z0w (compile fixed, 3 operator-auth runtime); bd_15u3 (deeper
+#   guardrail_monitor import drift); bd_91gg=bd-l6xn8 (compliance 85%<95%); runtime_lane_scheduler=bd-idt0o
+#   (cap/queue); storage_crash=bd-hlpwm (ReadResult/AdapterError fixed, 3 append-only/crash-recovery);
+#   connector_lifecycle_matrix=bd-6cdbp (ProtocolNegotiationResult redesign); golden_artifacts_comprehensive
+#   (included-file supply_chain::artifact_signing drift); golden_remote_api_connector_vef=bd-08com
+#   (VerificationContext removed from prod); runtime_lane_golden=bd-yozhq (4 snaps); incident_replay=bd-1qq5m
+#   (CLI drift); doctor_policy_activation_e2e=bd-86wc3 (config resolution). engine-dependent
+#   engine_dispatcher_profile_golden + supply_chain_attestation_manifest_golden await rch recovery.
+[[test]]
+name = "golden_security_serialization"
+path = "tests/golden_security_serialization.rs"
+required-features = ["verifier-tools"]
+
+[[test]]
+name = "deterministic_seed_metamorphic"
+path = "tests/deterministic_seed_metamorphic.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "bd_1zym_hardening_auto_trigger_conformance"
+path = "tests/bd_1zym_hardening_auto_trigger_conformance.rs"
+required-features = ["policy-engine"]
+
+[[test]]
+name = "lane_scheduler_golden_artifacts"
+path = "tests/lane_scheduler_golden_artifacts.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "vef_degraded_mode_metamorphic"
+path = "tests/vef_degraded_mode_metamorphic.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "migrate_validate_goldens"
+path = "tests/migrate_validate_goldens.rs"
+required-features = ["test-support"]

@@ -1,0 +1,24 @@
+---
+source: crates/franken-node/tests/lane_scheduler_golden_artifacts.rs
+assertion_line: 187
+expression: json_value
+---
+{
+  "validation_results": [
+    {
+      "policy_type": "empty_policy",
+      "validation_result": "no lanes configured",
+      "is_valid": false
+    },
+    {
+      "policy_type": "no_rules_policy",
+      "validation_result": "no mapping rules defined",
+      "is_valid": false
+    },
+    {
+      "policy_type": "zero_priority_policy",
+      "validation_result": "no mapping rules defined",
+      "is_valid": false
+    }
+  ]
+}

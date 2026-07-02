@@ -1660,8 +1660,13 @@ impl LaneScheduler {
 
     /// Take a telemetry snapshot.
     pub fn telemetry_snapshot(&self, timestamp_ms: u64) -> LaneTelemetrySnapshot {
+        // `counters` is a HashMap, whose iteration order is nondeterministic.
+        // Sort by lane name so telemetry snapshots are byte-for-byte reproducible
+        // (required for golden/replay evidence and deterministic operator output).
+        let mut counters: Vec<LaneCounters> = self.counters.values().cloned().collect();
+        counters.sort_by(|a, b| a.lane.as_str().cmp(b.lane.as_str()));
         LaneTelemetrySnapshot {
-            counters: self.counters.values().cloned().collect(),
+            counters,
             timestamp_ms,
             schema_version: SCHEMA_VERSION.to_string(),
         }

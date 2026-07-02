@@ -6,7 +6,7 @@
 //! - ReceiptCheckpoint with commitment verification
 //! - Receipt chain integrity and tamper detection patterns
 
-use super::super::golden;
+use crate::golden;
 use frankenengine_node::connector::vef_execution_receipt::{
     ExecutionActionType, ExecutionReceipt, ReceiptOperationType, VerificationContext,
     receipt_hash_sha256,

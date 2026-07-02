@@ -22,10 +22,8 @@
 //! - SHOULD: 3/3 (100%) ✓
 //! - Total: 10/10 (100%) ✓
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use franken_node::policy::{
-    guardrail_monitor::{GuardrailRejection, RejectionReason},
+use frankenengine_node::policy::{
+    guardrail_monitor::{BudgetId, GuardrailRejection},
     hardening_auto_trigger::{
         event_codes, HardeningAutoTrigger, TriggerConfig, TriggerEvent, TriggerResult,
     },
@@ -67,14 +65,13 @@ impl ConformanceResult {
 /// INV-AUTOTRIG-LATENCY: escalation within max_trigger_latency_ms of rejection
 fn inv_autotrig_latency_synchronous() -> ConformanceResult {
     let mut trigger = HardeningAutoTrigger::with_defaults();
-    let mut state_machine = HardeningStateMachine::with_defaults();
+    let mut state_machine = HardeningStateMachine::new();
 
     let rejection = GuardrailRejection {
         monitor_name: "test-monitor".to_string(),
-        budget_id: "budget-123".into(),
+        budget_id: BudgetId::new("budget-123"),
         epoch_id: 1000,
-        reason: RejectionReason::ThresholdExceeded,
-        evidence_fingerprint: "fp-abc123".to_string(),
+        reason: "threshold exceeded".to_string(),
     };
 
     let start_time = 1000000;
@@ -99,14 +96,13 @@ fn inv_autotrig_idempotent_deduplication() -> ConformanceResult {
         enable_idempotency: true,
     };
     let mut trigger = HardeningAutoTrigger::new(config);
-    let mut state_machine = HardeningStateMachine::with_defaults();
+    let mut state_machine = HardeningStateMachine::new();
 
     let rejection = GuardrailRejection {
         monitor_name: "test-monitor".to_string(),
-        budget_id: "budget-456".into(),
+        budget_id: BudgetId::new("budget-456"),
         epoch_id: 2000,
-        reason: RejectionReason::ThresholdExceeded,
-        evidence_fingerprint: "fp-def456".to_string(),
+        reason: "threshold exceeded".to_string(),
     };
 
     // First rejection should escalate
@@ -127,7 +123,7 @@ fn inv_autotrig_idempotent_deduplication() -> ConformanceResult {
     }
 
     // Reset state machine to same level for idempotency test
-    let mut state_machine2 = HardeningStateMachine::with_defaults();
+    let mut state_machine2 = HardeningStateMachine::new();
 
     // Second identical rejection should be suppressed
     let result2 = trigger.on_guardrail_rejection(&rejection, &mut state_machine2, 1000100, "trace-2");
@@ -142,14 +138,13 @@ fn inv_autotrig_idempotent_deduplication() -> ConformanceResult {
 /// INV-AUTOTRIG-CAUSAL: every trigger event links to its originating rejection
 fn inv_autotrig_causal_linkage() -> ConformanceResult {
     let mut trigger = HardeningAutoTrigger::with_defaults();
-    let mut state_machine = HardeningStateMachine::with_defaults();
+    let mut state_machine = HardeningStateMachine::new();
 
     let rejection = GuardrailRejection {
         monitor_name: "causal-monitor".to_string(),
-        budget_id: "budget-789".into(),
+        budget_id: BudgetId::new("budget-789"),
         epoch_id: 3000,
-        reason: RejectionReason::ThresholdExceeded,
-        evidence_fingerprint: "fp-ghi789".to_string(),
+        reason: "threshold exceeded".to_string(),
     };
 
     trigger.on_guardrail_rejection(&rejection, &mut state_machine, 2000000, "trace-causal");
@@ -194,14 +189,13 @@ fn inv_autotrig_causal_linkage() -> ConformanceResult {
 /// Event code AUTOTRIG_FIRED for successful escalations
 fn event_code_autotrig_fired() -> ConformanceResult {
     let mut trigger = HardeningAutoTrigger::with_defaults();
-    let mut state_machine = HardeningStateMachine::with_defaults();
+    let mut state_machine = HardeningStateMachine::new();
 
     let rejection = GuardrailRejection {
         monitor_name: "event-test".to_string(),
-        budget_id: "budget-event".into(),
+        budget_id: BudgetId::new("budget-event"),
         epoch_id: 4000,
-        reason: RejectionReason::ThresholdExceeded,
-        evidence_fingerprint: "fp-event".to_string(),
+        reason: "threshold exceeded".to_string(),
     };
 
     let result = trigger.on_guardrail_rejection(&rejection, &mut state_machine, 3000000, "trace-event");
@@ -225,17 +219,16 @@ fn event_code_autotrig_fired() -> ConformanceResult {
 /// Event code AUTOTRIG_ALREADY_AT_MAX when at critical level
 fn event_code_already_at_max() -> ConformanceResult {
     let mut trigger = HardeningAutoTrigger::with_defaults();
-    let mut state_machine = HardeningStateMachine::with_defaults();
+    let mut state_machine = HardeningStateMachine::new();
 
     // Escalate to maximum level
     state_machine.escalate(HardeningLevel::Critical, 1000, "setup").unwrap();
 
     let rejection = GuardrailRejection {
         monitor_name: "max-test".to_string(),
-        budget_id: "budget-max".into(),
+        budget_id: BudgetId::new("budget-max"),
         epoch_id: 5000,
-        reason: RejectionReason::ThresholdExceeded,
-        evidence_fingerprint: "fp-max".to_string(),
+        reason: "threshold exceeded".to_string(),
     };
 
     let result = trigger.on_guardrail_rejection(&rejection, &mut state_machine, 4000000, "trace-max");
@@ -263,21 +256,20 @@ fn event_code_suppressed() -> ConformanceResult {
         enable_idempotency: true,
     };
     let mut trigger = HardeningAutoTrigger::new(config);
-    let mut state_machine = HardeningStateMachine::with_defaults();
+    let mut state_machine = HardeningStateMachine::new();
 
     let rejection = GuardrailRejection {
         monitor_name: "suppress-test".to_string(),
-        budget_id: "budget-suppress".into(),
+        budget_id: BudgetId::new("budget-suppress"),
         epoch_id: 6000,
-        reason: RejectionReason::ThresholdExceeded,
-        evidence_fingerprint: "fp-suppress".to_string(),
+        reason: "threshold exceeded".to_string(),
     };
 
     // First call to setup idempotency
     trigger.on_guardrail_rejection(&rejection, &mut state_machine, 5000000, "trace-setup");
 
     // Reset state machine to trigger idempotent suppression
-    let mut state_machine2 = HardeningStateMachine::with_defaults();
+    let mut state_machine2 = HardeningStateMachine::new();
 
     let result = trigger.on_guardrail_rejection(&rejection, &mut state_machine2, 5000100, "trace-suppress");
 
@@ -329,7 +321,7 @@ fn config_latency_bounds() -> ConformanceResult {
 /// Hardening level progression through all valid transitions
 fn level_progression_complete() -> ConformanceResult {
     let mut trigger = HardeningAutoTrigger::with_defaults();
-    let mut state_machine = HardeningStateMachine::with_defaults();
+    let mut state_machine = HardeningStateMachine::new();
 
     let expected_transitions = [
         (HardeningLevel::Baseline, HardeningLevel::Standard),
@@ -341,10 +333,9 @@ fn level_progression_complete() -> ConformanceResult {
     for (step, (expected_from, expected_to)) in expected_transitions.iter().enumerate() {
         let rejection = GuardrailRejection {
             monitor_name: "progression".to_string(),
-            budget_id: format!("budget-{}", step).into(),
+            budget_id: BudgetId::new(format!("budget-{}", step)),
             epoch_id: (7000 + step) as u64,
-            reason: RejectionReason::ThresholdExceeded,
-            evidence_fingerprint: format!("fp-{}", step),
+            reason: "threshold exceeded".to_string(),
         };
 
         let result = trigger.on_guardrail_rejection(&rejection, &mut state_machine, 6000000 + step as u64 * 1000, &format!("trace-{}", step));
@@ -368,10 +359,9 @@ fn level_progression_complete() -> ConformanceResult {
     // Next attempt should hit AlreadyAtMax
     let final_rejection = GuardrailRejection {
         monitor_name: "final".to_string(),
-        budget_id: "budget-final".into(),
+        budget_id: BudgetId::new("budget-final"),
         epoch_id: 9000,
-        reason: RejectionReason::ThresholdExceeded,
-        evidence_fingerprint: "fp-final".to_string(),
+        reason: "threshold exceeded".to_string(),
     };
 
     let final_result = trigger.on_guardrail_rejection(&final_rejection, &mut state_machine, 7000000, "trace-final");
@@ -391,15 +381,14 @@ fn idempotency_reset() -> ConformanceResult {
         enable_idempotency: true,
     };
     let mut trigger = HardeningAutoTrigger::new(config);
-    let mut state_machine1 = HardeningStateMachine::with_defaults();
-    let mut state_machine2 = HardeningStateMachine::with_defaults();
+    let mut state_machine1 = HardeningStateMachine::new();
+    let mut state_machine2 = HardeningStateMachine::new();
 
     let rejection = GuardrailRejection {
         monitor_name: "reset-test".to_string(),
-        budget_id: "budget-reset".into(),
+        budget_id: BudgetId::new("budget-reset"),
         epoch_id: 8000,
-        reason: RejectionReason::ThresholdExceeded,
-        evidence_fingerprint: "fp-reset".to_string(),
+        reason: "threshold exceeded".to_string(),
     };
 
     // First trigger
@@ -417,7 +406,7 @@ fn idempotency_reset() -> ConformanceResult {
     trigger.reset_idempotency();
 
     // Should work again after reset
-    let mut state_machine3 = HardeningStateMachine::with_defaults();
+    let mut state_machine3 = HardeningStateMachine::new();
     let result2 = trigger.on_guardrail_rejection(&rejection, &mut state_machine3, 8000200, "trace-reset-3");
 
     match result2 {
@@ -442,11 +431,14 @@ fn trigger_event_jsonl_format() -> ConformanceResult {
     let jsonl = event.to_jsonl();
 
     // Parse back to verify structure
-    let parsed: serde_json::Value = serde_json::from_str(&jsonl).map_err(|e| {
-        ConformanceResult::Fail {
-            reason: format!("invalid JSON: {e}"),
+    let parsed: serde_json::Value = match serde_json::from_str(&jsonl) {
+        Ok(value) => value,
+        Err(e) => {
+            return ConformanceResult::Fail {
+                reason: format!("invalid JSON: {e}"),
+            };
         }
-    }).unwrap_or_else(|err| return err);
+    };
 
     let expected_fields = ["trigger_id", "rejection_id", "evidence_entry_id", "from", "to", "timestamp"];
     for field in expected_fields {
@@ -466,21 +458,20 @@ fn counter_overflow_protection() -> ConformanceResult {
 
     // Access counter through reflection would be complex, so we test behavior
     // by creating many events and checking ID format remains valid
-    let mut state_machine = HardeningStateMachine::with_defaults();
+    let mut state_machine = HardeningStateMachine::new();
 
     for i in 0..10 {
         let rejection = GuardrailRejection {
             monitor_name: "overflow-test".to_string(),
-            budget_id: format!("budget-{}", i).into(),
+            budget_id: BudgetId::new(format!("budget-{}", i)),
             epoch_id: (10000 + i) as u64,
-            reason: RejectionReason::ThresholdExceeded,
-            evidence_fingerprint: format!("fp-{}", i),
+            reason: "threshold exceeded".to_string(),
         };
 
         trigger.on_guardrail_rejection(&rejection, &mut state_machine, 10000000 + i as u64 * 1000, &format!("trace-{}", i));
 
         // Reset to baseline to allow further escalations
-        state_machine = HardeningStateMachine::with_defaults();
+        state_machine = HardeningStateMachine::new();
     }
 
     let events = trigger.events();

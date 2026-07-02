@@ -724,6 +724,13 @@ pub struct MigrateValidateArgs {
     /// Output format: json or text.
     #[arg(long, default_value = "text")]
     pub format: String,
+
+    /// Run only the deterministic static checks and skip the transformed-runtime
+    /// smoke test. Use this in CI/golden contexts where no JavaScript runtime is
+    /// guaranteed (the smoke test executes the project and its result depends on
+    /// which runtime is installed).
+    #[arg(long)]
+    pub static_only: bool,
 }
 
 #[derive(Debug, Parser)]

@@ -1725,7 +1725,10 @@ fn update_sha256_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateReport> {
+pub fn run_validate(
+    project_path: &Path,
+    static_only: bool,
+) -> anyhow::Result<MigrationValidateReport> {
     let audit = run_audit(project_path)?;
 
     let blocking_findings = audit
@@ -1782,10 +1785,16 @@ pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateRepo
                 .to_string(),
         ),
     });
-    if checks.iter().all(|check| check.passed) {
-        checks.push(runtime_smoke_validation_check(project_path));
-    } else {
-        checks.push(runtime_smoke_prerequisite_failure_check());
+    // The runtime smoke test executes the transformed project, so its outcome
+    // depends on which JavaScript runtime is installed. In `--static-only` mode
+    // (used by deterministic golden/CI contexts) we skip it entirely and derive
+    // the verdict from the deterministic static checks alone.
+    if !static_only {
+        if checks.iter().all(|check| check.passed) {
+            checks.push(runtime_smoke_validation_check(project_path));
+        } else {
+            checks.push(runtime_smoke_prerequisite_failure_check());
+        }
     }
 
     let status = if checks.iter().all(|check| check.passed) {
@@ -1808,7 +1817,7 @@ pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateRepo
 pub fn run_one_command_report(project_path: &Path) -> anyhow::Result<OneCommandMigrationReport> {
     let audit = run_audit(project_path)?;
     let rewrite_suggestions = run_rewrite(project_path, false)?;
-    let validation = run_validate(project_path)?;
+    let validation = run_validate(project_path, false)?;
     Ok(build_one_command_report(
         project_path,
         audit,
@@ -6014,7 +6023,7 @@ mod tests {
         )
         .expect("write package");
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
         assert!(!report.is_pass());
         assert!(
             report
@@ -6048,7 +6057,7 @@ mod tests {
         .expect("write package");
         std::fs::write(project.join("package-lock.json"), "{}\n").expect("write lockfile");
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
         assert!(report.is_pass());
         assert!(report.blocking_findings.is_empty());
         assert!(report.checks.iter().all(|check| check.passed));
@@ -6063,7 +6072,7 @@ mod tests {
         write_hardened_manifest(project);
         write_lockfile(project);
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
 
         assert!(report.is_pass());
         assert!(report.blocking_findings.is_empty());
@@ -6089,7 +6098,7 @@ mod tests {
         write_hardened_manifest(project);
         write_lockfile(project);
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
         let has_lockstep_warning = report.warning_findings.iter().any(|finding| {
             finding
                 .recommendation
@@ -6110,7 +6119,7 @@ mod tests {
         write_project_file(project, "package.json", r#"{"name":"demo","#);
         write_lockfile(project);
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
 
         assert!(!report.is_pass());
         assert!(report.checks.iter().any(|check| {
@@ -6132,7 +6141,7 @@ mod tests {
         write_project_file(project, "index.ts", "export const answer = 42;");
         write_lockfile(project);
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
 
         assert!(!report.is_pass());
         assert!(report.checks.iter().any(|check| {

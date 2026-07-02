@@ -1,0 +1,54 @@
+---
+source: crates/franken-node/tests/golden_security_serialization.rs
+assertion_line: 72
+expression: trust_card
+---
+{
+  "schema_version": "trust-card-v1.0",
+  "trust_card_version": 42,
+  "previous_version_hash": "sha256:abcd1234",
+  "extension": {
+    "extension_id": "example-ext-v1.0.0",
+    "version": "1.0.0"
+  },
+  "publisher": {
+    "publisher_id": "pub-example-corp",
+    "display_name": "Example Corporation"
+  },
+  "certification_level": "bronze",
+  "capability_declarations": [],
+  "behavioral_profile": {
+    "network_access": false,
+    "filesystem_access": false,
+    "subprocess_access": false,
+    "profile_summary": "no elevated behaviors observed"
+  },
+  "revocation_status": {
+    "status": "active"
+  },
+  "provenance_summary": {
+    "attestation_level": "verified",
+    "source_uri": "https://example.com/example-ext/v1.0.0",
+    "artifact_hashes": [
+      "sha256:deadbeef"
+    ],
+    "verified_at": "2026-05-08T12:00:00Z"
+  },
+  "reputation_score_basis_points": 8500,
+  "reputation_trend": "stable",
+  "active_quarantine": false,
+  "dependency_trust_summary": [],
+  "last_verified_timestamp": "2026-05-08T12:00:00Z",
+  "user_facing_risk_assessment": {
+    "level": "low",
+    "summary": "low user-facing risk"
+  },
+  "audit_history": [],
+  "derivation_evidence": {
+    "evidence_refs": [],
+    "derived_at_epoch": 1746705600,
+    "derivation_chain_hash": "sha256:evidence123"
+  },
+  "card_hash": "sha256:cardhash123",
+  "registry_signature": "sig-fixture-trust-card-v1"
+}

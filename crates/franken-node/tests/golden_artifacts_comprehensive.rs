@@ -10,7 +10,7 @@
 //! for deterministic comparison.
 
 // Dependencies for claims testing
-#[path = "../conformance/adjacent_claim_language_gate.rs"]
+#[path = "adjacent_claim_language_gate.rs"]
 mod adjacent_claim_language_gate;
 
 // Golden test modules

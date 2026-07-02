@@ -104,7 +104,7 @@ fn mr_hex_roundtrip_deterministic_seed() {
 
         // MR: seed.to_hex() should produce valid hex that represents the seed bytes
         let seed_hex = derived_seed.to_hex();
-        let expected_hex = hex::encode(derived_seed.bytes());
+        let expected_hex = hex::encode(derived_seed.bytes);
 
         if seed_hex != expected_hex {
             seed_failures.push(format!(
@@ -148,17 +148,17 @@ fn mr_domain_separation() {
                 let seed1 = derive_seed(domain1, &content_hash, &config);
                 let seed2 = derive_seed(domain2, &content_hash, &config);
 
-                if seed1.bytes() == seed2.bytes() {
+                if seed1.bytes == seed2.bytes {
                     separation_failures.push(format!(
                         "Iteration {}: Domain separation failed - {:?} and {:?} produced identical seeds: {}",
                         i, domain1, domain2, seed1.to_hex()
                     ));
                 }
 
-                if seed1.domain() == seed2.domain() {
+                if seed1.domain == seed2.domain {
                     separation_failures.push(format!(
                         "Iteration {}: Domain metadata not preserved - both seeds report domain {:?}",
-                        i, seed1.domain()
+                        i, seed1.domain
                     ));
                 }
             }
@@ -196,7 +196,7 @@ fn mr_content_sensitivity() {
         let seed1 = derive_seed(domain, &content1, &config);
         let seed2 = derive_seed(domain, &content2, &config);
 
-        if seed1.bytes() == seed2.bytes() {
+        if seed1.bytes == seed2.bytes {
             sensitivity_failures.push(format!(
                 "Iteration {}: Content sensitivity failed - different content produced identical seeds: {}",
                 i, seed1.to_hex()
@@ -228,7 +228,7 @@ fn mr_config_sensitivity() {
         let seed1 = derive_seed(domain, &content_hash, &config1);
         let seed2 = derive_seed(domain, &content_hash, &config2);
 
-        if seed1.bytes() == seed2.bytes() {
+        if seed1.bytes == seed2.bytes {
             config_failures.push(format!(
                 "Iteration {}: Config sensitivity failed - different configs produced identical seeds: {}",
                 i, seed1.to_hex()
@@ -236,10 +236,10 @@ fn mr_config_sensitivity() {
         }
 
         // Verify config version is preserved
-        if seed1.config_version() != config1.version() {
+        if seed1.config_version != config1.version {
             config_failures.push(format!(
                 "Iteration {}: Config version not preserved - seed reports {}, config was {}",
-                i, seed1.config_version(), config1.version()
+                i, seed1.config_version, config1.version
             ));
         }
     }
@@ -265,21 +265,21 @@ fn mr_derivation_determinism() {
         let seed1 = derive_seed(domain, &content_hash, &config);
         let seed2 = derive_seed(domain, &content_hash, &config);
 
-        if seed1.bytes() != seed2.bytes() {
+        if seed1.bytes != seed2.bytes {
             determinism_failures.push(format!(
                 "Iteration {}: Determinism failed - identical inputs produced different seeds: {} vs {}",
                 i, seed1.to_hex(), seed2.to_hex()
             ));
         }
 
-        if seed1.domain() != seed2.domain() {
+        if seed1.domain != seed2.domain {
             determinism_failures.push(format!(
                 "Iteration {}: Domain metadata inconsistent between identical calls",
                 i
             ));
         }
 
-        if seed1.config_version() != seed2.config_version() {
+        if seed1.config_version != seed2.config_version {
             determinism_failures.push(format!(
                 "Iteration {}: Config version inconsistent between identical calls",
                 i
@@ -312,14 +312,14 @@ fn mr_stateful_deriver_consistency() {
         let (stateful_seed, _bump) = deriver.derive_seed(domain, &content_hash, &config);
 
         // MR: stateful_derive_seed(args) = stateless_derive_seed(args)
-        if stateless_seed.bytes() != stateful_seed.bytes() {
+        if stateless_seed.bytes != stateful_seed.bytes {
             consistency_failures.push(format!(
                 "Iteration {}: Stateful/stateless inconsistency - stateless: {}, stateful: {}",
                 i, stateless_seed.to_hex(), stateful_seed.to_hex()
             ));
         }
 
-        if stateless_seed.domain() != stateful_seed.domain() {
+        if stateless_seed.domain != stateful_seed.domain {
             consistency_failures.push(format!(
                 "Iteration {}: Domain metadata inconsistency between stateful/stateless",
                 i
@@ -346,7 +346,7 @@ fn mr_collision_resistance() {
         let domain = &DomainTag::all()[i % DomainTag::all().len()];
 
         let derived_seed = derive_seed(domain, &content_hash, &config);
-        let seed_bytes = derived_seed.bytes().to_vec();
+        let seed_bytes = derived_seed.bytes.to_vec();
 
         // MR: Different inputs should (almost always) produce different outputs
         if all_seeds.contains(&seed_bytes) {
@@ -409,7 +409,7 @@ fn mr_hex_encoding_format() {
 
         // Check prefix hex format
         let prefix_hex = derived_seed.prefix_hex();
-        if prefix_hex.len() != 16 {  // First 8 bytes = 16 hex chars
+        if prefix_hex.len() != 8 {  // First 4 bytes = 8 hex chars (see DeterministicSeed::prefix_hex)
             format_failures.push(format!("Iteration {}: Prefix hex wrong length: {}", i, prefix_hex.len()));
         }
         if !seed_hex.starts_with(&prefix_hex) {
@@ -455,7 +455,7 @@ fn mr_comprehensive_composite() {
 
     for i in 0..all_seeds.len() {
         for j in (i + 1)..all_seeds.len() {
-            assert_ne!(all_seeds[i].bytes(), all_seeds[j].bytes(),
+            assert_ne!(all_seeds[i].bytes, all_seeds[j].bytes,
                 "Seeds {} and {} should be different but are identical: {}",
                 i, j, all_seeds[i].to_hex());
         }
@@ -470,6 +470,6 @@ fn mr_comprehensive_composite() {
 
     // Verify determinism by re-deriving
     let seed_d1_c1_cfg1_repeat = derive_seed(domain1, &content1, &config1);
-    assert_eq!(seed_d1_c1_cfg1.bytes(), seed_d1_c1_cfg1_repeat.bytes(),
+    assert_eq!(seed_d1_c1_cfg1.bytes, seed_d1_c1_cfg1_repeat.bytes,
         "Repeated derivation should be identical");
 }
