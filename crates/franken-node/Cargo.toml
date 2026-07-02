@@ -1721,10 +1721,10 @@ name = "bd_91gg_repair_controller_conformance"
 path = "tests/bd_91gg_repair_controller_conformance.rs"
 required-features = ["extended-surfaces"]
 
-# metamorphic_canonical_serializer (bd-x3mjo) in progress: strict-schema fixture
-# reconcile took it 1/13 -> 6/13; remaining 7 relations assume JSON-text output but
-# prod emits a length-prefixed binary frame — round-trip/UTF-8 assertions being
-# reconciled to the binary contract. Registered once green. See bd-x3mjo.
+[[test]]
+name = "metamorphic_canonical_serializer"
+path = "tests/metamorphic_canonical_serializer.rs"
+required-features = ["extended-surfaces"]
 
 [[test]]
 name = "decision_receipt_golden_vectors_conformance"
