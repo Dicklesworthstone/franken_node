@@ -16860,6 +16860,9 @@ struct IncidentReplayCliSummary {
     event_count: usize,
     expected_sequence_hash: String,
     replayed_sequence_hash: String,
+    /// Verified timeline events from the bundle, surfaced so `--json` can emit
+    /// the reconstructed incident timeline alongside the replay result.
+    timeline: Vec<tools::replay_bundle::TimelineEvent>,
 }
 
 fn incident_replay_cli_summary(
@@ -16877,6 +16880,7 @@ fn incident_replay_cli_summary(
         event_count: outcome.event_count,
         expected_sequence_hash: outcome.expected_sequence_hash,
         replayed_sequence_hash: outcome.replayed_sequence_hash,
+        timeline: bundle.timeline,
     })
 }
 
@@ -16890,6 +16894,8 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         args.trusted_key_dir.as_deref(),
     )?;
     let summary = incident_replay_cli_summary(&args.bundle, &trusted_key_ids)?;
+    // Preserve the machine-parseable stderr contract consumed by
+    // tests/incident_cli_e2e.rs (`parse_replay_result`) regardless of --json.
     eprintln!(
         "incident replay result: matched={} event_count={} expected={} replayed={}",
         summary.matched,
@@ -16897,6 +16903,38 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         summary.expected_sequence_hash,
         summary.replayed_sequence_hash
     );
+    if args.verbose {
+        eprintln!(
+            "incident replay verbose: incident_id={} timeline_events={} expected_hash={} replayed_hash={}",
+            summary.incident_id,
+            summary.timeline.len(),
+            summary.expected_sequence_hash,
+            summary.replayed_sequence_hash
+        );
+    }
+    if args.json {
+        let payload = serde_json::json!({
+            "command": "incident.replay",
+            "schema_version": "incident-replay-cli-v1",
+            "incident_id": &summary.incident_id,
+            "replay_result": {
+                "matched": summary.matched,
+                "event_count": summary.event_count,
+                "expected_sequence_hash": &summary.expected_sequence_hash,
+                "replayed_sequence_hash": &summary.replayed_sequence_hash,
+            },
+            "timeline": &summary.timeline,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "incident replay: incident_id={} matched={} timeline_events={} (replayed {} steps)",
+            summary.incident_id,
+            summary.matched,
+            summary.timeline.len(),
+            summary.event_count
+        );
+    }
     if !summary.matched {
         anyhow::bail!(
             "replay mismatch for incident {} in bundle {}",
@@ -17025,6 +17063,15 @@ fn incident_counterfactual_report_json(
             (None, None, None)
         };
 
+    // Surface the per-decision divergences as a first-class array so consumers
+    // can read the decision deltas without re-parsing the nested counterfactual
+    // output. `divergence_points` is always serialized (even when empty) for the
+    // single-policy-swap mode the CLI drives.
+    let decision_deltas = counterfactual_value
+        .get("divergence_points")
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
     let report = serde_json::json!({
         "schema_version": INCIDENT_COUNTERFACTUAL_REPORT_SCHEMA,
         "timestamp": timestamp,
@@ -17033,11 +17080,14 @@ fn incident_counterfactual_report_json(
         "bundle_created_at": &summary.bundle_created_at,
         "bundle_integrity_hash": &summary.bundle_integrity_hash,
         "policy": policy,
+        "original_policy": &summary.bundle_policy_version,
+        "counterfactual_policy": policy,
         "executor": &summary.executor,
         "evidence_refs": &summary.evidence_refs,
         "total_decisions": summary.total_decisions,
         "changed_decisions": summary.changed_decisions,
         "severity_delta": summary.severity_delta,
+        "decision_deltas": decision_deltas,
         "counterfactual_digest": counterfactual_digest,
         "counterfactual": counterfactual_value,
         "promotion_contract": promotion_contract,
@@ -17303,6 +17353,15 @@ fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs
             args.operator_id.as_deref(),
         )?;
         println!("{report_json}");
+    } else {
+        println!(
+            "incident counterfactual: policy={} executor={} total_decisions={} changed_decisions={} severity_delta={}",
+            args.policy,
+            summary.executor,
+            summary.total_decisions,
+            summary.changed_decisions,
+            summary.severity_delta
+        );
     }
     Ok(())
 }
@@ -27321,6 +27380,9 @@ fn main() -> Result<()> {
                         "command": "incident.list",
                         "schema_version": "incident-list-v1",
                         "severity_filter": severity_filter,
+                        "filters": {
+                            "severity": severity_filter,
+                        },
                         "count": entries.len(),
                         "incidents": entries,
                     });

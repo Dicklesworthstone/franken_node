@@ -1726,6 +1726,11 @@ name = "metamorphic_canonical_serializer"
 path = "tests/metamorphic_canonical_serializer.rs"
 required-features = ["extended-surfaces"]
 
+[[test]]
+name = "incident_replay_counterfactual_cli_e2e"
+path = "tests/incident_replay_counterfactual_cli_e2e.rs"
+required-features = ["extended-surfaces"]
+
 # golden_artifacts_comprehensive (bd-h4kkw/bd-ossc4): the golden/ submodules now
 # compile, but the top-level file is still blocked by its #[path]-included
 # adjacent_claim_language_gate.rs (bd-ossc4), which does not export

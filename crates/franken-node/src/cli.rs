@@ -1596,6 +1596,16 @@ pub struct IncidentReplayArgs {
     /// Directory containing trusted Ed25519 public keys for replay bundle verification.
     #[arg(long = "key-dir", alias = "trusted-key-dir")]
     pub trusted_key_dir: Option<PathBuf>,
+
+    /// Emit the structured replay result as JSON on stdout. Required for
+    /// compatibility with the README's "All commands accept `--json`" contract.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Emit additional replay diagnostics on stderr (bundle id, policy version,
+    /// timeline event count).
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Parser)]
