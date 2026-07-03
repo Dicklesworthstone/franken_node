@@ -6,12 +6,11 @@
 //! - Registry verification reports
 //! - Registry manifest JSON structures
 
-use std::fs;
 use frankenengine_node::supply_chain::artifact_signing::KeyId;
 use serde_json::Value;
 
 // Golden utilities re-exported from parent module
-use super::{assert_scrubbed_json_golden, assert_scrubbed_golden, assert_json_golden};
+use super::{assert_scrubbed_golden, assert_scrubbed_json_golden};
 
 /// Create a test signing key for deterministic outputs
 fn create_test_signing_key() -> ed25519_dalek::SigningKey {

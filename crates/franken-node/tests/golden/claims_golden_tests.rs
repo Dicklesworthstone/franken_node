@@ -6,16 +6,13 @@
 //! - Claim event streams
 //! - Claim validation results
 
-use std::fs;
 use serde_json::Value;
 
-// Include the claims conformance module
-use crate::adjacent_claim_language_gate::{
-    ClaimLanguageGate, Claim, ClaimCategory, ClaimStatus, ClaimGateEvent, ClaimGateSummary
-};
+// Include the claims conformance module (surfaced via the adjacent_claim_language_gate shim)
+use crate::adjacent_claim_language_gate::{Claim, ClaimCategory, ClaimLanguageGate, ClaimStatus};
 
 // Golden utilities re-exported from parent module
-use super::{assert_scrubbed_json_golden, assert_scrubbed_golden, assert_json_golden};
+use super::{assert_json_golden, assert_scrubbed_golden, assert_scrubbed_json_golden};
 
 /// Create test claims for golden file testing
 fn create_test_claims() -> Vec<Claim> {
@@ -196,11 +193,13 @@ fn test_claim_gate_fail_scenario_golden() {
 fn test_claim_categories_golden() {
     let categories_info = ClaimCategory::all()
         .iter()
-        .map(|cat| serde_json::json!({
-            "category": cat,
-            "label": cat.label(),
-            "display": format!("{}", cat)
-        }))
+        .map(|cat| {
+            serde_json::json!({
+                "category": cat,
+                "label": cat.label(),
+                "display": format!("{}", cat)
+            })
+        })
         .collect::<Vec<_>>();
 
     let json = serde_json::to_value(&categories_info).unwrap();

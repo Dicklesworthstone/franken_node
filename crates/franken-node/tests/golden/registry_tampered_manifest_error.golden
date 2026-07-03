@@ -1,0 +1,6 @@
+ERROR: Registry verification failed
+extension_id: plugin-tampered-[KEY_ID]
+error_type: invalid-signature
+manifest_path: .franken-node/state/registry/artifacts/plugin-tampered-[KEY_ID]/artifact.manifest.json
+artifact_path: .franken-node/state/registry/artifacts/plugin-tampered-[KEY_ID]/artifact.fnext
+details: Ed[DURATION]ignature verification failed for manifest

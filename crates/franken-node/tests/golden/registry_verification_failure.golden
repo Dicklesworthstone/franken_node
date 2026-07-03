@@ -1,0 +1,6 @@
+extension_id=plugin-corrupted-[KEY_ID]
+integrity=hash-mismatch
+manifest_path=.franken-node/state/registry/artifacts/plugin-corrupted-[KEY_ID]/artifact.manifest.json
+expected_sha256=sha256:[HASH]
+actual_sha256=sha256:different123456789fedcba0987654321abcdef1234567890fedcba098765
+archived=false

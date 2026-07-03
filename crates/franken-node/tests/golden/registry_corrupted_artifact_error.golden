@@ -1,0 +1,7 @@
+ERROR: Registry verification failed
+extension_id: plugin-corrupted-[KEY_ID]
+error_type: hash-mismatch
+manifest_path: .franken-node/state/registry/artifacts/plugin-corrupted-[KEY_ID]/artifact.manifest.json
+artifact_path: .franken-node/state/registry/artifacts/plugin-corrupted-[KEY_ID]/artifact.fnext
+expected_hash: sha256:[HASH]
+actual_hash: sha256:tampered123456789fedcba0987654321abcdef1234567890fedcba098765

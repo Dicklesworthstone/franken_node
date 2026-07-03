@@ -1815,3 +1815,18 @@ required-features = ["engine"]
 [[test]]
 name = "golden_remote_api_connector_vef"
 path = "tests/golden_remote_api_connector_vef.rs"
+
+# golden_artifacts_comprehensive (bd-ossc4): re-registered (session 2026-07-02).
+# Golden serialization suite for supply_chain trust-card / registry / claims
+# canonical forms. required-features=[advanced-features] because the claims path
+# (claims_golden_tests -> tests/conformance/adjacent_claim_language_gate.rs, wired
+# via the tests/adjacent_claim_language_gate.rs #[path] shim) pulls in the
+# advanced-features-gated `claims` surface. The only compile breaker was the shim
+# nesting the conformance types a private module level too deep — fixed by a
+# `pub use` re-export in the shim; trust_card/registry/conformance had no prod
+# drift (only unused-import cleanup). Shares tests/golden/mod.rs (+ incident /
+# canonical submodules) with golden_remote_api_connector_vef.
+[[test]]
+name = "golden_artifacts_comprehensive"
+path = "tests/golden_artifacts_comprehensive.rs"
+required-features = ["advanced-features", "test-support"]

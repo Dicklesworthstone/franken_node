@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0.0",
+  "trust_card_version": 1,
+  "previous_version_hash": null,
+  "extension": {
+    "extension_id": "npm:@test/golden-extension",
+    "version": "1.0.0"
+  },
+  "publisher": {
+    "publisher_id": "test-publisher",
+    "display_name": "Test Publisher"
+  },
+  "certification_level": "gold",
+  "capability_declarations": [
+    {
+      "name": "filesystem.read",
+      "description": "Read access to user files",
+      "risk": "medium"
+    },
+    {
+      "name": "network.http",
+      "description": "HTTP client access",
+      "risk": "low"
+    }
+  ],
+  "behavioral_profile": {
+    "network_access": true,
+    "filesystem_access": true,
+    "subprocess_access": false,
+    "profile_summary": "File processing utility with network sync"
+  },
+  "revocation_status": {
+    "status": "active"
+  },
+  "provenance_summary": {
+    "attestation_level": "signed",
+    "source_uri": "https://registry.npmjs.org/@test/golden-extension/-/golden-extension-1.0.0.tgz",
+    "artifact_hashes": [
+      "sha256:[KEY_ID]",
+      "sha512:[KEY_ID]"
+    ],
+    "verified_at": "[TIMESTAMP]"
+  },
+  "reputation_score_basis_points": 8500,
+  "reputation_trend": "improving",
+  "active_quarantine": false,
+  "dependency_trust_summary": [
+    {
+      "dependency_id": "npm:lodash",
+      "trust_level": "verified"
+    }
+  ],
+  "last_verified_timestamp": "[TIMESTAMP]",
+  "user_facing_risk_assessment": {
+    "level": "low",
+    "summary": "Well-maintained utility with good security practices"
+  },
+  "audit_history": [
+    {
+      "timestamp": "[TIMESTAMP]",
+      "event_code": "TRUST_CARD_CREATED",
+      "detail": "trust card created",
+      "trace_id": "test-trace"
+    }
+  ],
+  "derivation_evidence": {
+    "evidence_refs": [
+      {
+        "evidence_id": "evidence-1",
+        "evidence_type": "provenance_chain",
+        "verified_at_epoch": 1000,
+        "verification_receipt_hash": "receipt-hash-1"
+      }
+    ],
+    "derived_at_epoch": 1000,
+    "derivation_chain_hash": "sha256:[HASH]"
+  },
+  "card_hash": "[HASH]",
+  "registry_signature": "[HASH]"
+}

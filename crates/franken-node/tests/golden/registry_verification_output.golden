@@ -1,0 +1,4 @@
+extension_id=plugin-test-golden-[KEY_ID]
+integrity=verified
+manifest_path=.franken-node/state/registry/artifacts/plugin-test-golden-[KEY_ID]/artifact.manifest.json
+archived=false

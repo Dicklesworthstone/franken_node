@@ -6,19 +6,16 @@
 //! - Trust scan summaries
 //! - Security decision receipts
 
-use std::{fs, path::Path};
+use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
-    TrustCard, TrustCardRegistry, TrustCardInput, TrustCardListFilter,
-    CertificationLevel, ReputationTrend, RevocationStatus, RiskLevel,
-    ExtensionIdentity, PublisherIdentity, CapabilityDeclaration, CapabilityRisk,
-    BehavioralProfile, ProvenanceSummary, DependencyTrustStatus, RiskAssessment,
-    AuditRecord, fixture_registry
+    BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
+    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardInput,
+    TrustCardListFilter, TrustCardRegistry, fixture_registry,
 };
-use frankenengine_node::supply_chain::certification::{VerifiedEvidenceRef, EvidenceType};
-use serde_json::Value;
 
 // Golden utilities re-exported from parent module
-use super::{assert_scrubbed_json_golden, assert_scrubbed_golden, assert_json_golden};
+use super::{assert_json_golden, assert_scrubbed_golden, assert_scrubbed_json_golden};
 
 /// Create a deterministic test trust card
 fn create_test_trust_card() -> TrustCard {
@@ -56,7 +53,9 @@ fn create_test_trust_card() -> TrustCard {
         revocation_status: RevocationStatus::Active,
         provenance_summary: ProvenanceSummary {
             attestation_level: "signed".to_string(),
-            source_uri: "https://registry.npmjs.org/@test/golden-extension/-/golden-extension-1.0.0.tgz".to_string(),
+            source_uri:
+                "https://registry.npmjs.org/@test/golden-extension/-/golden-extension-1.0.0.tgz"
+                    .to_string(),
             artifact_hashes: vec![
                 "sha256:abcdef1234567890".to_string(),
                 "sha512:fedcba0987654321".to_string(),
@@ -66,28 +65,26 @@ fn create_test_trust_card() -> TrustCard {
         reputation_score_basis_points: 8500,
         reputation_trend: ReputationTrend::Improving,
         active_quarantine: false,
-        dependency_trust_summary: vec![
-            DependencyTrustStatus {
-                dependency_id: "npm:lodash".to_string(),
-                trust_level: "verified".to_string(),
-            },
-        ],
+        dependency_trust_summary: vec![DependencyTrustStatus {
+            dependency_id: "npm:lodash".to_string(),
+            trust_level: "verified".to_string(),
+        }],
         last_verified_timestamp: "2024-01-01T00:00:00Z".to_string(),
         user_facing_risk_assessment: RiskAssessment {
             level: RiskLevel::Low,
             summary: "Well-maintained utility with good security practices".to_string(),
         },
-        evidence_refs: vec![
-            VerifiedEvidenceRef {
-                evidence_id: "evidence-1".to_string(),
-                evidence_type: EvidenceType::ProvenanceChain,
-                verified_at_epoch: now_secs,
-                verification_receipt_hash: "receipt-hash-1".to_string(),
-            },
-        ],
+        evidence_refs: vec![VerifiedEvidenceRef {
+            evidence_id: "evidence-1".to_string(),
+            evidence_type: EvidenceType::ProvenanceChain,
+            verified_at_epoch: now_secs,
+            verification_receipt_hash: "receipt-hash-1".to_string(),
+        }],
     };
 
-    registry.create(input, now_secs, "test-trace").expect("create test card")
+    registry
+        .create(input, now_secs, "test-trace")
+        .expect("create test card")
 }
 
 /// Create a registry with multiple test cards for listing tests
@@ -114,11 +111,9 @@ fn test_trust_card_registry_snapshot_golden() {
 #[test]
 fn test_trust_card_list_all_golden() {
     let mut registry = create_test_registry();
-    let cards = registry.list(
-        &TrustCardListFilter::empty(),
-        "test-trace",
-        1000
-    ).expect("list all cards");
+    let cards = registry
+        .list(&TrustCardListFilter::empty(), "test-trace", 1000)
+        .expect("list all cards");
 
     // Format as human-readable table like the CLI does
     let mut output = String::new();
@@ -159,7 +154,9 @@ fn test_trust_card_list_filtered_golden() {
         capability: None,
     };
 
-    let cards = registry.list(&filter, "test-trace", 1000).expect("list filtered cards");
+    let cards = registry
+        .list(&filter, "test-trace", 1000)
+        .expect("list filtered cards");
     let json = serde_json::to_value(&cards).unwrap();
     assert_scrubbed_json_golden("trust_card_list_filtered", &json);
 }
@@ -167,19 +164,19 @@ fn test_trust_card_list_filtered_golden() {
 #[test]
 fn test_trust_card_comparison_golden() {
     let mut registry = create_test_registry();
-    let cards = registry.list(
-        &TrustCardListFilter::empty(),
-        "test-trace",
-        1000
-    ).expect("list cards");
+    let cards = registry
+        .list(&TrustCardListFilter::empty(), "test-trace", 1000)
+        .expect("list cards");
 
     if cards.len() >= 2 {
-        let comparison = registry.compare(
-            &cards[0].extension.extension_id,
-            &cards[1].extension.extension_id,
-            1000,
-            "test-trace",
-        ).expect("compare cards");
+        let comparison = registry
+            .compare(
+                &cards[0].extension.extension_id,
+                &cards[1].extension.extension_id,
+                1000,
+                "test-trace",
+            )
+            .expect("compare cards");
 
         let json = serde_json::to_value(&comparison).unwrap();
         assert_scrubbed_json_golden("trust_card_comparison", &json);
@@ -191,11 +188,9 @@ fn test_trust_card_diff_golden() {
     let mut registry = create_test_registry();
 
     // Get a card that has version history
-    let cards = registry.list(
-        &TrustCardListFilter::empty(),
-        "test-trace",
-        1000
-    ).expect("list cards");
+    let cards = registry
+        .list(&TrustCardListFilter::empty(), "test-trace", 1000)
+        .expect("list cards");
 
     for card in &cards {
         if card.trust_card_version > 1 {
@@ -240,11 +235,9 @@ fn test_trust_card_sync_report_golden() {
     let mut registry = create_test_registry();
 
     // Simulate a sync operation to get sync report data
-    let _cards = registry.list(
-        &TrustCardListFilter::empty(),
-        "test-trace",
-        1000
-    ).expect("list for sync");
+    let _cards = registry
+        .list(&TrustCardListFilter::empty(), "test-trace", 1000)
+        .expect("list for sync");
 
     // Create a representative sync report structure
     let sync_report = serde_json::json!({
@@ -275,7 +268,7 @@ fn test_trust_card_telemetry_events_golden() {
             "trace_id": "test-trace",
             "timestamp_secs": 1001,
             "detail": "Queried trust card details"
-        })
+        }),
     ];
 
     let json = serde_json::to_value(&telemetry_events).unwrap();

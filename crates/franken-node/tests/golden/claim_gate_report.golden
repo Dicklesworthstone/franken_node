@@ -1,0 +1,49 @@
+{
+  "bead_id": "bd-2ji2",
+  "section": "10.16",
+  "gate_verdict": "FAIL",
+  "summary": {
+    "total_claims": 4,
+    "linked": 2,
+    "unlinked": 1,
+    "broken_links": 1
+  },
+  "claims": [
+    {
+      "file": "docs/api.md",
+      "line": 42,
+      "claim_text": "The API supports batch operations for improved performance",
+      "category": "Api",
+      "linked_artifact": "artifacts/10.16/api_batch_conformance.json",
+      "artifact_exists": true,
+      "status": "Linked"
+    },
+    {
+      "file": "docs/storage.md",
+      "line": 128,
+      "claim_text": "Storage layer provides ACID guarantees for all transactions",
+      "category": "Storage",
+      "linked_artifact": "artifacts/10.16/storage_acid_test.json",
+      "artifact_exists": true,
+      "status": "Linked"
+    },
+    {
+      "file": "docs/tui.md",
+      "line": 67,
+      "claim_text": "TUI responds to resize events within [DURATION]",
+      "category": "Tui",
+      "linked_artifact": null,
+      "artifact_exists": false,
+      "status": "Unlinked"
+    },
+    {
+      "file": "docs/model.md",
+      "line": 203,
+      "claim_text": "Model validation ensures data integrity constraints",
+      "category": "Model",
+      "linked_artifact": "artifacts/10.16/missing_file.json",
+      "artifact_exists": false,
+      "status": "BrokenLink"
+    }
+  ]
+}

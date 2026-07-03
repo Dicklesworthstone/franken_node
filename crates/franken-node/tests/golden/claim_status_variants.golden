@@ -1,0 +1,17 @@
+[
+  {
+    "status": "Linked",
+    "display": "LINKED",
+    "is_pass": true
+  },
+  {
+    "status": "Unlinked",
+    "display": "UNLINKED",
+    "is_pass": false
+  },
+  {
+    "status": "BrokenLink",
+    "display": "BROKEN_LINK",
+    "is_pass": false
+  }
+]

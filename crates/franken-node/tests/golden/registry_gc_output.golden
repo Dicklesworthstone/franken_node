@@ -1,0 +1,6 @@
+registry garbage collection: keep=1
+archived=2
+deleted=0
+active_artifacts=1
+archived_artifacts=3
+total_artifacts=4

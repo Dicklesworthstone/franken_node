@@ -1,0 +1,12 @@
+{
+  "evidence_refs": [
+    {
+      "evidence_id": "evidence-1",
+      "evidence_type": "provenance_chain",
+      "verified_at_epoch": 1000,
+      "verification_receipt_hash": "receipt-hash-1"
+    }
+  ],
+  "derived_at_epoch": 1000,
+  "derivation_chain_hash": "sha256:[HASH]"
+}

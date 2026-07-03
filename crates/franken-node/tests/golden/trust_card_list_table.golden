@@ -1,0 +1,4 @@
+extension | publisher | cert | reputation | status
+---------|-----------|------|------------|-------
+npm:@acme/auth-guard | pub-acme | Gold | 920bp (↗) | active
+npm:@beta/telemetry-bridge | pub-beta | Bronze | 410bp (↘) | revoked

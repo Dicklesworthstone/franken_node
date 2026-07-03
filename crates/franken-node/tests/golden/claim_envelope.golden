@@ -1,0 +1,57 @@
+{
+  "schema_version": "franken-node/claim-envelope/v1",
+  "envelope_id": "claim-envelope-[KEY_ID]",
+  "created_at": "[TIMESTAMP]",
+  "claims": [
+    {
+      "file": "docs/api.md",
+      "line": 42,
+      "claim_text": "The API supports batch operations for improved performance",
+      "category": "Api",
+      "linked_artifact": "artifacts/10.16/api_batch_conformance.json",
+      "artifact_exists": true,
+      "status": "Linked"
+    },
+    {
+      "file": "docs/storage.md",
+      "line": 128,
+      "claim_text": "Storage layer provides ACID guarantees for all transactions",
+      "category": "Storage",
+      "linked_artifact": "artifacts/10.16/storage_acid_test.json",
+      "artifact_exists": true,
+      "status": "Linked"
+    },
+    {
+      "file": "docs/tui.md",
+      "line": 67,
+      "claim_text": "TUI responds to resize events within [DURATION]",
+      "category": "Tui",
+      "linked_artifact": null,
+      "artifact_exists": false,
+      "status": "Unlinked"
+    },
+    {
+      "file": "docs/model.md",
+      "line": 203,
+      "claim_text": "Model validation ensures data integrity constraints",
+      "category": "Model",
+      "linked_artifact": "artifacts/10.16/missing_file.json",
+      "artifact_exists": false,
+      "status": "BrokenLink"
+    }
+  ],
+  "metadata": {
+    "scan_root": "docs/",
+    "scan_patterns": [
+      "**/*.md"
+    ],
+    "artifact_root": "artifacts/10.16/",
+    "total_files_scanned": 12,
+    "total_claims_found": 4
+  },
+  "signature": {
+    "signer": "claim-validator-v1",
+    "signature_b64": "dGVzdC1jbGFpbS1zaWduYXR1cmU=",
+    "signed_at": "[TIMESTAMP]"
+  }
+}

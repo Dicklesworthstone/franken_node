@@ -1,0 +1,10 @@
+{
+  "extension_id": "plugin-test-golden-[KEY_ID]",
+  "publisher_key_id": "[KEY_ID]",
+  "signing_key_source": "test",
+  "signing_key_path": "[PATH]",
+  "artifact_path": ".franken-node/state/registry/artifacts/plugin-test-golden-[KEY_ID]/artifact.fnext",
+  "manifest_path": ".franken-node/state/registry/artifacts/plugin-test-golden-[KEY_ID]/artifact.manifest.json",
+  "integrity": "verified",
+  "published_at": "[TIMESTAMP]"
+}

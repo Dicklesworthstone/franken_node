@@ -14,16 +14,14 @@
 mod adjacent_claim_language_gate;
 
 // Golden test modules
-#[path = "golden/mod.rs"]
-mod golden;
-#[path = "golden/trust_card_golden_tests.rs"]
-mod trust_card_golden_tests;
-#[path = "golden/registry_golden_tests.rs"]
-mod registry_golden_tests;
 #[path = "golden/claims_golden_tests.rs"]
 mod claims_golden_tests;
-
-use std::env;
+#[path = "golden/mod.rs"]
+mod golden;
+#[path = "golden/registry_golden_tests.rs"]
+mod registry_golden_tests;
+#[path = "golden/trust_card_golden_tests.rs"]
+mod trust_card_golden_tests;
 
 #[test]
 fn golden_tests_require_update_goldens_env_for_creation() {
@@ -51,10 +49,10 @@ fn golden_infrastructure_test() {
     assert!(scrubbed.contains(r#""test": "value""#));
 }
 
-// Re-export golden utilities for the test modules
+// Re-export the golden utilities so the domain test modules can reach them via
+// `use super::{assert_scrubbed_json_golden, assert_scrubbed_golden, assert_json_golden}`.
 pub use golden::*;
 
-// Re-export the individual test modules so they run as part of this suite
-pub use trust_card_golden_tests::*;
-pub use registry_golden_tests::*;
-pub use claims_golden_tests::*;
+// The domain-specific #[test] functions (trust_card / registry / claims) are
+// collected automatically from the `mod` declarations above — no glob re-export
+// is needed for them to run as part of this suite.
