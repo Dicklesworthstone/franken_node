@@ -8,12 +8,11 @@
 
 use crate::golden;
 use frankenengine_node::connector::vef_execution_receipt::{
-    ExecutionActionType, ExecutionReceipt, ReceiptOperationType, VerificationContext,
-    receipt_hash_sha256,
+    ExecutionActionType, ExecutionReceipt, receipt_hash_sha256,
 };
 use frankenengine_node::vef::receipt_chain::{
-    ChainError, ChainEvent, GENESIS_PREV_HASH, RECEIPT_CHAIN_SCHEMA_VERSION, ReceiptChainConfig,
-    ReceiptChainEntry, ReceiptCheckpoint,
+    ChainError, GENESIS_PREV_HASH, RECEIPT_CHAIN_SCHEMA_VERSION, ReceiptChainConfig,
+    ReceiptChainEntry, ReceiptCheckpoint, error_codes, event_codes,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -23,7 +22,7 @@ fn test_execution_receipt_basic_structure() {
     // Test basic ExecutionReceipt structure serialization
     let receipt = ExecutionReceipt {
         schema_version: RECEIPT_CHAIN_SCHEMA_VERSION.to_string(),
-        action_type: ExecutionActionType::PolicyEvaluation,
+        action_type: ExecutionActionType::NetworkAccess,
         capability_context: {
             let mut context = BTreeMap::new();
             context.insert("capability_type".to_string(), "network_egress".to_string());
@@ -54,7 +53,7 @@ fn test_execution_receipt_canonicalization() {
     // Test that canonicalization produces deterministic output
     let base_receipt = ExecutionReceipt {
         schema_version: RECEIPT_CHAIN_SCHEMA_VERSION.to_string(),
-        action_type: ExecutionActionType::TrustDecision,
+        action_type: ExecutionActionType::PolicyTransition,
         capability_context: {
             let mut context = BTreeMap::new();
             context.insert("decision_type".to_string(), "allow".to_string());
@@ -111,15 +110,9 @@ fn test_execution_receipt_canonicalization() {
 
 #[test]
 fn test_execution_receipt_action_types() {
-    // Test different ExecutionActionType variations
-    let action_types = vec![
-        ExecutionActionType::PolicyEvaluation,
-        ExecutionActionType::TrustDecision,
-        ExecutionActionType::ArtifactVerification,
-        ExecutionActionType::CapabilityGrant,
-        ExecutionActionType::Evidence,
-    ];
-
+    // Test every ExecutionActionType variant. Iterate the prod-provided
+    // `ExecutionActionType::all()` slice rather than a hard-coded list so this
+    // golden cannot silently drift out of sync if the enum gains/loses variants.
     let base_receipt_template = |action_type| ExecutionReceipt {
         schema_version: RECEIPT_CHAIN_SCHEMA_VERSION.to_string(),
         action_type,
@@ -133,12 +126,12 @@ fn test_execution_receipt_action_types() {
         trace_id: "trace-action-type".to_string(),
     };
 
-    for action_type in action_types {
+    for &action_type in ExecutionActionType::all() {
         let receipt = base_receipt_template(action_type);
         let receipt_json = serde_json::to_value(&receipt).expect("Should serialize receipt");
 
         golden::assert_scrubbed_json_golden(
-            &format!("vef_receipt_envelope/action_types/{:?}", action_type),
+            &format!("vef_receipt_envelope/action_types/{action_type:?}"),
             &receipt_json,
         );
     }
@@ -149,7 +142,7 @@ fn test_receipt_hash_consistency() {
     // Test that receipt hashing is deterministic and consistent
     let receipt = ExecutionReceipt {
         schema_version: RECEIPT_CHAIN_SCHEMA_VERSION.to_string(),
-        action_type: ExecutionActionType::PolicyEvaluation,
+        action_type: ExecutionActionType::PolicyTransition,
         capability_context: {
             let mut context = BTreeMap::new();
             context.insert("test_key".to_string(), "test_value".to_string());
@@ -220,7 +213,7 @@ fn test_receipt_chain_entry_structure() {
     // Test ReceiptChainEntry structure
     let receipt = ExecutionReceipt {
         schema_version: RECEIPT_CHAIN_SCHEMA_VERSION.to_string(),
-        action_type: ExecutionActionType::Evidence,
+        action_type: ExecutionActionType::ArtifactPromotion,
         capability_context: {
             let mut context = BTreeMap::new();
             context.insert("evidence_type".to_string(), "signature".to_string());
@@ -254,7 +247,7 @@ fn test_receipt_chain_progression() {
     // Test chain progression with multiple entries
     let base_receipt = ExecutionReceipt {
         schema_version: RECEIPT_CHAIN_SCHEMA_VERSION.to_string(),
-        action_type: ExecutionActionType::PolicyEvaluation,
+        action_type: ExecutionActionType::PolicyTransition,
         capability_context: BTreeMap::new(),
         actor_identity: "progression-actor".to_string(),
         artifact_identity: "progression-artifact".to_string(),
@@ -456,23 +449,44 @@ fn test_receipt_chain_config_variations() {
 
 #[test]
 fn test_chain_error_patterns() {
-    // Test ChainError patterns for fail-closed semantics
+    // Test ChainError patterns for fail-closed semantics. The `tamper` /
+    // `checkpoint` / `sequence` / `internal` constructors are private to the
+    // receipt_chain module (internal fail-closed helpers), so we build the
+    // public `ChainError` struct directly from the public `error_codes` /
+    // `event_codes` constants — the exact pairing prod uses — to keep this
+    // golden faithful without widening the prod API surface.
     let error_test_cases = vec![
         (
             "tamper_error",
-            ChainError::tamper("Hash mismatch detected in chain entry 42"),
+            ChainError {
+                code: error_codes::ERR_VEF_CHAIN_TAMPER.to_string(),
+                event_code: event_codes::VEF_CHAIN_ERR_001_TAMPER.to_string(),
+                message: "Hash mismatch detected in chain entry 42".to_string(),
+            },
         ),
         (
             "checkpoint_error",
-            ChainError::checkpoint("Invalid checkpoint commitment hash"),
+            ChainError {
+                code: error_codes::ERR_VEF_CHAIN_CHECKPOINT.to_string(),
+                event_code: event_codes::VEF_CHAIN_ERR_002_CHECKPOINT.to_string(),
+                message: "Invalid checkpoint commitment hash".to_string(),
+            },
         ),
         (
             "sequence_error",
-            ChainError::sequence("Gap in chain sequence: expected index 10, got 12"),
+            ChainError {
+                code: error_codes::ERR_VEF_CHAIN_SEQUENCE.to_string(),
+                event_code: event_codes::VEF_CHAIN_ERR_003_SEQUENCE.to_string(),
+                message: "Gap in chain sequence: expected index 10, got 12".to_string(),
+            },
         ),
         (
             "internal_error",
-            ChainError::internal("Serialization failure during hash computation"),
+            ChainError {
+                code: error_codes::ERR_VEF_CHAIN_INTERNAL.to_string(),
+                event_code: event_codes::VEF_CHAIN_ERR_004_INTERNAL.to_string(),
+                message: "Serialization failure during hash computation".to_string(),
+            },
         ),
     ];
 
@@ -491,7 +505,7 @@ fn test_schema_version_consistency() {
     // Test that schema version is consistently applied
     let receipt_with_schema = ExecutionReceipt {
         schema_version: RECEIPT_CHAIN_SCHEMA_VERSION.to_string(),
-        action_type: ExecutionActionType::Evidence,
+        action_type: ExecutionActionType::ArtifactPromotion,
         capability_context: BTreeMap::new(),
         actor_identity: "schema-test-actor".to_string(),
         artifact_identity: "schema-test-artifact".to_string(),
@@ -513,79 +527,9 @@ fn test_schema_version_consistency() {
     golden::assert_scrubbed_json_golden("vef_receipt_envelope/schema_consistency", &schema_test);
 }
 
-#[test]
-fn test_verification_context_variations() {
-    // Test different VerificationContext patterns
-    let context_test_cases = vec![
-        (
-            "empty_context",
-            VerificationContext {
-                domain: "".to_string(),
-                constraints: None,
-            },
-        ),
-        (
-            "basic_context",
-            VerificationContext {
-                domain: "test-domain".to_string(),
-                constraints: None,
-            },
-        ),
-        (
-            "context_with_constraints",
-            VerificationContext {
-                domain: "production".to_string(),
-                constraints: Some({
-                    let mut constraints = BTreeMap::new();
-                    constraints.insert(
-                        "max_depth".to_string(),
-                        serde_json::Value::Number(10.into()),
-                    );
-                    constraints.insert(
-                        "timeout_ms".to_string(),
-                        serde_json::Value::Number(5000.into()),
-                    );
-                    constraints.insert(
-                        "require_signatures".to_string(),
-                        serde_json::Value::Bool(true),
-                    );
-                    constraints
-                }),
-            },
-        ),
-        (
-            "complex_constraints",
-            VerificationContext {
-                domain: "high-assurance".to_string(),
-                constraints: Some({
-                    let mut constraints = BTreeMap::new();
-                    constraints.insert(
-                        "verification_level".to_string(),
-                        serde_json::Value::String("strict".to_string()),
-                    );
-                    constraints.insert(
-                        "allowed_issuers".to_string(),
-                        serde_json::Value::Array(vec![
-                            serde_json::Value::String("issuer-1".to_string()),
-                            serde_json::Value::String("issuer-2".to_string()),
-                        ]),
-                    );
-                    constraints.insert(
-                        "policy_version".to_string(),
-                        serde_json::Value::String("v2.1.0".to_string()),
-                    );
-                    constraints
-                }),
-            },
-        ),
-    ];
-
-    for (test_name, context) in context_test_cases {
-        let context_json = serde_json::to_value(&context).expect("Should serialize context");
-
-        golden::assert_scrubbed_json_golden(
-            &format!("vef_receipt_envelope/verification_context/{}", test_name),
-            &context_json,
-        );
-    }
-}
+// NOTE (bd-08com): the former `test_verification_context_variations` golden was
+// removed here. Its subject type `VerificationContext { domain, constraints }`
+// was deleted from `connector::vef_execution_receipt` and has no successor type,
+// so there is nothing left to snapshot. If a replacement verification-context
+// surface is later introduced, add fresh golden coverage under a new bead rather
+// than resurrecting this one against a type that no longer exists.

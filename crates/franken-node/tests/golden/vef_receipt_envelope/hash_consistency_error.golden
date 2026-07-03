@@ -1,0 +1,4 @@
+{
+  "error": "initial_hash_failed",
+  "message": "VEF-RECEIPT-ERR-003: schema_version 'vef-receipt-chain-v1' does not match 'vef-execution-receipt-v1'"
+}

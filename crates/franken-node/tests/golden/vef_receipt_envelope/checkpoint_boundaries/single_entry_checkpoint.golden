@@ -1,0 +1,10 @@
+{
+  "checkpoint_id": 1,
+  "start_index": 0,
+  "end_index": 0,
+  "entry_count": 1,
+  "chain_head_hash": "sha256:single_entry_head",
+  "commitment_hash": "sha256:single_entry_commit",
+  "created_at_millis": [UNIX_TIMESTAMP],
+  "trace_id": "trace-single"
+}

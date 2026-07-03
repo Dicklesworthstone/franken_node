@@ -1,0 +1,16 @@
+{
+  "token_id": "[HASH]",
+  "issuer_identity": "ephemeral-issuer",
+  "issued_at_epoch_secs": [UNIX_TIMESTAMP],
+  "expires_at_epoch_secs": [UNIX_TIMESTAMP],
+  "scope": {
+    "operations": [
+      "revocation_fetch"
+    ],
+    "endpoint_prefixes": [
+      "https://revocation.example.com/"
+    ]
+  },
+  "signature": "[HASH]",
+  "single_use": false
+}

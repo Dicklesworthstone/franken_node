@@ -1800,3 +1800,18 @@ path = "tests/supply_chain_attestation_manifest_golden.rs"
 name = "engine_dispatcher_profile_golden"
 path = "tests/engine_dispatcher_profile_golden.rs"
 required-features = ["engine"]
+
+# golden_remote_api_connector_vef (bd-08com): re-registered (session 2026-07-02).
+# Golden serialization suite for remote_cap / frame_parser / vef receipt-chain
+# canonical forms (3 #[path] submodules under tests/golden/). All imported modules
+# (security::remote_cap, connector::frame_parser, connector::vef_execution_receipt,
+# vef::receipt_chain) live in the default surface, so no required-features. Fixed
+# submodule drift: ExecutionActionType enum was redesigned (old policy/trust
+# variants -> host-action variants; test now iterates ExecutionActionType::all()),
+# ChainError constructors went private (build the public struct from error_codes/
+# event_codes consts), FrameInput/ParserConfig lost Serialize (hand-build json!),
+# and VerificationContext/ReceiptOperationType were removed (dropped the dead
+# VerificationContext golden + unused imports).
+[[test]]
+name = "golden_remote_api_connector_vef"
+path = "tests/golden_remote_api_connector_vef.rs"

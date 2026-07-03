@@ -1,0 +1,62 @@
+[
+  {
+    "index": 0,
+    "prev_chain_hash": "sha256:[HASH]",
+    "receipt_hash": "sha256:hash000",
+    "chain_hash": "sha256:chain000",
+    "receipt": {
+      "schema_version": "vef-receipt-chain-v1",
+      "action_type": "policy_transition",
+      "capability_context": {},
+      "actor_identity": "progression-actor",
+      "artifact_identity": "progression-artifact",
+      "policy_snapshot_hash": "sha256:progression123",
+      "timestamp_millis": [UNIX_TIMESTAMP],
+      "sequence_number": 0,
+      "witness_references": [],
+      "trace_id": "trace-progression-0"
+    },
+    "appended_at_millis": [UNIX_TIMESTAMP],
+    "trace_id": "trace-progression-0"
+  },
+  {
+    "index": 1,
+    "prev_chain_hash": "sha256:chain000",
+    "receipt_hash": "sha256:hash001",
+    "chain_hash": "sha256:chain001",
+    "receipt": {
+      "schema_version": "vef-receipt-chain-v1",
+      "action_type": "policy_transition",
+      "capability_context": {},
+      "actor_identity": "progression-actor",
+      "artifact_identity": "progression-artifact",
+      "policy_snapshot_hash": "sha256:progression123",
+      "timestamp_millis": [UNIX_TIMESTAMP],
+      "sequence_number": 1,
+      "witness_references": [],
+      "trace_id": "trace-progression-1"
+    },
+    "appended_at_millis": [UNIX_TIMESTAMP],
+    "trace_id": "trace-progression-1"
+  },
+  {
+    "index": 2,
+    "prev_chain_hash": "sha256:chain001",
+    "receipt_hash": "sha256:hash002",
+    "chain_hash": "sha256:chain002",
+    "receipt": {
+      "schema_version": "vef-receipt-chain-v1",
+      "action_type": "policy_transition",
+      "capability_context": {},
+      "actor_identity": "progression-actor",
+      "artifact_identity": "progression-artifact",
+      "policy_snapshot_hash": "sha256:progression123",
+      "timestamp_millis": [UNIX_TIMESTAMP],
+      "sequence_number": 2,
+      "witness_references": [],
+      "trace_id": "trace-progression-2"
+    },
+    "appended_at_millis": [UNIX_TIMESTAMP],
+    "trace_id": "trace-progression-2"
+  }
+]

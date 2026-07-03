@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "error": "BPG_MALFORMED_FRAME: (empty) frame_id must not be empty",
+  "frame_id_length": 0,
+  "test_case": "empty_frame_id"
+}

@@ -8,17 +8,14 @@
 
 use crate::golden;
 use frankenengine_node::security::remote_cap::{
-    CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteCap, RemoteCapAuditEvent,
-    RemoteOperation, RemoteScope,
+    CapabilityGate, CapabilityProvider, ConnectivityMode, RemoteOperation, RemoteScope,
 };
 use serde_json::json;
-use std::collections::BTreeMap;
 
 #[test]
 fn test_remote_capability_envelope_basic_structure() {
     // Test basic RemoteCap structure serialization
-    let provider =
-        CapabilityProvider::new("test-signing-secret").expect("Should create provider");
+    let provider = CapabilityProvider::new("test-signing-secret").expect("Should create provider");
 
     let scope = RemoteScope::new(
         vec![
@@ -120,8 +117,7 @@ fn test_remote_scope_validation_patterns() {
 
 #[test]
 fn test_capability_provider_issuance_patterns() {
-    let provider =
-        CapabilityProvider::new("test-signing-secret").expect("Should create provider");
+    let provider = CapabilityProvider::new("test-signing-secret").expect("Should create provider");
 
     // Test different issuance patterns
     let test_cases = vec![
@@ -207,9 +203,10 @@ fn test_capability_provider_issuance_patterns() {
 
 #[test]
 fn test_capability_gate_authorization_decisions() {
-    let provider =
-        CapabilityProvider::new("gate-test-secret").expect("Should create provider");
-    let mut gate = CapabilityGate::new("gate-test-secret").expect("Should create gate");
+    let provider = CapabilityProvider::new("gate-test-signing-secret-material")
+        .expect("Should create provider");
+    let mut gate =
+        CapabilityGate::new("gate-test-signing-secret-material").expect("Should create gate");
 
     // Create test capability
     let scope = RemoteScope::new(
@@ -311,9 +308,10 @@ fn test_capability_gate_authorization_decisions() {
 
 #[test]
 fn test_capability_gate_audit_events() {
-    let provider =
-        CapabilityProvider::new("audit-test-secret").expect("Should create provider");
-    let mut gate = CapabilityGate::new("audit-test-secret").expect("Should create gate");
+    let provider = CapabilityProvider::new("audit-test-signing-secret-material")
+        .expect("Should create provider");
+    let mut gate =
+        CapabilityGate::new("audit-test-signing-secret-material").expect("Should create gate");
 
     let scope = RemoteScope::new(
         vec![RemoteOperation::NetworkEgress],
@@ -364,8 +362,7 @@ fn test_capability_gate_audit_events() {
 
 #[test]
 fn test_remote_capability_envelope_boundary_conditions() {
-    let provider =
-        CapabilityProvider::new("boundary-test-secret").expect("Should create provider");
+    let provider = CapabilityProvider::new("boundary-test-secret").expect("Should create provider");
 
     // Test boundary conditions
     let boundary_test_cases = vec![

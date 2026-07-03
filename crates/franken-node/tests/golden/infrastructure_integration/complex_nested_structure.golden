@@ -1,0 +1,38 @@
+{
+  "remote_capability": {
+    "token_id": "cap-[UUID]",
+    "issuer": "test-issuer",
+    "issued_at": "[TIMESTAMP]",
+    "expires_at": "[TIMESTAMP]",
+    "scope": {
+      "operations": [
+        "network_egress",
+        "telemetry_export"
+      ],
+      "endpoints": [
+        "https://api.example.com/"
+      ]
+    },
+    "signature": "mac:[KEY_ID]"
+  },
+  "connector_frame": {
+    "frame_id": "lifecycle-frame-001",
+    "timestamp": "[TIMESTAMP]",
+    "raw_bytes_len": 1024,
+    "nesting_depth": 5,
+    "decode_cpu_ms": 25,
+    "trace_id": "trace-12345"
+  },
+  "vef_receipt": {
+    "schema_version": "vef-receipt-chain-v1",
+    "receipt_hash": "sha256:[HASH]",
+    "chain_hash": "sha256:[HASH]",
+    "timestamp_millis": [UNIX_TIMESTAMP],
+    "sequence_number": 42,
+    "trace_id": "trace-vef-receipt-001",
+    "witness_references": [
+      "witness-[UUID]",
+      "witness-another-uuid-here"
+    ]
+  }
+}

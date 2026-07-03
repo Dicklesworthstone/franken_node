@@ -1,0 +1,27 @@
+{
+  "determinism_test": {
+    "timestamp": "[TIMESTAMP]",
+    "uuid": "[UUID]",
+    "capability_context": {
+      "capability_type": "network_egress",
+      "endpoint": "https://api.example.com"
+    },
+    "sorted_array": [
+      "alpha",
+      "beta",
+      "gamma"
+    ],
+    "numeric_values": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "boolean_flags": {
+      "enabled": true,
+      "verified": false,
+      "authenticated": true
+    }
+  }
+}

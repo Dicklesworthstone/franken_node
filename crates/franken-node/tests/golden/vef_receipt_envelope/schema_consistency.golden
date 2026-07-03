@@ -1,0 +1,18 @@
+{
+  "schema_version": "vef-receipt-chain-v1",
+  "receipt": {
+    "schema_version": "vef-receipt-chain-v1",
+    "action_type": "artifact_promotion",
+    "capability_context": {},
+    "actor_identity": "schema-test-actor",
+    "artifact_identity": "schema-test-artifact",
+    "policy_snapshot_hash": "sha256:schema123",
+    "timestamp_millis": [UNIX_TIMESTAMP],
+    "sequence_number": 1,
+    "witness_references": [],
+    "trace_id": "trace-schema"
+  },
+  "genesis_prev_hash": "sha256:[HASH]",
+  "schema_length": 20,
+  "schema_format": "vef-receipt-chain-v*"
+}

@@ -1,0 +1,5 @@
+{
+  "code": "ERR-VEF-CHAIN-CHECKPOINT",
+  "event_code": "VEF-CHAIN-ERR-002",
+  "message": "Invalid checkpoint commitment hash"
+}

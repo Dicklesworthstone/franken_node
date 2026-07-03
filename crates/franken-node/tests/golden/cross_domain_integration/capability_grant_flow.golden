@@ -1,0 +1,60 @@
+{
+  "scenario": "capability_grant_with_receipt_chain",
+  "flow": [
+    {
+      "step": 1,
+      "domain": "remote_capability",
+      "action": "issue_capability",
+      "data": {
+        "token_id": "cross-domain-cap-001",
+        "issuer": "central-authority",
+        "issued_at": "[TIMESTAMP]",
+        "scope": {
+          "operations": [
+            "remote_computation"
+          ],
+          "endpoints": [
+            "https://compute.example.com/"
+          ]
+        },
+        "trace_id": "trace-cross-domain-001"
+      }
+    },
+    {
+      "step": 2,
+      "domain": "connector_lifecycle",
+      "action": "validate_frame",
+      "data": {
+        "frame_id": "computation-request-frame",
+        "timestamp": "[TIMESTAMP]",
+        "raw_bytes_len": 2048,
+        "nesting_depth": 3,
+        "decode_cpu_ms": 15,
+        "trace_id": "trace-cross-domain-001"
+      }
+    },
+    {
+      "step": 3,
+      "domain": "vef_receipt",
+      "action": "create_execution_receipt",
+      "data": {
+        "schema_version": "vef-receipt-chain-v1",
+        "action_type": "capability_grant",
+        "actor_identity": "computation-service",
+        "artifact_identity": "cross-domain-computation",
+        "timestamp_millis": [UNIX_TIMESTAMP],
+        "sequence_number": 1,
+        "trace_id": "trace-cross-domain-001",
+        "capability_context": {
+          "granted_capability": "cross-domain-cap-001",
+          "frame_validation": "computation-request-frame"
+        }
+      }
+    }
+  ],
+  "integrity_checks": {
+    "trace_id_consistency": true,
+    "temporal_ordering": true,
+    "capability_chain_valid": true
+  }
+}

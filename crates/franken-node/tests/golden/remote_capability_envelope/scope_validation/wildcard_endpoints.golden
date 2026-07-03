@@ -1,0 +1,9 @@
+{
+  "operations": [
+    "network_egress"
+  ],
+  "endpoint_prefixes": [
+    "*",
+    "https://*.example.com/"
+  ]
+}

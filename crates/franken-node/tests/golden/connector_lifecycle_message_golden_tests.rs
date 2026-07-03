@@ -8,8 +8,7 @@
 
 use crate::golden;
 use frankenengine_node::connector::frame_parser::{
-    DecodeAuditEntry, DecodeVerdict, FrameInput, GuardrailViolation, ParserConfig, ParserError,
-    ResourceUsage, check_batch, check_frame, validate_config,
+    FrameInput, GuardrailViolation, ParserConfig, check_batch, check_frame, validate_config,
 };
 use serde_json::json;
 
@@ -23,7 +22,15 @@ fn test_frame_input_basic_structure() {
         decode_cpu_ms: 25,
     };
 
-    let frame_json = serde_json::to_value(&frame).expect("Should serialize FrameInput");
+    // `FrameInput` is a non-serde prod type (frame_parser carries no serde
+    // derives), so hand-build the JSON from its public fields — the same
+    // convention this file already uses for the other frame_parser types.
+    let frame_json = json!({
+        "frame_id": frame.frame_id,
+        "raw_bytes_len": frame.raw_bytes_len,
+        "nesting_depth": frame.nesting_depth,
+        "decode_cpu_ms": frame.decode_cpu_ms,
+    });
     golden::assert_scrubbed_json_golden(
         "connector_lifecycle_message/frame_input_basic",
         &frame_json,
@@ -62,9 +69,15 @@ fn test_parser_config_variations() {
     ];
 
     for (config_name, config) in configs {
-        let config_json = serde_json::to_value(&config).expect("Should serialize config");
+        // `ParserConfig` is a non-serde prod type; hand-build the JSON from its
+        // public fields (same convention as the rest of this file).
+        let config_json = json!({
+            "max_frame_bytes": config.max_frame_bytes,
+            "max_nesting_depth": config.max_nesting_depth,
+            "max_decode_cpu_ms": config.max_decode_cpu_ms,
+        });
         golden::assert_json_golden(
-            &format!("connector_lifecycle_message/parser_configs/{}", config_name),
+            &format!("connector_lifecycle_message/parser_configs/{config_name}"),
             &config_json,
         );
     }
@@ -415,11 +428,13 @@ fn test_frame_id_handling() {
     let config = ParserConfig::default_config();
     let timestamp = "2026-04-20T12:00:00Z";
 
-    // Test various frame ID patterns
+    // Test various frame ID patterns. `long_frame_id` is bound here so the
+    // 1000-char String outlives the borrow held by `frame_id_test_cases`.
+    let long_frame_id = "x".repeat(1000);
     let frame_id_test_cases = vec![
         ("normal_frame_id", "normal-frame-123"),
         ("empty_frame_id", ""),
-        ("very_long_frame_id", &"x".repeat(1000)),
+        ("very_long_frame_id", long_frame_id.as_str()),
         ("special_characters", "frame-with-!@#$%^&*()_+{}[]"),
         ("unicode_frame_id", "frame-🚀-test-🔒"),
         ("whitespace_frame_id", "  frame with spaces  "),
@@ -530,7 +545,7 @@ fn test_resource_usage_boundary_values() {
 
     for (test_name, frame) in boundary_test_cases {
         match check_frame(&frame, &config, timestamp) {
-            Ok((verdict, audit)) => {
+            Ok((verdict, _audit)) => {
                 let result_json = json!({
                     "success": true,
                     "input": {

@@ -1,0 +1,4 @@
+{
+  "checkpoint_every_entries": 10000,
+  "checkpoint_every_millis": 3600000
+}

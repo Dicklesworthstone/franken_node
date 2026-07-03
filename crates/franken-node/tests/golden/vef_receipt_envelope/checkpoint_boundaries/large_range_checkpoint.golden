@@ -1,0 +1,10 @@
+{
+  "checkpoint_id": 999,
+  "start_index": 1000000,
+  "end_index": 1999999,
+  "entry_count": 1000000,
+  "chain_head_hash": "sha256:large_range_head_hash",
+  "commitment_hash": "sha256:large_range_commit_hash",
+  "created_at_millis": [UNIX_TIMESTAMP],
+  "trace_id": "trace-large-range"
+}

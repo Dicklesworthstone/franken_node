@@ -1,0 +1,16 @@
+{
+  "token_id": "[HASH]",
+  "issuer_identity": "test-issuer",
+  "issued_at_epoch_secs": [UNIX_TIMESTAMP],
+  "expires_at_epoch_secs": [UNIX_TIMESTAMP],
+  "scope": {
+    "operations": [
+      "remote_computation"
+    ],
+    "endpoint_prefixes": [
+      "https://compute.example.com/single-use"
+    ]
+  },
+  "signature": "[HASH]",
+  "single_use": true
+}

@@ -1,0 +1,6 @@
+{
+  "frame_id": "test-frame-001",
+  "raw_bytes_len": 1024,
+  "nesting_depth": 5,
+  "decode_cpu_ms": 25
+}

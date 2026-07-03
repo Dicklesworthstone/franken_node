@@ -1,0 +1,44 @@
+{
+  "original": {
+    "schema_version": "vef-receipt-chain-v1",
+    "action_type": "policy_transition",
+    "capability_context": {
+      "decision_type": "allow",
+      "policy_id": "policy-123"
+    },
+    "actor_identity": "decision-engine",
+    "artifact_identity": "artifact-999",
+    "policy_snapshot_hash": "sha256:[KEY_ID]",
+    "timestamp_millis": [UNIX_TIMESTAMP],
+    "sequence_number": 1,
+    "witness_references": [
+      "witness-beta",
+      "witness-alpha",
+      "witness-beta",
+      "witness-gamma"
+    ],
+    "trace_id": "trace-canon-001"
+  },
+  "canonicalized": {
+    "schema_version": "vef-receipt-chain-v1",
+    "action_type": "policy_transition",
+    "capability_context": {
+      "decision_type": "allow",
+      "policy_id": "policy-123"
+    },
+    "actor_identity": "decision-engine",
+    "artifact_identity": "artifact-999",
+    "policy_snapshot_hash": "sha256:[KEY_ID]",
+    "timestamp_millis": [UNIX_TIMESTAMP],
+    "sequence_number": 1,
+    "witness_references": [
+      "witness-alpha",
+      "witness-beta",
+      "witness-gamma"
+    ],
+    "trace_id": "trace-canon-001"
+  },
+  "witness_references_changed": true,
+  "original_witness_count": 4,
+  "canonical_witness_count": 3
+}

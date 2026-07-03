@@ -1,0 +1,16 @@
+{
+  "success": true,
+  "input": {
+    "raw_bytes_len": 999999,
+    "nesting_depth": 31,
+    "decode_cpu_ms": 99
+  },
+  "resource_usage": {
+    "bytes_parsed": 999999,
+    "nesting_depth": 31,
+    "cpu_ms": 99
+  },
+  "allowed": true,
+  "violation_count": 0,
+  "test_case": "max_safe_values"
+}

@@ -1,0 +1,9 @@
+[
+  "network_egress",
+  "federation_sync",
+  "revocation_fetch",
+  "remote_attestation_verify",
+  "telemetry_export",
+  "remote_computation",
+  "artifact_upload"
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "event_code": "REMOTECAP_CONSUMED",
+    "legacy_event_code": "RC_CHECK_PASSED",
+    "token_id": "[HASH]",
+    "issuer_identity": "audit-issuer",
+    "operation": "network_egress",
+    "endpoint": "https://api.example.com/data",
+    "trace_id": "trace-audit-001",
+    "timestamp_epoch_secs": [UNIX_TIMESTAMP],
+    "allowed": true,
+    "denial_code": null
+  },
+  {
+    "event_code": "REMOTECAP_DENIED",
+    "legacy_event_code": "RC_CHECK_DENIED",
+    "token_id": "[HASH]",
+    "issuer_identity": "audit-issuer",
+    "operation": "federation_sync",
+    "endpoint": "https://api.example.com/sync",
+    "trace_id": "trace-audit-002",
+    "timestamp_epoch_secs": [UNIX_TIMESTAMP],
+    "allowed": false,
+    "denial_code": "REMOTECAP_SCOPE_DENIED"
+  },
+  {
+    "event_code": "REMOTECAP_DENIED",
+    "legacy_event_code": "RC_CHECK_DENIED",
+    "token_id": "[HASH]",
+    "issuer_identity": "audit-issuer",
+    "operation": "network_egress",
+    "endpoint": "https://unauthorized.com/",
+    "trace_id": "trace-audit-003",
+    "timestamp_epoch_secs": [UNIX_TIMESTAMP],
+    "allowed": false,
+    "denial_code": "REMOTECAP_SCOPE_DENIED"
+  }
+]

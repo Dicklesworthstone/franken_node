@@ -1,0 +1,5 @@
+{
+  "code": "ERR-VEF-CHAIN-SEQUENCE",
+  "event_code": "VEF-CHAIN-ERR-003",
+  "message": "Gap in chain sequence: expected index 10, got 12"
+}

@@ -1,0 +1,10 @@
+{
+  "checkpoint_id": 0,
+  "start_index": 0,
+  "end_index": 0,
+  "entry_count": 0,
+  "chain_head_hash": "",
+  "commitment_hash": "",
+  "created_at_millis": 0,
+  "trace_id": ""
+}

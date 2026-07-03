@@ -1,0 +1,25 @@
+{
+  "success": true,
+  "verdict": {
+    "frame_id": "at-depth-limit",
+    "allowed": true,
+    "violations": [],
+    "resource_usage": {
+      "bytes_parsed": 1000,
+      "nesting_depth": 31,
+      "cpu_ms": 10
+    }
+  },
+  "audit": {
+    "frame_id": "at-depth-limit",
+    "size": 1000,
+    "depth": 31,
+    "cpu_used": 10,
+    "size_limit": 1000000,
+    "depth_limit": 32,
+    "cpu_limit": 100,
+    "verdict": "ALLOW",
+    "timestamp": "[TIMESTAMP]"
+  },
+  "test_case": "at_depth_limit"
+}

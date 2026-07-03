@@ -1,0 +1,14 @@
+{
+  "schema_version": "vef-receipt-chain-v1",
+  "action_type": "process_spawn",
+  "capability_context": {},
+  "actor_identity": "test-actor",
+  "artifact_identity": "test-artifact",
+  "policy_snapshot_hash": "sha256:[KEY_ID]",
+  "timestamp_millis": [UNIX_TIMESTAMP],
+  "sequence_number": 1,
+  "witness_references": [
+    "witness-1"
+  ],
+  "trace_id": "trace-action-type"
+}

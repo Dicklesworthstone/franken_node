@@ -1,0 +1,8 @@
+{
+  "success": true,
+  "frame_id_preserved": true,
+  "frame_id_length": 27,
+  "verdict_allowed": true,
+  "audit_frame_id_match": true,
+  "test_case": "special_characters"
+}
