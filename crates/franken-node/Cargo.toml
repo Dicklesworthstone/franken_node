@@ -1788,3 +1788,15 @@ path = "tests/connector_lifecycle_conformance_matrix.rs"
 [[test]]
 name = "supply_chain_attestation_manifest_golden"
 path = "tests/supply_chain_attestation_manifest_golden.rs"
+
+# engine_dispatcher_profile_golden (bd-9kyqf): re-registered (session 2026-07-02).
+# franken-engine's execution_orchestrator::OrchestratorConfig dropped its Serialize
+# derive (engine-boundary decision), so the golden now serializes a franken_node-side
+# field-by-field JSON projection instead of the engine struct directly (do NOT force
+# an engine derive). Goldens tests/golden/engine_dispatcher_{strict,balanced,
+# legacy_risky}.json bootstrapped + reviewed. required-features=[engine] (the test
+# calls the #[cfg(feature="engine")] map_config_to_orchestrator_config_for_tests helper).
+[[test]]
+name = "engine_dispatcher_profile_golden"
+path = "tests/engine_dispatcher_profile_golden.rs"
+required-features = ["engine"]
