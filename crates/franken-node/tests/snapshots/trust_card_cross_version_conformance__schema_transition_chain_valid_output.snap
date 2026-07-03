@@ -1,0 +1,12 @@
+---
+source: crates/franken-node/tests/trust_card_cross_version_conformance.rs
+expression: "serde_json::json!({\n    \"test_name\": test_case.name, \"card_schema\": test_case.card_schema,\n    \"registry_schema\": test_case.registry_schema, \"verifier_version\":\n    format!(\"{:?}\", test_case.verifier_version), \"result\": match result\n    { Ok(_) => \"pass\", Err(_) => \"fail\" }, \"expected\":\n    format!(\"{:?}\", test_case.expected_result)\n})"
+---
+{
+  "test_name": "schema_transition_chain_valid",
+  "card_schema": "1.0.0",
+  "registry_schema": "franken-node/trust-card-registry-state/v1",
+  "verifier_version": "Current",
+  "result": "pass",
+  "expected": "Pass"
+}

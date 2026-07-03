@@ -1688,11 +1688,17 @@ name = "decision_receipt_signed_golden_conformance"
 path = "tests/decision_receipt_signed_golden_conformance.rs"
 required-features = ["extended-surfaces"]
 
-# bd_15u3_decision_engine_conformance (bd-2pbtu) compiles now (guardrail_monitor
-# drift reconciled) but is RUNTIME-RED: 9 pass / 3 fail — the test mock
-# mock_monitor_set_with_violations() is a no-op stub that never injects blocks, so
-# system-level-blocking assertions can't pass. Needs the mock implemented (semantic,
-# not drift). Compile-progress kept unregistered. See bd-2pbtu.
+# bd_15u3_decision_engine_conformance (bd-2pbtu): re-registered (session 2026-07-02).
+# Was RUNTIME-RED because mock_monitor_set_with_violations() was a no-op stub that
+# returned the default (non-blocking) monitor set, so system-level-blocking cases
+# (BD15U3-SYSTEM-BLOCK-001, BD15U3-MIXED-BLOCK-001) never saw a block. Fixed by
+# implementing the mock as an AlwaysBlockMonitor test double that honors its
+# violations arg (registers real Block-verdict monitors), so DecisionEngine::decide
+# blocks all candidates with the requested guardrail ids. required-features=[policy-engine].
+[[test]]
+name = "bd_15u3_decision_engine_conformance"
+path = "tests/bd_15u3_decision_engine_conformance.rs"
+required-features = ["policy-engine"]
 
 # --- batch-6 runtime-semantic capture wave (registered locally to capture failures;
 #     only the ones that verify GREEN are kept) ---
@@ -1743,17 +1749,42 @@ name = "decision_receipt_golden_vectors_conformance"
 path = "tests/decision_receipt_golden_vectors_conformance.rs"
 required-features = ["extended-surfaces"]
 
-# trust_card_cross_version_conformance (bd-tb7e3) is NOT a re-bless: prod now signs
-# schema_version (schema-downgrade defense), so the test's post-signing schema
-# override invalidates the signature (2 semantic fails). Needs a re-sign seam or an
-# inverted assertion. Deferred; compile clean. See bd-tb7e3.
+# trust_card_cross_version_conformance (bd-tb7e3): re-registered (session 2026-07-02).
+# Prod now signs schema_version (schema-downgrade defense), so the old test premise
+# (post-signing schema override, then expect it to verify) is no longer valid. Fixed
+# by exposing a public re-sign seam (supply_chain::trust_card::sign_card_in_place) so
+# create_card_with_schema produces a GENUINELY signed card at each schema, routing the
+# forward-incompat rejection through the real from_snapshot registry-schema gate, and
+# adding schema_downgrade_tamper_is_rejected to keep the tamper-rejection coverage.
+# insta snapshots re-blessed after review. required-features=[extended-surfaces].
+[[test]]
+name = "trust_card_cross_version_conformance"
+path = "tests/trust_card_cross_version_conformance.rs"
+required-features = ["extended-surfaces"]
 
 [[test]]
 name = "runtime_lane_golden_artifacts"
 path = "tests/runtime_lane_golden_artifacts.rs"
 required-features = ["extended-surfaces"]
 
-# supply_chain_attestation_manifest_golden (bd-nb0i6) is ENGINE-DEPENDENT (imports
-# frankenengine_extension_host) — cannot be verified via the no-engine build while
-# rch workers are offline. Deferred; re-bless artifacts/golden/supply_chain_attestation_manifest.json
-# via UPDATE_GOLDENS once rch recovers.
+# connector_lifecycle_conformance_matrix (bd-6cdbp): re-registered (session 2026-07-02).
+# Only imports the ungated connector::{frame_parser,lifecycle} modules, so no
+# required-features (runs in the default lane). Runtime drift fixed: (1) the
+# old_connector_new_host scenario now expects NegotiatedCompatibility (a legacy
+# connector legitimately lacks the bd-1cs7 Cancelling state -> 0.9459, backward-compat
+# negotiation, not full); (2) the self-contradictory session-negotiation assert (v0.9.0
+# vs v1.0.0 straddles a major boundary -> INCOMPATIBLE) was moved to the major-mismatch
+# test and replaced with a same-major FUTURE->CURRENT case; (3) 5 insta snapshots
+# bootstrapped + reviewed.
+[[test]]
+name = "connector_lifecycle_conformance_matrix"
+path = "tests/connector_lifecycle_conformance_matrix.rs"
+
+# supply_chain_attestation_manifest_golden (bd-nb0i6): re-registered after rch
+# remote-worker recovery (session 2026-07-02). ENGINE-DEPENDENT (imports
+# frankenengine_extension_host::Capability) => needs default features (engine). Golden
+# artifacts/golden/supply_chain_attestation_manifest.json re-blessed via UPDATE_GOLDENS
+# after diff review, verified 3/3 green under the default-features engine build on rch.
+[[test]]
+name = "supply_chain_attestation_manifest_golden"
+path = "tests/supply_chain_attestation_manifest_golden.rs"

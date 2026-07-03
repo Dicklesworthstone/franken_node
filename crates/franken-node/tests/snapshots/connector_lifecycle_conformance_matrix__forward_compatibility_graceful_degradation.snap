@@ -1,0 +1,44 @@
+---
+source: crates/franken-node/tests/connector_lifecycle_conformance_matrix.rs
+expression: degradation_test
+---
+{
+  "can_fallback": true,
+  "new_connector_features": [
+    "basic_lifecycle",
+    "graceful_restart",
+    "hot_reload",
+    "three_phase_cancellation"
+  ],
+  "new_connector_version": {
+    "api_version": "api-v2.2.0",
+    "lifecycle_protocol": "lifecycle-v1.3.0",
+    "session_version": "session-auth-v1.1.0"
+  },
+  "old_host_endpoints": {
+    "connector_status": {
+      "auth_required": false,
+      "deprecated": false,
+      "method": "GET",
+      "min_api_version": "api-v2.0.0",
+      "path": "/api/v1/connector/status"
+    },
+    "connector_transition": {
+      "auth_required": true,
+      "deprecated": false,
+      "method": "POST",
+      "min_api_version": "api-v2.0.0",
+      "path": "/api/v1/connector/transition"
+    }
+  },
+  "old_host_version": {
+    "api_version": "api-v2.0.0",
+    "lifecycle_protocol": "lifecycle-v1.1.0",
+    "session_version": "session-auth-v0.9.0"
+  },
+  "supported_endpoints": [
+    "connector_status",
+    "connector_transition"
+  ],
+  "test": "forward_compatibility_graceful_degradation"
+}

@@ -79,6 +79,6 @@ expression: deserialized_card
     "derived_at_epoch": 1000,
     "derivation_chain_hash": "sha256:d14390dc6cf9c9aa39d2a6c95b5730d05e02e1a1b5f820f7d7e1d7f5c6850f21"
   },
-  "card_hash": "f5669d09fc6e22dacf34ddaa04382fa23c0b94c78fb64e7b8adf6937f09dbc2f",
-  "registry_signature": "bf9ab63aede6bceed992f15e350c3c9b71510dcbdf462c0e7ce350707d11d90a"
+  "card_hash": "2549e36e2bcd09e735a4669ab093c07f194cb9bf8b3ddfd3e971f38bd967b5c0",
+  "registry_signature": "8c509bf4319ec961ec8d90812dafa942da647830eb19018b92e42fdcc4257e45"
 }

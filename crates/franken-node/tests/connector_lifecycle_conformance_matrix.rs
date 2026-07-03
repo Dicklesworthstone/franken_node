@@ -99,7 +99,14 @@ fn compatibility_scenarios() -> Vec<CompatibilityScenario> {
                 api_version: CURRENT_API_VERSION.to_string(),
                 session_version: CURRENT_SESSION_VERSION.to_string(),
             },
-            expected_compatibility: CompatibilityExpectation::FullCompatibility,
+            // A legacy connector legitimately lacks the Cancelling state added in
+            // bd-1cs7, so its connector-completeness score (8/9 states, 17/19
+            // transitions) is ~0.9459 — below the FullCompatibility bar by design.
+            // Talking to a newer host it negotiates down to its own (lower)
+            // lifecycle protocol, which is exactly NegotiatedCompatibility.
+            expected_compatibility: CompatibilityExpectation::NegotiatedCompatibility {
+                fallback_version: LEGACY_LIFECYCLE_PROTOCOL.to_string(),
+            },
         },
         // Current version compatibility (baseline)
         CompatibilityScenario {
@@ -919,9 +926,14 @@ fn test_protocol_negotiation_uses_lower_compatible_versions() {
         negotiate_version(FUTURE_API_VERSION, CURRENT_API_VERSION),
         CURRENT_API_VERSION
     );
+    // Session family, compatible pair (same major): a future session version
+    // negotiates down to the current one. (LEGACY_SESSION_VERSION is
+    // session-auth-v0.9.0, which straddles a MAJOR boundary vs the current
+    // v1.0.0 and is therefore INCOMPATIBLE — covered by the major-mismatch test
+    // below, not here.)
     assert_eq!(
-        negotiate_version(LEGACY_SESSION_VERSION, CURRENT_SESSION_VERSION),
-        LEGACY_SESSION_VERSION
+        negotiate_version(FUTURE_SESSION_VERSION, CURRENT_SESSION_VERSION),
+        CURRENT_SESSION_VERSION
     );
 }
 
@@ -933,6 +945,12 @@ fn test_protocol_negotiation_rejects_major_version_mismatch() {
     );
     assert_eq!(
         negotiate_version("api-v3.0.0", CURRENT_API_VERSION),
+        "INCOMPATIBLE"
+    );
+    // session-auth-v0.9.0 vs the current v1.0.0 is a major-version jump (0 -> 1),
+    // so it is incompatible despite being the "legacy" session version.
+    assert_eq!(
+        negotiate_version(LEGACY_SESSION_VERSION, CURRENT_SESSION_VERSION),
         "INCOMPATIBLE"
     );
 }

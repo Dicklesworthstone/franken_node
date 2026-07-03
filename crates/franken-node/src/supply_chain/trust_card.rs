@@ -3043,7 +3043,30 @@ fn canonical_card_without_hash_and_signature(card: &TrustCard) -> Result<Vec<u8>
     Ok(canonical_bytes(&value))
 }
 
-fn sign_card_in_place(card: &mut TrustCard, registry_key: &[u8]) -> Result<(), TrustCardError> {
+/// Recompute a trust card's canonical hash and registry signature in place.
+///
+/// This is the registry's low-level signing primitive: it recomputes
+/// [`compute_card_hash`] over the card's full canonical payload — which now
+/// includes `schema_version` (a schema-downgrade defense) — and re-derives the
+/// HMAC `registry_signature` over that hash. It is the counterpart to the public
+/// [`verify_card_signature`]: whoever holds the registry key can mint a validly
+/// signed card, and whoever holds it can verify one.
+///
+/// Exposed publicly so cross-version / schema-migration flows (and their
+/// conformance tests) can produce a *genuinely* signed card at an arbitrary
+/// `schema_version` rather than tampering with a card after it was signed (which
+/// the downgrade defense correctly rejects). It grants no authority beyond
+/// possession of `registry_key`, which is already the trust root.
+///
+/// # Parameters
+/// - `card`: the trust card to (re)sign; its `card_hash` and `registry_signature`
+///   fields are overwritten.
+/// - `registry_key`: HMAC key used to derive the signature.
+///
+/// # Errors
+/// Returns [`TrustCardError`] if the canonical hash cannot be computed or the
+/// registry key is invalid.
+pub fn sign_card_in_place(card: &mut TrustCard, registry_key: &[u8]) -> Result<(), TrustCardError> {
     card.card_hash = compute_card_hash(card)?;
     let mut mac =
         HmacSha256::new_from_slice(registry_key).map_err(|_| TrustCardError::InvalidRegistryKey)?;

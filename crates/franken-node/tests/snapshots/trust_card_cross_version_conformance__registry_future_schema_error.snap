@@ -1,0 +1,8 @@
+---
+source: crates/franken-node/tests/trust_card_cross_version_conformance.rs
+expression: "serde_json::json!({ \"error\": \"UnsupportedSnapshotSchema\", \"schema\": schema })"
+---
+{
+  "error": "UnsupportedSnapshotSchema",
+  "schema": "franken-node/trust-card-registry-state/v2"
+}

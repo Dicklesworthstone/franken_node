@@ -1,0 +1,57 @@
+---
+source: crates/franken-node/tests/connector_lifecycle_conformance_matrix.rs
+expression: transition_test
+---
+{
+  "new_host_version": {
+    "api_version": "api-v2.1.0",
+    "lifecycle_protocol": "lifecycle-v1.2.0",
+    "session_version": "session-auth-v1.0.0"
+  },
+  "old_connector_version": {
+    "api_version": "api-v2.0.0",
+    "lifecycle_protocol": "lifecycle-v1.1.0",
+    "session_version": "session-auth-v0.9.0"
+  },
+  "supported_states": [
+    "discovered",
+    "verified",
+    "installed",
+    "configured",
+    "active",
+    "paused",
+    "stopped",
+    "failed"
+  ],
+  "test": "backward_compatibility_state_transitions",
+  "tested_transitions": [
+    [
+      "discovered",
+      "verified"
+    ],
+    [
+      "verified",
+      "installed"
+    ],
+    [
+      "installed",
+      "configured"
+    ],
+    [
+      "configured",
+      "active"
+    ],
+    [
+      "active",
+      "paused"
+    ],
+    [
+      "paused",
+      "active"
+    ],
+    [
+      "active",
+      "stopped"
+    ]
+  ]
+}

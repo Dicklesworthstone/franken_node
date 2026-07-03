@@ -24,11 +24,10 @@
 
 use frankenengine_node::policy::{
     bayesian_diagnostics::{CandidateRef, RankedCandidate},
-    decision_engine::{
-        BlockedCandidate, DecisionEngine, DecisionOutcome, DecisionReason, GuardrailId,
-        EVD_DECIDE_001, EVD_DECIDE_002, EVD_DECIDE_003, EVD_DECIDE_004,
+    decision_engine::{DecisionEngine, DecisionReason, GuardrailId},
+    guardrail_monitor::{
+        BudgetId, GuardrailMonitor, GuardrailMonitorSet, GuardrailVerdict, SystemState,
     },
-    guardrail_monitor::{BudgetId, GuardrailMonitorSet, GuardrailVerdict, SystemState},
     hardening_state_machine::HardeningLevel,
 };
 
@@ -42,6 +41,9 @@ struct ConformanceCase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+// RFC-2119 requirement levels: the model is complete even though the current
+// conformance cases only exercise Must/Should.
+#[allow(dead_code)]
 enum RequirementLevel {
     Must,
     Should,
@@ -63,11 +65,6 @@ impl ConformanceResult {
 }
 
 // ── Helper Functions ───────────────────────────────────────────────
-
-/// Create a test candidate reference.
-fn candidate(id: &str) -> CandidateRef {
-    CandidateRef::new(id)
-}
 
 /// Create a test ranked candidate.
 fn ranked_candidate(
@@ -100,13 +97,51 @@ fn healthy_system_state() -> SystemState {
     }
 }
 
-/// Create a mock monitor set that can be configured to produce violations.
-fn mock_monitor_set_with_violations(violations: Vec<(String, BudgetId, String)>) -> GuardrailMonitorSet {
-    // In a real implementation, we would configure the monitors to produce these violations
-    // For testing purposes, we'll create a simplified mock that returns predetermined findings
-    let mut monitors = GuardrailMonitorSet::with_defaults();
-    // Note: This is a simplified approach for testing - in production, the monitor set
-    // would be configured with actual monitor instances that evaluate the system state
+/// A test double monitor that unconditionally blocks with a fixed budget id and
+/// reason, regardless of the system state. Lets a conformance case inject a
+/// deterministic system-level guardrail violation (the production monitors only
+/// block when the live `SystemState` crosses their thresholds).
+#[derive(Debug)]
+struct AlwaysBlockMonitor {
+    name: String,
+    budget_id: BudgetId,
+    reason: String,
+}
+
+impl GuardrailMonitor for AlwaysBlockMonitor {
+    fn check(&self, _state: &SystemState) -> GuardrailVerdict {
+        GuardrailVerdict::Block {
+            reason: self.reason.clone(),
+            budget_id: self.budget_id.clone(),
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn budget_id(&self) -> &BudgetId {
+        &self.budget_id
+    }
+}
+
+/// Create a monitor set that deterministically produces the requested
+/// system-level violations. Each `(name, budget_id, reason)` becomes an
+/// [`AlwaysBlockMonitor`] registered in the set, so `DecisionEngine::decide`
+/// sees a real Block verdict from `certify` and blocks all candidates with those
+/// guardrail ids — rather than the previous no-op stub that returned the default
+/// (non-blocking) monitor set and never produced a system-level block.
+fn mock_monitor_set_with_violations(
+    violations: Vec<(String, BudgetId, String)>,
+) -> GuardrailMonitorSet {
+    let mut monitors = GuardrailMonitorSet::new();
+    for (name, budget_id, reason) in violations {
+        monitors.register(Box::new(AlwaysBlockMonitor {
+            name,
+            budget_id,
+            reason,
+        }));
+    }
     monitors
 }
 
@@ -469,7 +504,7 @@ fn guardrail_id_formatting() -> ConformanceResult {
 
     if gid.to_string() != "test-guardrail-001" {
         return ConformanceResult::Fail {
-            reason: format!("GuardrailId to_string() wrong: {}", gid.to_string()),
+            reason: format!("GuardrailId to_string() wrong: {gid}"),
         };
     }
 
@@ -759,6 +794,8 @@ impl ConformanceStats {
 
 #[derive(Debug)]
 struct ConformanceReport {
+    // Recorded for report provenance; not asserted on directly.
+    #[allow(dead_code)]
     spec_id: String,
     stats: ConformanceStats,
     results: Vec<(String, RequirementLevel, ConformanceResult)>,

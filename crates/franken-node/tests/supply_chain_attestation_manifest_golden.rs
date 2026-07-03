@@ -10,7 +10,16 @@ use frankenengine_node::supply_chain::manifest::{
     ThresholdSignaturePolicy, TrustMetadata, validate_signed_manifest,
 };
 use serde_json::Value;
-use std::{error::Error, fs, path::Path};
+use std::{error::Error, fs, path::Path, path::PathBuf};
+
+/// Resolve a path relative to the workspace root. Integration tests run with a
+/// CWD of the package dir (`crates/franken-node/`), but this golden lives at the
+/// workspace root under `artifacts/golden/`, so a bare relative path would look
+/// in the wrong place. `CARGO_MANIFEST_DIR` is `crates/franken-node`, so `../..`
+/// reaches the workspace root deterministically regardless of CWD.
+fn workspace_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(relative)
+}
 
 const DETERMINISTIC_THRESHOLD_SIGNATURE: &str =
     "aJKWADQBpYEpQ+WF+MHY2a9fkVHBcxspfTW035PGNVVn3LKmDcvpVLeEqXHgbqj3r1xK52hlvtT8y938O3mq0w==";
@@ -93,7 +102,8 @@ fn supply_chain_attestation_manifest_json_format_golden() -> Result<(), Box<dyn 
     // Serialize to pretty-printed JSON (this is the format that would be exported)
     let json_output = format!("{}\n", serde_json::to_string_pretty(&manifest)?);
 
-    let golden_path = Path::new("artifacts/golden/supply_chain_attestation_manifest.json");
+    let golden_path = workspace_path("artifacts/golden/supply_chain_attestation_manifest.json");
+    let golden_path = golden_path.as_path();
 
     // Check if we're in update mode
     if std::env::var("UPDATE_GOLDENS").is_ok() {
@@ -118,7 +128,8 @@ fn supply_chain_attestation_manifest_json_format_golden() -> Result<(), Box<dyn 
     // Compare byte-for-byte
     if json_output != expected_json {
         let actual_path =
-            Path::new("artifacts/golden/supply_chain_attestation_manifest.actual.json");
+            workspace_path("artifacts/golden/supply_chain_attestation_manifest.actual.json");
+        let actual_path = actual_path.as_path();
         fs::write(actual_path, &json_output)?;
         assert_eq!(
             json_output,

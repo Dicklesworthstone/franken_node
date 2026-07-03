@@ -1,0 +1,33 @@
+---
+source: crates/franken-node/tests/connector_lifecycle_conformance_matrix.rs
+expression: session_results
+---
+[
+  {
+    "max_sessions": 16,
+    "session_version": "session-auth-v0.9.0",
+    "supported_auth_methods": [
+      "basic"
+    ],
+    "test_case": "legacy_session"
+  },
+  {
+    "max_sessions": 16,
+    "session_version": "session-auth-v1.0.0",
+    "supported_auth_methods": [
+      "basic",
+      "hmac"
+    ],
+    "test_case": "current_session"
+  },
+  {
+    "max_sessions": 16,
+    "session_version": "session-auth-v1.1.0",
+    "supported_auth_methods": [
+      "basic",
+      "hmac",
+      "mutual_tls"
+    ],
+    "test_case": "future_session"
+  }
+]
