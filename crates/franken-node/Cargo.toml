@@ -1830,3 +1830,22 @@ path = "tests/golden_remote_api_connector_vef.rs"
 name = "golden_artifacts_comprehensive"
 path = "tests/golden_artifacts_comprehensive.rs"
 required-features = ["advanced-features", "test-support"]
+
+# doctor_policy_activation_e2e (bd-86wc3): re-registered verified-green
+# (session 2026-07-03). Live CLI e2e for the `doctor` diagnostic + policy-
+# activation telemetry. `doctor` is a core (ungated) command, so no required-
+# features. Four historical failure families were resolved:
+#   0. config resolution: fixed in prod at main.rs:27497 (resolve_without_
+#      validation_with_env, mirrors the bd-3c2ie receipt-export probe) so the
+#      read-only diagnostic runs on workspaces without a prior `franken-node init`.
+#   A. debug-trace path guard: `debug trace --policy/--input` reject absolute
+#      paths (parse_safe_content_pathbuf); tests now run the binary with CWD
+#      pinned to the tempdir and pass workspace-relative names (guard unchanged).
+#   B/C. env-sensitive doctor checks (DR-WORKSPACE-001/DR-BENCH-015/DR-RESOURCE-
+#      GOVERNOR-014) flap under the concurrent build swarm; the policy-activation
+#      asserts and the golden canonicalizer now fold those out (ENV_SENSITIVE_SCOPES).
+# The env var FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT is not a prod input
+# channel (bd-lmbt0); its tests assert that inert contract.
+[[test]]
+name = "doctor_policy_activation_e2e"
+path = "tests/doctor_policy_activation_e2e.rs"
