@@ -1896,7 +1896,9 @@ pub struct DoctorArgs {
     pub profile: Option<String>,
 
     /// Path to policy activation input JSON for live guardrail diagnostics.
-    #[arg(long)]
+    /// Falls back to `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` when the
+    /// flag is omitted; the CLI flag takes precedence (bd-lmbt0).
+    #[arg(long, env = "FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT")]
     pub policy_activation_input: Option<PathBuf>,
 
     /// Emit machine-readable JSON report.
@@ -3435,10 +3437,7 @@ mod tests {
                 let mut init_cmd = Cli::command();
                 let init_help = format!(
                     "{}",
-                    init_cmd
-                        .find_subcommand_mut("init")
-                        .unwrap()
-                        .render_help()
+                    init_cmd.find_subcommand_mut("init").unwrap().render_help()
                 );
                 assert!(
                     !init_help.contains("%s"),
@@ -3550,7 +3549,13 @@ mod tests {
                 ];
 
                 for (env_var, test_name) in env_var_cases {
-                    let args = vec!["franken-node", "run", "script.js", "--env", env_var.as_str()];
+                    let args = vec![
+                        "franken-node",
+                        "run",
+                        "script.js",
+                        "--env",
+                        env_var.as_str(),
+                    ];
                     let parse_result = Cli::try_parse_from(&args);
 
                     match parse_result {
@@ -3613,7 +3618,12 @@ mod tests {
             // Test option value boundaries
             let long_value_1k = "x".repeat(1000);
             let long_value_100k = "x".repeat(100000);
-            let option_value_cases = vec!["", "short", long_value_1k.as_str(), long_value_100k.as_str()];
+            let option_value_cases = vec![
+                "",
+                "short",
+                long_value_1k.as_str(),
+                long_value_100k.as_str(),
+            ];
 
             for value in option_value_cases {
                 if value.is_empty() {

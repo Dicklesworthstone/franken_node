@@ -1762,6 +1762,7 @@ follow the `FRANKEN_NODE_<SECTION>_<KEY>` convention. The most common:
 | `FRANKEN_NODE_FLEET_NODE_ID` | `fleet.node_id` | Default `fleet agent` node ID |
 | `FRANKEN_NODE_FLEET_POLL_INTERVAL_SECONDS` | (none) | Default `fleet agent` poll interval |
 | `FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS` | `fleet.convergence_timeout_seconds` | Fleet release / reconcile timeout |
+| `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` | `doctor --policy-activation-input` | Fallback path to policy-activation input JSON; the CLI flag takes precedence |
 | `FRANKEN_NODE_REGISTRY_REQUIRE_SIGNATURES` | `registry.require_signatures` | Fail-closed if unset |
 | `FRANKEN_NODE_REGISTRY_REQUIRE_PROVENANCE` | `registry.require_provenance` | Fail-closed if unset |
 | `FRANKEN_NODE_REGISTRY_MINIMUM_ASSURANCE_LEVEL` | `registry.minimum_assurance_level` | 1-5 |

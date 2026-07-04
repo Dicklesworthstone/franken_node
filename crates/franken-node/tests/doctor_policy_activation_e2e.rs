@@ -782,32 +782,38 @@ fn doctor_policy_activation_block_fixture_has_fail_json_contract_shape() {
 }
 
 #[test]
-fn doctor_policy_activation_env_var_alone_does_not_drive_pipeline() {
-    // `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` is NOT a policy input
-    // channel: `doctor` runs the policy-activation pipeline only when
-    // `--policy-activation-input` is passed on the CLI (cli.rs `policy_activation_input`
-    // is `#[arg(long)]` with no clap `env=`; the env var has never been read in
-    // prod). Setting it alone must leave the pipeline off, so guardrail input
-    // cannot be injected out-of-band. bd-lmbt0 tracks wiring an env fallback if
-    // that channel is ever wanted.
+fn doctor_policy_activation_env_var_fallback_drives_pipeline() {
+    // `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` is a fallback input
+    // channel (bd-lmbt0): cli.rs `policy_activation_input` carries clap
+    // `env = "FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT"`, so setting the
+    // env var without `--policy-activation-input` runs the policy-activation
+    // pipeline on the env-supplied path.
     let report = run_doctor_without_policy_input(
         "doctor-policy-e2e-env-input",
         Some(&fixture_path("doctor_policy_activation_pass.json")),
     );
 
-    let codes = check_codes(&report);
-    assert!(report.get("policy_activation").is_none());
-    assert!(!codes.contains(&"DR-POLICY-009"));
-    assert!(!codes.contains(&"DR-POLICY-010"));
-    assert!(!codes.contains(&"DR-POLICY-011"));
+    assert_eq!(check_status(&report, "DR-POLICY-009"), "pass");
+    assert_eq!(check_status(&report, "DR-POLICY-010"), "pass");
+    assert_eq!(check_status(&report, "DR-POLICY-011"), "pass");
+    assert_eq!(
+        report["policy_activation"]["guardrail_certificate"]["dominant_verdict"],
+        "allow"
+    );
+    assert!(
+        report["policy_activation"]["input_path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("doctor_policy_activation_pass.json"))
+    );
 }
 
 #[test]
 fn doctor_policy_activation_cli_input_drives_pipeline_env_var_ignored() {
-    // With the CLI flag present, the pipeline runs on the CLI input and the
-    // (deliberately unread) env var has no effect: the env var points at the
-    // block fixture, yet the report reflects the CLI pass fixture (verdict
-    // allow), confirming the env var is inert rather than merged/overriding.
+    // With the CLI flag present, the flag takes precedence over the
+    // `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` fallback (standard clap
+    // `env=` semantics): the env var points at the block fixture, yet the
+    // report reflects the CLI pass fixture (verdict allow), confirming the
+    // env value is not merged in or overriding.
     let report = run_doctor_with_policy_input_and_env(
         &fixture_path("doctor_policy_activation_pass.json"),
         "doctor-policy-e2e-cli-over-env",
