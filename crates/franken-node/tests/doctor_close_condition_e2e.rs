@@ -724,3 +724,144 @@ fn doctor_close_condition_fails_closed_when_release_policy_ci_output_is_missing(
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+/// Acceptance-bar event stream, PASS arm (bd-f5b04.2.4.1): with parity AND
+/// proof-carrying evidence both verified, `--structured-logs-jsonl` must emit
+/// the stable FN-ACCEPT-001 (evaluated) then FN-ACCEPT-002 (PASS) codes on
+/// stderr, carrying the operator-supplied trace id.
+#[test]
+fn doctor_close_condition_structured_logs_emit_acceptance_pass_codes() {
+    let root = fixture_root();
+    let (signing_key_path, _) =
+        write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 71);
+    let signing_key_path = signing_key_path.display().to_string();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .env(
+            "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
+            "2026-02-21T00:00:00Z",
+        )
+        .args([
+            "doctor",
+            "--structured-logs-jsonl",
+            "--trace-id",
+            "accept-e2e-pass",
+            "close-condition",
+            "--json",
+            "--receipt-signing-key",
+            signing_key_path.as_str(),
+        ])
+        .output()
+        .expect("doctor close-condition should run");
+
+    assert!(
+        output.status.success(),
+        "doctor close-condition failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value =
+        serde_json::from_slice(&output.stdout).expect("stdout receipt must be JSON");
+    assert_eq!(receipt["composite_verdict"], "GREEN");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let events: Vec<Value> = stderr
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("stderr JSONL event"))
+        .collect();
+    let codes: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["event_code"].as_str())
+        .collect();
+    assert_eq!(
+        codes,
+        vec!["FN-ACCEPT-001", "FN-ACCEPT-002"],
+        "unexpected acceptance event stream: {stderr}"
+    );
+    for event in &events {
+        assert_eq!(event["trace_id"], "accept-e2e-pass", "{stderr}");
+        assert_eq!(event["surface"], "CLI-DOCTOR-CLOSE-CONDITION", "{stderr}");
+        assert_eq!(event["timestamp"], "2026-02-21T00:00:00Z", "{stderr}");
+    }
+    assert_eq!(events[1]["level"], "info", "{stderr}");
+}
+
+/// Acceptance-bar event stream, FAIL-CLOSED arm (bd-f5b04.2.4.1): a
+/// parity-GREEN-but-unproven operation set must emit FN-ACCEPT-003
+/// (fail-closed, naming the failing dimension) plus one FN-ACCEPT-004 per
+/// blocking finding — the event stream a SIEM pins to catch a regression
+/// that drops proof-carrying receipts while parity stays green.
+#[test]
+fn doctor_close_condition_structured_logs_emit_fail_closed_codes() {
+    let root = fixture_root();
+    write_parity_only_compatibility_fixture(root.path());
+    let (signing_key_path, _) =
+        write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 72);
+    let signing_key_path = signing_key_path.display().to_string();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .env(
+            "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
+            "2026-02-21T00:00:00Z",
+        )
+        .args([
+            "doctor",
+            "--structured-logs-jsonl",
+            "--trace-id",
+            "accept-e2e-fail",
+            "close-condition",
+            "--json",
+            "--receipt-signing-key",
+            signing_key_path.as_str(),
+        ])
+        .output()
+        .expect("doctor close-condition should run");
+
+    assert!(
+        output.status.success(),
+        "doctor close-condition should emit a red receipt instead of aborting: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt: Value =
+        serde_json::from_slice(&output.stdout).expect("stdout receipt must be JSON");
+    assert_eq!(receipt["composite_verdict"], "RED");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let events: Vec<Value> = stderr
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("stderr JSONL event"))
+        .collect();
+    let codes: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["event_code"].as_str())
+        .collect();
+    assert_eq!(codes[0], "FN-ACCEPT-001", "{stderr}");
+    assert_eq!(codes[1], "FN-ACCEPT-003", "{stderr}");
+    assert!(
+        codes[2..].iter().all(|code| *code == "FN-ACCEPT-004"),
+        "every trailing event must be a blocking finding: {stderr}"
+    );
+    assert!(
+        events[1]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("L1_product_oracle")),
+        "fail-closed event must name the failing dimension: {stderr}"
+    );
+    assert_eq!(events[1]["level"], "error", "{stderr}");
+    assert!(
+        events[2..].iter().any(|event| event["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("proof-carrying"))),
+        "blocking findings must surface the missing proof-carrying leg: {stderr}"
+    );
+    for event in &events {
+        assert_eq!(event["trace_id"], "accept-e2e-fail", "{stderr}");
+    }
+}

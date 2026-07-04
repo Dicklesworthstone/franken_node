@@ -19,6 +19,25 @@ pub const MAX_CLOSE_CONDITION_CARGO_FILES: usize = 256;
 pub const MAX_CLOSE_CONDITION_SCAN_FILES: usize = 4_096;
 const CLOSE_CONDITION_RECEIPT_PREIMAGE_DOMAIN: &[u8] = b"close_condition_receipt_v1:";
 
+/// Stable event codes for the acceptance-bar (dual-oracle close-condition)
+/// gate. SIEM filters and CI log scrapers pin on these codes, not message
+/// text; the code set only grows, existing codes never change meaning.
+pub mod event_codes {
+    /// The acceptance-bar gate was evaluated over all oracle dimensions.
+    pub const ACCEPTANCE_GATE_EVALUATED: &str = "FN-ACCEPT-001";
+    /// PASS: every dimension is GREEN — parity (lockstep) AND proof-carrying
+    /// host-effect evidence both verified, plus the engine-boundary and
+    /// release-policy dimensions.
+    pub const ACCEPTANCE_GATE_PASS: &str = "FN-ACCEPT-002";
+    /// FAIL-CLOSED: at least one dimension is RED; the composite verdict
+    /// refuses. Parity-GREEN-but-unproven and proven-but-parity-RED both
+    /// land here.
+    pub const ACCEPTANCE_GATE_FAIL_CLOSED: &str = "FN-ACCEPT-003";
+    /// One blocking finding behind a FAIL-CLOSED verdict (emitted once per
+    /// finding, prefixed with the owning dimension).
+    pub const ACCEPTANCE_GATE_BLOCKING_FINDING: &str = "FN-ACCEPT-004";
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OracleColor {
@@ -311,6 +330,116 @@ pub fn write_close_condition_receipt(
 
 pub fn render_close_condition_receipt_json(receipt: &CloseConditionReceipt) -> Result<String> {
     serde_json::to_string_pretty(receipt).context("failed to render close-condition receipt")
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CloseConditionStructuredLogLine {
+    timestamp: String,
+    level: &'static str,
+    event_code: &'static str,
+    message: String,
+    trace_id: String,
+    span_id: &'static str,
+    surface: &'static str,
+}
+
+fn close_condition_structured_log_line(
+    receipt: &CloseConditionReceipt,
+    trace_id: &str,
+    level: &'static str,
+    event_code: &'static str,
+    message: String,
+) -> CloseConditionStructuredLogLine {
+    CloseConditionStructuredLogLine {
+        timestamp: receipt.core.generated_at_utc.clone(),
+        level,
+        event_code,
+        message,
+        trace_id: trace_id.to_string(),
+        span_id: "doctor-close-condition",
+        surface: "CLI-DOCTOR-CLOSE-CONDITION",
+    }
+}
+
+/// Render the stable `FN-ACCEPT-*` acceptance-bar event stream for one
+/// close-condition receipt as JSONL. Always emits `FN-ACCEPT-001`
+/// (evaluated), then exactly one of `FN-ACCEPT-002` (PASS) or
+/// `FN-ACCEPT-003` (FAIL-CLOSED), and one `FN-ACCEPT-004` line per
+/// blocking finding when the gate refuses.
+pub fn render_close_condition_structured_logs_jsonl(
+    receipt: &CloseConditionReceipt,
+    trace_id: &str,
+) -> Result<String> {
+    let core = &receipt.core;
+    let mut lines = Vec::new();
+    lines.push(close_condition_structured_log_line(
+        receipt,
+        trace_id,
+        "info",
+        event_codes::ACCEPTANCE_GATE_EVALUATED,
+        format!(
+            "acceptance-bar gate evaluated: L1_product_oracle={:?} L2_engine_boundary_oracle={:?} release_policy_linkage={:?}",
+            core.l1_product_oracle.verdict,
+            core.l2_engine_boundary_oracle.verdict,
+            core.release_policy_linkage.verdict,
+        ),
+    ));
+
+    if core.composite_verdict == OracleColor::Green {
+        lines.push(close_condition_structured_log_line(
+            receipt,
+            trace_id,
+            "info",
+            event_codes::ACCEPTANCE_GATE_PASS,
+            "acceptance-bar gate PASS: parity AND proof-carrying evidence verified across all dimensions".to_string(),
+        ));
+    } else {
+        lines.push(close_condition_structured_log_line(
+            receipt,
+            trace_id,
+            "error",
+            event_codes::ACCEPTANCE_GATE_FAIL_CLOSED,
+            format!(
+                "acceptance-bar gate FAIL-CLOSED: failing dimensions [{}]",
+                core.failing_dimensions.join(", ")
+            ),
+        ));
+        let finding_groups = [
+            (
+                "L1_product_oracle",
+                &core.l1_product_oracle.blocking_findings,
+            ),
+            (
+                "L2_engine_boundary_oracle",
+                &core.l2_engine_boundary_oracle.blocking_findings,
+            ),
+            (
+                "release_policy_linkage",
+                &core.release_policy_linkage.blocking_findings,
+            ),
+        ];
+        for (dimension, findings) in finding_groups {
+            for finding in findings {
+                lines.push(close_condition_structured_log_line(
+                    receipt,
+                    trace_id,
+                    "error",
+                    event_codes::ACCEPTANCE_GATE_BLOCKING_FINDING,
+                    format!("{dimension}: {finding}"),
+                ));
+            }
+        }
+    }
+
+    let mut rendered = String::new();
+    for line in &lines {
+        rendered.push_str(
+            &serde_json::to_string(line)
+                .context("failed to render close-condition structured log line")?,
+        );
+        rendered.push('\n');
+    }
+    Ok(rendered)
 }
 
 fn generated_at_utc() -> String {
@@ -1028,6 +1157,395 @@ mod tests {
     use super::*;
     use std::path::Path;
     use tempfile::TempDir;
+
+    fn corpus_totals_json(passed: u64, failed: u64, pass_rate_pct: f64) -> Value {
+        serde_json::json!({
+            "corpus": { "corpus_version": "compat-corpus-test" },
+            "thresholds": { "overall_pass_rate_min_pct": 95.0 },
+            "totals": {
+                "total_test_cases": passed + failed,
+                "passed_test_cases": passed,
+                "failed_test_cases": failed,
+                "errored_test_cases": 0,
+                "skipped_test_cases": 0,
+                "overall_pass_rate_pct": pass_rate_pct,
+            },
+        })
+    }
+
+    fn valid_proof_carrying_effects_json() -> Value {
+        serde_json::json!({
+            "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+            "required_subjects": ["fs.read", "fs.write", "http.request"],
+            "verified_subjects": ["fs.read", "fs.write", "http.request"],
+            "effect_receipts_verified": 3,
+            "invalid_receipts": 0,
+            "receipt_chain_verified": true,
+        })
+    }
+
+    fn corpus_with_valid_proof(passed: u64, failed: u64, pass_rate_pct: f64) -> Value {
+        let mut data = corpus_totals_json(passed, failed, pass_rate_pct);
+        data["proof_carrying_effects"] = valid_proof_carrying_effects_json();
+        data
+    }
+
+    #[test]
+    fn valid_proof_carrying_effects_evidence_yields_no_findings() {
+        let data = corpus_with_valid_proof(100, 0, 100.0);
+        assert!(validate_l1_proof_carrying_effects(&data).is_empty());
+    }
+
+    #[test]
+    fn proof_carrying_effects_missing_evidence_fails_closed() {
+        let data = corpus_totals_json(100, 0, 100.0);
+        let findings = validate_l1_proof_carrying_effects(&data);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("evidence missing"), "{findings:?}");
+    }
+
+    #[test]
+    fn proof_carrying_effects_non_object_evidence_fails_closed() {
+        let mut data = corpus_totals_json(100, 0, 100.0);
+        data["proof_carrying_effects"] = serde_json::json!("trust me");
+        let findings = validate_l1_proof_carrying_effects(&data);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("must be an object"), "{findings:?}");
+    }
+
+    #[test]
+    fn proof_carrying_effects_wrong_or_missing_schema_version_fails_closed() {
+        for tamper in [
+            Some(serde_json::json!(
+                "franken-node/l1-proof-carrying-effects/v0"
+            )),
+            None,
+        ] {
+            let mut data = corpus_with_valid_proof(100, 0, 100.0);
+            let proof = data["proof_carrying_effects"].as_object_mut().unwrap();
+            match tamper {
+                Some(version) => {
+                    proof.insert("schema_version".to_string(), version);
+                }
+                None => {
+                    proof.remove("schema_version");
+                }
+            }
+            let findings = validate_l1_proof_carrying_effects(&data);
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.contains("schema_version missing or unsupported")),
+                "{findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn proof_carrying_effects_each_missing_subject_fails_closed_independently() {
+        for missing in REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS {
+            let mut data = corpus_with_valid_proof(100, 0, 100.0);
+            let subjects = REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS
+                .iter()
+                .filter(|subject| subject != &missing)
+                .collect::<Vec<_>>();
+            data["proof_carrying_effects"]["verified_subjects"] = serde_json::json!(subjects);
+            let findings = validate_l1_proof_carrying_effects(&data);
+            assert_eq!(findings.len(), 1, "{findings:?}");
+            assert!(
+                findings[0].contains(&format!("missing subject {missing}")),
+                "{findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn proof_carrying_effects_receipt_count_below_or_missing_fails_closed() {
+        for tamper in [Some(serde_json::json!(2)), None] {
+            let mut data = corpus_with_valid_proof(100, 0, 100.0);
+            let proof = data["proof_carrying_effects"].as_object_mut().unwrap();
+            match tamper {
+                Some(count) => {
+                    proof.insert("effect_receipts_verified".to_string(), count);
+                }
+                None => {
+                    proof.remove("effect_receipts_verified");
+                }
+            }
+            let findings = validate_l1_proof_carrying_effects(&data);
+            assert_eq!(findings.len(), 1, "{findings:?}");
+            assert!(findings[0].contains("receipt count"), "{findings:?}");
+        }
+    }
+
+    #[test]
+    fn proof_carrying_effects_invalid_receipts_nonzero_or_missing_fails_closed() {
+        for (tamper, expected) in [
+            (Some(serde_json::json!(1)), "1 invalid receipt(s)"),
+            (None, "invalid receipt count missing"),
+        ] {
+            let mut data = corpus_with_valid_proof(100, 0, 100.0);
+            let proof = data["proof_carrying_effects"].as_object_mut().unwrap();
+            match tamper {
+                Some(count) => {
+                    proof.insert("invalid_receipts".to_string(), count);
+                }
+                None => {
+                    proof.remove("invalid_receipts");
+                }
+            }
+            let findings = validate_l1_proof_carrying_effects(&data);
+            assert_eq!(findings.len(), 1, "{findings:?}");
+            assert!(findings[0].contains(expected), "{findings:?}");
+        }
+    }
+
+    #[test]
+    fn proof_carrying_effects_unverified_chain_fails_closed() {
+        for tamper in [Some(serde_json::json!(false)), None] {
+            let mut data = corpus_with_valid_proof(100, 0, 100.0);
+            let proof = data["proof_carrying_effects"].as_object_mut().unwrap();
+            match tamper {
+                Some(flag) => {
+                    proof.insert("receipt_chain_verified".to_string(), flag);
+                }
+                None => {
+                    proof.remove("receipt_chain_verified");
+                }
+            }
+            let findings = validate_l1_proof_carrying_effects(&data);
+            assert_eq!(findings.len(), 1, "{findings:?}");
+            assert!(
+                findings[0].contains("receipt chain did not verify"),
+                "{findings:?}"
+            );
+        }
+    }
+
+    fn write_corpus_fixture(root: &Path, data: &Value) {
+        let path = root.join(COMPATIBILITY_CORPUS_RESULTS_PATH);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string_pretty(data).unwrap()).unwrap();
+    }
+
+    /// The acceptance-bar conjunction at the L1 unit level: GREEN iff
+    /// parity passes AND proof-carrying evidence verifies; each arm missing
+    /// independently forces RED (fail-closed), as does both missing.
+    #[test]
+    fn l1_oracle_verdict_is_conjunction_of_parity_and_proof() {
+        // Both legs satisfied => GREEN.
+        let temp = TempDir::new().unwrap();
+        write_corpus_fixture(temp.path(), &corpus_with_valid_proof(100, 0, 100.0));
+        let oracle = evaluate_l1_product_oracle(temp.path());
+        assert_eq!(oracle.verdict, OracleColor::Green, "{oracle:?}");
+        assert!(oracle.blocking_findings.is_empty(), "{oracle:?}");
+
+        // Parity GREEN but unproven => FAIL-CLOSED.
+        let temp = TempDir::new().unwrap();
+        write_corpus_fixture(temp.path(), &corpus_totals_json(100, 0, 100.0));
+        let oracle = evaluate_l1_product_oracle(temp.path());
+        assert_eq!(oracle.verdict, OracleColor::Red, "{oracle:?}");
+        assert!(
+            oracle
+                .blocking_findings
+                .iter()
+                .any(|finding| finding.contains("proof-carrying")),
+            "{oracle:?}"
+        );
+
+        // Proven but parity RED => FAIL-CLOSED.
+        let temp = TempDir::new().unwrap();
+        write_corpus_fixture(temp.path(), &corpus_with_valid_proof(90, 10, 90.0));
+        let oracle = evaluate_l1_product_oracle(temp.path());
+        assert_eq!(oracle.verdict, OracleColor::Red, "{oracle:?}");
+        assert!(
+            oracle
+                .blocking_findings
+                .iter()
+                .any(|finding| finding.contains("pass rate")),
+            "{oracle:?}"
+        );
+        assert!(
+            !oracle
+                .blocking_findings
+                .iter()
+                .any(|finding| finding.contains("proof-carrying")),
+            "proof leg should be clean in this arm: {oracle:?}"
+        );
+
+        // Both legs missing => FAIL-CLOSED with findings from both legs.
+        let temp = TempDir::new().unwrap();
+        write_corpus_fixture(temp.path(), &corpus_totals_json(0, 0, 0.0));
+        let oracle = evaluate_l1_product_oracle(temp.path());
+        assert_eq!(oracle.verdict, OracleColor::Red, "{oracle:?}");
+        assert!(
+            oracle
+                .blocking_findings
+                .iter()
+                .any(|finding| finding.contains("zero test cases")),
+            "{oracle:?}"
+        );
+        assert!(
+            oracle
+                .blocking_findings
+                .iter()
+                .any(|finding| finding.contains("proof-carrying")),
+            "{oracle:?}"
+        );
+    }
+
+    fn test_receipt(
+        l1_verdict: OracleColor,
+        l1_findings: Vec<String>,
+        composite_verdict: OracleColor,
+        failing_dimensions: Vec<String>,
+    ) -> CloseConditionReceipt {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        CloseConditionReceipt {
+            core: CloseConditionReceiptCore {
+                schema_version: "oracle-close-condition-receipt/v1".to_string(),
+                receipt_path: CLOSE_CONDITION_RECEIPT_PATH.to_string(),
+                generated_at_utc: "2026-07-04T00:00:00Z".to_string(),
+                l1_product_oracle: L1ProductOracle {
+                    verdict: l1_verdict,
+                    source_path: COMPATIBILITY_CORPUS_RESULTS_PATH.to_string(),
+                    corpus_version: Some("compat-corpus-test".to_string()),
+                    total_test_cases: 100,
+                    passed_test_cases: 100,
+                    failed_test_cases: 0,
+                    errored_test_cases: 0,
+                    skipped_test_cases: 0,
+                    pass_rate_pct: 100.0,
+                    required_pass_rate_pct: 95.0,
+                    blocking_findings: l1_findings,
+                },
+                l2_engine_boundary_oracle: L2EngineBoundaryOracle {
+                    verdict: OracleColor::Green,
+                    source: "engine_split_contract_check".to_string(),
+                    contract_ref: "docs/ENGINE_SPLIT_CONTRACT.md".to_string(),
+                    checks: Vec::new(),
+                    summary: SplitContractSummary {
+                        total_checks: 0,
+                        passing_checks: 0,
+                        failing_checks: 0,
+                    },
+                    blocking_findings: Vec::new(),
+                },
+                release_policy_linkage: ReleasePolicyLinkage {
+                    verdict: OracleColor::Green,
+                    source: "ci_gate_output".to_string(),
+                    ci_outputs_accessible: true,
+                    ci_output_ref: Some(SECTION_10N_GATE_VERDICT_PATH.to_string()),
+                    consumed_oracles: vec![
+                        "L1_product_oracle".to_string(),
+                        "L2_engine_boundary_oracle".to_string(),
+                    ],
+                    blocking_findings: Vec::new(),
+                },
+                composite_verdict,
+                failing_dimensions,
+            },
+            tamper_evidence: TamperEvidence {
+                algorithm: "SHA-256".to_string(),
+                canonicalization: "lexicographically-sorted-json-keys/no-whitespace".to_string(),
+                hash_scope: "close_condition_receipt_v1_len_prefixed_core".to_string(),
+                sha256: "sha256:unused-in-log-render".to_string(),
+                signature: CloseConditionReceiptSignature {
+                    algorithm: "ed25519".to_string(),
+                    public_key_hex: hex::encode(verifying_key.to_bytes()),
+                    key_id: "test-key".to_string(),
+                    key_source: "test".to_string(),
+                    signing_identity: "oracle-close-condition".to_string(),
+                    trust_scope: "oracle_close_condition".to_string(),
+                    signed_payload_sha256: "unused".to_string(),
+                    signature_hex: "unused".to_string(),
+                },
+            },
+        }
+    }
+
+    fn parse_jsonl(rendered: &str) -> Vec<Value> {
+        rendered
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn acceptance_gate_structured_logs_pass_emits_evaluated_then_pass() {
+        let receipt = test_receipt(
+            OracleColor::Green,
+            Vec::new(),
+            OracleColor::Green,
+            Vec::new(),
+        );
+        let rendered =
+            render_close_condition_structured_logs_jsonl(&receipt, "trace-accept-pass").unwrap();
+        let lines = parse_jsonl(&rendered);
+        assert_eq!(lines.len(), 2, "{rendered}");
+        assert_eq!(
+            lines[0]["event_code"],
+            event_codes::ACCEPTANCE_GATE_EVALUATED
+        );
+        assert_eq!(lines[1]["event_code"], event_codes::ACCEPTANCE_GATE_PASS);
+        assert_eq!(lines[1]["level"], "info");
+        for line in &lines {
+            assert_eq!(line["trace_id"], "trace-accept-pass");
+            assert_eq!(line["surface"], "CLI-DOCTOR-CLOSE-CONDITION");
+        }
+    }
+
+    #[test]
+    fn acceptance_gate_structured_logs_fail_closed_emits_findings() {
+        let receipt = test_receipt(
+            OracleColor::Red,
+            vec![
+                "proof-carrying host-effect evidence missing at proof_carrying_effects".to_string(),
+                "compatibility corpus pass rate 90.00% is below required 95.00%".to_string(),
+            ],
+            OracleColor::Red,
+            vec!["L1_product_oracle".to_string()],
+        );
+        let rendered =
+            render_close_condition_structured_logs_jsonl(&receipt, "trace-accept-fail").unwrap();
+        let lines = parse_jsonl(&rendered);
+        assert_eq!(lines.len(), 4, "{rendered}");
+        assert_eq!(
+            lines[0]["event_code"],
+            event_codes::ACCEPTANCE_GATE_EVALUATED
+        );
+        assert_eq!(
+            lines[1]["event_code"],
+            event_codes::ACCEPTANCE_GATE_FAIL_CLOSED
+        );
+        assert_eq!(lines[1]["level"], "error");
+        assert!(
+            lines[1]["message"]
+                .as_str()
+                .unwrap()
+                .contains("L1_product_oracle"),
+            "{rendered}"
+        );
+        for finding_line in &lines[2..] {
+            assert_eq!(
+                finding_line["event_code"],
+                event_codes::ACCEPTANCE_GATE_BLOCKING_FINDING
+            );
+            assert_eq!(finding_line["level"], "error");
+        }
+        assert!(
+            lines[2]["message"]
+                .as_str()
+                .unwrap()
+                .contains("proof-carrying"),
+            "{rendered}"
+        );
+        assert!(
+            lines[3]["message"].as_str().unwrap().contains("pass rate"),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn test_engine_dependency_paths_proper_toml_parsing() {

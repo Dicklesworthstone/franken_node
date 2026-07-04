@@ -6375,7 +6375,11 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_doctor_close_condition(args: &DoctorCloseConditionArgs) -> Result<()> {
+fn handle_doctor_close_condition(
+    args: &DoctorCloseConditionArgs,
+    trace_id: &str,
+    structured_logs_jsonl: bool,
+) -> Result<()> {
     let root = std::env::current_dir()
         .context("failed resolving current working directory for close-condition receipt")?;
     let signing_material = load_receipt_signing_material(args.receipt_signing_key.as_deref())?
@@ -6393,6 +6397,13 @@ fn handle_doctor_close_condition(args: &DoctorCloseConditionArgs) -> Result<()> 
     let receipt_path = ops::close_condition::write_close_condition_receipt(&root, &receipt)
         .context("failed writing close-condition receipt")?;
     let rendered = ops::close_condition::render_close_condition_receipt_json(&receipt)?;
+
+    if structured_logs_jsonl {
+        eprint!(
+            "{}",
+            ops::close_condition::render_close_condition_structured_logs_jsonl(&receipt, trace_id)?
+        );
+    }
 
     if args.json {
         println!("{rendered}");
@@ -27467,7 +27478,11 @@ fn main() -> Result<()> {
             if let Some(command) = &args.command {
                 match command {
                     DoctorCommand::CloseCondition(close_args) => {
-                        handle_doctor_close_condition(close_args)?;
+                        handle_doctor_close_condition(
+                            close_args,
+                            &args.trace_id,
+                            args.structured_logs_jsonl,
+                        )?;
                     }
                     DoctorCommand::EvidenceReadiness(readiness_args) => {
                         handle_doctor_evidence_readiness(
