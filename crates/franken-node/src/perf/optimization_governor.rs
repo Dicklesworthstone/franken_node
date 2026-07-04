@@ -83,12 +83,10 @@ pub struct GovernorGate {
 impl GovernorGate {
     /// Create a new gate wrapping an [`OptimizationGovernor`].
     pub fn new(governor: OptimizationGovernor) -> Self {
-        let gate = Self {
+        Self {
             inner: governor,
             audit_trail: Vec::new(),
-        };
-
-        gate
+        }
     }
 
     /// Create a gate with default settings.
@@ -3212,9 +3210,7 @@ mod tests {
         ));
         // The (unbounded-length) id is recorded faithfully in the audit trail.
         assert!(
-            gate.audit_trail()
-                .iter()
-                .any(|e| e.proposal_id == long_id),
+            gate.audit_trail().iter().any(|e| e.proposal_id == long_id),
             "extreme proposal id should be recorded in the audit trail"
         );
     }
@@ -3863,10 +3859,10 @@ mod tests {
                 old_value: 10000,
                 new_value: 1000,
                 predicted: PredictedMetrics {
-                    throughput_rps: (80.0) as u64,  // Worse performance
+                    throughput_rps: (80.0) as u64, // Worse performance
                     error_rate_pct: 0.1,
                     latency_ms: (70.0) as u64, // Worse latency
-                    memory_mb: (512) as u64, // Less memory (good)
+                    memory_mb: (512) as u64,   // Less memory (good)
                 },
                 rationale: "bd-yom8c reconciled test".to_string(),
                 trace_id: "trace-test".to_string(),
@@ -4105,7 +4101,7 @@ mod tests {
 
             // Perform live check
             let check_metrics = PredictedMetrics {
-                throughput_rps: (90.0) as u64,  // Below expected
+                throughput_rps: (90.0) as u64, // Below expected
                 error_rate_pct: 0.1,
                 latency_ms: (60.0) as u64, // Above expected
                 memory_mb: (3000) as u64,
@@ -4685,10 +4681,10 @@ mod tests {
 
             // Test safety envelope calculation with extreme precision
             let extreme_metrics = PredictedMetrics {
-                throughput_rps: (1.0000000000000002) as u64,  // Just above 1.0 in f64 precision
+                throughput_rps: (1.0000000000000002) as u64, // Just above 1.0 in f64 precision
                 error_rate_pct: 0.1,
                 latency_ms: (1.0000000000000004) as u64, // Next representable value
-                memory_mb: (u32::MAX as usize) as u64, // Maximum memory value
+                memory_mb: (u32::MAX as usize) as u64,   // Maximum memory value
             };
             let _ = gate.live_check(&extreme_metrics);
         }
@@ -5678,7 +5674,8 @@ mod tests {
                         old_value: ((complexity_level * iteration) % 1000) as u64,
                         new_value: (((complexity_level + 1) * (iteration + 1)) % 1000) as u64,
                         predicted: PredictedMetrics {
-                            throughput_rps: ((complexity_level as f64) * (iteration as f64) * 0.5) as u64,
+                            throughput_rps: ((complexity_level as f64) * (iteration as f64) * 0.5)
+                                as u64,
                             error_rate_pct: 0.1,
                             latency_ms: (50.0 + (complexity_level as f64) * 2.0) as u64,
                             memory_mb: (1500 + (complexity_level * iteration * 100)) as u64,

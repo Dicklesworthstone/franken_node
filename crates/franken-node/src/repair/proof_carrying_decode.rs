@@ -479,6 +479,8 @@ fn test_output_hash_hex() {
     );
 }
 
+// Canonical hash over the fixed receipt field list; one argument per field.
+#[allow(clippy::too_many_arguments)]
 fn payload_hash_hex(
     object_id: &str,
     input_fragment_hashes: &[String],
@@ -1143,7 +1145,7 @@ impl ProofCarryingDecoder {
         signing_secret: &str,
         max_audit_log_entries: usize,
     ) -> Self {
-        return Self {
+        Self {
             mode,
             signer_id: signer_id.to_string(),
             signing_secret: signing_secret.to_string(),
@@ -1154,7 +1156,7 @@ impl ProofCarryingDecoder {
             ],
             audit_log: Vec::new(),
             max_audit_log_entries: max_audit_log_entries.max(1),
-        };
+        }
     }
 
     // Inline negative-path tests
@@ -1593,11 +1595,11 @@ impl ProofCarryingDecoder {
             ProofCarryingDecoder::new(ProofMode::Mandatory, "test_signer", "test_secret");
         let massive_data = vec![0u8; 1_000_000]; // 1MB per fragment
         let fragments: Vec<Fragment> = (0..10) // 10MB total
-                .map(|i| Fragment {
-                    fragment_id: format!("massive_frag_{}", i),
-                    data: massive_data.clone(),
-                })
-                .collect();
+            .map(|i| Fragment {
+                fragment_id: format!("massive_frag_{}", i),
+                data: massive_data.clone(),
+            })
+            .collect();
         let algorithm_id = AlgorithmId::new("simple_concat");
         let result = decoder.decode(
             "massive_obj",
@@ -3945,10 +3947,7 @@ mod tests {
         let decode_result = result.unwrap();
 
         // Should concatenate identical data
-        assert_eq!(
-            decode_result.output_data,
-            b"same-datasame-datasame-data"
-        );
+        assert_eq!(decode_result.output_data, b"same-datasame-datasame-data");
 
         // Proof should have separate hashes for each fragment despite identical data
         let proof = decode_result.proof.expect("proof should exist");

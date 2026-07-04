@@ -141,6 +141,11 @@ impl SignalKind {
     }
 
     /// Inverse of [`Self::as_str`]. Returns `None` for unknown strings.
+    ///
+    /// Deliberately an inherent `Option`-returning parse (not
+    /// `std::str::FromStr`, which would force a `Result` shape onto the
+    /// prod call site and the `fuzz_federation_signal_kind_parser` target).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "anomaly_observation" => Some(SignalKind::AnomalyObservation),

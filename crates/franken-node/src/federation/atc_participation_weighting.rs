@@ -471,6 +471,9 @@ impl ParticipationWeightEngine {
         )
     }
 
+    // Test-only convenience over `compute_single_weight_with_attestation`;
+    // production callers go through `compute_single_weight_at`.
+    #[cfg(test)]
     fn compute_single_weight(&self, participant: &ParticipantIdentity) -> ParticipationWeight {
         self.compute_single_weight_with_attestation(
             participant,
@@ -648,7 +651,7 @@ impl ParticipationWeightEngine {
         }
         established_weights.sort_by(|a, b| a.total_cmp(b));
         let mid = established_weights.len() / 2;
-        if established_weights.len() % 2 == 0 {
+        if established_weights.len().is_multiple_of(2) {
             (established_weights[mid - 1] + established_weights[mid]) / 2.0
         } else {
             established_weights[mid]

@@ -1426,15 +1426,12 @@ fn generate_benchmark_metrics(now_secs: u64) -> Result<RealBenchmarkMetrics, Cat
 #[cfg(feature = "advanced-features")]
 fn load_compatibility_corpus_pass_rate() -> Option<f64> {
     let corpus_path = "artifacts/13/compatibility_corpus_results.json";
-    if let Ok(content) = fs::read_to_string(corpus_path) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
-            return value
-                .get("totals")
-                .and_then(|t| t.get("overall_pass_rate_pct"))
-                .and_then(|p| p.as_f64());
-        }
-    }
-    None
+    let content = fs::read_to_string(corpus_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("totals")
+        .and_then(|t| t.get("overall_pass_rate_pct"))
+        .and_then(|p| p.as_f64())
 }
 
 /// Save benchmark results to artifacts folder for CI gating and regression detection
@@ -1851,7 +1848,7 @@ fn analyze_evidence_economics(ledger: &EvidenceLedger) -> (f64, f64, f64) {
     let stability_multiplier = 1.0 + (1.0 - rollback_rate).max(0.0);
 
     // Activity volume: more total decisions = more network activity = scale benefits
-    let volume_multiplier = 1.0 + (total_decisions.ln() / 20.0).max(0.0).min(2.0);
+    let volume_multiplier = 1.0 + (total_decisions.ln() / 20.0).clamp(0.0, 2.0);
 
     (trust_multiplier, stability_multiplier, volume_multiplier)
 }
@@ -2113,9 +2110,9 @@ fn generate_real_moonshot_bets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::clock;
     #[cfg(feature = "advanced-features")]
     use crate::observability::evidence_ledger::{LedgerCapacity, test_entry};
+    use crate::runtime::clock;
 
     fn sample_evidence(now_secs: u64) -> EvidenceInput {
         let content = r#"{"test":"data"}"#;

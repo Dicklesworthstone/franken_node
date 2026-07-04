@@ -167,6 +167,8 @@ pub struct DgisTopologyIndicatorInput {
 }
 
 impl DgisTopologyIndicatorInput {
+    // Constructor maps one argument per indicator-input field.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         package_name: impl Into<String>,
         version: impl Into<String>,
