@@ -6,9 +6,9 @@ mod metamorphic_tests;
 #[cfg(test)]
 mod tests {
     use super::proof_carrying_decode::{
-        AlgorithmId, Attestation, DecodeResult, Fragment, ProofAuditEvent, ProofCarryingDecodeError,
-        ProofCarryingDecoder, ProofMode, ProofVerificationApi, REPAIR_PROOF_INVALID, RepairProof,
-        VerificationResult,
+        AlgorithmId, Attestation, DecodeResult, Fragment, ProofAuditEvent,
+        ProofCarryingDecodeError, ProofCarryingDecoder, ProofMode, ProofVerificationApi,
+        REPAIR_PROOF_INVALID, RepairProof, VerificationResult,
     };
 
     fn fragments() -> Vec<Fragment> {
@@ -1502,7 +1502,7 @@ mod tests {
         // Test all proof mode variants with extreme configurations
         let modes = [ProofMode::Mandatory, ProofMode::Advisory];
         let extreme_configs = [
-            ("".to_string(), "".to_string()), // Empty signer and secret
+            ("".to_string(), "".to_string()),         // Empty signer and secret
             ("x".repeat(100000), "y".repeat(100000)), // Very long signer and secret
             ("\x00\r\n\t".to_string(), "\x1b[31m\x00".to_string()), // Control characters
             ("🚀🔐💀".to_string(), "🛡️🔥⚠️".to_string()), // Unicode symbols
@@ -1576,20 +1576,20 @@ mod tests {
 
         // Test algorithm ID creation with potential security issues
         let security_test_algorithms = [
-            "".to_string(),                          // Empty algorithm ID
-            " ".to_string(),                         // Whitespace-only
-            "\0".to_string(),                        // Null byte
-            "algo\r\ninjection".to_string(),         // CRLF injection
-            "algo\x00null".to_string(),              // Null byte injection
-            "algo\x1b[31mred\x1b[0m".to_string(),    // ANSI escape sequences
-            "../../../etc/passwd".to_string(),       // Path traversal
-            "CON".to_string(),                       // Windows reserved name
-            "simple\tconcatspaced".to_string(),      // Tab character
-            "\u{FEFF}algo".to_string(),              // Unicode BOM
+            "".to_string(),                              // Empty algorithm ID
+            " ".to_string(),                             // Whitespace-only
+            "\0".to_string(),                            // Null byte
+            "algo\r\ninjection".to_string(),             // CRLF injection
+            "algo\x00null".to_string(),                  // Null byte injection
+            "algo\x1b[31mred\x1b[0m".to_string(),        // ANSI escape sequences
+            "../../../etc/passwd".to_string(),           // Path traversal
+            "CON".to_string(),                           // Windows reserved name
+            "simple\tconcatspaced".to_string(),          // Tab character
+            "\u{FEFF}algo".to_string(),                  // Unicode BOM
             "\u{200B}invisible\u{200B}algo".to_string(), // Zero-width spaces
-            "algo\u{202E}reverse".to_string(),       // Right-to-left override
-            format!("long_{}", "x".repeat(100000)), // Very long algorithm ID
-            "simple_concat".to_string(),             // Valid reference for comparison
+            "algo\u{202E}reverse".to_string(),           // Right-to-left override
+            format!("long_{}", "x".repeat(100000)),      // Very long algorithm ID
+            "simple_concat".to_string(),                 // Valid reference for comparison
         ];
 
         let mut decoder = decoder();
@@ -2045,12 +2045,15 @@ mod tests {
             for (test_idx, (test_proof, test_fragments, test_output, _expected_code)) in
                 test_cases.iter().enumerate()
             {
-                // Measure verification timing
-                let start = Instant::now(); // ubs:ignore - test timing measurement, not random generation.
+                // Measure verification timing as a median over repeated runs
+                // (verify is pure; 8 single-shot samples were pure scheduler
+                // noise even on a pinned core — bd-m87xv).
+                let median_ns = crate::testing::median_wallclock_ns(31, || {
+                    let _ = current_verifier.verify(test_proof, test_fragments, test_output);
+                });
+                let duration = Duration::from_nanos(u64::try_from(median_ns).unwrap_or(u64::MAX));
 
                 let verification = current_verifier.verify(test_proof, test_fragments, test_output);
-
-                let duration = start.elapsed();
                 timing_measurements.push((
                     verifier_idx,
                     test_idx,
@@ -2090,26 +2093,24 @@ mod tests {
             .map(|(_, _, duration, _)| *duration)
             .max()
             .unwrap_or(Duration::from_nanos(0));
-        // FIXME(bd-o776s): wall-clock timing-variance side-channel assertion is
-        // non-deterministic on a loaded host. With only 8 single-shot measurements
-        // (2 verifiers x 4 cases) and no per-case repetition, the min/max ratio is
-        // dominated by scheduler preemption / cache noise on a multi-agent build
-        // host rather than by any data-dependent branch; loosening the bound enough
-        // to never flake would also stop it from detecting a real side-channel. The
-        // actual constant-time guarantee is enforced by ct_eq inside the verifier.
-        #[cfg(any())]
-        {
-            let min_timing = timing_measurements
-                .iter()
-                .map(|(_, _, duration, _)| *duration)
-                .min()
-                .unwrap_or(Duration::from_nanos(1));
-
-            // Timing should not vary by more than an order of magnitude for constant-time operations
-            assert!(
-                max_timing.as_nanos() < min_timing.as_nanos() * 100,
-                "Verification timing variance is too high - possible timing side-channel"
-            );
+        // No cross-case ratio is asserted: valid proofs do full-work
+        // verification while malformed ones deliberately fail fast (a stable
+        // >100x median gap even on the quiesced timing lane), and proof
+        // validity is known to the submitter — the constant-time guarantee
+        // prod makes is for secret-dependent comparisons, enforced by ct_eq
+        // inside the verifier. The timing lane (bd-m87xv,
+        // scripts/run_timing_tests.sh) instead bounds every case with a
+        // per-verification latency budget.
+        if crate::testing::timing_assertions_enabled() {
+            for (verifier_idx, test_idx, duration, _) in &timing_measurements {
+                assert!(
+                    duration.as_millis() < 50,
+                    "Verification latency budget exceeded (verifier {}, case {}): {:?}",
+                    verifier_idx,
+                    test_idx,
+                    duration
+                );
+            }
         }
 
         // All operations should complete reasonably quickly (less than 100ms)
@@ -2221,7 +2222,10 @@ mod tests {
                             assert!(!reason.is_empty(), "Error reason should not be empty");
                         }
                         ProofCarryingDecodeError::CapacityExceeded { resource, .. } => {
-                            assert!(!resource.is_empty(), "Capacity error should name a resource");
+                            assert!(
+                                !resource.is_empty(),
+                                "Capacity error should name a resource"
+                            );
                         }
                     }
                 }
@@ -3605,7 +3609,8 @@ mod tests {
             ),
             (
                 base_proof
-                    .attestation.signature
+                    .attestation
+                    .signature
                     .chars()
                     .take(base_proof.attestation.signature.len() - 2)
                     .collect(),
@@ -3639,7 +3644,8 @@ mod tests {
             ),
             (
                 base_proof
-                    .attestation.signature
+                    .attestation
+                    .signature
                     .trim_end_matches('=')
                     .to_string(),
                 "Padding removal attack",
@@ -3688,7 +3694,8 @@ mod tests {
                     "{}{}",
                     base_proof.attestation.signature,
                     base_proof
-                        .attestation.signature
+                        .attestation
+                        .signature
                         .chars()
                         .rev()
                         .collect::<String>()
@@ -4178,11 +4185,16 @@ mod tests {
                 }
             }
 
-            // Analyze timing correlation
-            let attack_mean = attack_times.iter().sum::<Duration>()
-                / u32::try_from(attack_times.len()).unwrap_or(u32::MAX);
+            // Analyze timing correlation with an outlier-robust median
+            let attack_median_ns = {
+                let mut ns: Vec<u128> = attack_times.iter().map(Duration::as_nanos).collect();
+                ns.sort_unstable();
+                ns[ns.len() / 2].max(1)
+            };
+            let attack_median =
+                Duration::from_nanos(u64::try_from(attack_median_ns).unwrap_or(u64::MAX));
             let timing_ratio = if baseline_mean.as_nanos() > 0 {
-                attack_mean.as_nanos() as f64 / baseline_mean.as_nanos() as f64
+                attack_median_ns as f64 / baseline_mean.as_nanos() as f64
             } else {
                 1.0
             };
@@ -4190,12 +4202,12 @@ mod tests {
             timing_correlations.push((
                 timing_fragment.fragment_id.clone(),
                 timing_ratio,
-                attack_mean,
+                attack_median,
             ));
 
             println!(
-                "Timing attack {}: {} - Ratio: {:.3}, Mean: {:?}",
-                attack_idx, timing_fragment.fragment_id, timing_ratio, attack_mean
+                "Timing attack {}: {} - Ratio: {:.3}, Median: {:?}",
+                attack_idx, timing_fragment.fragment_id, timing_ratio, attack_median
             );
 
             // Verify timing doesn't reveal excessive information
@@ -4235,19 +4247,48 @@ mod tests {
         println!("  Correlation variance: {:.6}", correlation_variance);
         println!("  Attack vectors tested: {}", timing_correlations.len());
 
-        // Verify timing variance is within reasonable bounds.
-        // FIXME(bd-o776s): timing-correlation variance is wall-clock/host-load dependent
-        // (observed ~835 under a shared host with --test-threads=4); a fixed numeric bound
-        // cannot validate the constant-time property deterministically in this environment.
-        // Gated until this can run on an isolated/quiesced host. The structural portions of
-        // this test (decoder recovery, ratio computation) still execute above.
-        #[cfg(any())]
-        {
-            assert!(
-                correlation_variance < 10.0,
-                "Timing correlation variance should not be excessive: {:.6}",
-                correlation_variance
+        // Timing-lane assertions (bd-m87xv, scripts/run_timing_tests.sh).
+        //
+        // Reconstruction cost legitimately scales with fragment SIZE (1 byte vs
+        // 100KB attack vectors — sizes are not secrets), so a blanket variance
+        // bound vs the baseline asserted a property prod neither has nor needs.
+        // Content-independence across SAME-SIZE fragments is the meaningful
+        // check: the ~1KB content/pattern variants must have comparable median
+        // cost, and every attack vector must stay under an absolute budget.
+        if crate::testing::timing_assertions_enabled() {
+            let same_size_group = [
+                "zeros_fragment",
+                "ones_fragment",
+                "random_fragment",
+                "sequential_pattern",
+            ];
+            let group_medians: Vec<u128> = timing_correlations
+                .iter()
+                .filter(|(id, _, _)| same_size_group.contains(&id.as_str()))
+                .map(|(_, _, median)| median.as_nanos().max(1))
+                .collect();
+            assert_eq!(
+                group_medians.len(),
+                same_size_group.len(),
+                "expected all same-size attack vectors to be measured"
             );
+            let group_max = *group_medians.iter().max().unwrap();
+            let group_min = *group_medians.iter().min().unwrap();
+            let content_ratio = group_max as f64 / group_min as f64;
+            assert!(
+                content_ratio < 5.0,
+                "Same-size fragment content should not drive reconstruction timing: ratio {:.3}",
+                content_ratio
+            );
+
+            for (id, _, median) in &timing_correlations {
+                assert!(
+                    median.as_millis() < 100,
+                    "Attack vector {} exceeded the reconstruction latency budget: {:?}",
+                    id,
+                    median
+                );
+            }
         }
     }
 
@@ -4436,13 +4477,12 @@ mod tests {
                 // that round-trips, so an injected trace_id cannot corrupt the audit log format.
                 let entry_json =
                     serde_json::to_string(entry).expect("audit entry should serialize");
-                let reparsed_entry: ProofAuditEvent = serde_json::from_str(&entry_json)
-                    .expect("audit entry JSON should round-trip");
+                let reparsed_entry: ProofAuditEvent =
+                    serde_json::from_str(&entry_json).expect("audit entry JSON should round-trip");
                 assert_eq!(
                     reparsed_entry.trace_id, entry.trace_id,
                     "Attack {} Entry {}: audit JSON round-trip must preserve the trace ID",
-                    attack_idx,
-                    entry_idx
+                    attack_idx, entry_idx
                 );
                 assert!(
                     !entry.object_id.contains("<script>"),
@@ -4618,8 +4658,11 @@ mod tests {
                     // Valid verification - check for state consistency
 
                     // Verify multiple verification attempts are deterministic
-                    let verification_2 =
-                        verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
+                    let verification_2 = verifier_api.verify(
+                        proof,
+                        &proof.input_fragment_hashes,
+                        &proof.output_hash,
+                    );
                     assert_eq!(
                         format!("{:?}", verification_result),
                         format!("{:?}", verification_2),
@@ -4629,8 +4672,11 @@ mod tests {
 
                     // Test verification after state manipulation attempts
                     for manipulation_idx in 0..10 {
-                        let manipulation_verification =
-                            verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
+                        let manipulation_verification = verifier_api.verify(
+                            proof,
+                            &proof.input_fragment_hashes,
+                            &proof.output_hash,
+                        );
                         assert!(
                             manipulation_verification.is_valid(),
                             "Attack {} Manipulation {}: State should remain consistent",
@@ -4643,8 +4689,11 @@ mod tests {
                     // Invalid verification - check error consistency
 
                     // Verify error is deterministic
-                    let error_verification_2 =
-                        verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
+                    let error_verification_2 = verifier_api.verify(
+                        proof,
+                        &proof.input_fragment_hashes,
+                        &proof.output_hash,
+                    );
                     match (&verification_result, &error_verification_2) {
                         (
                             VerificationResult::InvalidSignature,
@@ -4678,8 +4727,11 @@ mod tests {
                     );
 
                     // Verify that verifying one proof doesn't affect verification of others
-                    let original_verification =
-                        verifier_api.verify(proof, &proof.input_fragment_hashes, &proof.output_hash);
+                    let original_verification = verifier_api.verify(
+                        proof,
+                        &proof.input_fragment_hashes,
+                        &proof.output_hash,
+                    );
                     assert_eq!(
                         format!("{:?}", verification_result),
                         format!("{:?}", original_verification),

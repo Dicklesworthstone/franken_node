@@ -138,18 +138,22 @@ fn is_valid_exception(preceding_line: Option<&str>) -> bool {
     !justification.trim().is_empty()
 }
 
-/// Returns true if the line is inside a `#[cfg(test)]` module or a `// test`
-/// comment context. This is a conservative heuristic: we only skip lines
-/// that are clearly in test-only code.
-fn is_in_test_context(lines: &[&str], line_idx: usize) -> bool {
+/// Per-line test-context map computed in a single forward pass.
+///
+/// `map[idx]` is true when line `idx` is inside a `#[cfg(test)]` module or a
+/// pending `#[cfg(test)]` attribute context — the same conservative state
+/// machine `is_in_test_context` exposes per line, hoisted to one O(n) sweep so
+/// whole-file scans are near-linear instead of O(n^2) (bd-m87xv).
+fn test_context_map(lines: &[&str]) -> Vec<bool> {
+    let mut map = Vec::with_capacity(lines.len());
     let mut pending_cfg_test = false;
     let mut depth = 0isize;
     let mut test_context_depth: Option<isize> = None;
 
-    for (idx, line) in lines.iter().enumerate() {
-        if idx == line_idx {
-            return test_context_depth.is_some() || pending_cfg_test;
-        }
+    for line in lines {
+        // State *before* processing this line, matching the original
+        // early-return semantics of is_in_test_context.
+        map.push(test_context_depth.is_some() || pending_cfg_test);
 
         let trimmed = line.trim();
         if trimmed == "#[cfg(test)]" {
@@ -174,7 +178,17 @@ fn is_in_test_context(lines: &[&str], line_idx: usize) -> bool {
             test_context_depth = None;
         }
     }
-    false
+    map
+}
+
+/// Returns true if the line is inside a `#[cfg(test)]` module or a `// test`
+/// comment context. This is a conservative heuristic: we only skip lines
+/// that are clearly in test-only code.
+fn is_in_test_context(lines: &[&str], line_idx: usize) -> bool {
+    test_context_map(lines)
+        .get(line_idx)
+        .copied()
+        .unwrap_or(false)
 }
 
 fn brace_delta(line: &str) -> isize {
@@ -211,12 +225,39 @@ fn is_api_source_file(file: &Path) -> bool {
 }
 
 /// Check a single line for banned patterns.
+// Only test code drives the slice-based wrapper directly; production scans go
+// through the `_with_context` core with a single-pass `test_context_map`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn check_line_for_violations(
     line: &str,
     line_number: usize,
     preceding_line: Option<&str>,
     file: &Path,
     all_lines: &[&str],
+    violations: &mut Vec<DriftViolation>,
+    exceptions_honored: &mut usize,
+) {
+    let in_test_context = is_in_test_context(all_lines, line_number.saturating_sub(1));
+    check_line_for_violations_with_context(
+        line,
+        line_number,
+        preceding_line,
+        file,
+        in_test_context,
+        violations,
+        exceptions_honored,
+    );
+}
+
+/// Core line checker with a precomputed test-context flag, so whole-file scans
+/// can consult a single-pass `test_context_map` instead of rescanning the file
+/// per line (bd-m87xv).
+fn check_line_for_violations_with_context(
+    line: &str,
+    line_number: usize,
+    preceding_line: Option<&str>,
+    file: &Path,
+    in_test_context: bool,
     violations: &mut Vec<DriftViolation>,
     exceptions_honored: &mut usize,
 ) {
@@ -228,7 +269,7 @@ fn check_line_for_violations(
     }
 
     // Skip lines in test context
-    if is_in_test_context(all_lines, line_number.saturating_sub(1)) {
+    if in_test_context {
         return;
     }
 
@@ -284,12 +325,38 @@ fn check_line_for_violations(
 }
 
 /// Check a single line for API transport-boundary trigger patterns.
+// Only test code drives the slice-based wrapper directly; production scans go
+// through the `_with_context` core with a single-pass `test_context_map`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn check_api_transport_boundary_line_for_violations(
     line: &str,
     line_number: usize,
     preceding_line: Option<&str>,
     file: &Path,
     all_lines: &[&str],
+    violations: &mut Vec<DriftViolation>,
+    exceptions_honored: &mut usize,
+) {
+    let in_test_context = is_in_test_context(all_lines, line_number.saturating_sub(1));
+    check_api_transport_boundary_line_for_violations_with_context(
+        line,
+        line_number,
+        preceding_line,
+        file,
+        in_test_context,
+        violations,
+        exceptions_honored,
+    );
+}
+
+/// Core API transport-boundary line checker with a precomputed test-context
+/// flag (see `check_line_for_violations_with_context`).
+fn check_api_transport_boundary_line_for_violations_with_context(
+    line: &str,
+    line_number: usize,
+    preceding_line: Option<&str>,
+    file: &Path,
+    in_test_context: bool,
     violations: &mut Vec<DriftViolation>,
     exceptions_honored: &mut usize,
 ) {
@@ -303,7 +370,7 @@ fn check_api_transport_boundary_line_for_violations(
         return;
     }
 
-    if is_in_test_context(all_lines, line_number.saturating_sub(1)) {
+    if in_test_context {
         return;
     }
 
@@ -547,15 +614,16 @@ pub fn check_tokio_drift(crate_root: &Path) -> DriftCheckResult {
         files_scanned = files_scanned.saturating_add(1);
 
         let lines: Vec<&str> = content.lines().collect();
+        let test_context = test_context_map(&lines);
         for (idx, line) in lines.iter().enumerate() {
             let line_number = idx.saturating_add(1);
             let preceding = if idx > 0 { Some(lines[idx - 1]) } else { None };
-            check_line_for_violations(
+            check_line_for_violations_with_context(
                 line,
                 line_number,
                 preceding,
                 file_path,
-                &lines,
+                test_context.get(idx).copied().unwrap_or(false),
                 &mut violations,
                 &mut exceptions_honored,
             );
@@ -590,15 +658,16 @@ pub fn check_api_transport_boundary_trigger(crate_root: &Path) -> DriftCheckResu
         files_scanned = files_scanned.saturating_add(1);
 
         let lines: Vec<&str> = content.lines().collect();
+        let test_context = test_context_map(&lines);
         for (idx, line) in lines.iter().enumerate() {
             let line_number = idx.saturating_add(1);
             let preceding = if idx > 0 { Some(lines[idx - 1]) } else { None };
-            check_api_transport_boundary_line_for_violations(
+            check_api_transport_boundary_line_for_violations_with_context(
                 line,
                 line_number,
                 preceding,
                 file_path,
-                &lines,
+                test_context.get(idx).copied().unwrap_or(false),
                 &mut violations,
                 &mut exceptions_honored,
             );
@@ -1403,16 +1472,11 @@ features = ["rt"]
     // Full integration: check real crate (current tree)
     // ---------------------------------------------------------------
 
-    // FIXME(bd-o776s): `check_tokio_drift` is O(n^2) per file — `check_line_for_violations`
-    // calls `is_in_test_context(all_lines, idx)` for every line, and that helper rescans
-    // lines `0..idx` (each line costing an O(len) `brace_delta`). On the current crate tree
-    // (e.g. `src/main.rs` is ~1.1 MB / ~30k lines) this whole-tree scan does not complete in
-    // any reasonable unit-test budget (observed: >2 min, no completion). It also scans the
-    // *live* filesystem at `CARGO_MANIFEST_DIR`, so its cost is environment/scale-dependent.
-    // Gated until the production scanner is made near-linear (hoist the test-context sweep to a
-    // single forward pass instead of an O(n) lookup per line); see report. The `src/api`-only
-    // sibling `real_crate_has_no_api_transport_boundary_trigger` stays enabled (small subtree).
-    #[cfg(any())]
+    // Re-enabled (bd-m87xv): the scanner's test-context sweep was hoisted into a
+    // single forward pass (`test_context_map`), taking the whole-tree scan from
+    // O(n^2) per file (>2 min, never completed on the ~30k-line main.rs) to
+    // near-linear. Still scans the live tree at CARGO_MANIFEST_DIR by design —
+    // it is the drift gate for the current checkout.
     #[test]
     fn real_crate_is_tokio_drift_free() {
         let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

@@ -2942,17 +2942,21 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             timing_ratio.is_finite(),
             "Timing ratio must be finite for meaningful comparison"
         );
-        // FIXME(bd-o776s): wall-clock nanosecond timing-variance ratios are
-        // environment-dependent (measured 31.76 under concurrent build load) and not
-        // reliably testable on a shared/loaded host. The path is still exercised and
-        // the finiteness invariant above is still checked; only the brittle
-        // side-channel threshold is gated off.
-        #[cfg(any())]
-        assert!(
-            timing_ratio < 5.0,
-            "Participant validation timing variance too high: {}",
-            timing_ratio
-        );
+        // Reframed as a latency budget on the timing lane (bd-m87xv):
+        // participant ids are not secrets and valid/invalid acks legitimately
+        // take different validation paths, so a cross-input nanosecond ratio
+        // (observed 148.9x even on a pinned core) asserts a property prod
+        // neither has nor needs. What must hold: no ack validation blows a
+        // per-op latency budget. The path is always exercised and the
+        // finiteness invariant above is always checked.
+        let _ = timing_ratio;
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                max_timing.as_millis() < 10,
+                "Participant validation exceeded latency budget: {:?}",
+                max_timing
+            );
+        }
 
         // Test barrier ID validation timing consistency
         let test_barrier_ids = [
@@ -2989,14 +2993,16 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             barrier_timing_ratio.is_finite(),
             "Barrier timing ratio must be finite for meaningful comparison"
         );
-        // FIXME(bd-o776s): see above — wall-clock ns timing-variance threshold is
-        // environment-dependent and not reliably testable here; gated off.
-        #[cfg(any())]
-        assert!(
-            barrier_timing_ratio < 4.0,
-            "Barrier ID validation timing variance too high: {}",
-            barrier_timing_ratio
-        );
+        // See above — latency budget on the timing lane (bd-m87xv); barrier ids
+        // are not secrets and mismatched ids legitimately exit early.
+        let _ = barrier_timing_ratio;
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                max_barrier_timing.as_millis() < 10,
+                "Barrier ID validation exceeded latency budget: {:?}",
+                max_barrier_timing
+            );
+        }
 
         // Test participant timeout check timing consistency
         let mut timeout_barrier = EpochTransitionBarrier::default();
@@ -3025,14 +3031,15 @@ mod epoch_transition_barrier_comprehensive_negative_tests {
             timeout_timing_ratio.is_finite(),
             "Timeout timing ratio must be finite for meaningful comparison"
         );
-        // FIXME(bd-o776s): see above — wall-clock ns timing-variance threshold is
-        // environment-dependent and not reliably testable here; gated off.
-        #[cfg(any())]
-        assert!(
-            timeout_timing_ratio < 3.0,
-            "Timeout check timing variance too high: {}",
-            timeout_timing_ratio
-        );
+        // See above — latency budget on the timing lane (bd-m87xv).
+        let _ = timeout_timing_ratio;
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                max_timeout_timing.as_millis() < 10,
+                "Timeout check exceeded latency budget: {:?}",
+                max_timeout_timing
+            );
+        }
     }
 
     /// Negative test: Push_bounded edge cases and audit history capacity attacks

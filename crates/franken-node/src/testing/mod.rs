@@ -2,6 +2,51 @@ pub mod lab_runtime;
 pub mod scenario_builder;
 pub mod virtual_transport;
 
+/// Opt-in gate for wall-clock timing-variance assertions (bd-m87xv).
+///
+/// Nanosecond-scale timing thresholds are only meaningful on a quiesced,
+/// core-isolated host; on a shared multi-agent build machine a single
+/// scheduler preemption blows any ratio bound. Tests keep exercising the
+/// measured code paths unconditionally and wrap only the brittle numeric
+/// thresholds in this check. `scripts/run_timing_tests.sh` pins the test
+/// binary to an isolated core and sets `FRANKEN_NODE_TIMING_TESTS=1` to turn
+/// the assertions on.
+#[must_use]
+pub fn timing_assertions_enabled() -> bool {
+    std::env::var_os("FRANKEN_NODE_TIMING_TESTS").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Median wall-clock nanoseconds of `op` over `samples` runs (bd-m87xv).
+///
+/// The building block for the timing lane's statistics: single-shot nanosecond
+/// measurements are dominated by timer quantization and scheduler preemption
+/// even on a pinned core, while medians over dozens-to-hundreds of runs are
+/// stable. Returns at least 1 so callers can divide safely.
+pub fn median_wallclock_ns(samples: usize, mut op: impl FnMut()) -> u128 {
+    let mut times: Vec<u128> = (0..samples.max(1))
+        .map(|_| {
+            let start = std::time::Instant::now();
+            op();
+            start.elapsed().as_nanos()
+        })
+        .collect();
+    times.sort_unstable();
+    times[times.len() / 2].max(1)
+}
+
+/// Percentile (0-100) of a sample set in nanoseconds (bd-m87xv).
+///
+/// Used by timing-lane assertions that keep a full sample vector: comparing a
+/// high percentile against the median tolerates the occasional interrupt that
+/// makes raw max/min ratios meaningless. Returns at least 1.
+pub fn percentile_ns(samples: &[u128], pct: u32) -> u128 {
+    assert!(!samples.is_empty(), "percentile of empty sample set");
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let rank = (sorted.len().saturating_sub(1)) * (pct.min(100) as usize) / 100;
+    sorted[rank].max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::scenario_builder::{
@@ -752,7 +797,9 @@ mod testing_module_negative_tests {
             let node_id = format!("n{}", i);
             // .clone() so the Err(_) => break arm does not leave `builder` moved-out
             // (add_node consumes self and does not return it on Err).
-            let result = builder.clone().add_node(&node_id, "Stress Node", NodeRole::Participant);
+            let result = builder
+                .clone()
+                .add_node(&node_id, "Stress Node", NodeRole::Participant);
 
             match result {
                 Ok(new_builder) => {
@@ -772,19 +819,24 @@ mod testing_module_negative_tests {
 
         // Test empty node ID (edge case)
         // .clone() so `builder` stays valid for the subsequent single-shot add_node probes below.
-        let empty_id_result = builder.clone().add_node("", "Empty ID Node", NodeRole::Coordinator);
+        let empty_id_result = builder
+            .clone()
+            .add_node("", "Empty ID Node", NodeRole::Coordinator);
         // FIXME(bd-yom8c): EmptyNodeId/NodeIdTooLong/NodeDescTooLong variants removed; the current
         // builder performs no id/desc length validation, so map the (now-unreachable) graceful
         // rejection arms to the surviving node-limit variant (TooManyNodes).
         match empty_id_result {
-            Ok(_) => {}                                       // Empty ID accepted
+            Ok(_) => {}                                          // Empty ID accepted
             Err(ScenarioBuilderError::TooManyNodes { .. }) => {} // Rejected gracefully
             Err(other) => panic!("Unexpected error for empty node ID: {:?}", other),
         }
 
         // Test very long node ID
         let long_id = "x".repeat(100000);
-        let long_id_result = builder.clone().add_node(&long_id, "Long ID Node", NodeRole::Participant);
+        let long_id_result =
+            builder
+                .clone()
+                .add_node(&long_id, "Long ID Node", NodeRole::Participant);
         match long_id_result {
             Ok(_) => {}                                          // Long ID accepted
             Err(ScenarioBuilderError::TooManyNodes { .. }) => {} // Rejected gracefully
@@ -1111,7 +1163,10 @@ mod testing_module_negative_tests {
             // Add nodes up to reasonable limit
             for i in 0..1000 {
                 let node_id = format!("node_{}", i);
-                match builder.clone().add_node(&node_id, "Stress Node", NodeRole::Participant) {
+                match builder
+                    .clone()
+                    .add_node(&node_id, "Stress Node", NodeRole::Participant)
+                {
                     Ok(new_builder) => builder = new_builder,
                     Err(_) => break, // Hit capacity limit, which is expected
                 }
@@ -1403,10 +1458,14 @@ mod testing_module_negative_tests {
                 let node_id = format!("node_{:04}", i);
                 let node_name = format!("Node {} with long description {}", i, "x".repeat(100));
 
-                builder = match builder.clone().add_node(&node_id, &node_name, NodeRole::Participant) {
-                    Ok(b) => b,
-                    Err(_) => break, // Hit capacity limit
-                };
+                builder =
+                    match builder
+                        .clone()
+                        .add_node(&node_id, &node_name, NodeRole::Participant)
+                    {
+                        Ok(b) => b,
+                        Err(_) => break, // Hit capacity limit
+                    };
             }
 
             // Add many links between nodes
@@ -2159,12 +2218,13 @@ mod testing_module_negative_tests {
                                     let link_id = "message_source->message_target";
                                     // `within_ticks` can be u64::MAX (edge-case vector),
                                     // so saturate to avoid overflow in the loop bound.
-                                    for tick in 1..=std::cmp::min(within_ticks.saturating_add(100), 1000) {
+                                    for tick in
+                                        1..=std::cmp::min(within_ticks.saturating_add(100), 1000)
+                                    {
                                         transport.advance_tick(tick);
 
                                         // Check if message delivered
-                                        if let Ok(Some(delivered)) =
-                                            transport.deliver_next(link_id)
+                                        if let Ok(Some(delivered)) = transport.deliver_next(link_id)
                                         {
                                             let delivery_tick =
                                                 delivered.tick_delivered.unwrap_or(0);
@@ -2356,7 +2416,11 @@ mod testing_module_negative_tests {
                     let node_id = format!("stress_node_{:05}", i);
                     let massive_description = "STRESS ".repeat(1000); // 6KB per description
 
-                    match builder.clone().add_node(&node_id, &massive_description, NodeRole::Participant) {
+                    match builder.clone().add_node(
+                        &node_id,
+                        &massive_description,
+                        NodeRole::Participant,
+                    ) {
                         Ok(new_builder) => {
                             builder = new_builder;
                             node_count = node_count.saturating_add(1);
@@ -2435,10 +2499,7 @@ mod testing_module_negative_tests {
                             stats.total_messages < u64::MAX,
                             "Message count should not overflow"
                         );
-                        assert!(
-                            stats.active_links <= 100,
-                            "Link count should be bounded"
-                        );
+                        assert!(stats.active_links <= 100, "Link count should be bounded");
                     }
                     Err(_) => {
                         // Build failure under memory pressure is acceptable
@@ -2680,8 +2741,11 @@ mod testing_module_negative_tests {
                         let node_id = format!("thread_{}_node_{}", thread_id, i);
                         let node_desc = format!("Concurrent Node {} {}", thread_id, i);
 
-                        match current_builder.clone().add_node(&node_id, &node_desc, NodeRole::Participant)
-                        {
+                        match current_builder.clone().add_node(
+                            &node_id,
+                            &node_desc,
+                            NodeRole::Participant,
+                        ) {
                             Ok(new_builder) => current_builder = new_builder,
                             Err(_) => break,
                         }
@@ -2898,7 +2962,11 @@ mod testing_module_negative_tests {
                 let mut node_count = 0usize;
                 for i in 0..1000 {
                     let node_id = format!("boundary_node_{:04}", i);
-                    match large_builder.clone().add_node(&node_id, "Boundary Node", NodeRole::Participant) {
+                    match large_builder.clone().add_node(
+                        &node_id,
+                        "Boundary Node",
+                        NodeRole::Participant,
+                    ) {
                         Ok(builder) => {
                             large_builder = builder;
                             node_count = node_count.saturating_add(1);
@@ -3160,8 +3228,11 @@ mod testing_module_negative_tests {
                 let mut current_builder = cascade_test.expect("Initial builder should work");
                 for i in 2..=100 {
                     let node_id = format!("cascade_{}", i);
-                    match current_builder.clone().add_node(&node_id, "Cascade Node", NodeRole::Participant)
-                    {
+                    match current_builder.clone().add_node(
+                        &node_id,
+                        "Cascade Node",
+                        NodeRole::Participant,
+                    ) {
                         Ok(builder) => current_builder = builder,
                         Err(_) => {
                             // Failure should be isolated, not cascade to previous nodes

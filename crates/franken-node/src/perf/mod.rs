@@ -858,8 +858,8 @@ mod perf_module_extreme_adversarial_negative_tests {
         let contradictory_envelope = SafetyEnvelope {
             max_latency_ms: 0,            // Impossible: must be > 0
             min_throughput_rps: u64::MAX, // Impossible: unreachable throughput floor
-            max_error_rate_pct: -1.0,    // Impossible: negative error rate
-            max_memory_mb: 0,            // Invalid: zero memory limit
+            max_error_rate_pct: -1.0,     // Impossible: negative error rate
+            max_memory_mb: 0,             // Invalid: zero memory limit
         };
 
         // bd-o776s: build the governor with the DEFAULT knob states so the proposal
@@ -1241,17 +1241,16 @@ mod perf_module_extreme_adversarial_negative_tests {
         assert!(gate.inner().decision_count() > 0);
     }
 
-    // FIXME(bd-o776s): wall-clock timing side-channel test — environment-dependent
-    // and non-deterministic. It asserts a bounded timing ratio (< 3.0) across
-    // `submit()` calls with short vs. long proposal ids/rationales, but (a) `submit`
-    // is NOT constant-time (it formats/clones the id and pushes audit entries whose
-    // cost scales with id length) and prod makes no constant-time guarantee here
-    // (proposal ids are not secrets), and (b) on a loaded multi-agent host the
-    // wall-clock ratio is dominated by scheduler noise (observed ratio ~70x). Gated
-    // off rather than asserting a property prod neither has nor needs; needs a
-    // statistical/quiesced-host harness to be meaningful. Reported under bd-o776s.
-    #[cfg(any())]
+    // Re-enabled under bd-m87xv, reframed as a latency-budget (DoS-resistance)
+    // check: `submit` is NOT constant-time (it formats/clones the id and pushes
+    // audit entries whose cost scales with input length) and prod makes no
+    // constant-time guarantee for proposal ids — they are not secrets — so the
+    // original cross-variant ratio asserted a property prod neither has nor
+    // needs. What prod DOES need is that adversarial long ids/rationales cannot
+    // blow submission latency past a sane budget. Budget assertions run only on
+    // the isolated-core timing lane (scripts/run_timing_tests.sh).
     #[test]
+    #[ignore = "timing-sensitive (bd-m87xv): run via scripts/run_timing_tests.sh on an isolated core"]
     fn negative_timing_side_channel_resistance_in_proposal_evaluation() {
         use std::time::Instant;
 
@@ -1339,22 +1338,26 @@ mod perf_module_extreme_adversarial_negative_tests {
                 push_bounded(&mut long_timings, start.elapsed(), 10000);
             }
 
-            // Statistical analysis of timing differences
-            let avg_short = short_timings.iter().sum::<std::time::Duration>().as_nanos() as f64
-                / sample_size as f64;
-            let avg_long = long_timings.iter().sum::<std::time::Duration>().as_nanos() as f64
-                / sample_size as f64;
+            // Latency-budget analysis: median per-submit cost for both variants
+            // must stay under a generous absolute budget. Input length may
+            // legitimately affect cost (ids are not secrets); what must not
+            // happen is a pathological blowup from adversarial inputs.
+            let median_ns = |timings: &mut Vec<std::time::Duration>| -> u128 {
+                timings.sort_unstable();
+                timings[timings.len() / 2].as_nanos()
+            };
+            let median_short = median_ns(&mut short_timings);
+            let median_long = median_ns(&mut long_timings);
 
-            if avg_short > 0.0 && avg_long > 0.0 {
-                let timing_ratio = (avg_long - avg_short).abs() / avg_short.min(avg_long);
-                // Timing should not vary dramatically based on input characteristics
+            const SUBMIT_BUDGET_NS: u128 = 5_000_000; // 5ms per submit, generous for debug builds
+            if crate::testing::timing_assertions_enabled() {
                 assert!(
-                    timing_ratio < 3.0,
-                    "Suspicious timing variation for case {}: short={:.0}ns, long={:.0}ns, ratio={:.2}",
+                    median_short < SUBMIT_BUDGET_NS && median_long < SUBMIT_BUDGET_NS,
+                    "Proposal submission latency budget exceeded for case {}: short={}ns, long={}ns (budget {}ns)",
                     case_name,
-                    avg_short,
-                    avg_long,
-                    timing_ratio
+                    median_short,
+                    median_long,
+                    SUBMIT_BUDGET_NS
                 );
             }
         }
@@ -2125,16 +2128,17 @@ mod perf_module_extreme_adversarial_negative_tests {
         ));
     }
 
-    // FIXME(bd-o776s): wall-clock timing-correlation test — environment-dependent
-    // and non-deterministic. It asserts the (max-min)/avg spread of `submit()`
-    // timings stays < 5.0 across proposal-id lengths 1..100000, but `submit` cost
-    // genuinely grows with id length (string clone + audit-entry push) and prod
-    // makes no constant-time guarantee for proposal ids (they are not secrets); on a
-    // loaded host a single scheduling hiccup blows the spread past 5.0 (observed
-    // ~9x). Gated off rather than asserting a property prod neither has nor needs;
-    // needs a quiesced-host statistical harness. Reported under bd-o776s.
-    #[cfg(any())]
+    // Re-enabled under bd-m87xv, reframed as a latency-budget (DoS-resistance)
+    // check: `submit` cost genuinely grows with id length (string clone +
+    // audit-entry push) and prod makes no constant-time guarantee for proposal
+    // ids (they are not secrets), so the original (max-min)/avg spread asserted
+    // a property prod neither has nor needs. What prod DOES need: adversarial
+    // id lengths up to 100k chars cannot blow per-submit latency past a sane
+    // budget (the 100ms hard panic below always runs), and the per-length
+    // median budget runs on the isolated-core timing lane
+    // (scripts/run_timing_tests.sh).
     #[test]
+    #[ignore = "timing-sensitive (bd-m87xv): run via scripts/run_timing_tests.sh on an isolated core"]
     fn extreme_adversarial_timing_attack_via_proposal_id_length_correlation() {
         use super::optimization_governor::{
             GovernorGate, OptimizationProposal, PredictedMetrics, RuntimeKnob,
@@ -2153,11 +2157,20 @@ mod perf_module_extreme_adversarial_negative_tests {
             let mut timing_samples = Vec::new();
 
             for iteration in 0..sample_size {
-                // Create proposal ID of exact target length
+                // Create proposal ID of exact target length. Built by hand:
+                // `format!("{:0width$}")` panics ("Formatting argument out of
+                // range") for widths above u16::MAX, and the 100_000-length
+                // case exceeds that (bd-m87xv).
                 let proposal_id = if target_length == 1 {
                     "a".to_string()
                 } else {
-                    format!("a{:0width$}", iteration, width = target_length - 1)
+                    let digits = iteration.to_string();
+                    let pad = target_length - 1 - digits.len().min(target_length - 1);
+                    let mut id = String::with_capacity(target_length);
+                    id.push('a');
+                    id.push_str(&"0".repeat(pad));
+                    id.push_str(&digits[..digits.len().min(target_length - 1)]);
+                    id
                 };
 
                 assert_eq!(
@@ -2196,39 +2209,35 @@ mod perf_module_extreme_adversarial_negative_tests {
                 }
             }
 
-            // Analyze timing distribution
-            let avg_nanos: f64 = timing_samples
-                .iter()
-                .map(|d| d.as_nanos() as f64)
-                .sum::<f64>()
-                / sample_size as f64;
+            // Analyze timing distribution: median (outlier-robust) per length
+            timing_samples.sort_unstable();
+            let median_nanos = timing_samples[timing_samples.len() / 2].as_nanos();
 
-            let max_nanos = timing_samples.iter().map(|d| d.as_nanos()).max().unwrap() as f64;
-
-            let min_nanos = timing_samples.iter().map(|d| d.as_nanos()).min().unwrap() as f64;
-
-            // Check for timing attack vulnerability patterns
-            let variance_ratio = (max_nanos - min_nanos) / avg_nanos;
-
-            // Should not have excessive timing variance based on input length
-            assert!(
-                variance_ratio < 5.0,
-                "Excessive timing variance for length {}: avg={:.0}ns, max={:.0}ns, min={:.0}ns, ratio={:.2}",
-                target_length,
-                avg_nanos,
-                max_nanos,
-                min_nanos,
-                variance_ratio
-            );
-
-            // Processing time should not grow linearly with input size for small inputs
-            if target_length <= 1000 {
+            // Per-length latency budget: adversarial id lengths must not blow
+            // the submit cost past a sane per-op bound. Length may legitimately
+            // affect cost (ids are not secrets); a pathological blowup may not.
+            // Measured on the timing lane: ~7ms median for the 100k-char id in
+            // a debug build — linear scaling, so the blowup detector sits at
+            // 20ms.
+            const SUBMIT_BUDGET_NS: u128 = 20_000_000; // 20ms
+            if crate::testing::timing_assertions_enabled() {
                 assert!(
-                    avg_nanos < 1_000_000.0, // 1ms threshold for small inputs
-                    "Processing too slow for length {}: {:.0}ns",
+                    median_nanos < SUBMIT_BUDGET_NS,
+                    "Submit latency budget exceeded for id length {}: median={}ns (budget {}ns)",
                     target_length,
-                    avg_nanos
+                    median_nanos,
+                    SUBMIT_BUDGET_NS
                 );
+
+                // Small inputs should stay well under a tighter budget
+                if target_length <= 1000 {
+                    assert!(
+                        median_nanos < 1_000_000, // 1ms threshold for small inputs
+                        "Processing too slow for length {}: median={}ns",
+                        target_length,
+                        median_nanos
+                    );
+                }
             }
         }
     }
@@ -2435,11 +2444,7 @@ mod perf_module_extreme_adversarial_negative_tests {
                                 } else {
                                     1_000_000
                                 },
-                                throughput_rps: if iteration % 3 == 0 {
-                                    0
-                                } else {
-                                    500
-                                },
+                                throughput_rps: if iteration % 3 == 0 { 0 } else { 500 },
                                 error_rate_pct: (iteration as f64) * 10.0, // Often invalid
                                 memory_mb: u64::MAX,
                             };

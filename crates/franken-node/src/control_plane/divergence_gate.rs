@@ -3891,20 +3891,29 @@ mod tests {
             let min_time = comparison_times.iter().min().unwrap();
             let time_range = max_time.saturating_sub(*min_time);
 
-            // FIXME(bd-o776s): the constant-time *timing* property is environment-
-            // dependent — under concurrent build load a single preempted sample
-            // (max 12.954µs vs 47ns mean) dwarfs the signal, so the ns-variance
-            // threshold is not reliably testable here. The comparison path is still
-            // exercised 1000x above; only the brittle threshold is gated off.
+            // The constant-time *timing* property is environment-dependent — a
+            // single preempted sample (observed max 14µs vs 48ns median even on a
+            // pinned core) dwarfs raw range/max statistics — so the threshold only
+            // runs on the opt-in isolated-core timing lane (bd-m87xv,
+            // scripts/run_timing_tests.sh) and compares p95 against the median
+            // with a small floor for timer quantization at ~50ns op scale. The
+            // comparison path is still exercised 1000x above unconditionally.
             let _ = (attack_name, mean_time, time_range);
-            #[cfg(any())]
-            assert!(
-                time_range.as_nanos() < mean_time.as_nanos() * 10,
-                "Timing variation too large for hash comparison attack '{}': range {:?} vs mean {:?}",
-                attack_name,
-                time_range,
-                mean_time
-            );
+            if crate::testing::timing_assertions_enabled() {
+                let samples_ns: Vec<u128> = comparison_times
+                    .iter()
+                    .map(std::time::Duration::as_nanos)
+                    .collect();
+                let median = crate::testing::percentile_ns(&samples_ns, 50);
+                let p95 = crate::testing::percentile_ns(&samples_ns, 95);
+                assert!(
+                    p95 < median * 10 + 2_000,
+                    "Timing variation too large for hash comparison attack '{}': p95 {}ns vs median {}ns",
+                    attack_name,
+                    p95,
+                    median
+                );
+            }
         }
 
         // Test 2: Authorization signature timing attacks
@@ -3964,18 +3973,26 @@ mod tests {
             let min_time = verification_times.iter().min().unwrap();
             let time_variance = max_time.saturating_sub(*min_time);
 
-            // FIXME(bd-o776s): wall-clock ns timing-variance is environment-dependent
-            // and not reliably testable under concurrent build load; verification path
-            // still exercised 1000x above. Brittle threshold gated off.
+            // Threshold only runs on the isolated-core timing lane (bd-m87xv);
+            // p95-vs-median tolerates isolated preemption outliers that raw
+            // range statistics cannot. Verification path still exercised 1000x
+            // above unconditionally.
             let _ = (attack_name, mean_time, time_variance);
-            #[cfg(any())]
-            assert!(
-                time_variance.as_nanos() < mean_time.as_nanos() * 5,
-                "Verification timing too variable for signature attack '{}': variance {:?} vs mean {:?}",
-                attack_name,
-                time_variance,
-                mean_time
-            );
+            if crate::testing::timing_assertions_enabled() {
+                let samples_ns: Vec<u128> = verification_times
+                    .iter()
+                    .map(std::time::Duration::as_nanos)
+                    .collect();
+                let median = crate::testing::percentile_ns(&samples_ns, 50);
+                let p95 = crate::testing::percentile_ns(&samples_ns, 95);
+                assert!(
+                    p95 < median * 5 + 2_000,
+                    "Verification timing too variable for signature attack '{}': p95 {}ns vs median {}ns",
+                    attack_name,
+                    p95,
+                    median
+                );
+            }
         }
 
         // Test 3: State hash computation and manipulation attacks
@@ -4012,19 +4029,26 @@ mod tests {
                 / u32::try_from(hash_times.len()).unwrap_or(u32::MAX);
             let max_time = hash_times.iter().max().unwrap();
 
-            // FIXME(bd-o776s): wall-clock ns timing-variance is environment-dependent
-            // and not reliably testable under concurrent build load; hash path still
-            // exercised 1000x above and determinism is asserted below. Brittle
-            // threshold gated off.
+            // Threshold only runs on the isolated-core timing lane (bd-m87xv);
+            // p95-vs-median tolerates isolated preemption outliers. Hash path
+            // still exercised 1000x above and determinism is asserted below
+            // unconditionally.
             let _ = (max_time, mean_time);
-            #[cfg(any())]
-            assert!(
-                max_time.as_nanos() < mean_time.as_nanos() * 10,
-                "Hash computation timing too variable for attack '{}': max {:?} vs mean {:?}",
-                attack_name,
-                max_time,
-                mean_time
-            );
+            if crate::testing::timing_assertions_enabled() {
+                let samples_ns: Vec<u128> = hash_times
+                    .iter()
+                    .map(std::time::Duration::as_nanos)
+                    .collect();
+                let median = crate::testing::percentile_ns(&samples_ns, 50);
+                let p95 = crate::testing::percentile_ns(&samples_ns, 95);
+                assert!(
+                    p95 < median * 10 + 2_000,
+                    "Hash computation timing too variable for attack '{}': p95 {}ns vs median {}ns",
+                    attack_name,
+                    p95,
+                    median
+                );
+            }
 
             // Verify hash output is deterministic
             let hash1 = StateVector::compute_state_hash(&state_content);
