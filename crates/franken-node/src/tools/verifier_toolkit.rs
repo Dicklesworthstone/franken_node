@@ -155,13 +155,11 @@ fn deterministic_timestamp(domain: &[u8], fields: &[&str], ordinal: usize) -> St
     let offset = (u64::from_le_bytes(prefix) % DETERMINISTIC_TIME_WINDOW_SECONDS)
         .saturating_add(ordinal as u64);
     let base = current_year_base();
-    let timestamp = Utc
-        .timestamp_opt(base.saturating_add(offset as i64), 0)
+    Utc.timestamp_opt(base.saturating_add(offset as i64), 0)
         .single()
         .or_else(|| Utc.timestamp_opt(base, 0).single())
         .map(|ts| ts.to_rfc3339())
-        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
-    timestamp
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }
 
 // ---------------------------------------------------------------------------
