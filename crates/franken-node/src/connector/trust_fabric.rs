@@ -1423,23 +1423,34 @@ mod tests {
     }
 
     /// Negative path: massive number of trust cards/extensions causing memory pressure
+    ///
+    /// `add_trust_card`/`add_extension` recompute the full-state digest on every
+    /// call, so driving all 10k items through them is O(n^2) hashing (~GBs of
+    /// SHA-256 in a debug build). The per-insert digest path is covered on a
+    /// small prefix; the bulk of the state is populated directly and the digest
+    /// recomputed once, which is what keeps this test fast in the inline lane
+    /// while still exercising digest + delta behavior at the 10k scale.
     #[test]
     fn test_trust_fabric_handles_large_state_without_overflow() {
+        const API_PREFIX: usize = 128;
         let mut state = TrustStateVector::new(1);
 
-        // Add 10,000 trust cards
-        for i in 0..10_000 {
-            state.add_trust_card(&format!("card-{:05}", i));
+        // Exercise the real per-insert (digest-recomputing) API on a prefix.
+        for i in 0..API_PREFIX {
+            state.add_trust_card(&format!("card-{i:05}"));
+            state.add_extension(&format!("ext-{i:05}"));
         }
+        // Bulk-populate the remainder to 10,000 trust cards and extensions.
+        for i in API_PREFIX..10_000 {
+            state.trust_cards.insert(format!("card-{i:05}"));
+            state.extensions.insert(format!("ext-{i:05}"));
+            state.version = state.version.saturating_add(2);
+        }
+        state.recompute_digest();
         assert_eq!(state.trust_cards.len(), 10_000);
-
-        // Add 10,000 extensions
-        for i in 0..10_000 {
-            state.add_extension(&format!("ext-{:05}", i));
-        }
         assert_eq!(state.extensions.len(), 10_000);
 
-        // Digest computation should handle large state
+        // Digest computation should handle large state (idempotent recompute)
         let original_digest = state.digest;
         state.recompute_digest();
         assert_eq!(original_digest, state.digest);
@@ -1447,8 +1458,10 @@ mod tests {
         // Delta computation should work with large sets
         let mut other_state = TrustStateVector::new(1);
         for i in 5_000..15_000 {
-            other_state.add_trust_card(&format!("card-{:05}", i));
+            other_state.trust_cards.insert(format!("card-{i:05}"));
+            other_state.version = other_state.version.saturating_add(1);
         }
+        other_state.recompute_digest();
 
         let delta = state.delta_from(&other_state);
         assert_eq!(delta.new_cards.len(), 5_000); // cards 0-4999 not in other_state
@@ -1569,15 +1582,21 @@ mod tests {
     }
 
     /// Negative path: event system overflow with bounded capacity
+    ///
+    /// The property under test is event bounding, not state growth, so the
+    /// card ids cycle over a small space (keeps the per-op full-state digest
+    /// recompute O(1) instead of O(n), which made this test quadratic in the
+    /// debug inline lane), and the loop generates exactly MAX_EVENTS + 100
+    /// events (100 past capacity) so only a bounded number of front-drains run.
     #[test]
     fn test_event_system_handles_massive_event_generation() {
         let mut node = make_node("event-overflow");
 
-        // Generate more events than MAX_EVENTS capacity
-        for i in 0..MAX_EVENTS + 100 {
-            node.add_trust_card(&format!("card-{}", i))
+        // Generate more events than MAX_EVENTS capacity (2 events per iteration)
+        for i in 0..MAX_EVENTS / 2 + 50 {
+            node.add_trust_card(&format!("card-{}", i % 8))
                 .expect("add card");
-            node.apply_revocation(&format!("card-{}", i)); // Each generates 2 events
+            node.apply_revocation(&format!("card-{}", i % 8)); // Each generates 2 events
         }
 
         // Events should be bounded to MAX_EVENTS
