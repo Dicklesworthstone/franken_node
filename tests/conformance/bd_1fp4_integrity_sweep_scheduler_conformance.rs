@@ -180,6 +180,22 @@ const BD_1FP4_CASES: &[ConformanceCase] = &[
         description: "default configuration has reasonable values",
         test_fn: test_default_config_reasonable,
     },
+    // INV-SWEEP-BOUNDED: counters saturate instead of wrapping
+    ConformanceCase {
+        id: "bd-1fp4-bounded-3",
+        invariant: "INV-SWEEP-BOUNDED",
+        requirement_level: RequirementLevel::Must,
+        description: "update and hysteresis counters saturate instead of wrapping",
+        test_fn: test_counter_saturation_protection,
+    },
+    // CSV export contract for trajectory artifacts
+    ConformanceCase {
+        id: "bd-1fp4-csv-1",
+        invariant: "CSV-EXPORT",
+        requirement_level: RequirementLevel::Should,
+        description: "to_csv emits the stable header and one 8-field row per decision",
+        test_fn: test_csv_export_format,
+    },
 ];
 
 // Test implementations
@@ -815,6 +831,99 @@ fn test_default_config_reasonable() -> TestResult {
                 config.low_repairability_threshold
             ),
         };
+    }
+
+    TestResult::Pass
+}
+
+fn test_counter_saturation_protection() -> TestResult {
+    // Update counter: many updates must accumulate without wrapping.
+    let mut scheduler = IntegritySweepScheduler::new(SweepSchedulerConfig::default_config());
+    for i in 0..1000u64 {
+        let evidence = EvidenceTrajectory::new(1, 0, 0.8, Trend::Stable, 1000 + i);
+        scheduler.update_trajectory(&evidence);
+    }
+    if scheduler.update_count() < 1000 {
+        return TestResult::Fail {
+            reason: format!(
+                "update_count {} after 1000 updates suggests counter wrapped",
+                scheduler.update_count()
+            ),
+        };
+    }
+
+    // Hysteresis counter: with de-escalation blocked, consecutive lower-band
+    // readings must accumulate without wrapping.
+    let mut hysteresis_scheduler = IntegritySweepScheduler::new(SweepSchedulerConfig {
+        hysteresis_threshold: u32::MAX,
+        ..SweepSchedulerConfig::default_config()
+    });
+    let red_evidence = EvidenceTrajectory::new(10, 0, 0.3, Trend::Degrading, 1000);
+    hysteresis_scheduler.update_trajectory(&red_evidence);
+    for i in 0..1000u64 {
+        let evidence = EvidenceTrajectory::new(1, 0, 0.8, Trend::Stable, 2000 + i);
+        hysteresis_scheduler.update_trajectory(&evidence);
+    }
+    if hysteresis_scheduler.hysteresis_counter() < 1000 {
+        return TestResult::Fail {
+            reason: format!(
+                "hysteresis_counter {} after 1000 lower-band readings suggests counter wrapped",
+                hysteresis_scheduler.hysteresis_counter()
+            ),
+        };
+    }
+
+    TestResult::Pass
+}
+
+fn test_csv_export_format() -> TestResult {
+    let mut scheduler = IntegritySweepScheduler::with_defaults();
+    let evidence_sequence = [
+        EvidenceTrajectory::new(0, 0, 0.95, Trend::Stable, 1000),
+        EvidenceTrajectory::new(3, 1, 0.70, Trend::Degrading, 2000),
+        EvidenceTrajectory::new(10, 3, 0.30, Trend::Degrading, 3000),
+    ];
+    for evidence in &evidence_sequence {
+        scheduler.update_trajectory(evidence);
+    }
+
+    let csv = scheduler.to_csv();
+    let lines: Vec<&str> = csv.trim().split('\n').collect();
+
+    let expected_header = "timestamp,band,interval_ms,depth,rejection_count,escalation_count,repairability_avg,hysteresis_count";
+    match lines.first() {
+        Some(header) if *header == expected_header => {}
+        other => {
+            return TestResult::Fail {
+                reason: format!("CSV header mismatch: expected {expected_header}, got {other:?}"),
+            };
+        }
+    }
+
+    if lines.len() != 4 {
+        return TestResult::Fail {
+            reason: format!(
+                "expected 4 CSV lines (header + 3 decisions), got {}",
+                lines.len()
+            ),
+        };
+    }
+
+    for data_line in &lines[1..] {
+        let fields: Vec<&str> = data_line.split(',').collect();
+        if fields.len() != 8 {
+            return TestResult::Fail {
+                reason: format!(
+                    "expected 8 CSV fields per data line, got {} in: {data_line}",
+                    fields.len()
+                ),
+            };
+        }
+        if fields[0].parse::<u64>().is_err() {
+            return TestResult::Fail {
+                reason: format!("timestamp field should be numeric, got: {}", fields[0]),
+            };
+        }
     }
 
     TestResult::Pass
