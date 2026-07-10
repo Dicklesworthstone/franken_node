@@ -106,6 +106,10 @@ fn create_slow_fixture_engine_binary(dir: &Path, delay_secs: u64) -> PathBuf {
 }
 
 /// Create a franken-engine fixture binary that fails with a non-zero exit code.
+/// Only the `not(engine)` subprocess-dispatch tests spawn fixture engines
+/// (bd-4f4f0); with the `engine` feature the FrankenEngine plan executes
+/// natively and never runs an external binary.
+#[cfg(not(feature = "engine"))]
 fn create_failing_fixture_engine_binary(dir: &Path, exit_code: i32) -> PathBuf {
     let engine_path = dir.join("failing-franken-engine");
     #[cfg(unix)]
@@ -139,6 +143,9 @@ fn create_failing_fixture_engine_binary(dir: &Path, exit_code: i32) -> PathBuf {
 }
 
 /// Create a franken-engine fixture binary that terminates abnormally.
+/// See `create_failing_fixture_engine_binary` for the `not(engine)` gating
+/// rationale (bd-4f4f0).
+#[cfg(not(feature = "engine"))]
 fn create_crashing_fixture_engine_binary(dir: &Path) -> PathBuf {
     let engine_path = dir.join("crashing-franken-engine");
     #[cfg(unix)]
@@ -1445,156 +1452,152 @@ fn test_engine_timeout_handling_with_fixture_binary() {
     );
 }
 
+/// bd-4f4f0: requesting `--runtime franken-engine` with a missing engine
+/// binary is a fail-closed CLI contract — the process exits 127 with an
+/// actionable message. Asserted through the REAL binary in a subprocess
+/// because `dispatch_run` terminates the process for an unavailable
+/// requested runtime (`std::process::exit(127)`); an in-process call would
+/// abort the test harness itself. (The old in-process variant passed the
+/// invalid policy mode "test" and, since bd-233ja's fail-closed policy-mode
+/// validation, asserted on the wrong error entirely.)
 #[test]
-#[cfg(feature = "engine")]
 fn test_native_engine_missing_binary_error_handling() {
-    // Test boundary condition: engine feature enabled but binary missing
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let app_path = create_test_app(
+    create_test_app(
         temp_dir.path(),
         "missing_binary_test.js",
         r#"console.log("This should fail - engine binary missing");"#,
     );
 
-    // Point to a non-existent engine binary
-    let nonexistent_engine_path = temp_dir.path().join("nonexistent-franken-engine");
-
-    let config = balanced_config();
-
-    let dispatcher = EngineDispatcher::new(
-        Some(nonexistent_engine_path.clone()),
-        PreferredRuntime::FrankenEngine,
-    );
-
-    // Execute and expect failure due to missing binary
-    let result = dispatcher.dispatch_run(&app_path, &config, "test", &[], 0);
-
-    assert!(result.is_err(), "Should fail when engine binary is missing");
-
-    let error = result.unwrap_err();
-    let error_str = error.to_string();
-
-    // Verify this is an ActionableError with proper context
+    // Bootstrap a fail-closed-valid workspace exactly as a real operator
+    // would (`init` synthesizes trust.registry_signing_key and the other
+    // required security defaults so `run` reaches dispatch resolution).
+    let init = assert_cmd::Command::cargo_bin("franken-node")
+        .expect("franken-node binary")
+        .current_dir(temp_dir.path())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .output()
+        .expect("init command should execute");
     assert!(
-        error_str.contains("engine")
-            || error_str.contains("binary")
-            || error_str.contains("not found")
-            || error_str.contains("No such file"),
-        "Error should indicate engine binary issue, got: {}",
-        error_str
+        init.status.success(),
+        "init must bootstrap the workspace: stderr={}",
+        String::from_utf8_lossy(&init.stderr)
     );
 
-    // Verify error provides meaningful context (ActionableError integration tested elsewhere)
-    println!("Engine binary missing error: {}", error_str);
+    // The CLI rejects absolute user-content paths, so run from the app's
+    // directory with relative paths (matching the run-CLI e2e conventions).
+    // The --engine-bin hint takes absolute precedence in resolution and is
+    // used verbatim, so the missing relative path deterministically fails
+    // the existence check regardless of host PATH/candidate state.
+    let output = assert_cmd::Command::cargo_bin("franken-node")
+        .expect("franken-node binary")
+        .current_dir(temp_dir.path())
+        .args([
+            "run",
+            "missing_binary_test.js",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            "nonexistent-franken-engine",
+        ])
+        .output()
+        .expect("run command should execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(127),
+        "a missing requested engine binary must exit 127: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("franken-engine") && stderr.contains("not found"),
+        "the refusal must name the missing runtime actionably, got: {stderr}"
+    );
 }
 
+/// bd-4f4f0: the external-process dispatch path for the FrankenEngine plan
+/// only exists WITHOUT the `engine` feature — with it, execution is native
+/// and in-process, fixture binaries are never spawned, and the old
+/// always-compiled variant of this test passed vacuously (it asserted loose
+/// wording against an unrelated error). Under `not(engine)`, a fixture
+/// engine exiting non-zero is NOT a dispatch error: the run completes and
+/// the report surfaces the real exit code fail-visibly.
 #[test]
+#[cfg(not(feature = "engine"))]
 fn test_engine_non_zero_exit_code_fixture_error_handling() {
-    // Test boundary condition: controlled fixture engine returns non-zero exit.
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
         "exit_code_test.js",
-        r#"console.log("This should fail due to engine exit code");"#,
+        r#"console.log("This should surface the engine exit code");"#,
     );
 
     // Create a fixture engine that returns exit code 1
     let failing_engine_path = create_failing_fixture_engine_binary(temp_dir.path(), 1);
 
     let config = balanced_config();
-
-    // Force external process execution to test exit code handling
     let dispatcher = EngineDispatcher::new(
         Some(failing_engine_path.clone()),
         PreferredRuntime::FrankenEngine,
     );
 
-    // Execute and expect failure due to non-zero exit
-    let result = dispatcher.dispatch_run(&app_path, &config, "test", &[], 0);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "balanced", &[], 0)
+        .expect("subprocess dispatch surfaces exit codes in the report, not as errors");
 
-    assert!(
-        result.is_err(),
-        "Should fail when engine returns non-zero exit code"
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+    assert_eq!(
+        report.exit_code,
+        Some(1),
+        "the report must carry the fixture engine's real exit code"
     );
-
-    let error = result.unwrap_err();
-    let error_str = error.to_string();
-
-    // Verify error indicates process failure
     assert!(
-        error_str.contains("failed")
-            || error_str.contains("exit")
-            || error_str.contains("error")
-            || error_str.contains("status"),
-        "Error should indicate process failure, got: {}",
-        error_str
+        !report.terminated_by_signal,
+        "a clean non-zero exit is not a signal termination"
     );
-
-    // Verify error provides meaningful context (ActionableError integration tested elsewhere)
-    println!("Engine exit code error: {}", error_str);
 }
 
+/// bd-4f4f0 (see the exit-code variant above for the routing reality): a
+/// fixture engine killed by a signal completes the dispatch with no exit
+/// code and `terminated_by_signal` set — the abnormal termination is
+/// fail-visible in the report rather than smuggled into an error string.
 #[test]
+#[cfg(not(feature = "engine"))]
 fn test_engine_crash_signal_fixture_error_handling() {
-    // Test boundary condition: controlled fixture engine terminates abnormally.
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
         "crash_test.js",
-        r#"console.log("This should fail due to engine crash");"#,
+        r#"console.log("This should surface the engine crash");"#,
     );
 
     // Create a fixture engine that crashes with SIGKILL
     let crashing_engine_path = create_crashing_fixture_engine_binary(temp_dir.path());
 
     let config = balanced_config();
-
-    // Force external process execution to test signal handling
     let dispatcher = EngineDispatcher::new(
         Some(crashing_engine_path.clone()),
         PreferredRuntime::FrankenEngine,
     );
 
-    // Set short timeout for faster test completion
-    unsafe {
-        std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "10");
-    }
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "balanced", &[], 0)
+        .expect("subprocess dispatch surfaces signal termination in the report");
 
-    // Clean up env var when test completes
-    struct EnvCleanup(&'static str);
-    impl Drop for EnvCleanup {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var(self.0);
-            }
-        }
-    }
-    let _cleanup = EnvCleanup("FRANKEN_ENGINE_TIMEOUT_SECS");
-
-    // Execute and expect failure due to signal/crash
-    let result = dispatcher.dispatch_run(&app_path, &config, "test", &[], 0);
-
+    assert_eq!(report.runtime, "franken_engine");
     assert!(
-        result.is_err(),
-        "Should fail when engine crashes/receives signal"
+        report.terminated_by_signal,
+        "SIGKILL termination must be reported as terminated_by_signal"
     );
-
-    let error = result.unwrap_err();
-    let error_str = error.to_string();
-
-    // Verify error indicates abnormal termination
-    assert!(
-        error_str.contains("signal")
-            || error_str.contains("killed")
-            || error_str.contains("terminated")
-            || error_str.contains("crash")
-            || error_str.contains("failed"),
-        "Error should indicate abnormal process termination, got: {}",
-        error_str
+    assert_eq!(
+        report.exit_code, None,
+        "a signal-terminated engine has no exit code"
     );
-
-    // Verify error provides meaningful context (ActionableError integration tested elsewhere)
-    println!("Engine crash error: {}", error_str);
 }
 
 #[test]
