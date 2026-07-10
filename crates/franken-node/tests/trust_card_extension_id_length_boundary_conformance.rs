@@ -12,8 +12,8 @@
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
-    ExtensionIdentity, ProvenanceSummary, PublisherIdentity, ReputationTrend,
-    RevocationStatus, RiskAssessment, RiskLevel, TrustCardInput, TrustCardRegistry,
+    ExtensionIdentity, ProvenanceSummary, PublisherIdentity, ReputationTrend, RevocationStatus,
+    RiskAssessment, RiskLevel, TrustCardInput, TrustCardRegistry,
 };
 
 const MAX_EXTENSION_ID_LEN: usize = 256;
@@ -31,13 +31,11 @@ fn create_valid_baseline_input() -> TrustCardInput {
             display_name: "Test Publisher".to_string(),
         },
         certification_level: CertificationLevel::Bronze,
-        capability_declarations: vec![
-            CapabilityDeclaration {
-                name: "fs.read".to_string(),
-                description: "Reads configuration".to_string(),
-                risk: CapabilityRisk::Low,
-            },
-        ],
+        capability_declarations: vec![CapabilityDeclaration {
+            name: "fs.read".to_string(),
+            description: "Reads configuration".to_string(),
+            risk: CapabilityRisk::Low,
+        }],
         behavioral_profile: BehavioralProfile {
             network_access: false,
             filesystem_access: true,
@@ -60,14 +58,12 @@ fn create_valid_baseline_input() -> TrustCardInput {
             level: RiskLevel::Low,
             summary: "filesystem access; mitigation: review file patterns".to_string(),
         },
-        evidence_refs: vec![
-            VerifiedEvidenceRef {
-                evidence_id: "test-evidence-001".to_string(),
-                evidence_type: EvidenceType::AuditReport,
-                verified_at_epoch: BASE_TIMESTAMP,
-                verification_receipt_hash: "sha256:".to_string() + &"a".repeat(64),
-            }
-        ],
+        evidence_refs: vec![VerifiedEvidenceRef {
+            evidence_id: "test-evidence-001".to_string(),
+            evidence_type: EvidenceType::AuditReport,
+            verified_at_epoch: BASE_TIMESTAMP,
+            verification_receipt_hash: "sha256:".to_string() + &"a".repeat(64),
+        }],
     }
 }
 
@@ -133,8 +129,10 @@ fn trust_card_extension_id_exceeding_max_length_is_rejected() {
 
     let error_message = result.err().unwrap().to_string().to_lowercase();
     assert!(
-        error_message.contains("extension") &&
-        (error_message.contains("length") || error_message.contains("long") || error_message.contains("size")),
+        error_message.contains("extension")
+            && (error_message.contains("length")
+                || error_message.contains("long")
+                || error_message.contains("size")),
         "Error message should indicate extension ID length violation. Got: {}",
         error_message
     );
@@ -212,21 +210,41 @@ fn extension_id_length_boundary_conformance_report() {
             _ => false,             // Mismatch
         };
 
-        results.push((case_name, actual_length, should_accept, result.is_ok(), test_passed));
+        results.push((
+            case_name,
+            actual_length,
+            should_accept,
+            result.is_ok(),
+            test_passed,
+        ));
 
         if test_passed {
-            eprintln!("✅ {}: {} chars - {}", case_name, actual_length,
-                     if *should_accept { "accepted as expected" } else { "rejected as expected" });
+            eprintln!(
+                "✅ {}: {} chars - {}",
+                case_name,
+                actual_length,
+                if *should_accept {
+                    "accepted as expected"
+                } else {
+                    "rejected as expected"
+                }
+            );
         } else {
-            eprintln!("❌ {}: {} chars - expected {}, got {}",
-                     case_name, actual_length,
-                     if *should_accept { "accept" } else { "reject" },
-                     if result.is_ok() { "accept" } else { "reject" });
+            eprintln!(
+                "❌ {}: {} chars - expected {}, got {}",
+                case_name,
+                actual_length,
+                if *should_accept { "accept" } else { "reject" },
+                if result.is_ok() { "accept" } else { "reject" }
+            );
         }
     }
 
     let total_tests = results.len();
-    let passed_tests = results.iter().filter(|(_, _, _, _, passed)| *passed).count();
+    let passed_tests = results
+        .iter()
+        .filter(|(_, _, _, _, passed)| *passed)
+        .count();
 
     eprintln!("\n📋 Extension ID Length Boundary Conformance Report");
     eprintln!("Spec: docs/specs/section_10_4/bd-2yh_contract.md");
@@ -236,7 +254,9 @@ fn extension_id_length_boundary_conformance_report() {
     if passed_tests == total_tests {
         eprintln!("🎉 All extension ID length boundary tests passed!");
     } else {
-        panic!("Extension ID length boundary conformance failed: {}/{} tests passed",
-               passed_tests, total_tests);
+        panic!(
+            "Extension ID length boundary conformance failed: {}/{} tests passed",
+            passed_tests, total_tests
+        );
     }
 }

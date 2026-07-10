@@ -2146,8 +2146,12 @@ mod tests {
 
         // A name whose total length exceeds MAX_COMPUTATION_NAME_LENGTH is rejected by
         // the global length guard before any per-component validation runs.
-        let over_limit_name =
-            format!("{}.{}.v{}", "a".repeat(200), "b".repeat(200), "1".repeat(200));
+        let over_limit_name = format!(
+            "{}.{}.v{}",
+            "a".repeat(200),
+            "b".repeat(200),
+            "1".repeat(200)
+        );
         assert!(over_limit_name.len() > MAX_COMPUTATION_NAME_LENGTH);
         assert!(
             !is_canonical_computation_name(&over_limit_name),

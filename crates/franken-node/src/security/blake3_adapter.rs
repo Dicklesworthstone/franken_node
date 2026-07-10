@@ -200,9 +200,9 @@ pub fn domain_keyed_hash(domain: &str, key: &[u8], data: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use super::{FastHashContext, HashProvider, HmacSha256, Sha2HmacProvider, domain_keyed_hash};
     #[cfg(feature = "blake3")]
     use super::Blake3Provider;
+    use super::{FastHashContext, HashProvider, HmacSha256, Sha2HmacProvider, domain_keyed_hash};
     use hmac::{KeyInit, Mac};
     use sha2::{Digest, Sha256};
 

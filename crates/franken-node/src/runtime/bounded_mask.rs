@@ -453,170 +453,6 @@ impl CancellationState {
             return;
         }
         self.cancel_requested = true;
-
-        // Inline negative-path tests for cancellation request handling
-        #[cfg(test)]
-        #[allow(unreachable_code)]
-        {
-            // Test: immediate cancellation when not masked
-            let mut state = Self::new();
-            assert!(
-                !state.is_cancel_requested(),
-                "new state should not be cancelled"
-            );
-            state.request_cancel();
-            assert!(
-                state.is_cancel_requested(),
-                "should be cancelled immediately when not masked"
-            );
-            assert_eq!(
-                state.deferred_signals(),
-                0,
-                "should have no deferred signals"
-            );
-
-            // Test: deferred cancellation when masked
-            let mut masked_state = Self {
-                cancel_requested: false,
-                masked: true,
-                deferred_signals: 0,
-                delivered_after_mask: 0,
-            };
-            masked_state.request_cancel();
-            assert!(
-                !masked_state.is_cancel_requested(),
-                "should not be immediately cancelled when masked"
-            );
-            assert_eq!(
-                masked_state.deferred_signals(),
-                1,
-                "should have one deferred signal"
-            );
-
-            // Test: multiple deferred cancellations accumulate
-            masked_state.request_cancel();
-            masked_state.request_cancel();
-            assert!(
-                !masked_state.is_cancel_requested(),
-                "should remain not immediately cancelled"
-            );
-            assert_eq!(
-                masked_state.deferred_signals(),
-                3,
-                "should accumulate deferred signals"
-            );
-
-            // Test: deferred signal counter saturating arithmetic
-            let mut overflow_state = Self {
-                cancel_requested: false,
-                masked: true,
-                deferred_signals: u64::MAX - 1,
-                delivered_after_mask: 0,
-            };
-            overflow_state.request_cancel();
-            assert_eq!(
-                overflow_state.deferred_signals(),
-                u64::MAX,
-                "should saturate at u64::MAX"
-            );
-            overflow_state.request_cancel();
-            assert_eq!(
-                overflow_state.deferred_signals(),
-                u64::MAX,
-                "should remain at u64::MAX"
-            );
-
-            // Test: requesting cancellation when already cancelled and not masked
-            let mut already_cancelled = Self {
-                cancel_requested: true,
-                masked: false,
-                deferred_signals: 0,
-                delivered_after_mask: 0,
-            };
-            already_cancelled.request_cancel();
-            assert!(
-                already_cancelled.is_cancel_requested(),
-                "should remain cancelled"
-            );
-            assert_eq!(
-                already_cancelled.deferred_signals(),
-                0,
-                "should not add deferred signals when not masked"
-            );
-
-            // Test: requesting cancellation when already cancelled and masked
-            let mut already_cancelled_masked = Self {
-                cancel_requested: true,
-                masked: true,
-                deferred_signals: 5,
-                delivered_after_mask: 0,
-            };
-            already_cancelled_masked.request_cancel();
-            assert!(
-                already_cancelled_masked.cancel_requested,
-                "cancel_requested should remain true"
-            );
-            assert_eq!(
-                already_cancelled_masked.deferred_signals(),
-                6,
-                "should still defer additional signals when masked"
-            );
-
-            // Test: state consistency after mask transitions
-            let mut transition_state = Self {
-                cancel_requested: false,
-                masked: true,
-                deferred_signals: 2,
-                delivered_after_mask: 1,
-            };
-            transition_state.request_cancel();
-            assert_eq!(
-                transition_state.deferred_signals(),
-                3,
-                "should increment deferred while masked"
-            );
-
-            // Simulate mask ending
-            transition_state.masked = false;
-            transition_state.request_cancel();
-            assert!(
-                transition_state.is_cancel_requested(),
-                "should immediately cancel when no longer masked"
-            );
-
-            // Test: boundary condition with zero deferred signals
-            let mut zero_deferred = Self {
-                cancel_requested: false,
-                masked: true,
-                deferred_signals: 0,
-                delivered_after_mask: 0,
-            };
-            zero_deferred.request_cancel();
-            assert_eq!(
-                zero_deferred.deferred_signals(),
-                1,
-                "should increment from zero"
-            );
-
-            // Test: preserving delivered_after_mask counter during request
-            let mut preserve_delivered = Self {
-                cancel_requested: false,
-                masked: true,
-                deferred_signals: 0,
-                delivered_after_mask: 99,
-            };
-            preserve_delivered.request_cancel();
-            assert_eq!(
-                preserve_delivered.delivered_after_mask(),
-                99,
-                "should preserve delivered_after_mask counter"
-            );
-            assert_eq!(
-                preserve_delivered.deferred_signals(),
-                1,
-                "should increment deferred signals"
-            );
-        }
     }
 
     /// Whether cancellation has been requested and delivered.
@@ -1115,289 +951,6 @@ fn emit_event(
     if events.len() > MAX_EVENTS {
         let overflow = events.len().saturating_sub(MAX_EVENTS);
         events.drain(0..overflow.min(events.len()));
-    }
-
-    // Inline negative-path tests for bounded event emission
-    #[cfg(test)]
-    #[allow(unreachable_code)]
-    {
-        // Test: empty event buffer should accept first event
-        let mut empty_events = Vec::new();
-        emit_event(
-            &mut empty_events,
-            MaskEventKind {
-                event_code: "TEST_001",
-                event_name: "TEST_EVENT",
-            },
-            MaskEventContext {
-                operation_name: "test_op",
-                trace_id: "test_trace",
-                cx_id: "test_cx",
-            },
-            MaskEventOutcome {
-                elapsed_ns: 1000,
-                completed_within_bound: true,
-                deferred_cancel_pending: false,
-            },
-        );
-        assert_eq!(
-            empty_events.len(),
-            1,
-            "empty buffer should accept first event"
-        );
-        assert_eq!(
-            empty_events[0].event_code, "TEST_001",
-            "event code should be preserved"
-        );
-
-        // Test: events exactly at MAX_EVENTS should not trigger overflow
-        let mut max_events = Vec::new();
-        for i in 0..MAX_EVENTS {
-            emit_event(
-                &mut max_events,
-                MaskEventKind {
-                    event_code: "TEST_MAX",
-                    event_name: "MAX_EVENT",
-                },
-                MaskEventContext {
-                    operation_name: &format!("op_{}", i),
-                    trace_id: "trace",
-                    cx_id: "cx",
-                },
-                MaskEventOutcome {
-                    elapsed_ns: i as u64,
-                    completed_within_bound: true,
-                    deferred_cancel_pending: false,
-                },
-            );
-        }
-        assert_eq!(
-            max_events.len(),
-            MAX_EVENTS,
-            "should accept exactly MAX_EVENTS without overflow"
-        );
-        assert_eq!(
-            max_events[0].operation_name, "op_0",
-            "first event should be preserved"
-        );
-        assert_eq!(
-            max_events[MAX_EVENTS - 1].operation_name,
-            format!("op_{}", MAX_EVENTS - 1),
-            "last event should be preserved"
-        );
-
-        // Test: overflow should remove oldest events (FIFO behavior)
-        emit_event(
-            &mut max_events,
-            MaskEventKind {
-                event_code: "OVERFLOW",
-                event_name: "OVERFLOW_EVENT",
-            },
-            MaskEventContext {
-                operation_name: "overflow_op",
-                trace_id: "trace",
-                cx_id: "cx",
-            },
-            MaskEventOutcome {
-                elapsed_ns: 9999,
-                completed_within_bound: false,
-                deferred_cancel_pending: true,
-            },
-        );
-        assert_eq!(
-            max_events.len(),
-            MAX_EVENTS,
-            "should maintain MAX_EVENTS capacity after overflow"
-        );
-        assert_eq!(
-            max_events[0].operation_name, "op_1",
-            "oldest event should be removed"
-        );
-        assert_eq!(
-            max_events[MAX_EVENTS - 1].operation_name,
-            "overflow_op",
-            "newest event should be added"
-        );
-
-        // Test: multiple overflow events should maintain FIFO order
-        for i in 0..10 {
-            emit_event(
-                &mut max_events,
-                MaskEventKind {
-                    event_code: "MULTI_OVERFLOW",
-                    event_name: "MULTI_EVENT",
-                },
-                MaskEventContext {
-                    operation_name: &format!("multi_{}", i),
-                    trace_id: "trace",
-                    cx_id: "cx",
-                },
-                MaskEventOutcome {
-                    elapsed_ns: i as u64,
-                    completed_within_bound: i % 2 == 0,
-                    deferred_cancel_pending: i % 3 == 0,
-                },
-            );
-        }
-        assert_eq!(
-            max_events.len(),
-            MAX_EVENTS,
-            "should maintain capacity with multiple overflows"
-        );
-        assert_eq!(
-            max_events[MAX_EVENTS - 1].operation_name,
-            "multi_9",
-            "last multi overflow should be newest"
-        );
-
-        // Test: pathological string content should be preserved without corruption
-        let mut pathological_events = Vec::new();
-        let pathological_x = "x".repeat(100000);
-        let pathological_y = "y".repeat(50000);
-        let pathological_z = "z".repeat(75000);
-        let pathological_w = "w".repeat(25000);
-        let pathological_strings = [
-            ("", "", "", ""),
-            (
-                pathological_x.as_str(),
-                pathological_y.as_str(),
-                pathological_z.as_str(),
-                pathological_w.as_str(),
-            ),
-            (
-                "event\x00null",
-                "op\r\ninjection",
-                "trace\t\x08control",
-                "cx\u{202E}unicode",
-            ),
-            (
-                "\u{FEFF}bom",
-                "\u{200B}invisible",
-                "\u{1F4A9}emoji",
-                "normal",
-            ),
-        ];
-
-        for (i, (event_code, operation_name, trace_id, cx_id)) in
-            pathological_strings.iter().enumerate()
-        {
-            emit_event(
-                &mut pathological_events,
-                MaskEventKind {
-                    event_code,
-                    event_name: "PATHOLOGICAL",
-                },
-                MaskEventContext {
-                    operation_name,
-                    trace_id,
-                    cx_id,
-                },
-                MaskEventOutcome {
-                    elapsed_ns: i as u64,
-                    completed_within_bound: true,
-                    deferred_cancel_pending: false,
-                },
-            );
-        }
-
-        assert_eq!(
-            pathological_events.len(),
-            pathological_strings.len(),
-            "should handle all pathological strings"
-        );
-        for (i, event) in pathological_events.iter().enumerate() {
-            let (expected_code, expected_op, expected_trace, expected_cx) = pathological_strings[i];
-            assert_eq!(
-                event.event_code, expected_code,
-                "pathological event code should be preserved"
-            );
-            assert_eq!(
-                event.operation_name, expected_op,
-                "pathological operation name should be preserved"
-            );
-            assert_eq!(
-                event.trace_id, expected_trace,
-                "pathological trace id should be preserved"
-            );
-            assert_eq!(
-                event.cx_id, expected_cx,
-                "pathological cx id should be preserved"
-            );
-        }
-
-        // Test: outcome field boundary values should be preserved correctly
-        let mut boundary_events = Vec::new();
-        let boundary_outcomes = [
-            (0, true, false),
-            (1, false, true),
-            (u64::MAX, true, true),
-            (u64::MAX - 1, false, false),
-        ];
-
-        for (elapsed_ns, completed_within_bound, deferred_cancel_pending) in boundary_outcomes {
-            emit_event(
-                &mut boundary_events,
-                MaskEventKind {
-                    event_code: "BOUNDARY",
-                    event_name: "BOUNDARY_EVENT",
-                },
-                MaskEventContext {
-                    operation_name: "boundary_op",
-                    trace_id: "boundary_trace",
-                    cx_id: "boundary_cx",
-                },
-                MaskEventOutcome {
-                    elapsed_ns,
-                    completed_within_bound,
-                    deferred_cancel_pending,
-                },
-            );
-        }
-
-        for (i, event) in boundary_events.iter().enumerate() {
-            let (expected_elapsed, expected_bound, expected_cancel) = boundary_outcomes[i];
-            assert_eq!(
-                event.elapsed_ns, expected_elapsed,
-                "boundary elapsed_ns should be preserved"
-            );
-            assert_eq!(
-                event.completed_within_bound, expected_bound,
-                "boundary completed_within_bound should be preserved"
-            );
-            assert_eq!(
-                event.deferred_cancel_pending, expected_cancel,
-                "boundary deferred_cancel_pending should be preserved"
-            );
-        }
-
-        // Test: capacity calculation should handle edge cases without panic
-        let mut edge_capacity_events = Vec::with_capacity(0);
-        emit_event(
-            &mut edge_capacity_events,
-            MaskEventKind {
-                event_code: "EDGE",
-                event_name: "EDGE_EVENT",
-            },
-            MaskEventContext {
-                operation_name: "edge_op",
-                trace_id: "edge_trace",
-                cx_id: "edge_cx",
-            },
-            MaskEventOutcome {
-                elapsed_ns: 1,
-                completed_within_bound: true,
-                deferred_cancel_pending: false,
-            },
-        );
-        assert_eq!(
-            edge_capacity_events.len(),
-            1,
-            "zero-capacity vec should grow to accept event"
-        );
-        assert!(
-            edge_capacity_events.len() <= MAX_EVENTS,
-            "should not exceed MAX_EVENTS"
-        );
     }
 }
 
@@ -2353,7 +1906,8 @@ mod bounded_mask_comprehensive_negative_tests {
         let mut cancellation = CancellationState::new();
         let policy = MaskPolicy::new(Duration::from_millis(10), "trace-panic-patterns");
 
-        let long_panic_message = "panic! with extremely long message: ".to_owned() + &"x".repeat(100000);
+        let long_panic_message =
+            "panic! with extremely long message: ".to_owned() + &"x".repeat(100000);
         let panic_patterns = [
             "panic!() with empty message",
             long_panic_message.as_str(),
@@ -2731,5 +2285,118 @@ mod bounded_mask_comprehensive_negative_tests {
         .expect("Should work after panic nesting failure");
 
         assert_eq!(final_recovery.into_inner(), 456);
+    }
+    /// Extracted from the former inline `#[cfg(test)]` block embedded in
+    /// `CancellationState::request_cancel` (removed under bd-o776s: the
+    /// embedded block recursively called `request_cancel`, so every unmasked
+    /// call in a test build overflowed the stack). Keeps the assertions the
+    /// sibling tests do not already cover.
+    #[test]
+    fn request_cancel_immediate_vs_masked_negative_paths() {
+        // Already-cancelled and unmasked: stays cancelled, no deferral.
+        let mut already_cancelled = CancellationState {
+            cancel_requested: true,
+            masked: false,
+            deferred_signals: 0,
+            delivered_after_mask: 0,
+        };
+        already_cancelled.request_cancel();
+        assert!(already_cancelled.is_cancel_requested());
+        assert_eq!(already_cancelled.deferred_signals(), 0);
+
+        // Already-cancelled and masked: additional signals still defer.
+        let mut already_cancelled_masked = CancellationState {
+            cancel_requested: true,
+            masked: true,
+            deferred_signals: 5,
+            delivered_after_mask: 0,
+        };
+        already_cancelled_masked.request_cancel();
+        assert!(already_cancelled_masked.is_cancel_requested());
+        assert_eq!(already_cancelled_masked.deferred_signals(), 6);
+
+        // Mask transition: defers while masked, cancels immediately after.
+        let mut transition_state = CancellationState {
+            cancel_requested: false,
+            masked: true,
+            deferred_signals: 2,
+            delivered_after_mask: 1,
+        };
+        transition_state.request_cancel();
+        assert_eq!(transition_state.deferred_signals(), 3);
+        assert!(!transition_state.is_cancel_requested());
+        transition_state.masked = false;
+        transition_state.request_cancel();
+        assert!(transition_state.is_cancel_requested());
+        assert_eq!(
+            transition_state.delivered_after_mask(),
+            1,
+            "request_cancel must not touch the delivery counter"
+        );
+    }
+
+    /// Extracted from the former inline `#[cfg(test)]` block embedded in
+    /// `emit_event` (removed under bd-o776s: the embedded block recursively
+    /// called `emit_event`, so every event emission in a test build
+    /// overflowed the stack). FIFO overflow is covered by
+    /// `event_buffer_drops_oldest_entries_when_over_capacity`; this keeps the
+    /// distinct pathological-content and boundary-value assertions.
+    #[test]
+    fn emit_event_preserves_pathological_content_and_boundary_outcomes() {
+        let mut events = Vec::with_capacity(0);
+        let long_op = "x".repeat(100_000);
+        let cases = [
+            ("", "", "", "", 0_u64, true, false),
+            (
+                "event\x00null",
+                long_op.as_str(),
+                "trace\t\x08control",
+                "cx\u{202E}unicode",
+                1,
+                false,
+                true,
+            ),
+            (
+                "\u{FEFF}bom",
+                "\u{200B}invisible",
+                "\u{1F4A9}emoji",
+                "normal",
+                u64::MAX,
+                true,
+                true,
+            ),
+        ];
+
+        for (event_code, operation_name, trace_id, cx_id, elapsed_ns, within, deferred) in &cases {
+            emit_event(
+                &mut events,
+                MaskEventKind {
+                    event_code,
+                    event_name: "PATHOLOGICAL",
+                },
+                MaskEventContext {
+                    operation_name,
+                    trace_id,
+                    cx_id,
+                },
+                MaskEventOutcome {
+                    elapsed_ns: *elapsed_ns,
+                    completed_within_bound: *within,
+                    deferred_cancel_pending: *deferred,
+                },
+            );
+        }
+
+        assert_eq!(events.len(), cases.len());
+        for (event, case) in events.iter().zip(&cases) {
+            let (event_code, operation_name, trace_id, cx_id, elapsed_ns, within, deferred) = case;
+            assert_eq!(event.event_code, *event_code);
+            assert_eq!(event.operation_name, *operation_name);
+            assert_eq!(event.trace_id, *trace_id);
+            assert_eq!(event.cx_id, *cx_id);
+            assert_eq!(event.elapsed_ns, *elapsed_ns);
+            assert_eq!(event.completed_within_bound, *within);
+            assert_eq!(event.deferred_cancel_pending, *deferred);
+        }
     }
 }

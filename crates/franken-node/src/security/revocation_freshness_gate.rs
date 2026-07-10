@@ -1613,11 +1613,7 @@ mod tests {
         let mut mid_chars: Vec<char> = valid_sig.chars().collect();
         if mid_chars.len() > 2 {
             let mid_idx = mid_chars.len() / 2;
-            mid_chars[mid_idx] = if mid_chars[mid_idx] == '0' {
-                '1'
-            } else {
-                '0'
-            };
+            mid_chars[mid_idx] = if mid_chars[mid_idx] == '0' { '1' } else { '0' };
         }
         mid_byte_diff.signature = mid_chars.into_iter().collect();
 
@@ -2584,8 +2580,9 @@ mod tests {
                         &format!("tr-{}-{}", thread_id, nonce_id),
                     );
 
-                    let mut results = try_lock(&results_clone, "revocation freshness replay results")
-                        .expect("revocation freshness replay results mutex should lock");
+                    let mut results =
+                        try_lock(&results_clone, "revocation freshness replay results")
+                            .expect("revocation freshness replay results mutex should lock");
                     results.push((thread_id, nonce_id, shared_nonce, result.is_ok()));
                 }
             });

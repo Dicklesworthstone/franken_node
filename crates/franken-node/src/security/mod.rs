@@ -122,8 +122,7 @@ mod tests {
 
     #[test]
     fn negative_remote_cap_gate_denies_missing_capability() {
-        let mut gate =
-            CapabilityGate::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("gate should construct");
+        let mut gate = CapabilityGate::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -582,8 +581,8 @@ mod security_extreme_adversarial_negative_tests {
 
     #[test]
     fn extreme_adversarial_remote_capability_endpoint_confusion_attack() {
-        let provider =
-            CapabilityProvider::new("V4ult!8x-Hsm#Torus9@Cipher").expect("provider should construct");
+        let provider = CapabilityProvider::new("V4ult!8x-Hsm#Torus9@Cipher")
+            .expect("provider should construct");
 
         // Crafted endpoints designed to confuse URL parsing
         let confusing_endpoints = vec![
@@ -837,7 +836,8 @@ mod security_extreme_adversarial_negative_tests {
         // Cloning a gate shares its `consumed_tokens` replay state (Arc-backed), so
         // single-use enforcement applies across all attempts — the same sharing
         // model used by the in-process memory replay-store concurrency tests.
-        let base_gate = CapabilityGate::new("race-condition-secret").expect("gate should construct");
+        let base_gate =
+            CapabilityGate::new("race-condition-secret").expect("gate should construct");
         let mut gates = vec![base_gate.clone(), base_gate.clone(), base_gate];
 
         let mut results = Vec::new();

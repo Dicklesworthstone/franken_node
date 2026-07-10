@@ -177,8 +177,7 @@ fn fail_closed_capacity_enforcement_under_concurrent_load_simulation() {
 
     // Fail-closed: with the lane still at capacity, a further assignment is
     // rejected rather than silently over-committing the lane.
-    let result4 =
-        scheduler.assign_task(&task_classes::epoch_transition(), 1004, "post-completion");
+    let result4 = scheduler.assign_task(&task_classes::epoch_transition(), 1004, "post-completion");
     assert!(result4.is_err());
     assert_eq!(
         result4.unwrap_err().code(),

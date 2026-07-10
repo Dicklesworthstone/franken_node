@@ -2145,8 +2145,7 @@ mod tests {
             // back below the requested amount, so the dominance only holds when the
             // product did not overflow.
             assert!(
-                saturating_slash >= slash_amount
-                    || amount.checked_mul(percentage as u64).is_none()
+                saturating_slash >= slash_amount || amount.checked_mul(percentage as u64).is_none()
             );
         }
 

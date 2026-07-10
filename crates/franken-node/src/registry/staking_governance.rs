@@ -3691,7 +3691,12 @@ mod staking_governance_boundary_negative_tests {
     fn negative_withdraw_rejects_zero_amount() {
         let mut ledger = malicious_ledger();
         let stake_id = ledger
-            .deposit("publisher-zero-withdraw", MINIMUM_STAKE, RiskTier::Low, 1000)
+            .deposit(
+                "publisher-zero-withdraw",
+                MINIMUM_STAKE,
+                RiskTier::Low,
+                1000,
+            )
             .expect("deposit should succeed");
 
         // FIXME(bd-yom8c): `StakingLedger::withdraw` takes no amount, so a
@@ -3745,7 +3750,12 @@ mod staking_governance_boundary_negative_tests {
     fn negative_appeal_slash_rejects_duplicate_appeal() {
         let mut ledger = malicious_ledger();
         let stake_id = ledger
-            .deposit("publisher-duplicate-appeal", MINIMUM_STAKE, RiskTier::Low, 1000)
+            .deposit(
+                "publisher-duplicate-appeal",
+                MINIMUM_STAKE,
+                RiskTier::Low,
+                1000,
+            )
             .expect("deposit should succeed");
 
         let evidence = SlashEvidence::new(
@@ -3773,7 +3783,12 @@ mod staking_governance_boundary_negative_tests {
         // moved the stake out of the Slashed state into UnderAppeal, so a second
         // attempt is rejected with InvalidTransition (the current prod API
         // surfaces the re-appeal as an illegal state transition).
-        let result = ledger.file_appeal(stake_id, slash_event.slash_id, "Second appeal justification", 2001);
+        let result = ledger.file_appeal(
+            stake_id,
+            slash_event.slash_id,
+            "Second appeal justification",
+            2001,
+        );
 
         assert!(matches!(
             result,
@@ -4749,7 +4764,11 @@ mod staking_governance_boundary_negative_tests {
             );
 
             let penalty = engine
-                .compute_penalty(&RiskTier::Medium, test_stake_amount, &evidence.evidence_hash)
+                .compute_penalty(
+                    &RiskTier::Medium,
+                    test_stake_amount,
+                    &evidence.evidence_hash,
+                )
                 .expect("penalty")
                 .0;
             violation_penalties.insert(format!("{:?}", violation_type), penalty);
@@ -4768,30 +4787,32 @@ mod staking_governance_boundary_negative_tests {
         }
 
         // Test that different violation types may have different penalties (business logic)
-        let _unique_penalties: std::collections::HashSet<_> = violation_penalties.values().collect();
+        let _unique_penalties: std::collections::HashSet<_> =
+            violation_penalties.values().collect();
         // Note: penalties might be the same across violation types depending on business rules
 
         // Test publisher ID validation edge cases. All entries are `String` so
         // the array has a single element type.
         let problematic_publisher_ids = [
-            "".to_string(),         // Empty string
-            " ".to_string(),        // Whitespace only
-            "\n\r\t".to_string(),   // Control characters
-            "a".repeat(1000),       // Very long ID
+            "".to_string(),             // Empty string
+            " ".to_string(),            // Whitespace only
+            "\n\r\t".to_string(),       // Control characters
+            "a".repeat(1000),           // Very long ID
             "unicode-𝓽𝓮𝓼𝓽".to_string(), // Unicode characters
         ];
 
         for (i, publisher_id) in problematic_publisher_ids.iter().enumerate() {
-            let _result = capacity_ledger.deposit(publisher_id, 100, RiskTier::Low, 1000 + i as u64);
+            let _result =
+                capacity_ledger.deposit(publisher_id, 100, RiskTier::Low, 1000 + i as u64);
             // Some may succeed, some may fail - ensure no panic and reasonable behavior
         }
 
         // Test evidence payload boundary cases. All entries are `String`.
         let boundary_payloads = [
-            "".to_string(),         // Empty payload
-            "a".repeat(100000),     // Very large payload
+            "".to_string(),             // Empty payload
+            "a".repeat(100000),         // Very large payload
             "\x00\x01\x02".to_string(), // Binary data
-            "🚀💻🔒".to_string(),   // Emoji payload
+            "🚀💻🔒".to_string(),       // Emoji payload
         ];
 
         for (i, payload) in boundary_payloads.iter().enumerate() {

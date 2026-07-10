@@ -3349,8 +3349,9 @@ mod tests {
         let store_dir = dir.path().join("remote-cap-replay");
 
         {
-            let mut first_gate = CapabilityGate::with_durable_replay_store("Zq7!Kp3m-Xv9Rw#Lt2Bn", &store_dir)
-                .expect("open durable store");
+            let mut first_gate =
+                CapabilityGate::with_durable_replay_store("Zq7!Kp3m-Xv9Rw#Lt2Bn", &store_dir)
+                    .expect("open durable store");
             first_gate
                 .authorize_network(
                     Some(&cap),
@@ -3362,8 +3363,9 @@ mod tests {
                 .expect("first use should pass");
         }
 
-        let mut restarted_gate = CapabilityGate::with_durable_replay_store("Zq7!Kp3m-Xv9Rw#Lt2Bn", &store_dir)
-            .expect("reopen durable store");
+        let mut restarted_gate =
+            CapabilityGate::with_durable_replay_store("Zq7!Kp3m-Xv9Rw#Lt2Bn", &store_dir)
+                .expect("reopen durable store");
         let err = restarted_gate
             .authorize_network(
                 Some(&cap),
@@ -3472,8 +3474,9 @@ mod tests {
                              cap: RemoteCap,
                              store_dir: PathBuf| {
             std::thread::spawn(move || {
-                let mut gate = CapabilityGate::with_durable_replay_store("Zq7!Kp3m-Xv9Rw#Lt2Bn", &store_dir)
-                    .expect("open durable store");
+                let mut gate =
+                    CapabilityGate::with_durable_replay_store("Zq7!Kp3m-Xv9Rw#Lt2Bn", &store_dir)
+                        .expect("open durable store");
                 barrier.wait();
                 gate.authorize_network(
                     Some(&cap),
@@ -3766,7 +3769,8 @@ mod tests {
     #[test]
     fn local_mode_allows_local_operations_without_cap() {
         let mut gate =
-            CapabilityGate::with_mode("Zq7!Kp3m-Xv9Rw#Lt2Bn", ConnectivityMode::LocalOnly).expect("valid gate");
+            CapabilityGate::with_mode("Zq7!Kp3m-Xv9Rw#Lt2Bn", ConnectivityMode::LocalOnly)
+                .expect("valid gate");
         gate.authorize_local_operation("evidence_ledger_append", 1_700_000_030, "trace-15");
         let event = gate.audit_log().last().expect("event");
         assert_eq!(event.event_code, "REMOTECAP_LOCAL_MODE_ACTIVE");
@@ -3789,7 +3793,8 @@ mod tests {
             .expect("issue");
 
         let mut gate =
-            CapabilityGate::with_mode("Zq7!Kp3m-Xv9Rw#Lt2Bn", ConnectivityMode::LocalOnly).expect("valid gate");
+            CapabilityGate::with_mode("Zq7!Kp3m-Xv9Rw#Lt2Bn", ConnectivityMode::LocalOnly)
+                .expect("valid gate");
         let err = gate
             .authorize_network(
                 Some(&cap),
@@ -3884,10 +3889,14 @@ mod tests {
         // comma-boundary entries are carried in the URL path. The two scopes
         // remain distinct sets (the comma sits at a different boundary), which
         // the length-prefixed scope encoding must keep separable.
-        let lhs_scope =
-            scope_with_endpoint_prefixes(&["https://boundary.example/alpha,beta", "https://boundary.example/gamma"]);
-        let rhs_scope =
-            scope_with_endpoint_prefixes(&["https://boundary.example/alpha", "https://boundary.example/beta,gamma"]);
+        let lhs_scope = scope_with_endpoint_prefixes(&[
+            "https://boundary.example/alpha,beta",
+            "https://boundary.example/gamma",
+        ]);
+        let rhs_scope = scope_with_endpoint_prefixes(&[
+            "https://boundary.example/alpha",
+            "https://boundary.example/beta,gamma",
+        ]);
 
         assert_ne!(scope_fingerprint(&lhs_scope), scope_fingerprint(&rhs_scope));
 
@@ -3923,10 +3932,14 @@ mod tests {
         let provider = CapabilityProvider::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("valid provider");
         // Identical valid-URL prefix sets must issue identically (prod requires
         // valid-URL prefixes; bare comma-delimited entries no longer parse).
-        let lhs_scope =
-            scope_with_endpoint_prefixes(&["https://boundary.example/alpha,beta", "https://boundary.example/gamma"]);
-        let rhs_scope =
-            scope_with_endpoint_prefixes(&["https://boundary.example/alpha,beta", "https://boundary.example/gamma"]);
+        let lhs_scope = scope_with_endpoint_prefixes(&[
+            "https://boundary.example/alpha,beta",
+            "https://boundary.example/gamma",
+        ]);
+        let rhs_scope = scope_with_endpoint_prefixes(&[
+            "https://boundary.example/alpha,beta",
+            "https://boundary.example/gamma",
+        ]);
 
         let (lhs, _) = provider
             .issue(
@@ -4059,8 +4072,8 @@ mod tests {
         // bd-yom8c: signing-material validation now runs in CapabilityProvider::new,
         // so whitespace-only material fails closed at construction time — there is no
         // provider that could ever reach the issuance path with empty material.
-        let err = CapabilityProvider::new("  ")
-            .expect_err("empty signing material must fail closed");
+        let err =
+            CapabilityProvider::new("  ").expect_err("empty signing material must fail closed");
 
         assert_eq!(err.code(), "REMOTECAP_CRYPTO_UNAVAILABLE");
         assert!(matches!(
@@ -4272,7 +4285,8 @@ mod tests {
     #[test]
     fn local_only_mode_denies_missing_cap_as_connectivity_mode_violation() {
         let mut gate =
-            CapabilityGate::with_mode("Zq7!Kp3m-Xv9Rw#Lt2Bn", ConnectivityMode::LocalOnly).expect("valid gate");
+            CapabilityGate::with_mode("Zq7!Kp3m-Xv9Rw#Lt2Bn", ConnectivityMode::LocalOnly)
+                .expect("valid gate");
 
         let err = gate
             .authorize_network(

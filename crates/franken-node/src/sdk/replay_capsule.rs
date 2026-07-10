@@ -2748,7 +2748,7 @@ mod tests {
             "\u{FFFF}\u{FFFE}\u{FDD0}non_characters", // Non-character code points
             "🎬🔄\u{1F4A5}💥\u{1F52B}🔫",           // Complex emoji sequences
             "\u{0300}\u{0301}\u{0302}combining_marks", // Combining marks
-            path_traversal_pattern.as_str(), // Path traversal + long string
+            path_traversal_pattern.as_str(),        // Path traversal + long string
             "capsule\x00\x01\x02\x03\x04\x05hidden", // Binary injection
         ];
 

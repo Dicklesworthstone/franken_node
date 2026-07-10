@@ -1806,8 +1806,8 @@ mod tests {
             .saturating_add(massive_trace.len())
             .saturating_add(policy.connector_id.len())
             .saturating_add(16); // slack for the "-{i}" suffixes
-        let memory_bound = crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES
-            .saturating_mul(per_entry_max);
+        let memory_bound =
+            crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES.saturating_mul(per_entry_max);
         assert!(total_audit_size <= memory_bound); // Bounded by cap × payload
     }
 
@@ -1882,17 +1882,17 @@ mod tests {
         // Test boundary conditions for each standard blocked CIDR
         let bypass_attempts = [
             ("126.255.255.255", true), // Just before 127.0.0.0/8 (126/8 is public)
-            ("128.0.0.1", true),        // Just after 127.255.255.255
-            ("9.255.255.255", true),    // Just before 10.0.0.0/8
-            ("11.0.0.1", true),         // Just after 10.255.255.255
-            ("172.15.255.255", true),   // Just before 172.16.0.0/12
-            ("172.32.0.1", true),       // Just after 172.31.255.255
-            ("192.167.255.255", true),  // Just before 192.168.0.0/16
-            ("192.169.0.1", true),      // Just after 192.168.255.255
-            ("169.253.255.255", true),  // Just before 169.254.0.0/16
-            ("169.255.0.1", true),      // Just after 169.254.255.255
-            ("100.63.255.255", true),   // Just before 100.64.0.0/10
-            ("100.128.0.1", true),      // Just after 100.127.255.255
+            ("128.0.0.1", true),       // Just after 127.255.255.255
+            ("9.255.255.255", true),   // Just before 10.0.0.0/8
+            ("11.0.0.1", true),        // Just after 10.255.255.255
+            ("172.15.255.255", true),  // Just before 172.16.0.0/12
+            ("172.32.0.1", true),      // Just after 172.31.255.255
+            ("192.167.255.255", true), // Just before 192.168.0.0/16
+            ("192.169.0.1", true),     // Just after 192.168.255.255
+            ("169.253.255.255", true), // Just before 169.254.0.0/16
+            ("169.255.0.1", true),     // Just after 169.254.255.255
+            ("100.63.255.255", true),  // Just before 100.64.0.0/10
+            ("100.128.0.1", true),     // Just after 100.127.255.255
         ];
 
         for (ip, should_be_public) in bypass_attempts {

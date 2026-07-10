@@ -21,14 +21,12 @@
 //! - Total: 13/13 (100%) ✓
 
 use frankenengine_node::policy::approval_workflow::{
-    ApprovalSignature, ChangeEvidencePackage, PolicyChangeEngine, PolicyChangeProposal,
-    PolicyDiffEntry, ProposalRecord, ProposalState, RiskAssessment,
-    POLICY_CHANGE_PROPOSED, POLICY_CHANGE_REVIEWED, POLICY_CHANGE_APPROVED,
-    POLICY_CHANGE_REJECTED, POLICY_CHANGE_ACTIVATED, POLICY_CHANGE_ROLLED_BACK,
-    AUDIT_CHAIN_VERIFIED, AUDIT_CHAIN_BROKEN,
-    ERR_PROPOSAL_NOT_FOUND, ERR_SOLE_APPROVER, ERR_INVALID_SIGNATURE,
-    ERR_QUORUM_NOT_MET, ERR_INVALID_STATE_TRANSITION, ERR_AUDIT_CHAIN_BROKEN,
-    ERR_JUSTIFICATION_TOO_SHORT,
+    AUDIT_CHAIN_BROKEN, AUDIT_CHAIN_VERIFIED, ApprovalSignature, ChangeEvidencePackage,
+    ERR_AUDIT_CHAIN_BROKEN, ERR_INVALID_SIGNATURE, ERR_INVALID_STATE_TRANSITION,
+    ERR_JUSTIFICATION_TOO_SHORT, ERR_PROPOSAL_NOT_FOUND, ERR_QUORUM_NOT_MET, ERR_SOLE_APPROVER,
+    POLICY_CHANGE_ACTIVATED, POLICY_CHANGE_APPROVED, POLICY_CHANGE_PROPOSED,
+    POLICY_CHANGE_REJECTED, POLICY_CHANGE_REVIEWED, POLICY_CHANGE_ROLLED_BACK, PolicyChangeEngine,
+    PolicyChangeProposal, PolicyDiffEntry, ProposalRecord, ProposalState, RiskAssessment,
 };
 
 /// Test case with structured result tracking for bd-sh3 compliance.
@@ -68,13 +66,11 @@ fn create_test_proposal(id: &str, proposer: &str) -> PolicyChangeProposal {
         proposal_id: id.to_string(),
         proposed_by: proposer.to_string(),
         proposed_at: "2026-01-01T10:00:00Z".to_string(),
-        policy_diff: vec![
-            PolicyDiffEntry {
-                field: "max_connections".to_string(),
-                old_value: "100".to_string(),
-                new_value: "200".to_string(),
-            }
-        ],
+        policy_diff: vec![PolicyDiffEntry {
+            field: "max_connections".to_string(),
+            old_value: "100".to_string(),
+            new_value: "200".to_string(),
+        }],
         justification: "Increase connection limit for better performance under load".to_string(),
         risk_assessment: RiskAssessment::Low,
         required_approvers: vec!["alice".to_string(), "bob".to_string()],
@@ -110,7 +106,10 @@ fn key_role_separation_sole_approver() -> ConformanceResult {
             ConformanceResult::Pass
         } else {
             ConformanceResult::Fail {
-                reason: format!("Wrong error code, expected {}, got: {}", ERR_SOLE_APPROVER, err),
+                reason: format!(
+                    "Wrong error code, expected {}, got: {}",
+                    ERR_SOLE_APPROVER, err
+                ),
             }
         }
     } else {
@@ -134,7 +133,10 @@ fn quorum_requirements_validation() -> ConformanceResult {
     // Should be UnderReview, not yet Approved
     if state1 != ProposalState::UnderReview {
         return ConformanceResult::Fail {
-            reason: format!("Expected UnderReview after first approval, got {:?}", state1),
+            reason: format!(
+                "Expected UnderReview after first approval, got {:?}",
+                state1
+            ),
         };
     }
 
@@ -179,7 +181,10 @@ fn state_transition_validation() -> ConformanceResult {
             ConformanceResult::Pass
         } else {
             ConformanceResult::Fail {
-                reason: format!("Wrong error code, expected {}, got: {}", ERR_INVALID_STATE_TRANSITION, err),
+                reason: format!(
+                    "Wrong error code, expected {}, got: {}",
+                    ERR_INVALID_STATE_TRANSITION, err
+                ),
             }
         }
     } else {
@@ -203,7 +208,10 @@ fn justification_length_validation() -> ConformanceResult {
             ConformanceResult::Pass
         } else {
             ConformanceResult::Fail {
-                reason: format!("Wrong error code, expected {}, got: {}", ERR_JUSTIFICATION_TOO_SHORT, err),
+                reason: format!(
+                    "Wrong error code, expected {}, got: {}",
+                    ERR_JUSTIFICATION_TOO_SHORT, err
+                ),
             }
         }
     } else {
@@ -226,7 +234,10 @@ fn proposal_not_found_handling() -> ConformanceResult {
             ConformanceResult::Pass
         } else {
             ConformanceResult::Fail {
-                reason: format!("Wrong error code, expected {}, got: {}", ERR_PROPOSAL_NOT_FOUND, err),
+                reason: format!(
+                    "Wrong error code, expected {}, got: {}",
+                    ERR_PROPOSAL_NOT_FOUND, err
+                ),
             }
         }
     } else {
@@ -281,7 +292,12 @@ fn rejection_workflow() -> ConformanceResult {
     engine.propose(proposal).unwrap();
 
     // Reject the proposal
-    let result = engine.reject("test-006", "admin", "Security concerns", "2026-01-01T12:00:00Z");
+    let result = engine.reject(
+        "test-006",
+        "admin",
+        "Security concerns",
+        "2026-01-01T12:00:00Z",
+    );
 
     if result.is_err() {
         return ConformanceResult::Fail {
@@ -379,7 +395,10 @@ fn required_approvers_validation() -> ConformanceResult {
     // Now should be approved
     if state3 != ProposalState::Approved {
         return ConformanceResult::Fail {
-            reason: format!("Expected Approved after all required approvers, got {:?}", state3),
+            reason: format!(
+                "Expected Approved after all required approvers, got {:?}",
+                state3
+            ),
         };
     }
 
@@ -426,7 +445,10 @@ fn empty_required_approvers_validation() -> ConformanceResult {
             ConformanceResult::Pass
         } else {
             ConformanceResult::Fail {
-                reason: format!("Wrong error code, expected {}, got: {}", ERR_QUORUM_NOT_MET, err),
+                reason: format!(
+                    "Wrong error code, expected {}, got: {}",
+                    ERR_QUORUM_NOT_MET, err
+                ),
             }
         }
     } else {
@@ -447,7 +469,10 @@ fn proposal_statistics_tracking() -> ConformanceResult {
     // Check that total proposals incremented
     if engine.total_proposals() != 1 {
         return ConformanceResult::Fail {
-            reason: format!("Expected total_proposals = 1, got {}", engine.total_proposals()),
+            reason: format!(
+                "Expected total_proposals = 1, got {}",
+                engine.total_proposals()
+            ),
         };
     }
 
@@ -457,7 +482,10 @@ fn proposal_statistics_tracking() -> ConformanceResult {
 
     if engine.total_proposals() != 2 {
         return ConformanceResult::Fail {
-            reason: format!("Expected total_proposals = 2, got {}", engine.total_proposals()),
+            reason: format!(
+                "Expected total_proposals = 2, got {}",
+                engine.total_proposals()
+            ),
         };
     }
 
@@ -475,7 +503,10 @@ fn risk_assessment_preservation() -> ConformanceResult {
 
     if record.proposal.risk_assessment != RiskAssessment::Critical {
         return ConformanceResult::Fail {
-            reason: format!("Risk assessment not preserved: {:?}", record.proposal.risk_assessment),
+            reason: format!(
+                "Risk assessment not preserved: {:?}",
+                record.proposal.risk_assessment
+            ),
         };
     }
 
@@ -516,7 +547,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Proposal not found error handling",
         test_fn: proposal_not_found_handling,
     },
-
     // Workflow Operations (MUST)
     ConformanceCase {
         id: "BDSH3-PROPOSAL-SUB-001",
@@ -548,7 +578,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Case-insensitive identity matching for sole approver detection",
         test_fn: case_insensitive_identity_matching,
     },
-
     // Input Validation (SHOULD)
     ConformanceCase {
         id: "BDSH3-EMPTY-APPROVE-001",
@@ -603,15 +632,21 @@ impl ConformanceStats {
         match level {
             RequirementLevel::Must => {
                 self.must_total += 1;
-                if is_pass { self.must_pass += 1; }
+                if is_pass {
+                    self.must_pass += 1;
+                }
             }
             RequirementLevel::Should => {
                 self.should_total += 1;
-                if is_pass { self.should_pass += 1; }
+                if is_pass {
+                    self.should_pass += 1;
+                }
             }
             RequirementLevel::May => {
                 self.may_total += 1;
-                if is_pass { self.may_pass += 1; }
+                if is_pass {
+                    self.may_pass += 1;
+                }
             }
         }
     }
@@ -672,12 +707,27 @@ impl ConformanceReport {
              ## Detailed Results\n\n\
              | Test ID | Level | Status | Description |\n\
              |---------|-------|--------|--------------|\n",
-            self.stats.must_pass, self.stats.must_total,
-            if self.stats.must_total > 0 { self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0 } else { 0.0 },
-            self.stats.should_pass, self.stats.should_total,
-            if self.stats.should_total > 0 { self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0 } else { 0.0 },
-            self.stats.may_pass, self.stats.may_total,
-            if self.stats.may_total > 0 { self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0 } else { 0.0 },
+            self.stats.must_pass,
+            self.stats.must_total,
+            if self.stats.must_total > 0 {
+                self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.should_pass,
+            self.stats.should_total,
+            if self.stats.should_total > 0 {
+                self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.may_pass,
+            self.stats.may_total,
+            if self.stats.may_total > 0 {
+                self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0
+            } else {
+                0.0
+            },
             self.stats.compliance_score(),
         );
 
@@ -694,12 +744,16 @@ impl ConformanceReport {
             };
 
             // Find the description from the case
-            let description = CONFORMANCE_CASES.iter()
+            let description = CONFORMANCE_CASES
+                .iter()
                 .find(|case| case.id == test_id)
                 .map(|case| case.description)
                 .unwrap_or("Unknown test case");
 
-            md.push_str(&format!("| {} | {} | {} | {} |\n", test_id, level_str, status, description));
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                test_id, level_str, status, description
+            ));
         }
 
         md
@@ -721,40 +775,93 @@ mod tests {
 
         // Verify all MUST requirements pass
         if report.stats.must_total > 0 && report.stats.must_pass < report.stats.must_total {
-            let failed_musts: Vec<_> = report.results.iter()
-                .filter(|(_, level, result)| *level == RequirementLevel::Must && matches!(result, ConformanceResult::Fail { .. }))
+            let failed_musts: Vec<_> = report
+                .results
+                .iter()
+                .filter(|(_, level, result)| {
+                    *level == RequirementLevel::Must
+                        && matches!(result, ConformanceResult::Fail { .. })
+                })
                 .collect();
 
-            panic!("❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
+            panic!(
+                "❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
                 report.stats.must_total - report.stats.must_pass,
                 report.stats.must_total,
-                failed_musts);
+                failed_musts
+            );
         }
 
         // Check compliance threshold (95% for bd specifications)
         let compliance = report.stats.compliance_score();
         if compliance < 95.0 {
-            panic!("❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold", compliance);
+            panic!(
+                "❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold",
+                compliance
+            );
         }
 
-        println!("✅ bd-sh3 CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
+        println!(
+            "✅ bd-sh3 CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
             compliance,
-            report.stats.must_pass, report.stats.must_total,
-            report.stats.should_pass, report.stats.should_total);
+            report.stats.must_pass,
+            report.stats.must_total,
+            report.stats.should_pass,
+            report.stats.should_total
+        );
     }
 
     // Individual test method for each conformance case
-    #[test] fn security_sole_approver() { key_role_separation_sole_approver().unwrap_pass(); }
-    #[test] fn quorum_requirements() { quorum_requirements_validation().unwrap_pass(); }
-    #[test] fn state_transitions() { state_transition_validation().unwrap_pass(); }
-    #[test] fn justification_length() { justification_length_validation().unwrap_pass(); }
-    #[test] fn proposal_not_found() { proposal_not_found_handling().unwrap_pass(); }
-    #[test] fn proposal_submission() { proposal_submission_events().unwrap_pass(); }
-    #[test] fn rejection_workflow() { super::rejection_workflow().unwrap_pass(); }
-    #[test] fn duplicate_approval() { duplicate_approval_prevention().unwrap_pass(); }
-    #[test] fn required_approvers() { required_approvers_validation().unwrap_pass(); }
-    #[test] fn case_insensitive() { case_insensitive_identity_matching().unwrap_pass(); }
-    #[test] fn empty_approvers() { empty_required_approvers_validation().unwrap_pass(); }
-    #[test] fn statistics_tracking() { proposal_statistics_tracking().unwrap_pass(); }
-    #[test] fn risk_preservation() { risk_assessment_preservation().unwrap_pass(); }
+    #[test]
+    fn security_sole_approver() {
+        key_role_separation_sole_approver().unwrap_pass();
+    }
+    #[test]
+    fn quorum_requirements() {
+        quorum_requirements_validation().unwrap_pass();
+    }
+    #[test]
+    fn state_transitions() {
+        state_transition_validation().unwrap_pass();
+    }
+    #[test]
+    fn justification_length() {
+        justification_length_validation().unwrap_pass();
+    }
+    #[test]
+    fn proposal_not_found() {
+        proposal_not_found_handling().unwrap_pass();
+    }
+    #[test]
+    fn proposal_submission() {
+        proposal_submission_events().unwrap_pass();
+    }
+    #[test]
+    fn rejection_workflow() {
+        super::rejection_workflow().unwrap_pass();
+    }
+    #[test]
+    fn duplicate_approval() {
+        duplicate_approval_prevention().unwrap_pass();
+    }
+    #[test]
+    fn required_approvers() {
+        required_approvers_validation().unwrap_pass();
+    }
+    #[test]
+    fn case_insensitive() {
+        case_insensitive_identity_matching().unwrap_pass();
+    }
+    #[test]
+    fn empty_approvers() {
+        empty_required_approvers_validation().unwrap_pass();
+    }
+    #[test]
+    fn statistics_tracking() {
+        proposal_statistics_tracking().unwrap_pass();
+    }
+    #[test]
+    fn risk_preservation() {
+        risk_assessment_preservation().unwrap_pass();
+    }
 }

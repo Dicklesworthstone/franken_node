@@ -1352,12 +1352,12 @@ mod tests {
         let long_domain = "x".repeat(100);
         let domain_pairs = vec![
             ("marker", "manifest"),
-            ("", "x"),                   // Empty vs single char
-            ("domain", "domain2"),       // Similar domains
-            ("a", "A"),                  // Case sensitivity
-            ("test", "test "),           // Trailing space
-            ("domain", "domain\0"),      // Null byte
-            ("unicode", "unicode域"),    // Unicode difference
+            ("", "x"),                       // Empty vs single char
+            ("domain", "domain2"),           // Similar domains
+            ("a", "A"),                      // Case sensitivity
+            ("test", "test "),               // Trailing space
+            ("domain", "domain\0"),          // Null byte
+            ("unicode", "unicode域"),        // Unicode difference
             ("short", long_domain.as_str()), // Length difference
         ];
 

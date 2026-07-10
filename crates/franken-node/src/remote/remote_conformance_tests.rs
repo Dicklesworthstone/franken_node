@@ -566,11 +566,15 @@ mod tests {
         bulkhead.next_permit_id = u64::MAX - 1;
 
         // Should issue second-to-last permit ID
-        let permit1 = bulkhead.acquire(RemoteCapLookup::Granted, "req1", 1000).unwrap();
+        let permit1 = bulkhead
+            .acquire(RemoteCapLookup::Granted, "req1", 1000)
+            .unwrap();
         assert_eq!(permit1.permit_id(), u64::MAX - 1);
 
         // Should issue last permit ID
-        let permit2 = bulkhead.acquire(RemoteCapLookup::Granted, "req2", 1001).unwrap();
+        let permit2 = bulkhead
+            .acquire(RemoteCapLookup::Granted, "req2", 1001)
+            .unwrap();
         assert_eq!(permit2.permit_id(), u64::MAX);
 
         // Release both permits
@@ -578,7 +582,9 @@ mod tests {
         bulkhead.release(permit2, 1003).unwrap();
 
         // Next acquire should fail due to permit ID exhaustion
-        let err = bulkhead.acquire(RemoteCapLookup::Granted, "req3", 1004).unwrap_err();
+        let err = bulkhead
+            .acquire(RemoteCapLookup::Granted, "req3", 1004)
+            .unwrap_err();
         assert_eq!(err.code(), "RB_ERR_PERMIT_ID_EXHAUSTED");
     }
 
@@ -595,10 +601,14 @@ mod tests {
         .unwrap();
 
         // Acquire permit to fill capacity
-        let permit = bulkhead.acquire(RemoteCapLookup::Granted, "active", 1000).unwrap();
+        let permit = bulkhead
+            .acquire(RemoteCapLookup::Granted, "active", 1000)
+            .unwrap();
 
         // Queue request at t=1001
-        let queued = bulkhead.acquire(RemoteCapLookup::Granted, "queued", 1001).unwrap_err();
+        let queued = bulkhead
+            .acquire(RemoteCapLookup::Granted, "queued", 1001)
+            .unwrap_err();
         assert!(matches!(queued, BulkheadError::Queued { .. }));
 
         // Poll at exactly timeout boundary (t=1002, expires_at=1002)
@@ -616,16 +626,24 @@ mod tests {
         let mut bulkhead = RemoteBulkhead::new(3, BackpressurePolicy::Reject, 50).unwrap();
 
         // Fill to capacity
-        let permit1 = bulkhead.acquire(RemoteCapLookup::Granted, "req1", 1000).unwrap();
-        let permit2 = bulkhead.acquire(RemoteCapLookup::Granted, "req2", 1001).unwrap();
-        let permit3 = bulkhead.acquire(RemoteCapLookup::Granted, "req3", 1002).unwrap();
+        let permit1 = bulkhead
+            .acquire(RemoteCapLookup::Granted, "req1", 1000)
+            .unwrap();
+        let permit2 = bulkhead
+            .acquire(RemoteCapLookup::Granted, "req2", 1001)
+            .unwrap();
+        let permit3 = bulkhead
+            .acquire(RemoteCapLookup::Granted, "req3", 1002)
+            .unwrap();
 
         // Reduce capacity while at full capacity
         bulkhead.set_max_in_flight(1, 1003).unwrap();
         assert_eq!(bulkhead.draining_target(), Some(1));
 
         // New acquires should be blocked by draining
-        let drain_err = bulkhead.acquire(RemoteCapLookup::Granted, "req4", 1004).unwrap_err();
+        let drain_err = bulkhead
+            .acquire(RemoteCapLookup::Granted, "req4", 1004)
+            .unwrap_err();
         assert!(matches!(
             drain_err,
             BulkheadError::Draining {
@@ -647,7 +665,9 @@ mod tests {
         assert_eq!(bulkhead.draining_target(), None); // remains complete
 
         // Should now be able to acquire within new capacity
-        let new_permit = bulkhead.acquire(RemoteCapLookup::Granted, "req5", 1008).unwrap();
+        let new_permit = bulkhead
+            .acquire(RemoteCapLookup::Granted, "req5", 1008)
+            .unwrap();
         bulkhead.release(new_permit, 1009).unwrap();
     }
 
@@ -702,7 +722,9 @@ mod tests {
         ];
 
         for invalid_id in invalid_ids {
-            let err = bulkhead.acquire(RemoteCapLookup::Granted, invalid_id, 1000).unwrap_err();
+            let err = bulkhead
+                .acquire(RemoteCapLookup::Granted, invalid_id, 1000)
+                .unwrap_err();
             assert_eq!(err.code(), "RB_ERR_INVALID_REQUEST_ID");
         }
 
@@ -717,12 +739,16 @@ mod tests {
         ];
 
         // Only the internal spaces one should succeed
-        let permit = bulkhead.acquire(RemoteCapLookup::Granted, "request with spaces", 1000).unwrap();
+        let permit = bulkhead
+            .acquire(RemoteCapLookup::Granted, "request with spaces", 1000)
+            .unwrap();
         bulkhead.release(permit, 1001).unwrap();
 
         // The ones with leading/trailing spaces should fail
         for &id in &[" leading-space", "trailing-space "] {
-            let err = bulkhead.acquire(RemoteCapLookup::Granted, id, 1002).unwrap_err();
+            let err = bulkhead
+                .acquire(RemoteCapLookup::Granted, id, 1002)
+                .unwrap_err();
             assert_eq!(err.code(), "RB_ERR_INVALID_REQUEST_ID");
         }
     }
@@ -1000,7 +1026,9 @@ mod tests {
     #[test]
     fn negative_bulkhead_duplicate_active_request_rejected() {
         let mut bulkhead = RemoteBulkhead::new(2, BackpressurePolicy::Reject, 50).unwrap();
-        let permit = bulkhead.acquire(RemoteCapLookup::Granted, "duplicate-active", 1_000).unwrap();
+        let permit = bulkhead
+            .acquire(RemoteCapLookup::Granted, "duplicate-active", 1_000)
+            .unwrap();
 
         let err = bulkhead
             .acquire(RemoteCapLookup::Granted, "duplicate-active", 1_001)

@@ -22,9 +22,9 @@ use adapter_types::*;
 /// Conformance test requirement levels for prioritization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequirementLevel {
-    Must,    // Breaking changes are NOT allowed (bd-1a1j contract violations)
-    Should,  // Breaking changes require major version bump
-    May,     // Breaking changes allowed with documentation
+    Must,   // Breaking changes are NOT allowed (bd-1a1j contract violations)
+    Should, // Breaking changes require major version bump
+    May,    // Breaking changes allowed with documentation
 }
 
 /// Test categories for organization
@@ -60,8 +60,8 @@ pub enum TestStatus {
 fn load_golden_catalog() -> PersistenceClassCatalog {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/goldens/frankensqlite/persistence_class_catalog.json");
-    let content = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to load golden catalog: {}", e));
+    let content =
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to load golden catalog: {}", e));
     serde_json::from_str(&content)
         .unwrap_or_else(|e| panic!("Failed to parse golden catalog: {}", e))
 }
@@ -125,8 +125,14 @@ pub fn run_bd1a1j_conformance_suite() -> Vec<ConformanceTestResult> {
 
     // Run conformance tests - one per bd-1a1j requirement
     results.extend(test_catalog_structure(&golden_catalog, &actual_classes));
-    results.extend(test_tier_durability_mapping(&golden_matrix, &actual_classes));
-    results.extend(test_replay_support_requirements(&golden_matrix, &actual_classes));
+    results.extend(test_tier_durability_mapping(
+        &golden_matrix,
+        &actual_classes,
+    ));
+    results.extend(test_replay_support_requirements(
+        &golden_matrix,
+        &actual_classes,
+    ));
     results.extend(test_uniqueness_constraints(&actual_classes));
     results.extend(test_adapter_behavior());
 
@@ -147,7 +153,8 @@ fn test_catalog_structure(
         requirement_id: "BD1A1J-CATALOG-001".to_string(),
         section: "catalog_structure".to_string(),
         level: RequirementLevel::Must,
-        description: "Catalog MUST contain exactly the specified number of persistence classes".to_string(),
+        description: "Catalog MUST contain exactly the specified number of persistence classes"
+            .to_string(),
         status: if actual_count == golden.total_classes {
             TestStatus::Pass
         } else {
@@ -263,9 +270,13 @@ fn test_replay_support_requirements(
                     requirement_id: format!("BD1A1J-REPLAY-STRATEGY-{}", class.domain),
                     section: "replay_support".to_string(),
                     level: RequirementLevel::Must,
-                    description: "Classes with replay_support=true MUST specify replay strategy".to_string(),
+                    description: "Classes with replay_support=true MUST specify replay strategy"
+                        .to_string(),
                     status: TestStatus::Fail,
-                    details: Some(format!("domain: {} has replay_support=true but empty replay_strategy", class.domain)),
+                    details: Some(format!(
+                        "domain: {} has replay_support=true but empty replay_strategy",
+                        class.domain
+                    )),
                 });
             }
         }
@@ -294,7 +305,8 @@ fn test_uniqueness_constraints(actual: &[PersistenceClass]) -> Vec<ConformanceTe
         },
         details: Some(format!(
             "total domains: {}, unique domains: {}",
-            domains.len(), unique_domains.len()
+            domains.len(),
+            unique_domains.len()
         )),
     });
 
@@ -316,7 +328,8 @@ fn test_uniqueness_constraints(actual: &[PersistenceClass]) -> Vec<ConformanceTe
         },
         details: Some(format!(
             "total tables: {}, unique tables: {}",
-            all_tables.len(), unique_tables.len()
+            all_tables.len(),
+            unique_tables.len()
         )),
     });
 
@@ -372,7 +385,10 @@ fn test_adapter_behavior() -> Vec<ConformanceTestResult> {
         } else {
             TestStatus::Fail
         },
-        details: Some(format!("registered classes: {}", loaded_adapter.summary().total_classes)),
+        details: Some(format!(
+            "registered classes: {}",
+            loaded_adapter.summary().total_classes
+        )),
     });
 
     results
@@ -397,9 +413,18 @@ fn count_by_tier(classes: &[PersistenceClass]) -> BTreeMap<String, u32> {
 
 pub fn generate_conformance_report(results: &[ConformanceTestResult]) -> String {
     let total = results.len();
-    let passed = results.iter().filter(|r| r.status == TestStatus::Pass).count();
-    let failed = results.iter().filter(|r| r.status == TestStatus::Fail).count();
-    let xfailed = results.iter().filter(|r| r.status == TestStatus::ExpectedFailure).count();
+    let passed = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Pass)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Fail)
+        .count();
+    let xfailed = results
+        .iter()
+        .filter(|r| r.status == TestStatus::ExpectedFailure)
+        .count();
 
     let mut by_section: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for result in results {
@@ -412,7 +437,12 @@ pub fn generate_conformance_report(results: &[ConformanceTestResult]) -> String 
 
     let mut report = String::new();
     report.push_str("# BD-1A1J Frankensqlite Conformance Report\n\n");
-    report.push_str(&format!("**Overall**: {}/{} pass ({:.1}% compliance)\n\n", passed, total, (passed as f64 / total as f64) * 100.0));
+    report.push_str(&format!(
+        "**Overall**: {}/{} pass ({:.1}% compliance)\n\n",
+        passed,
+        total,
+        (passed as f64 / total as f64) * 100.0
+    ));
 
     report.push_str("## Coverage Matrix\n\n");
     report.push_str("| Section | MUST Tests | Passed | Score |\n");
@@ -420,13 +450,17 @@ pub fn generate_conformance_report(results: &[ConformanceTestResult]) -> String 
 
     for (section, (passed, total)) in by_section {
         let score = (passed as f64 / total as f64) * 100.0;
-        report.push_str(&format!("| {} | {} | {} | {:.1}% |\n", section, total, passed, score));
+        report.push_str(&format!(
+            "| {} | {} | {} | {:.1}% |\n",
+            section, total, passed, score
+        ));
     }
 
     if failed > 0 {
         report.push_str("\n## Failed Requirements\n\n");
         for result in results.iter().filter(|r| r.status == TestStatus::Fail) {
-            report.push_str(&format!("- **{}**: {} ({})\n",
+            report.push_str(&format!(
+                "- **{}**: {} ({})\n",
                 result.requirement_id,
                 result.description,
                 result.details.as_deref().unwrap_or("no details")
@@ -445,11 +479,16 @@ fn bd1a1j_full_conformance() {
 
     // Generate structured JSON output for CI
     for result in &results {
-        eprintln!("{{\"id\":\"{}\",\"status\":\"{:?}\",\"level\":\"{:?}\",\"section\":\"{}\"}}",
-            result.requirement_id, result.status, result.level, result.section);
+        eprintln!(
+            "{{\"id\":\"{}\",\"status\":\"{:?}\",\"level\":\"{:?}\",\"section\":\"{}\"}}",
+            result.requirement_id, result.status, result.level, result.section
+        );
     }
 
-    let failed_count = results.iter().filter(|r| r.status == TestStatus::Fail).count();
+    let failed_count = results
+        .iter()
+        .filter(|r| r.status == TestStatus::Fail)
+        .count();
     let total_count = results.len();
     let compliance_score = (total_count - failed_count) as f64 / total_count as f64;
 
@@ -458,10 +497,15 @@ fn bd1a1j_full_conformance() {
     eprintln!("\n{}", report);
 
     // Fail if any MUST requirements fail
-    assert_eq!(failed_count, 0,
+    assert_eq!(
+        failed_count,
+        0,
         "{} out of {} conformance requirements failed (compliance: {:.1}%)",
-        failed_count, total_count, compliance_score * 100.0);
+        failed_count,
+        total_count,
+        compliance_score * 100.0
+    );
 }
 
 // Re-export for adapter integration tests
-pub use adapter_types::{canonical_classes, FrankensqliteAdapter, AdapterConfig};
+pub use adapter_types::{AdapterConfig, FrankensqliteAdapter, canonical_classes};

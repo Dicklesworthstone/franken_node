@@ -1971,11 +1971,11 @@ mod tests {
         // Test problematic characters in trace IDs
         let high_byte_trace = format!("trace\x7F{}", String::from_utf8_lossy(&[0x80, 0xFF]));
         let problematic_traces = vec![
-            "trace\0null",          // Null byte
-            "trace\x01\x02control", // Control characters
-            "trace\r\ninjection",   // Line breaks
+            "trace\0null",            // Null byte
+            "trace\x01\x02control",   // Control characters
+            "trace\r\ninjection",     // Line breaks
             high_byte_trace.as_str(), // High bytes and DEL
-            "trace\u{FFFE}\u{FFFF}", // Unicode non-characters
+            "trace\u{FFFE}\u{FFFF}",  // Unicode non-characters
         ];
 
         for trace_id in &problematic_traces {

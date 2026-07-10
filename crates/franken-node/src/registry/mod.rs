@@ -947,8 +947,7 @@ mod tests {
             // Periodic verification that earlier accounts still exist
             if i % 100 == 0 && i > 0 {
                 let check_idx = i / 2;
-                if let Some((check_publisher, check_stake)) =
-                    created_stakes.get(check_idx as usize)
+                if let Some((check_publisher, check_stake)) = created_stakes.get(check_idx as usize)
                 {
                     let account = ledger.get_account(check_publisher);
                     assert!(account.is_some(), "Earlier account should still exist");

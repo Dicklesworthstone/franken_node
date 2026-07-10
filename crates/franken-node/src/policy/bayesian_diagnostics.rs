@@ -2051,8 +2051,7 @@ mod tests {
                             !json.chars().any(|c| (c as u32) < 0x20),
                             "raw control bytes must be escaped, not emitted literally"
                         );
-                        let round_trip: Result<RankedCandidate, _> =
-                            serde_json::from_str(&json);
+                        let round_trip: Result<RankedCandidate, _> = serde_json::from_str(&json);
                         assert!(
                             round_trip.is_ok(),
                             "serialized candidate must deserialize safely"
@@ -2159,7 +2158,10 @@ mod tests {
             }
 
             // Should handle all epoch boundaries gracefully
-            assert_eq!(diagnostics.total_observations(), epoch_boundaries.len() as u64 * 2);
+            assert_eq!(
+                diagnostics.total_observations(),
+                epoch_boundaries.len() as u64 * 2
+            );
 
             let ranked = diagnostics.rank_candidates(&candidates, &[]);
             assert_eq!(ranked.len(), 2);

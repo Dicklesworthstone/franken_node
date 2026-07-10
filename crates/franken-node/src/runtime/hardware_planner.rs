@@ -2759,11 +2759,8 @@ mod hardware_planner_comprehensive_negative_tests {
         // Create policy that requires specific capabilities and low risk
         // Required capabilities are matched via the WorkloadRequest below; the
         // policy carries the risk tolerance (max_risk_tolerance) under test.
-        let strict_policy = PlacementPolicy::new(
-            "strict_fallback",
-            "Strict policy for fallback testing",
-            30,
-        );
+        let strict_policy =
+            PlacementPolicy::new("strict_fallback", "Strict policy for fallback testing", 30);
 
         planner
             .register_policy(strict_policy, 1002, "trace-strict-policy")
@@ -2956,7 +2953,8 @@ mod hardware_planner_comprehensive_negative_tests {
         }
 
         // Test policy evidence generation with various schema patterns
-        let mut policy = PlacementPolicy::new("schema_test_policy", "Policy for schema testing", 50);
+        let mut policy =
+            PlacementPolicy::new("schema_test_policy", "Policy for schema testing", 50);
         // Preserve the unicode/zero-width-space schema version exercised by this test.
         policy.schema_version = "policy-v-test\u{200B}".to_string();
 

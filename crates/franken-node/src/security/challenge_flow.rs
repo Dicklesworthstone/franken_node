@@ -2504,7 +2504,9 @@ mod tests {
             // Must match one of the challenge's required_proofs (prod rejects unrequired
             // types). The first required type already carries RTL/Unicode injection, so
             // unicode in the proof type is still exercised end-to-end.
-            proof_type: RequiredProofType::Custom("\u{202E}ggats\u{202D}legitimate_proof".to_string()),
+            proof_type: RequiredProofType::Custom(
+                "\u{202E}ggats\u{202D}legitimate_proof".to_string(),
+            ),
             // data_hash must be valid hex 32..=128 chars (prod format validation now
             // rejects unicode hashes); injection coverage is preserved via submitter_id
             // and actor_id below, which prod stores verbatim into the audit log.
@@ -3064,11 +3066,9 @@ mod tests {
                 // submit_proof (hex/length format validation) and the subsequent
                 // verify_proof (verifier hash match) succeed.
                 let proof_type = RequiredProofType::Custom(format!("proof_{}", i));
-                let data_hash = ChallengeFlowController::compute_expected_proof_hash(
-                    &artifact_id,
-                    &proof_type,
-                )
-                .unwrap();
+                let data_hash =
+                    ChallengeFlowController::compute_expected_proof_hash(&artifact_id, &proof_type)
+                        .unwrap();
                 let proof = ProofSubmission {
                     proof_type,
                     data_hash,
@@ -3459,7 +3459,10 @@ mod tests {
                 if proof_data_hash_matches_constant_time(&proof.data_hash, &expected) {
                     Ok(())
                 } else {
-                    Err(ChallengeError::new(ERR_PROOF_INVALID, "proof digest mismatch"))
+                    Err(ChallengeError::new(
+                        ERR_PROOF_INVALID,
+                        "proof digest mismatch",
+                    ))
                 }
             });
 

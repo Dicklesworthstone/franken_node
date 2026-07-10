@@ -1141,9 +1141,10 @@ mod tests {
                 // Periodically check that the set is still functioning
                 if i % 100 == 0 {
                     let test_state = policy_state();
-                    let check_result = std::panic::catch_unwind(
-                        std::panic::AssertUnwindSafe(|| monitor_set.check_all(&test_state)),
-                    );
+                    let check_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            monitor_set.check_all(&test_state)
+                        }));
                     assert!(
                         check_result.is_ok(),
                         "Monitor set should handle {} guardrails",

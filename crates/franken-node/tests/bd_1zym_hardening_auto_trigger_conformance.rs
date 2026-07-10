@@ -25,7 +25,7 @@
 use frankenengine_node::policy::{
     guardrail_monitor::{BudgetId, GuardrailRejection},
     hardening_auto_trigger::{
-        event_codes, HardeningAutoTrigger, TriggerConfig, TriggerEvent, TriggerResult,
+        HardeningAutoTrigger, TriggerConfig, TriggerEvent, TriggerResult, event_codes,
     },
     hardening_state_machine::{HardeningLevel, HardeningStateMachine},
 };
@@ -75,7 +75,8 @@ fn inv_autotrig_latency_synchronous() -> ConformanceResult {
     };
 
     let start_time = 1000000;
-    let result = trigger.on_guardrail_rejection(&rejection, &mut state_machine, start_time, "trace-1");
+    let result =
+        trigger.on_guardrail_rejection(&rejection, &mut state_machine, start_time, "trace-1");
 
     // Synchronous escalation should have 0 latency
     match result {
@@ -106,7 +107,8 @@ fn inv_autotrig_idempotent_deduplication() -> ConformanceResult {
     };
 
     // First rejection should escalate
-    let result1 = trigger.on_guardrail_rejection(&rejection, &mut state_machine, 1000000, "trace-1");
+    let result1 =
+        trigger.on_guardrail_rejection(&rejection, &mut state_machine, 1000000, "trace-1");
     match result1 {
         TriggerResult::Escalated { from, to, .. } => {
             if from != HardeningLevel::Baseline || to != HardeningLevel::Standard {
@@ -126,9 +128,12 @@ fn inv_autotrig_idempotent_deduplication() -> ConformanceResult {
     let mut state_machine2 = HardeningStateMachine::new();
 
     // Second identical rejection should be suppressed
-    let result2 = trigger.on_guardrail_rejection(&rejection, &mut state_machine2, 1000100, "trace-2");
+    let result2 =
+        trigger.on_guardrail_rejection(&rejection, &mut state_machine2, 1000100, "trace-2");
     match result2 {
-        TriggerResult::Suppressed { reason } if reason.contains("idempotent dedup") => ConformanceResult::Pass,
+        TriggerResult::Suppressed { reason } if reason.contains("idempotent dedup") => {
+            ConformanceResult::Pass
+        }
         other => ConformanceResult::Fail {
             reason: format!("expected idempotent deduplication, got {other:?}"),
         },
@@ -165,7 +170,8 @@ fn inv_autotrig_causal_linkage() -> ConformanceResult {
         };
     }
 
-    if !event.rejection_id.contains("causal-monitor") || !event.rejection_id.contains("budget-789") {
+    if !event.rejection_id.contains("causal-monitor") || !event.rejection_id.contains("budget-789")
+    {
         return ConformanceResult::Fail {
             reason: format!("rejection_id missing causal info: {}", event.rejection_id),
         };
@@ -173,13 +179,19 @@ fn inv_autotrig_causal_linkage() -> ConformanceResult {
 
     if !event.evidence_entry_id.contains("evd-autotrig") {
         return ConformanceResult::Fail {
-            reason: format!("invalid evidence_entry_id format: {}", event.evidence_entry_id),
+            reason: format!(
+                "invalid evidence_entry_id format: {}",
+                event.evidence_entry_id
+            ),
         };
     }
 
     if event.from_level != HardeningLevel::Baseline || event.to_level != HardeningLevel::Standard {
         return ConformanceResult::Fail {
-            reason: format!("incorrect level transition: {:?} -> {:?}", event.from_level, event.to_level),
+            reason: format!(
+                "incorrect level transition: {:?} -> {:?}",
+                event.from_level, event.to_level
+            ),
         };
     }
 
@@ -198,7 +210,8 @@ fn event_code_autotrig_fired() -> ConformanceResult {
         reason: "threshold exceeded".to_string(),
     };
 
-    let result = trigger.on_guardrail_rejection(&rejection, &mut state_machine, 3000000, "trace-event");
+    let result =
+        trigger.on_guardrail_rejection(&rejection, &mut state_machine, 3000000, "trace-event");
 
     match result {
         TriggerResult::Escalated { .. } => {
@@ -222,7 +235,9 @@ fn event_code_already_at_max() -> ConformanceResult {
     let mut state_machine = HardeningStateMachine::new();
 
     // Escalate to maximum level
-    state_machine.escalate(HardeningLevel::Critical, 1000, "setup").unwrap();
+    state_machine
+        .escalate(HardeningLevel::Critical, 1000, "setup")
+        .unwrap();
 
     let rejection = GuardrailRejection {
         monitor_name: "max-test".to_string(),
@@ -231,7 +246,8 @@ fn event_code_already_at_max() -> ConformanceResult {
         reason: "threshold exceeded".to_string(),
     };
 
-    let result = trigger.on_guardrail_rejection(&rejection, &mut state_machine, 4000000, "trace-max");
+    let result =
+        trigger.on_guardrail_rejection(&rejection, &mut state_machine, 4000000, "trace-max");
 
     match result {
         TriggerResult::AlreadyAtMax => {
@@ -271,7 +287,8 @@ fn event_code_suppressed() -> ConformanceResult {
     // Reset state machine to trigger idempotent suppression
     let mut state_machine2 = HardeningStateMachine::new();
 
-    let result = trigger.on_guardrail_rejection(&rejection, &mut state_machine2, 5000100, "trace-suppress");
+    let result =
+        trigger.on_guardrail_rejection(&rejection, &mut state_machine2, 5000100, "trace-suppress");
 
     match result {
         TriggerResult::Suppressed { .. } => {
@@ -338,13 +355,21 @@ fn level_progression_complete() -> ConformanceResult {
             reason: "threshold exceeded".to_string(),
         };
 
-        let result = trigger.on_guardrail_rejection(&rejection, &mut state_machine, 6000000 + step as u64 * 1000, &format!("trace-{}", step));
+        let result = trigger.on_guardrail_rejection(
+            &rejection,
+            &mut state_machine,
+            6000000 + step as u64 * 1000,
+            &format!("trace-{}", step),
+        );
 
         match result {
             TriggerResult::Escalated { from, to, .. } => {
                 if from != *expected_from || to != *expected_to {
                     return ConformanceResult::Fail {
-                        reason: format!("step {}: expected {expected_from:?} -> {expected_to:?}, got {from:?} -> {to:?}", step),
+                        reason: format!(
+                            "step {}: expected {expected_from:?} -> {expected_to:?}, got {from:?} -> {to:?}",
+                            step
+                        ),
                     };
                 }
             }
@@ -364,7 +389,12 @@ fn level_progression_complete() -> ConformanceResult {
         reason: "threshold exceeded".to_string(),
     };
 
-    let final_result = trigger.on_guardrail_rejection(&final_rejection, &mut state_machine, 7000000, "trace-final");
+    let final_result = trigger.on_guardrail_rejection(
+        &final_rejection,
+        &mut state_machine,
+        7000000,
+        "trace-final",
+    );
 
     match final_result {
         TriggerResult::AlreadyAtMax => ConformanceResult::Pass,
@@ -395,7 +425,8 @@ fn idempotency_reset() -> ConformanceResult {
     trigger.on_guardrail_rejection(&rejection, &mut state_machine1, 8000000, "trace-reset-1");
 
     // Should be suppressed due to idempotency
-    let result1 = trigger.on_guardrail_rejection(&rejection, &mut state_machine2, 8000100, "trace-reset-2");
+    let result1 =
+        trigger.on_guardrail_rejection(&rejection, &mut state_machine2, 8000100, "trace-reset-2");
     if !matches!(result1, TriggerResult::Suppressed { .. }) {
         return ConformanceResult::Fail {
             reason: "expected suppression before reset".to_string(),
@@ -407,7 +438,8 @@ fn idempotency_reset() -> ConformanceResult {
 
     // Should work again after reset
     let mut state_machine3 = HardeningStateMachine::new();
-    let result2 = trigger.on_guardrail_rejection(&rejection, &mut state_machine3, 8000200, "trace-reset-3");
+    let result2 =
+        trigger.on_guardrail_rejection(&rejection, &mut state_machine3, 8000200, "trace-reset-3");
 
     match result2 {
         TriggerResult::Escalated { .. } => ConformanceResult::Pass,
@@ -440,7 +472,14 @@ fn trigger_event_jsonl_format() -> ConformanceResult {
         }
     };
 
-    let expected_fields = ["trigger_id", "rejection_id", "evidence_entry_id", "from", "to", "timestamp"];
+    let expected_fields = [
+        "trigger_id",
+        "rejection_id",
+        "evidence_entry_id",
+        "from",
+        "to",
+        "timestamp",
+    ];
     for field in expected_fields {
         if !parsed.as_object().unwrap().contains_key(field) {
             return ConformanceResult::Fail {
@@ -468,7 +507,12 @@ fn counter_overflow_protection() -> ConformanceResult {
             reason: "threshold exceeded".to_string(),
         };
 
-        trigger.on_guardrail_rejection(&rejection, &mut state_machine, 10000000 + i as u64 * 1000, &format!("trace-{}", i));
+        trigger.on_guardrail_rejection(
+            &rejection,
+            &mut state_machine,
+            10000000 + i as u64 * 1000,
+            &format!("trace-{}", i),
+        );
 
         // Reset to baseline to allow further escalations
         state_machine = HardeningStateMachine::new();
@@ -481,7 +525,10 @@ fn counter_overflow_protection() -> ConformanceResult {
         let expected_id = format!("trig-{:04}", i + 1);
         if event.trigger_id != expected_id {
             return ConformanceResult::Fail {
-                reason: format!("counter formatting broken: expected {expected_id}, got {}", event.trigger_id),
+                reason: format!(
+                    "counter formatting broken: expected {expected_id}, got {}",
+                    event.trigger_id
+                ),
             };
         }
     }
@@ -511,7 +558,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "INV-AUTOTRIG-CAUSAL: trigger events link to originating rejections",
         test_fn: inv_autotrig_causal_linkage,
     },
-
     // Event Codes (MUST)
     ConformanceCase {
         id: "BD1ZYM-EVENT-FIRED-001",
@@ -531,7 +577,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "AUTOTRIG_SUPPRESSED event code for blocked escalations",
         test_fn: event_code_suppressed,
     },
-
     // Configuration (MUST)
     ConformanceCase {
         id: "BD1ZYM-CONFIG-001",
@@ -539,7 +584,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Configuration validation and preservation",
         test_fn: config_latency_bounds,
     },
-
     // Functional Requirements (SHOULD)
     ConformanceCase {
         id: "BD1ZYM-LEVEL-001",
@@ -559,7 +603,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Trigger event JSONL serialization format",
         test_fn: trigger_event_jsonl_format,
     },
-
     // Security (MUST)
     ConformanceCase {
         id: "BD1ZYM-SEC-OVERFLOW-001",
@@ -602,15 +645,21 @@ impl ConformanceStats {
         match level {
             RequirementLevel::Must => {
                 self.must_total += 1;
-                if is_pass { self.must_pass += 1; }
+                if is_pass {
+                    self.must_pass += 1;
+                }
             }
             RequirementLevel::Should => {
                 self.should_total += 1;
-                if is_pass { self.should_pass += 1; }
+                if is_pass {
+                    self.should_pass += 1;
+                }
             }
             RequirementLevel::May => {
                 self.may_total += 1;
-                if is_pass { self.may_pass += 1; }
+                if is_pass {
+                    self.may_pass += 1;
+                }
             }
         }
     }
@@ -671,12 +720,27 @@ impl ConformanceReport {
              ## Detailed Results\n\n\
              | Test ID | Level | Status | Description |\n\
              |---------|-------|--------|--------------|\n",
-            self.stats.must_pass, self.stats.must_total,
-            if self.stats.must_total > 0 { self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0 } else { 0.0 },
-            self.stats.should_pass, self.stats.should_total,
-            if self.stats.should_total > 0 { self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0 } else { 0.0 },
-            self.stats.may_pass, self.stats.may_total,
-            if self.stats.may_total > 0 { self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0 } else { 0.0 },
+            self.stats.must_pass,
+            self.stats.must_total,
+            if self.stats.must_total > 0 {
+                self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.should_pass,
+            self.stats.should_total,
+            if self.stats.should_total > 0 {
+                self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.may_pass,
+            self.stats.may_total,
+            if self.stats.may_total > 0 {
+                self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0
+            } else {
+                0.0
+            },
             self.stats.compliance_score(),
         );
 
@@ -693,12 +757,16 @@ impl ConformanceReport {
             };
 
             // Find the description from the case
-            let description = CONFORMANCE_CASES.iter()
+            let description = CONFORMANCE_CASES
+                .iter()
                 .find(|case| case.id == test_id)
                 .map(|case| case.description)
                 .unwrap_or("Unknown test case");
 
-            md.push_str(&format!("| {} | {} | {} | {} |\n", test_id, level_str, status, description));
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                test_id, level_str, status, description
+            ));
         }
 
         md
@@ -720,38 +788,85 @@ mod tests {
 
         // Verify all MUST requirements pass
         if report.stats.must_total > 0 && report.stats.must_pass < report.stats.must_total {
-            let failed_musts: Vec<_> = report.results.iter()
-                .filter(|(_, level, result)| *level == RequirementLevel::Must && matches!(result, ConformanceResult::Fail { .. }))
+            let failed_musts: Vec<_> = report
+                .results
+                .iter()
+                .filter(|(_, level, result)| {
+                    *level == RequirementLevel::Must
+                        && matches!(result, ConformanceResult::Fail { .. })
+                })
                 .collect();
 
-            panic!("❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
+            panic!(
+                "❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
                 report.stats.must_total - report.stats.must_pass,
                 report.stats.must_total,
-                failed_musts);
+                failed_musts
+            );
         }
 
         // Check compliance threshold (95% for bd specifications)
         let compliance = report.stats.compliance_score();
         if compliance < 95.0 {
-            panic!("❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold", compliance);
+            panic!(
+                "❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold",
+                compliance
+            );
         }
 
-        println!("✅ bd-1zym CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
+        println!(
+            "✅ bd-1zym CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
             compliance,
-            report.stats.must_pass, report.stats.must_total,
-            report.stats.should_pass, report.stats.should_total);
+            report.stats.must_pass,
+            report.stats.must_total,
+            report.stats.should_pass,
+            report.stats.should_total
+        );
     }
 
     // Individual test method for each conformance case
-    #[test] fn inv_latency_synchronous() { inv_autotrig_latency_synchronous().unwrap_pass(); }
-    #[test] fn inv_idempotent_dedup() { inv_autotrig_idempotent_deduplication().unwrap_pass(); }
-    #[test] fn inv_causal_linkage() { inv_autotrig_causal_linkage().unwrap_pass(); }
-    #[test] fn event_fired() { event_code_autotrig_fired().unwrap_pass(); }
-    #[test] fn event_max() { event_code_already_at_max().unwrap_pass(); }
-    #[test] fn event_suppressed() { event_code_suppressed().unwrap_pass(); }
-    #[test] fn config_bounds() { config_latency_bounds().unwrap_pass(); }
-    #[test] fn level_progression() { level_progression_complete().unwrap_pass(); }
-    #[test] fn reset_functionality() { idempotency_reset().unwrap_pass(); }
-    #[test] fn jsonl_format() { trigger_event_jsonl_format().unwrap_pass(); }
-    #[test] fn overflow_protection() { counter_overflow_protection().unwrap_pass(); }
+    #[test]
+    fn inv_latency_synchronous() {
+        inv_autotrig_latency_synchronous().unwrap_pass();
+    }
+    #[test]
+    fn inv_idempotent_dedup() {
+        inv_autotrig_idempotent_deduplication().unwrap_pass();
+    }
+    #[test]
+    fn inv_causal_linkage() {
+        inv_autotrig_causal_linkage().unwrap_pass();
+    }
+    #[test]
+    fn event_fired() {
+        event_code_autotrig_fired().unwrap_pass();
+    }
+    #[test]
+    fn event_max() {
+        event_code_already_at_max().unwrap_pass();
+    }
+    #[test]
+    fn event_suppressed() {
+        event_code_suppressed().unwrap_pass();
+    }
+    #[test]
+    fn config_bounds() {
+        config_latency_bounds().unwrap_pass();
+    }
+    #[test]
+    fn level_progression() {
+        level_progression_complete().unwrap_pass();
+    }
+    #[test]
+    fn reset_functionality() {
+        idempotency_reset().unwrap_pass();
+    }
+    #[test]
+    fn jsonl_format() {
+        trigger_event_jsonl_format().unwrap_pass();
+    }
+    #[test]
+    fn overflow_protection() {
+        counter_overflow_protection().unwrap_pass();
+    }
 }

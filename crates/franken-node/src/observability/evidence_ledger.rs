@@ -3147,10 +3147,20 @@ mod tests {
 
     #[test]
     fn mr_larger_entry_capacity_preserves_smaller_capacity_suffix() {
-        let small =
-            run_sequence(LedgerCapacity::new(3, 100_000), 1, 8, default_verifying_key()).snapshot();
-        let large =
-            run_sequence(LedgerCapacity::new(5, 100_000), 1, 8, default_verifying_key()).snapshot();
+        let small = run_sequence(
+            LedgerCapacity::new(3, 100_000),
+            1,
+            8,
+            default_verifying_key(),
+        )
+        .snapshot();
+        let large = run_sequence(
+            LedgerCapacity::new(5, 100_000),
+            1,
+            8,
+            default_verifying_key(),
+        )
+        .snapshot();
 
         let small_ids = snapshot_decision_ids(&small);
         let large_ids = snapshot_decision_ids(&large);
@@ -3161,8 +3171,13 @@ mod tests {
 
     #[test]
     fn mr_irrelevant_prefix_noise_preserves_retained_tail() {
-        let baseline =
-            run_sequence(LedgerCapacity::new(4, 100_000), 5, 8, default_verifying_key()).snapshot();
+        let baseline = run_sequence(
+            LedgerCapacity::new(4, 100_000),
+            5,
+            8,
+            default_verifying_key(),
+        )
+        .snapshot();
 
         let mut with_prefix = EvidenceLedger::new(LedgerCapacity::new(4, 100_000));
         for i in 1..=8 {
@@ -3182,7 +3197,12 @@ mod tests {
 
     #[test]
     fn mr_iter_recent_is_suffix_of_all_entries_for_each_window() {
-        let ledger = run_sequence(LedgerCapacity::new(6, 100_000), 1, 6, default_verifying_key());
+        let ledger = run_sequence(
+            LedgerCapacity::new(6, 100_000),
+            1,
+            6,
+            default_verifying_key(),
+        );
         let all_ids = iter_decision_ids(&ledger);
 
         for window in [0, 1, 3, 6, 10] {
@@ -3197,8 +3217,12 @@ mod tests {
 
     #[test]
     fn mr_rejected_entry_does_not_mutate_snapshot_or_counters() {
-        let mut ledger =
-            run_sequence(LedgerCapacity::new(3, 100_000), 1, 3, default_verifying_key());
+        let mut ledger = run_sequence(
+            LedgerCapacity::new(3, 100_000),
+            1,
+            3,
+            default_verifying_key(),
+        );
         let before = ledger.snapshot();
 
         let too_large = make_entry_with_payload("DEC-TOO-LARGE", 99, 200_000);
@@ -3222,12 +3246,21 @@ mod tests {
         // budget can no longer hold three entries. Size the byte budget from the ACTUAL
         // steady-state size of three chained entries (measured via a count-capacity probe)
         // so the byte-capacity ledger retains the same 3-entry suffix as the count cap.
-        let three_entry_bytes =
-            run_sequence(LedgerCapacity::new(3, 1_000_000), 1, 9, default_verifying_key())
-                .snapshot()
-                .current_bytes;
-        let by_count =
-            run_sequence(LedgerCapacity::new(3, 1_000_000), 1, 9, default_verifying_key()).snapshot();
+        let three_entry_bytes = run_sequence(
+            LedgerCapacity::new(3, 1_000_000),
+            1,
+            9,
+            default_verifying_key(),
+        )
+        .snapshot()
+        .current_bytes;
+        let by_count = run_sequence(
+            LedgerCapacity::new(3, 1_000_000),
+            1,
+            9,
+            default_verifying_key(),
+        )
+        .snapshot();
         let by_bytes = run_sequence(
             LedgerCapacity::new(100, three_entry_bytes),
             1,
@@ -3298,8 +3331,12 @@ mod tests {
 
     #[test]
     fn mr_snapshot_clone_is_unchanged_by_append_transform() {
-        let mut ledger =
-            run_sequence(LedgerCapacity::new(4, 100_000), 1, 4, default_verifying_key());
+        let mut ledger = run_sequence(
+            LedgerCapacity::new(4, 100_000),
+            1,
+            4,
+            default_verifying_key(),
+        );
         let before = ledger.snapshot();
 
         ledger
@@ -4490,7 +4527,10 @@ mod tests {
                         "control-char decision_id should be rejected: {result:?}"
                     );
                 } else {
-                    assert!(result.is_ok(), "opaque malicious id should append: {result:?}");
+                    assert!(
+                        result.is_ok(),
+                        "opaque malicious id should append: {result:?}"
+                    );
                     stored_ids.push((*malicious_id).to_string());
                 }
             }
@@ -6117,7 +6157,10 @@ mod tests {
                     {
                         // Unicode should not create privileged identifiers
                         assert!(
-                            !constant_time::ct_eq_bytes(found_entry.decision_id.as_bytes(), b"admin"),
+                            !constant_time::ct_eq_bytes(
+                                found_entry.decision_id.as_bytes(),
+                                b"admin"
+                            ),
                             "Unicode injection should not create admin decisions"
                         );
 
@@ -6565,8 +6608,7 @@ mod tests {
         // as a bare integer), so serialize the EvidenceEntry values themselves for the
         // entry-shaped roundtrip below.
         let snapshot = ledger.snapshot();
-        let entries: Vec<EvidenceEntry> =
-            snapshot.entries.iter().map(|(_, e)| e.clone()).collect();
+        let entries: Vec<EvidenceEntry> = snapshot.entries.iter().map(|(_, e)| e.clone()).collect();
         let json = serde_json::to_string(&entries).expect("should serialize");
 
         // JSON should contain all decision kind labels
@@ -6675,8 +6717,8 @@ mod tests {
             // a quoted JSON string and cannot break out into JSON structure. Verify that real
             // property: the serialized form must still parse to a structurally-valid array,
             // i.e. the `</script>` payload did not corrupt the JSON.
-            let reparsed: serde_json::Value = serde_json::from_str(&json)
-                .expect("injected HTML must not break JSON structure");
+            let reparsed: serde_json::Value =
+                serde_json::from_str(&json).expect("injected HTML must not break JSON structure");
             assert!(
                 reparsed.is_array(),
                 "HTML injection must remain contained within JSON string values"
@@ -9672,7 +9714,8 @@ mod tests {
         assert_eq!(snapshot.total_evicted, replay_snapshot.total_evicted);
         assert_eq!(snapshot.entries.len(), replay_snapshot.entries.len());
 
-        for ((_, orig), (_, replay)) in snapshot.entries.iter().zip(replay_snapshot.entries.iter()) {
+        for ((_, orig), (_, replay)) in snapshot.entries.iter().zip(replay_snapshot.entries.iter())
+        {
             assert_eq!(orig.entry_id, replay.entry_id);
             assert_eq!(orig.decision_id, replay.decision_id);
             assert_eq!(orig.decision_kind, replay.decision_kind);

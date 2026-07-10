@@ -594,7 +594,8 @@ mod tests {
     }
 
     fn gate_and_cap(single_use: bool) -> (CapabilityGate, RemoteCap) {
-        let provider = CapabilityProvider::new("network-guard-secret-7f3a9c2e").expect("capability provider");
+        let provider =
+            CapabilityProvider::new("network-guard-secret-7f3a9c2e").expect("capability provider");
         let (cap, _) = provider
             .issue(
                 "network-guard-tests",
@@ -926,7 +927,8 @@ mod tests {
     #[test]
     fn missing_remote_cap_is_denied() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let mut gate = CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
+        let mut gate =
+            CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
         let err = guard
             .process_egress(
                 "api.example.com",
@@ -1122,7 +1124,8 @@ mod tests {
     #[test]
     fn missing_remote_cap_is_audited_as_denied_even_when_policy_would_allow() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let mut gate = CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
+        let mut gate =
+            CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
 
         let err = guard
             .process_egress(
@@ -1294,7 +1297,8 @@ mod tests {
     #[test]
     fn remote_cap_scope_denial_is_audited_before_policy_allow() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let provider = CapabilityProvider::new("network-guard-secret-7f3a9c2e").expect("capability provider");
+        let provider =
+            CapabilityProvider::new("network-guard-secret-7f3a9c2e").expect("capability provider");
         let (cap, _) = provider
             .issue(
                 "network-guard-tests",
@@ -1312,7 +1316,8 @@ mod tests {
                 "trace-scope-issue",
             )
             .expect("issue remote cap with non-egress scope");
-        let mut gate = CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
+        let mut gate =
+            CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
 
         let err = guard
             .process_egress(
@@ -2102,16 +2107,16 @@ mod network_guard_additional_negative_tests {
         // Subdomain traversal attack vectors
         let massive_subdomain = format!("x{}.safe.internal", "a".repeat(10000));
         let traversal_attacks = [
-            "evil.com.safe.internal",      // Domain confusion
-            "safe.internal.evil.com",      // Suffix confusion
-            "api.safe.internal.evil.com",  // Double suffix
-            "safe-internal.evil.com",      // Dash confusion
-            "sub.safe.internalevil.com",   // Concatenation attack
-            "sub.safe.internal.evil.com",  // Chain traversal
-            "..safe.internal",             // Path-like traversal
-            ".safe.internal",              // Leading dot
-            "safe.internal.",              // Trailing dot (should normalize)
-            massive_subdomain.as_str(),    // Massive subdomain
+            "evil.com.safe.internal",     // Domain confusion
+            "safe.internal.evil.com",     // Suffix confusion
+            "api.safe.internal.evil.com", // Double suffix
+            "safe-internal.evil.com",     // Dash confusion
+            "sub.safe.internalevil.com",  // Concatenation attack
+            "sub.safe.internal.evil.com", // Chain traversal
+            "..safe.internal",            // Path-like traversal
+            ".safe.internal",             // Leading dot
+            "safe.internal.",             // Trailing dot (should normalize)
+            massive_subdomain.as_str(),   // Massive subdomain
         ];
 
         for attack_host in traversal_attacks {

@@ -1847,211 +1847,211 @@ mod claim_compiler_boundary_negative_tests {
     mod speculative_trustclaim_api_disabled {
         use super::*;
 
-    fn malicious_compiler() -> ClaimCompiler {
-        ClaimCompiler::new("test-signer", "test-secret")
-    }
-
-    fn malicious_trust_claim() -> TrustClaim {
-        TrustClaim {
-            claim_id: "claim-malicious".to_string(),
-            claimant: "malicious-claimant".to_string(),
-            claim_text: "Trust assertion for testing".to_string(),
-            evidence_links: vec!["https://example.com/evidence".to_string()],
-            timestamp_ms: 1000,
+        fn malicious_compiler() -> ClaimCompiler {
+            ClaimCompiler::new("test-signer", "test-secret")
         }
-    }
 
-    #[test]
-    fn negative_compiler_rejects_empty_signer_id() {
-        let result = std::panic::catch_unwind(|| ClaimCompiler::new("", "test-secret"));
-
-        // Should either panic or return error, not succeed silently
-        match result {
-            Ok(compiler) => {
-                // If construction succeeds, compilation should fail
-                let claim = malicious_trust_claim();
-                let result = compiler.compile_claim(&claim, "trace-empty-signer");
-                assert!(result.is_err());
-            }
-            Err(_) => {
-                // Panic is also acceptable for invalid signer
+        fn malicious_trust_claim() -> TrustClaim {
+            TrustClaim {
+                claim_id: "claim-malicious".to_string(),
+                claimant: "malicious-claimant".to_string(),
+                claim_text: "Trust assertion for testing".to_string(),
+                evidence_links: vec!["https://example.com/evidence".to_string()],
+                timestamp_ms: 1000,
             }
         }
-    }
 
-    #[test]
-    fn negative_compiler_rejects_empty_secret() {
-        let result = std::panic::catch_unwind(|| ClaimCompiler::new("test-signer", ""));
+        #[test]
+        fn negative_compiler_rejects_empty_signer_id() {
+            let result = std::panic::catch_unwind(|| ClaimCompiler::new("", "test-secret"));
 
-        // Should either panic or return error, not succeed silently
-        match result {
-            Ok(compiler) => {
-                // If construction succeeds, compilation should fail
-                let claim = malicious_trust_claim();
-                let result = compiler.compile_claim(&claim, "trace-empty-secret");
-                assert!(result.is_err());
-            }
-            Err(_) => {
-                // Panic is also acceptable for invalid secret
-            }
-        }
-    }
-
-    #[test]
-    fn negative_compile_claim_rejects_empty_claim_id() {
-        let compiler = malicious_compiler();
-        let mut claim = malicious_trust_claim();
-        claim.claim_id = String::new();
-
-        let result = compiler.compile_claim(&claim, "trace-empty-claim-id");
-
-        assert!(result.is_err());
-        match result {
-            Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)),
-            Ok(_) => panic!("expected compilation failure for empty claim ID"),
-        }
-    }
-
-    #[test]
-    fn negative_compile_claim_rejects_claim_id_with_nul_bytes() {
-        let compiler = malicious_compiler();
-        let mut claim = malicious_trust_claim();
-        claim.claim_id = "claim\0injection".to_string();
-
-        let result = compiler.compile_claim(&claim, "trace-nul-claim-id");
-
-        assert!(result.is_err());
-        match result {
-            Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)),
-            Ok(_) => panic!("expected compilation failure for nul bytes in claim ID"),
-        }
-    }
-
-    #[test]
-    fn negative_compile_claim_rejects_empty_claimant() {
-        let compiler = malicious_compiler();
-        let mut claim = malicious_trust_claim();
-        claim.claimant = String::new();
-
-        let result = compiler.compile_claim(&claim, "trace-empty-claimant");
-
-        assert!(result.is_err());
-        match result {
-            Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)),
-            Ok(_) => panic!("expected compilation failure for empty claimant"),
-        }
-    }
-
-    #[test]
-    fn negative_compile_claim_rejects_empty_claim_text() {
-        let compiler = malicious_compiler();
-        let mut claim = malicious_trust_claim();
-        claim.claim_text = String::new();
-
-        let result = compiler.compile_claim(&claim, "trace-empty-text");
-
-        assert!(result.is_err());
-        match result {
-            Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_UNVERIFIABLE)),
-            Ok(_) => panic!("expected compilation failure for empty claim text"),
-        }
-    }
-
-    #[test]
-    fn negative_compile_claim_rejects_malformed_evidence_links() {
-        let compiler = malicious_compiler();
-        let mut claim = malicious_trust_claim();
-        claim.evidence_links = vec!["not-a-url".to_string(), "".to_string()];
-
-        let result = compiler.compile_claim(&claim, "trace-malformed-links");
-
-        assert!(result.is_err());
-        match result {
-            Err(msg) => assert!(
-                msg.contains(error_codes::ERR_CLAIM_EVIDENCE_MISSING)
-                    || msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)
-            ),
-            Ok(_) => panic!("expected compilation failure for malformed evidence links"),
-        }
-    }
-
-    #[test]
-    fn negative_compile_claim_rejects_extremely_old_timestamp() {
-        let compiler = malicious_compiler();
-        let mut claim = malicious_trust_claim();
-        claim.timestamp_ms = 0; // Unix epoch start
-
-        let result = compiler.compile_claim(&claim, "trace-old-timestamp");
-
-        // Should either reject old timestamps or handle gracefully
-        match result {
-            Ok(contract) => {
-                // If accepted, contract should still be valid
-                assert!(!contract.contract_hash.is_empty());
-            }
-            Err(msg) => {
-                // Rejection is also acceptable for ancient timestamps
-                assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID));
+            // Should either panic or return error, not succeed silently
+            match result {
+                Ok(compiler) => {
+                    // If construction succeeds, compilation should fail
+                    let claim = malicious_trust_claim();
+                    let result = compiler.compile_claim(&claim, "trace-empty-signer");
+                    assert!(result.is_err());
+                }
+                Err(_) => {
+                    // Panic is also acceptable for invalid signer
+                }
             }
         }
-    }
 
-    #[test]
-    fn negative_compile_claim_rejects_future_timestamp() {
-        let compiler = malicious_compiler();
-        let mut claim = malicious_trust_claim();
-        claim.timestamp_ms = u64::MAX; // Far future timestamp
+        #[test]
+        fn negative_compiler_rejects_empty_secret() {
+            let result = std::panic::catch_unwind(|| ClaimCompiler::new("test-signer", ""));
 
-        let result = compiler.compile_claim(&claim, "trace-future-timestamp");
-
-        assert!(result.is_err());
-        match result {
-            Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)),
-            Ok(_) => panic!("expected compilation failure for future timestamp"),
+            // Should either panic or return error, not succeed silently
+            match result {
+                Ok(compiler) => {
+                    // If construction succeeds, compilation should fail
+                    let claim = malicious_trust_claim();
+                    let result = compiler.compile_claim(&claim, "trace-empty-secret");
+                    assert!(result.is_err());
+                }
+                Err(_) => {
+                    // Panic is also acceptable for invalid secret
+                }
+            }
         }
-    }
 
-    #[test]
-    fn negative_scoreboard_update_rejects_empty_update_id() {
-        let mut compiler = malicious_compiler();
-        let contract = ClaimContract {
-            claim_id: "claim-test".to_string(),
-            contract_hash: "hash-test".to_string(),
-            evidence_digest: "digest-test".to_string(),
-            signature: "signature-test".to_string(),
-        };
+        #[test]
+        fn negative_compile_claim_rejects_empty_claim_id() {
+            let compiler = malicious_compiler();
+            let mut claim = malicious_trust_claim();
+            claim.claim_id = String::new();
 
-        let result = compiler.publish_scoreboard_update(
-            "", // Empty update ID
-            vec![contract],
-            2000,
-            "trace-empty-update-id",
-        );
+            let result = compiler.compile_claim(&claim, "trace-empty-claim-id");
 
-        assert!(result.is_err());
-        match result {
-            Err(msg) => assert!(msg.contains("update_id") || msg.contains("empty")),
-            Ok(_) => panic!("expected failure for empty update ID"),
+            assert!(result.is_err());
+            match result {
+                Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)),
+                Ok(_) => panic!("expected compilation failure for empty claim ID"),
+            }
         }
-    }
 
-    #[test]
-    fn negative_scoreboard_update_rejects_empty_contracts_list() {
-        let mut compiler = malicious_compiler();
+        #[test]
+        fn negative_compile_claim_rejects_claim_id_with_nul_bytes() {
+            let compiler = malicious_compiler();
+            let mut claim = malicious_trust_claim();
+            claim.claim_id = "claim\0injection".to_string();
 
-        let result = compiler.publish_scoreboard_update(
-            "update-empty-contracts",
-            vec![], // Empty contracts
-            2000,
-            "trace-empty-contracts",
-        );
+            let result = compiler.compile_claim(&claim, "trace-nul-claim-id");
 
-        assert!(result.is_err());
-        match result {
-            Err(msg) => assert!(msg.contains("contracts") || msg.contains("empty")),
-            Ok(_) => panic!("expected failure for empty contracts list"),
+            assert!(result.is_err());
+            match result {
+                Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)),
+                Ok(_) => panic!("expected compilation failure for nul bytes in claim ID"),
+            }
         }
-    }
+
+        #[test]
+        fn negative_compile_claim_rejects_empty_claimant() {
+            let compiler = malicious_compiler();
+            let mut claim = malicious_trust_claim();
+            claim.claimant = String::new();
+
+            let result = compiler.compile_claim(&claim, "trace-empty-claimant");
+
+            assert!(result.is_err());
+            match result {
+                Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)),
+                Ok(_) => panic!("expected compilation failure for empty claimant"),
+            }
+        }
+
+        #[test]
+        fn negative_compile_claim_rejects_empty_claim_text() {
+            let compiler = malicious_compiler();
+            let mut claim = malicious_trust_claim();
+            claim.claim_text = String::new();
+
+            let result = compiler.compile_claim(&claim, "trace-empty-text");
+
+            assert!(result.is_err());
+            match result {
+                Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_UNVERIFIABLE)),
+                Ok(_) => panic!("expected compilation failure for empty claim text"),
+            }
+        }
+
+        #[test]
+        fn negative_compile_claim_rejects_malformed_evidence_links() {
+            let compiler = malicious_compiler();
+            let mut claim = malicious_trust_claim();
+            claim.evidence_links = vec!["not-a-url".to_string(), "".to_string()];
+
+            let result = compiler.compile_claim(&claim, "trace-malformed-links");
+
+            assert!(result.is_err());
+            match result {
+                Err(msg) => assert!(
+                    msg.contains(error_codes::ERR_CLAIM_EVIDENCE_MISSING)
+                        || msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)
+                ),
+                Ok(_) => panic!("expected compilation failure for malformed evidence links"),
+            }
+        }
+
+        #[test]
+        fn negative_compile_claim_rejects_extremely_old_timestamp() {
+            let compiler = malicious_compiler();
+            let mut claim = malicious_trust_claim();
+            claim.timestamp_ms = 0; // Unix epoch start
+
+            let result = compiler.compile_claim(&claim, "trace-old-timestamp");
+
+            // Should either reject old timestamps or handle gracefully
+            match result {
+                Ok(contract) => {
+                    // If accepted, contract should still be valid
+                    assert!(!contract.contract_hash.is_empty());
+                }
+                Err(msg) => {
+                    // Rejection is also acceptable for ancient timestamps
+                    assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID));
+                }
+            }
+        }
+
+        #[test]
+        fn negative_compile_claim_rejects_future_timestamp() {
+            let compiler = malicious_compiler();
+            let mut claim = malicious_trust_claim();
+            claim.timestamp_ms = u64::MAX; // Far future timestamp
+
+            let result = compiler.compile_claim(&claim, "trace-future-timestamp");
+
+            assert!(result.is_err());
+            match result {
+                Err(msg) => assert!(msg.contains(error_codes::ERR_CLAIM_SYNTAX_INVALID)),
+                Ok(_) => panic!("expected compilation failure for future timestamp"),
+            }
+        }
+
+        #[test]
+        fn negative_scoreboard_update_rejects_empty_update_id() {
+            let mut compiler = malicious_compiler();
+            let contract = ClaimContract {
+                claim_id: "claim-test".to_string(),
+                contract_hash: "hash-test".to_string(),
+                evidence_digest: "digest-test".to_string(),
+                signature: "signature-test".to_string(),
+            };
+
+            let result = compiler.publish_scoreboard_update(
+                "", // Empty update ID
+                vec![contract],
+                2000,
+                "trace-empty-update-id",
+            );
+
+            assert!(result.is_err());
+            match result {
+                Err(msg) => assert!(msg.contains("update_id") || msg.contains("empty")),
+                Ok(_) => panic!("expected failure for empty update ID"),
+            }
+        }
+
+        #[test]
+        fn negative_scoreboard_update_rejects_empty_contracts_list() {
+            let mut compiler = malicious_compiler();
+
+            let result = compiler.publish_scoreboard_update(
+                "update-empty-contracts",
+                vec![], // Empty contracts
+                2000,
+                "trace-empty-contracts",
+            );
+
+            assert!(result.is_err());
+            match result {
+                Err(msg) => assert!(msg.contains("contracts") || msg.contains("empty")),
+                Ok(_) => panic!("expected failure for empty contracts list"),
+            }
+        }
     } // end speculative_trustclaim_api_disabled (cfg(any()))
 
     #[test]
@@ -2995,11 +2995,11 @@ mod claim_compiler_boundary_negative_tests {
         let x_repeat = "x".repeat(1000);
         let y_repeat = "y".repeat(1000);
         let hash_test_cases = vec![
-            ("", ""),                                   // Empty hashes
-            ("a", "a"),                                 // Single char identical
-            ("a", "b"),                                 // Single char different
-            (x_repeat.as_str(), x_repeat.as_str()),     // Large identical
-            (x_repeat.as_str(), y_repeat.as_str()),     // Large different
+            ("", ""),                               // Empty hashes
+            ("a", "a"),                             // Single char identical
+            ("a", "b"),                             // Single char different
+            (x_repeat.as_str(), x_repeat.as_str()), // Large identical
+            (x_repeat.as_str(), y_repeat.as_str()), // Large different
         ];
 
         for (hash1, hash2) in hash_test_cases {

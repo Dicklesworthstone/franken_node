@@ -1430,7 +1430,10 @@ mod tests {
             // it can consume capacity. The resulting empty high-impact set then
             // fails closed as MissingWitnesses — the rejection still happens,
             // one layer earlier than the strict locator check.
-            assert!(witnesses.is_empty(), "whitespace locator must drop the witness");
+            assert!(
+                witnesses.is_empty(),
+                "whitespace locator must drop the witness"
+            );
             let mut validator = WitnessValidator::strict();
 
             let err = validator

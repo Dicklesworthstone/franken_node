@@ -1448,7 +1448,11 @@ mod negative_path_tests {
             (f64::MAX, 1.0, "Maximum dividend"),
             (f64::MIN_POSITIVE, f64::MAX, "Min/Max ratio"),
             (1.0 / 3.0, 2.0 / 3.0, "Repeating decimal ratio"),
-            (std::f64::consts::PI, std::f64::consts::E, "Transcendental ratio"),
+            (
+                std::f64::consts::PI,
+                std::f64::consts::E,
+                "Transcendental ratio",
+            ),
             (0.1 + 0.2, 0.3, "Classic floating-point precision"),
         ];
 

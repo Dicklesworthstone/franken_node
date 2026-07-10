@@ -47,8 +47,7 @@ fn create_test_bundle(workspace: &Path, bundle_name: &str) -> String {
     let bundle_path = workspace.join(format!("{}.fnbundle", bundle_name));
 
     let events = fixture_incident_events(bundle_name);
-    let mut bundle =
-        generate_replay_bundle(bundle_name, &events).expect("generate replay bundle");
+    let mut bundle = generate_replay_bundle(bundle_name, &events).expect("generate replay bundle");
     let signing_key = SigningKey::from_bytes(&TEST_SIGNING_SEED);
     let signing_material = ReplayBundleSigningMaterial {
         signing_key: &signing_key,
@@ -101,8 +100,9 @@ decision_receipt_signing_key_path = "keys/receipt-signing.key"
     // Write hex-encoded seed bytes as expected by the signing key loader
     fs::write(
         workspace.join("keys/receipt-signing.key"),
-        hex::encode(signing_key.to_bytes())
-    ).expect("Write signing key");
+        hex::encode(signing_key.to_bytes()),
+    )
+    .expect("Write signing key");
 }
 
 #[test]
@@ -114,12 +114,12 @@ fn incident_replay_success() {
 
     let mut cmd = incident_cmd();
     cmd.arg("replay")
-       .arg("--bundle")
-       .arg(&bundle_path)
-       .arg("--trusted-public-key")
-       .arg(&anchor)
-       .arg("--json")
-       .current_dir(workspace.path());
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--trusted-public-key")
+        .arg(&anchor)
+        .arg("--json")
+        .current_dir(workspace.path());
 
     let result = cmd.assert().success();
     let output = result.get_output();
@@ -128,8 +128,14 @@ fn incident_replay_success() {
     // Parse the JSON output
     let json: Value = serde_json::from_str(stdout).expect("Invalid JSON output");
 
-    assert!(json["incident_id"].is_string(), "Expected incident_id field");
-    assert!(json["replay_result"].is_object(), "Expected replay_result object");
+    assert!(
+        json["incident_id"].is_string(),
+        "Expected incident_id field"
+    );
+    assert!(
+        json["replay_result"].is_object(),
+        "Expected replay_result object"
+    );
     assert!(json["timeline"].is_array(), "Expected timeline array");
 }
 
@@ -141,19 +147,22 @@ fn incident_replay_missing_bundle_fails() {
 
     let mut cmd = incident_cmd();
     cmd.arg("replay")
-       .arg("--bundle")
-       .arg("nonexistent.fnbundle")
-       .arg("--trusted-public-key")
-       .arg(&anchor)
-       .arg("--json")
-       .current_dir(workspace.path());
+        .arg("--bundle")
+        .arg("nonexistent.fnbundle")
+        .arg("--trusted-public-key")
+        .arg(&anchor)
+        .arg("--json")
+        .current_dir(workspace.path());
 
     let result = cmd.assert().failure();
     let output = result.get_output();
     let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
 
-    assert!(stderr.contains("bundle") || stderr.contains("not found"),
-            "Expected error about missing bundle: {}", stderr);
+    assert!(
+        stderr.contains("bundle") || stderr.contains("not found"),
+        "Expected error about missing bundle: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -167,12 +176,12 @@ fn incident_replay_malformed_bundle_fails() {
 
     let mut cmd = incident_cmd();
     cmd.arg("replay")
-       .arg("--bundle")
-       .arg(&malformed_bundle)
-       .arg("--trusted-public-key")
-       .arg(&anchor)
-       .arg("--json")
-       .current_dir(workspace.path());
+        .arg("--bundle")
+        .arg(&malformed_bundle)
+        .arg("--trusted-public-key")
+        .arg(&anchor)
+        .arg("--json")
+        .current_dir(workspace.path());
 
     let result = cmd.assert().failure();
     let output = result.get_output();
@@ -186,7 +195,9 @@ fn incident_replay_malformed_bundle_fails() {
             || stderr.contains("json")
             || stderr.contains("parse")
             || stderr.contains("invalid"),
-        "Expected error about malformed bundle: {}", stderr);
+        "Expected error about malformed bundle: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -198,14 +209,14 @@ fn incident_counterfactual_success() {
 
     let mut cmd = incident_cmd();
     cmd.arg("counterfactual")
-       .arg("--bundle")
-       .arg(&bundle_path)
-       .arg("--trusted-public-key")
-       .arg(&anchor)
-       .arg("--policy")
-       .arg("strict")
-       .arg("--json")
-       .current_dir(workspace.path());
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--trusted-public-key")
+        .arg(&anchor)
+        .arg("--policy")
+        .arg("strict")
+        .arg("--json")
+        .current_dir(workspace.path());
 
     let result = cmd.assert().success();
     let output = result.get_output();
@@ -213,10 +224,22 @@ fn incident_counterfactual_success() {
 
     let json: Value = serde_json::from_str(stdout).expect("Invalid JSON output");
 
-    assert!(json["incident_id"].is_string(), "Expected incident_id field");
-    assert!(json["original_policy"].is_string(), "Expected original_policy field");
-    assert!(json["counterfactual_policy"].is_string(), "Expected counterfactual_policy field");
-    assert!(json["decision_deltas"].is_array(), "Expected decision_deltas array");
+    assert!(
+        json["incident_id"].is_string(),
+        "Expected incident_id field"
+    );
+    assert!(
+        json["original_policy"].is_string(),
+        "Expected original_policy field"
+    );
+    assert!(
+        json["counterfactual_policy"].is_string(),
+        "Expected counterfactual_policy field"
+    );
+    assert!(
+        json["decision_deltas"].is_array(),
+        "Expected decision_deltas array"
+    );
 }
 
 #[test]
@@ -228,12 +251,12 @@ fn incident_counterfactual_missing_policy_fails() {
 
     let mut cmd = incident_cmd();
     cmd.arg("counterfactual")
-       .arg("--bundle")
-       .arg(&bundle_path)
-       .arg("--trusted-public-key")
-       .arg(&anchor)
-       .arg("--json")
-       .current_dir(workspace.path());
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--trusted-public-key")
+        .arg(&anchor)
+        .arg("--json")
+        .current_dir(workspace.path());
 
     // `--policy` is a required clap arg, so this fails at parse time.
     cmd.assert().failure();
@@ -248,21 +271,24 @@ fn incident_counterfactual_invalid_policy_fails() {
 
     let mut cmd = incident_cmd();
     cmd.arg("counterfactual")
-       .arg("--bundle")
-       .arg(&bundle_path)
-       .arg("--trusted-public-key")
-       .arg(&anchor)
-       .arg("--policy")
-       .arg("invalid-policy-name")
-       .arg("--json")
-       .current_dir(workspace.path());
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--trusted-public-key")
+        .arg(&anchor)
+        .arg("--policy")
+        .arg("invalid-policy-name")
+        .arg("--json")
+        .current_dir(workspace.path());
 
     let result = cmd.assert().failure();
     let output = result.get_output();
     let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
 
-    assert!(stderr.contains("policy") || stderr.contains("invalid"),
-            "Expected error about invalid policy: {}", stderr);
+    assert!(
+        stderr.contains("policy") || stderr.contains("invalid"),
+        "Expected error about invalid policy: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -271,9 +297,7 @@ fn incident_list_empty_workspace() {
     setup_test_config(workspace.path());
 
     let mut cmd = incident_cmd();
-    cmd.arg("list")
-       .arg("--json")
-       .current_dir(workspace.path());
+    cmd.arg("list").arg("--json").current_dir(workspace.path());
 
     let result = cmd.assert().success();
     let output = result.get_output();
@@ -293,18 +317,24 @@ fn incident_list_with_filter() {
 
     let mut cmd = incident_cmd();
     cmd.arg("list")
-       .arg("--severity")
-       .arg("high")
-       .arg("--json")
-       .current_dir(workspace.path());
+        .arg("--severity")
+        .arg("high")
+        .arg("--json")
+        .current_dir(workspace.path());
 
     let result = cmd.assert().success();
     let output = result.get_output();
     let stdout = std::str::from_utf8(&output.stdout).expect("Invalid UTF-8");
 
     let json: Value = serde_json::from_str(stdout).expect("Invalid JSON output");
-    assert!(json["incidents"].is_array(), "Expected filtered incidents array");
-    assert!(json["filters"]["severity"].as_str() == Some("high"), "Expected severity filter");
+    assert!(
+        json["incidents"].is_array(),
+        "Expected filtered incidents array"
+    );
+    assert!(
+        json["filters"]["severity"].as_str() == Some("high"),
+        "Expected severity filter"
+    );
 }
 
 #[test]
@@ -313,8 +343,7 @@ fn incident_list_human_output() {
     setup_test_config(workspace.path());
 
     let mut cmd = incident_cmd();
-    cmd.arg("list")
-       .current_dir(workspace.path());
+    cmd.arg("list").current_dir(workspace.path());
 
     let result = cmd.assert().success();
     let output = result.get_output();
@@ -326,7 +355,9 @@ fn incident_list_human_output() {
     let lower = stdout.to_lowercase();
     assert!(
         lower.contains("incident") || lower.contains("no bundles") || stdout.contains("ID"),
-        "Expected human-readable incident list output: {}", stdout);
+        "Expected human-readable incident list output: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -338,19 +369,21 @@ fn incident_replay_human_output() {
 
     let mut cmd = incident_cmd();
     cmd.arg("replay")
-       .arg("--bundle")
-       .arg(&bundle_path)
-       .arg("--trusted-public-key")
-       .arg(&anchor)
-       .current_dir(workspace.path());
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--trusted-public-key")
+        .arg(&anchor)
+        .current_dir(workspace.path());
 
     let result = cmd.assert().success();
     let output = result.get_output();
     let stdout = std::str::from_utf8(&output.stdout).expect("Invalid UTF-8");
 
     // Human-readable output should contain replay information
-    assert!(stdout.contains("replay") || stdout.contains("timeline") || stdout.contains("step"),
-            "Expected human-readable replay output");
+    assert!(
+        stdout.contains("replay") || stdout.contains("timeline") || stdout.contains("step"),
+        "Expected human-readable replay output"
+    );
 }
 
 #[test]
@@ -362,21 +395,23 @@ fn incident_counterfactual_human_output() {
 
     let mut cmd = incident_cmd();
     cmd.arg("counterfactual")
-       .arg("--bundle")
-       .arg(&bundle_path)
-       .arg("--trusted-public-key")
-       .arg(&anchor)
-       .arg("--policy")
-       .arg("strict")
-       .current_dir(workspace.path());
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--trusted-public-key")
+        .arg(&anchor)
+        .arg("--policy")
+        .arg("strict")
+        .current_dir(workspace.path());
 
     let result = cmd.assert().success();
     let output = result.get_output();
     let stdout = std::str::from_utf8(&output.stdout).expect("Invalid UTF-8");
 
     // Human-readable output should contain counterfactual analysis
-    assert!(stdout.contains("counterfactual") || stdout.contains("policy") || stdout.contains("delta"),
-            "Expected human-readable counterfactual output");
+    assert!(
+        stdout.contains("counterfactual") || stdout.contains("policy") || stdout.contains("delta"),
+        "Expected human-readable counterfactual output"
+    );
 }
 
 #[test]
@@ -388,14 +423,14 @@ fn incident_replay_with_verbose_logging() {
 
     let mut cmd = incident_cmd();
     cmd.arg("replay")
-       .arg("--bundle")
-       .arg(&bundle_path)
-       .arg("--trusted-public-key")
-       .arg(&anchor)
-       .arg("--verbose")
-       .arg("--json")
-       .current_dir(workspace.path())
-       .env("RUST_LOG", "debug");
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--trusted-public-key")
+        .arg(&anchor)
+        .arg("--verbose")
+        .arg("--json")
+        .current_dir(workspace.path())
+        .env("RUST_LOG", "debug");
 
     let result = cmd.assert().success();
     let output = result.get_output();
@@ -405,7 +440,9 @@ fn incident_replay_with_verbose_logging() {
     // standard replay-result line.
     assert!(
         stderr.contains("incident replay verbose:"),
-        "Expected verbose replay diagnostics on stderr: {}", stderr);
+        "Expected verbose replay diagnostics on stderr: {}",
+        stderr
+    );
 }
 
 #[test]
@@ -417,10 +454,16 @@ fn incident_help_shows_subcommands() {
     let output = result.get_output();
     let stdout = std::str::from_utf8(&output.stdout).expect("Invalid UTF-8");
 
-    assert!(stdout.contains("Incident replay and forensics"), "Expected help description");
+    assert!(
+        stdout.contains("Incident replay and forensics"),
+        "Expected help description"
+    );
     assert!(stdout.contains("bundle"), "Expected bundle subcommand");
     assert!(stdout.contains("replay"), "Expected replay subcommand");
-    assert!(stdout.contains("counterfactual"), "Expected counterfactual subcommand");
+    assert!(
+        stdout.contains("counterfactual"),
+        "Expected counterfactual subcommand"
+    );
     assert!(stdout.contains("list"), "Expected list subcommand");
 }
 

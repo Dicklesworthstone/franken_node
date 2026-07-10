@@ -1603,10 +1603,7 @@ mod tests {
 
             // Verify ID is preserved exactly for forensics
             let record = proto.get_record(malicious_id).expect("record should exist");
-            assert_eq!(
-                record.workflow_id, malicious_id,
-                "ID should be preserved"
-            );
+            assert_eq!(record.workflow_id, malicious_id, "ID should be preserved");
 
             // Test JSON serialization safety
             let json = serde_json::to_string(&record).expect("serialization should work");
@@ -1773,9 +1770,7 @@ mod tests {
         let mut proto = CancellationProtocol::new(DrainConfig::new(1000, true));
 
         let cancel_id = "resource-leak-test";
-        proto
-            .request_cancel(cancel_id, 0, 1000, "trace")
-            .unwrap();
+        proto.request_cancel(cancel_id, 0, 1000, "trace").unwrap();
         proto.start_drain(cancel_id, 1100, "trace").unwrap();
         proto.complete_drain(cancel_id, 1200, "trace").unwrap();
 
@@ -2166,8 +2161,7 @@ mod tests {
         // Test rapid-fire cancellations to stress FIFO eviction
         for i in 0..100 {
             let rapid_id = format!("rapid-{:03}", i);
-            let result =
-                proto.request_cancel(&rapid_id, 0, 1000, &format!("rapid-trace-{:03}", i));
+            let result = proto.request_cancel(&rapid_id, 0, 1000, &format!("rapid-trace-{:03}", i));
             assert!(result.is_ok(), "should handle rapid cancellation {}", i);
         }
 
@@ -2238,7 +2232,9 @@ mod tests {
                                     "cancellation protocol concurrent drain start",
                                 )
                                 .expect("protocol mutex should lock for drain start");
-                                locked_proto.start_drain(&cancel_id, 1100, &trace).map(|_| ())
+                                locked_proto
+                                    .start_drain(&cancel_id, 1100, &trace)
+                                    .map(|_| ())
                             };
 
                             if drain_result.is_ok() {

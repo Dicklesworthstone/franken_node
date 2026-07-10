@@ -2587,7 +2587,12 @@ mod tests {
         // violations the target must exist but be outside the source's allowed
         // cross-zone targets (Strict isolation, never granted via allow_cross_zone).
         violation_engine
-            .register_zone(ZonePolicy::new("blocked-zone", 80, 5, IsolationLevel::Strict))
+            .register_zone(ZonePolicy::new(
+                "blocked-zone",
+                80,
+                5,
+                IsolationLevel::Strict,
+            ))
             .unwrap();
 
         // Generate many isolation violations

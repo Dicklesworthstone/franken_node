@@ -113,9 +113,14 @@ impl ConformanceReport {
 
     pub fn to_markdown(&self) -> String {
         let score = self.compliance_score() * 100.0;
-        let status = if score >= 95.0 { "CONFORMANT" } else { "NON-CONFORMANT" };
+        let status = if score >= 95.0 {
+            "CONFORMANT"
+        } else {
+            "NON-CONFORMANT"
+        };
 
-        format!(r#"# bd-1m8r Revocation Freshness Gate Conformance Report
+        format!(
+            r#"# bd-1m8r Revocation Freshness Gate Conformance Report
 
 ## Compliance Score: {:.1}% - {status}
 
@@ -146,21 +151,34 @@ Total conformance tests: {}
 Generated: {}
 "#,
             score,
-            self.stats.must_pass, self.stats.must_fail,
+            self.stats.must_pass,
+            self.stats.must_fail,
             self.stats.must_pass + self.stats.must_fail,
             if self.stats.must_pass + self.stats.must_fail > 0 {
-                self.stats.must_pass as f64 / (self.stats.must_pass + self.stats.must_fail) as f64 * 100.0
-            } else { 0.0 },
-            self.stats.should_pass, self.stats.should_fail,
+                self.stats.must_pass as f64 / (self.stats.must_pass + self.stats.must_fail) as f64
+                    * 100.0
+            } else {
+                0.0
+            },
+            self.stats.should_pass,
+            self.stats.should_fail,
             self.stats.should_pass + self.stats.should_fail,
             if self.stats.should_pass + self.stats.should_fail > 0 {
-                self.stats.should_pass as f64 / (self.stats.should_pass + self.stats.should_fail) as f64 * 100.0
-            } else { 0.0 },
-            self.stats.may_pass, self.stats.may_fail,
+                self.stats.should_pass as f64
+                    / (self.stats.should_pass + self.stats.should_fail) as f64
+                    * 100.0
+            } else {
+                0.0
+            },
+            self.stats.may_pass,
+            self.stats.may_fail,
             self.stats.may_pass + self.stats.may_fail,
             if self.stats.may_pass + self.stats.may_fail > 0 {
-                self.stats.may_pass as f64 / (self.stats.may_pass + self.stats.may_fail) as f64 * 100.0
-            } else { 0.0 },
+                self.stats.may_pass as f64 / (self.stats.may_pass + self.stats.may_fail) as f64
+                    * 100.0
+            } else {
+                0.0
+            },
             self.stats.must_pass + self.stats.should_pass + self.stats.may_pass,
             self.stats.must_fail + self.stats.should_fail + self.stats.may_fail,
             self.results.len(),
@@ -185,7 +203,10 @@ Generated: {}
                     TestResult::Skipped { .. } => "⏭️ SKIP",
                     TestResult::ExpectedFailure { .. } => "⏳ XFAIL",
                 };
-                output.push_str(&format!("- **{}**: {} - {}\n", record.id, status, record.description));
+                output.push_str(&format!(
+                    "- **{}**: {} - {}\n",
+                    record.id, status, record.description
+                ));
                 if let TestResult::Fail { reason } = &record.result {
                     output.push_str(&format!("  - ❌ {}\n", reason));
                 }
@@ -229,7 +250,6 @@ const BD_1M8R_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "INV-RF-AUDIT: Every evaluation produces a structured FreshnessDecision record",
         test_fn: test_invariant_audit,
     },
-
     // Error Codes (MUST requirements)
     ConformanceCase {
         id: "BD1M8R-ERR-1",
@@ -252,7 +272,6 @@ const BD_1M8R_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "RF_POLICY_INVALID: Policy configuration violates constraints",
         test_fn: test_error_policy_invalid,
     },
-
     // Policy Validation (SHOULD requirements)
     ConformanceCase {
         id: "BD1M8R-POL-1",
@@ -275,7 +294,6 @@ const BD_1M8R_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Policy validation executed before gate decisions",
         test_fn: test_policy_validation_precedence,
     },
-
     // Field Validation (SHOULD requirements)
     ConformanceCase {
         id: "BD1M8R-FLD-1",
@@ -312,7 +330,6 @@ const BD_1M8R_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Null byte rejection in text fields",
         test_fn: test_field_null_byte_rejection,
     },
-
     // Override Receipt Security (SHOULD requirements)
     ConformanceCase {
         id: "BD1M8R-OVR-1",
@@ -342,7 +359,6 @@ const BD_1M8R_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Reason field validation (non-empty, clean)",
         test_fn: test_override_reason_validation,
     },
-
     // Boundary Behavior (SHOULD requirements)
     ConformanceCase {
         id: "BD1M8R-BND-1",
@@ -380,18 +396,18 @@ fn test_invariant_standard_pass() -> TestResult {
             Ok(decision) => {
                 if !decision.allowed {
                     return TestResult::Fail {
-                        reason: format!("Standard tier denied for age {}", large_age)
+                        reason: format!("Standard tier denied for age {}", large_age),
                     };
                 }
                 if decision.max_age_secs.is_some() {
                     return TestResult::Fail {
-                        reason: "Standard tier should not have max_age_secs".to_string()
+                        reason: "Standard tier should not have max_age_secs".to_string(),
                     };
                 }
-            },
+            }
             Err(e) => {
                 return TestResult::Fail {
-                    reason: format!("Standard tier failed with error: {}", e)
+                    reason: format!("Standard tier failed with error: {}", e),
                 };
             }
         }
@@ -409,30 +425,31 @@ fn test_invariant_tier_gate() -> TestResult {
         Err(e) => {
             if e.code() != "RF_STALE_FRONTIER" {
                 return TestResult::Fail {
-                    reason: format!("Wrong error code for stale risky: {}", e.code())
+                    reason: format!("Wrong error code for stale risky: {}", e.code()),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Stale risky action was allowed".to_string()
+                reason: "Stale risky action was allowed".to_string(),
             };
         }
     }
 
     // Test Dangerous tier with stale data
-    let stale_dangerous_check = create_check(SafetyTier::Dangerous, policy.dangerous_max_age_secs + 1);
+    let stale_dangerous_check =
+        create_check(SafetyTier::Dangerous, policy.dangerous_max_age_secs + 1);
     match evaluate_freshness(&policy, &stale_dangerous_check, None) {
         Err(e) => {
             if e.code() != "RF_STALE_FRONTIER" {
                 return TestResult::Fail {
-                    reason: format!("Wrong error code for stale dangerous: {}", e.code())
+                    reason: format!("Wrong error code for stale dangerous: {}", e.code()),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Stale dangerous action was allowed".to_string()
+                reason: "Stale dangerous action was allowed".to_string(),
             };
         }
     }
@@ -443,13 +460,13 @@ fn test_invariant_tier_gate() -> TestResult {
         Ok(decision) => {
             if !decision.allowed {
                 return TestResult::Fail {
-                    reason: "Fresh risky action was denied".to_string()
+                    reason: "Fresh risky action was denied".to_string(),
                 };
             }
-        },
+        }
         Err(e) => {
             return TestResult::Fail {
-                reason: format!("Fresh risky action failed: {}", e)
+                reason: format!("Fresh risky action failed: {}", e),
             };
         }
     }
@@ -468,43 +485,44 @@ fn test_invariant_override_receipt() -> TestResult {
         Ok(decision) => {
             if !decision.allowed {
                 return TestResult::Fail {
-                    reason: "Override receipt did not allow stale action".to_string()
+                    reason: "Override receipt did not allow stale action".to_string(),
                 };
             }
             if decision.override_receipt.is_none() {
                 return TestResult::Fail {
-                    reason: "Override receipt not recorded in decision".to_string()
+                    reason: "Override receipt not recorded in decision".to_string(),
                 };
             }
             let recorded_receipt = decision.override_receipt.unwrap();
             if recorded_receipt.actor != override_receipt.actor {
                 return TestResult::Fail {
-                    reason: "Override receipt actor not preserved".to_string()
+                    reason: "Override receipt actor not preserved".to_string(),
                 };
             }
-        },
+        }
         Err(e) => {
             return TestResult::Fail {
-                reason: format!("Override receipt failed: {}", e)
+                reason: format!("Override receipt failed: {}", e),
             };
         }
     }
 
     // Test override allows stale dangerous action
-    let stale_dangerous_check = create_check(SafetyTier::Dangerous, policy.dangerous_max_age_secs + 500);
+    let stale_dangerous_check =
+        create_check(SafetyTier::Dangerous, policy.dangerous_max_age_secs + 500);
     let dangerous_override = create_override_receipt(&stale_dangerous_check);
 
     match evaluate_freshness(&policy, &stale_dangerous_check, Some(&dangerous_override)) {
         Ok(decision) => {
             if !decision.allowed {
                 return TestResult::Fail {
-                    reason: "Override receipt did not allow stale dangerous action".to_string()
+                    reason: "Override receipt did not allow stale dangerous action".to_string(),
                 };
             }
-        },
+        }
         Err(e) => {
             return TestResult::Fail {
-                reason: format!("Override for dangerous failed: {}", e)
+                reason: format!("Override for dangerous failed: {}", e),
             };
         }
     }
@@ -516,47 +534,52 @@ fn test_invariant_audit() -> TestResult {
     let policy = create_test_policy();
 
     // Test all three tiers produce decisions
-    for tier in [SafetyTier::Standard, SafetyTier::Risky, SafetyTier::Dangerous] {
+    for tier in [
+        SafetyTier::Standard,
+        SafetyTier::Risky,
+        SafetyTier::Dangerous,
+    ] {
         let check = create_check(tier, 100); // Fresh for all tiers
 
         match evaluate_freshness(&policy, &check, None) {
             Ok(decision) => {
                 if decision.action_id != check.action_id {
                     return TestResult::Fail {
-                        reason: format!("Decision missing action_id for tier {:?}", tier)
+                        reason: format!("Decision missing action_id for tier {:?}", tier),
                     };
                 }
                 if decision.trace_id != check.trace_id {
                     return TestResult::Fail {
-                        reason: format!("Decision missing trace_id for tier {:?}", tier)
+                        reason: format!("Decision missing trace_id for tier {:?}", tier),
                     };
                 }
                 if decision.timestamp != check.timestamp {
                     return TestResult::Fail {
-                        reason: format!("Decision missing timestamp for tier {:?}", tier)
+                        reason: format!("Decision missing timestamp for tier {:?}", tier),
                     };
                 }
                 if decision.tier != tier {
                     return TestResult::Fail {
-                        reason: format!("Decision tier mismatch for {:?}", tier)
+                        reason: format!("Decision tier mismatch for {:?}", tier),
                     };
                 }
                 if decision.revocation_age_secs != check.revocation_age_secs {
                     return TestResult::Fail {
-                        reason: format!("Decision age mismatch for tier {:?}", tier)
+                        reason: format!("Decision age mismatch for tier {:?}", tier),
                     };
                 }
                 if decision.reason.is_empty() {
                     return TestResult::Fail {
-                        reason: format!("Decision missing reason for tier {:?}", tier)
+                        reason: format!("Decision missing reason for tier {:?}", tier),
                     };
                 }
-            },
+            }
             Err(_) => {
                 // Even errors should not occur for fresh data on standard/risky/dangerous
                 if tier == SafetyTier::Standard {
                     return TestResult::Fail {
-                        reason: "Standard tier produced error instead of audit decision".to_string()
+                        reason: "Standard tier produced error instead of audit decision"
+                            .to_string(),
                     };
                 }
             }
@@ -576,25 +599,28 @@ fn test_error_stale_frontier() -> TestResult {
         Err(e) => {
             if e.code() != "RF_STALE_FRONTIER" {
                 return TestResult::Fail {
-                    reason: format!("Wrong error code: expected RF_STALE_FRONTIER, got {}", e.code())
+                    reason: format!(
+                        "Wrong error code: expected RF_STALE_FRONTIER, got {}",
+                        e.code()
+                    ),
                 };
             }
 
             let error_string = e.to_string();
             if !error_string.contains("RF_STALE_FRONTIER") {
                 return TestResult::Fail {
-                    reason: "Error display missing RF_STALE_FRONTIER".to_string()
+                    reason: "Error display missing RF_STALE_FRONTIER".to_string(),
                 };
             }
             if !error_string.contains(&format!("{}", policy.risky_max_age_secs + 1)) {
                 return TestResult::Fail {
-                    reason: "Error display missing actual age".to_string()
+                    reason: "Error display missing actual age".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Expected RF_STALE_FRONTIER error".to_string()
+                reason: "Expected RF_STALE_FRONTIER error".to_string(),
             };
         }
     }
@@ -614,13 +640,16 @@ fn test_error_override_required() -> TestResult {
         Err(e) => {
             if e.code() != "RF_OVERRIDE_REQUIRED" {
                 return TestResult::Fail {
-                    reason: format!("Wrong error code: expected RF_OVERRIDE_REQUIRED, got {}", e.code())
+                    reason: format!(
+                        "Wrong error code: expected RF_OVERRIDE_REQUIRED, got {}",
+                        e.code()
+                    ),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Expected RF_OVERRIDE_REQUIRED error".to_string()
+                reason: "Expected RF_OVERRIDE_REQUIRED error".to_string(),
             };
         }
     }
@@ -640,18 +669,24 @@ fn test_error_policy_invalid() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: format!("Wrong error code: expected RF_POLICY_INVALID, got {}", e.code())
+                    reason: format!(
+                        "Wrong error code: expected RF_POLICY_INVALID, got {}",
+                        e.code()
+                    ),
                 };
             }
-            if !e.to_string().contains("dangerous_max_age must be <= risky_max_age") {
+            if !e
+                .to_string()
+                .contains("dangerous_max_age must be <= risky_max_age")
+            {
                 return TestResult::Fail {
-                    reason: "Error message missing expected constraint text".to_string()
+                    reason: "Error message missing expected constraint text".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Expected RF_POLICY_INVALID error".to_string()
+                reason: "Expected RF_POLICY_INVALID error".to_string(),
             };
         }
     }
@@ -671,13 +706,13 @@ fn test_policy_dangerous_risky_constraint() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: "Policy validation should return RF_POLICY_INVALID".to_string()
+                    reason: "Policy validation should return RF_POLICY_INVALID".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Invalid policy passed validation".to_string()
+                reason: "Invalid policy passed validation".to_string(),
             };
         }
     }
@@ -690,7 +725,7 @@ fn test_policy_dangerous_risky_constraint() -> TestResult {
 
     if valid_policy.validate().is_err() {
         return TestResult::Fail {
-            reason: "Valid policy failed validation".to_string()
+            reason: "Valid policy failed validation".to_string(),
         };
     }
 
@@ -707,18 +742,18 @@ fn test_policy_risky_nonzero_constraint() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: "Zero risky age should return RF_POLICY_INVALID".to_string()
+                    reason: "Zero risky age should return RF_POLICY_INVALID".to_string(),
                 };
             }
             if !e.to_string().contains("risky_max_age must be > 0") {
                 return TestResult::Fail {
-                    reason: "Error message should mention risky_max_age > 0".to_string()
+                    reason: "Error message should mention risky_max_age > 0".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Zero risky age should fail validation".to_string()
+                reason: "Zero risky age should fail validation".to_string(),
             };
         }
     }
@@ -740,13 +775,13 @@ fn test_policy_validation_precedence() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: "Policy validation should precede gate decisions".to_string()
+                    reason: "Policy validation should precede gate decisions".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Invalid policy should be rejected before gate evaluation".to_string()
+                reason: "Invalid policy should be rejected before gate evaluation".to_string(),
             };
         }
     }
@@ -767,13 +802,13 @@ fn test_field_action_id_validation() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: "Empty action_id should return RF_POLICY_INVALID".to_string()
+                    reason: "Empty action_id should return RF_POLICY_INVALID".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Empty action_id should be rejected".to_string()
+                reason: "Empty action_id should be rejected".to_string(),
             };
         }
     }
@@ -784,13 +819,13 @@ fn test_field_action_id_validation() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: "Padded action_id should return RF_POLICY_INVALID".to_string()
+                    reason: "Padded action_id should return RF_POLICY_INVALID".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Padded action_id should be rejected".to_string()
+                reason: "Padded action_id should be rejected".to_string(),
             };
         }
     }
@@ -809,13 +844,13 @@ fn test_field_trace_id_validation() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: "Empty trace_id should return RF_POLICY_INVALID".to_string()
+                    reason: "Empty trace_id should return RF_POLICY_INVALID".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Empty trace_id should be rejected".to_string()
+                reason: "Empty trace_id should be rejected".to_string(),
             };
         }
     }
@@ -834,13 +869,13 @@ fn test_field_timestamp_validation() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: "Empty timestamp should return RF_POLICY_INVALID".to_string()
+                    reason: "Empty timestamp should return RF_POLICY_INVALID".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Empty timestamp should be rejected".to_string()
+                reason: "Empty timestamp should be rejected".to_string(),
             };
         }
     }
@@ -858,13 +893,13 @@ fn test_field_control_character_rejection() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: "Control characters should return RF_POLICY_INVALID".to_string()
+                    reason: "Control characters should return RF_POLICY_INVALID".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Control characters should be rejected".to_string()
+                reason: "Control characters should be rejected".to_string(),
             };
         }
     }
@@ -882,13 +917,13 @@ fn test_field_null_byte_rejection() -> TestResult {
         Err(e) => {
             if e.code() != "RF_POLICY_INVALID" {
                 return TestResult::Fail {
-                    reason: "Null bytes should return RF_POLICY_INVALID".to_string()
+                    reason: "Null bytes should return RF_POLICY_INVALID".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Null bytes should be rejected".to_string()
+                reason: "Null bytes should be rejected".to_string(),
             };
         }
     }
@@ -906,7 +941,7 @@ fn test_override_action_id_comparison() -> TestResult {
     let good_receipt = create_override_receipt(&check);
     if evaluate_freshness(&policy, &check, Some(&good_receipt)).is_err() {
         return TestResult::Fail {
-            reason: "Exact action_id match should work".to_string()
+            reason: "Exact action_id match should work".to_string(),
         };
     }
 
@@ -918,13 +953,14 @@ fn test_override_action_id_comparison() -> TestResult {
         Err(e) => {
             if e.code() != "RF_OVERRIDE_REQUIRED" {
                 return TestResult::Fail {
-                    reason: "Case-different action_id should fail with RF_OVERRIDE_REQUIRED".to_string()
+                    reason: "Case-different action_id should fail with RF_OVERRIDE_REQUIRED"
+                        .to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Case-different action_id should be rejected".to_string()
+                reason: "Case-different action_id should be rejected".to_string(),
             };
         }
     }
@@ -944,13 +980,14 @@ fn test_override_trace_id_comparison() -> TestResult {
         Err(e) => {
             if e.code() != "RF_OVERRIDE_REQUIRED" {
                 return TestResult::Fail {
-                    reason: "Trace_id with suffix should fail with RF_OVERRIDE_REQUIRED".to_string()
+                    reason: "Trace_id with suffix should fail with RF_OVERRIDE_REQUIRED"
+                        .to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Trace_id with suffix should be rejected".to_string()
+                reason: "Trace_id with suffix should be rejected".to_string(),
             };
         }
     }
@@ -970,13 +1007,13 @@ fn test_override_actor_validation() -> TestResult {
         Err(e) => {
             if e.code() != "RF_OVERRIDE_REQUIRED" {
                 return TestResult::Fail {
-                    reason: "Empty actor should fail with RF_OVERRIDE_REQUIRED".to_string()
+                    reason: "Empty actor should fail with RF_OVERRIDE_REQUIRED".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Empty actor should be rejected".to_string()
+                reason: "Empty actor should be rejected".to_string(),
             };
         }
     }
@@ -996,13 +1033,13 @@ fn test_override_reason_validation() -> TestResult {
         Err(e) => {
             if e.code() != "RF_OVERRIDE_REQUIRED" {
                 return TestResult::Fail {
-                    reason: "Whitespace reason should fail with RF_OVERRIDE_REQUIRED".to_string()
+                    reason: "Whitespace reason should fail with RF_OVERRIDE_REQUIRED".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Whitespace reason should be rejected".to_string()
+                reason: "Whitespace reason should be rejected".to_string(),
             };
         }
     }
@@ -1021,30 +1058,31 @@ fn test_boundary_fail_closed() -> TestResult {
         Err(e) => {
             if e.code() != "RF_STALE_FRONTIER" {
                 return TestResult::Fail {
-                    reason: "Boundary should fail closed with RF_STALE_FRONTIER".to_string()
+                    reason: "Boundary should fail closed with RF_STALE_FRONTIER".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Boundary age should be denied (fail-closed)".to_string()
+                reason: "Boundary age should be denied (fail-closed)".to_string(),
             };
         }
     }
 
     // Test dangerous tier at exact boundary
-    let dangerous_boundary_check = create_check(SafetyTier::Dangerous, policy.dangerous_max_age_secs);
+    let dangerous_boundary_check =
+        create_check(SafetyTier::Dangerous, policy.dangerous_max_age_secs);
     match evaluate_freshness(&policy, &dangerous_boundary_check, None) {
         Err(e) => {
             if e.code() != "RF_STALE_FRONTIER" {
                 return TestResult::Fail {
-                    reason: "Dangerous boundary should fail closed".to_string()
+                    reason: "Dangerous boundary should fail closed".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Dangerous boundary age should be denied".to_string()
+                reason: "Dangerous boundary age should be denied".to_string(),
             };
         }
     }
@@ -1061,13 +1099,13 @@ fn test_boundary_fresh_allowed() -> TestResult {
         Ok(decision) => {
             if !decision.allowed {
                 return TestResult::Fail {
-                    reason: "Fresh data should be allowed".to_string()
+                    reason: "Fresh data should be allowed".to_string(),
                 };
             }
-        },
+        }
         Err(e) => {
             return TestResult::Fail {
-                reason: format!("Fresh data failed: {}", e)
+                reason: format!("Fresh data failed: {}", e),
             };
         }
     }
@@ -1082,7 +1120,7 @@ fn test_boundary_tier_differences() -> TestResult {
     let test_age = policy.dangerous_max_age_secs + 1;
     if test_age >= policy.risky_max_age_secs {
         return TestResult::Fail {
-            reason: "Test setup: need dangerous < test_age < risky".to_string()
+            reason: "Test setup: need dangerous < test_age < risky".to_string(),
         };
     }
 
@@ -1092,13 +1130,13 @@ fn test_boundary_tier_differences() -> TestResult {
         Ok(decision) => {
             if !decision.allowed {
                 return TestResult::Fail {
-                    reason: "Age should be fresh for risky tier".to_string()
+                    reason: "Age should be fresh for risky tier".to_string(),
                 };
             }
-        },
+        }
         Err(e) => {
             return TestResult::Fail {
-                reason: format!("Risky tier failed unexpectedly: {}", e)
+                reason: format!("Risky tier failed unexpectedly: {}", e),
             };
         }
     }
@@ -1109,13 +1147,13 @@ fn test_boundary_tier_differences() -> TestResult {
         Err(e) => {
             if e.code() != "RF_STALE_FRONTIER" {
                 return TestResult::Fail {
-                    reason: "Dangerous tier should fail with RF_STALE_FRONTIER".to_string()
+                    reason: "Dangerous tier should fail with RF_STALE_FRONTIER".to_string(),
                 };
             }
-        },
+        }
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Age should be stale for dangerous tier".to_string()
+                reason: "Age should be stale for dangerous tier".to_string(),
             };
         }
     }
@@ -1214,18 +1252,24 @@ mod tests {
         assert_eq!(report.results.len(), BD_1M8R_CONFORMANCE_CASES.len());
 
         // Compliance score should be reasonable (all tests should pass in our implementation)
-        assert!(report.compliance_score() >= 0.95,
+        assert!(
+            report.compliance_score() >= 0.95,
             "bd-1m8r compliance score too low: {:.1}%",
-            report.compliance_score() * 100.0);
+            report.compliance_score() * 100.0
+        );
 
         // Should have zero MUST requirement failures for conformant implementation
-        assert_eq!(report.stats.must_fail, 0,
-            "MUST requirements failed - implementation not conformant");
+        assert_eq!(
+            report.stats.must_fail, 0,
+            "MUST requirements failed - implementation not conformant"
+        );
 
-        println!("bd-1m8r conformance: {:.1}% ({} MUST pass, {} SHOULD pass)",
+        println!(
+            "bd-1m8r conformance: {:.1}% ({} MUST pass, {} SHOULD pass)",
             report.compliance_score() * 100.0,
             report.stats.must_pass,
-            report.stats.should_pass);
+            report.stats.should_pass
+        );
     }
 
     #[test]

@@ -541,7 +541,14 @@ mod tests {
             .find(|p| p.connector_id == connector_id && p.trusted)
             .or_else(|| pins.iter().find(|p| p.connector_id == connector_id))
             .or_else(|| pins.first());
-        match det.evaluate(connector_id, &[], pin, now, trace_id, "1970-01-01T00:00:00Z") {
+        match det.evaluate(
+            connector_id,
+            &[],
+            pin,
+            now,
+            trace_id,
+            "1970-01-01T00:00:00Z",
+        ) {
             Ok(decision) => decision,
             Err(_) => det
                 .incidents
@@ -575,11 +582,7 @@ mod tests {
 
     /// Legacy shape: `record_crash(event, epoch, trace)`. The current detector
     /// records by reference and no longer accepts a per-call trace id.
-    fn record_crash_traced(
-        det: &mut CrashLoopDetector,
-        event: CrashEvent,
-        epoch_secs: u64,
-    ) -> u32 {
+    fn record_crash_traced(det: &mut CrashLoopDetector, event: CrashEvent, epoch_secs: u64) -> u32 {
         det.record_crash(&event, epoch_secs)
     }
 
@@ -1467,8 +1470,13 @@ mod tests {
 
         detector.record_crash(&crash, 1000000);
 
-        let decision =
-            eval_rollback_decision(&mut detector, "max-crashes", 1000000, "trace", &[trusted_pin()]);
+        let decision = eval_rollback_decision(
+            &mut detector,
+            "max-crashes",
+            1000000,
+            "trace",
+            &[trusted_pin()],
+        );
 
         // Should not crash due to overflow
         assert!(
@@ -1498,8 +1506,13 @@ mod tests {
 
         detector.record_crash(&crash, 1000000);
 
-        let decision =
-            eval_rollback_decision(&mut detector, "zero-window", 1000000, "trace", &[trusted_pin()]);
+        let decision = eval_rollback_decision(
+            &mut detector,
+            "zero-window",
+            1000000,
+            "trace",
+            &[trusted_pin()],
+        );
 
         // Should handle zero window gracefully without division by zero
         assert_eq!(decision.window_secs, 0);
@@ -1522,7 +1535,8 @@ mod tests {
 
         detector.record_crash(&crash_empty_id, 1000000);
 
-        let decision = eval_rollback_decision(&mut detector, "", 1000000, "trace", &[trusted_pin()]);
+        let decision =
+            eval_rollback_decision(&mut detector, "", 1000000, "trace", &[trusted_pin()]);
 
         // Should handle empty connector ID gracefully
         assert_eq!(decision.connector_id, "");
@@ -1587,8 +1601,13 @@ mod tests {
 
         detector.record_crash(&crash, 1000000);
 
-        let decision =
-            eval_rollback_decision(&mut detector, "large-window", u64::MAX, "trace", &[trusted_pin()]);
+        let decision = eval_rollback_decision(
+            &mut detector,
+            "large-window",
+            u64::MAX,
+            "trace",
+            &[trusted_pin()],
+        );
 
         // Should handle extreme window size without overflow
         assert_eq!(decision.window_secs, u64::MAX);
@@ -1626,8 +1645,13 @@ mod tests {
             },
         ];
 
-        let decision =
-            eval_rollback_decision(&mut detector, "hash-collision", 1000060, "trace", &conflicting_pins);
+        let decision = eval_rollback_decision(
+            &mut detector,
+            "hash-collision",
+            1000060,
+            "trace",
+            &conflicting_pins,
+        );
 
         // Should handle hash collision gracefully and prefer trusted pins
         assert!(decision.triggered);
@@ -1657,10 +1681,20 @@ mod tests {
         }
 
         // Simulate concurrent evaluations
-        let decision1 =
-            eval_rollback_decision(&mut detector, connector_id, 1000000, "trace1", &[trusted_pin()]);
-        let decision2 =
-            eval_rollback_decision(&mut detector, connector_id, 1000001, "trace2", &[trusted_pin()]);
+        let decision1 = eval_rollback_decision(
+            &mut detector,
+            connector_id,
+            1000000,
+            "trace1",
+            &[trusted_pin()],
+        );
+        let decision2 = eval_rollback_decision(
+            &mut detector,
+            connector_id,
+            1000001,
+            "trace2",
+            &[trusted_pin()],
+        );
 
         // Should maintain consistency across concurrent-like operations
         assert_eq!(decision1.triggered, decision2.triggered);
@@ -1748,7 +1782,8 @@ mod tests {
                 trusted: true,
             };
 
-            let decision = eval_rollback_decision(&mut detector, special_id, 1000000, "trace", &[pin]);
+            let decision =
+                eval_rollback_decision(&mut detector, special_id, 1000000, "trace", &[pin]);
 
             // Should handle gracefully
             assert_eq!(decision.connector_id, *special_id);
@@ -1981,7 +2016,10 @@ mod tests {
                 // Create threshold-exceeding crashes
                 for crash_idx in 0..3 {
                     let event = crash(&connector_id, "flood_ts", "flood_reason");
-                    det.record_crash(&event, 1000 + (incident_idx as u64 * 100) + crash_idx as u64);
+                    det.record_crash(
+                        &event,
+                        1000 + (incident_idx as u64 * 100) + crash_idx as u64,
+                    );
                 }
 
                 let events = threshold_events(&connector_id);
@@ -3831,11 +3869,7 @@ mod tests {
 
                 // Record crash event (potential memory exhaustion point)
                 let record_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    record_crash_traced(
-                        &mut detector,
-                        crash_event,
-                        10000 + event_idx as u64,
-                    );
+                    record_crash_traced(&mut detector, crash_event, 10000 + event_idx as u64);
                 }));
 
                 match record_result {
@@ -3985,7 +4019,9 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::thread;
 
-        let detector = Arc::new(Mutex::new(CrashLoopDetector::new(CrashLoopConfig::default_config())));
+        let detector = Arc::new(Mutex::new(CrashLoopDetector::new(
+            CrashLoopConfig::default_config(),
+        )));
         let race_connector = "concurrent_race_target";
 
         // Setup initial crash state for race conditions

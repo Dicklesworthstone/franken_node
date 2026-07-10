@@ -1864,10 +1864,9 @@ mod tests {
     use super::*;
     use crate::ops::validation_broker::{
         DigestRef, EnvironmentPolicy, FallbackPolicy, OutputPolicy, RchMode, RchReceipt,
-        ReceiptArtifacts,
-        ReceiptClassifications, ReceiptRequestRef, ReceiptTrust, SourceOnlyReason, TargetDirPolicy,
-        TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind, ValidationPriority,
-        ValidationTiming,
+        ReceiptArtifacts, ReceiptClassifications, ReceiptRequestRef, ReceiptTrust,
+        SourceOnlyReason, TargetDirPolicy, TimeoutClass, ValidationErrorClass, ValidationExit,
+        ValidationExitKind, ValidationPriority, ValidationTiming,
     };
     use chrono::TimeZone;
     use tempfile::TempDir;

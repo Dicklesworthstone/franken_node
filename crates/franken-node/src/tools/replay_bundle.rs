@@ -4584,8 +4584,8 @@ mod tests {
 /// Verifies INV-RB-DETERMINISTIC, INV-RB-INTEGRITY, and INV-RB-CHUNKING.
 #[cfg(test)]
 mod proptest_replay_bundle_invariants {
-    use super::*;
     use super::tests::json_leaf_strategy;
+    use super::*;
     use proptest::prelude::*;
 
     fn raw_event_strategy() -> impl Strategy<Value = RawEvent> {

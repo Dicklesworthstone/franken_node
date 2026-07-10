@@ -887,18 +887,18 @@ mod tests {
         let collision_attempts = [
             b"request1".as_slice(),
             b"request2".as_slice(),
-            b"request1\0".as_slice(),       // Null termination
-            b"request1\0\0\0\0".as_slice(), // Multiple nulls
-            b"\0request1".as_slice(),       // Leading null
-            b"request\01".as_slice(),       // Embedded null
-            b"req\0uest1".as_slice(),       // Split with null
-            b"".as_slice(),                 // Empty request
-            &[0u8; 1000],                   // Large zero buffer
-            &[0xFFu8; 1000],                // Large 0xFF buffer
-            b"request1\r\n\r\n",            // HTTP-style separators
-            b"request1||request2",          // Delimiter confusion
-            b"request1\x1f\x1e\x1d\x1c",    // ASCII separators
-            zero_request_10mb.as_slice(),   // 10MB zero request (memory stress)
+            b"request1\0".as_slice(),        // Null termination
+            b"request1\0\0\0\0".as_slice(),  // Multiple nulls
+            b"\0request1".as_slice(),        // Leading null
+            b"request\01".as_slice(),        // Embedded null
+            b"req\0uest1".as_slice(),        // Split with null
+            b"".as_slice(),                  // Empty request
+            &[0u8; 1000],                    // Large zero buffer
+            &[0xFFu8; 1000],                 // Large 0xFF buffer
+            b"request1\r\n\r\n",             // HTTP-style separators
+            b"request1||request2",           // Delimiter confusion
+            b"request1\x1f\x1e\x1d\x1c",     // ASCII separators
+            zero_request_10mb.as_slice(),    // 10MB zero request (memory stress)
             nonzero_request_10mb.as_slice(), // 10MB non-zero request
         ];
 
@@ -1042,19 +1042,19 @@ mod tests {
         let all_null_64 = "\0".repeat(64);
         let malicious_hex_inputs = [
             "",                                                                                 // Empty string
-            "0",                  // Too short (odd length)
-            "00",                 // Too short (1 byte)
-            "g",                  // Invalid hex character
-            "0g",                 // Invalid hex character
-            "00gg00",             // Invalid hex in middle
-            all_z_64.as_str(),    // All invalid hex chars
-            zero_63.as_str(),     // One char short
-            zero_65.as_str(),     // One char long
-            zero_128.as_str(),    // Double length
-            all_x_64.as_str(),    // Valid length, invalid chars
+            "0",               // Too short (odd length)
+            "00",              // Too short (1 byte)
+            "g",               // Invalid hex character
+            "0g",              // Invalid hex character
+            "00gg00",          // Invalid hex in middle
+            all_z_64.as_str(), // All invalid hex chars
+            zero_63.as_str(),  // One char short
+            zero_65.as_str(),  // One char long
+            zero_128.as_str(), // Double length
+            all_x_64.as_str(), // Valid length, invalid chars
             "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDE", // 63 chars
             "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEG", // 64 chars with invalid last char
-            all_null_64.as_str(),                                              // Null bytes
+            all_null_64.as_str(),                                               // Null bytes
             "\u{202E}0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF\u{202C}", // BiDi override
             "\x1b[31m0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF\x1b[0m", // ANSI escape
         ];

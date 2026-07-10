@@ -5340,8 +5340,9 @@ mod tests {
             },
             CapabilityDeclaration {
                 name: "capability\"}{\"admin\":true,\"bypass".to_string(), // JSON injection
-                description: "scope=local\0null|impact=high\r\n\t|evidence_ref=ref/../../etc/passwd"
-                    .to_string(), // null byte + control chars + path traversal
+                description:
+                    "scope=local\0null|impact=high\r\n\t|evidence_ref=ref/../../etc/passwd"
+                        .to_string(), // null byte + control chars + path traversal
                 risk: CapabilityRisk::Critical,
             },
             CapabilityDeclaration {
@@ -6535,7 +6536,10 @@ mod tests {
             .get("npm:@acme/plugin")
             .expect("Cache should contain repaired entry");
         assert_eq!(cached.card.card_hash, original_card.card_hash);
-        assert_eq!(cached.card.registry_signature, original_card.registry_signature);
+        assert_eq!(
+            cached.card.registry_signature,
+            original_card.registry_signature
+        );
         assert_ne!(
             cached.card.registry_signature,
             "deadbeefdeadbeefdeadbeefdeadbeef"
@@ -6548,7 +6552,8 @@ mod tests {
                 card: {
                     let mut another_poison = original_card.clone();
                     another_poison.reputation_score_basis_points = 1; // Different poison
-                    another_poison.registry_signature = "cafebabecafebabecafebabecafebabe".to_string();
+                    another_poison.registry_signature =
+                        "cafebabecafebabecafebabecafebabe".to_string();
                     another_poison
                 },
                 cached_at_secs: 1_003,

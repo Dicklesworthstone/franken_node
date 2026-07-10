@@ -1268,7 +1268,10 @@ mod tests {
         let mut rng_wrap = SplitMix64::new(u64::MAX - 0x9e37_79b9_7f4a_7c15 + 1);
         let wrap_val = rng_wrap.next_u64();
         assert_eq!(wrap_val, 0, "wrapped-to-zero state yields a 0 output");
-        assert!(rng_wrap.next_u64() > 0, "generator recovers after the zero-state output");
+        assert!(
+            rng_wrap.next_u64() > 0,
+            "generator recovers after the zero-state output"
+        );
 
         // Test next_f64 edge cases
         let mut rng_float = SplitMix64::new(1);
@@ -4163,10 +4166,10 @@ mod tests {
 
         // Test maximum capacity boundary
         let max_fault_profile = FaultProfile {
-            delay_ticks: u64::MAX / 2,  // Large but safe delay
-            drop_pct: 1.0,              // 100% drop rate
-            corrupt_probability: 1.0,   // 100% corruption
-            reorder_depth: 1000,        // Large reorder buffer
+            delay_ticks: u64::MAX / 2, // Large but safe delay
+            drop_pct: 1.0,             // 100% drop rate
+            corrupt_probability: 1.0,  // 100% corruption
+            reorder_depth: 1000,       // Large reorder buffer
         };
 
         let max_link = VirtualLink {
@@ -4750,10 +4753,11 @@ mod tests {
             }
 
             // Identifiers must be recorded faithfully in the event log.
-            let recorded = runtime
-                .events()
-                .iter()
-                .any(|e| malicious_scenario_ids.iter().any(|id| e.payload.contains(*id)));
+            let recorded = runtime.events().iter().any(|e| {
+                malicious_scenario_ids
+                    .iter()
+                    .any(|id| e.payload.contains(*id))
+            });
             assert!(
                 recorded,
                 "Malicious identifiers should be recorded without corruption"
@@ -5137,15 +5141,15 @@ mod tests {
             let malicious_unicode_patterns = [
                 "\u{202E}\u{202D}fake_scenario\u{202C}".to_string(), // Right-to-left override
                 "scenario\u{000A}\u{000D}injected\x00nulls".to_string(), // CRLF + null injection
-                "\u{FEFF}bom_scenario\u{FFFE}reversed".to_string(), // BOM injection attacks
-                "\u{200B}\u{200C}\u{200D}zero_width".to_string(),   // Zero-width characters
-                "场景\u{007F}\u{0001}\u{001F}控制字符".to_string(), // Unicode + control chars
+                "\u{FEFF}bom_scenario\u{FFFE}reversed".to_string(),  // BOM injection attacks
+                "\u{200B}\u{200C}\u{200D}zero_width".to_string(),    // Zero-width characters
+                "场景\u{007F}\u{0001}\u{001F}控制字符".to_string(),  // Unicode + control chars
                 "\u{FFFF}\u{FFFE}\u{FDD0}non_characters".to_string(), // Non-character code points
-                "🧪🔬\u{1F4A5}💥\u{1F52B}🔫".to_string(),           // Complex emoji sequences
+                "🧪🔬\u{1F4A5}💥\u{1F52B}🔫".to_string(),            // Complex emoji sequences
                 "\u{0300}\u{0301}\u{0302}combining_marks".to_string(), // Combining marks
-                format!("../../../{}", "x".repeat(1000)), // Path traversal + long string
+                format!("../../../{}", "x".repeat(1000)),            // Path traversal + long string
                 "scenario\x00\x01\x02\x03\x04\x05hidden".to_string(), // Binary injection
-                "scenario".repeat(100_000),              // Extremely long scenario ID
+                "scenario".repeat(100_000),                          // Extremely long scenario ID
             ];
 
             let config = LabConfig {
@@ -5880,8 +5884,9 @@ mod tests {
                     let result = match action {
                         "start" => runtime.schedule_timer(1, scenario_id),
                         "complete" => runtime.schedule_timer(1, scenario_id),
-                        "fail" => runtime
-                            .schedule_timer(1, format!("{}_fail_{}", scenario_id, seq_idx)),
+                        "fail" => {
+                            runtime.schedule_timer(1, format!("{}_fail_{}", scenario_id, seq_idx))
+                        }
                         _ => continue,
                     };
 
@@ -5940,11 +5945,11 @@ mod tests {
 
             // Test scenario with extreme names and failure reasons
             let extreme_scenarios = vec![
-                ("".to_string(), "empty_name"),                // Empty name
-                ("x".repeat(100_000), "very_long_name"),       // Very long name
+                ("".to_string(), "empty_name"),                          // Empty name
+                ("x".repeat(100_000), "very_long_name"),                 // Very long name
                 ("scenario\x00\x01\x02null".to_string(), "binary_data"), // Binary data in name
                 ("scenario\u{202E}reverse".to_string(), "unicode_attack"), // Unicode direction override
-                ("../../../etc/passwd".to_string(), "path_traversal"), // Path traversal attempt
+                ("../../../etc/passwd".to_string(), "path_traversal"),     // Path traversal attempt
                 ("scenario; rm -rf /".to_string(), "command_injection"), // Command injection attempt
             ];
 
@@ -6211,8 +6216,7 @@ mod tests {
                             }
 
                             // Test replay safety
-                            let replay_result =
-                                LabRuntime::replay_bundle(&bundle, &|_rt| Ok(true));
+                            let replay_result = LabRuntime::replay_bundle(&bundle, &|_rt| Ok(true));
                             match replay_result {
                                 Ok(_) => {
                                     // Replay should not execute injection content
@@ -6517,8 +6521,7 @@ mod tests {
                                 // Verify timer fired correctly
                                 let events = runtime.events();
                                 let timer_fired = events.iter().any(|e| {
-                                    e.event_code.contains("TIMER")
-                                        && e.payload.contains(timer_id)
+                                    e.event_code.contains("TIMER") && e.payload.contains(timer_id)
                                 });
 
                                 if fire_time <= runtime.now() {
@@ -6655,15 +6658,15 @@ mod tests {
     fn negative_virtual_link_with_malicious_endpoint_names() {
         // Test VirtualLink creation with malicious endpoint names
         let malicious_names: Vec<String> = vec![
-            "endpoint\0with_null".to_string(),       // Null byte injection
+            "endpoint\0with_null".to_string(),         // Null byte injection
             "endpoint\r\nHTTP/1.1 200 OK".to_string(), // HTTP header injection
-            "endpoint\x1b[31mRED\x1b[0m".to_string(), // ANSI escape sequences
+            "endpoint\x1b[31mRED\x1b[0m".to_string(),  // ANSI escape sequences
             "endpoint\u{202E}reverse\u{202D}".to_string(), // BiDi override attack
             "endpoint<script>alert('xss')</script>".to_string(), // XSS-style payload
             "../../../../../../etc/passwd".to_string(), // Path traversal
-            "endpoint\u{FEFF}bom".to_string(),       // Byte order mark
-            "\u{200B}endpoint".to_string(),          // Zero-width space prefix
-            "endpoint".repeat(10000),                // Extremely long name
+            "endpoint\u{FEFF}bom".to_string(),         // Byte order mark
+            "\u{200B}endpoint".to_string(),            // Zero-width space prefix
+            "endpoint".repeat(10000),                  // Extremely long name
         ];
 
         for (i, malicious_name) in malicious_names.iter().enumerate() {
@@ -7414,9 +7417,8 @@ mod tests {
         let long_node_a = "node_".to_string() + &"a".repeat(10000);
         let long_node_b = "node_".to_string() + &"b".repeat(10000);
 
-        let long_link_result =
-            VirtualLink::new(long_node_a, long_node_b, FaultProfile::default())
-                .and_then(|link| runtime.add_link(link));
+        let long_link_result = VirtualLink::new(long_node_a, long_node_b, FaultProfile::default())
+            .and_then(|link| runtime.add_link(link));
 
         // Should handle long identifiers gracefully (or fail closed at capacity).
         match long_link_result {
@@ -7709,7 +7711,9 @@ mod tests {
 
         // Send some messages to build state.
         for i in 0..10 {
-            runtime.send_message(link_idx, &format!("message_{}", i)).ok();
+            runtime
+                .send_message(link_idx, &format!("message_{}", i))
+                .ok();
         }
         let _ = runtime.advance_clock(100);
 
@@ -7721,9 +7725,18 @@ mod tests {
         // owned `String`s so the collection has a uniform element type.
         let corruption_patterns: Vec<(&str, String)> = vec![
             // Truncation at different positions.
-            ("truncate_half", bundle_json[..bundle_json.len() / 2].to_string()),
-            ("truncate_quarter", bundle_json[..bundle_json.len() / 4].to_string()),
-            ("truncate_end", bundle_json[..bundle_json.len() - 10].to_string()),
+            (
+                "truncate_half",
+                bundle_json[..bundle_json.len() / 2].to_string(),
+            ),
+            (
+                "truncate_quarter",
+                bundle_json[..bundle_json.len() / 4].to_string(),
+            ),
+            (
+                "truncate_end",
+                bundle_json[..bundle_json.len() - 10].to_string(),
+            ),
             // Invalid JSON structure.
             ("missing_brace", bundle_json.replace('}', "")),
             ("missing_bracket", bundle_json.replace(']', "")),
@@ -7836,9 +7849,7 @@ mod tests {
                 0 => {
                     // Message sending on every link.
                     for &link in &links {
-                        runtime
-                            .send_message(link, &format!("round_{}", round))
-                            .ok();
+                        runtime.send_message(link, &format!("round_{}", round)).ok();
                     }
                 }
                 1 => {
@@ -7877,9 +7888,7 @@ mod tests {
 
         // Final consistency check after simulated concurrent operations.
         assert!(runtime.link_count() as u64 >= u64::try_from(links.len()).unwrap_or(u64::MAX));
-        assert!(
-            (runtime.events().len() as u64) >= u64::try_from(timers.len()).unwrap_or(u64::MAX)
-        );
+        assert!((runtime.events().len() as u64) >= u64::try_from(timers.len()).unwrap_or(u64::MAX));
         assert!((runtime.events().len() as u64) < u64::MAX);
         assert!(runtime.now() < u64::MAX);
 
@@ -7925,9 +7934,18 @@ mod tests {
         let control_char_payloads: Vec<(&str, String)> = vec![
             // ASCII control characters.
             ("null_bytes", "\u{0000}\u{0001}\u{0002}\u{0003}".to_string()),
-            ("bell_backspace", "\u{0007}\u{0008}hello\u{0008}\u{0007}".to_string()),
-            ("tab_newline", "line1\u{0009}\u{000A}line2\u{000D}\u{000A}".to_string()),
-            ("escape_sequences", "\u{001B}[31mred\u{001B}[0mnormal".to_string()),
+            (
+                "bell_backspace",
+                "\u{0007}\u{0008}hello\u{0008}\u{0007}".to_string(),
+            ),
+            (
+                "tab_newline",
+                "line1\u{0009}\u{000A}line2\u{000D}\u{000A}".to_string(),
+            ),
+            (
+                "escape_sequences",
+                "\u{001B}[31mred\u{001B}[0mnormal".to_string(),
+            ),
             // "Binary" data patterns as code points (every byte value 0x00..=0xFF).
             (
                 "all_bytes",
@@ -7944,8 +7962,14 @@ mod tests {
                 "\u{00FF}\u{00FE}\u{00FD}\u{00FC}\u{00FB}\u{00FA}".to_string(),
             ),
             // UTF-8 with control chars.
-            ("utf8_control", "Hello\u{0000}World\u{001F}测试\u{007F}".to_string()),
-            ("utf8_mixed", "🦀\u{0000}Rust\u{0001}Lang\u{0002}".to_string()),
+            (
+                "utf8_control",
+                "Hello\u{0000}World\u{001F}测试\u{007F}".to_string(),
+            ),
+            (
+                "utf8_mixed",
+                "🦀\u{0000}Rust\u{0001}Lang\u{0002}".to_string(),
+            ),
             // Very long payloads with control chars.
             ("long_control", {
                 let mut payload = String::with_capacity(10000);
@@ -7955,11 +7979,17 @@ mod tests {
                 payload
             }),
             // Embedded null terminators (C-style string attacks).
-            ("null_terminators", "normal\u{0000}hidden\u{0000}data\u{0000}".to_string()),
+            (
+                "null_terminators",
+                "normal\u{0000}hidden\u{0000}data\u{0000}".to_string(),
+            ),
             ("multiple_nulls", "\u{0000}".repeat(1000)),
             // JSON-like control char injection (literal backslash escapes).
             ("json_injection", r#"{"evil": true}\x00\x0A"#.to_string()),
-            ("newline_injection", "line1\nINJECTED: evil\nline2".to_string()),
+            (
+                "newline_injection",
+                "line1\nINJECTED: evil\nline2".to_string(),
+            ),
         ];
 
         for (test_name, payload) in control_char_payloads {
@@ -8536,14 +8566,14 @@ mod lab_runtime_comprehensive_resilience_and_attack_vector_tests {
             .map(|c| char::from_u32(c).unwrap_or('?'))
             .collect();
         let size_attack_messages: Vec<String> = vec![
-            String::new(),                          // Empty message
-            "B".to_string(),                        // Single byte (0x42)
-            "\u{0000}".repeat(1000),                // Null bytes
-            "\u{00FF}".repeat(1000),                // High bytes
-            large_pattern,                          // Large Latin-1 pattern
-            "B".repeat(1_000_000),                  // 1MB message
-            "🚀".repeat(1000),                      // Unicode flood
-            "\r\n\t\u{0000}\u{00FF}".repeat(1000),  // Control character flood
+            String::new(),                         // Empty message
+            "B".to_string(),                       // Single byte (0x42)
+            "\u{0000}".repeat(1000),               // Null bytes
+            "\u{00FF}".repeat(1000),               // High bytes
+            large_pattern,                         // Large Latin-1 pattern
+            "B".repeat(1_000_000),                 // 1MB message
+            "🚀".repeat(1000),                     // Unicode flood
+            "\r\n\t\u{0000}\u{00FF}".repeat(1000), // Control character flood
         ];
 
         for (idx, message) in size_attack_messages.iter().enumerate() {

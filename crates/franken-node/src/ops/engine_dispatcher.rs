@@ -6103,11 +6103,7 @@ mod tests {
         // Test 2: String processing with length validation
         let medium_input = "medium".repeat(100);
         let long_input = "very_long_string".repeat(10000);
-        let test_inputs = vec![
-            "short",
-            medium_input.as_str(),
-            long_input.as_str(),
-        ];
+        let test_inputs = vec!["short", medium_input.as_str(), long_input.as_str()];
 
         for input in test_inputs {
             let len = input.len();

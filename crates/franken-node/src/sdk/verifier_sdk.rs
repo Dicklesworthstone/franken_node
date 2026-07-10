@@ -3298,8 +3298,11 @@ mod verifier_sdk_boundary_negative_tests {
 
         assert!(matches!(report.verdict, VerifyVerdict::Fail(_)));
         assert!(
-            report.evidence.iter().any(|e| e.check_name == "artifact_id_present"
-                && e.detail.contains("artifact\0injection")),
+            report
+                .evidence
+                .iter()
+                .any(|e| e.check_name == "artifact_id_present"
+                    && e.detail.contains("artifact\0injection")),
             "artifact_id (incl. NUL) round-trips verbatim into evidence detail"
         );
     }
@@ -3389,8 +3392,10 @@ mod verifier_sdk_boundary_negative_tests {
 
         assert!(matches!(report.verdict, VerifyVerdict::Fail(_)));
         assert!(
-            report.evidence.iter().any(|e| e.check_name == "artifact_id_present"
-                && e.detail.contains(SCHEMA_TAG)),
+            report
+                .evidence
+                .iter()
+                .any(|e| e.check_name == "artifact_id_present" && e.detail.contains(SCHEMA_TAG)),
             "schema-tag artifact_id round-trips into evidence detail"
         );
     }
@@ -4135,7 +4140,7 @@ mod verifier_sdk_boundary_negative_tests {
             // NOTE: "\u{0041}" IS the byte-identical ASCII 'A', so the original
             // pair was not a distinct-representation case (it would collide).
             // Use Greek capital Alpha (a true homograph, distinct codepoint).
-            ("A", "\u{0391}"),        // Latin 'A' vs Greek capital Alpha (homograph)
+            ("A", "\u{0391}"), // Latin 'A' vs Greek capital Alpha (homograph)
             // Homograph attacks
             ("microsoft", "microsоft"), // Latin 'o' vs Cyrillic 'о'
             ("secure", "secuгe"),       // Latin 'r' vs Cyrillic 'г'
@@ -4519,8 +4524,7 @@ mod verifier_sdk_boundary_negative_tests {
                     assert!(json.is_ok(), "Edge config {} should serialize", i);
 
                     if let Ok(json_str) = json {
-                        let parsed: Result<VerificationReport, _> =
-                            serde_json::from_str(&json_str);
+                        let parsed: Result<VerificationReport, _> = serde_json::from_str(&json_str);
                         assert!(parsed.is_ok(), "Edge config {} should deserialize", i);
                     }
                 }
@@ -4557,9 +4561,9 @@ mod verifier_sdk_boundary_negative_tests {
             "\u{FFFF}\u{FFFE}\u{FDD0}non_characters", // Non-character code points
             "🔐🛡️\u{1F4A5}💥\u{1F52B}🔫",            // Complex emoji sequences
             "\u{0300}\u{0301}\u{0302}combining_marks", // Combining marks
-            path_traversal_pat.as_str(),              // Path traversal + long string
+            path_traversal_pat.as_str(),             // Path traversal + long string
             "verifier\x00\x01\x02\x03\x04\x05hidden", // Binary injection
-            protocol_injection_pat.as_str(),          // Protocol injection
+            protocol_injection_pat.as_str(),         // Protocol injection
             "verifier://admin'; DROP TABLE verifiers; --@evil.com", // SQL injection style
             "verifier://admin$(rm -rf /)@evil.com",  // Command injection style
         ];
@@ -5265,8 +5269,11 @@ mod verifier_sdk_boundary_negative_tests {
                         0 => {
                             // Conflicting verdicts should be detected
                             assert!(
-                                chain_report.evidence.iter().any(|e| e.detail.contains("conflict")
-                                    || e.detail.contains("inconsistent"))
+                                chain_report
+                                    .evidence
+                                    .iter()
+                                    .any(|e| e.detail.contains("conflict")
+                                        || e.detail.contains("inconsistent"))
                                     || matches!(chain_report.verdict, VerifyVerdict::Fail(_)),
                                 "Should detect conflicting verdicts"
                             );
@@ -5482,12 +5489,11 @@ mod verifier_sdk_boundary_negative_tests {
 
                     // Evidence should mention version handling for extreme versions
                     if attack_capsule.format_version == 0 || attack_capsule.format_version > 100 {
-                        let evidence_mentions_version =
-                            capsule_report.evidence.iter().any(|e| {
-                                e.detail.contains("version")
-                                    || e.detail.contains("format")
-                                    || e.detail.contains("unsupported")
-                            });
+                        let evidence_mentions_version = capsule_report.evidence.iter().any(|e| {
+                            e.detail.contains("version")
+                                || e.detail.contains("format")
+                                || e.detail.contains("unsupported")
+                        });
 
                         assert!(
                             evidence_mentions_version
@@ -5938,8 +5944,11 @@ mod verifier_sdk_boundary_negative_tests {
                         );
                         let trimmed_id = attack_id.trim();
                         assert!(
-                            report.evidence.iter().any(|e| e.check_name == "artifact_id_present"
-                                && e.detail == format!("artifact_id={trimmed_id}")),
+                            report
+                                .evidence
+                                .iter()
+                                .any(|e| e.check_name == "artifact_id_present"
+                                    && e.detail == format!("artifact_id={trimmed_id}")),
                             "artifact_id is reflected verbatim (inert) into evidence detail"
                         );
                     }
@@ -7251,7 +7260,7 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
             ("test", "te\u{0301}st"), // Different but similar Unicode
             ("file", "file\u{200B}"), // With zero-width space
             // Boundary condition attacks
-            ("", "\x00"),       // Empty vs null
+            ("", "\x00"), // Empty vs null
             // NOTE: "\x61" IS the byte-identical ASCII 'a' (not a distinct
             // input), so the original pair would collide. Use a char with/
             // without a NUL terminator as a genuine boundary pair instead.
@@ -7628,7 +7637,7 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
             "verifier://user@evil.com\u{202E}moc.evil@resu", // Unicode BIDI override
             "verifier://\u{FEFF}admin@evil.com", // BOM injection
             "verifier://admin@evil.com\u{200B}", // Zero-width space
-            mem_exhaust_identity.as_str(), // Memory exhaustion
+            mem_exhaust_identity.as_str(),     // Memory exhaustion
             "verifier://admin@evil.com\x1B[31mCOLORED_TEXT\x1B[0m", // Terminal escape sequences
         ];
 
@@ -7748,19 +7757,19 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
         // Test: Artifact ID boundary injection attacks
         let mem_exhaust_id = format!("valid_{}", "x".repeat(10_000));
         let artifact_id_attacks = vec![
-            "  valid_id  ",                          // Leading/trailing whitespace (should fail)
-            "valid\x00id",                           // Null byte injection
-            "valid\r\nid",                           // CRLF injection
-            "valid\tid",                             // Tab injection
-            "valid\u{200B}id",                       // Zero-width space
-            "valid\u{FEFF}id",                       // BOM injection
-            "valid\u{202E}di\u{202D}id",             // BIDI override
-            "valid🔒id",                             // Emoji injection
-            "válid_íd",                              // Unicode normalization
-            mem_exhaust_id.as_str(),                 // Memory exhaustion
-            "VALID_ID",                              // Case variation
-            "valid_id/../../etc/passwd",             // Path traversal
-            "../etc/passwd",                         // Direct path traversal
+            "  valid_id  ",              // Leading/trailing whitespace (should fail)
+            "valid\x00id",               // Null byte injection
+            "valid\r\nid",               // CRLF injection
+            "valid\tid",                 // Tab injection
+            "valid\u{200B}id",           // Zero-width space
+            "valid\u{FEFF}id",           // BOM injection
+            "valid\u{202E}di\u{202D}id", // BIDI override
+            "valid🔒id",                 // Emoji injection
+            "válid_íd",                  // Unicode normalization
+            mem_exhaust_id.as_str(),     // Memory exhaustion
+            "VALID_ID",                  // Case variation
+            "valid_id/../../etc/passwd", // Path traversal
+            "../etc/passwd",             // Direct path traversal
             "CON",
             "PRN",
             "AUX",

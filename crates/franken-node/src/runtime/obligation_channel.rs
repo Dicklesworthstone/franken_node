@@ -1756,460 +1756,466 @@ mod tests {
         use super::*;
 
         #[test]
-    fn negative_massive_obligation_queue_memory_pressure_handling() {
-        // Test channel behavior with massive number of queued obligations
-        let mut channel = ObligationChannel::new();
-        let mut ledger = ObligationLedger::new();
+        fn negative_massive_obligation_queue_memory_pressure_handling() {
+            // Test channel behavior with massive number of queued obligations
+            let mut channel = ObligationChannel::new();
+            let mut ledger = ObligationLedger::new();
 
-        let massive_obligation_count = MAX_QUEUE_ENTRIES.saturating_add(1000);
-        let mut successful_sends = 0;
+            let massive_obligation_count = MAX_QUEUE_ENTRIES.saturating_add(1000);
+            let mut successful_sends = 0;
 
-        // Attempt to queue far more obligations than capacity allows
-        for i in 0..massive_obligation_count {
-            let obligation = ChannelObligation {
-                obligation_id: format!("stress-obligation-{:08}", i),
-                deadline: 10000 + i as u64,
-                trace_id: format!("stress-trace-{:08}", i),
-                status: ObligationStatus::Created,
-                created_at_ms: 1000 + i as u64,
-                resolved_at_ms: None,
-                timeout_policy: TimeoutPolicy::Escalate,
-                schema_version: SCHEMA_VERSION.to_string(),
-            };
+            // Attempt to queue far more obligations than capacity allows
+            for i in 0..massive_obligation_count {
+                let obligation = ChannelObligation {
+                    obligation_id: format!("stress-obligation-{:08}", i),
+                    deadline: 10000 + i as u64,
+                    trace_id: format!("stress-trace-{:08}", i),
+                    status: ObligationStatus::Created,
+                    created_at_ms: 1000 + i as u64,
+                    resolved_at_ms: None,
+                    timeout_policy: TimeoutPolicy::Escalate,
+                    schema_version: SCHEMA_VERSION.to_string(),
+                };
 
-            match channel.send_obligation(obligation.clone(), &mut ledger, 2000 + i as u64) {
-                Ok(()) => {
-                    successful_sends = successful_sends.saturating_add(1);
-                }
-                Err(ChannelError::QueueAtCapacity { .. }) => {
-                    // Expected when queue fills up - should be handled gracefully
-                    break;
-                }
-                Err(_) => {
-                    // Other errors also acceptable under memory pressure
-                    break;
-                }
-            }
-        }
-
-        // Should have sent some obligations but enforced capacity limits
-        assert!(successful_sends > 0);
-        assert!(successful_sends <= MAX_QUEUE_ENTRIES);
-
-        // Channel should remain functional despite stress test
-        let queue = channel.live_queue();
-        assert!(queue.len() <= MAX_QUEUE_ENTRIES);
-
-        // Ledger should track all successful sends
-        let audit_log = ledger.audit_log();
-        assert_eq!(audit_log.len(), successful_sends);
-    }
-
-    #[test]
-    fn negative_unicode_injection_in_obligation_identifiers() {
-        // Test obligation IDs with Unicode, control characters, and injection attempts
-        let mut channel = ObligationChannel::new();
-        let mut ledger = ObligationLedger::new();
-
-        let malicious_obligation_ids = vec![
-            "obligation\0null-injection",
-            "obligation🚀emoji-attack",
-            "obligation\u{200B}zero-width-space",
-            "obligation\u{FEFF}bom-marker",
-            "obligation\r\ncarriage-return",
-            "obligation/../../../etc/passwd",
-            "obligation\u{202E}rtl-override\u{202D}attack",
-            "obligation\x1B[H\x1B[2Jansi-escape",
-            "обязательство-кириллица",
-            "义务-中文",
-            "obligation\x01\x02\x03control-chars",
-        ];
-
-        for (i, malicious_id) in malicious_obligation_ids.iter().enumerate() {
-            let obligation = ChannelObligation {
-                obligation_id: malicious_id.clone(),
-                deadline: 5000 + i as u64,
-                trace_id: format!("unicode-trace-{}", i),
-                status: ObligationStatus::Created,
-                created_at_ms: 1000 + i as u64,
-                resolved_at_ms: None,
-                timeout_policy: TimeoutPolicy::Escalate,
-                schema_version: SCHEMA_VERSION.to_string(),
-            };
-
-            // Should handle Unicode identifiers without corruption or crashes
-            let send_result =
-                channel.send_obligation(obligation.clone(), &mut ledger, 2000 + i as u64);
-
-            match send_result {
-                Ok(()) => {
-                    // Successfully sent - should be able to fulfill with same ID
-                    let fulfill_result =
-                        channel.fulfill_obligation(malicious_id, &mut ledger, 3000 + i as u64);
-                    assert!(
-                        fulfill_result.is_ok(),
-                        "Should fulfill obligation with Unicode ID: {}",
-                        malicious_id
-                    );
-                }
-                Err(_) => {
-                    // Acceptable to reject malformed identifiers
+                match channel.send_obligation(obligation.clone(), &mut ledger, 2000 + i as u64) {
+                    Ok(()) => {
+                        successful_sends = successful_sends.saturating_add(1);
+                    }
+                    Err(ChannelError::QueueAtCapacity { .. }) => {
+                        // Expected when queue fills up - should be handled gracefully
+                        break;
+                    }
+                    Err(_) => {
+                        // Other errors also acceptable under memory pressure
+                        break;
+                    }
                 }
             }
+
+            // Should have sent some obligations but enforced capacity limits
+            assert!(successful_sends > 0);
+            assert!(successful_sends <= MAX_QUEUE_ENTRIES);
+
+            // Channel should remain functional despite stress test
+            let queue = channel.live_queue();
+            assert!(queue.len() <= MAX_QUEUE_ENTRIES);
+
+            // Ledger should track all successful sends
+            let audit_log = ledger.audit_log();
+            assert_eq!(audit_log.len(), successful_sends);
         }
 
-        // Audit log should handle Unicode content safely
-        let audit_log = ledger.audit_log();
-        for record in audit_log {
-            assert!(!record.obligation_id.is_empty());
-            // Should not have corrupted other fields
-            assert!(!record.trace_id.is_empty());
-        }
-    }
+        #[test]
+        fn negative_unicode_injection_in_obligation_identifiers() {
+            // Test obligation IDs with Unicode, control characters, and injection attempts
+            let mut channel = ObligationChannel::new();
+            let mut ledger = ObligationLedger::new();
 
-    #[test]
-    fn negative_extreme_deadline_arithmetic_overflow_protection() {
-        // Test deadline calculations near u64::MAX boundary
-        let mut channel = ObligationChannel::new();
-        let mut ledger = ObligationLedger::new();
+            let malicious_obligation_ids = vec![
+                "obligation\0null-injection",
+                "obligation🚀emoji-attack",
+                "obligation\u{200B}zero-width-space",
+                "obligation\u{FEFF}bom-marker",
+                "obligation\r\ncarriage-return",
+                "obligation/../../../etc/passwd",
+                "obligation\u{202E}rtl-override\u{202D}attack",
+                "obligation\x1B[H\x1B[2Jansi-escape",
+                "обязательство-кириллица",
+                "义务-中文",
+                "obligation\x01\x02\x03control-chars",
+            ];
 
-        let extreme_deadline_cases = vec![
-            u64::MAX,
-            u64::MAX.saturating_sub(1),
-            u64::MAX.saturating_sub(1000),
-            0, // Zero deadline (edge case)
-            1, // Minimal deadline
-        ];
+            for (i, malicious_id) in malicious_obligation_ids.iter().enumerate() {
+                let obligation = ChannelObligation {
+                    obligation_id: malicious_id.clone(),
+                    deadline: 5000 + i as u64,
+                    trace_id: format!("unicode-trace-{}", i),
+                    status: ObligationStatus::Created,
+                    created_at_ms: 1000 + i as u64,
+                    resolved_at_ms: None,
+                    timeout_policy: TimeoutPolicy::Escalate,
+                    schema_version: SCHEMA_VERSION.to_string(),
+                };
 
-        for (i, extreme_deadline) in extreme_deadline_cases.iter().enumerate() {
-            let obligation = ChannelObligation {
-                obligation_id: format!("extreme-deadline-{}", i),
-                deadline: *extreme_deadline,
-                trace_id: format!("extreme-trace-{}", i),
-                status: ObligationStatus::Created,
-                created_at_ms: 1000,
-                resolved_at_ms: None,
-                timeout_policy: TimeoutPolicy::Escalate,
-                schema_version: SCHEMA_VERSION.to_string(),
-            };
+                // Should handle Unicode identifiers without corruption or crashes
+                let send_result =
+                    channel.send_obligation(obligation.clone(), &mut ledger, 2000 + i as u64);
 
-            let send_result = channel.send_obligation(obligation.clone(), &mut ledger, 2000);
-
-            match send_result {
-                Ok(()) => {
-                    // Test timeout checking with extreme deadlines
-                    let now_extreme = u64::MAX.saturating_sub(500);
-                    let timeout_results = channel.check_timeouts(&mut ledger, now_extreme);
-
-                    // Should handle extreme arithmetic without overflow
-                    assert!(timeout_results.len() <= 1); // At most the current obligation
-                }
-                Err(_) => {
-                    // Acceptable to reject extreme deadlines
-                }
-            }
-        }
-
-        // Audit log should handle extreme timestamps
-        let audit_log = ledger.audit_log();
-        for record in audit_log {
-            assert!(record.timestamp_ms <= u64::MAX);
-        }
-    }
-
-    #[test]
-    fn negative_two_phase_flow_state_corruption_and_double_operations() {
-        // Test two-phase flow against state corruption and double operations
-        let mut channel = ObligationChannel::new();
-        let mut ledger = ObligationLedger::new();
-
-        // Create two-phase flow
-        let flow_id = "state-corruption-flow".to_string();
-        let obligations = vec![
-            make_obligation("corrupt-1", 10000, "trace-corrupt-1"),
-            make_obligation("corrupt-2", 10000, "trace-corrupt-2"),
-        ];
-
-        let mut flow = TwoPhaseFlow::new(flow_id.clone(), obligations);
-
-        // Normal prepare
-        let prepare_result = flow.prepare(&mut channel, &mut ledger, 5000);
-        assert!(matches!(prepare_result, PrepareResult::Prepared { .. }));
-
-        // Try to prepare again (double prepare)
-        let double_prepare_result = flow.prepare(&mut channel, &mut ledger, 5100);
-        match double_prepare_result {
-            PrepareResult::Failed { reason, .. } => {
-                assert!(reason.contains("already prepared") || reason.contains("invalid state"));
-            }
-            _ => {} // Implementation may allow idempotent prepare
-        }
-
-        // Try to commit without proper state
-        let commit_result = flow.commit(&mut channel, &mut ledger, 5200);
-
-        // Should succeed if properly prepared
-        match commit_result {
-            CommitResult::Committed { .. } => {
-                // Try to commit again (double commit)
-                let double_commit_result = flow.commit(&mut channel, &mut ledger, 5300);
-                match double_commit_result {
-                    CommitResult::RolledBack { reason, .. } => {
+                match send_result {
+                    Ok(()) => {
+                        // Successfully sent - should be able to fulfill with same ID
+                        let fulfill_result =
+                            channel.fulfill_obligation(malicious_id, &mut ledger, 3000 + i as u64);
                         assert!(
-                            reason.contains("already committed")
-                                || reason.contains("invalid state")
+                            fulfill_result.is_ok(),
+                            "Should fulfill obligation with Unicode ID: {}",
+                            malicious_id
                         );
                     }
-                    _ => {} // Implementation may handle double commit differently
+                    Err(_) => {
+                        // Acceptable to reject malformed identifiers
+                    }
                 }
             }
-            CommitResult::RolledBack { .. } => {
-                // Expected if flow couldn't commit
+
+            // Audit log should handle Unicode content safely
+            let audit_log = ledger.audit_log();
+            for record in audit_log {
+                assert!(!record.obligation_id.is_empty());
+                // Should not have corrupted other fields
+                assert!(!record.trace_id.is_empty());
             }
         }
 
-        // Flow should maintain consistent state despite corruption attempts
-        assert!(flow.is_committed() != flow.is_rolled_back()); // Mutually exclusive states
-    }
+        #[test]
+        fn negative_extreme_deadline_arithmetic_overflow_protection() {
+            // Test deadline calculations near u64::MAX boundary
+            let mut channel = ObligationChannel::new();
+            let mut ledger = ObligationLedger::new();
 
-    #[test]
-    fn negative_malformed_timeout_policy_edge_cases() {
-        // Test malformed and edge case timeout policies
-        let mut channel = ObligationChannel::new();
-        let mut ledger = ObligationLedger::new();
+            let extreme_deadline_cases = vec![
+                u64::MAX,
+                u64::MAX.saturating_sub(1),
+                u64::MAX.saturating_sub(1000),
+                0, // Zero deadline (edge case)
+                1, // Minimal deadline
+            ];
 
-        let timeout_policy_cases = vec![
-            TimeoutPolicy::Escalate,
-            TimeoutPolicy::FailSilently,
-            TimeoutPolicy::Retry,
-        ];
+            for (i, extreme_deadline) in extreme_deadline_cases.iter().enumerate() {
+                let obligation = ChannelObligation {
+                    obligation_id: format!("extreme-deadline-{}", i),
+                    deadline: *extreme_deadline,
+                    trace_id: format!("extreme-trace-{}", i),
+                    status: ObligationStatus::Created,
+                    created_at_ms: 1000,
+                    resolved_at_ms: None,
+                    timeout_policy: TimeoutPolicy::Escalate,
+                    schema_version: SCHEMA_VERSION.to_string(),
+                };
 
-        for (i, policy) in timeout_policy_cases.iter().enumerate() {
-            // Create obligation with immediate deadline (already expired)
-            let expired_obligation = ChannelObligation {
-                obligation_id: format!("expired-policy-{}", i),
-                deadline: 1, // Already expired when checking at time 1000+
-                trace_id: format!("expired-trace-{}", i),
-                status: ObligationStatus::Created,
-                created_at_ms: 500,
-                resolved_at_ms: None,
-                timeout_policy: policy.clone(),
-                schema_version: SCHEMA_VERSION.to_string(),
-            };
+                let send_result = channel.send_obligation(obligation.clone(), &mut ledger, 2000);
 
-            let send_result =
-                channel.send_obligation(expired_obligation.clone(), &mut ledger, 1000);
+                match send_result {
+                    Ok(()) => {
+                        // Test timeout checking with extreme deadlines
+                        let now_extreme = u64::MAX.saturating_sub(500);
+                        let timeout_results = channel.check_timeouts(&mut ledger, now_extreme);
 
-            if send_result.is_ok() {
-                // Check timeouts with various policies
-                let timeout_results = channel.check_timeouts(&mut ledger, 2000);
+                        // Should handle extreme arithmetic without overflow
+                        assert!(timeout_results.len() <= 1); // At most the current obligation
+                    }
+                    Err(_) => {
+                        // Acceptable to reject extreme deadlines
+                    }
+                }
+            }
 
-                // Should handle different timeout policies appropriately
-                // Exact behavior depends on policy implementation
-                for timeout_result in timeout_results {
-                    assert!(!timeout_result.obligation_id.is_empty());
+            // Audit log should handle extreme timestamps
+            let audit_log = ledger.audit_log();
+            for record in audit_log {
+                assert!(record.timestamp_ms <= u64::MAX);
+            }
+        }
+
+        #[test]
+        fn negative_two_phase_flow_state_corruption_and_double_operations() {
+            // Test two-phase flow against state corruption and double operations
+            let mut channel = ObligationChannel::new();
+            let mut ledger = ObligationLedger::new();
+
+            // Create two-phase flow
+            let flow_id = "state-corruption-flow".to_string();
+            let obligations = vec![
+                make_obligation("corrupt-1", 10000, "trace-corrupt-1"),
+                make_obligation("corrupt-2", 10000, "trace-corrupt-2"),
+            ];
+
+            let mut flow = TwoPhaseFlow::new(flow_id.clone(), obligations);
+
+            // Normal prepare
+            let prepare_result = flow.prepare(&mut channel, &mut ledger, 5000);
+            assert!(matches!(prepare_result, PrepareResult::Prepared { .. }));
+
+            // Try to prepare again (double prepare)
+            let double_prepare_result = flow.prepare(&mut channel, &mut ledger, 5100);
+            match double_prepare_result {
+                PrepareResult::Failed { reason, .. } => {
+                    assert!(
+                        reason.contains("already prepared") || reason.contains("invalid state")
+                    );
+                }
+                _ => {} // Implementation may allow idempotent prepare
+            }
+
+            // Try to commit without proper state
+            let commit_result = flow.commit(&mut channel, &mut ledger, 5200);
+
+            // Should succeed if properly prepared
+            match commit_result {
+                CommitResult::Committed { .. } => {
+                    // Try to commit again (double commit)
+                    let double_commit_result = flow.commit(&mut channel, &mut ledger, 5300);
+                    match double_commit_result {
+                        CommitResult::RolledBack { reason, .. } => {
+                            assert!(
+                                reason.contains("already committed")
+                                    || reason.contains("invalid state")
+                            );
+                        }
+                        _ => {} // Implementation may handle double commit differently
+                    }
+                }
+                CommitResult::RolledBack { .. } => {
+                    // Expected if flow couldn't commit
+                }
+            }
+
+            // Flow should maintain consistent state despite corruption attempts
+            assert!(flow.is_committed() != flow.is_rolled_back()); // Mutually exclusive states
+        }
+
+        #[test]
+        fn negative_malformed_timeout_policy_edge_cases() {
+            // Test malformed and edge case timeout policies
+            let mut channel = ObligationChannel::new();
+            let mut ledger = ObligationLedger::new();
+
+            let timeout_policy_cases = vec![
+                TimeoutPolicy::Escalate,
+                TimeoutPolicy::FailSilently,
+                TimeoutPolicy::Retry,
+            ];
+
+            for (i, policy) in timeout_policy_cases.iter().enumerate() {
+                // Create obligation with immediate deadline (already expired)
+                let expired_obligation = ChannelObligation {
+                    obligation_id: format!("expired-policy-{}", i),
+                    deadline: 1, // Already expired when checking at time 1000+
+                    trace_id: format!("expired-trace-{}", i),
+                    status: ObligationStatus::Created,
+                    created_at_ms: 500,
+                    resolved_at_ms: None,
+                    timeout_policy: policy.clone(),
+                    schema_version: SCHEMA_VERSION.to_string(),
+                };
+
+                let send_result =
+                    channel.send_obligation(expired_obligation.clone(), &mut ledger, 1000);
+
+                if send_result.is_ok() {
+                    // Check timeouts with various policies
+                    let timeout_results = channel.check_timeouts(&mut ledger, 2000);
+
+                    // Should handle different timeout policies appropriately
+                    // Exact behavior depends on policy implementation
+                    for timeout_result in timeout_results {
+                        assert!(!timeout_result.obligation_id.is_empty());
+                    }
                 }
             }
         }
-    }
 
-    #[test]
-    fn negative_obligation_status_transition_validation() {
-        // Test invalid obligation status transitions
-        let mut channel = ObligationChannel::new();
-        let mut ledger = ObligationLedger::new();
+        #[test]
+        fn negative_obligation_status_transition_validation() {
+            // Test invalid obligation status transitions
+            let mut channel = ObligationChannel::new();
+            let mut ledger = ObligationLedger::new();
 
-        // Create and send obligation
-        let obligation = make_obligation("status-test", 10000, "status-trace");
-        channel
-            .send_obligation(obligation, &mut ledger, 1000)
-            .expect("send obligation");
+            // Create and send obligation
+            let obligation = make_obligation("status-test", 10000, "status-trace");
+            channel
+                .send_obligation(obligation, &mut ledger, 1000)
+                .expect("send obligation");
 
-        // Try to fulfill
-        channel
-            .fulfill_obligation("status-test", &mut ledger, 2000)
-            .expect("fulfill obligation");
+            // Try to fulfill
+            channel
+                .fulfill_obligation("status-test", &mut ledger, 2000)
+                .expect("fulfill obligation");
 
-        // Try to fulfill already-fulfilled obligation
-        let double_fulfill_result = channel.fulfill_obligation("status-test", &mut ledger, 3000);
-        match double_fulfill_result {
-            Err(ChannelError::AlreadyFulfilled { .. }) => {
-                // Expected error
+            // Try to fulfill already-fulfilled obligation
+            let double_fulfill_result =
+                channel.fulfill_obligation("status-test", &mut ledger, 3000);
+            match double_fulfill_result {
+                Err(ChannelError::AlreadyFulfilled { .. }) => {
+                    // Expected error
+                }
+                _ => {} // Implementation may handle differently
             }
-            _ => {} // Implementation may handle differently
+
+            // Try to reject already-fulfilled obligation
+            let reject_fulfilled_result =
+                channel.reject_obligation("status-test", &mut ledger, "test reason", 4000);
+            match reject_fulfilled_result {
+                Err(ChannelError::AlreadyFulfilled { .. }) => {
+                    // Expected error
+                }
+                _ => {} // Implementation may handle differently
+            }
+
+            // Try to cancel already-fulfilled obligation
+            let cancel_fulfilled_result =
+                channel.cancel_obligation("status-test", &mut ledger, 5000);
+            match cancel_fulfilled_result {
+                Err(ChannelError::AlreadyFulfilled { .. }) => {
+                    // Expected error
+                }
+                _ => {} // Implementation may handle differently
+            }
+
+            // All invalid transitions should be properly recorded in audit log
+            let audit_log = ledger.audit_log();
+            assert!(audit_log.len() >= 2); // At least send + fulfill
         }
 
-        // Try to reject already-fulfilled obligation
-        let reject_fulfilled_result =
-            channel.reject_obligation("status-test", &mut ledger, "test reason", 4000);
-        match reject_fulfilled_result {
-            Err(ChannelError::AlreadyFulfilled { .. }) => {
-                // Expected error
+        #[test]
+        fn negative_audit_log_memory_exhaustion_with_rapid_operations() {
+            // Test audit log behavior under rapid operation bursts
+            let mut channel = ObligationChannel::new();
+            let mut ledger = ObligationLedger::new();
+
+            // Generate operations far exceeding MAX_AUDIT_LOG_ENTRIES
+            for cycle in 0..100 {
+                for op_num in 0..50 {
+                    let obligation_id = format!("rapid-{:03}-{:03}", cycle, op_num);
+                    let obligation = make_obligation(
+                        &obligation_id,
+                        10000,
+                        &format!("rapid-trace-{}-{}", cycle, op_num),
+                    );
+
+                    // Send obligation
+                    if channel
+                        .send_obligation(obligation, &mut ledger, cycle * 100 + op_num)
+                        .is_ok()
+                    {
+                        // Randomly fulfill, reject, or cancel
+                        match op_num % 3 {
+                            0 => {
+                                let _ = channel.fulfill_obligation(
+                                    &obligation_id,
+                                    &mut ledger,
+                                    cycle * 100 + op_num + 50,
+                                );
+                            }
+                            1 => {
+                                let _ = channel.reject_obligation(
+                                    &obligation_id,
+                                    &mut ledger,
+                                    "test",
+                                    cycle * 100 + op_num + 50,
+                                );
+                            }
+                            2 => {
+                                let _ = channel.cancel_obligation(
+                                    &obligation_id,
+                                    &mut ledger,
+                                    cycle * 100 + op_num + 50,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
-            _ => {} // Implementation may handle differently
+
+            // Audit log should be bounded despite high operation volume
+            let audit_log = ledger.audit_log();
+            assert!(audit_log.len() <= MAX_AUDIT_LOG_ENTRIES.saturating_add(100)); // Allow implementation slack
+
+            // All audit entries should be well-formed
+            for record in audit_log {
+                assert!(!record.obligation_id.is_empty());
+                assert!(!record.trace_id.is_empty());
+                assert!(!record.event_code.is_empty());
+                assert!(record.timestamp_ms > 0);
+            }
         }
 
-        // Try to cancel already-fulfilled obligation
-        let cancel_fulfilled_result = channel.cancel_obligation("status-test", &mut ledger, 5000);
-        match cancel_fulfilled_result {
-            Err(ChannelError::AlreadyFulfilled { .. }) => {
-                // Expected error
-            }
-            _ => {} // Implementation may handle differently
-        }
+        #[test]
+        fn negative_closure_proof_generation_with_massive_obligation_sets() {
+            // Test closure proof generation under memory pressure with large obligation sets
+            let mut channel = ObligationChannel::new();
+            let mut ledger = ObligationLedger::new();
 
-        // All invalid transitions should be properly recorded in audit log
-        let audit_log = ledger.audit_log();
-        assert!(audit_log.len() >= 2); // At least send + fulfill
-    }
+            // Create large set of obligations with various states
+            let large_obligation_count = 1000;
+            let mut obligation_ids = Vec::new();
 
-    #[test]
-    fn negative_audit_log_memory_exhaustion_with_rapid_operations() {
-        // Test audit log behavior under rapid operation bursts
-        let mut channel = ObligationChannel::new();
-        let mut ledger = ObligationLedger::new();
+            for i in 0..large_obligation_count {
+                let obligation_id = format!("closure-obligation-{:06}", i);
+                let obligation =
+                    make_obligation(&obligation_id, 20000, &format!("closure-trace-{:06}", i));
 
-        // Generate operations far exceeding MAX_AUDIT_LOG_ENTRIES
-        for cycle in 0..100 {
-            for op_num in 0..50 {
-                let obligation_id = format!("rapid-{:03}-{:03}", cycle, op_num);
-                let obligation = make_obligation(
-                    &obligation_id,
-                    10000,
-                    &format!("rapid-trace-{}-{}", cycle, op_num),
-                );
-
-                // Send obligation
                 if channel
-                    .send_obligation(obligation, &mut ledger, cycle * 100 + op_num)
+                    .send_obligation(obligation, &mut ledger, 1000 + i)
                     .is_ok()
                 {
-                    // Randomly fulfill, reject, or cancel
-                    match op_num % 3 {
+                    obligation_ids.push(obligation_id.clone());
+
+                    // Create various terminal states
+                    match i % 4 {
                         0 => {
-                            let _ = channel.fulfill_obligation(
-                                &obligation_id,
-                                &mut ledger,
-                                cycle * 100 + op_num + 50,
-                            );
+                            let _ =
+                                channel.fulfill_obligation(&obligation_id, &mut ledger, 15000 + i);
                         }
                         1 => {
                             let _ = channel.reject_obligation(
                                 &obligation_id,
                                 &mut ledger,
-                                "test",
-                                cycle * 100 + op_num + 50,
+                                "test rejection",
+                                15000 + i,
                             );
                         }
                         2 => {
-                            let _ = channel.cancel_obligation(
-                                &obligation_id,
-                                &mut ledger,
-                                cycle * 100 + op_num + 50,
-                            );
+                            let _ =
+                                channel.cancel_obligation(&obligation_id, &mut ledger, 15000 + i);
+                        }
+                        3 => {
+                            // Leave in Created state - will be timed out
+                            let _timeout_results = channel.check_timeouts(&mut ledger, 25000 + i);
                         }
                         _ => {}
                     }
                 }
             }
-        }
 
-        // Audit log should be bounded despite high operation volume
-        let audit_log = ledger.audit_log();
-        assert!(audit_log.len() <= MAX_AUDIT_LOG_ENTRIES.saturating_add(100)); // Allow implementation slack
+            // Generate closure proof with large obligation set
+            let proof_result = channel.generate_closure_proof(&ledger, 30000);
 
-        // All audit entries should be well-formed
-        for record in audit_log {
-            assert!(!record.obligation_id.is_empty());
-            assert!(!record.trace_id.is_empty());
-            assert!(!record.event_code.is_empty());
-            assert!(record.timestamp_ms > 0);
-        }
-    }
+            match proof_result {
+                Ok(proof) => {
+                    // Proof should handle large datasets without memory exhaustion
+                    assert!(!proof.proof_id.is_empty());
+                    assert!(
+                        proof.total_obligations
+                            <= u32::try_from(obligation_ids.len()).unwrap_or(u32::MAX)
+                    );
+                    assert!(proof.fulfilled_count <= proof.total_obligations);
+                    assert!(proof.rejected_count <= proof.total_obligations);
+                    assert!(proof.cancelled_count <= proof.total_obligations);
+                    assert!(proof.timed_out_count <= proof.total_obligations);
 
-    #[test]
-    fn negative_closure_proof_generation_with_massive_obligation_sets() {
-        // Test closure proof generation under memory pressure with large obligation sets
-        let mut channel = ObligationChannel::new();
-        let mut ledger = ObligationLedger::new();
+                    // Sum should equal total
+                    let sum = proof.fulfilled_count
+                        + proof.rejected_count
+                        + proof.cancelled_count
+                        + proof.timed_out_count;
+                    assert_eq!(sum, proof.total_obligations);
 
-        // Create large set of obligations with various states
-        let large_obligation_count = 1000;
-        let mut obligation_ids = Vec::new();
-
-        for i in 0..large_obligation_count {
-            let obligation_id = format!("closure-obligation-{:06}", i);
-            let obligation =
-                make_obligation(&obligation_id, 20000, &format!("closure-trace-{:06}", i));
-
-            if channel
-                .send_obligation(obligation, &mut ledger, 1000 + i)
-                .is_ok()
-            {
-                obligation_ids.push(obligation_id.clone());
-
-                // Create various terminal states
-                match i % 4 {
-                    0 => {
-                        let _ = channel.fulfill_obligation(&obligation_id, &mut ledger, 15000 + i);
-                    }
-                    1 => {
-                        let _ = channel.reject_obligation(
-                            &obligation_id,
-                            &mut ledger,
-                            "test rejection",
-                            15000 + i,
-                        );
-                    }
-                    2 => {
-                        let _ = channel.cancel_obligation(&obligation_id, &mut ledger, 15000 + i);
-                    }
-                    3 => {
-                        // Leave in Created state - will be timed out
-                        let _timeout_results = channel.check_timeouts(&mut ledger, 25000 + i);
-                    }
-                    _ => {}
+                    // Obligation details should be bounded or summarized appropriately
+                    assert!(proof.obligation_details.len() <= large_obligation_count);
+                }
+                Err(_) => {
+                    // Acceptable to fail under extreme memory pressure
                 }
             }
-        }
 
-        // Generate closure proof with large obligation set
-        let proof_result = channel.generate_closure_proof(&ledger, 30000);
-
-        match proof_result {
-            Ok(proof) => {
-                // Proof should handle large datasets without memory exhaustion
-                assert!(!proof.proof_id.is_empty());
-                assert!(
-                    proof.total_obligations
-                        <= u32::try_from(obligation_ids.len()).unwrap_or(u32::MAX)
-                );
-                assert!(proof.fulfilled_count <= proof.total_obligations);
-                assert!(proof.rejected_count <= proof.total_obligations);
-                assert!(proof.cancelled_count <= proof.total_obligations);
-                assert!(proof.timed_out_count <= proof.total_obligations);
-
-                // Sum should equal total
-                let sum = proof.fulfilled_count
-                    + proof.rejected_count
-                    + proof.cancelled_count
-                    + proof.timed_out_count;
-                assert_eq!(sum, proof.total_obligations);
-
-                // Obligation details should be bounded or summarized appropriately
-                assert!(proof.obligation_details.len() <= large_obligation_count);
-            }
-            Err(_) => {
-                // Acceptable to fail under extreme memory pressure
+            // Channel should remain functional after closure proof generation
+            let queue = channel.live_queue();
+            // Queue should be empty or contain only non-terminal obligations
+            for obligation in queue {
+                assert_eq!(obligation.status, ObligationStatus::Created);
             }
         }
-
-        // Channel should remain functional after closure proof generation
-        let queue = channel.live_queue();
-        // Queue should be empty or contain only non-terminal obligations
-        for obligation in queue {
-            assert_eq!(obligation.status, ObligationStatus::Created);
-        }
-    }
     }
 }

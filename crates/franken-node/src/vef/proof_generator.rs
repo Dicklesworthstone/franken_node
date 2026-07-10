@@ -2291,10 +2291,10 @@ mod tests {
                     "C:\\Windows\\System32\\config\\sam",
                     "javascript:alert(1)",
                     "data:text/html,<script>",
-                    "",                              // Empty name
-                    " ",                             // Whitespace only
-                    "\t\n\r",                        // Control characters
-                    extremely_long_name.as_str(),    // Extremely long
+                    "",                           // Empty name
+                    " ",                          // Whitespace only
+                    "\t\n\r",                     // Control characters
+                    extremely_long_name.as_str(), // Extremely long
                 ];
 
                 for malicious_name in malicious_backend_names {

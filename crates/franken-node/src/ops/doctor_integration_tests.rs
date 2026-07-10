@@ -347,10 +347,9 @@ mod tests {
             }
             (Value::Object(xs), Value::Object(ys)) => {
                 xs.len() == ys.len()
-                    && xs.iter().all(|(key, xv)| {
-                        ys.get(key)
-                            .is_some_and(|yv| json_value_approx_eq(xv, yv))
-                    })
+                    && xs
+                        .iter()
+                        .all(|(key, xv)| ys.get(key).is_some_and(|yv| json_value_approx_eq(xv, yv)))
             }
             _ => a == b,
         }

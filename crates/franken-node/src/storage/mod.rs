@@ -97,8 +97,11 @@ mod negative_path_tests {
     fn missing_cache_read_returns_no_value() {
         let mut adapter = FrankensqliteAdapter::default();
 
-        let result =
-            FrankensqliteTestCallerExt::read(&mut adapter, PersistenceClass::Cache, "missing-cache-key");
+        let result = FrankensqliteTestCallerExt::read(
+            &mut adapter,
+            PersistenceClass::Cache,
+            "missing-cache-key",
+        );
 
         assert!(!result.found);
         assert!(result.value.is_none());

@@ -843,7 +843,8 @@ fn run_surfaces_signed_http_get_response_event_stream_ledger_bd_3894s() {
     let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
         serde_json::from_str(&entries_json)
             .expect("verifier SDK accepts the run --json ledger wire shape");
-    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-http-event-stream-e2e");
+    let sdk =
+        frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-http-event-stream-e2e");
     let verdict = sdk
         .verify_effect_chain_entries(&sdk_entries)
         .expect("verifier SDK re-derives the http + fs effect chain offline");

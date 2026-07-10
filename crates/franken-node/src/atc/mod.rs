@@ -1098,8 +1098,11 @@ mod update_field_negative_tests {
         update_field(&mut hasher1, b"domain", b"data");
 
         // Attack: try to embed fake length prefixes
-        let fake_domain: &'static [u8] =
-            Box::leak([&6u64.to_le_bytes()[..], b"domain"].concat().into_boxed_slice());
+        let fake_domain: &'static [u8] = Box::leak(
+            [&6u64.to_le_bytes()[..], b"domain"]
+                .concat()
+                .into_boxed_slice(),
+        );
         let fake_data = [&4u64.to_le_bytes()[..], b"data"].concat();
         update_field(&mut hasher2, fake_domain, &fake_data);
 
@@ -2368,7 +2371,7 @@ mod atc_extreme_adversarial_negative_tests {
             // so it could never differ. Use a genuine homoglyph (Greek capital Alpha) so the
             // "distinct Unicode representation => distinct fingerprint" intent is exercised.
             ("A", "\u{0391}"), // ASCII 'A' vs Greek capital Alpha homoglyph (distinct bytes)
-            ("Ⅸ", "IX"),              // Roman numeral vs ASCII
+            ("Ⅸ", "IX"),       // Roman numeral vs ASCII
             ("\u{FEFF}test", "test"), // With/without BOM
             ("test\u{200B}", "test"), // With/without zero-width space
         ];
@@ -4201,39 +4204,39 @@ mod atc_extreme_adversarial_negative_tests {
 
         // Test module name validation resistance
         let boundary_violation_modules = vec![
-            "",               // Empty module
-            " ",              // Whitespace only
-            "\t",             // Tab only
-            "\n",             // Newline only
-            "\r\n",           // CRLF
-            ".",              // Single dot
-            "..",             // Double dot
-            "...",            // Triple dot
-            "module.",        // Ends with dot
-            ".module",        // Starts with dot
-            "mod..ule",       // Double dots in middle
-            "module/",        // Ends with slash
-            "/module",        // Starts with slash
-            "mod/ule",        // Slash in middle
-            "module\\",       // Ends with backslash
-            "\\module",       // Starts with backslash
-            "mod\\ule",       // Backslash in middle
-            "MOD",            // All uppercase
-            "Mod",            // Mixed case
-            "123",            // Numeric only
-            "_",              // Underscore only
-            "__",             // Double underscore
-            "mod__ule",       // Double underscore in middle
-            "module__",       // Ends with double underscore
-            "__module",       // Starts with double underscore
+            "",         // Empty module
+            " ",        // Whitespace only
+            "\t",       // Tab only
+            "\n",       // Newline only
+            "\r\n",     // CRLF
+            ".",        // Single dot
+            "..",       // Double dot
+            "...",      // Triple dot
+            "module.",  // Ends with dot
+            ".module",  // Starts with dot
+            "mod..ule", // Double dots in middle
+            "module/",  // Ends with slash
+            "/module",  // Starts with slash
+            "mod/ule",  // Slash in middle
+            "module\\", // Ends with backslash
+            "\\module", // Starts with backslash
+            "mod\\ule", // Backslash in middle
+            "MOD",      // All uppercase
+            "Mod",      // Mixed case
+            "123",      // Numeric only
+            "_",        // Underscore only
+            "__",       // Double underscore
+            "mod__ule", // Double underscore in middle
+            "module__", // Ends with double underscore
+            "__module", // Starts with double underscore
             {
                 // Leak so the long module name shares the `&'static str` element type.
                 let long: &'static str = Box::leak("a".repeat(1000).into_boxed_str());
                 long
             }, // Extremely long
-            "\x00module",     // Null prefix
-            "module\x00",     // Null suffix
-            "mod\x00ule",     // Null in middle
+            "\x00module", // Null prefix
+            "module\x00", // Null suffix
+            "mod\x00ule", // Null in middle
         ];
 
         for (boundary_idx, boundary_module) in boundary_violation_modules.into_iter().enumerate() {
@@ -5120,8 +5123,7 @@ mod atc_extreme_adversarial_negative_tests {
             } else {
                 // Just test a few permutations for larger sets. Use owned `String`s so
                 // this branch matches the `Vec<Vec<String>>` type of the `if` branch.
-                let base_strings: Vec<String> =
-                    base_order.iter().map(|s| s.to_string()).collect();
+                let base_strings: Vec<String> = base_order.iter().map(|s| s.to_string()).collect();
                 vec![
                     base_strings.clone(),
                     {
@@ -6989,8 +6991,8 @@ mod atc_extreme_adversarial_negative_tests {
                 "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb".to_string(), // SHA256("a")
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(), // SHA256("abc")
                 "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592".to_string(), // SHA256("The quick brown fox jumps over the lazy dog")
-                "0".repeat(64),                                                     // All zeros
-                "f".repeat(64),                                                     // All F's
+                "0".repeat(64),       // All zeros
+                "f".repeat(64),       // All F's
                 "deadbeef".repeat(8), // Repeated pattern
             ];
 

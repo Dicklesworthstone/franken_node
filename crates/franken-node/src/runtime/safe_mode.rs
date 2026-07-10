@@ -3537,11 +3537,13 @@ mod tests {
                     "Environment variable name should not contain null bytes"
                 );
                 assert!(
-                    constant_time::ct_eq_bytes(config.env_var_name.as_bytes(), b"FRANKEN_SAFE_MODE")
-                        || config
-                            .env_var_name
-                            .chars()
-                            .all(|c| c.is_alphanumeric() || c == '_'),
+                    constant_time::ct_eq_bytes(
+                        config.env_var_name.as_bytes(),
+                        b"FRANKEN_SAFE_MODE"
+                    ) || config
+                        .env_var_name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_'),
                     "Environment variable name should be sanitized"
                 );
             }

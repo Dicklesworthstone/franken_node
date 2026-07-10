@@ -295,7 +295,10 @@ fn neutralize_live_workspace_pressure(report: &mut Value) {
             }
         }
     }
-    if let Some(logs) = report.get_mut("structured_logs").and_then(Value::as_array_mut) {
+    if let Some(logs) = report
+        .get_mut("structured_logs")
+        .and_then(Value::as_array_mut)
+    {
         for log in logs.iter_mut() {
             if log.get("check_code").and_then(Value::as_str) == Some("DR-WORKSPACE-001") {
                 if let Some(value) = log.get_mut("status") {

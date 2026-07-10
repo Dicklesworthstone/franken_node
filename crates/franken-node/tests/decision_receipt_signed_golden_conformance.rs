@@ -181,7 +181,8 @@ fn canonicalize_value(value: Value) -> Value {
 }
 
 fn canonical_json(value: &impl Serialize) -> Result<String, String> {
-    let value = serde_json::to_value(value).map_err(|err| format!("serialize canonical value: {err}"))?;
+    let value =
+        serde_json::to_value(value).map_err(|err| format!("serialize canonical value: {err}"))?;
     serde_json::to_string(&canonicalize_value(value))
         .map_err(|err| format!("encode canonical json: {err}"))
 }
@@ -190,9 +191,17 @@ fn compute_chain_hash(previous_hash: Option<&str>, payload: &str) -> String {
     let previous = previous_hash.unwrap_or("GENESIS");
     let mut hasher = Sha256::new();
     hasher.update(b"decision_receipt_chain_v1:");
-    hasher.update(u64::try_from(previous.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(previous.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(previous.as_bytes());
-    hasher.update(u64::try_from(payload.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(payload.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(payload.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -242,7 +251,10 @@ fn expected_golden_vectors() -> Result<Vec<GoldenVector>, String> {
 #[test]
 fn decision_receipt_signed_golden_vectors_conformance() -> Result<(), String> {
     let actual_pairs = materialize_signed_vectors()?;
-    let actual_vectors: Vec<GoldenVector> = actual_pairs.iter().map(|(golden, _)| golden.clone()).collect();
+    let actual_vectors: Vec<GoldenVector> = actual_pairs
+        .iter()
+        .map(|(golden, _)| golden.clone())
+        .collect();
 
     if std::env::var_os("UPDATE_GOLDENS").is_some() {
         let rendered = serde_json::to_string_pretty(&actual_vectors)
@@ -276,7 +288,8 @@ fn decision_receipt_signed_golden_vectors_conformance() -> Result<(), String> {
         .map(|(_, signed)| signed.clone())
         .collect();
 
-    verify_hash_chain(&signed_receipts).map_err(|err| format!("verify receipt hash chain: {err}"))?;
+    verify_hash_chain(&signed_receipts)
+        .map_err(|err| format!("verify receipt hash chain: {err}"))?;
 
     for (golden, signed) in &actual_pairs {
         if signed.receipt.signature_version != DECISION_RECEIPT_SIGNATURE_VERSION {
@@ -294,10 +307,7 @@ fn decision_receipt_signed_golden_vectors_conformance() -> Result<(), String> {
 
         let payload = canonical_json(&signed.receipt)?;
         if payload != golden.canonical_receipt_json {
-            return Err(format!(
-                "{} canonical receipt payload drifted",
-                golden.name
-            ));
+            return Err(format!("{} canonical receipt payload drifted", golden.name));
         }
 
         let expected_chain_hash =

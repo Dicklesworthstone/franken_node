@@ -7,9 +7,9 @@
 //! 4. Schema-driven canonicalization idempotence
 
 use frankenengine_node::connector::canonical_serializer::{
-    CanonicalSerializer, TrustObjectType, SignaturePreimage,
+    CanonicalSerializer, SignaturePreimage, TrustObjectType,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 // === ORACLE PROBLEM AREAS ===
@@ -116,9 +116,7 @@ mod field_order_invariance_tests {
 
                 Value::Object(reordered.into_iter().collect())
             }
-            Value::Array(arr) => {
-                Value::Array(arr.iter().map(reorder_json_fields).collect())
-            }
+            Value::Array(arr) => Value::Array(arr.iter().map(reorder_json_fields).collect()),
             _ => value.clone(),
         }
     }
@@ -143,27 +141,35 @@ mod field_order_invariance_tests {
         // Verify they're structurally different in JSON representation
         let original_str = serde_json::to_string(&original_policy).unwrap();
         let reordered_str = serde_json::to_string(&reordered_policy).unwrap();
-        assert_ne!(original_str, reordered_str,
-            "Test setup error: reordered JSON should differ in string form");
+        assert_ne!(
+            original_str, reordered_str,
+            "Test setup error: reordered JSON should differ in string form"
+        );
 
         // MR assertion: canonical serialization should be identical
-        let result1 = serializer.serialize_value(
-            TrustObjectType::PolicyCheckpoint,
-            &original_policy,
-            "mr-field-order-1"
-        ).expect("original serialization should succeed");
+        let result1 = serializer
+            .serialize_value(
+                TrustObjectType::PolicyCheckpoint,
+                &original_policy,
+                "mr-field-order-1",
+            )
+            .expect("original serialization should succeed");
 
-        let result2 = serializer.serialize_value(
-            TrustObjectType::PolicyCheckpoint,
-            &reordered_policy,
-            "mr-field-order-2"
-        ).expect("reordered serialization should succeed");
+        let result2 = serializer
+            .serialize_value(
+                TrustObjectType::PolicyCheckpoint,
+                &reordered_policy,
+                "mr-field-order-2",
+            )
+            .expect("reordered serialization should succeed");
 
-        assert_eq!(result1, result2,
+        assert_eq!(
+            result1, result2,
             "Field-order invariance violated: different JSON field orders produced different canonical serialization.\n\
              Original JSON:   {original_str}\n\
              Reordered JSON:  {reordered_str}\n\
-             This indicates the canonicalizer is not properly enforcing field order from schema");
+             This indicates the canonicalizer is not properly enforcing field order from schema"
+        );
     }
 
     #[test]
@@ -183,20 +189,26 @@ mod field_order_invariance_tests {
 
         let reordered_token = reorder_json_fields(&original_token);
 
-        let result1 = serializer.serialize_value(
-            TrustObjectType::DelegationToken,
-            &original_token,
-            "mr-delegation-1"
-        ).expect("original delegation token should serialize");
+        let result1 = serializer
+            .serialize_value(
+                TrustObjectType::DelegationToken,
+                &original_token,
+                "mr-delegation-1",
+            )
+            .expect("original delegation token should serialize");
 
-        let result2 = serializer.serialize_value(
-            TrustObjectType::DelegationToken,
-            &reordered_token,
-            "mr-delegation-2"
-        ).expect("reordered delegation token should serialize");
+        let result2 = serializer
+            .serialize_value(
+                TrustObjectType::DelegationToken,
+                &reordered_token,
+                "mr-delegation-2",
+            )
+            .expect("reordered delegation token should serialize");
 
-        assert_eq!(result1, result2,
-            "Delegation token field-order invariance violated");
+        assert_eq!(
+            result1, result2,
+            "Delegation token field-order invariance violated"
+        );
     }
 
     #[test]
@@ -210,60 +222,83 @@ mod field_order_invariance_tests {
         // `valid_until`, `claim_id`/`source_zone`/`target_zone`, `operation`)
         // that the strict schema rejects.
         let test_cases = vec![
-            (TrustObjectType::PolicyCheckpoint, json!({
-                "checkpoint_id": "test-policy",
-                "epoch": 1,
-                "sequence": 1,
-                "policy_hash": "sha256:rule1:rule2",
-                "timestamp": "2026-04-21T00:00:00Z"
-            })),
-            (TrustObjectType::DelegationToken, json!({
-                "token_id": "test-token",
-                "issuer": "issuer-a",
-                "delegate": "test@example.com",
-                "scope": "test:scope",
-                "expiry": 1714305600_i64
-            })),
-            (TrustObjectType::RevocationAssertion, json!({
-                "assertion_id": "test-assertion",
-                "target_id": "obj-12345",
-                "reason": "security_breach",
-                "effective_at": "2026-04-21T00:00:00Z",
-                "evidence_hash": "sha256:evidence"
-            })),
-            (TrustObjectType::SessionTicket, json!({
-                "session_id": "test-ticket",
-                "client_id": "client-a",
-                "server_id": "sess-12345",
-                "issued_at": "2026-04-21T00:00:00Z",
-                "ttl": 1714305600_i64
-            })),
-            (TrustObjectType::ZoneBoundaryClaim, json!({
-                "zone_id": "test-claim",
-                "boundary_type": "trust",
-                "peer_zone": "zone-b",
-                "trust_level": "strict",
-                "established_at": "2026-04-21T00:00:00Z"
-            })),
-            (TrustObjectType::OperatorReceipt, json!({
-                "receipt_id": "test-receipt",
-                "operator_id": "operator-a",
-                "action": "deploy",
-                "artifact_hash": "sha256:artifact",
-                "timestamp": "2026-04-21T00:00:00Z"
-            })),
+            (
+                TrustObjectType::PolicyCheckpoint,
+                json!({
+                    "checkpoint_id": "test-policy",
+                    "epoch": 1,
+                    "sequence": 1,
+                    "policy_hash": "sha256:rule1:rule2",
+                    "timestamp": "2026-04-21T00:00:00Z"
+                }),
+            ),
+            (
+                TrustObjectType::DelegationToken,
+                json!({
+                    "token_id": "test-token",
+                    "issuer": "issuer-a",
+                    "delegate": "test@example.com",
+                    "scope": "test:scope",
+                    "expiry": 1714305600_i64
+                }),
+            ),
+            (
+                TrustObjectType::RevocationAssertion,
+                json!({
+                    "assertion_id": "test-assertion",
+                    "target_id": "obj-12345",
+                    "reason": "security_breach",
+                    "effective_at": "2026-04-21T00:00:00Z",
+                    "evidence_hash": "sha256:evidence"
+                }),
+            ),
+            (
+                TrustObjectType::SessionTicket,
+                json!({
+                    "session_id": "test-ticket",
+                    "client_id": "client-a",
+                    "server_id": "sess-12345",
+                    "issued_at": "2026-04-21T00:00:00Z",
+                    "ttl": 1714305600_i64
+                }),
+            ),
+            (
+                TrustObjectType::ZoneBoundaryClaim,
+                json!({
+                    "zone_id": "test-claim",
+                    "boundary_type": "trust",
+                    "peer_zone": "zone-b",
+                    "trust_level": "strict",
+                    "established_at": "2026-04-21T00:00:00Z"
+                }),
+            ),
+            (
+                TrustObjectType::OperatorReceipt,
+                json!({
+                    "receipt_id": "test-receipt",
+                    "operator_id": "operator-a",
+                    "action": "deploy",
+                    "artifact_hash": "sha256:artifact",
+                    "timestamp": "2026-04-21T00:00:00Z"
+                }),
+            ),
         ];
 
         for (object_type, original_value) in test_cases {
             let reordered_value = reorder_json_fields(&original_value);
 
-            let result1 = serializer.serialize_value(object_type, &original_value, "mr-all-1")
+            let result1 = serializer
+                .serialize_value(object_type, &original_value, "mr-all-1")
                 .expect("original should serialize");
-            let result2 = serializer.serialize_value(object_type, &reordered_value, "mr-all-2")
+            let result2 = serializer
+                .serialize_value(object_type, &reordered_value, "mr-all-2")
                 .expect("reordered should serialize");
 
-            assert_eq!(result1, result2,
-                "Field-order invariance violated for {:?}", object_type);
+            assert_eq!(
+                result1, result2,
+                "Field-order invariance violated for {:?}",
+                object_type
+            );
         }
     }
 }
@@ -282,30 +317,37 @@ mod round_trip_consistency_tests {
         // `canonical_encode` in prod canonical_serializer.rs). It is NOT plain
         // JSON text, so `String::from_utf8`/`serde_json::from_str` on the raw
         // frame would fail on the leading NUL length bytes.
-        let serialized_1 = serializer.serialize_value(object_type, value, "rt-1")
+        let serialized_1 = serializer
+            .serialize_value(object_type, value, "rt-1")
             .expect("initial serialization should succeed");
 
         // Step 2: Decode the frame with the PUBLIC prod decoder
         // (`CanonicalSerializer::deserialize` -> `canonical_decode`), which
         // strips the 4-byte length prefix and returns the canonical JSON payload
         // bytes. Those bytes are UTF-8 and parse as JSON.
-        let canonical_payload = serializer.deserialize(object_type, &serialized_1)
+        let canonical_payload = serializer
+            .deserialize(object_type, &serialized_1)
             .expect("serialized frame should decode via prod deserialize");
         let parsed_value: Value = serde_json::from_slice(&canonical_payload)
             .expect("decoded canonical payload should parse as JSON");
 
         // Step 3: Re-serialize the parsed value
-        let serialized_2 = serializer.serialize_value(object_type, &parsed_value, "rt-2")
+        let serialized_2 = serializer
+            .serialize_value(object_type, &parsed_value, "rt-2")
             .expect("re-serialization should succeed");
 
         // MR assertion: round-trip should be stable
-        assert_eq!(serialized_1, serialized_2,
+        assert_eq!(
+            serialized_1,
+            serialized_2,
             "Round-trip consistency violated for {:?}:\n\
              Original serialization:   {:?}\n\
              Re-serialization:         {:?}\n\
              This indicates canonical serialization is not stable",
-            object_type, String::from_utf8_lossy(&serialized_1),
-            String::from_utf8_lossy(&serialized_2));
+            object_type,
+            String::from_utf8_lossy(&serialized_1),
+            String::from_utf8_lossy(&serialized_2)
+        );
     }
 
     #[test]
@@ -380,7 +422,6 @@ mod round_trip_consistency_tests {
                 "issued_at": "2026-04-21T00:00:00Z",
                 "ttl": 300
             }),
-
             // Large strings: carried in a canonical field value.
             json!({
                 "session_id": "large-string-test",
@@ -389,7 +430,6 @@ mod round_trip_consistency_tests {
                 "issued_at": "2026-04-21T00:00:00Z",
                 "ttl": 300
             }),
-
             // Many fields: nested UNDER a canonical field (nested objects allow
             // arbitrary keys and are sorted deterministically).
             json!({
@@ -404,7 +444,6 @@ mod round_trip_consistency_tests {
                 "issued_at": "2026-04-21T00:00:00Z",
                 "ttl": 300
             }),
-
             // Special characters: carried in canonical field values.
             json!({
                 "session_id": "special-chars-test",
@@ -412,14 +451,11 @@ mod round_trip_consistency_tests {
                 "server_id": "{\"nested\": [1,2,3]}",
                 "issued_at": "2026-04-21T00:00:00Z",
                 "ttl": 300
-            })
+            }),
         ];
 
         for edge_case in edge_cases.iter() {
-            test_roundtrip_consistency(
-                TrustObjectType::SessionTicket,
-                edge_case
-            );
+            test_roundtrip_consistency(TrustObjectType::SessionTicket, edge_case);
         }
     }
 }
@@ -451,21 +487,24 @@ mod domain_tag_determinism_tests {
 
         for &object_type in all_types {
             let payload = canonical_payload_for(object_type);
-            let result = serializer.serialize_value(object_type, &payload, "mr-domain")
+            let result = serializer
+                .serialize_value(object_type, &payload, "mr-domain")
                 .expect("serialization should succeed for all types");
             serialization_results.push((object_type, result));
         }
 
         // MR assertion: different trust object types must produce different serializations
         for i in 0..serialization_results.len() {
-            for j in (i+1)..serialization_results.len() {
+            for j in (i + 1)..serialization_results.len() {
                 let (type_a, result_a) = &serialization_results[i];
                 let (type_b, result_b) = &serialization_results[j];
 
-                assert_ne!(result_a, result_b,
+                assert_ne!(
+                    result_a, result_b,
                     "Domain tag separation failed: {:?} and {:?} produced identical canonical serialization.\n\
                      Distinct trust object types must never collide to identical canonical bytes (signature collision risk).",
-                    type_a, type_b);
+                    type_a, type_b
+                );
             }
         }
     }
@@ -482,14 +521,18 @@ mod domain_tag_determinism_tests {
         for &object_type in TrustObjectType::all() {
             let test_payload = canonical_payload_for(object_type);
 
-            let result1 = serializer1.serialize_value(object_type, &test_payload, "consistency-1")
+            let result1 = serializer1
+                .serialize_value(object_type, &test_payload, "consistency-1")
                 .expect("first serializer should work");
-            let result2 = serializer2.serialize_value(object_type, &test_payload, "consistency-2")
+            let result2 = serializer2
+                .serialize_value(object_type, &test_payload, "consistency-2")
                 .expect("second serializer should work");
 
-            assert_eq!(result1, result2,
+            assert_eq!(
+                result1, result2,
                 "Domain tag consistency violated: same object type {:?} produced different results across serializer instances",
-                object_type);
+                object_type
+            );
         }
     }
 
@@ -513,16 +556,18 @@ mod domain_tag_determinism_tests {
 
         // MR assertion: different inputs should produce different preimage bytes
         for i in 0..preimage_bytes.len() {
-            for j in (i+1)..preimage_bytes.len() {
+            for j in (i + 1)..preimage_bytes.len() {
                 let (preimage_a, bytes_a) = &preimage_bytes[i];
                 let (preimage_b, bytes_b) = &preimage_bytes[j];
 
-                assert_ne!(bytes_a, bytes_b,
+                assert_ne!(
+                    bytes_a, bytes_b,
                     "Signature preimage collision detected:\n\
                      Preimage A: {:?}\n\
                      Preimage B: {:?}\n\
                      Both produced bytes: {:?}",
-                    preimage_a, preimage_b, bytes_a);
+                    preimage_a, preimage_b, bytes_a
+                );
             }
         }
     }
@@ -552,34 +597,42 @@ mod canonicalization_idempotence_tests {
         });
 
         // First serialization
-        let result1 = serializer.serialize_value(
-            TrustObjectType::ZoneBoundaryClaim,
-            &test_object,
-            "idempotent-1"
-        ).expect("first serialization should succeed");
+        let result1 = serializer
+            .serialize_value(
+                TrustObjectType::ZoneBoundaryClaim,
+                &test_object,
+                "idempotent-1",
+            )
+            .expect("first serialization should succeed");
 
         // Decode the binary frame via the prod decoder (strips the 4-byte
         // length prefix) before parsing the canonical JSON payload.
-        let canonical_payload = serializer.deserialize(TrustObjectType::ZoneBoundaryClaim, &result1)
+        let canonical_payload = serializer
+            .deserialize(TrustObjectType::ZoneBoundaryClaim, &result1)
             .expect("serialized frame should decode via prod deserialize");
         let canonical_value: Value = serde_json::from_slice(&canonical_payload)
             .expect("decoded canonical payload should parse as JSON");
 
         // Second serialization of the canonical form
-        let result2 = serializer.serialize_value(
-            TrustObjectType::ZoneBoundaryClaim,
-            &canonical_value,
-            "idempotent-2"
-        ).expect("second serialization should succeed");
+        let result2 = serializer
+            .serialize_value(
+                TrustObjectType::ZoneBoundaryClaim,
+                &canonical_value,
+                "idempotent-2",
+            )
+            .expect("second serialization should succeed");
 
         // MR assertion: serialization should be idempotent
-        assert_eq!(result1, result2,
+        assert_eq!(
+            result1,
+            result2,
             "Serialization idempotence violated:\n\
              First result:  {:?}\n\
              Second result: {:?}\n\
              Canonicalization should be stable under re-application",
             String::from_utf8_lossy(&result1),
-            String::from_utf8_lossy(&result2));
+            String::from_utf8_lossy(&result2)
+        );
     }
 
     #[test]
@@ -613,11 +666,13 @@ mod canonicalization_idempotence_tests {
 
         // Perform multiple rounds of serialize → parse → serialize
         for round in 0..5 {
-            let serialized = serializer.serialize_value(
-                TrustObjectType::OperatorReceipt,
-                &current_value,
-                &format!("multi-pass-{round}")
-            ).expect("serialization should succeed in all rounds");
+            let serialized = serializer
+                .serialize_value(
+                    TrustObjectType::OperatorReceipt,
+                    &current_value,
+                    &format!("multi-pass-{round}"),
+                )
+                .expect("serialization should succeed in all rounds");
 
             serialization_results.push(serialized.clone());
 
@@ -632,12 +687,15 @@ mod canonicalization_idempotence_tests {
 
         // MR assertion: all rounds should produce identical results
         for (round, result) in serialization_results.iter().enumerate() {
-            assert_eq!(&serialization_results[0], result,
+            assert_eq!(
+                &serialization_results[0],
+                result,
                 "Multi-pass serialization stability violated at round {round}:\n\
                  Round 0 result: {:?}\n\
                  Round {round} result: {:?}",
                 String::from_utf8_lossy(&serialization_results[0]),
-                String::from_utf8_lossy(result));
+                String::from_utf8_lossy(result)
+            );
         }
     }
 }
@@ -671,15 +729,26 @@ mod composite_metamorphic_tests {
         let reordered = super::field_order_invariance_tests::reorder_json_fields(&original_object);
 
         // Step 2: Serialize both
-        let orig_serialized = serializer.serialize_value(
-            TrustObjectType::PolicyCheckpoint, &original_object, "composite-orig")
+        let orig_serialized = serializer
+            .serialize_value(
+                TrustObjectType::PolicyCheckpoint,
+                &original_object,
+                "composite-orig",
+            )
             .expect("original should serialize");
-        let reord_serialized = serializer.serialize_value(
-            TrustObjectType::PolicyCheckpoint, &reordered, "composite-reord")
+        let reord_serialized = serializer
+            .serialize_value(
+                TrustObjectType::PolicyCheckpoint,
+                &reordered,
+                "composite-reord",
+            )
             .expect("reordered should serialize");
 
         // MR1: Field order invariance should hold
-        assert_eq!(orig_serialized, reord_serialized, "Field order invariance violated in composite test");
+        assert_eq!(
+            orig_serialized, reord_serialized,
+            "Field order invariance violated in composite test"
+        );
 
         // Step 3: Round-trip both results. Decode each binary frame via the prod
         // decoder (strips the 4-byte length prefix) before parsing the JSON.
@@ -687,25 +756,38 @@ mod composite_metamorphic_tests {
             .deserialize(TrustObjectType::PolicyCheckpoint, &orig_serialized)
             .expect("original frame should decode via prod deserialize");
         let orig_parsed: Value = serde_json::from_slice(&orig_payload).expect("JSON parse");
-        let orig_roundtrip = serializer.serialize_value(
-            TrustObjectType::PolicyCheckpoint, &orig_parsed, "composite-orig-rt")
+        let orig_roundtrip = serializer
+            .serialize_value(
+                TrustObjectType::PolicyCheckpoint,
+                &orig_parsed,
+                "composite-orig-rt",
+            )
             .expect("original roundtrip should work");
 
         let reord_payload = serializer
             .deserialize(TrustObjectType::PolicyCheckpoint, &reord_serialized)
             .expect("reordered frame should decode via prod deserialize");
         let reord_parsed: Value = serde_json::from_slice(&reord_payload).expect("JSON parse");
-        let reord_roundtrip = serializer.serialize_value(
-            TrustObjectType::PolicyCheckpoint, &reord_parsed, "composite-reord-rt")
+        let reord_roundtrip = serializer
+            .serialize_value(
+                TrustObjectType::PolicyCheckpoint,
+                &reord_parsed,
+                "composite-reord-rt",
+            )
             .expect("reordered roundtrip should work");
 
         // MR2: Round-trip should be stable for both
         assert_eq!(orig_serialized, orig_roundtrip, "Original roundtrip failed");
-        assert_eq!(reord_serialized, reord_roundtrip, "Reordered roundtrip failed");
+        assert_eq!(
+            reord_serialized, reord_roundtrip,
+            "Reordered roundtrip failed"
+        );
 
         // MR3: Composition should be commutative
-        assert_eq!(orig_roundtrip, reord_roundtrip,
-            "Composite field-reorder + roundtrip not commutative");
+        assert_eq!(
+            orig_roundtrip, reord_roundtrip,
+            "Composite field-reorder + roundtrip not commutative"
+        );
     }
 
     #[test]
@@ -720,20 +802,26 @@ mod composite_metamorphic_tests {
             let test_payload = canonical_payload_for(object_type);
 
             // First serialization
-            let result1 = serializer.serialize_value(object_type, &test_payload, "comp-1")
+            let result1 = serializer
+                .serialize_value(object_type, &test_payload, "comp-1")
                 .expect("first serialization should succeed");
 
             // Decode the binary frame (strip the 4-byte length prefix) via the
             // prod decoder, then re-serialize (idempotence test).
-            let parsed_payload = serializer.deserialize(object_type, &result1)
+            let parsed_payload = serializer
+                .deserialize(object_type, &result1)
                 .expect("serialized frame should decode via prod deserialize");
             let parsed_value: Value = serde_json::from_slice(&parsed_payload).expect("JSON");
-            let result2 = serializer.serialize_value(object_type, &parsed_value, "comp-2")
+            let result2 = serializer
+                .serialize_value(object_type, &parsed_value, "comp-2")
                 .expect("second serialization should succeed");
 
             // MR: Should be idempotent for each type
-            assert_eq!(result1, result2,
-                "Composite idempotence failed for {:?}", object_type);
+            assert_eq!(
+                result1, result2,
+                "Composite idempotence failed for {:?}",
+                object_type
+            );
         }
     }
 }

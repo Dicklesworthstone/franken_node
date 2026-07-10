@@ -5,17 +5,17 @@
 //!
 //! Bead: bd-1sgm4
 
+use ed25519_dalek::SigningKey;
 use frankenengine_node::api::fleet_quarantine::{
     DecisionReceipt, DecisionReceiptPayload, DecisionReceiptScope,
-    canonical_decision_receipt_payload_hash, decision_receipt_payload_bytes,
-    sign_decision_receipt,
+    canonical_decision_receipt_payload_hash, decision_receipt_payload_bytes, sign_decision_receipt,
 };
-use ed25519_dalek::SigningKey;
 use hex;
 use serde_json;
 
 /// Fixed Ed25519 signing key for reproducible golden vectors
-const GOLDEN_SIGNING_KEY_HEX: &str = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
+const GOLDEN_SIGNING_KEY_HEX: &str =
+    "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
 
 fn create_golden_decision_receipt() -> DecisionReceipt {
     let scope = DecisionReceiptScope::zone("abc123");
@@ -89,8 +89,7 @@ fn decision_receipt_signature_golden_vector() {
     let receipt = create_golden_decision_receipt();
 
     // Create signing key from fixed bytes for reproducible signatures
-    let key_bytes = hex::decode(GOLDEN_SIGNING_KEY_HEX)
-        .expect("Valid hex key");
+    let key_bytes = hex::decode(GOLDEN_SIGNING_KEY_HEX).expect("Valid hex key");
     let signing_key = SigningKey::from_bytes(&key_bytes.try_into().unwrap());
 
     // Sign the receipt
@@ -102,10 +101,16 @@ fn decision_receipt_signature_golden_vector() {
     );
 
     eprintln!("Golden signature algorithm: {}", signature.algorithm);
-    eprintln!("Golden signature public_key_hex: {}", signature.public_key_hex);
+    eprintln!(
+        "Golden signature public_key_hex: {}",
+        signature.public_key_hex
+    );
     eprintln!("Golden signature key_id: {}", signature.key_id);
     eprintln!("Golden signature trust_scope: {}", signature.trust_scope);
-    eprintln!("Golden signature payload_sha256: {}", signature.signed_payload_sha256);
+    eprintln!(
+        "Golden signature payload_sha256: {}",
+        signature.signed_payload_sha256
+    );
     eprintln!("Golden signature hex: {}", signature.signature_hex);
 
     // Verify basic signature properties
@@ -121,8 +126,7 @@ fn decision_receipt_full_signed_golden_vector() {
     let mut receipt = create_golden_decision_receipt();
 
     // Create signing key and sign
-    let key_bytes = hex::decode(GOLDEN_SIGNING_KEY_HEX)
-        .expect("Valid hex key");
+    let key_bytes = hex::decode(GOLDEN_SIGNING_KEY_HEX).expect("Valid hex key");
     let signing_key = SigningKey::from_bytes(&key_bytes.try_into().unwrap());
 
     let signature = sign_decision_receipt(
@@ -135,14 +139,13 @@ fn decision_receipt_full_signed_golden_vector() {
     receipt.signature = Some(signature);
 
     // Serialize to JSON and verify structure
-    let json_str = serde_json::to_string_pretty(&receipt)
-        .expect("Receipt should serialize");
+    let json_str = serde_json::to_string_pretty(&receipt).expect("Receipt should serialize");
 
     eprintln!("Golden signed receipt JSON:\n{}", json_str);
 
     // Verify JSON roundtrip
-    let deserialized: DecisionReceipt = serde_json::from_str(&json_str)
-        .expect("Receipt should deserialize");
+    let deserialized: DecisionReceipt =
+        serde_json::from_str(&json_str).expect("Receipt should deserialize");
 
     assert_eq!(deserialized, receipt);
 

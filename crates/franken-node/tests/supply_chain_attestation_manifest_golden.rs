@@ -18,7 +18,9 @@ use std::{error::Error, fs, path::Path, path::PathBuf};
 /// in the wrong place. `CARGO_MANIFEST_DIR` is `crates/franken-node`, so `../..`
 /// reaches the workspace root deterministically regardless of CWD.
 fn workspace_path(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(relative)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative)
 }
 
 const DETERMINISTIC_THRESHOLD_SIGNATURE: &str =

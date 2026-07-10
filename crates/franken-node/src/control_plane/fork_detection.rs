@@ -696,8 +696,8 @@ impl MarkerProofVerifier {
 mod tests {
     use super::{
         DetectionResult, DivergenceDetector, DivergenceLogEvent, ForkDetectionError,
-        MarkerProofVerifier, ReconciliationSuggestion, RollbackDetector, RollbackProof, StateVector,
-        event_codes, push_bounded,
+        MarkerProofVerifier, ReconciliationSuggestion, RollbackDetector, RollbackProof,
+        StateVector, event_codes, push_bounded,
     };
     use crate::control_plane::marker_stream::{MarkerEventType, MarkerStream};
     use crate::security::constant_time;

@@ -986,11 +986,14 @@ mod tests {
 
     #[test]
     fn report_hash_large_input_saturation() {
-        // Test boundary case: oversized inputs trigger saturation (u64::MAX)
-        // This verifies the fix prevents integer truncation on large schema versions
-
-        // Create engine with very long schema version that would overflow usize → u64 cast
-        let mut engine = engine_with_schema(&"schema_".repeat(usize::MAX / 32));
+        // Boundary case: multi-megabyte inputs must hash cleanly without
+        // truncation. The original version called `"schema_".repeat(usize::MAX
+        // / 32)` — a ~2^61-byte allocation that aborted the whole test process
+        // (allocation failure aborts, it does not panic). On 64-bit targets the
+        // `u64::try_from(len).unwrap_or(u64::MAX)` saturation arm is
+        // structurally unreachable via real allocations (usize::MAX <=
+        // u64::MAX), so a real multi-megabyte input is the honest boundary.
+        let mut engine = engine_with_schema(&"schema_".repeat(1024 * 1024));
 
         let mut large_cohort = sample_cohort("large_cohort", CohortCategory::NodeMinimal);
         large_cohort.name = "n".repeat(1000000); // 1MB name

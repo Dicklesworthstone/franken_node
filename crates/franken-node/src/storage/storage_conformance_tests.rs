@@ -262,8 +262,11 @@ mod input_validation_edge_tests {
         )
         .expect("long key should be handled");
 
-        let result =
-            FrankensqliteTestCallerExt::read(&mut adapter, PersistenceClass::ControlState, &long_key);
+        let result = FrankensqliteTestCallerExt::read(
+            &mut adapter,
+            PersistenceClass::ControlState,
+            &long_key,
+        );
         assert!(result.found);
         assert_eq!(result.value.unwrap(), b"data");
     }
@@ -950,8 +953,11 @@ mod error_handling_tests {
         assert!(recovered_count >= 2);
 
         // Tier 1 data should still be readable
-        let control_result =
-            FrankensqliteTestCallerExt::read(&mut adapter, PersistenceClass::ControlState, "fence1");
+        let control_result = FrankensqliteTestCallerExt::read(
+            &mut adapter,
+            PersistenceClass::ControlState,
+            "fence1",
+        );
         assert!(control_result.found);
 
         let audit_result =

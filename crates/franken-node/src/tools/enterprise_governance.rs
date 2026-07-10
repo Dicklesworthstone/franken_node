@@ -1575,11 +1575,17 @@ mod tests {
 
     #[test]
     fn compute_report_content_hash_large_input_saturation() {
-        // Test boundary case: oversized inputs should trigger saturation (u64::MAX)
-        // This verifies that the fix prevents integer truncation on large collections
+        // Boundary case for the bd-8e9kv length-prefix sites: large inputs must
+        // hash cleanly and deterministically. The original version of this test
+        // called `"x".repeat(usize::MAX / 16)` — a 2^60-byte allocation that
+        // aborted the whole test process (allocation failure is a process abort,
+        // not a panic). On 64-bit targets `u64::try_from(len)` can never fail
+        // (usize::MAX <= u64::MAX), so the `unwrap_or(u64::MAX)` saturation arm
+        // is structurally unreachable via real allocations; what this test CAN
+        // honestly pin is that multi-megabyte inputs hash without truncation
+        // and reproducibly.
 
-        // Create inputs with very long strings that would overflow usize → u64 cast
-        let long_schema = "x".repeat(std::usize::MAX / 16); // Large but manageable
+        let long_schema = "x".repeat(4 * 1024 * 1024);
         let long_category = CategoryCompliance {
             category: RuleCategory::AccessControl,
             total_rules: 1,
@@ -1590,20 +1596,18 @@ mod tests {
             compliance_rate: 1.0,
         };
 
-        let long_rule_id = "r".repeat(std::usize::MAX / 32); // Large rule ID
+        let long_rule_id = "r".repeat(2 * 1024 * 1024);
         let blocked_rules = vec![long_rule_id];
 
-        // Should succeed without panicking (saturation prevents overflow)
         let hash = compute_report_content_hash(
             &long_schema,
             2,
             2,
-            &[long_category],
+            &[long_category.clone()],
             GateAction::Allow,
             &blocked_rules,
         );
 
-        // Should produce valid hash despite large inputs
         assert_eq!(
             hash.len(),
             64,
@@ -1613,6 +1617,16 @@ mod tests {
             hash.chars().all(|c| c.is_ascii_hexdigit()),
             "Hash should be hex"
         );
+
+        let hash_again = compute_report_content_hash(
+            &long_schema,
+            2,
+            2,
+            &[long_category],
+            GateAction::Allow,
+            &blocked_rules,
+        );
+        assert_eq!(hash, hash_again, "large inputs must hash deterministically");
     }
 
     #[test]
@@ -1733,7 +1747,7 @@ mod tests {
                 compliant: 8,
                 non_compliant: 2,
                 partially_compliant: 0,
-            not_assessed: 0,
+                not_assessed: 0,
                 compliance_rate: 0.8,
             },
             CategoryCompliance {
@@ -1742,7 +1756,7 @@ mod tests {
                 compliant: 12,
                 non_compliant: 3,
                 partially_compliant: 0,
-            not_assessed: 0,
+                not_assessed: 0,
                 compliance_rate: 0.8,
             },
             CategoryCompliance {
@@ -1751,7 +1765,7 @@ mod tests {
                 compliant: 5,
                 non_compliant: 0,
                 partially_compliant: 0,
-            not_assessed: 0,
+                not_assessed: 0,
                 compliance_rate: 1.0,
             },
         ];
@@ -1831,7 +1845,7 @@ mod tests {
                 compliant: 1,
                 non_compliant: 0,
                 partially_compliant: 0,
-            not_assessed: 0,
+                not_assessed: 0,
                 compliance_rate: 1.0,
             }],
             GateAction::Allow,

@@ -580,16 +580,28 @@ pub fn test_scenario_compatibility(scenario: &CompatibilityScenario) -> Conforma
     // Collect limitations based on compatibility threshold failures
     let mut discovered_limitations = Vec::new();
     if state_compatibility < 0.8 {
-        discovered_limitations.push(format!("State management compatibility below threshold: {:.2}", state_compatibility));
+        discovered_limitations.push(format!(
+            "State management compatibility below threshold: {:.2}",
+            state_compatibility
+        ));
     }
     if transition_compatibility < 0.8 {
-        discovered_limitations.push(format!("State transition compatibility below threshold: {:.2}", transition_compatibility));
+        discovered_limitations.push(format!(
+            "State transition compatibility below threshold: {:.2}",
+            transition_compatibility
+        ));
     }
     if endpoint_compatibility < 0.8 {
-        discovered_limitations.push(format!("API endpoint compatibility below threshold: {:.2}", endpoint_compatibility));
+        discovered_limitations.push(format!(
+            "API endpoint compatibility below threshold: {:.2}",
+            endpoint_compatibility
+        ));
     }
     if frame_compatibility < 0.8 {
-        discovered_limitations.push(format!("Frame parser compatibility below threshold: {:.2}", frame_compatibility));
+        discovered_limitations.push(format!(
+            "Frame parser compatibility below threshold: {:.2}",
+            frame_compatibility
+        ));
     }
 
     // Add protocol negotiation limitations under the intersection-based model.

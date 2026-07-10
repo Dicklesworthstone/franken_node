@@ -1880,8 +1880,7 @@ mod tests {
         };
         let empty_bundle = generate_bundle(&empty_ctx);
         assert_eq!(
-            empty_bundle.bundle_id.0,
-            "VB-3d94b7d8078691b6",
+            empty_bundle.bundle_id.0, "VB-3d94b7d8078691b6",
             "empty-context bundle_id drifted — \
              check the v1 domain separator or the events/artifacts/proofs \
              zero-length section framing"
@@ -1925,8 +1924,7 @@ mod tests {
         };
         let populated_bundle = generate_bundle(&populated_ctx);
         assert_eq!(
-            populated_bundle.bundle_id.0,
-            "VB-af83cc84d66fe130",
+            populated_bundle.bundle_id.0, "VB-af83cc84d66fe130",
             "populated-context bundle_id drifted — \
              check per-event evidence_ref Some/None framing, per-artifact field \
              ordering, or string_list_item domain bytes"

@@ -3612,16 +3612,16 @@ mod tests {
         // Test default_scoring with various problematic input strings
         let long_name = "very_".to_string() + &"long_".repeat(1000) + "scenario";
         let problematic_names = vec![
-            "",                             // Empty string
-            "   ",                          // Whitespace only
-            "\0null_terminated",            // Null byte
-            "scenario\nwith\nnewlines",     // Multiline
-            "🚀emoji_scenario🔥",           // Unicode emoji
-            "\u{FFFF}max_unicode",          // Max BMP character
-            long_name.as_str(),             // Very long name
-            "../../../etc/passwd",          // Path traversal
+            "",                              // Empty string
+            "   ",                           // Whitespace only
+            "\0null_terminated",             // Null byte
+            "scenario\nwith\nnewlines",      // Multiline
+            "🚀emoji_scenario🔥",            // Unicode emoji
+            "\u{FFFF}max_unicode",           // Max BMP character
+            long_name.as_str(),              // Very long name
+            "../../../etc/passwd",           // Path traversal
             "<script>alert('xss')</script>", // XSS attempt
-            "{\"json\": \"injection\"}",    // JSON injection
+            "{\"json\": \"injection\"}",     // JSON injection
         ];
 
         for name in problematic_names {
@@ -3694,8 +3694,8 @@ mod tests {
                 os: "\u{FFFF}\u{10FFFF}".to_string(),
             },
             HardwareProfile {
-                cpu: "".to_string(),  // Empty CPU
-                memory_mb: 0,         // Zero memory
+                cpu: "".to_string(),   // Empty CPU
+                memory_mb: 0,          // Zero memory
                 os: "   ".to_string(), // Whitespace os
             },
             HardwareProfile {

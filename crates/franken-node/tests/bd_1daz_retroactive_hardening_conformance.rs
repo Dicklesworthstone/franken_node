@@ -26,9 +26,9 @@
 use frankenengine_node::policy::{
     hardening_state_machine::HardeningLevel,
     retroactive_hardening::{
-        CanonicalObject, HardeningProgressRecord, HardeningResult, ObjectId, ProtectionArtifact,
-        ProtectionType, RepairabilityScore, RetroactiveHardeningPipeline, EVD_RETROHARDEN_001,
-        EVD_RETROHARDEN_002, EVD_RETROHARDEN_003, EVD_RETROHARDEN_004,
+        CanonicalObject, EVD_RETROHARDEN_001, EVD_RETROHARDEN_002, EVD_RETROHARDEN_003,
+        EVD_RETROHARDEN_004, HardeningProgressRecord, HardeningResult, ObjectId,
+        ProtectionArtifact, ProtectionType, RepairabilityScore, RetroactiveHardeningPipeline,
     },
 };
 
@@ -101,12 +101,19 @@ fn inv_retroharden_union_only_identity_preservation() -> ConformanceResult {
     let original_content = original.content.clone();
 
     // Generate artifacts (which should not modify the original object)
-    let artifacts = pipeline.harden(&original, HardeningLevel::Baseline, HardeningLevel::Enhanced);
+    let artifacts = pipeline.harden(
+        &original,
+        HardeningLevel::Baseline,
+        HardeningLevel::Enhanced,
+    );
 
     // Verify canonical identity is unchanged
     if original.object_id != original_id {
         return ConformanceResult::Fail {
-            reason: format!("Object ID changed: {:?} -> {:?}", original_id, original.object_id),
+            reason: format!(
+                "Object ID changed: {:?} -> {:?}",
+                original_id, original.object_id
+            ),
         };
     }
 
@@ -253,7 +260,10 @@ fn inv_retroharden_idempotent_no_duplicate_artifacts() -> ConformanceResult {
     for (a1, a2) in artifacts3.iter().zip(artifacts5.iter()) {
         if a1.artifact_id != a2.artifact_id {
             return ConformanceResult::Fail {
-                reason: format!("Artifact ID differs: {} vs {}", a1.artifact_id, a2.artifact_id),
+                reason: format!(
+                    "Artifact ID differs: {} vs {}",
+                    a1.artifact_id, a2.artifact_id
+                ),
             };
         }
     }
@@ -268,15 +278,18 @@ fn inv_retroharden_bounded_memory_usage() -> ConformanceResult {
     // Create a large corpus to test memory bounds
     let corpus_size = 1000;
     let objects: Vec<CanonicalObject> = (0..corpus_size)
-        .map(|i| create_test_object(&format!("obj-{:04}", i), &[i as u8; 100], HardeningLevel::Baseline))
+        .map(|i| {
+            create_test_object(
+                &format!("obj-{:04}", i),
+                &[i as u8; 100],
+                HardeningLevel::Baseline,
+            )
+        })
         .collect();
 
     // Process the entire corpus
-    let result = pipeline.harden_corpus(
-        &objects,
-        HardeningLevel::Baseline,
-        HardeningLevel::Critical,
-    );
+    let result =
+        pipeline.harden_corpus(&objects, HardeningLevel::Baseline, HardeningLevel::Critical);
 
     // Verify progress records are bounded (MAX_HARDENING_PROGRESS_RECORDS = 4096)
     let max_progress = 4096;
@@ -323,7 +336,11 @@ fn protection_type_level_requirements() -> ConformanceResult {
 
     // Test each level transition produces expected protection types
     let expected_progressions = [
-        (HardeningLevel::Baseline, HardeningLevel::Standard, vec![ProtectionType::Checksum]),
+        (
+            HardeningLevel::Baseline,
+            HardeningLevel::Standard,
+            vec![ProtectionType::Checksum],
+        ),
         (
             HardeningLevel::Standard,
             HardeningLevel::Enhanced,
@@ -478,7 +495,10 @@ fn artifact_id_generation_uniqueness() -> ConformanceResult {
     for artifact in &artifacts1 {
         if artifact.artifact_id.contains("art-002") {
             return ConformanceResult::Fail {
-                reason: format!("Object1 artifact references object2: {}", artifact.artifact_id),
+                reason: format!(
+                    "Object1 artifact references object2: {}",
+                    artifact.artifact_id
+                ),
             };
         }
     }
@@ -486,7 +506,10 @@ fn artifact_id_generation_uniqueness() -> ConformanceResult {
     for artifact in &artifacts2 {
         if artifact.artifact_id.contains("art-001") {
             return ConformanceResult::Fail {
-                reason: format!("Object2 artifact references object1: {}", artifact.artifact_id),
+                reason: format!(
+                    "Object2 artifact references object1: {}",
+                    artifact.artifact_id
+                ),
             };
         }
     }
@@ -498,7 +521,10 @@ fn artifact_id_generation_uniqueness() -> ConformanceResult {
                 reason: format!("Artifact ID missing object ID: {}", artifact.artifact_id),
             };
         }
-        if !artifact.artifact_id.contains(artifact.artifact_type.label()) {
+        if !artifact
+            .artifact_id
+            .contains(artifact.artifact_type.label())
+        {
             return ConformanceResult::Fail {
                 reason: format!("Artifact ID missing type label: {}", artifact.artifact_id),
             };
@@ -543,7 +569,10 @@ fn content_hash_stability_domain_separation() -> ConformanceResult {
     // Verify hash length is 32 bytes (SHA-256)
     if obj1.content_hash.len() != 32 {
         return ConformanceResult::Fail {
-            reason: format!("Content hash wrong length: {} bytes", obj1.content_hash.len()),
+            reason: format!(
+                "Content hash wrong length: {} bytes",
+                obj1.content_hash.len()
+            ),
         };
     }
 
@@ -556,11 +585,8 @@ fn level_transition_validation() -> ConformanceResult {
     let object = create_test_object("trans-001", b"transition test", HardeningLevel::Standard);
 
     // Test downgrade produces no artifacts
-    let down_artifacts = pipeline.harden(
-        &object,
-        HardeningLevel::Enhanced,
-        HardeningLevel::Standard,
-    );
+    let down_artifacts =
+        pipeline.harden(&object, HardeningLevel::Enhanced, HardeningLevel::Standard);
     if !down_artifacts.is_empty() {
         return ConformanceResult::Fail {
             reason: "Downgrade should produce no artifacts".to_string(),
@@ -568,11 +594,8 @@ fn level_transition_validation() -> ConformanceResult {
     }
 
     // Test same level produces no artifacts
-    let same_artifacts = pipeline.harden(
-        &object,
-        HardeningLevel::Enhanced,
-        HardeningLevel::Enhanced,
-    );
+    let same_artifacts =
+        pipeline.harden(&object, HardeningLevel::Enhanced, HardeningLevel::Enhanced);
     if !same_artifacts.is_empty() {
         return ConformanceResult::Fail {
             reason: "Same level should produce no artifacts".to_string(),
@@ -593,11 +616,8 @@ fn level_transition_validation() -> ConformanceResult {
     }
 
     // Test valid upgrade
-    let upgrade_artifacts = pipeline.harden(
-        &object,
-        HardeningLevel::Standard,
-        HardeningLevel::Critical,
-    );
+    let upgrade_artifacts =
+        pipeline.harden(&object, HardeningLevel::Standard, HardeningLevel::Critical);
     if upgrade_artifacts.is_empty() {
         return ConformanceResult::Fail {
             reason: "Valid upgrade should produce artifacts".to_string(),
@@ -619,11 +639,8 @@ fn corpus_processing_result_aggregation() -> ConformanceResult {
     ];
 
     // Process corpus
-    let result = pipeline.harden_corpus(
-        &objects,
-        HardeningLevel::Baseline,
-        HardeningLevel::Maximum,
-    );
+    let result =
+        pipeline.harden_corpus(&objects, HardeningLevel::Baseline, HardeningLevel::Maximum);
 
     // Verify result structure
     if result.objects_processed != objects.len() {
@@ -723,34 +740,42 @@ fn empty_corpus_edge_case() -> ConformanceResult {
     let pipeline = RetroactiveHardeningPipeline::new(1000);
 
     // Process empty corpus
-    let result = pipeline.harden_corpus(
-        &[],
-        HardeningLevel::Baseline,
-        HardeningLevel::Critical,
-    );
+    let result = pipeline.harden_corpus(&[], HardeningLevel::Baseline, HardeningLevel::Critical);
 
     // Verify empty result
     if result.objects_processed != 0 {
         return ConformanceResult::Fail {
-            reason: format!("Expected 0 objects processed, got {}", result.objects_processed),
+            reason: format!(
+                "Expected 0 objects processed, got {}",
+                result.objects_processed
+            ),
         };
     }
 
     if result.total_artifacts_created != 0 {
         return ConformanceResult::Fail {
-            reason: format!("Expected 0 artifacts, got {}", result.total_artifacts_created),
+            reason: format!(
+                "Expected 0 artifacts, got {}",
+                result.total_artifacts_created
+            ),
         };
     }
 
     if !result.artifacts.is_empty() {
         return ConformanceResult::Fail {
-            reason: format!("Expected empty artifacts list, got {}", result.artifacts.len()),
+            reason: format!(
+                "Expected empty artifacts list, got {}",
+                result.artifacts.len()
+            ),
         };
     }
 
     if !result.progress.is_empty() {
         return ConformanceResult::Fail {
-            reason: format!("Expected empty progress list, got {}", result.progress.len()),
+            reason: format!(
+                "Expected empty progress list, got {}",
+                result.progress.len()
+            ),
         };
     }
 
@@ -785,7 +810,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "INV-RETROHARDEN-BOUNDED: pipeline memory is bounded by corpus size",
         test_fn: inv_retroharden_bounded_memory_usage,
     },
-
     // Protection System (MUST)
     ConformanceCase {
         id: "BD1DAZ-PROTECT-LEVELS-001",
@@ -799,7 +823,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Protection type weights and repairability calculation",
         test_fn: protection_type_weights_validation,
     },
-
     // Artifact Management (MUST)
     ConformanceCase {
         id: "BD1DAZ-ARTIFACT-ID-001",
@@ -813,7 +836,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Content hash stability and domain separation",
         test_fn: content_hash_stability_domain_separation,
     },
-
     // Level Transitions (SHOULD)
     ConformanceCase {
         id: "BD1DAZ-TRANS-VALID-001",
@@ -827,7 +849,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Corpus processing and result aggregation",
         test_fn: corpus_processing_result_aggregation,
     },
-
     // Utility and Edge Cases (SHOULD)
     ConformanceCase {
         id: "BD1DAZ-FORMAT-001",
@@ -876,15 +897,21 @@ impl ConformanceStats {
         match level {
             RequirementLevel::Must => {
                 self.must_total += 1;
-                if is_pass { self.must_pass += 1; }
+                if is_pass {
+                    self.must_pass += 1;
+                }
             }
             RequirementLevel::Should => {
                 self.should_total += 1;
-                if is_pass { self.should_pass += 1; }
+                if is_pass {
+                    self.should_pass += 1;
+                }
             }
             RequirementLevel::May => {
                 self.may_total += 1;
-                if is_pass { self.may_pass += 1; }
+                if is_pass {
+                    self.may_pass += 1;
+                }
             }
         }
     }
@@ -945,12 +972,27 @@ impl ConformanceReport {
              ## Detailed Results\n\n\
              | Test ID | Level | Status | Description |\n\
              |---------|-------|--------|--------------|\n",
-            self.stats.must_pass, self.stats.must_total,
-            if self.stats.must_total > 0 { self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0 } else { 0.0 },
-            self.stats.should_pass, self.stats.should_total,
-            if self.stats.should_total > 0 { self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0 } else { 0.0 },
-            self.stats.may_pass, self.stats.may_total,
-            if self.stats.may_total > 0 { self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0 } else { 0.0 },
+            self.stats.must_pass,
+            self.stats.must_total,
+            if self.stats.must_total > 0 {
+                self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.should_pass,
+            self.stats.should_total,
+            if self.stats.should_total > 0 {
+                self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.may_pass,
+            self.stats.may_total,
+            if self.stats.may_total > 0 {
+                self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0
+            } else {
+                0.0
+            },
             self.stats.compliance_score(),
         );
 
@@ -967,12 +1009,16 @@ impl ConformanceReport {
             };
 
             // Find the description from the case
-            let description = CONFORMANCE_CASES.iter()
+            let description = CONFORMANCE_CASES
+                .iter()
                 .find(|case| case.id == test_id)
                 .map(|case| case.description)
                 .unwrap_or("Unknown test case");
 
-            md.push_str(&format!("| {} | {} | {} | {} |\n", test_id, level_str, status, description));
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                test_id, level_str, status, description
+            ));
         }
 
         md
@@ -994,39 +1040,89 @@ mod tests {
 
         // Verify all MUST requirements pass
         if report.stats.must_total > 0 && report.stats.must_pass < report.stats.must_total {
-            let failed_musts: Vec<_> = report.results.iter()
-                .filter(|(_, level, result)| *level == RequirementLevel::Must && matches!(result, ConformanceResult::Fail { .. }))
+            let failed_musts: Vec<_> = report
+                .results
+                .iter()
+                .filter(|(_, level, result)| {
+                    *level == RequirementLevel::Must
+                        && matches!(result, ConformanceResult::Fail { .. })
+                })
                 .collect();
 
-            panic!("❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
+            panic!(
+                "❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
                 report.stats.must_total - report.stats.must_pass,
                 report.stats.must_total,
-                failed_musts);
+                failed_musts
+            );
         }
 
         // Check compliance threshold (95% for bd specifications)
         let compliance = report.stats.compliance_score();
         if compliance < 95.0 {
-            panic!("❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold", compliance);
+            panic!(
+                "❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold",
+                compliance
+            );
         }
 
-        println!("✅ bd-1daz CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
+        println!(
+            "✅ bd-1daz CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
             compliance,
-            report.stats.must_pass, report.stats.must_total,
-            report.stats.should_pass, report.stats.should_total);
+            report.stats.must_pass,
+            report.stats.must_total,
+            report.stats.should_pass,
+            report.stats.should_total
+        );
     }
 
     // Individual test method for each conformance case
-    #[test] fn inv_union_identity() { inv_retroharden_union_only_identity_preservation().unwrap_pass(); }
-    #[test] fn inv_monotonic_repair() { inv_retroharden_monotonic_repairability_increase().unwrap_pass(); }
-    #[test] fn inv_idempotent_artifacts() { inv_retroharden_idempotent_no_duplicate_artifacts().unwrap_pass(); }
-    #[test] fn inv_bounded_memory() { inv_retroharden_bounded_memory_usage().unwrap_pass(); }
-    #[test] fn protect_levels() { protection_type_level_requirements().unwrap_pass(); }
-    #[test] fn protect_weights() { protection_type_weights_validation().unwrap_pass(); }
-    #[test] fn artifact_ids() { artifact_id_generation_uniqueness().unwrap_pass(); }
-    #[test] fn hash_stability() { content_hash_stability_domain_separation().unwrap_pass(); }
-    #[test] fn transition_validation() { level_transition_validation().unwrap_pass(); }
-    #[test] fn corpus_processing() { corpus_processing_result_aggregation().unwrap_pass(); }
-    #[test] fn id_formatting() { object_id_display_formatting().unwrap_pass(); }
-    #[test] fn empty_corpus() { empty_corpus_edge_case().unwrap_pass(); }
+    #[test]
+    fn inv_union_identity() {
+        inv_retroharden_union_only_identity_preservation().unwrap_pass();
+    }
+    #[test]
+    fn inv_monotonic_repair() {
+        inv_retroharden_monotonic_repairability_increase().unwrap_pass();
+    }
+    #[test]
+    fn inv_idempotent_artifacts() {
+        inv_retroharden_idempotent_no_duplicate_artifacts().unwrap_pass();
+    }
+    #[test]
+    fn inv_bounded_memory() {
+        inv_retroharden_bounded_memory_usage().unwrap_pass();
+    }
+    #[test]
+    fn protect_levels() {
+        protection_type_level_requirements().unwrap_pass();
+    }
+    #[test]
+    fn protect_weights() {
+        protection_type_weights_validation().unwrap_pass();
+    }
+    #[test]
+    fn artifact_ids() {
+        artifact_id_generation_uniqueness().unwrap_pass();
+    }
+    #[test]
+    fn hash_stability() {
+        content_hash_stability_domain_separation().unwrap_pass();
+    }
+    #[test]
+    fn transition_validation() {
+        level_transition_validation().unwrap_pass();
+    }
+    #[test]
+    fn corpus_processing() {
+        corpus_processing_result_aggregation().unwrap_pass();
+    }
+    #[test]
+    fn id_formatting() {
+        object_id_display_formatting().unwrap_pass();
+    }
+    #[test]
+    fn empty_corpus() {
+        empty_corpus_edge_case().unwrap_pass();
+    }
 }

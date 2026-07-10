@@ -25,8 +25,8 @@
 use serde_json::json;
 
 use frankenengine_node::policy::correctness_envelope::{
-    CorrectnessEnvelope, EnforcementMode, EnvelopeViolation, Invariant, InvariantId,
-    PolicyChange, PolicyProposal, SectionId,
+    CorrectnessEnvelope, EnforcementMode, EnvelopeViolation, Invariant, InvariantId, PolicyChange,
+    PolicyProposal, SectionId,
 };
 
 /// Test case with structured result tracking for bd-sddz compliance.
@@ -116,7 +116,10 @@ fn evd_envelope_002_violation_detected() -> ConformanceResult {
             // Verify violation contains expected information
             if violation.invariant_id.as_str() != "INV-001-MONOTONIC-HARDENING" {
                 return ConformanceResult::Fail {
-                    reason: format!("Wrong invariant ID in violation: {}", violation.invariant_id),
+                    reason: format!(
+                        "Wrong invariant ID in violation: {}",
+                        violation.invariant_id
+                    ),
                 };
             }
             if violation.proposal_field != "hardening.direction" {
@@ -137,7 +140,11 @@ fn canonical_invariants_completeness() -> ConformanceResult {
     let expected_count = 12;
     if envelope.len() != expected_count {
         return ConformanceResult::Fail {
-            reason: format!("Expected {} invariants, got {}", expected_count, envelope.len()),
+            reason: format!(
+                "Expected {} invariants, got {}",
+                expected_count,
+                envelope.len()
+            ),
         };
     }
 
@@ -202,7 +209,10 @@ fn enforcement_mode_classification() -> ConformanceResult {
         ("INV-001-MONOTONIC-HARDENING", EnforcementMode::Runtime),
         ("INV-002-EVIDENCE-EMISSION", EnforcementMode::Runtime),
         ("INV-003-DETERMINISTIC-SEED", EnforcementMode::Compile),
-        ("INV-004-INTEGRITY-PROOF-VERIFICATION", EnforcementMode::Runtime),
+        (
+            "INV-004-INTEGRITY-PROOF-VERIFICATION",
+            EnforcementMode::Runtime,
+        ),
         ("INV-005-RING-BUFFER-FIFO", EnforcementMode::Compile),
         ("INV-006-EPOCH-MONOTONIC", EnforcementMode::Runtime),
         ("INV-007-WITNESS-HASH-SHA256", EnforcementMode::Compile),
@@ -374,7 +384,10 @@ fn policy_field_validation_security() -> ConformanceResult {
 
         if envelope.is_within_envelope(&proposal).is_ok() {
             return ConformanceResult::Fail {
-                reason: format!("Field with path separators should be rejected: {}", bad_field),
+                reason: format!(
+                    "Field with path separators should be rejected: {}",
+                    bad_field
+                ),
             };
         }
     }
@@ -423,7 +436,10 @@ fn proposal_change_count_limits() -> ConformanceResult {
 
     if envelope.is_within_envelope(&oversized_proposal).is_ok() {
         return ConformanceResult::Fail {
-            reason: format!("Proposal with {} changes should be rejected", max_changes + 1),
+            reason: format!(
+                "Proposal with {} changes should be rejected",
+                max_changes + 1
+            ),
         };
     }
 
@@ -715,10 +731,7 @@ fn mixed_proposal_validation() -> ConformanceResult {
             // Verify the violation points to the correct immutable field
             if violation.proposal_field != "hardening.level_decrease" {
                 return ConformanceResult::Fail {
-                    reason: format!(
-                        "Wrong field in violation: {}",
-                        violation.proposal_field
-                    ),
+                    reason: format!("Wrong field in violation: {}", violation.proposal_field),
                 };
             }
             ConformanceResult::Pass
@@ -742,7 +755,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "EVD-ENVELOPE-002: envelope violation detected for immutable field changes",
         test_fn: evd_envelope_002_violation_detected,
     },
-
     // Canonical Invariant Set (MUST)
     ConformanceCase {
         id: "BDSDDZ-INV-COMPLETENESS",
@@ -756,7 +768,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Enforcement mode classification for each invariant type",
         test_fn: enforcement_mode_classification,
     },
-
     // Field Protection (MUST)
     ConformanceCase {
         id: "BDSDDZ-FIELD-PREFIX-001",
@@ -770,7 +781,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Policy field validation: length limits, null bytes, path separators",
         test_fn: policy_field_validation_security,
     },
-
     // Proposal Limits (MUST)
     ConformanceCase {
         id: "BDSDDZ-PROPOSAL-LIMITS-001",
@@ -778,7 +788,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Proposal change count limits and bounds checking",
         test_fn: proposal_change_count_limits,
     },
-
     // Export and Serialization (SHOULD)
     ConformanceCase {
         id: "BDSDDZ-MANIFEST-JSON-001",
@@ -792,7 +801,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Envelope lookup and retrieval functionality",
         test_fn: envelope_lookup_functionality,
     },
-
     // Error Handling (MUST)
     ConformanceCase {
         id: "BDSDDZ-ERROR-FORMAT-001",
@@ -812,7 +820,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Section and invariant ID formatting and display",
         test_fn: id_formatting_and_display,
     },
-
     // Complex Scenarios (SHOULD)
     ConformanceCase {
         id: "BDSDDZ-MIXED-PROPOSAL-001",
@@ -855,15 +862,21 @@ impl ConformanceStats {
         match level {
             RequirementLevel::Must => {
                 self.must_total += 1;
-                if is_pass { self.must_pass += 1; }
+                if is_pass {
+                    self.must_pass += 1;
+                }
             }
             RequirementLevel::Should => {
                 self.should_total += 1;
-                if is_pass { self.should_pass += 1; }
+                if is_pass {
+                    self.should_pass += 1;
+                }
             }
             RequirementLevel::May => {
                 self.may_total += 1;
-                if is_pass { self.may_pass += 1; }
+                if is_pass {
+                    self.may_pass += 1;
+                }
             }
         }
     }
@@ -924,12 +937,27 @@ impl ConformanceReport {
              ## Detailed Results\n\n\
              | Test ID | Level | Status | Description |\n\
              |---------|-------|--------|--------------|\n",
-            self.stats.must_pass, self.stats.must_total,
-            if self.stats.must_total > 0 { self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0 } else { 0.0 },
-            self.stats.should_pass, self.stats.should_total,
-            if self.stats.should_total > 0 { self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0 } else { 0.0 },
-            self.stats.may_pass, self.stats.may_total,
-            if self.stats.may_total > 0 { self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0 } else { 0.0 },
+            self.stats.must_pass,
+            self.stats.must_total,
+            if self.stats.must_total > 0 {
+                self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.should_pass,
+            self.stats.should_total,
+            if self.stats.should_total > 0 {
+                self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.may_pass,
+            self.stats.may_total,
+            if self.stats.may_total > 0 {
+                self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0
+            } else {
+                0.0
+            },
             self.stats.compliance_score(),
         );
 
@@ -946,12 +974,16 @@ impl ConformanceReport {
             };
 
             // Find the description from the case
-            let description = CONFORMANCE_CASES.iter()
+            let description = CONFORMANCE_CASES
+                .iter()
                 .find(|case| case.id == test_id)
                 .map(|case| case.description)
                 .unwrap_or("Unknown test case");
 
-            md.push_str(&format!("| {} | {} | {} | {} |\n", test_id, level_str, status, description));
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                test_id, level_str, status, description
+            ));
         }
 
         md
@@ -973,40 +1005,93 @@ mod tests {
 
         // Verify all MUST requirements pass
         if report.stats.must_total > 0 && report.stats.must_pass < report.stats.must_total {
-            let failed_musts: Vec<_> = report.results.iter()
-                .filter(|(_, level, result)| *level == RequirementLevel::Must && matches!(result, ConformanceResult::Fail { .. }))
+            let failed_musts: Vec<_> = report
+                .results
+                .iter()
+                .filter(|(_, level, result)| {
+                    *level == RequirementLevel::Must
+                        && matches!(result, ConformanceResult::Fail { .. })
+                })
                 .collect();
 
-            panic!("❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
+            panic!(
+                "❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
                 report.stats.must_total - report.stats.must_pass,
                 report.stats.must_total,
-                failed_musts);
+                failed_musts
+            );
         }
 
         // Check compliance threshold (95% for bd specifications)
         let compliance = report.stats.compliance_score();
         if compliance < 95.0 {
-            panic!("❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold", compliance);
+            panic!(
+                "❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold",
+                compliance
+            );
         }
 
-        println!("✅ bd-sddz CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
+        println!(
+            "✅ bd-sddz CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
             compliance,
-            report.stats.must_pass, report.stats.must_total,
-            report.stats.should_pass, report.stats.should_total);
+            report.stats.must_pass,
+            report.stats.must_total,
+            report.stats.should_pass,
+            report.stats.should_total
+        );
     }
 
     // Individual test method for each conformance case
-    #[test] fn evd_001_pass() { evd_envelope_001_check_passed().unwrap_pass(); }
-    #[test] fn evd_002_violation() { evd_envelope_002_violation_detected().unwrap_pass(); }
-    #[test] fn inv_completeness() { canonical_invariants_completeness().unwrap_pass(); }
-    #[test] fn inv_enforcement() { enforcement_mode_classification().unwrap_pass(); }
-    #[test] fn field_prefix_protection() { immutable_field_prefix_protection().unwrap_pass(); }
-    #[test] fn field_validation() { policy_field_validation_security().unwrap_pass(); }
-    #[test] fn proposal_limits() { proposal_change_count_limits().unwrap_pass(); }
-    #[test] fn manifest_json() { json_manifest_export_format().unwrap_pass(); }
-    #[test] fn lookup_functionality() { envelope_lookup_functionality().unwrap_pass(); }
-    #[test] fn error_format() { violation_error_format().unwrap_pass(); }
-    #[test] fn enforcement_labels() { enforcement_mode_labels().unwrap_pass(); }
-    #[test] fn id_formatting() { id_formatting_and_display().unwrap_pass(); }
-    #[test] fn mixed_proposals() { mixed_proposal_validation().unwrap_pass(); }
+    #[test]
+    fn evd_001_pass() {
+        evd_envelope_001_check_passed().unwrap_pass();
+    }
+    #[test]
+    fn evd_002_violation() {
+        evd_envelope_002_violation_detected().unwrap_pass();
+    }
+    #[test]
+    fn inv_completeness() {
+        canonical_invariants_completeness().unwrap_pass();
+    }
+    #[test]
+    fn inv_enforcement() {
+        enforcement_mode_classification().unwrap_pass();
+    }
+    #[test]
+    fn field_prefix_protection() {
+        immutable_field_prefix_protection().unwrap_pass();
+    }
+    #[test]
+    fn field_validation() {
+        policy_field_validation_security().unwrap_pass();
+    }
+    #[test]
+    fn proposal_limits() {
+        proposal_change_count_limits().unwrap_pass();
+    }
+    #[test]
+    fn manifest_json() {
+        json_manifest_export_format().unwrap_pass();
+    }
+    #[test]
+    fn lookup_functionality() {
+        envelope_lookup_functionality().unwrap_pass();
+    }
+    #[test]
+    fn error_format() {
+        violation_error_format().unwrap_pass();
+    }
+    #[test]
+    fn enforcement_labels() {
+        enforcement_mode_labels().unwrap_pass();
+    }
+    #[test]
+    fn id_formatting() {
+        id_formatting_and_display().unwrap_pass();
+    }
+    #[test]
+    fn mixed_proposals() {
+        mixed_proposal_validation().unwrap_pass();
+    }
 }

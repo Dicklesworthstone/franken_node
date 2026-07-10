@@ -32,19 +32,22 @@ fn test_crash_recovery_tier_durability_guarantees() {
 
     // Tier 1: WAL-backed, must survive crash
     for key in tier1_keys.iter() {
-        adapter.write(&caller, PersistenceClass::AuditLog, key, b"tier1_data")
+        adapter
+            .write(&caller, PersistenceClass::AuditLog, key, b"tier1_data")
             .expect("Tier 1 write should succeed");
     }
 
     // Tier 2: Periodic flush, may survive depending on timing
     for key in tier2_keys.iter() {
-        adapter.write(&caller, PersistenceClass::Snapshot, key, b"tier2_data")
+        adapter
+            .write(&caller, PersistenceClass::Snapshot, key, b"tier2_data")
             .expect("Tier 2 write should succeed");
     }
 
     // Tier 3: Ephemeral, should be lost on crash
     for key in tier3_keys.iter() {
-        adapter.write(&caller, PersistenceClass::Cache, key, b"tier3_data")
+        adapter
+            .write(&caller, PersistenceClass::Cache, key, b"tier3_data")
             .expect("Tier 3 write should succeed");
     }
 
@@ -64,12 +67,19 @@ fn test_crash_recovery_tier_durability_guarantees() {
 
     // Simulate crash and recovery
     let recovered_count = adapter.crash_recovery();
-    assert!(recovered_count > 0, "Crash recovery should process operations");
+    assert!(
+        recovered_count > 0,
+        "Crash recovery should process operations"
+    );
 
     // CRITICAL ASSERTION: All Tier 1 data must survive
     for key in tier1_keys.iter() {
         let result = adapter.read(&caller, PersistenceClass::AuditLog, key);
-        assert!(result.is_ok(), "Tier 1 data '{}' must survive crash recovery", key);
+        assert!(
+            result.is_ok(),
+            "Tier 1 data '{}' must survive crash recovery",
+            key
+        );
         match result {
             Ok(read) if read.found => {
                 assert_eq!(
@@ -98,8 +108,11 @@ fn test_crash_recovery_tier_durability_guarantees() {
     // Consequently, after in-place crash_recovery(), Tier 3 data remains readable in this model.
     for key in tier3_keys.iter() {
         let result = adapter.read(&caller, PersistenceClass::Cache, key);
-        assert!(matches!(result, Ok(ref read) if read.found),
-                "Tier 3 data '{}' remains after verify-only crash_recovery() (model retains the store in place)", key);
+        assert!(
+            matches!(result, Ok(ref read) if read.found),
+            "Tier 3 data '{}' remains after verify-only crash_recovery() (model retains the store in place)",
+            key
+        );
     }
 
     // Restart model: a freshly constructed adapter carries no ephemeral (Tier 3) data,
@@ -108,8 +121,11 @@ fn test_crash_recovery_tier_durability_guarantees() {
         .expect("adapter re-creation should succeed");
     for key in tier3_keys.iter() {
         let result = restarted.read(&caller, PersistenceClass::Cache, key);
-        assert!(matches!(result, Ok(ref read) if !read.found),
-                "Tier 3 data '{}' must be absent after adapter restart (ephemeral, lost on restart)", key);
+        assert!(
+            matches!(result, Ok(ref read) if !read.found),
+            "Tier 3 data '{}' must be absent after adapter restart (ephemeral, lost on restart)",
+            key
+        );
     }
 }
 
@@ -131,12 +147,13 @@ fn test_replay_deterministic_state_reconstruction() {
 
     // Execute operations multiple times and verify replay produces identical results
     for iteration in 0..5 {
-        let mut adapter = FrankensqliteAdapter::new(config.clone())
-            .expect("adapter creation should succeed");
+        let mut adapter =
+            FrankensqliteAdapter::new(config.clone()).expect("adapter creation should succeed");
 
         // Execute the sequence
         for (key, class, data) in &operations {
-            adapter.write(&caller, *class, key, *data)
+            adapter
+                .write(&caller, *class, key, *data)
                 .expect("write should succeed");
         }
 
@@ -158,14 +175,19 @@ fn test_replay_deterministic_state_reconstruction() {
             temp_adapter.replay()
         };
 
-        assert_eq!(replay_results.len(), first_replay.len(),
-                  "Replay length must be deterministic");
+        assert_eq!(
+            replay_results.len(),
+            first_replay.len(),
+            "Replay length must be deterministic"
+        );
 
         // Verify each replayed operation matches
         for (i, (result, expected)) in replay_results.iter().zip(first_replay.iter()).enumerate() {
-            assert_eq!(result, expected,
-                      "Replay operation {} must be deterministic: got {:?}, expected {:?}",
-                      i, result, expected);
+            assert_eq!(
+                result, expected,
+                "Replay operation {} must be deterministic: got {:?}, expected {:?}",
+                i, result, expected
+            );
         }
     }
 }
@@ -182,22 +204,36 @@ fn test_schema_version_migration_consistency() {
     assert!(initial_version > 0, "Schema version must be positive");
 
     // Write some data
-    adapter.write(&caller, PersistenceClass::AuditLog, "pre_migration", b"original")
+    adapter
+        .write(
+            &caller,
+            PersistenceClass::AuditLog,
+            "pre_migration",
+            b"original",
+        )
         .expect("write before migration should succeed");
 
     // Schema version should remain consistent during normal operations
-    assert_eq!(adapter.schema_version(), initial_version,
-              "Schema version should not change during normal operations");
+    assert_eq!(
+        adapter.schema_version(),
+        initial_version,
+        "Schema version should not change during normal operations"
+    );
 
     // Simulate crash and recovery - schema version must be preserved
     adapter.crash_recovery();
-    assert_eq!(adapter.schema_version(), initial_version,
-              "Schema version must be preserved across crash recovery");
+    assert_eq!(
+        adapter.schema_version(),
+        initial_version,
+        "Schema version must be preserved across crash recovery"
+    );
 
     // Data written before migration must still be readable
     let result = adapter.read(&caller, PersistenceClass::AuditLog, "pre_migration");
-    assert!(matches!(result, Ok(ref read) if read.found),
-            "Pre-migration data must survive version consistency checks");
+    assert!(
+        matches!(result, Ok(ref read) if read.found),
+        "Pre-migration data must survive version consistency checks"
+    );
 }
 
 /// Test authorization controls prevent unauthorized access
@@ -212,19 +248,43 @@ fn test_authorization_access_controls() {
     let readonly_caller = CallerContext::read_only("readonly", "auth_test");
 
     // System caller should be able to write to all classes
-    adapter.write(&system_caller, PersistenceClass::AuditLog, "system_key", b"data")
+    adapter
+        .write(
+            &system_caller,
+            PersistenceClass::AuditLog,
+            "system_key",
+            b"data",
+        )
         .expect("system caller should write to audit log");
-    adapter.write(&system_caller, PersistenceClass::ControlState, "system_control", b"data")
+    adapter
+        .write(
+            &system_caller,
+            PersistenceClass::ControlState,
+            "system_control",
+            b"data",
+        )
         .expect("system caller should write to control state");
 
     // Service caller should have limited write access
-    let service_audit_result = adapter.write(&service_caller, PersistenceClass::AuditLog, "service_key", b"data");
+    let service_audit_result = adapter.write(
+        &service_caller,
+        PersistenceClass::AuditLog,
+        "service_key",
+        b"data",
+    );
     // Note: Exact authorization rules depend on implementation, this tests that authorization is enforced
 
     // Read-only caller should never be able to write
-    let readonly_write_result = adapter.write(&readonly_caller, PersistenceClass::Cache, "readonly_key", b"data");
-    assert!(readonly_write_result.is_err(),
-            "Read-only caller must not be able to write");
+    let readonly_write_result = adapter.write(
+        &readonly_caller,
+        PersistenceClass::Cache,
+        "readonly_key",
+        b"data",
+    );
+    assert!(
+        readonly_write_result.is_err(),
+        "Read-only caller must not be able to write"
+    );
 
     // All callers should be able to read (if authorized for that specific data)
     let system_read = adapter.read(&system_caller, PersistenceClass::AuditLog, "system_key");
@@ -236,10 +296,10 @@ fn test_authorization_access_controls() {
     match readonly_read {
         Ok(_) => {
             // If read is allowed, it should return correct data
-        },
+        }
         Err(AdapterError::AuthorizationFailed(_)) => {
             // If read is denied, it should be explicit authorization error
-        },
+        }
         Err(other) => {
             panic!("Unexpected error type for authorization check: {:?}", other);
         }
@@ -269,13 +329,17 @@ fn test_concurrent_operations_state_integrity() {
 
     // Execute operations
     for (key, class, data) in &concurrent_operations {
-        adapter.write(&caller, *class, key, *data)
+        adapter
+            .write(&caller, *class, key, *data)
             .expect("concurrent write should succeed");
     }
 
     // State must be consistent - last write wins for same key
     let final_shared_result = adapter.read(&caller, PersistenceClass::ControlState, "shared_key");
-    assert!(final_shared_result.is_ok(), "Shared key should be readable after concurrent writes");
+    assert!(
+        final_shared_result.is_ok(),
+        "Shared key should be readable after concurrent writes"
+    );
 
     // Audit log should contain all operations as distinct append-only entries.
     let other_result_a = adapter.read(&caller, PersistenceClass::AuditLog, "other_key_a");
@@ -297,12 +361,18 @@ fn test_concurrent_operations_state_integrity() {
     let post_recovery_other_a = adapter.read(&caller, PersistenceClass::AuditLog, "other_key_a");
     let post_recovery_other_b = adapter.read(&caller, PersistenceClass::AuditLog, "other_key_b");
 
-    assert!(post_recovery_shared.is_ok(),
-            "Shared key must survive crash recovery after concurrent operations");
-    assert!(post_recovery_other_a.is_ok(),
-            "First audit append must survive crash recovery after concurrent operations");
-    assert!(post_recovery_other_b.is_ok(),
-            "Second audit append must survive crash recovery after concurrent operations");
+    assert!(
+        post_recovery_shared.is_ok(),
+        "Shared key must survive crash recovery after concurrent operations"
+    );
+    assert!(
+        post_recovery_other_a.is_ok(),
+        "First audit append must survive crash recovery after concurrent operations"
+    );
+    assert!(
+        post_recovery_other_b.is_ok(),
+        "Second audit append must survive crash recovery after concurrent operations"
+    );
 }
 
 /// Test adapter summary provides accurate state information
@@ -331,11 +401,14 @@ fn test_adapter_summary_state_accuracy() {
         .unwrap_or(0);
 
     // Perform operations across tiers
-    adapter.write(&caller, PersistenceClass::AuditLog, "audit1", b"data")
+    adapter
+        .write(&caller, PersistenceClass::AuditLog, "audit1", b"data")
         .expect("tier1 write should succeed");
-    adapter.write(&caller, PersistenceClass::Snapshot, "snap1", b"data")
+    adapter
+        .write(&caller, PersistenceClass::Snapshot, "snap1", b"data")
         .expect("tier2 write should succeed");
-    adapter.write(&caller, PersistenceClass::Cache, "cache1", b"data")
+    adapter
+        .write(&caller, PersistenceClass::Cache, "cache1", b"data")
         .expect("tier3 write should succeed");
 
     // Get updated summary
@@ -371,8 +444,11 @@ fn test_adapter_summary_state_accuracy() {
     );
 
     // Summary should include schema version
-    assert_eq!(updated_summary.schema_version, adapter.schema_version(),
-              "Summary schema version must match adapter");
+    assert_eq!(
+        updated_summary.schema_version,
+        adapter.schema_version(),
+        "Summary schema version must match adapter"
+    );
 
     // After crash recovery, the recovery routine should report processed operations.
     // NOTE: AdapterSummary no longer exposes a recovery counter, so assert on the
@@ -382,8 +458,10 @@ fn test_adapter_summary_state_accuracy() {
     let _post_crash_summary = adapter.summary();
 
     // Recovery should have processed the Tier 1 audit write performed above.
-    assert!(recovery_count > 0,
-           "Summary should reflect crash recovery execution");
+    assert!(
+        recovery_count > 0,
+        "Summary should reflect crash recovery execution"
+    );
 }
 
 /// Test edge cases and error conditions
@@ -395,35 +473,62 @@ fn test_error_conditions_and_edge_cases() {
 
     // Test reading non-existent keys
     let missing_result = adapter.read(&caller, PersistenceClass::ControlState, "non_existent_key");
-    assert!(matches!(missing_result, Ok(ref read) if !read.found),
-            "Reading non-existent key should return NotFound, not error");
+    assert!(
+        matches!(missing_result, Ok(ref read) if !read.found),
+        "Reading non-existent key should return NotFound, not error"
+    );
 
     // Test writing empty data
-    adapter.write(&caller, PersistenceClass::AuditLog, "empty_key", b"")
+    adapter
+        .write(&caller, PersistenceClass::AuditLog, "empty_key", b"")
         .expect("writing empty data should succeed");
 
     let empty_result = adapter.read(&caller, PersistenceClass::AuditLog, "empty_key");
-    assert!(matches!(empty_result, Ok(ref read) if read.found && read.value.as_ref().is_some_and(|d| d.is_empty())),
-            "Empty data should be retrievable");
+    assert!(
+        matches!(empty_result, Ok(ref read) if read.found && read.value.as_ref().is_some_and(|d| d.is_empty())),
+        "Empty data should be retrievable"
+    );
 
     // Test writing large data
     let large_data = vec![0u8; 1024 * 1024]; // 1MB
-    adapter.write(&caller, PersistenceClass::Snapshot, "large_key", &large_data)
+    adapter
+        .write(
+            &caller,
+            PersistenceClass::Snapshot,
+            "large_key",
+            &large_data,
+        )
         .expect("writing large data should succeed");
 
     let large_result = adapter.read(&caller, PersistenceClass::Snapshot, "large_key");
-    assert!(matches!(large_result, Ok(ref read) if read.found && read.value.as_ref().is_some_and(|d| d.len() == large_data.len())),
-            "Large data should be retrievable with correct size");
+    assert!(
+        matches!(large_result, Ok(ref read) if read.found && read.value.as_ref().is_some_and(|d| d.len() == large_data.len())),
+        "Large data should be retrievable with correct size"
+    );
 
     // Test key collision behavior
-    adapter.write(&caller, PersistenceClass::ControlState, "collision_key", b"first")
+    adapter
+        .write(
+            &caller,
+            PersistenceClass::ControlState,
+            "collision_key",
+            b"first",
+        )
         .expect("first write should succeed");
-    adapter.write(&caller, PersistenceClass::ControlState, "collision_key", b"second")
+    adapter
+        .write(
+            &caller,
+            PersistenceClass::ControlState,
+            "collision_key",
+            b"second",
+        )
         .expect("second write should succeed");
 
     let collision_result = adapter.read(&caller, PersistenceClass::ControlState, "collision_key");
-    assert!(matches!(collision_result, Ok(ref read) if read.found && read.value.as_deref() == Some(b"second".as_slice())),
-            "Last write should win for key collisions");
+    assert!(
+        matches!(collision_result, Ok(ref read) if read.found && read.value.as_deref() == Some(b"second".as_slice())),
+        "Last write should win for key collisions"
+    );
 }
 
 /// Comprehensive metamorphic property: operations + crash + recovery should be equivalent to operations + recovery
@@ -463,21 +568,32 @@ fn test_crash_recovery_metamorphic_property() {
 
     // METAMORPHIC PROPERTY: Both paths should yield equivalent durable state
     for (key, class, _) in &operations {
-        if *class != PersistenceClass::Cache { // Cache data may be lost
+        if *class != PersistenceClass::Cache {
+            // Cache data may be lost
             let result_a = adapter_a.read(&caller, *class, key);
             let result_b = adapter_b.read(&caller, *class, key);
 
-            assert_eq!(result_a.is_ok(), result_b.is_ok(),
-                      "Read success should be equivalent for key {}", key);
+            assert_eq!(
+                result_a.is_ok(),
+                result_b.is_ok(),
+                "Read success should be equivalent for key {}",
+                key
+            );
 
             if let (Ok(data_a), Ok(data_b)) = (result_a, result_b) {
-                assert_eq!(data_a.value, data_b.value,
-                          "Data should be equivalent after crash recovery for key {}", key);
+                assert_eq!(
+                    data_a.value, data_b.value,
+                    "Data should be equivalent after crash recovery for key {}",
+                    key
+                );
             }
         }
     }
 
     // Schema versions should be equivalent
-    assert_eq!(adapter_a.schema_version(), adapter_b.schema_version(),
-              "Schema versions should be equivalent");
+    assert_eq!(
+        adapter_a.schema_version(),
+        adapter_b.schema_version(),
+        "Schema versions should be equivalent"
+    );
 }

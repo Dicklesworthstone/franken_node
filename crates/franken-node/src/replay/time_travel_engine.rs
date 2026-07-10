@@ -3223,11 +3223,10 @@ mod tests {
                     .register_trace(trace)
                     .expect("register malicious-side-effect trace");
 
-                let replay_result =
-                    engine.replay_with_adapter(malicious_trace_id, |step, _env| {
-                        // Return same side effects to avoid divergence
-                        Ok((step.output.clone(), step.side_effects.clone()))
-                    });
+                let replay_result = engine.replay_with_adapter(malicious_trace_id, |step, _env| {
+                    // Return same side effects to avoid divergence
+                    Ok((step.output.clone(), step.side_effects.clone()))
+                });
 
                 match replay_result {
                     Ok(result) => {
@@ -3251,8 +3250,7 @@ mod tests {
         let divergent_trace_id = "massive-divergence-test";
 
         // Create trace with various output sizes
-        let mut builder =
-            TraceBuilder::new(divergent_trace_id, "divergence-workflow", demo_env());
+        let mut builder = TraceBuilder::new(divergent_trace_id, "divergence-workflow", demo_env());
 
         let original_outputs = vec![
             vec![0x00; 1],                // 1 byte
@@ -4174,8 +4172,7 @@ mod tests {
         let exception_trace_id = "exception-test";
 
         // Create a simple trace via the capture-phase builder
-        let mut builder =
-            TraceBuilder::new(exception_trace_id, "exception-workflow", demo_env());
+        let mut builder = TraceBuilder::new(exception_trace_id, "exception-workflow", demo_env());
 
         for i in 0..5u64 {
             builder.record_step(

@@ -34,8 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use frankenengine_node::connector::repair_controller::{
-    RepairConfig, RepairItem, RepairError,
-    run_cycle, validate_config,
+    RepairConfig, RepairError, RepairItem, run_cycle, validate_config,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,9 +110,14 @@ impl ConformanceReport {
 
     pub fn to_markdown(&self) -> String {
         let score = self.compliance_score() * 100.0;
-        let status = if score >= 95.0 { "CONFORMANT" } else { "NON-CONFORMANT" };
+        let status = if score >= 95.0 {
+            "CONFORMANT"
+        } else {
+            "NON-CONFORMANT"
+        };
 
-        format!(r#"# bd-91gg Background Repair Controller Conformance Report
+        format!(
+            r#"# bd-91gg Background Repair Controller Conformance Report
 
 ## Compliance Score: {:.1}% - {status}
 
@@ -144,21 +148,34 @@ Total conformance tests: {}
 Generated: {}
 "#,
             score,
-            self.stats.must_pass, self.stats.must_fail,
+            self.stats.must_pass,
+            self.stats.must_fail,
             self.stats.must_pass + self.stats.must_fail,
             if self.stats.must_pass + self.stats.must_fail > 0 {
-                self.stats.must_pass as f64 / (self.stats.must_pass + self.stats.must_fail) as f64 * 100.0
-            } else { 0.0 },
-            self.stats.should_pass, self.stats.should_fail,
+                self.stats.must_pass as f64 / (self.stats.must_pass + self.stats.must_fail) as f64
+                    * 100.0
+            } else {
+                0.0
+            },
+            self.stats.should_pass,
+            self.stats.should_fail,
             self.stats.should_pass + self.stats.should_fail,
             if self.stats.should_pass + self.stats.should_fail > 0 {
-                self.stats.should_pass as f64 / (self.stats.should_pass + self.stats.should_fail) as f64 * 100.0
-            } else { 0.0 },
-            self.stats.may_pass, self.stats.may_fail,
+                self.stats.should_pass as f64
+                    / (self.stats.should_pass + self.stats.should_fail) as f64
+                    * 100.0
+            } else {
+                0.0
+            },
+            self.stats.may_pass,
+            self.stats.may_fail,
             self.stats.may_pass + self.stats.may_fail,
             if self.stats.may_pass + self.stats.may_fail > 0 {
-                self.stats.may_pass as f64 / (self.stats.may_pass + self.stats.may_fail) as f64 * 100.0
-            } else { 0.0 },
+                self.stats.may_pass as f64 / (self.stats.may_pass + self.stats.may_fail) as f64
+                    * 100.0
+            } else {
+                0.0
+            },
             self.stats.must_pass + self.stats.should_pass + self.stats.may_pass,
             self.stats.must_fail + self.stats.should_fail + self.stats.may_fail,
             self.results.len(),
@@ -183,7 +200,10 @@ Generated: {}
                     TestResult::Skipped { .. } => "⏭️ SKIP",
                     TestResult::ExpectedFailure { .. } => "⏳ XFAIL",
                 };
-                output.push_str(&format!("- **{}**: {} - {}\n", record.id, status, record.description));
+                output.push_str(&format!(
+                    "- **{}**: {} - {}\n",
+                    record.id, status, record.description
+                ));
                 if let TestResult::Fail { reason } = &record.result {
                     output.push_str(&format!("  - ❌ {}\n", reason));
                 }
@@ -227,7 +247,6 @@ const BD_91GG_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "INV-BRC-DETERMINISTIC: Allocation order is deterministic (tenant_id, then priority desc)",
         test_fn: test_invariant_deterministic,
     },
-
     // Error Codes (MUST requirements)
     ConformanceCase {
         id: "BD91GG-ERR-1",
@@ -257,7 +276,6 @@ const BD_91GG_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "BRC_CAP_EXCEEDED: Capacity exceeded error code presence",
         test_fn: test_error_cap_exceeded,
     },
-
     // Configuration Validation (SHOULD requirements)
     ConformanceCase {
         id: "BD91GG-CFG-1",
@@ -294,7 +312,6 @@ const BD_91GG_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "trace_id validation: non-empty and unpadded",
         test_fn: test_config_trace_id_validation,
     },
-
     // Input Validation (SHOULD requirements)
     ConformanceCase {
         id: "BD91GG-INP-1",
@@ -317,7 +334,6 @@ const BD_91GG_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "duplicate item_ids validation: must be rejected",
         test_fn: test_input_duplicate_items_validation,
     },
-
     // Algorithm Behavior (SHOULD requirements)
     ConformanceCase {
         id: "BD91GG-ALG-1",
@@ -364,13 +380,13 @@ fn test_invariant_bounded() -> TestResult {
                     reason: format!(
                         "Units exceeded cap: {} > {}",
                         audit.total_units_used, config.max_units_per_cycle
-                    )
+                    ),
                 }
             }
-        },
-        Err(e) => TestResult::Fail {
-            reason: format!("Cycle failed unexpectedly: {}", e)
         }
+        Err(e) => TestResult::Fail {
+            reason: format!("Cycle failed unexpectedly: {}", e),
+        },
     }
 }
 
@@ -406,16 +422,20 @@ fn test_invariant_fairness() -> TestResult {
                     return TestResult::Fail {
                         reason: format!(
                             "Tenant {} allocated {} < fairness floor {} (min of fairness_minimum {} and available {})",
-                            alloc.tenant_id, alloc.units_used, fairness_floor, config.fairness_minimum, tenant_available
-                        )
+                            alloc.tenant_id,
+                            alloc.units_used,
+                            fairness_floor,
+                            config.fairness_minimum,
+                            tenant_available
+                        ),
                     };
                 }
             }
             TestResult::Pass
-        },
-        Err(e) => TestResult::Fail {
-            reason: format!("Fairness test cycle failed: {}", e)
         }
+        Err(e) => TestResult::Fail {
+            reason: format!("Fairness test cycle failed: {}", e),
+        },
     }
 }
 
@@ -428,29 +448,29 @@ fn test_invariant_auditable() -> TestResult {
             // Verify audit record has all required fields
             if audit.cycle_id.is_empty() {
                 return TestResult::Fail {
-                    reason: "Audit missing cycle_id".to_string()
+                    reason: "Audit missing cycle_id".to_string(),
                 };
             }
             if audit.trace_id.is_empty() {
                 return TestResult::Fail {
-                    reason: "Audit missing trace_id".to_string()
+                    reason: "Audit missing trace_id".to_string(),
                 };
             }
             if audit.timestamp.is_empty() {
                 return TestResult::Fail {
-                    reason: "Audit missing timestamp".to_string()
+                    reason: "Audit missing timestamp".to_string(),
                 };
             }
             if audit.allocations.is_empty() {
                 return TestResult::Fail {
-                    reason: "Audit missing allocations".to_string()
+                    reason: "Audit missing allocations".to_string(),
                 };
             }
             TestResult::Pass
-        },
-        Err(e) => TestResult::Fail {
-            reason: format!("Auditability test failed: {}", e)
         }
+        Err(e) => TestResult::Fail {
+            reason: format!("Auditability test failed: {}", e),
+        },
     }
 }
 
@@ -470,7 +490,7 @@ fn test_invariant_deterministic() -> TestResult {
         (Ok((allocs1, _)), Ok((allocs2, _))) => {
             if allocs1.len() != allocs2.len() {
                 return TestResult::Fail {
-                    reason: "Allocation count differs between runs".to_string()
+                    reason: "Allocation count differs between runs".to_string(),
                 };
             }
 
@@ -480,23 +500,20 @@ fn test_invariant_deterministic() -> TestResult {
                         reason: format!(
                             "Tenant order differs: {} vs {}",
                             a1.tenant_id, a2.tenant_id
-                        )
+                        ),
                     };
                 }
                 if a1.items_allocated != a2.items_allocated {
                     return TestResult::Fail {
-                        reason: format!(
-                            "Item allocation differs for tenant {}",
-                            a1.tenant_id
-                        )
+                        reason: format!("Item allocation differs for tenant {}", a1.tenant_id),
                     };
                 }
             }
             TestResult::Pass
-        },
-        _ => TestResult::Fail {
-            reason: "Determinism test cycles failed".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Determinism test cycles failed".to_string(),
+        },
     }
 }
 
@@ -513,17 +530,22 @@ fn test_error_invalid_config() -> TestResult {
 
     match run_cycle(&items, &invalid_config, "err-test", "trace", "ts") {
         Err(RepairError::InvalidConfig { .. }) => {
-            if (RepairError::InvalidConfig { reason: "test".into() }).code() == "BRC_INVALID_CONFIG" {
+            if (RepairError::InvalidConfig {
+                reason: "test".into(),
+            })
+            .code()
+                == "BRC_INVALID_CONFIG"
+            {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: "Wrong error code for invalid config".to_string()
+                    reason: "Wrong error code for invalid config".to_string(),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected BRC_INVALID_CONFIG error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected BRC_INVALID_CONFIG error".to_string(),
+        },
     }
 }
 
@@ -537,27 +559,27 @@ fn test_error_no_pending() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: "Wrong error code for no pending".to_string()
+                    reason: "Wrong error code for no pending".to_string(),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected BRC_NO_PENDING error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected BRC_NO_PENDING error".to_string(),
+        },
     }
 }
 
 fn test_error_starvation() -> TestResult {
     // Test that starvation error code exists and is properly formatted
     let starvation_error = RepairError::Starvation {
-        tenant_id: "test-tenant".to_string()
+        tenant_id: "test-tenant".to_string(),
     };
 
     if starvation_error.code() == "BRC_STARVATION" {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: "Wrong error code for starvation".to_string()
+            reason: "Wrong error code for starvation".to_string(),
         }
     }
 }
@@ -573,7 +595,7 @@ fn test_error_cap_exceeded() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: "Wrong error code for cap exceeded".to_string()
+            reason: "Wrong error code for cap exceeded".to_string(),
         }
     }
 }
@@ -593,13 +615,13 @@ fn test_config_max_units_validation() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Wrong validation message: {}", reason)
+                    reason: format!("Wrong validation message: {}", reason),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected max_units_per_cycle validation error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected max_units_per_cycle validation error".to_string(),
+        },
     }
 }
 
@@ -616,13 +638,13 @@ fn test_config_fairness_validation() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Wrong validation message: {}", reason)
+                    reason: format!("Wrong validation message: {}", reason),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected fairness_minimum validation error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected fairness_minimum validation error".to_string(),
+        },
     }
 }
 
@@ -639,13 +661,13 @@ fn test_config_max_tenants_validation() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Wrong validation message: {}", reason)
+                    reason: format!("Wrong validation message: {}", reason),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected max_tenants_per_cycle validation error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected max_tenants_per_cycle validation error".to_string(),
+        },
     }
 }
 
@@ -660,13 +682,13 @@ fn test_config_cycle_id_validation() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Wrong cycle_id validation message: {}", reason)
+                    reason: format!("Wrong cycle_id validation message: {}", reason),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected cycle_id validation error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected cycle_id validation error".to_string(),
+        },
     }
 }
 
@@ -681,13 +703,13 @@ fn test_config_trace_id_validation() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Wrong trace_id validation message: {}", reason)
+                    reason: format!("Wrong trace_id validation message: {}", reason),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected trace_id validation error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected trace_id validation error".to_string(),
+        },
     }
 }
 
@@ -708,13 +730,13 @@ fn test_input_item_id_validation() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Wrong item_id validation message: {}", reason)
+                    reason: format!("Wrong item_id validation message: {}", reason),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected item_id validation error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected item_id validation error".to_string(),
+        },
     }
 }
 
@@ -733,13 +755,13 @@ fn test_input_tenant_id_validation() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Wrong tenant_id validation message: {}", reason)
+                    reason: format!("Wrong tenant_id validation message: {}", reason),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected tenant_id validation error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected tenant_id validation error".to_string(),
+        },
     }
 }
 
@@ -756,13 +778,13 @@ fn test_input_duplicate_items_validation() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Wrong duplicate validation message: {}", reason)
+                    reason: format!("Wrong duplicate validation message: {}", reason),
                 }
             }
-        },
-        _ => TestResult::Fail {
-            reason: "Expected duplicate item_id validation error".to_string()
         }
+        _ => TestResult::Fail {
+            reason: "Expected duplicate item_id validation error".to_string(),
+        },
     }
 }
 
@@ -788,18 +810,18 @@ fn test_algorithm_priority_allocation() -> TestResult {
                     TestResult::Pass
                 } else {
                     TestResult::Fail {
-                        reason: "High priority item not allocated first".to_string()
+                        reason: "High priority item not allocated first".to_string(),
                     }
                 }
             } else {
                 TestResult::Fail {
-                    reason: "No allocations found".to_string()
+                    reason: "No allocations found".to_string(),
                 }
             }
-        },
-        Err(e) => TestResult::Fail {
-            reason: format!("Priority test failed: {}", e)
         }
+        Err(e) => TestResult::Fail {
+            reason: format!("Priority test failed: {}", e),
+        },
     }
 }
 
@@ -824,14 +846,15 @@ fn test_algorithm_tenant_limit() -> TestResult {
                 TestResult::Fail {
                     reason: format!(
                         "Tenant limit not enforced: {} allocs, {} skipped",
-                        allocs.len(), audit.tenants_skipped
-                    )
+                        allocs.len(),
+                        audit.tenants_skipped
+                    ),
                 }
             }
-        },
-        Err(e) => TestResult::Fail {
-            reason: format!("Tenant limit test failed: {}", e)
         }
+        Err(e) => TestResult::Fail {
+            reason: format!("Tenant limit test failed: {}", e),
+        },
     }
 }
 
@@ -843,8 +866,8 @@ fn test_algorithm_two_pass_allocation() -> TestResult {
     };
 
     let items = vec![
-        create_item("t1-low", "tenant1", 1, 10),   // Low priority, big
-        create_item("t2-high", "tenant2", 10, 2),  // High priority, small
+        create_item("t1-low", "tenant1", 1, 10),  // Low priority, big
+        create_item("t2-high", "tenant2", 10, 2), // High priority, small
     ];
 
     match run_cycle(&items, &config, "two-pass", "trace", "ts") {
@@ -883,22 +906,26 @@ fn test_algorithm_two_pass_allocation() -> TestResult {
                 TestResult::Fail {
                     reason: format!(
                         "Two-pass allocation failed: t1={} (floor {}), t2={} (floor {}), fairness={}",
-                        tenant1_units, tenant1_floor, tenant2_units, tenant2_floor, config.fairness_minimum
-                    )
+                        tenant1_units,
+                        tenant1_floor,
+                        tenant2_units,
+                        tenant2_floor,
+                        config.fairness_minimum
+                    ),
                 }
             }
-        },
-        Err(e) => TestResult::Fail {
-            reason: format!("Two-pass test failed: {}", e)
         }
+        Err(e) => TestResult::Fail {
+            reason: format!("Two-pass test failed: {}", e),
+        },
     }
 }
 
 fn test_algorithm_zero_sized_items() -> TestResult {
     let config = create_test_config();
     let items = vec![
-        create_item("zero-size", "tenant", 10, 0),    // Zero size
-        create_item("normal", "tenant", 5, 10),       // Normal size
+        create_item("zero-size", "tenant", 10, 0), // Zero size
+        create_item("normal", "tenant", 5, 10),    // Normal size
     ];
 
     match run_cycle(&items, &config, "zero-test", "trace", "ts") {
@@ -918,18 +945,18 @@ fn test_algorithm_zero_sized_items() -> TestResult {
                         reason: format!(
                             "Zero-sized item handling failed: alloc_units={}, total_units={}, expected fairness_minimum={}",
                             alloc.units_used, audit.total_units_used, config.fairness_minimum
-                        )
+                        ),
                     }
                 }
             } else {
                 TestResult::Fail {
-                    reason: "No allocations found for zero-sized test".to_string()
+                    reason: "No allocations found for zero-sized test".to_string(),
                 }
             }
-        },
-        Err(e) => TestResult::Fail {
-            reason: format!("Zero-sized test failed: {}", e)
         }
+        Err(e) => TestResult::Fail {
+            reason: format!("Zero-sized test failed: {}", e),
+        },
     }
 }
 
@@ -1037,18 +1064,24 @@ mod tests {
         assert_eq!(report.results.len(), BD_91GG_CONFORMANCE_CASES.len());
 
         // Compliance score should be reasonable (all tests should pass in our implementation)
-        assert!(report.compliance_score() >= 0.95,
+        assert!(
+            report.compliance_score() >= 0.95,
             "bd-91gg compliance score too low: {:.1}%",
-            report.compliance_score() * 100.0);
+            report.compliance_score() * 100.0
+        );
 
         // Should have zero MUST requirement failures for conformant implementation
-        assert_eq!(report.stats.must_fail, 0,
-            "MUST requirements failed - implementation not conformant");
+        assert_eq!(
+            report.stats.must_fail, 0,
+            "MUST requirements failed - implementation not conformant"
+        );
 
-        println!("bd-91gg conformance: {:.1}% ({} MUST pass, {} SHOULD pass)",
+        println!(
+            "bd-91gg conformance: {:.1}% ({} MUST pass, {} SHOULD pass)",
             report.compliance_score() * 100.0,
             report.stats.must_pass,
-            report.stats.should_pass);
+            report.stats.should_pass
+        );
     }
 
     #[test]

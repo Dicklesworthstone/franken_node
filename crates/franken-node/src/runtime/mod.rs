@@ -710,8 +710,7 @@ mod tests {
                     assert!(bulkhead.in_flight() > 0);
 
                     // Release should work with the issued permit id and same operation id
-                    let release_result =
-                        bulkhead.release(&permit.permit_id, operation_id, now_ms);
+                    let release_result = bulkhead.release(&permit.permit_id, operation_id, now_ms);
                     assert!(
                         release_result.is_ok() || release_result.is_err(),
                         "Release should complete deterministically for operation '{}'",
@@ -746,7 +745,8 @@ mod tests {
                 // operation ids, so the two permits stay independent.
                 if let Ok(ref second) = duplicate_result {
                     assert_ne!(
-                        first.permit_id, second.permit_id,
+                        first.permit_id,
+                        second.permit_id,
                         "distinct acquisitions must yield distinct permit ids for '{}'",
                         id1.escape_debug()
                     );
@@ -1036,8 +1036,8 @@ mod tests {
                 timestamp: "1970-01-01T00:00:00Z".to_string(), // Epoch start
             },
             TrustVerificationInput {
-                trust_state_hash: "\x00".repeat(64),               // Null byte hash
-                evidence_entries: vec!["".to_string(); 50_000],    // Many empty entries
+                trust_state_hash: "\x00".repeat(64),            // Null byte hash
+                evidence_entries: vec!["".to_string(); 50_000], // Many empty entries
                 current_epoch: u64::MAX,
                 last_evidence_epoch: 1,
                 staleness_threshold: 1,
@@ -1069,9 +1069,10 @@ mod tests {
 
             // Test trust verification processing with extreme inputs
             let started_at = test_clock_start();
-            let verification_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                SafeModeController::verify_trust_state(trust_input)
-            }));
+            let verification_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    SafeModeController::verify_trust_state(trust_input)
+                }));
             let verification_duration = started_at.elapsed();
 
             // Should complete without panic and in reasonable time
@@ -1181,9 +1182,9 @@ mod tests {
                 let recomputed = match op_idx {
                     0 => SafeModeController::compute_restricted_capabilities(flags),
                     1 => SafeModeController::compute_restricted_capabilities(&complement),
-                    _ => SafeModeController::compute_restricted_capabilities(
-                        &OperationFlags::none(),
-                    ),
+                    _ => {
+                        SafeModeController::compute_restricted_capabilities(&OperationFlags::none())
+                    }
                 };
                 assert_eq!(
                     restricted, &recomputed,
@@ -1200,7 +1201,10 @@ mod tests {
             );
 
             let flag_bits = active_count(flags);
-            assert!(flag_bits <= 4, "Flag count should be deterministic and bounded");
+            assert!(
+                flag_bits <= 4,
+                "Flag count should be deterministic and bounded"
+            );
 
             // Field-wise union / intersection are the analogs of bitwise | and &.
             let combined_flags = OperationFlags {

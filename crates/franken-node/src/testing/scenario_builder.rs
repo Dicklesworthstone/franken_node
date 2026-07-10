@@ -2028,8 +2028,7 @@ impl ScenarioBuilder {
             );
             if let Ok(scenario) = result {
                 assert_eq!(
-                    scenario.name,
-                    unicode_attack_name,
+                    scenario.name, unicode_attack_name,
                     "Malicious scenario name should be preserved"
                 );
             }
@@ -2244,14 +2243,12 @@ impl ScenarioBuilder {
                 );
                 if let Ok(scenario) = result {
                     assert_eq!(
-                        scenario.description,
-                        injection,
+                        scenario.description, injection,
                         "{} injection in description should be preserved as text",
                         name
                     );
                     assert_eq!(
-                        scenario.nodes[0].name,
-                        injection,
+                        scenario.nodes[0].name, injection,
                         "{} injection in node name should be preserved as text",
                         name
                     );
@@ -4033,7 +4030,10 @@ mod tests {
             .add_link("self-loop", "n1", "n1", true)
             .unwrap()
             .build();
-        assert!(result.is_ok(), "self-loops are accepted as a valid topology");
+        assert!(
+            result.is_ok(),
+            "self-loops are accepted as a valid topology"
+        );
     }
 
     #[test]
@@ -4477,7 +4477,9 @@ mod tests {
 
         let mut builder = ScenarioBuilder::new("unicode-test").seed(123);
         for node in &unicode_nodes {
-            builder = builder.add_node(*node, *node, NodeRole::Participant).unwrap();
+            builder = builder
+                .add_node(*node, *node, NodeRole::Participant)
+                .unwrap();
         }
 
         // Add links between all nodes
@@ -4744,8 +4746,9 @@ mod tests {
         use std::sync::{Arc, Barrier, Mutex};
         use std::thread;
 
-        let shared_builder =
-            Arc::new(Mutex::new(ScenarioBuilder::new("concurrent-test").seed(333)));
+        let shared_builder = Arc::new(Mutex::new(
+            ScenarioBuilder::new("concurrent-test").seed(333),
+        ));
         let barrier = Arc::new(Barrier::new(4));
 
         let handles: Vec<_> = (0..4)
@@ -4763,7 +4766,11 @@ mod tests {
                             .expect("builder mutex should lock for concurrent access");
                     *builder = builder
                         .clone()
-                        .add_node(node_name.as_str(), node_name.as_str(), NodeRole::Participant)
+                        .add_node(
+                            node_name.as_str(),
+                            node_name.as_str(),
+                            NodeRole::Participant,
+                        )
                         .unwrap();
 
                     if i == 0 {
@@ -5546,10 +5553,11 @@ mod tests {
 
         // Add maximum number of assertions
         for assertion_idx in 0..MAX_ASSERTIONS.min(1000) {
-            assertion_builder = assertion_builder.add_assertion(ScenarioAssertion::PartitionDetected {
-                by_node: "test_node".into(),
-                within_ticks: assertion_idx as u64,
-            });
+            assertion_builder =
+                assertion_builder.add_assertion(ScenarioAssertion::PartitionDetected {
+                    by_node: "test_node".into(),
+                    within_ticks: assertion_idx as u64,
+                });
         }
 
         let assertion_start = Instant::now();
@@ -5692,7 +5700,8 @@ mod tests {
             ),
         ];
 
-        for (attack_idx, (payload, malicious_config)) in malicious_fault_configs.iter().enumerate() {
+        for (attack_idx, (payload, malicious_config)) in malicious_fault_configs.iter().enumerate()
+        {
             println!("Testing fault injection attack {}: {}", attack_idx, payload);
 
             // Create separate builder for each attack; the injection payload is carried as
@@ -6273,9 +6282,17 @@ mod tests {
         // Test seed manipulation via external modification
         let manipulation_result = ScenarioBuilder::new("seed_manipulation_test")
             .seed(0x1337DEADBEEF1337)
-            .add_node("manipulation_node", "manipulation_node", NodeRole::Coordinator)
+            .add_node(
+                "manipulation_node",
+                "manipulation_node",
+                NodeRole::Coordinator,
+            )
             .unwrap()
-            .add_node("manipulation_peer", "manipulation_peer", NodeRole::Participant)
+            .add_node(
+                "manipulation_peer",
+                "manipulation_peer",
+                NodeRole::Participant,
+            )
             .unwrap()
             .build();
         if let Ok(scenario) = manipulation_result {
@@ -6728,8 +6745,7 @@ mod tests {
                 match build_result {
                     Ok(scenario) => {
                         assert_eq!(
-                            scenario.name,
-                            malicious_name,
+                            scenario.name, malicious_name,
                             "Built scenario should preserve name"
                         );
                         assert!(scenario.nodes.len() >= 2, "Should have required nodes");
@@ -6745,8 +6761,8 @@ mod tests {
 
             // Attack 2: Description field injection attacks
             let mut malicious_descriptions: Vec<String> = [
-                "\x00\x01\x02\x03\x04\x05",                     // Null bytes and control chars
-                "desc with\r\nCRLF\r\ninjection",               // CRLF injection
+                "\x00\x01\x02\x03\x04\x05",       // Null bytes and control chars
+                "desc with\r\nCRLF\r\ninjection", // CRLF injection
                 r#"{"injected": "json", "in": "description"}"#, // JSON in description
             ]
             .iter()
@@ -6771,8 +6787,7 @@ mod tests {
                 if build_result.is_ok() {
                     let scenario = build_result.unwrap();
                     assert_eq!(
-                        scenario.description,
-                        desc,
+                        scenario.description, desc,
                         "Description should be preserved"
                     );
                 }
@@ -6927,7 +6942,11 @@ mod tests {
             }
 
             // Attack 5: Node role exhaustive testing
-            let all_roles = vec![NodeRole::Participant, NodeRole::Coordinator, NodeRole::Observer];
+            let all_roles = vec![
+                NodeRole::Participant,
+                NodeRole::Coordinator,
+                NodeRole::Observer,
+            ];
 
             for role in all_roles {
                 let role_result = ScenarioBuilder::new("role_test")
@@ -7033,7 +7052,8 @@ mod tests {
                 .expect("First link should be added successfully");
 
             // Try to add second link with same ID
-            let duplicate_link_result = link_builder.add_link(duplicate_id, "node2", "node1", false);
+            let duplicate_link_result =
+                link_builder.add_link(duplicate_id, "node2", "node1", false);
 
             assert!(
                 duplicate_link_result.is_err(),
@@ -7199,7 +7219,10 @@ mod tests {
 
                 // Values should be preserved even if extreme
                 assert_eq!(stored_config.delay_ticks, fault_config.delay_ticks);
-                assert_eq!(stored_config.drop_probability, fault_config.drop_probability);
+                assert_eq!(
+                    stored_config.drop_probability,
+                    fault_config.drop_probability
+                );
             }
 
             // Attack 4: Multiple fault-profile updates on same link (keyed by link id,

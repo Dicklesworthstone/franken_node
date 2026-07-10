@@ -13,8 +13,8 @@
 //! - Domain leakage vulnerabilities
 
 use frankenengine_node::encoding::deterministic_seed::{
-    ContentHash, DeterministicSeed, DeterministicSeedDeriver, DomainTag, ScheduleConfig,
-    derive_seed, SeedError,
+    ContentHash, DeterministicSeed, DeterministicSeedDeriver, DomainTag, ScheduleConfig, SeedError,
+    derive_seed,
 };
 use std::collections::HashSet;
 
@@ -79,12 +79,20 @@ fn mr_hex_roundtrip_content_hash() {
         }
 
         // Additional check: hex string should be exactly 64 characters
-        assert_eq!(hex_string.len(), 64,
-            "Hex string should be 64 characters at iteration {}: '{}'", i, hex_string);
+        assert_eq!(
+            hex_string.len(),
+            64,
+            "Hex string should be 64 characters at iteration {}: '{}'",
+            i,
+            hex_string
+        );
     }
 
-    assert!(roundtrip_failures.is_empty(),
-        "Hex roundtrip failures:\n{}", roundtrip_failures.join("\n"));
+    assert!(
+        roundtrip_failures.is_empty(),
+        "Hex roundtrip failures:\n{}",
+        roundtrip_failures.join("\n")
+    );
 }
 
 /// MR2: Hex Roundtrip Identity for DeterministicSeed
@@ -114,14 +122,26 @@ fn mr_hex_roundtrip_deterministic_seed() {
         }
 
         // Verify hex string properties
-        assert_eq!(seed_hex.len(), 64,
-            "Seed hex should be 64 characters at iteration {}: '{}'", i, seed_hex);
-        assert!(seed_hex.chars().all(|c| c.is_ascii_hexdigit()),
-            "Seed hex should contain only hex digits at iteration {}: '{}'", i, seed_hex);
+        assert_eq!(
+            seed_hex.len(),
+            64,
+            "Seed hex should be 64 characters at iteration {}: '{}'",
+            i,
+            seed_hex
+        );
+        assert!(
+            seed_hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "Seed hex should contain only hex digits at iteration {}: '{}'",
+            i,
+            seed_hex
+        );
     }
 
-    assert!(seed_failures.is_empty(),
-        "Seed hex roundtrip failures:\n{}", seed_failures.join("\n"));
+    assert!(
+        seed_failures.is_empty(),
+        "Seed hex roundtrip failures:\n{}",
+        seed_failures.join("\n")
+    );
 }
 
 /// MR3: Domain Separation (Exclusive)
@@ -165,8 +185,11 @@ fn mr_domain_separation() {
         }
     }
 
-    assert!(separation_failures.is_empty(),
-        "Domain separation failures:\n{}", separation_failures.join("\n"));
+    assert!(
+        separation_failures.is_empty(),
+        "Domain separation failures:\n{}",
+        separation_failures.join("\n")
+    );
 }
 
 /// MR4: Content Sensitivity (Exclusive)
@@ -204,8 +227,11 @@ fn mr_content_sensitivity() {
         }
     }
 
-    assert!(sensitivity_failures.is_empty(),
-        "Content sensitivity failures:\n{}", sensitivity_failures.join("\n"));
+    assert!(
+        sensitivity_failures.is_empty(),
+        "Content sensitivity failures:\n{}",
+        sensitivity_failures.join("\n")
+    );
 }
 
 /// MR5: Configuration Sensitivity (Exclusive)
@@ -244,8 +270,11 @@ fn mr_config_sensitivity() {
         }
     }
 
-    assert!(config_failures.is_empty(),
-        "Configuration sensitivity failures:\n{}", config_failures.join("\n"));
+    assert!(
+        config_failures.is_empty(),
+        "Configuration sensitivity failures:\n{}",
+        config_failures.join("\n")
+    );
 }
 
 /// MR6: Derivation Determinism (Equivalence)
@@ -287,8 +316,11 @@ fn mr_derivation_determinism() {
         }
     }
 
-    assert!(determinism_failures.is_empty(),
-        "Derivation determinism failures:\n{}", determinism_failures.join("\n"));
+    assert!(
+        determinism_failures.is_empty(),
+        "Derivation determinism failures:\n{}",
+        determinism_failures.join("\n")
+    );
 }
 
 /// MR7: Stateful Deriver Consistency
@@ -315,7 +347,9 @@ fn mr_stateful_deriver_consistency() {
         if stateless_seed.bytes != stateful_seed.bytes {
             consistency_failures.push(format!(
                 "Iteration {}: Stateful/stateless inconsistency - stateless: {}, stateful: {}",
-                i, stateless_seed.to_hex(), stateful_seed.to_hex()
+                i,
+                stateless_seed.to_hex(),
+                stateful_seed.to_hex()
             ));
         }
 
@@ -327,8 +361,11 @@ fn mr_stateful_deriver_consistency() {
         }
     }
 
-    assert!(consistency_failures.is_empty(),
-        "Stateful deriver consistency failures:\n{}", consistency_failures.join("\n"));
+    assert!(
+        consistency_failures.is_empty(),
+        "Stateful deriver consistency failures:\n{}",
+        consistency_failures.join("\n")
+    );
 }
 
 /// MR8: Collision Resistance (Statistical)
@@ -358,14 +395,20 @@ fn mr_collision_resistance() {
 
     // With 100 iterations and 256-bit seeds, collisions should be extremely rare
     // Allow at most 1 collision (could be legitimate with random chance)
-    assert!(collision_count <= 1,
+    assert!(
+        collision_count <= 1,
         "Too many seed collisions detected: {} out of {} iterations",
-        collision_count, PROPERTY_TEST_ITERATIONS);
+        collision_count,
+        PROPERTY_TEST_ITERATIONS
+    );
 
     // Verify we generated a reasonable number of unique seeds
-    assert!(all_seeds.len() >= PROPERTY_TEST_ITERATIONS - 1,
+    assert!(
+        all_seeds.len() >= PROPERTY_TEST_ITERATIONS - 1,
         "Not enough unique seeds generated: {} unique out of {} iterations",
-        all_seeds.len(), PROPERTY_TEST_ITERATIONS);
+        all_seeds.len(),
+        PROPERTY_TEST_ITERATIONS
+    );
 }
 
 /// MR9: Hex Encoding Validation (Format Consistency)
@@ -386,39 +429,70 @@ fn mr_hex_encoding_format() {
         // Check ContentHash hex format
         let content_hex = content_hash.to_hex();
         if content_hex.len() != 64 {
-            format_failures.push(format!("Iteration {}: ContentHash hex wrong length: {}", i, content_hex.len()));
+            format_failures.push(format!(
+                "Iteration {}: ContentHash hex wrong length: {}",
+                i,
+                content_hex.len()
+            ));
         }
         if !content_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            format_failures.push(format!("Iteration {}: ContentHash hex contains non-hex: '{}'", i, content_hex));
+            format_failures.push(format!(
+                "Iteration {}: ContentHash hex contains non-hex: '{}'",
+                i, content_hex
+            ));
         }
         if content_hex != content_hex.to_lowercase() {
-            format_failures.push(format!("Iteration {}: ContentHash hex not lowercase: '{}'", i, content_hex));
+            format_failures.push(format!(
+                "Iteration {}: ContentHash hex not lowercase: '{}'",
+                i, content_hex
+            ));
         }
 
         // Check DeterministicSeed hex format
         let seed_hex = derived_seed.to_hex();
         if seed_hex.len() != 64 {
-            format_failures.push(format!("Iteration {}: Seed hex wrong length: {}", i, seed_hex.len()));
+            format_failures.push(format!(
+                "Iteration {}: Seed hex wrong length: {}",
+                i,
+                seed_hex.len()
+            ));
         }
         if !seed_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            format_failures.push(format!("Iteration {}: Seed hex contains non-hex: '{}'", i, seed_hex));
+            format_failures.push(format!(
+                "Iteration {}: Seed hex contains non-hex: '{}'",
+                i, seed_hex
+            ));
         }
         if seed_hex != seed_hex.to_lowercase() {
-            format_failures.push(format!("Iteration {}: Seed hex not lowercase: '{}'", i, seed_hex));
+            format_failures.push(format!(
+                "Iteration {}: Seed hex not lowercase: '{}'",
+                i, seed_hex
+            ));
         }
 
         // Check prefix hex format
         let prefix_hex = derived_seed.prefix_hex();
-        if prefix_hex.len() != 8 {  // First 4 bytes = 8 hex chars (see DeterministicSeed::prefix_hex)
-            format_failures.push(format!("Iteration {}: Prefix hex wrong length: {}", i, prefix_hex.len()));
+        if prefix_hex.len() != 8 {
+            // First 4 bytes = 8 hex chars (see DeterministicSeed::prefix_hex)
+            format_failures.push(format!(
+                "Iteration {}: Prefix hex wrong length: {}",
+                i,
+                prefix_hex.len()
+            ));
         }
         if !seed_hex.starts_with(&prefix_hex) {
-            format_failures.push(format!("Iteration {}: Prefix hex not a prefix of full hex", i));
+            format_failures.push(format!(
+                "Iteration {}: Prefix hex not a prefix of full hex",
+                i
+            ));
         }
     }
 
-    assert!(format_failures.is_empty(),
-        "Hex format validation failures:\n{}", format_failures.join("\n"));
+    assert!(
+        format_failures.is_empty(),
+        "Hex format validation failures:\n{}",
+        format_failures.join("\n")
+    );
 }
 
 /// Comprehensive metamorphic test combining multiple relations
@@ -455,9 +529,14 @@ fn mr_comprehensive_composite() {
 
     for i in 0..all_seeds.len() {
         for j in (i + 1)..all_seeds.len() {
-            assert_ne!(all_seeds[i].bytes, all_seeds[j].bytes,
+            assert_ne!(
+                all_seeds[i].bytes,
+                all_seeds[j].bytes,
                 "Seeds {} and {} should be different but are identical: {}",
-                i, j, all_seeds[i].to_hex());
+                i,
+                j,
+                all_seeds[i].to_hex()
+            );
         }
     }
 
@@ -465,11 +544,18 @@ fn mr_comprehensive_composite() {
     for (idx, seed) in all_seeds.iter().enumerate() {
         let hex = seed.to_hex();
         let parsed_hash = ContentHash::from_hex(&hex);
-        assert!(parsed_hash.is_ok(), "Seed {} hex should be parseable: '{}'", idx, hex);
+        assert!(
+            parsed_hash.is_ok(),
+            "Seed {} hex should be parseable: '{}'",
+            idx,
+            hex
+        );
     }
 
     // Verify determinism by re-deriving
     let seed_d1_c1_cfg1_repeat = derive_seed(domain1, &content1, &config1);
-    assert_eq!(seed_d1_c1_cfg1.bytes, seed_d1_c1_cfg1_repeat.bytes,
-        "Repeated derivation should be identical");
+    assert_eq!(
+        seed_d1_c1_cfg1.bytes, seed_d1_c1_cfg1_repeat.bytes,
+        "Repeated derivation should be identical"
+    );
 }

@@ -4,13 +4,13 @@
 //! any changes that could break cryptographic hash consistency or security assumptions.
 
 use frankenengine_node::sdk::replay_capsule::{
-    CapsuleInput, CapsuleOutput, ReplayCapsule, EnvironmentSnapshot, CURRENT_FORMAT_VERSION,
-};
-use frankenengine_node::supply_chain::trust_card::{
-    TrustCard, ExtensionIdentity, PublisherIdentity, CertificationLevel, BehavioralProfile,
-    RevocationStatus, ProvenanceSummary, ReputationTrend, RiskAssessment, RiskLevel,
+    CURRENT_FORMAT_VERSION, CapsuleInput, CapsuleOutput, EnvironmentSnapshot, ReplayCapsule,
 };
 use frankenengine_node::supply_chain::certification::DerivationMetadata;
+use frankenengine_node::supply_chain::trust_card::{
+    BehavioralProfile, CertificationLevel, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard,
+};
 use insta::{assert_json_snapshot, assert_snapshot};
 use serde_json;
 use std::collections::BTreeMap;
@@ -104,13 +104,11 @@ fn test_replay_capsule_canonical_json_snapshot() {
                 metadata: input_metadata_2,
             },
         ],
-        expected_outputs: vec![
-            CapsuleOutput {
-                seq: 1,
-                data: b"PASS:0.95".to_vec(),
-                output_hash: "sha256:passoutput123".to_string(),
-            },
-        ],
+        expected_outputs: vec![CapsuleOutput {
+            seq: 1,
+            data: b"PASS:0.95".to_vec(),
+            output_hash: "sha256:passoutput123".to_string(),
+        }],
         environment: EnvironmentSnapshot {
             runtime_version: "franken-v1.0.0".to_string(),
             platform: "linux-x86_64".to_string(),

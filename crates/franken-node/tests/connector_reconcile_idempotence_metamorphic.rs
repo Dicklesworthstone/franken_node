@@ -6,8 +6,8 @@
 //! bd-ewfq9: [TEST] connector reconcile idempotence metamorphic
 
 use frankenengine_node::connector::state_model::{
-    DivergenceCheck, DivergenceType, ReconcileAction, StateModelType, StateRoot,
-    detect_divergence, reconcile_action,
+    DivergenceCheck, DivergenceType, ReconcileAction, StateModelType, StateRoot, detect_divergence,
+    reconcile_action,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -27,15 +27,27 @@ fn reconcile_action_idempotent_all_divergence_types() {
 
         // First application
         let action1 = reconcile_action(&check);
-        assert_eq!(action1, expected_action, "First reconcile action mismatch for {:?}", divergence_type);
+        assert_eq!(
+            action1, expected_action,
+            "First reconcile action mismatch for {:?}",
+            divergence_type
+        );
 
         // Second application - should be identical (idempotent)
         let action2 = reconcile_action(&check);
-        assert_eq!(action1, action2, "Reconcile action not idempotent for {:?}", divergence_type);
+        assert_eq!(
+            action1, action2,
+            "Reconcile action not idempotent for {:?}",
+            divergence_type
+        );
 
         // Third application - still identical
         let action3 = reconcile_action(&check);
-        assert_eq!(action1, action3, "Reconcile action not idempotent on third call for {:?}", divergence_type);
+        assert_eq!(
+            action1, action3,
+            "Reconcile action not idempotent on third call for {:?}",
+            divergence_type
+        );
     }
 }
 
@@ -80,16 +92,24 @@ fn reconciliation_converges_to_stable_state() {
             }
 
             reconcile_steps += 1;
-            assert!(reconcile_steps < max_steps,
-                    "Reconciliation did not converge within {} steps for scenario {}",
-                    max_steps, scenario_name);
+            assert!(
+                reconcile_steps < max_steps,
+                "Reconciliation did not converge within {} steps for scenario {}",
+                max_steps,
+                scenario_name
+            );
         }
 
         // Verify final convergence - should be stable (NoAction)
         let final_check = detect_divergence(&local, &canonical);
         let final_action = reconcile_action(&final_check);
-        assert_eq!(final_action, ReconcileAction::NoAction,
-                  "Final state not stable for scenario {}: {:?}", scenario_name, final_check);
+        assert_eq!(
+            final_action,
+            ReconcileAction::NoAction,
+            "Final state not stable for scenario {}: {:?}",
+            scenario_name,
+            final_check
+        );
     }
 }
 
@@ -102,10 +122,12 @@ fn multiple_reconcile_sequences_equivalent() {
     let result1 = apply_reconciliation_sequence(&local, &canonical, vec!["direct"]);
 
     // Sequence 2: Multiple small steps
-    let result2 = apply_reconciliation_sequence(&local, &canonical, vec!["step1", "step2", "step3"]);
+    let result2 =
+        apply_reconciliation_sequence(&local, &canonical, vec!["step1", "step2", "step3"]);
 
     // Sequence 3: Repeated reconciliation (should be idempotent)
-    let result3 = apply_reconciliation_sequence(&local, &canonical, vec!["repeat", "repeat", "repeat"]);
+    let result3 =
+        apply_reconciliation_sequence(&local, &canonical, vec!["repeat", "repeat", "repeat"]);
 
     // All sequences should produce equivalent final states
     assert_states_equivalent(&result1, &result2, "Sequence 1 and 2 not equivalent");
@@ -116,8 +138,12 @@ fn multiple_reconcile_sequences_equivalent() {
     for (i, result) in [&result1, &result2, &result3].iter().enumerate() {
         let check = detect_divergence(result, &canonical);
         let action = reconcile_action(&check);
-        assert_eq!(action, ReconcileAction::NoAction,
-                  "Result {} is not in stable state", i + 1);
+        assert_eq!(
+            action,
+            ReconcileAction::NoAction,
+            "Result {} is not in stable state",
+            i + 1
+        );
     }
 }
 
@@ -136,15 +162,25 @@ fn reconcile_order_independence() {
         let order3_result = apply_reconciliation_with_order(&local, &canonical, vec![2, 3, 1]);
 
         // All orders should produce equivalent results
-        assert_states_equivalent(&order1_result, &order2_result,
-                                &format!("Scenario {} order 1,2 not equivalent", scenario_idx));
-        assert_states_equivalent(&order1_result, &order3_result,
-                                &format!("Scenario {} order 1,3 not equivalent", scenario_idx));
+        assert_states_equivalent(
+            &order1_result,
+            &order2_result,
+            &format!("Scenario {} order 1,2 not equivalent", scenario_idx),
+        );
+        assert_states_equivalent(
+            &order1_result,
+            &order3_result,
+            &format!("Scenario {} order 1,3 not equivalent", scenario_idx),
+        );
 
         // Final states should be stable
         let final_check = detect_divergence(&order1_result, &canonical);
-        assert_eq!(reconcile_action(&final_check), ReconcileAction::NoAction,
-                  "Scenario {} final state not stable", scenario_idx);
+        assert_eq!(
+            reconcile_action(&final_check),
+            ReconcileAction::NoAction,
+            "Scenario {} final state not stable",
+            scenario_idx
+        );
     }
 }
 
@@ -175,9 +211,21 @@ fn test_idempotence_property(local: &StateRoot, canonical: &StateRoot, scenario:
     let action2 = reconcile_action(&check);
     let action3 = reconcile_action(&check);
 
-    assert_eq!(action1, action2, "Not idempotent on 2nd call for {}", scenario);
-    assert_eq!(action1, action3, "Not idempotent on 3rd call for {}", scenario);
-    assert_eq!(action2, action3, "Not idempotent between 2nd and 3rd call for {}", scenario);
+    assert_eq!(
+        action1, action2,
+        "Not idempotent on 2nd call for {}",
+        scenario
+    );
+    assert_eq!(
+        action1, action3,
+        "Not idempotent on 3rd call for {}",
+        scenario
+    );
+    assert_eq!(
+        action2, action3,
+        "Not idempotent between 2nd and 3rd call for {}",
+        scenario
+    );
 }
 
 // Helper functions for creating test scenarios
@@ -323,17 +371,9 @@ fn create_version_and_hash_mismatch_scenario() -> (StateRoot, StateRoot) {
 }
 
 fn create_empty_state_scenario() -> (StateRoot, StateRoot) {
-    let local = StateRoot::new(
-        "empty".to_string(),
-        StateModelType::Stateless,
-        json!({}),
-    );
+    let local = StateRoot::new("empty".to_string(), StateModelType::Stateless, json!({}));
 
-    let canonical = StateRoot::new(
-        "empty".to_string(),
-        StateModelType::Stateless,
-        json!(null),
-    );
+    let canonical = StateRoot::new("empty".to_string(), StateModelType::Stateless, json!(null));
 
     (local, canonical)
 }
@@ -463,9 +503,25 @@ fn apply_reconciliation_with_order(
 }
 
 fn assert_states_equivalent(state1: &StateRoot, state2: &StateRoot, message: &str) {
-    assert_eq!(state1.connector_id, state2.connector_id, "{}: connector_id mismatch", message);
-    assert_eq!(state1.state_model, state2.state_model, "{}: state_model mismatch", message);
-    assert_eq!(state1.root_hash, state2.root_hash, "{}: root_hash mismatch", message);
-    assert_eq!(state1.head, state2.head, "{}: head content mismatch", message);
+    assert_eq!(
+        state1.connector_id, state2.connector_id,
+        "{}: connector_id mismatch",
+        message
+    );
+    assert_eq!(
+        state1.state_model, state2.state_model,
+        "{}: state_model mismatch",
+        message
+    );
+    assert_eq!(
+        state1.root_hash, state2.root_hash,
+        "{}: root_hash mismatch",
+        message
+    );
+    assert_eq!(
+        state1.head, state2.head,
+        "{}: head content mismatch",
+        message
+    );
     // Note: version and last_modified may differ due to reconciliation process
 }
