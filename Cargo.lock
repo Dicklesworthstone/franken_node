@@ -412,79 +412,26 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.3.4"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c72750f89a297f34f0daaf0eb824dbd9effcaa85a562f631109d502dbf742a3"
+checksum = "0350965ddf8c00001227d5e019613c1bbafe14d26b716f58d69a1c8204687dab"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
  "base64",
- "bincode-next 2.1.0",
+ "bincode-next",
  "chacha20poly1305",
  "crc32fast",
  "crossbeam-deque",
  "crossbeam-queue",
- "franken-decision 0.3.4",
- "franken-evidence 0.3.4",
- "franken-kernel 0.3.4",
+ "franken-decision",
+ "franken-evidence",
+ "franken-kernel",
  "futures-lite",
  "getrandom 0.4.3",
  "hashbrown 0.17.0",
  "hex",
- "hkdf 0.12.4",
- "hmac 0.13.0",
- "js-sys",
- "libc",
- "memchr",
- "nix",
- "nkeys",
- "parking_lot",
- "pin-project",
- "polling",
- "prost",
- "rmp-serde",
- "semver",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.11.0",
- "signal-hook",
- "slab",
- "smallvec",
- "socket2",
- "subtle",
- "sysinfo 0.33.1",
- "tempfile",
- "thiserror",
- "tracing",
- "tracing-subscriber",
- "visibility",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "windows-sys 0.61.2",
- "zeroize",
-]
-
-[[package]]
-name = "asupersync"
-version = "0.3.5"
-dependencies = [
- "aes-gcm",
- "base64",
- "bincode-next 3.1.1",
- "chacha20poly1305",
- "crc32fast",
- "crossbeam-deque",
- "crossbeam-queue",
- "franken-decision 0.3.5",
- "franken-evidence 0.3.5",
- "franken-kernel 0.3.5",
- "futures-lite",
- "getrandom 0.4.3",
- "hashbrown 0.17.0",
- "hex",
- "hkdf 0.13.0",
+ "hkdf",
  "hmac 0.13.0",
  "io-uring",
  "js-sys",
@@ -507,9 +454,12 @@ dependencies = [
  "smallvec",
  "socket2",
  "subtle",
- "sysinfo 0.39.5",
+ "sysinfo",
  "tempfile",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "visibility",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -520,9 +470,9 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.3.4"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0f5adb3656cbf0422a51fc053f5d35893b5976a915179e6aa1724968c46e5df"
+checksum = "223fae3572bf68e3c424c5c5b050086637708f8ba634f1e12c1228ae4782d7d3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -567,35 +517,15 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bincode-next"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbe9e7e6d14aeb39557f226bff158a30e367fac279d0e69b8b42fb41999f9a86"
-dependencies = [
- "bincode_derive-next 2.1.0",
- "serde",
- "unty-next",
-]
-
-[[package]]
-name = "bincode-next"
 version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d6626829353ae29293be5c86f42de5f0468bc758af074b0c7d08f07e538ccbc"
 dependencies = [
- "bincode_derive-next 3.1.1",
+ "bincode_derive-next",
  "pastey",
  "rapidhash",
  "serde",
  "unty-next",
-]
-
-[[package]]
-name = "bincode_derive-next"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2af389a025376dbbe728c43dfa5c08f866116c0b62627787c21ca1c69e2b8dec"
-dependencies = [
- "virtue-next",
 ]
 
 [[package]]
@@ -1259,6 +1189,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "deranged"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+
+[[package]]
 name = "derive_arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1447,7 +1383,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1460,7 +1396,7 @@ checksum = "f8eb564c5c7423d25c886fb561d1e4ee69f72354d16918afa32c08811f6b6a55"
 name = "fastapi-core"
 version = "0.3.0"
 dependencies = [
- "asupersync 0.3.4",
+ "asupersync",
  "fastapi-openapi",
  "fastapi-router",
  "fastapi-types",
@@ -1475,7 +1411,7 @@ dependencies = [
 name = "fastapi-http"
 version = "0.3.0"
 dependencies = [
- "asupersync 0.3.4",
+ "asupersync",
  "fastapi-core",
 ]
 
@@ -1642,7 +1578,7 @@ dependencies = [
  "fp-index",
  "fp-types",
  "parquet",
- "quick-xml 0.40.1",
+ "quick-xml 0.41.0",
  "rust_xlsxwriter",
  "ryu",
  "scraper",
@@ -1672,21 +1608,12 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.3.4"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0eab25c0123956de2a2386908e31508b3049eeb5145d1818f151157e3535760"
+checksum = "6bb981475a72a66b0c948538e5924e4ad97642abc9781534d24570b8fdea4085"
 dependencies = [
- "franken-evidence 0.3.4",
- "franken-kernel 0.3.4",
- "serde",
-]
-
-[[package]]
-name = "franken-decision"
-version = "0.3.5"
-dependencies = [
- "franken-evidence 0.3.5",
- "franken-kernel 0.3.5",
+ "franken-evidence",
+ "franken-kernel",
  "serde",
 ]
 
@@ -1716,17 +1643,9 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.3.4"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ff54a8d80d29a1960c5f78f9c7fb15b1e0bef8ac5e386b46edd847d96038119"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "franken-evidence"
-version = "0.3.5"
+checksum = "1b05716823d865d39eb48749341cd74163f3c8564220c0126878b50cf9f86879"
 dependencies = [
  "serde",
  "serde_json",
@@ -1734,16 +1653,9 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.3.4"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b2304bb46a2a4f813de1f561340970d0f9b3a1020f5746f4dc1a2235838cfc5"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "franken-kernel"
-version = "0.3.5"
+checksum = "cdb4d0fd4d8e0ff8f082692ea40ae1d06ae704d4894fd915458582f0df1cd320"
 dependencies = [
  "serde",
 ]
@@ -1794,12 +1706,12 @@ dependencies = [
  "fp-index",
  "fp-io",
  "fp-types",
- "franken-decision 0.3.4",
+ "franken-decision",
  "franken-engine-deterministic-derive",
  "franken-engine-deterministic-trait",
  "franken-engine-fixed-layout-derive",
- "franken-evidence 0.3.4",
- "franken-kernel 0.3.4",
+ "franken-evidence",
+ "franken-kernel",
  "frankenengine-core",
  "frankenengine-extension-host",
  "hex",
@@ -1833,10 +1745,13 @@ name = "frankenengine-extension-host"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1847,7 +1762,7 @@ dependencies = [
  "arbitrary",
  "assert2",
  "assert_cmd",
- "asupersync 0.3.4",
+ "asupersync",
  "base64",
  "blake3",
  "chrono",
@@ -1867,14 +1782,17 @@ dependencies = [
  "ftui",
  "hdrhistogram",
  "hex",
- "hkdf 0.13.0",
+ "hkdf",
  "hmac 0.13.0",
  "insta",
  "lazy_static",
  "loom",
  "proptest",
  "rand 0.8.6",
+ "rcgen",
  "regex",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1929,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "fsqlite-core",
  "fsqlite-error",
@@ -1943,14 +1861,14 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ast"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "fsqlite-types",
 ]
 
 [[package]]
 name = "fsqlite-btree"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "foldhash",
  "fsqlite-error",
@@ -1966,9 +1884,9 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-core"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
- "asupersync 0.3.5",
+ "asupersync",
  "blake3",
  "foldhash",
  "fsqlite-ast",
@@ -2002,14 +1920,14 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-error"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "fsqlite-ext-fts5"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2020,7 +1938,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-icu"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2030,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-json"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2041,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-misc"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2053,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-rtree"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -2062,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-func"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "chrono",
  "fsqlite-error",
@@ -2072,9 +1990,9 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-mvcc"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
- "asupersync 0.3.5",
+ "asupersync",
  "blake3",
  "crc32c",
  "crossbeam-epoch",
@@ -2095,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-observability"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "fsqlite-types",
  "parking_lot",
@@ -2105,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-pager"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "argon2",
  "bumpalo",
@@ -2126,7 +2044,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-parser"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "fsqlite-ast",
  "fsqlite-error",
@@ -2138,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-planner"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "blake3",
  "fsqlite-ast",
@@ -2154,9 +2072,9 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-types"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
- "asupersync 0.3.5",
+ "asupersync",
  "bitflags",
  "blake3",
  "fsqlite-error",
@@ -2171,9 +2089,9 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vdbe"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
- "asupersync 0.3.5",
+ "asupersync",
  "crossbeam-deque",
  "fsqlite-ast",
  "fsqlite-btree",
@@ -2192,10 +2110,10 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vfs"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
  "advisory-lock",
- "asupersync 0.3.5",
+ "asupersync",
  "fsqlite-error",
  "fsqlite-observability",
  "fsqlite-types",
@@ -2208,9 +2126,9 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-wal"
-version = "0.1.13"
+version = "0.1.15"
 dependencies = [
- "asupersync 0.3.5",
+ "asupersync",
  "blake3",
  "crc32c",
  "fsqlite-error",
@@ -2224,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "ftui"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ftui-core",
  "ftui-layout",
@@ -2236,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-a11y"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "ftui-core",
@@ -2244,7 +2162,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-backend"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ftui-core",
  "ftui-render",
@@ -2252,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2269,11 +2187,11 @@ dependencies = [
 
 [[package]]
 name = "ftui-i18n"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "ftui-layout"
-version = "0.4.1"
+version = "0.5.1"
 dependencies = [
  "ftui-core",
  "rustc-hash",
@@ -2284,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-render"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -2298,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-runtime"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "ftui-backend",
@@ -2316,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-style"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2326,7 +2244,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-text"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ftui-core",
  "ftui-layout",
@@ -2343,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-widgets"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -2425,7 +2343,7 @@ dependencies = [
  "log",
  "rustversion",
  "windows-link",
- "windows-result 0.4.1",
+ "windows-result",
 ]
 
 [[package]]
@@ -2557,15 +2475,6 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hkdf"
-version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
-dependencies = [
- "hmac 0.12.1",
-]
-
-[[package]]
-name = "hkdf"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
@@ -2638,7 +2547,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core",
 ]
 
 [[package]]
@@ -2807,7 +2716,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3137,6 +3046,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-conv"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
+
+[[package]]
 name = "num-integer"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3314,6 +3229,16 @@ name = "pastey"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
+
+[[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64",
+ "serde_core",
+]
 
 [[package]]
 name = "pem-rfc7468"
@@ -3567,6 +3492,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "powerfmt"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3677,9 +3608,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.40.1"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
 ]
@@ -3820,6 +3751,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3934,7 +3878,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4317,7 +4261,7 @@ dependencies = [
 name = "sqlmodel"
 version = "0.2.2"
 dependencies = [
- "asupersync 0.3.4",
+ "asupersync",
  "serde",
  "serde_json",
  "sqlmodel-core",
@@ -4332,7 +4276,7 @@ dependencies = [
 name = "sqlmodel-core"
 version = "0.2.2"
 dependencies = [
- "asupersync 0.3.4",
+ "asupersync",
  "regex",
  "serde",
  "serde_json",
@@ -4343,7 +4287,7 @@ dependencies = [
 name = "sqlmodel-frankensqlite"
 version = "0.2.2"
 dependencies = [
- "asupersync 0.3.4",
+ "asupersync",
  "fsqlite",
  "fsqlite-core",
  "fsqlite-error",
@@ -4367,7 +4311,7 @@ dependencies = [
 name = "sqlmodel-pool"
 version = "0.2.2"
 dependencies = [
- "asupersync 0.3.4",
+ "asupersync",
  "sqlmodel-core",
  "tracing",
 ]
@@ -4376,7 +4320,7 @@ dependencies = [
 name = "sqlmodel-query"
 version = "0.2.2"
 dependencies = [
- "asupersync 0.3.4",
+ "asupersync",
  "serde",
  "sqlmodel-core",
  "tracing",
@@ -4386,7 +4330,7 @@ dependencies = [
 name = "sqlmodel-schema"
 version = "0.2.2"
 dependencies = [
- "asupersync 0.3.4",
+ "asupersync",
  "serde",
  "sqlmodel-core",
  "sqlmodel-macros",
@@ -4397,7 +4341,7 @@ dependencies = [
 name = "sqlmodel-session"
 version = "0.2.2"
 dependencies = [
- "asupersync 0.3.4",
+ "asupersync",
  "serde",
  "serde_json",
  "sqlmodel-core",
@@ -4483,20 +4427,6 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.33.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fc858248ea01b66f19d8e8a6d55f41deaf91e9d495246fd01368d99935c6c01"
-dependencies = [
- "core-foundation-sys",
- "libc",
- "memchr",
- "ntapi",
- "rayon",
- "windows 0.57.0",
-]
-
-[[package]]
-name = "sysinfo"
 version = "0.39.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c8bd2130a9b60bee2581bf82cfe89ee836424d1f37dcfa4ce21509611684673"
@@ -4507,7 +4437,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "objc2-open-directory",
- "windows 0.62.2",
+ "windows",
 ]
 
 [[package]]
@@ -4520,7 +4450,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4577,6 +4507,25 @@ checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "time"
+version = "0.3.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18dfaaeddcb932337b5e7866ee7d0ce9b76d2fd092997146f187ec09b4558a50"
+dependencies = [
+ "deranged",
+ "num-conv",
+ "powerfmt",
+ "serde_core",
+ "time-core",
+]
+
+[[package]]
+name = "time-core"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "tiny-keccak"
@@ -5203,7 +5152,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5214,22 +5163,12 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12342cb4d8e3b046f3d80effd474a7a02447231330ef77d71daa6fbc40681143"
-dependencies = [
- "windows-core 0.57.0",
- "windows-targets",
-]
-
-[[package]]
-name = "windows"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580"
 dependencies = [
  "windows-collections",
- "windows-core 0.62.2",
+ "windows-core",
  "windows-future",
  "windows-numerics",
 ]
@@ -5240,19 +5179,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610"
 dependencies = [
- "windows-core 0.62.2",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2ed2439a290666cd67ecce2b0ffaad89c2a56b976b736e6ece670297897832d"
-dependencies = [
- "windows-implement 0.57.0",
- "windows-interface 0.57.0",
- "windows-result 0.1.2",
- "windows-targets",
+ "windows-core",
 ]
 
 [[package]]
@@ -5261,10 +5188,10 @@ version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
 dependencies = [
- "windows-implement 0.60.2",
- "windows-interface 0.59.3",
+ "windows-implement",
+ "windows-interface",
  "windows-link",
- "windows-result 0.4.1",
+ "windows-result",
  "windows-strings",
 ]
 
@@ -5274,20 +5201,9 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb"
 dependencies = [
- "windows-core 0.62.2",
+ "windows-core",
  "windows-link",
  "windows-threading",
-]
-
-[[package]]
-name = "windows-implement"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -5295,17 +5211,6 @@ name = "windows-implement"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29bee4b38ea3cde66011baa44dba677c432a78593e202392d1e9070cf2a7fca7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5335,17 +5240,8 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
 dependencies = [
- "windows-core 0.62.2",
+ "windows-core",
  "windows-link",
-]
-
-[[package]]
-name = "windows-result"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e383302e8ec8515204254685643de10811af0ed97ea37210dc26fb0032647f8"
-dependencies = [
- "windows-targets",
 ]
 
 [[package]]
@@ -5505,6 +5401,15 @@ name = "yansi"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
+]
 
 [[package]]
 name = "yoke"

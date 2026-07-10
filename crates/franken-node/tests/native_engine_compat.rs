@@ -441,6 +441,264 @@ fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
     assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
 }
 
+/// bd-3894s slice (5) (https leg, mock-free e2e — real TLS): a real JS program
+/// performing `require('https').get('https://127.0.0.1:PORT/')` runs through the
+/// PUBLIC `dispatch_run` path against a REAL rustls TLS listener on loopback.
+/// The engine's wire builder marks the effect `use_tls` (https scheme), the
+/// SSRF gate authorizes the allowlisted endpoint, and the network mechanism
+/// performs the round trip inside a genuine TLS session: the listener only
+/// observes the framed GET AFTER a successful handshake + decrypt (a plaintext
+/// egress could never produce it), trust in the test anchor flows through the
+/// operator config seam `[security.network_policy].tls_extra_roots_pem_path`,
+/// and the signed host-effect ledger surfaces the egress as an allowed
+/// `http_request` effect that the public verifier SDK re-derives offline.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_https_request_effect_ledger_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A fresh self-signed anchor for 127.0.0.1 and a one-shot rustls server.
+    let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("generate self-signed certificate");
+    let cert_pem = certified.cert.pem();
+    let cert_der = certified.cert.der().clone();
+    let key_der = rustls_pki_types::PrivateKeyDer::Pkcs8(certified.key_pair.serialize_der().into());
+    let tls_provider = Arc::new(rustls::crypto::ring::default_provider());
+    let server_config = rustls::ServerConfig::builder_with_provider(tls_provider)
+        .with_safe_default_protocol_versions()
+        .expect("server protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .expect("server certificate");
+    let server_config = Arc::new(server_config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TLS sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (tcp, _peer) = listener.accept().expect("accept guest egress");
+        tcp.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let conn = rustls::ServerConnection::new(server_config).expect("server connection");
+        let mut tls = rustls::StreamOwned::new(conn, tcp);
+        // Read the decrypted request up to the header terminator (bodyless GET).
+        let mut received = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match tls.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    received.extend_from_slice(&buf[..n]);
+                    if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = tls.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
+        );
+        let _ = tls.flush();
+        tls.conn.send_close_notify();
+        let _ = tls.flush();
+        received
+    });
+
+    // An idiomatic guest program performing a single HTTPS GET.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!("require('https').get('https://{addr}/');\n");
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // The operator trusts the test anchor via the config seam (ADDED to the
+    // webpki roots) and allowlists the loopback sink through the SSRF gate.
+    let roots_path = temp_dir.path().join("extra-roots.pem");
+    std::fs::write(&roots_path, cert_pem).expect("write extra TLS roots PEM");
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config.security.network_policy.tls_extra_roots_pem_path =
+        Some(roots_path.to_string_lossy().into_owned());
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback TLS test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with an allowlisted https egress should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The framed request reached the listener THROUGH the TLS session: these
+    // are decrypted bytes, so a plaintext egress (or a failed handshake) could
+    // never produce them.
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("GET / HTTP/1.1\r\n"),
+        "the TLS sink must observe the decrypted engine-framed GET, got {wire:?}"
+    );
+    assert!(
+        wire.contains(&format!("Host: {addr}\r\n")),
+        "the framed request must carry the Host header for {addr}, got {wire:?}"
+    );
+
+    // The signed host-effect ledger surfaces the TLS egress as an `http_request`.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native https run must surface a host-effect ledger");
+    assert_eq!(ledger.schema_version, "host-effect-ledger-v1.0");
+    assert_eq!(
+        ledger.effect_count, 1,
+        "expected a single http_request effect, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 1);
+    assert_eq!(ledger.denied_count, 0);
+    assert_eq!(
+        ledger.entries[0].receipt.effect_kind.label(),
+        "http_request",
+        "the TLS egress must be recorded as an http_request effect"
+    );
+
+    // An external auditor re-derives the chain offline with the public SDK.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-https-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the https effect chain offline");
+    assert_eq!(verdict.effect_count, 1);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
+/// bd-3894s slice (5): an https egress whose server anchor is NOT trusted
+/// (no `tls_extra_roots_pem_path`, self-signed peer) fails certificate
+/// verification inside the network mechanism — fail-closed. The run still
+/// completes and the signed ledger records the attempt honestly: the effect's
+/// SSRF authorization succeeded (allowlisted endpoint) but the round trip
+/// errored, so no forged "response" ever reaches the guest and no plaintext
+/// fallback occurs (the sink observes zero decrypted request bytes).
+#[test]
+#[cfg(feature = "engine")]
+fn run_https_untrusted_anchor_fails_closed_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("generate self-signed certificate");
+    let cert_der = certified.cert.der().clone();
+    let key_der = rustls_pki_types::PrivateKeyDer::Pkcs8(certified.key_pair.serialize_der().into());
+    let tls_provider = Arc::new(rustls::crypto::ring::default_provider());
+    let server_config = rustls::ServerConfig::builder_with_provider(tls_provider)
+        .with_safe_default_protocol_versions()
+        .expect("server protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .expect("server certificate");
+    let server_config = Arc::new(server_config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TLS sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (tcp, _peer) = listener.accept().expect("accept guest egress");
+        tcp.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let conn = rustls::ServerConnection::new(server_config).expect("server connection");
+        let mut tls = rustls::StreamOwned::new(conn, tcp);
+        // The client must abort the handshake (untrusted anchor); any read
+        // error or clean close yields zero decrypted request bytes.
+        let mut received = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match tls.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    received.extend_from_slice(&buf[..n]);
+                    if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let _ = tls.flush();
+        received
+    });
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!("require('https').get('https://{addr}/');\n");
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // Allowlist the endpoint (SSRF authorizes it) but deliberately do NOT
+    // install the anchor: certificate verification is the layer under test.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: SSRF-authorize the sink; TLS verification must still fail".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("the run completes; the failed TLS effect is recorded, not fatal");
+
+    assert_eq!(report.runtime, "franken_engine");
+
+    // No decrypted request bytes ever reached the peer.
+    let received = server.join().expect("server thread");
+    assert!(
+        received.is_empty(),
+        "certificate verification failure must abort before any request bytes cross, got {:?}",
+        String::from_utf8_lossy(&received)
+    );
+
+    // The ledger records the attempt honestly: a single fail-closed receipt,
+    // nothing allowed, no fabricated response.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native https run must surface a host-effect ledger");
+    assert_eq!(
+        ledger.allowed_count, 0,
+        "a failed TLS handshake must not be recorded as an allowed effect: {:?}",
+        ledger.entries
+    );
+    assert_eq!(
+        ledger.denied_count, 1,
+        "the failed TLS egress must surface as a fail-closed receipt: {:?}",
+        ledger.entries
+    );
+    assert_eq!(
+        ledger.entries[0].receipt.effect_kind.label(),
+        "http_request"
+    );
+}
+
 /// bd-3894s slice (2b) (http leg, mock-free e2e — writable ClientRequest body): a
 /// real JS program that builds an HTTP request body INCREMENTALLY via the writable
 /// `ClientRequest` stream —
@@ -721,6 +979,7 @@ fn run_surfaces_signed_http_get_response_callback_ledger_bd_3894s() {
 ///   - on the FOLLOWING turns the engine emits `'data'` with the whole body as one
 ///     chunk (the listener accumulates it) and then `'end'` (the listener writes the
 ///     accumulated buffer to the sandbox).
+///
 /// The file therefore exists, with the server's body, ONLY if the listeners were
 /// registered AND fired in data→end order with the real response bytes — no synchronous
 /// `res.body` shortcut is used. The signed host-effect ledger carries BOTH the

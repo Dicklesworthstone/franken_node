@@ -189,6 +189,12 @@ syn = { version = "2.0", features = ["full"] }
 tracing-subscriber = { workspace = true }
 insta = { version = "1.40", features = ["json", "filters", "redactions"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+# bd-3894s slice (5): mock-free https e2e — a real rustls TLS listener on
+# loopback with a fresh rcgen self-signed anchor (no external network). The
+# `ring` provider matches the engine mechanism's TLS stack.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [[test]]
 name = "migrate_cli_e2e"

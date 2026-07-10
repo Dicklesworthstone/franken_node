@@ -3095,6 +3095,16 @@ pub struct NetworkPolicyConfig {
     /// Whether to log blocked requests (always true in strict mode).
     #[serde(default = "default_true")]
     pub audit_blocked_requests: bool,
+
+    /// bd-3894s slice (5): optional path to a PEM bundle of additional TLS
+    /// trust anchors for guest `https` egress (private CAs, test anchors).
+    /// The anchors are ADDED to the built-in webpki (Mozilla) roots — they
+    /// never replace them. Fail-closed: if the file is missing or unparseable
+    /// the run proceeds WITHOUT the extra anchors (https to hosts signed by
+    /// them fails certificate verification); it never silently disables TLS
+    /// verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_extra_roots_pem_path: Option<String>,
 }
 
 /// An entry in the network allowlist.
@@ -3121,6 +3131,7 @@ impl Default for NetworkPolicyConfig {
             block_cloud_metadata: true,
             allowlist: Vec::new(),
             audit_blocked_requests: true,
+            tls_extra_roots_pem_path: None,
         }
     }
 }

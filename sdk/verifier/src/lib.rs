@@ -1869,7 +1869,7 @@ impl VerificationSession {
 /// ```
 pub fn create_verifier_sdk(verifier_identity: impl Into<String>) -> VerifierSdk {
     // For testing: if counter is close to MAX, reset it to avoid test failures
-    let _ = SESSION_NONCE_COUNTER.fetch_update(
+    let _ = SESSION_NONCE_COUNTER.try_update(
         std::sync::atomic::Ordering::Relaxed,
         std::sync::atomic::Ordering::Relaxed,
         |counter| {
@@ -1951,7 +1951,7 @@ fn next_session_nonce_counter() -> Result<u64, VerifierSdkError> {
 
 fn next_session_nonce_counter_from(counter: &AtomicU64) -> Result<u64, VerifierSdkError> {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |counter| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |counter| {
             if counter == u64::MAX {
                 None // Prevent update - counter is exhausted
             } else {

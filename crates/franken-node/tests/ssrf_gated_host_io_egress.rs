@@ -78,7 +78,40 @@ fn net_request(endpoint: &str) -> HostIoRequest {
         endpoint: endpoint.to_string(),
         payload: b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec(),
         max_len: 4096,
+        use_tls: false,
     }
+}
+
+// bd-3894s slice (5): the TLS-marked round trip (an https guest URL) — the SSRF
+// gate must treat it exactly like the plaintext form (scheme carries no policy
+// privilege).
+fn net_request_tls(endpoint: &str) -> HostIoRequest {
+    HostIoRequest::NetworkRequest {
+        endpoint: endpoint.to_string(),
+        payload: b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".to_vec(),
+        max_len: 4096,
+        use_tls: true,
+    }
+}
+
+/// bd-3894s slice (5): a TLS-marked round trip is SSRF-gated identically to the
+/// plaintext form — an https URL must not smuggle an egress past the gate.
+#[test]
+fn default_policy_denies_loopback_tls_round_trip_bd_3894s() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let gated = SsrfGatedHostIo::new(RecordingInner { seen: seen.clone() }, "trace-tls-roundtrip");
+    let outcome = gated.perform(
+        &net_request_tls("127.0.0.1:8443"),
+        &[HostIoCapability::NetworkSend],
+    );
+    assert!(
+        matches!(outcome, Err(HostIoError::Denied { .. })),
+        "a loopback TLS round trip must be SSRF-denied, got {outcome:?}"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "the inner mechanism must never see a denied TLS round trip"
+    );
 }
 
 /// bd-3894s slice (4): a `NetworkRequest` round trip is an egress and MUST be

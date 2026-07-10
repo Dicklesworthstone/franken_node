@@ -2223,6 +2223,33 @@ impl EngineDispatcher {
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         match SandboxedHostIo::with_root(&sandbox_root) {
             Ok(provider) => {
+                // bd-3894s slice (5): operator-configured extra TLS trust anchors
+                // (private CAs / test anchors) for guest `https` egress. ADDED to
+                // the provider's built-in webpki roots. Fail-closed: a missing or
+                // unparseable bundle keeps the default roots (https to hosts
+                // signed by the extra anchors fails certificate verification) —
+                // it never weakens or disables TLS verification.
+                let provider = match &config.security.network_policy.tls_extra_roots_pem_path {
+                    Some(path) => {
+                        const TLS_ROOTS_PEM_MAX_BYTES: u64 = 1024 * 1024;
+                        match crate::bounded_read(Path::new(path), TLS_ROOTS_PEM_MAX_BYTES)
+                            .and_then(|pem| provider.clone().with_extra_tls_roots_pem(&pem))
+                        {
+                            Ok(with_roots) => with_roots,
+                            Err(err) => {
+                                tracing::warn!(
+                                    execution_mode = "native",
+                                    tls_extra_roots_pem_path = %path,
+                                    error = %err,
+                                    "Could not install extra TLS trust anchors; \
+                                     continuing with the built-in webpki roots only"
+                                );
+                                provider
+                            }
+                        }
+                    }
+                    None => provider,
+                };
                 let recorder: Arc<dyn HostIoRecorder> =
                     Arc::new(InMemoryHostIoTranscript::recording());
                 // bd-656a2: wrap the engine's network MECHANISM with the product-
@@ -2976,6 +3003,7 @@ mod tests {
                 block_cloud_metadata: true,
                 audit_blocked_requests: true,
                 allowlist: vec![],
+                tls_extra_roots_pem_path: None,
             };
 
             // FIXME(bd-yom8c): the degraded-fallback opt-in is read from the live
@@ -3026,6 +3054,7 @@ mod tests {
                 block_cloud_metadata: true,
                 audit_blocked_requests: true,
                 allowlist: vec![],
+                tls_extra_roots_pem_path: None,
             };
 
             // FIXME(bd-yom8c): opt-in cannot be seeded here (forbid(unsafe_code) +

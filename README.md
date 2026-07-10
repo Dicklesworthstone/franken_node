@@ -615,6 +615,14 @@ Mechanics:
 - **Report-only mode.** During migration, `mode = "report-only"` allows
   the call but records the would-be-decision so operators can review
   before flipping the gate to `enforced`.
+- **TLS for guest `https` egress.** A guest `https.*`/`fetch(https://…)`
+  call performs a real TLS handshake in the engine's network mechanism
+  (rustls; certificate verification against the built-in webpki roots).
+  `tls_extra_roots_pem_path` under `[security.network_policy]` ADDS
+  operator trust anchors (private CAs) to the webpki roots — it never
+  replaces them, and a missing or unparseable bundle fails closed
+  (certificate verification simply fails for hosts signed by those
+  anchors; verification is never weakened or skipped).
 
 Network allowlist parsing is fuzz-covered
 (`fuzz_targets/network_allowlist_entry_*`) and the rebind path is
