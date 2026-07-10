@@ -91,8 +91,24 @@ Two `proof_carrying_effects` schema versions are accepted:
   requirements are evaluated over the derived values only. Denied receipts
   are legitimate chain content but never evidence an executed subject.
 
-Producing v2 evidence from real `run --json` host-effect ledgers is tracked
-as bd-qr5i2.2, Python-gate v2 parity as bd-qr5i2.3, regeneration of the
+v2 evidence is produced from a **real native-engine run** by
+`franken-node ops proof-carrying-evidence`
+(`ops::proof_carrying_evidence::produce_proof_carrying_effects_evidence`,
+bd-qr5i2.2). The producer executes one guest program covering every
+acceptance subject (`fs.write` + `fs.read` against the run sandbox,
+`http.request` against a loopback sink allowlisted through the standard
+`[security.network_policy]` mechanism), harvests the signed
+`host_effect_ledger` from the dispatch report, re-verifies it natively with
+the same primitives the gate uses, and emits the v2 block whose declared
+summary equals the derived values by construction. `--merge-corpus
+artifacts/13/compatibility_corpus_results.json` writes the block into the
+artifact this gate reads (`--out` writes the block standalone). The producer
+fails closed — dispatch failure, fallback runtime, missing ledger, chain or
+receipt invalidity, a denied effect, a missing subject, or an egress that
+never reached the loopback sink each abort production — and requires the
+`engine` feature (no native run, no evidence).
+
+Python-gate v2 parity is tracked as bd-qr5i2.3, regeneration of the
 committed artifacts (and v1 retirement) as bd-qr5i2.4; unifying the Rust and
 Python gate inputs and wiring the real lockstep-oracle verdict into the
 parity leg is tracked as bd-ry7d1.

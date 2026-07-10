@@ -1098,3 +1098,133 @@ fn doctor_close_condition_fails_l1_when_v2_chain_missing_http_subject() {
         serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
     );
 }
+
+// ── bd-qr5i2.2: real-run producer → re-deriving v2 gate, the full loop ──
+
+/// The evidence produced by a REAL native-engine run (one guest program
+/// performing fs.write + fs.read + http.request against a loopback sink)
+/// passes the re-deriving v2 gate end to end: producer → corpus artifact →
+/// `doctor close-condition` GREEN. No hand-authored receipts anywhere in the
+/// loop — this closes the evidence loop that bd-qr5i2.1 opened on the gate
+/// side.
+#[test]
+#[cfg(feature = "engine")]
+fn real_run_producer_evidence_passes_v2_close_condition_gate() {
+    let evidence =
+        frankenengine_node::ops::proof_carrying_evidence::produce_proof_carrying_effects_evidence()
+            .expect("producer must emit verified evidence from a real run");
+
+    assert_eq!(
+        evidence.schema_version,
+        "franken-node/l1-proof-carrying-effects/v2"
+    );
+    assert_eq!(
+        evidence.verified_subjects,
+        vec!["fs.read", "fs.write", "http.request"],
+        "the producer run must evidence every acceptance subject"
+    );
+    assert!(evidence.receipt_chain_verified);
+    assert_eq!(evidence.invalid_receipts, 0);
+    assert!(evidence.effect_receipts_verified >= 3);
+
+    let root = fixture_root();
+    write_v2_compatibility_fixture(
+        root.path(),
+        serde_json::to_value(&evidence).expect("serialize producer evidence"),
+    );
+    let receipt = run_close_condition_receipt(root.path(), 75);
+    assert_eq!(
+        receipt["composite_verdict"],
+        "GREEN",
+        "real-run producer evidence must re-derive GREEN at the gate: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "GREEN");
+}
+
+/// Verifier-SDK parity: an external auditor re-derives the producer's effect
+/// chain offline from the emitted `receipt_chain_entries` alone, using the
+/// public verifier SDK — no trust in the producing runtime.
+#[test]
+#[cfg(feature = "engine")]
+fn real_run_producer_evidence_chain_verifies_via_verifier_sdk() {
+    let evidence =
+        frankenengine_node::ops::proof_carrying_evidence::produce_proof_carrying_effects_evidence()
+            .expect("producer must emit verified evidence from a real run");
+
+    let entries_json = serde_json::to_string(&evidence.receipt_chain_entries)
+        .expect("serialize producer chain entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the producer evidence wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-qr5i2-2-producer");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the producer effect chain offline");
+    assert_eq!(
+        u64::try_from(verdict.effect_count).expect("effect count fits u64"),
+        evidence.effect_receipts_verified,
+        "every producer receipt is an allowed acceptance-subject effect"
+    );
+}
+
+/// The operator-facing CLI loop: `ops proof-carrying-evidence --merge-corpus`
+/// replaces a stale v1 block in the corpus artifact with real v2 evidence,
+/// and `doctor close-condition` then re-derives GREEN from it. This is the
+/// exact flow slice bd-qr5i2.4 will use to regenerate the committed artifact.
+#[test]
+#[cfg(feature = "engine")]
+fn ops_proof_carrying_evidence_cli_merges_corpus_and_gate_passes() {
+    let root = fixture_root(); // corpus starts with the legacy v1 block
+
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .args([
+            "ops",
+            "proof-carrying-evidence",
+            "--merge-corpus",
+            "artifacts/13/compatibility_corpus_results.json",
+            "--json",
+        ])
+        .output()
+        .expect("ops proof-carrying-evidence should run");
+    assert!(
+        output.status.success(),
+        "producer CLI must succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let emitted: Value =
+        serde_json::from_slice(&output.stdout).expect("producer CLI stdout must be JSON");
+    assert_eq!(
+        emitted["schema_version"], "franken-node/l1-proof-carrying-effects/v2",
+        "producer CLI must emit the v2 evidence block"
+    );
+
+    let merged: Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.path()
+                .join("artifacts/13/compatibility_corpus_results.json"),
+        )
+        .expect("read merged corpus"),
+    )
+    .expect("parse merged corpus");
+    assert_eq!(
+        merged["proof_carrying_effects"]["schema_version"],
+        "franken-node/l1-proof-carrying-effects/v2",
+        "the corpus artifact must now carry the v2 block"
+    );
+    assert_eq!(
+        merged["totals"]["total_test_cases"], 100,
+        "merging must preserve the parity totals"
+    );
+
+    let receipt = run_close_condition_receipt(root.path(), 76);
+    assert_eq!(
+        receipt["composite_verdict"],
+        "GREEN",
+        "CLI-merged real evidence must re-derive GREEN at the gate: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+}

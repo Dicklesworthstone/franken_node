@@ -1372,6 +1372,9 @@ pub enum OpsCommand {
     ConfigAudit(OpsConfigAuditArgs),
     /// Emit operator metrics in a scrape-friendly text format.
     Metrics(OpsMetricsArgs),
+    /// Produce L1 proof-carrying host-effect evidence (v2) from a real native-engine run.
+    #[command(name = "proof-carrying-evidence")]
+    ProofCarryingEvidence(OpsProofCarryingEvidenceArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1520,6 +1523,22 @@ pub struct OpsConfigAuditArgs {
     /// Stable trace ID for correlating config audit output.
     #[arg(long, default_value = "ops-config-audit")]
     pub trace_id: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsProofCarryingEvidenceArgs {
+    /// Emit the produced evidence block as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Write the produced evidence block JSON to this path.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub out: Option<PathBuf>,
+
+    /// Merge the produced evidence into this compatibility-corpus results
+    /// JSON artifact (replaces its `proof_carrying_effects` block in place).
+    #[arg(long = "merge-corpus", value_parser = parse_safe_content_pathbuf)]
+    pub merge_corpus: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -2466,6 +2485,44 @@ mod parser_contract_extra_tests {
             other => return Err(format!("expected ops health-check command, got {other:?}")),
         };
         assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn ops_proof_carrying_evidence_parses_out_merge_corpus_and_json() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "ops",
+            "proof-carrying-evidence",
+            "--out",
+            "artifacts/oracle/proof_carrying_effects.v2.json",
+            "--merge-corpus",
+            "artifacts/13/compatibility_corpus_results.json",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Ops(OpsCommand::ProofCarryingEvidence(args)) => args,
+            other => {
+                return Err(format!(
+                    "expected ops proof-carrying-evidence command, got {other:?}"
+                ));
+            }
+        };
+        assert!(args.json);
+        assert_eq!(
+            args.out,
+            Some(PathBuf::from(
+                "artifacts/oracle/proof_carrying_effects.v2.json"
+            ))
+        );
+        assert_eq!(
+            args.merge_corpus,
+            Some(PathBuf::from(
+                "artifacts/13/compatibility_corpus_results.json"
+            ))
+        );
         Ok(())
     }
 

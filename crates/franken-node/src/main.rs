@@ -110,14 +110,14 @@ use crate::cli::{
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
     DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorWorkspacePressureArgs,
     FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
-    OpsConfigAuditArgs, OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
-    OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand,
-    ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
-    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
-    SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
-    TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
-    load_doctor_policy_activation_input,
+    OpsConfigAuditArgs, OpsMetricsFormat, OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs,
+    OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
+    ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
+    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
+    RuntimeLaneCommand, SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs,
+    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
+    VerifyMigrationArgs, VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs,
+    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -7606,6 +7606,73 @@ fn build_run_execution_receipt(
 
 fn run_execution_receipts_root(project_root: &Path) -> Result<PathBuf> {
     Ok(ensure_state_dir(project_root)?.join("execution-receipts"))
+}
+
+/// bd-qr5i2.2: produce L1 proof-carrying host-effect evidence (v2) from a
+/// real native-engine run, optionally writing it to a file and/or merging it
+/// into the compatibility-corpus results artifact the close-condition gate
+/// reads.
+#[cfg(feature = "engine")]
+fn handle_ops_proof_carrying_evidence(args: &OpsProofCarryingEvidenceArgs) -> Result<()> {
+    use ops::proof_carrying_evidence::{
+        merge_into_corpus_results, produce_proof_carrying_effects_evidence,
+    };
+
+    let evidence = produce_proof_carrying_effects_evidence()?;
+    if let Some(out) = args.out.as_deref() {
+        if let Some(parent) = out.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create evidence output directory {}", parent.display())
+            })?;
+        }
+        std::fs::write(
+            out,
+            format!("{}\n", serde_json::to_string_pretty(&evidence)?),
+        )
+        .with_context(|| format!("write evidence to {}", out.display()))?;
+    }
+    if let Some(corpus) = args.merge_corpus.as_deref() {
+        merge_into_corpus_results(corpus, &evidence)?;
+    }
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&evidence)?);
+    } else {
+        let mut rendered = format!(
+            "L1 proof-carrying host-effect evidence (v2)\n\
+             trace_id: {}\n\
+             verified subjects: {}\n\
+             effect receipts verified: {}\n\
+             invalid receipts: {}\n\
+             receipt chain verified: {}\n\
+             chain entries: {}",
+            evidence.trace_id,
+            evidence.verified_subjects.join(", "),
+            evidence.effect_receipts_verified,
+            evidence.invalid_receipts,
+            evidence.receipt_chain_verified,
+            evidence.receipt_chain_entries.len(),
+        );
+        if let Some(out) = args.out.as_deref() {
+            rendered.push_str(&format!("\nwritten to: {}", out.display()));
+        }
+        if let Some(corpus) = args.merge_corpus.as_deref() {
+            rendered.push_str(&format!("\nmerged into: {}", corpus.display()));
+        }
+        emit_operator_surface_output("ops-proof-carrying-evidence", &rendered)?;
+    }
+    Ok(())
+}
+
+/// Without the `engine` feature there is no native effect-producing run, so
+/// the producer fails closed instead of fabricating evidence.
+#[cfg(not(feature = "engine"))]
+fn handle_ops_proof_carrying_evidence(_args: &OpsProofCarryingEvidenceArgs) -> Result<()> {
+    anyhow::bail!(
+        "ops proof-carrying-evidence requires the `engine` feature: the evidence is \
+         produced by a real native franken_engine run and cannot be fabricated"
+    )
 }
 
 fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> {
@@ -27438,6 +27505,9 @@ fn main() -> Result<()> {
             OpsCommand::Metrics(args) => {
                 let report = ops_metrics_report(Path::new("."))?;
                 emit_ops_metrics_report(&report, args.format)?;
+            }
+            OpsCommand::ProofCarryingEvidence(args) => {
+                handle_ops_proof_carrying_evidence(&args)?;
             }
         },
 
