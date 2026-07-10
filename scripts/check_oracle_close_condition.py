@@ -24,6 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_ARTIFACTS_DIR = ROOT / "artifacts" / "oracle"
+# Mirrors the canonical Rust constants in
+# crates/franken-node/src/schema_versions.rs (L1_PROOF_CARRYING_EFFECTS and
+# L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS, acceptance invariant bd-f5b04.2.4).
+# Update both sides together; the Rust conformance tests bind the subject
+# list to the compat-gate contract layer.
 L1_PROOF_EVIDENCE_SCHEMA = "franken-node/l1-proof-carrying-effects/v1"
 REQUIRED_L1_PROOF_SUBJECTS = ("fs.read", "fs.write", "http.request")
 

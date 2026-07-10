@@ -26,6 +26,9 @@
 //! - **INV-PCG-AUDITABLE**: Every gate decision produces structured audit events
 //! - **INV-PCG-RECEIPT**: Every divergence/transition produces signed receipts
 //! - **INV-PCG-TRANSITION**: Mode transitions are policy-gated
+//! - **INV-PCG-ACCEPTANCE**: A canonical operation is "done" iff it is BOTH
+//!   lockstep/parity-GREEN AND proof-carrying (verified `EffectReceipt`);
+//!   enforced fail-closed by the dual-oracle close-condition gate
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -82,6 +85,12 @@ pub const INV_PCG_AUDITABLE: &str = "INV-PCG-AUDITABLE";
 pub const INV_PCG_RECEIPT: &str = "INV-PCG-RECEIPT";
 /// Invariant: mode transitions are policy-gated.
 pub const INV_PCG_TRANSITION: &str = "INV-PCG-TRANSITION";
+/// Invariant (bd-f5b04.2.4 acceptance bar): a canonical first-tranche
+/// operation counts as "done" only when it is BOTH lockstep/parity-GREEN
+/// AND proof-carrying (a verified `EffectReceipt` for its L1 subject).
+/// Parity-GREEN-but-unproven and proven-but-parity-RED both fail closed in
+/// the dual-oracle close-condition gate (`ops::close_condition`).
+pub const INV_PCG_ACCEPTANCE: &str = "INV-PCG-ACCEPTANCE";
 
 // ---------------------------------------------------------------------------
 // Compatibility mode
@@ -278,6 +287,20 @@ impl CompatOperationId {
             Self::HttpRequest => "request",
             Self::ProcessEnv => "env",
             Self::ModuleResolve => "resolve",
+        }
+    }
+
+    /// The L1 proof-carrying acceptance subject this operation must evidence
+    /// (`INV-PCG-ACCEPTANCE`), or `None` for operations that produce no host
+    /// effect in the first tranche and are therefore accepted on parity
+    /// alone. Subject strings match the `EffectReceipt` subjects surfaced in
+    /// the signed `run --json` host-effect ledger.
+    pub fn l1_proof_carrying_subject(self) -> Option<&'static str> {
+        match self {
+            Self::FsReadFile => Some("fs.read"),
+            Self::FsWriteFile => Some("fs.write"),
+            Self::HttpRequest => Some("http.request"),
+            Self::ProcessEnv | Self::ModuleResolve => None,
         }
     }
 }
@@ -560,6 +583,19 @@ pub fn first_tranche_contract_for(
     first_tranche_operation_contracts()
         .iter()
         .find(|contract| contract.operation_id == operation_id)
+}
+
+/// The L1 proof-carrying acceptance subjects (`INV-PCG-ACCEPTANCE`), derived
+/// from the canonical first-tranche operation contracts in declaration
+/// order. Must stay identical to
+/// [`crate::schema_versions::L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS`], which
+/// the (feature-independent) close-condition gate enforces; the
+/// `acceptance_subjects_*` tests bind the two so neither can drift alone.
+pub fn l1_proof_carrying_acceptance_subjects() -> Vec<&'static str> {
+    first_tranche_operation_contracts()
+        .iter()
+        .filter_map(|contract| contract.operation_id.l1_proof_carrying_subject())
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1289,6 +1325,43 @@ mod tests {
             assert!(!contract.node_error_parity.is_empty());
             assert!(!contract.policy_hooks.is_empty());
             assert!(contract.resource_budget.max_duration_ms > 0);
+        }
+    }
+
+    #[test]
+    fn acceptance_subjects_match_canonical_schema_versions_list() {
+        // INV-PCG-ACCEPTANCE: the contract-derived acceptance subjects and
+        // the schema_versions constant that ops::close_condition enforces
+        // must be the same list, in the same order. If either side changes
+        // alone, this test fails and the drift is caught at the seam.
+        assert_eq!(
+            l1_proof_carrying_acceptance_subjects(),
+            crate::schema_versions::L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS,
+        );
+    }
+
+    #[test]
+    fn acceptance_subjects_cover_exactly_the_host_effect_operations() {
+        for contract in first_tranche_operation_contracts() {
+            let subject = contract.operation_id.l1_proof_carrying_subject();
+            match contract.side_effect_category {
+                CompatSideEffectCategory::FilesystemRead => {
+                    assert_eq!(subject, Some("fs.read"));
+                }
+                CompatSideEffectCategory::FilesystemWrite => {
+                    assert_eq!(subject, Some("fs.write"));
+                }
+                CompatSideEffectCategory::NetworkEgress => {
+                    assert_eq!(subject, Some("http.request"));
+                }
+                CompatSideEffectCategory::EnvironmentRead
+                | CompatSideEffectCategory::ModuleGraphRead => {
+                    assert_eq!(
+                        subject, None,
+                        "parity-only operation must not claim a proof-carrying subject"
+                    );
+                }
+            }
         }
     }
 

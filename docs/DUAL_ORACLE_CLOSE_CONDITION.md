@@ -27,6 +27,62 @@ FAIL if:
   any dimension is missing, malformed, RED, or YELLOW
 ```
 
+## Acceptance Invariant
+
+The L1 Product Oracle is **defined** by the acceptance invariant
+(`INV-PCG-ACCEPTANCE`, bd-f5b04.2.4):
+
+> No canonical operation is "done" until it is **both**
+> lockstep/parity-GREEN **and** proof-carrying (a verifiable
+> `EffectReceipt` for the operation's L1 subject).
+
+The invariant rules out the two failure shapes by construction:
+
+| Shape | Example | Outcome |
+|---|---|---|
+| Parity-GREEN-but-unproven | Compatibility corpus passes, but `proof_carrying_effects` evidence is missing, partial, invalid, or chain-unverified | L1 = RED (fail closed) |
+| Proven-but-parity-RED | Effect receipts verify, but the corpus pass rate is below threshold or has errored cases | L1 = RED (fail closed) |
+
+Both legs feed the same `blocking_findings` list in the L1 evaluator, so a
+single failing condition on either leg makes the dimension RED and therefore
+the composite verdict FAIL. There is no partial credit and no waiver.
+
+### Canonical subject list
+
+The per-operation acceptance subjects are owned by
+`crates/franken-node/src/schema_versions.rs`
+(`L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS`): `fs.read`, `fs.write`,
+`http.request`. The list is bound at three points so it cannot drift:
+
+- **Contract layer**: `api::compat_gate::l1_proof_carrying_acceptance_subjects()`
+  derives the same list from `FIRST_TRANCHE_OPERATION_CONTRACTS`
+  (`CompatOperationId::l1_proof_carrying_subject`); conformance tests fail if
+  the derivation and the canonical constant diverge. Operations without a
+  first-tranche host effect (`process.env`, `module.resolve`) carry no
+  subject and are accepted on parity alone.
+- **Gate**: `ops::close_condition` enforces the list fail-closed
+  (`evaluate_l1_product_oracle` + `validate_l1_proof_carrying_effects`).
+- **CI mirror**: `scripts/check_oracle_close_condition.py`
+  (`REQUIRED_L1_PROOF_SUBJECTS`) applies the same list to the committed
+  verdict artifacts in `.github/workflows/execution-normalization-gate.yml`.
+
+### Enforcement and observability
+
+`franken-node doctor close-condition` evaluates the invariant and emits the
+stable `FN-ACCEPT-*` event stream under `--structured-logs-jsonl`:
+`FN-ACCEPT-001` (evaluated), then exactly one of `FN-ACCEPT-002` (PASS) or
+`FN-ACCEPT-003` (FAIL-CLOSED), plus one `FN-ACCEPT-004` line per blocking
+finding. SIEM filters should pin on these codes, not message text.
+
+### Current evidence contract and tracked hardening
+
+Today the gate validates a *declared* `proof_carrying_effects` summary
+(fail-closed on any missing/partial/invalid field). Re-deriving the summary
+from embedded `EffectReceipt` chain entries — and producing that evidence
+from real `run --json` host-effect ledgers instead of fixtures — is tracked
+as bd-qr5i2; unifying the Rust and Python gate inputs and wiring the real
+lockstep-oracle verdict into the parity leg is tracked as bd-ry7d1.
+
 ## Verdict Artifact Schema
 
 Each oracle dimension produces a verdict artifact:

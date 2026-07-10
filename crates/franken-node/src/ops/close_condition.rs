@@ -9,9 +9,15 @@ use std::path::{Path, PathBuf};
 pub const CLOSE_CONDITION_RECEIPT_PATH: &str = "artifacts/oracle/close_condition_receipt.json";
 const COMPATIBILITY_CORPUS_RESULTS_PATH: &str = "artifacts/13/compatibility_corpus_results.json";
 const L1_PROOF_CARRYING_EFFECTS_PATH: &str = "proof_carrying_effects";
+/// Acceptance invariant (bd-f5b04.2.4): every canonical first-tranche
+/// operation must be BOTH parity-GREEN AND proof-carrying before L1 may
+/// report GREEN. The subject list is owned by `schema_versions` so this
+/// gate, the `api::compat_gate` contract layer (feature-gated behind
+/// `control-plane`), and the Python CI mirror cannot drift independently.
 const REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS: &[&str] =
-    &["fs.read", "fs.write", "http.request"];
-const REQUIRED_L1_PROOF_CARRYING_EFFECT_RECEIPT_COUNT: u64 = 3;
+    crate::schema_versions::L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS;
+const REQUIRED_L1_PROOF_CARRYING_EFFECT_RECEIPT_COUNT: u64 =
+    REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS.len() as u64;
 const SECTION_10N_GATE_VERDICT_PATH: &str =
     "artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json";
 const CLOSE_CONDITION_TIMESTAMP_ENV: &str = "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC";
@@ -527,7 +533,7 @@ fn validate_l1_proof_carrying_effects(data: &Value) -> Vec<String> {
 
     let mut findings = Vec::new();
     let schema_version = get_str(data, &[L1_PROOF_CARRYING_EFFECTS_PATH, "schema_version"]);
-    if schema_version != Some("franken-node/l1-proof-carrying-effects/v1") {
+    if schema_version != Some(crate::schema_versions::L1_PROOF_CARRYING_EFFECTS) {
         findings.push("proof-carrying evidence schema_version missing or unsupported".to_string());
     }
 

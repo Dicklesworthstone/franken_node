@@ -39,6 +39,7 @@ use frankenengine_node::api::compat_gate::{
     CompatOperationId, CompatPolicyHook, CompatSideEffectCategory, GateCheckRequest, GateDecision,
     ModeTransitionRequest, PolicyPredicate, ShimMetadata, error_codes, event_codes,
     first_tranche_contract_for, first_tranche_operation_contracts,
+    l1_proof_carrying_acceptance_subjects,
 };
 use frankenengine_node::schema_versions;
 
@@ -1167,5 +1168,35 @@ mod tests {
                 .iter()
                 .any(|entry| entry.node_code == "ERR_ACCESS_DENIED" && entry.bun_code.is_none())
         );
+    }
+
+    /// INV-PCG-ACCEPTANCE (bd-f5b04.2.4): the acceptance-invariant subject
+    /// list the dual-oracle close-condition gate enforces fail-closed must be
+    /// exactly the list derived from the canonical first-tranche operation
+    /// contracts, so the contract layer and the release machinery cannot
+    /// drift apart. Host-effect operations carry a subject; parity-only
+    /// operations must not.
+    #[test]
+    fn acceptance_invariant_subjects_bind_contract_layer_to_close_condition_gate() {
+        assert_eq!(
+            l1_proof_carrying_acceptance_subjects(),
+            schema_versions::L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS,
+            "compat-gate contract layer and schema_versions acceptance list diverged"
+        );
+
+        for contract in first_tranche_operation_contracts() {
+            let expects_receipt = matches!(
+                contract.side_effect_category,
+                CompatSideEffectCategory::FilesystemRead
+                    | CompatSideEffectCategory::FilesystemWrite
+                    | CompatSideEffectCategory::NetworkEgress
+            );
+            assert_eq!(
+                contract.operation_id.l1_proof_carrying_subject().is_some(),
+                expects_receipt,
+                "{} proof-carrying subject presence must match its host-effect category",
+                contract.operation_id.registry_id()
+            );
+        }
     }
 }

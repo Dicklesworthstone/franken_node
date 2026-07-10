@@ -75,6 +75,18 @@ pub const COMPAT_PROCESS_ENV_ERROR: &str = "compat-process-env-error-v1";
 pub const COMPAT_MODULE_RESOLVE_ARGS: &str = "compat-module-resolve-args-v1";
 pub const COMPAT_MODULE_RESOLVE_RESULT: &str = "compat-module-resolve-result-v1";
 pub const COMPAT_MODULE_RESOLVE_ERROR: &str = "compat-module-resolve-error-v1";
+/// Schema for the `proof_carrying_effects` evidence block consumed by the
+/// dual-oracle close-condition gate (`ops::close_condition`) and mirrored by
+/// `scripts/check_oracle_close_condition.py`.
+pub const L1_PROOF_CARRYING_EFFECTS: &str = "franken-node/l1-proof-carrying-effects/v1";
+/// Acceptance-invariant subject list (bd-f5b04.2.4): the canonical
+/// first-tranche operations that must be BOTH lockstep/parity-GREEN AND
+/// proof-carrying (a verified `EffectReceipt`) before the L1 Product Oracle
+/// may report GREEN. Single authoritative list: the `api::compat_gate`
+/// contract layer proves it stays derivable from
+/// `FIRST_TRANCHE_OPERATION_CONTRACTS`, `ops::close_condition` enforces it
+/// fail-closed, and the Python CI gate mirrors it.
+pub const L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS: &[&str] = &["fs.read", "fs.write", "http.request"];
 
 // ── Verifier & Evidence ────────────────────────────────────────────
 pub const VERIFIER_SDK_API: &str = "1.0.0";
@@ -249,6 +261,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("compat_module_resolve_args", COMPAT_MODULE_RESOLVE_ARGS),
         ("compat_module_resolve_result", COMPAT_MODULE_RESOLVE_RESULT),
         ("compat_module_resolve_error", COMPAT_MODULE_RESOLVE_ERROR),
+        ("l1_proof_carrying_effects", L1_PROOF_CARRYING_EFFECTS),
         // Verifier & Evidence
         ("verifier_sdk_api", VERIFIER_SDK_API),
         ("verifier_sdk_schema_tag", VERIFIER_SDK_SCHEMA_TAG),
