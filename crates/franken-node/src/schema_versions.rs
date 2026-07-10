@@ -79,6 +79,14 @@ pub const COMPAT_MODULE_RESOLVE_ERROR: &str = "compat-module-resolve-error-v1";
 /// dual-oracle close-condition gate (`ops::close_condition`) and mirrored by
 /// `scripts/check_oracle_close_condition.py`.
 pub const L1_PROOF_CARRYING_EFFECTS: &str = "franken-node/l1-proof-carrying-effects/v1";
+/// v2 of the `proof_carrying_effects` evidence block: adds mandatory
+/// `receipt_chain_entries` (serialized `EffectReceiptChainEntry` array) that
+/// the close-condition gate RE-DERIVES — chain integrity, per-receipt
+/// validity, subjects, and counts are recomputed and cross-checked against
+/// the declared summary fields, failing closed on any mismatch. v1 remains
+/// the legacy declared-summary form until the real-run producer lands
+/// (bd-qr5i2.2).
+pub const L1_PROOF_CARRYING_EFFECTS_V2: &str = "franken-node/l1-proof-carrying-effects/v2";
 /// Acceptance-invariant subject list (bd-f5b04.2.4): the canonical
 /// first-tranche operations that must be BOTH lockstep/parity-GREEN AND
 /// proof-carrying (a verified `EffectReceipt`) before the L1 Product Oracle
@@ -262,6 +270,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("compat_module_resolve_result", COMPAT_MODULE_RESOLVE_RESULT),
         ("compat_module_resolve_error", COMPAT_MODULE_RESOLVE_ERROR),
         ("l1_proof_carrying_effects", L1_PROOF_CARRYING_EFFECTS),
+        ("l1_proof_carrying_effects_v2", L1_PROOF_CARRYING_EFFECTS_V2),
         // Verifier & Evidence
         ("verifier_sdk_api", VERIFIER_SDK_API),
         ("verifier_sdk_schema_tag", VERIFIER_SDK_SCHEMA_TAG),

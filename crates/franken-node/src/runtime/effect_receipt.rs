@@ -93,6 +93,21 @@ impl EffectKind {
             EffectKind::ModuleResolve => "module_resolve",
         }
     }
+
+    /// The L1 acceptance-invariant subject this effect kind evidences
+    /// (`INV-PCG-ACCEPTANCE`), or `None` for kinds outside the first-tranche
+    /// acceptance list. Must stay aligned with
+    /// [`crate::schema_versions::L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS`];
+    /// the dual-oracle close-condition gate maps re-derived receipts to
+    /// subjects through this method.
+    pub const fn l1_acceptance_subject(self) -> Option<&'static str> {
+        match self {
+            EffectKind::FsRead => Some("fs.read"),
+            EffectKind::FsWrite => Some("fs.write"),
+            EffectKind::HttpRequest => Some("http.request"),
+            EffectKind::NetConnect | EffectKind::Spawn | EffectKind::ModuleResolve => None,
+        }
+    }
 }
 
 /// The pre-execution policy decision bound into the receipt.

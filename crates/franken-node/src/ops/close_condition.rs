@@ -531,8 +531,12 @@ fn validate_l1_proof_carrying_effects(data: &Value) -> Vec<String> {
         )];
     }
 
-    let mut findings = Vec::new();
     let schema_version = get_str(data, &[L1_PROOF_CARRYING_EFFECTS_PATH, "schema_version"]);
+    if schema_version == Some(crate::schema_versions::L1_PROOF_CARRYING_EFFECTS_V2) {
+        return validate_l1_proof_carrying_effects_v2(summary);
+    }
+
+    let mut findings = Vec::new();
     if schema_version != Some(crate::schema_versions::L1_PROOF_CARRYING_EFFECTS) {
         findings.push("proof-carrying evidence schema_version missing or unsupported".to_string());
     }
@@ -571,6 +575,129 @@ fn validate_l1_proof_carrying_effects(data: &Value) -> Vec<String> {
     ) != Some(true)
     {
         findings.push("proof-carrying receipt chain did not verify".to_string());
+    }
+
+    findings
+}
+
+/// v2 evidence: the gate does not trust the declared summary — it re-derives
+/// chain integrity, per-receipt validity, subjects, and counts from the
+/// embedded `receipt_chain_entries` and fails closed both on any
+/// declared↔derived mismatch and on the acceptance requirements themselves
+/// (evaluated over the DERIVED values only).
+fn validate_l1_proof_carrying_effects_v2(summary: &Value) -> Vec<String> {
+    use crate::runtime::effect_receipt::{
+        EffectReceiptChain, EffectReceiptChainEntry, PolicyOutcome,
+    };
+
+    let Some(entries_value) = summary.get("receipt_chain_entries") else {
+        return vec![
+            "proof-carrying v2 evidence missing receipt_chain_entries; v2 requires the embedded receipt chain"
+                .to_string(),
+        ];
+    };
+    let entries: Vec<EffectReceiptChainEntry> = match serde_json::from_value(entries_value.clone())
+    {
+        Ok(entries) => entries,
+        Err(err) => {
+            return vec![format!(
+                "proof-carrying v2 receipt_chain_entries failed to parse: {err}"
+            )];
+        }
+    };
+
+    let mut findings = Vec::new();
+
+    let derived_chain_verified = match EffectReceiptChain::verify_entries_integrity(&entries) {
+        Ok(()) => true,
+        Err(err) => {
+            findings.push(format!(
+                "proof-carrying receipt chain failed re-derivation: {err}"
+            ));
+            false
+        }
+    };
+
+    let mut derived_invalid: u64 = 0;
+    let mut derived_verified: u64 = 0;
+    let mut derived_subjects: std::collections::BTreeSet<&'static str> =
+        std::collections::BTreeSet::new();
+    for entry in &entries {
+        if entry.receipt.validate().is_err() {
+            derived_invalid = derived_invalid.saturating_add(1);
+            continue;
+        }
+        // Denied receipts are legitimate ledger content (fail-closed proof
+        // that nothing ran) but they do not evidence an executed subject.
+        if !matches!(entry.receipt.policy_outcome, PolicyOutcome::Allowed { .. }) {
+            continue;
+        }
+        if let Some(subject) = entry.receipt.effect_kind.l1_acceptance_subject()
+            && REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS.contains(&subject)
+        {
+            derived_subjects.insert(subject);
+            derived_verified = derived_verified.saturating_add(1);
+        }
+    }
+
+    // Declared summary fields must match the re-derived values exactly; an
+    // artifact that overstates (or understates) its own evidence fails closed.
+    let declared_subjects: std::collections::BTreeSet<String> = summary
+        .get("verified_subjects")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let derived_subject_set: std::collections::BTreeSet<String> =
+        derived_subjects.iter().map(ToString::to_string).collect();
+    if declared_subjects != derived_subject_set {
+        findings.push(format!(
+            "declared verified_subjects {declared_subjects:?} do not match re-derived {derived_subject_set:?}"
+        ));
+    }
+    let declared_verified = summary
+        .get("effect_receipts_verified")
+        .and_then(Value::as_u64);
+    if declared_verified != Some(derived_verified) {
+        findings.push(format!(
+            "declared effect_receipts_verified {declared_verified:?} does not match re-derived {derived_verified}"
+        ));
+    }
+    let declared_invalid = summary.get("invalid_receipts").and_then(Value::as_u64);
+    if declared_invalid != Some(derived_invalid) {
+        findings.push(format!(
+            "declared invalid_receipts {declared_invalid:?} does not match re-derived {derived_invalid}"
+        ));
+    }
+    let declared_chain_verified = summary
+        .get("receipt_chain_verified")
+        .and_then(Value::as_bool);
+    if declared_chain_verified != Some(derived_chain_verified) {
+        findings.push(format!(
+            "declared receipt_chain_verified {declared_chain_verified:?} does not match re-derived {derived_chain_verified}"
+        ));
+    }
+
+    // Acceptance requirements over the DERIVED values only.
+    for subject in REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS {
+        if !derived_subjects.contains(subject) {
+            findings.push(format!("proof-carrying evidence missing subject {subject}"));
+        }
+    }
+    if derived_verified < REQUIRED_L1_PROOF_CARRYING_EFFECT_RECEIPT_COUNT {
+        findings.push(format!(
+            "proof-carrying effect receipt count {derived_verified} below required {REQUIRED_L1_PROOF_CARRYING_EFFECT_RECEIPT_COUNT}",
+        ));
+    }
+    if derived_invalid != 0 {
+        findings.push(format!(
+            "proof-carrying evidence contains {derived_invalid} invalid receipt(s)"
+        ));
     }
 
     findings

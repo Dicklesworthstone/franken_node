@@ -865,3 +865,236 @@ fn doctor_close_condition_structured_logs_emit_fail_closed_codes() {
         assert_eq!(event["trace_id"], "accept-e2e-fail", "{stderr}");
     }
 }
+
+// ── proof_carrying_effects v2: gate re-derives the embedded chain (bd-qr5i2.1) ──
+
+/// Build a REAL effect-receipt chain covering the three L1 acceptance
+/// subjects through the production chain API (no hand-written hashes), so
+/// the e2e fixtures carry evidence the gate can actually re-derive.
+fn l1_acceptance_chain_entries()
+-> Vec<frankenengine_node::runtime::effect_receipt::EffectReceiptChainEntry> {
+    use frankenengine_node::runtime::effect_receipt::{
+        EffectKind, EffectReceipt, EffectReceiptChain,
+    };
+    use frankenengine_node::storage::cas::content_hash;
+
+    let mut chain = EffectReceiptChain::new();
+    for (seq, kind) in [
+        (0_u64, EffectKind::FsRead),
+        (1, EffectKind::FsWrite),
+        (2, EffectKind::HttpRequest),
+    ] {
+        let receipt = EffectReceipt::allowed(
+            seq,
+            "acceptance-evidence-v2-e2e",
+            kind,
+            "cap-l1-acceptance",
+            content_hash(b"pre-state"),
+            content_hash(b"args"),
+            content_hash(b"result"),
+            content_hash(b"post-state"),
+            1_774_000_000_000,
+        );
+        chain.append(receipt).expect("append acceptance receipt");
+    }
+    chain.entries().to_vec()
+}
+
+/// Write a green-parity corpus fixture whose `proof_carrying_effects` block
+/// is the supplied v2 evidence object.
+fn write_v2_compatibility_fixture(root: &Path, proof_carrying_effects: Value) {
+    let corpus = serde_json::json!({
+        "corpus": { "corpus_version": "compat-corpus-test" },
+        "thresholds": { "overall_pass_rate_min_pct": 95.0 },
+        "totals": {
+            "total_test_cases": 100,
+            "passed_test_cases": 98,
+            "failed_test_cases": 2,
+            "errored_test_cases": 0,
+            "skipped_test_cases": 0,
+            "overall_pass_rate_pct": 98.0
+        },
+        "proof_carrying_effects": proof_carrying_effects
+    });
+    write_fixture(
+        &root.join("artifacts/13/compatibility_corpus_results.json"),
+        &serde_json::to_string_pretty(&corpus).expect("corpus fixture render"),
+    );
+}
+
+fn v2_proof_block(
+    entries: &[frankenengine_node::runtime::effect_receipt::EffectReceiptChainEntry],
+    verified_subjects: Value,
+    effect_receipts_verified: u64,
+) -> Value {
+    serde_json::json!({
+        "schema_version": "franken-node/l1-proof-carrying-effects/v2",
+        "required_subjects": ["fs.read", "fs.write", "http.request"],
+        "verified_subjects": verified_subjects,
+        "effect_receipts_verified": effect_receipts_verified,
+        "invalid_receipts": 0,
+        "receipt_chain_verified": true,
+        "receipt_chain_entries": entries
+    })
+}
+
+fn run_close_condition_receipt(root: &Path, seed: u8) -> Value {
+    let (signing_key_path, _) =
+        write_test_signing_key(root, ".franken-node/keys/oracle-close.key", seed);
+    let signing_key_path = signing_key_path.display().to_string();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root)
+        .env(
+            "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
+            "2026-02-21T00:00:00Z",
+        )
+        .args([
+            "doctor",
+            "close-condition",
+            "--json",
+            "--receipt-signing-key",
+            signing_key_path.as_str(),
+        ])
+        .output()
+        .expect("doctor close-condition should run");
+    assert!(
+        output.status.success(),
+        "doctor close-condition should emit a receipt instead of aborting: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("stdout receipt must be JSON")
+}
+
+fn l1_blocking_findings_contain(receipt: &Value, needle: &str) -> bool {
+    receipt["L1_product_oracle"]["blocking_findings"]
+        .as_array()
+        .expect("L1 blocking findings")
+        .iter()
+        .any(|finding| finding.as_str().is_some_and(|text| text.contains(needle)))
+}
+
+/// GREEN arm: v2 evidence with a genuine, re-derivable receipt chain covering
+/// all three acceptance subjects passes the gate end-to-end.
+#[test]
+fn doctor_close_condition_passes_l1_with_v2_rederived_receipt_chain() {
+    let root = fixture_root();
+    let entries = l1_acceptance_chain_entries();
+    write_v2_compatibility_fixture(
+        root.path(),
+        v2_proof_block(
+            &entries,
+            serde_json::json!(["fs.read", "fs.write", "http.request"]),
+            3,
+        ),
+    );
+    let receipt = run_close_condition_receipt(root.path(), 71);
+    assert_eq!(
+        receipt["composite_verdict"],
+        "GREEN",
+        "v2 evidence with a valid re-derived chain must be GREEN: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "GREEN");
+}
+
+/// Tamper arm: flipping one recorded receipt hash breaks re-derivation even
+/// though every declared summary field still claims success.
+#[test]
+fn doctor_close_condition_fails_l1_when_v2_chain_entry_tampered() {
+    let root = fixture_root();
+    let mut entries = l1_acceptance_chain_entries();
+    let mut tampered = entries[1].receipt_hash.clone();
+    let flipped = if tampered.ends_with('0') { '1' } else { '0' };
+    tampered.pop();
+    tampered.push(flipped);
+    entries[1].receipt_hash = tampered;
+    write_v2_compatibility_fixture(
+        root.path(),
+        v2_proof_block(
+            &entries,
+            serde_json::json!(["fs.read", "fs.write", "http.request"]),
+            3,
+        ),
+    );
+    let receipt = run_close_condition_receipt(root.path(), 72);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
+    assert!(
+        l1_blocking_findings_contain(&receipt, "failed re-derivation"),
+        "tampered chain must surface a re-derivation finding: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+}
+
+/// Mismatch arm: the chain is genuine but the declared summary overstates the
+/// verified receipt count — the gate must refuse the artifact that lies about
+/// its own evidence.
+#[test]
+fn doctor_close_condition_fails_l1_when_v2_declared_count_inflated() {
+    let root = fixture_root();
+    let entries = l1_acceptance_chain_entries();
+    write_v2_compatibility_fixture(
+        root.path(),
+        v2_proof_block(
+            &entries,
+            serde_json::json!(["fs.read", "fs.write", "http.request"]),
+            4,
+        ),
+    );
+    let receipt = run_close_condition_receipt(root.path(), 73);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert!(
+        l1_blocking_findings_contain(&receipt, "does not match re-derived 3"),
+        "inflated declared count must surface a mismatch finding: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+}
+
+/// Missing-subject arm: an honestly-declared chain that only covers the fs
+/// subjects still fails the acceptance requirements on the derived values.
+#[test]
+fn doctor_close_condition_fails_l1_when_v2_chain_missing_http_subject() {
+    use frankenengine_node::runtime::effect_receipt::{
+        EffectKind, EffectReceipt, EffectReceiptChain,
+    };
+    use frankenengine_node::storage::cas::content_hash;
+
+    let root = fixture_root();
+    let mut chain = EffectReceiptChain::new();
+    for (seq, kind) in [(0_u64, EffectKind::FsRead), (1, EffectKind::FsWrite)] {
+        let receipt = EffectReceipt::allowed(
+            seq,
+            "acceptance-evidence-v2-e2e",
+            kind,
+            "cap-l1-acceptance",
+            content_hash(b"pre-state"),
+            content_hash(b"args"),
+            content_hash(b"result"),
+            content_hash(b"post-state"),
+            1_774_000_000_000,
+        );
+        chain.append(receipt).expect("append acceptance receipt");
+    }
+    write_v2_compatibility_fixture(
+        root.path(),
+        v2_proof_block(
+            chain.entries(),
+            serde_json::json!(["fs.read", "fs.write"]),
+            2,
+        ),
+    );
+    let receipt = run_close_condition_receipt(root.path(), 74);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert!(
+        l1_blocking_findings_contain(&receipt, "missing subject http.request"),
+        "missing http.request evidence must fail closed: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+    assert!(
+        l1_blocking_findings_contain(&receipt, "below required 3"),
+        "derived receipt count below the floor must fail closed: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+}

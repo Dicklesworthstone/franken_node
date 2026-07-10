@@ -76,12 +76,26 @@ finding. SIEM filters should pin on these codes, not message text.
 
 ### Current evidence contract and tracked hardening
 
-Today the gate validates a *declared* `proof_carrying_effects` summary
-(fail-closed on any missing/partial/invalid field). Re-deriving the summary
-from embedded `EffectReceipt` chain entries — and producing that evidence
-from real `run --json` host-effect ledgers instead of fixtures — is tracked
-as bd-qr5i2; unifying the Rust and Python gate inputs and wiring the real
-lockstep-oracle verdict into the parity leg is tracked as bd-ry7d1.
+Two `proof_carrying_effects` schema versions are accepted:
+
+- **v1** (`franken-node/l1-proof-carrying-effects/v1`) — legacy *declared*
+  summary; the gate validates every field fail-closed but cannot re-derive
+  the underlying receipts. Retained only until the real-run producer lands.
+- **v2** (`franken-node/l1-proof-carrying-effects/v2`) — adds mandatory
+  `receipt_chain_entries` (serialized `EffectReceiptChainEntry` array). The
+  gate **re-derives** the evidence natively: chain integrity
+  (`EffectReceiptChain::verify_entries_integrity`), per-receipt validity,
+  subjects (via `EffectKind::l1_acceptance_subject`, counting only `allowed`
+  receipts), and counts. Any mismatch between the declared summary fields
+  and the re-derived values is a blocking finding, and the acceptance
+  requirements are evaluated over the derived values only. Denied receipts
+  are legitimate chain content but never evidence an executed subject.
+
+Producing v2 evidence from real `run --json` host-effect ledgers is tracked
+as bd-qr5i2.2, Python-gate v2 parity as bd-qr5i2.3, regeneration of the
+committed artifacts (and v1 retirement) as bd-qr5i2.4; unifying the Rust and
+Python gate inputs and wiring the real lockstep-oracle verdict into the
+parity leg is tracked as bd-ry7d1.
 
 ## Verdict Artifact Schema
 
