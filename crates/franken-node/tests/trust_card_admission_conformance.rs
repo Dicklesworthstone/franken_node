@@ -16,9 +16,9 @@
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
-    DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
-    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardError,
-    TrustCardInput, TrustCardRegistry, compute_card_hash, verify_card_signature,
+    ExtensionIdentity, ProvenanceSummary, PublisherIdentity, ReputationTrend, RevocationStatus,
+    RiskAssessment, RiskLevel, TrustCardInput, TrustCardRegistry, compute_card_hash,
+    verify_card_signature,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -33,6 +33,8 @@ const BASE_TIMESTAMP: u64 = 1745000000;
 enum RequirementLevel {
     Must,
     Should,
+    // Spec vocabulary from bd-2yh; no MAY-level conformance case exists yet.
+    #[allow(dead_code)]
     May,
 }
 
@@ -40,6 +42,9 @@ enum RequirementLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum AdmissionTestCategory {
     ModelValidation,
+    // Spec vocabulary from bd-2yh; current admission-logic cases are filed
+    // under ModelValidation/IntegrityInvariant, so the label is unused today.
+    #[allow(dead_code)]
     AdmissionLogic,
     IntegrityInvariant,
     EdgeCase,
@@ -50,8 +55,14 @@ enum AdmissionTestCategory {
 #[derive(Debug, Clone)]
 enum ConformanceTestResult {
     Pass,
-    Fail { reason: String },
-    ExpectedFailure { reason: String },
+    Fail {
+        reason: String,
+    },
+    // Consumed by the XFAIL arm of the report; no case currently produces it.
+    #[allow(dead_code)]
+    ExpectedFailure {
+        reason: String,
+    },
 }
 
 /// Comprehensive conformance case for trust card admission
@@ -68,7 +79,9 @@ struct AdmissionConformanceCase {
 
 #[derive(Debug)]
 enum AdmissionTestInput {
-    ValidCard(TrustCardInput),
+    // Boxed: a full TrustCardInput dwarfs the other variants
+    // (clippy::large_enum_variant on the current toolchain).
+    ValidCard(Box<TrustCardInput>),
     InvalidCard {
         input: Value,
         violation: &'static str,
@@ -146,7 +159,7 @@ fn generate_admission_conformance_cases() -> Vec<AdmissionConformanceCase> {
             requirement_level: RequirementLevel::Must,
             category: AdmissionTestCategory::ModelValidation,
             description: "Valid trust card with all required fields must be admitted",
-            input: AdmissionTestInput::ValidCard(valid_baseline_input()),
+            input: AdmissionTestInput::ValidCard(Box::new(valid_baseline_input())),
             expected: AdmissionExpectation::Accept {
                 validate_hash: true,
                 validate_signature: true,
@@ -159,7 +172,7 @@ fn generate_admission_conformance_cases() -> Vec<AdmissionConformanceCase> {
             requirement_level: RequirementLevel::Must,
             category: AdmissionTestCategory::IntegrityInvariant,
             description: "Identical logical inputs must produce identical card hash + signature",
-            input: AdmissionTestInput::ValidCard(valid_baseline_input()),
+            input: AdmissionTestInput::ValidCard(Box::new(valid_baseline_input())),
             expected: AdmissionExpectation::Accept {
                 validate_hash: true,
                 validate_signature: true,
@@ -235,7 +248,7 @@ fn generate_admission_conformance_cases() -> Vec<AdmissionConformanceCase> {
             requirement_level: RequirementLevel::Must,
             category: AdmissionTestCategory::IntegrityInvariant,
             description: "Card hash and HMAC signature verification must succeed for admission",
-            input: AdmissionTestInput::ValidCard(valid_baseline_input()),
+            input: AdmissionTestInput::ValidCard(Box::new(valid_baseline_input())),
             expected: AdmissionExpectation::Accept {
                 validate_hash: true,
                 validate_signature: true,
@@ -248,7 +261,7 @@ fn generate_admission_conformance_cases() -> Vec<AdmissionConformanceCase> {
             requirement_level: RequirementLevel::Should,
             category: AdmissionTestCategory::ModelValidation,
             description: "High-risk capabilities should trigger appropriate risk assessment",
-            input: AdmissionTestInput::ValidCard({
+            input: AdmissionTestInput::ValidCard(Box::new({
                 let mut input = valid_baseline_input();
                 input.capability_declarations = vec![CapabilityDeclaration {
                     name: "network.egress".to_string(),
@@ -257,7 +270,7 @@ fn generate_admission_conformance_cases() -> Vec<AdmissionConformanceCase> {
                 }];
                 input.behavioral_profile.network_access = true;
                 input
-            }),
+            })),
             expected: AdmissionExpectation::Accept {
                 validate_hash: true,
                 validate_signature: true,
@@ -270,13 +283,13 @@ fn generate_admission_conformance_cases() -> Vec<AdmissionConformanceCase> {
             requirement_level: RequirementLevel::Must,
             category: AdmissionTestCategory::EdgeCase,
             description: "Trust card with no capability declarations must be admitted",
-            input: AdmissionTestInput::ValidCard({
+            input: AdmissionTestInput::ValidCard(Box::new({
                 let mut input = valid_baseline_input();
                 input.capability_declarations = vec![];
                 input.behavioral_profile.filesystem_access = false;
                 input.behavioral_profile.profile_summary = "No capabilities declared".to_string();
                 input
-            }),
+            })),
             expected: AdmissionExpectation::Accept {
                 validate_hash: true,
                 validate_signature: true,
@@ -305,7 +318,7 @@ fn run_admission_conformance_case(
 
     match &case.input {
         AdmissionTestInput::ValidCard(input) => {
-            match registry.create(input.clone(), timestamp, &trace_id) {
+            match registry.create((**input).clone(), timestamp, &trace_id) {
                 Ok(card) => {
                     if let AdmissionExpectation::Accept {
                         validate_hash,
@@ -334,12 +347,12 @@ fn run_admission_conformance_case(
                         }
 
                         // Validate signature if required
-                        if *validate_signature {
-                            if let Err(e) = verify_card_signature(&card, REGISTRY_KEY.as_bytes()) {
-                                return ConformanceTestResult::Fail {
-                                    reason: format!("Signature verification failed: {}", e),
-                                };
-                            }
+                        if *validate_signature
+                            && let Err(e) = verify_card_signature(&card, REGISTRY_KEY.as_bytes())
+                        {
+                            return ConformanceTestResult::Fail {
+                                reason: format!("Signature verification failed: {}", e),
+                            };
                         }
 
                         ConformanceTestResult::Pass
@@ -371,18 +384,16 @@ fn run_admission_conformance_case(
             }
         }
 
-        AdmissionTestInput::InvalidCard {
-            input,
-            violation: _,
-        } => {
+        AdmissionTestInput::InvalidCard { input, violation } => {
             // Attempt to deserialize the invalid card input
             match serde_json::from_value::<TrustCardInput>(input.clone()) {
                 Ok(parsed_input) => match registry.create(parsed_input, timestamp, &trace_id) {
                     Ok(_) => {
                         if let AdmissionExpectation::Reject { .. } = &case.expected {
                             ConformanceTestResult::Fail {
-                                reason: "Expected rejection but invalid card was admitted"
-                                    .to_string(),
+                                reason: format!(
+                                    "Expected rejection but invalid card ({violation}) was admitted"
+                                ),
                             }
                         } else {
                             ConformanceTestResult::Pass
@@ -464,11 +475,7 @@ fn generate_conformance_report(
     report.push_str("|-------|-------|---------|----------|\n");
 
     for (level, (total, passing)) in &coverage_by_level {
-        let percentage = if *total > 0 {
-            (*passing * 100) / *total
-        } else {
-            0
-        };
+        let percentage = (*passing * 100).checked_div(*total).unwrap_or(0);
         report.push_str(&format!(
             "| {:?} | {} | {} | {}% |\n",
             level, total, passing, percentage
@@ -480,11 +487,7 @@ fn generate_conformance_report(
     report.push_str("|----------|-------|---------|----------|\n");
 
     for (category, (total, passing)) in &coverage_by_category {
-        let percentage = if *total > 0 {
-            (*passing * 100) / *total
-        } else {
-            0
-        };
+        let percentage = (*passing * 100).checked_div(*total).unwrap_or(0);
         report.push_str(&format!(
             "| {:?} | {} | {} | {}% |\n",
             category, total, passing, percentage
@@ -501,8 +504,8 @@ fn generate_conformance_report(
         };
 
         report.push_str(&format!(
-            "- **{}** ({:?}): {} - {}\n",
-            case.id, case.requirement_level, status, case.description
+            "- **{}** ({:?}, {}): {} - {}\n",
+            case.id, case.requirement_level, case.spec_section, status, case.description
         ));
 
         if let ConformanceTestResult::Fail { reason } = result {

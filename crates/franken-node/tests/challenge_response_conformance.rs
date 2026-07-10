@@ -414,14 +414,10 @@ fn conformance_timing_attack_resistance() -> TestResult {
 
     let config = test_config();
     let secret = test_secret();
-    let mut channel = ControlChannel::new(config.clone(), secret.clone())
+    // Prove channel creation succeeds before timing; the measurement loops
+    // below build a fresh channel + message per iteration.
+    let _channel = ControlChannel::new(config.clone(), secret.clone())
         .map_err(|e| format!("Channel creation failed: {e}"))?;
-
-    // Create valid message with correct MAC
-    let valid_msg = create_message("valid-msg", Direction::Send, 1, &config, &secret);
-
-    // Create invalid message with forged MAC
-    let invalid_msg = create_message_with_forged_mac("invalid-msg", Direction::Send, 2);
 
     const ITERATIONS: usize = 100;
     let mut valid_times = Vec::new();
@@ -507,7 +503,10 @@ fn conformance_coverage_verification() -> TestResult {
 
     for row in COVERAGE {
         if !row.tested {
-            missing_coverage.push(format!("{}: {}", row.spec_section, row.invariant));
+            missing_coverage.push(format!(
+                "{}: {} ({})",
+                row.spec_section, row.invariant, row.level
+            ));
         }
     }
 

@@ -7,12 +7,10 @@
 //! Pattern: Spec-Derived Testing (Pattern 4) - one test per requirement
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 // Import the existing conformance types and adapter
 #[path = "frankensqlite_adapter_conformance.rs"]
@@ -55,7 +53,7 @@ pub enum TestStatus {
     ExpectedFailure, // Known divergence documented in DISCREPANCIES.md
 }
 
-/// Golden file loaders with scrubbing support
+// Golden file loaders with scrubbing support
 
 fn load_golden_catalog() -> PersistenceClassCatalog {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -75,17 +73,23 @@ fn load_golden_tier_matrix() -> TierMatrix {
         .unwrap_or_else(|e| panic!("Failed to parse golden tier matrix: {}", e))
 }
 
-/// Golden file structures
+// Golden file structures. Every field mirrors the golden JSON schema so that
+// deserialization itself validates the artifact's shape — a missing or
+// retyped field in the golden fails the load. Fields the assertions do not
+// read are therefore still load-bearing (hence the targeted dead_code allows).
 
 #[derive(Debug, Deserialize)]
 struct PersistenceClassCatalog {
+    #[allow(dead_code)]
     contract_version: String,
     total_classes: u32,
     tier_distribution: BTreeMap<String, u32>,
+    #[allow(dead_code)]
     classes: Vec<GoldenPersistenceClass>,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct GoldenPersistenceClass {
     domain: String,
     owner_module: String,
@@ -99,19 +103,23 @@ struct GoldenPersistenceClass {
 #[derive(Debug, Deserialize)]
 struct TierMatrix {
     tier_definitions: BTreeMap<String, TierDefinition>,
+    #[allow(dead_code)]
     compliance_rules: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TierDefinition {
+    #[allow(dead_code)]
     label: String,
     durability_mode: String,
+    #[allow(dead_code)]
     journal_mode: String,
+    #[allow(dead_code)]
     synchronous: String,
     requires_replay: bool,
 }
 
-/// Conformance test runner
+// Conformance test runner
 
 pub fn run_bd1a1j_conformance_suite() -> Vec<ConformanceTestResult> {
     let mut results = Vec::new();
@@ -139,7 +147,7 @@ pub fn run_bd1a1j_conformance_suite() -> Vec<ConformanceTestResult> {
     results
 }
 
-/// BD1A1J-CATALOG-* tests: Catalog structure conformance
+// BD1A1J-CATALOG-* tests: Catalog structure conformance
 
 fn test_catalog_structure(
     golden: &PersistenceClassCatalog,
@@ -190,7 +198,7 @@ fn test_catalog_structure(
     results
 }
 
-/// BD1A1J-TIER-* tests: Tier-durability mapping conformance
+// BD1A1J-TIER-* tests: Tier-durability mapping conformance
 
 fn test_tier_durability_mapping(
     golden_matrix: &TierMatrix,
@@ -228,7 +236,7 @@ fn test_tier_durability_mapping(
     results
 }
 
-/// BD1A1J-REPLAY-* tests: Replay support requirements
+// BD1A1J-REPLAY-* tests: Replay support requirements
 
 fn test_replay_support_requirements(
     golden_matrix: &TierMatrix,
@@ -285,7 +293,7 @@ fn test_replay_support_requirements(
     results
 }
 
-/// BD1A1J-UNIQUE-* tests: Uniqueness constraints
+// BD1A1J-UNIQUE-* tests: Uniqueness constraints
 
 fn test_uniqueness_constraints(actual: &[PersistenceClass]) -> Vec<ConformanceTestResult> {
     let mut results = Vec::new();
@@ -336,7 +344,7 @@ fn test_uniqueness_constraints(actual: &[PersistenceClass]) -> Vec<ConformanceTe
     results
 }
 
-/// BD1A1J-ADAPTER-* tests: Adapter behavior requirements
+// BD1A1J-ADAPTER-* tests: Adapter behavior requirements
 
 fn test_adapter_behavior() -> Vec<ConformanceTestResult> {
     let mut results = Vec::new();
@@ -394,7 +402,7 @@ fn test_adapter_behavior() -> Vec<ConformanceTestResult> {
     results
 }
 
-/// Helper functions
+// Helper functions
 
 fn count_by_tier(classes: &[PersistenceClass]) -> BTreeMap<String, u32> {
     let mut counts = BTreeMap::new();
@@ -409,7 +417,7 @@ fn count_by_tier(classes: &[PersistenceClass]) -> BTreeMap<String, u32> {
     counts
 }
 
-/// Generate conformance compliance report
+// Generate conformance compliance report
 
 pub fn generate_conformance_report(results: &[ConformanceTestResult]) -> String {
     let total = results.len();
@@ -438,9 +446,11 @@ pub fn generate_conformance_report(results: &[ConformanceTestResult]) -> String 
     let mut report = String::new();
     report.push_str("# BD-1A1J Frankensqlite Conformance Report\n\n");
     report.push_str(&format!(
-        "**Overall**: {}/{} pass ({:.1}% compliance)\n\n",
+        "**Overall**: {}/{} pass, {} failed, {} xfail ({:.1}% compliance)\n\n",
         passed,
         total,
+        failed,
+        xfailed,
         (passed as f64 / total as f64) * 100.0
     ));
 
