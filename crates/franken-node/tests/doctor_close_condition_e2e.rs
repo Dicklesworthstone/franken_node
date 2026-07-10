@@ -900,6 +900,30 @@ fn l1_acceptance_chain_entries()
     chain.entries().to_vec()
 }
 
+/// bd-qr5i2.3: cross-language parity pin. The Python CI gate
+/// (`scripts/check_oracle_close_condition.py`) re-implements the canonical
+/// receipt/chain hash preimages so it can re-derive v2 evidence
+/// independently. Both implementations must produce EXACTLY these constants
+/// for the deterministic chain built by `l1_acceptance_chain_entries` — the
+/// same constants are asserted by
+/// `tests/test_check_oracle_close_condition.py::test_parity_pin_hashes`, so
+/// any preimage drift breaks exactly one suite immediately and names the
+/// divergent side.
+#[test]
+fn effect_receipt_hash_cross_language_parity_pin_bd_qr5i2_3() {
+    let entries = l1_acceptance_chain_entries();
+    assert_eq!(
+        entries[0].receipt_hash,
+        "sha256:4c95c6f0ba9a43d07dbf8646b3876e1588873165b1ee91862490fc4bf4939979",
+        "receipt-hash preimage drifted from the Python gate's implementation"
+    );
+    assert_eq!(
+        entries[2].chain_hash,
+        "sha256:ff29fcb4bbbff4bcd338d6b7bdaa2a9f137de11990190aebc841feb034c1b3c1",
+        "chain-hash preimage drifted from the Python gate's implementation"
+    );
+}
+
 /// Write a green-parity corpus fixture whose `proof_carrying_effects` block
 /// is the supplied v2 evidence object.
 fn write_v2_compatibility_fixture(root: &Path, proof_carrying_effects: Value) {

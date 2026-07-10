@@ -108,10 +108,21 @@ receipt invalidity, a denied effect, a missing subject, or an egress that
 never reached the loopback sink each abort production — and requires the
 `engine` feature (no native run, no evidence).
 
-Python-gate v2 parity is tracked as bd-qr5i2.3, regeneration of the
-committed artifacts (and v1 retirement) as bd-qr5i2.4; unifying the Rust and
-Python gate inputs and wiring the real lockstep-oracle verdict into the
-parity leg is tracked as bd-ry7d1.
+The Python CI gate (`scripts/check_oracle_close_condition.py`) applies the
+same v2 re-derivation independently (bd-qr5i2.3): it re-implements the
+canonical receipt/chain hash preimages, re-derives chain integrity,
+per-receipt validity, subjects, and counts from `receipt_chain_entries`, and
+fail-closes on any declared↔derived mismatch — alongside the legacy v1
+declared-summary path. A cross-language parity pin (the Rust
+`effect_receipt_hash_cross_language_parity_pin_bd_qr5i2_3` test and the
+Python `test_parity_pin_hashes` test assert identical deterministic hash
+constants) makes preimage drift between the two implementations break CI
+immediately. Reference fixtures: `tests/fixtures/oracle_gate/pass_v2/` and
+`tests/fixtures/oracle_gate/fail_v2_tampered/`.
+
+Regeneration of the committed artifacts (and v1 retirement) is tracked as
+bd-qr5i2.4; unifying the Rust and Python gate inputs and wiring the real
+lockstep-oracle verdict into the parity leg is tracked as bd-ry7d1.
 
 ## Verdict Artifact Schema
 

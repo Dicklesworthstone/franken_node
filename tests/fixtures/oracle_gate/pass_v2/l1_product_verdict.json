@@ -1,0 +1,110 @@
+{
+  "dimension": "l1_product",
+  "verdict": "GREEN",
+  "owner_track": "10.2",
+  "timestamp": "2026-07-10T00:00:00Z",
+  "evidence": {
+    "tests_passed": 42,
+    "tests_failed": 0,
+    "tests_skipped": 0,
+    "coverage_pct": 95.2,
+    "details_ref": "artifacts/oracle/l1_product_detail.json",
+    "proof_carrying_effects": {
+      "schema_version": "franken-node/l1-proof-carrying-effects/v2",
+      "required_subjects": [
+        "fs.read",
+        "fs.write",
+        "http.request"
+      ],
+      "verified_subjects": [
+        "fs.read",
+        "fs.write",
+        "http.request"
+      ],
+      "effect_receipts_verified": 3,
+      "invalid_receipts": 0,
+      "receipt_chain_verified": true,
+      "receipt_chain_entries": [
+        {
+          "index": 0,
+          "prev_chain_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "receipt_hash": "sha256:4c95c6f0ba9a43d07dbf8646b3876e1588873165b1ee91862490fc4bf4939979",
+          "chain_hash": "sha256:a66fdc12558fbe3a3c9e8d9ffdd3fad6313f1f80bd43711f17dcdae730a6a368",
+          "receipt": {
+            "schema_version": "effect-receipt-v1.1",
+            "seq": 0,
+            "trace_id": "acceptance-evidence-v2-e2e",
+            "effect_kind": "fs_read",
+            "policy_outcome": {
+              "outcome": "allowed",
+              "capability_ref": "cap-l1-acceptance"
+            },
+            "pre_state_hash": "sha256:b6de708109164a59d3867462a54e2555790201a1e532bf239ca9ad0af9560d47",
+            "args_hash": "sha256:7315d9c24f7a02a76e38e36014b7bf08c1f1ea15a6c0ac026bf0698c6903e26f",
+            "result_hash": "sha256:17618228319d8ee12ca52ea54e997a2a2ab913f730c681d783fef92e8955c0b8",
+            "post_state_hash": "sha256:1f4523228ac55a7ba196a381afb5a004958286bb8c318aaf725d1b2c095e5cdf",
+            "input_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "output_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "declassification_ref": null,
+            "flow_policy_verdict": "label_clean",
+            "recorded_at_millis": 1774000000000
+          }
+        },
+        {
+          "index": 1,
+          "prev_chain_hash": "sha256:a66fdc12558fbe3a3c9e8d9ffdd3fad6313f1f80bd43711f17dcdae730a6a368",
+          "receipt_hash": "sha256:3e6e41a84bdec5fa6c0ac5f25e060046a11a3713cbfd64c6ef7855fc9a7e9a66",
+          "chain_hash": "sha256:12446dc10a315a61db60036ba2a5e1a211a4f429e66a073728fa17fdd8d0532b",
+          "receipt": {
+            "schema_version": "effect-receipt-v1.1",
+            "seq": 1,
+            "trace_id": "acceptance-evidence-v2-e2e",
+            "effect_kind": "fs_write",
+            "policy_outcome": {
+              "outcome": "allowed",
+              "capability_ref": "cap-l1-acceptance"
+            },
+            "pre_state_hash": "sha256:b6de708109164a59d3867462a54e2555790201a1e532bf239ca9ad0af9560d47",
+            "args_hash": "sha256:7315d9c24f7a02a76e38e36014b7bf08c1f1ea15a6c0ac026bf0698c6903e26f",
+            "result_hash": "sha256:17618228319d8ee12ca52ea54e997a2a2ab913f730c681d783fef92e8955c0b8",
+            "post_state_hash": "sha256:1f4523228ac55a7ba196a381afb5a004958286bb8c318aaf725d1b2c095e5cdf",
+            "input_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "output_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "declassification_ref": null,
+            "flow_policy_verdict": "label_clean",
+            "recorded_at_millis": 1774000000000
+          }
+        },
+        {
+          "index": 2,
+          "prev_chain_hash": "sha256:12446dc10a315a61db60036ba2a5e1a211a4f429e66a073728fa17fdd8d0532b",
+          "receipt_hash": "sha256:c6b8e5d951027894e138f4e3bc484738e039980540e7a38c8807dfea42adbc45",
+          "chain_hash": "sha256:ff29fcb4bbbff4bcd338d6b7bdaa2a9f137de11990190aebc841feb034c1b3c1",
+          "receipt": {
+            "schema_version": "effect-receipt-v1.1",
+            "seq": 2,
+            "trace_id": "acceptance-evidence-v2-e2e",
+            "effect_kind": "http_request",
+            "policy_outcome": {
+              "outcome": "allowed",
+              "capability_ref": "cap-l1-acceptance"
+            },
+            "pre_state_hash": "sha256:b6de708109164a59d3867462a54e2555790201a1e532bf239ca9ad0af9560d47",
+            "args_hash": "sha256:7315d9c24f7a02a76e38e36014b7bf08c1f1ea15a6c0ac026bf0698c6903e26f",
+            "result_hash": "sha256:17618228319d8ee12ca52ea54e997a2a2ab913f730c681d783fef92e8955c0b8",
+            "post_state_hash": "sha256:1f4523228ac55a7ba196a381afb5a004958286bb8c318aaf725d1b2c095e5cdf",
+            "input_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "output_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "declassification_ref": null,
+            "flow_policy_verdict": "label_clean",
+            "recorded_at_millis": 1774000000000
+          }
+        }
+      ]
+    }
+  },
+  "blocking_findings": []
+}
