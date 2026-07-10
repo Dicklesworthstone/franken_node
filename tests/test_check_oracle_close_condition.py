@@ -30,16 +30,15 @@ def test_dimension_ids():
 
 
 def l1_proof_evidence():
+    """v2 evidence with a genuine re-derivable chain (v1 declared-summary
+    acceptance is retired, bd-qr5i2.4)."""
     return {
         "evidence": {
-            "proof_carrying_effects": {
-                "schema_version": "franken-node/l1-proof-carrying-effects/v1",
-                "required_subjects": ["fs.read", "fs.write", "http.request"],
-                "verified_subjects": ["fs.read", "fs.write", "http.request"],
-                "effect_receipts_verified": 3,
-                "invalid_receipts": 0,
-                "receipt_chain_verified": True,
-            }
+            "proof_carrying_effects": v2_proof(
+                acceptance_chain_entries(),
+                ["fs.read", "fs.write", "http.request"],
+                3,
+            )
         }
     }
 
@@ -156,6 +155,8 @@ class TestCheckDimension:
         assert "proof_carrying_effects evidence missing" in result["error"]
 
     def test_l1_incomplete_proof_carrying_effects_fails_closed(self, tmp_path):
+        # Understating every declared summary field against a genuine chain:
+        # each disagreement with the re-derived values fails closed.
         dim = self._dim("l1_product")
         artifact = tmp_path / dim["artifact"]
         payload = green_payload("l1_product")
@@ -165,9 +166,33 @@ class TestCheckDimension:
         proof["receipt_chain_verified"] = False
         artifact.write_text(json.dumps(payload))
         result = mod.check_dimension(tmp_path, dim)
-        assert "missing subject http.request" in result["error"]
-        assert "effect_receipts_verified below required 3" in result["error"]
-        assert "receipt_chain_verified is not true" in result["error"]
+        assert "verified_subjects" in result["error"]
+        assert "effect_receipts_verified 2 does not match re-derived 3" in result["error"]
+        assert "receipt_chain_verified False does not match re-derived True" in result["error"]
+
+    def test_l1_retired_v1_evidence_is_rejected(self, tmp_path):
+        # bd-qr5i2.4: a fully-populated v1 declared summary that used to pass
+        # now fails closed with an unsupported-schema finding.
+        dim = self._dim("l1_product")
+        artifact = tmp_path / dim["artifact"]
+        payload = {
+            "verdict": "GREEN",
+            "evidence": {
+                "proof_carrying_effects": {
+                    "schema_version": mod.L1_PROOF_EVIDENCE_SCHEMA,
+                    "required_subjects": ["fs.read", "fs.write", "http.request"],
+                    "verified_subjects": ["fs.read", "fs.write", "http.request"],
+                    "effect_receipts_verified": 3,
+                    "invalid_receipts": 0,
+                    "receipt_chain_verified": True,
+                }
+            },
+        }
+        artifact.write_text(json.dumps(payload))
+        result = mod.check_dimension(tmp_path, dim)
+        assert result["error"] is not None
+        assert "is unsupported" in result["error"]
+        assert "proof-carrying-evidence" in result["error"]
 
 
 # ---------------------------------------------------------------------------

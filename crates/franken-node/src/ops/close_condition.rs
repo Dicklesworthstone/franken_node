@@ -536,48 +536,17 @@ fn validate_l1_proof_carrying_effects(data: &Value) -> Vec<String> {
         return validate_l1_proof_carrying_effects_v2(summary);
     }
 
-    let mut findings = Vec::new();
-    if schema_version != Some(crate::schema_versions::L1_PROOF_CARRYING_EFFECTS) {
-        findings.push("proof-carrying evidence schema_version missing or unsupported".to_string());
-    }
-
-    let verified_subjects =
-        get_str_array(data, &[L1_PROOF_CARRYING_EFFECTS_PATH, "verified_subjects"])
-            .unwrap_or_default();
-    for subject in REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS {
-        if !verified_subjects.contains(subject) {
-            findings.push(format!("proof-carrying evidence missing subject {subject}"));
-        }
-    }
-
-    match get_u64(
-        data,
-        &[L1_PROOF_CARRYING_EFFECTS_PATH, "effect_receipts_verified"],
-    ) {
-        Some(count) if count >= REQUIRED_L1_PROOF_CARRYING_EFFECT_RECEIPT_COUNT => {}
-        Some(count) => findings.push(format!(
-            "proof-carrying effect receipt count {count} below required {REQUIRED_L1_PROOF_CARRYING_EFFECT_RECEIPT_COUNT}",
-        )),
-        None => findings.push("proof-carrying effect receipt count missing or invalid".to_string()),
-    }
-
-    match get_u64(data, &[L1_PROOF_CARRYING_EFFECTS_PATH, "invalid_receipts"]) {
-        Some(0) => {}
-        Some(count) => findings.push(format!(
-            "proof-carrying evidence reports {count} invalid receipt(s)"
-        )),
-        None => findings.push("proof-carrying invalid receipt count missing".to_string()),
-    }
-
-    if get_bool(
-        data,
-        &[L1_PROOF_CARRYING_EFFECTS_PATH, "receipt_chain_verified"],
-    ) != Some(true)
-    {
-        findings.push("proof-carrying receipt chain did not verify".to_string());
-    }
-
-    findings
+    // bd-qr5i2.4: v1 acceptance is retired. A declared-only summary (no
+    // embedded receipt chain) can no longer pass the gate — regenerate the
+    // artifact from a real run with `franken-node ops proof-carrying-evidence`.
+    // The v1 schema id stays registered in `schema_versions` (registry is
+    // append-only); only its ACCEPTANCE here is withdrawn.
+    vec![format!(
+        "proof-carrying evidence schema_version {schema_version:?} is unsupported: only {} is \
+         accepted (v1 declared-summary acceptance retired; regenerate via `franken-node ops \
+         proof-carrying-evidence`)",
+        crate::schema_versions::L1_PROOF_CARRYING_EFFECTS_V2
+    )]
 }
 
 /// v2 evidence: the gate does not trust the declared summary — it re-derives
@@ -1004,20 +973,8 @@ fn get_f64(value: &Value, path: &[&str]) -> Option<f64> {
     get_value(value, path).and_then(Value::as_f64)
 }
 
-fn get_bool(value: &Value, path: &[&str]) -> Option<bool> {
-    get_value(value, path).and_then(Value::as_bool)
-}
-
 fn get_str<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
     get_value(value, path).and_then(Value::as_str)
-}
-
-fn get_str_array<'a>(value: &'a Value, path: &[&str]) -> Option<Vec<&'a str>> {
-    get_value(value, path).and_then(|nested| {
-        nested
-            .as_array()
-            .map(|items| items.iter().filter_map(Value::as_str).collect())
-    })
 }
 
 fn collect_files_named(
@@ -1306,14 +1263,40 @@ mod tests {
         })
     }
 
+    /// A genuine, re-derivable v2 evidence block built through the production
+    /// chain API (no hand-written hashes) — the only accepted schema after
+    /// bd-qr5i2.4 retired v1 declared-summary acceptance.
     fn valid_proof_carrying_effects_json() -> Value {
+        use crate::runtime::effect_receipt::{EffectKind, EffectReceipt, EffectReceiptChain};
+        use crate::storage::cas::content_hash;
+
+        let mut chain = EffectReceiptChain::new();
+        for (seq, kind) in [
+            (0_u64, EffectKind::FsRead),
+            (1, EffectKind::FsWrite),
+            (2, EffectKind::HttpRequest),
+        ] {
+            let receipt = EffectReceipt::allowed(
+                seq,
+                "close-condition-inline-tests",
+                kind,
+                "cap-l1-acceptance",
+                content_hash(b"pre-state"),
+                content_hash(b"args"),
+                content_hash(b"result"),
+                content_hash(b"post-state"),
+                1_774_000_000_000,
+            );
+            chain.append(receipt).expect("append acceptance receipt");
+        }
         serde_json::json!({
-            "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+            "schema_version": crate::schema_versions::L1_PROOF_CARRYING_EFFECTS_V2,
             "required_subjects": ["fs.read", "fs.write", "http.request"],
             "verified_subjects": ["fs.read", "fs.write", "http.request"],
             "effect_receipts_verified": 3,
             "invalid_receipts": 0,
             "receipt_chain_verified": true,
+            "receipt_chain_entries": chain.entries(),
         })
     }
 
@@ -1346,9 +1329,14 @@ mod tests {
         assert!(findings[0].contains("must be an object"), "{findings:?}");
     }
 
+    /// bd-qr5i2.4: v1 (and any other non-v2 schema) is refused outright —
+    /// the declared-summary acceptance path is retired.
     #[test]
-    fn proof_carrying_effects_wrong_or_missing_schema_version_fails_closed() {
+    fn proof_carrying_effects_retired_or_missing_schema_version_fails_closed() {
         for tamper in [
+            Some(serde_json::json!(
+                "franken-node/l1-proof-carrying-effects/v1"
+            )),
             Some(serde_json::json!(
                 "franken-node/l1-proof-carrying-effects/v0"
             )),
@@ -1365,17 +1353,15 @@ mod tests {
                 }
             }
             let findings = validate_l1_proof_carrying_effects(&data);
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.contains("schema_version missing or unsupported")),
-                "{findings:?}"
-            );
+            assert_eq!(findings.len(), 1, "{findings:?}");
+            assert!(findings[0].contains("is unsupported"), "{findings:?}");
         }
     }
 
+    /// Understating verified_subjects no longer slips through as a plain
+    /// subject gap: the declared set disagrees with the re-derived one.
     #[test]
-    fn proof_carrying_effects_each_missing_subject_fails_closed_independently() {
+    fn proof_carrying_effects_declared_subject_mismatch_fails_closed() {
         for missing in REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS {
             let mut data = corpus_with_valid_proof(100, 0, 100.0);
             let subjects = REQUIRED_L1_PROOF_CARRYING_EFFECT_SUBJECTS
@@ -1384,17 +1370,20 @@ mod tests {
                 .collect::<Vec<_>>();
             data["proof_carrying_effects"]["verified_subjects"] = serde_json::json!(subjects);
             let findings = validate_l1_proof_carrying_effects(&data);
-            assert_eq!(findings.len(), 1, "{findings:?}");
             assert!(
-                findings[0].contains(&format!("missing subject {missing}")),
+                findings
+                    .iter()
+                    .any(|finding| finding.contains("do not match re-derived")),
                 "{findings:?}"
             );
         }
     }
 
+    /// A declared count that disagrees with the re-derived count (inflated,
+    /// deflated, or missing) fails closed as a mismatch.
     #[test]
-    fn proof_carrying_effects_receipt_count_below_or_missing_fails_closed() {
-        for tamper in [Some(serde_json::json!(2)), None] {
+    fn proof_carrying_effects_declared_count_mismatch_fails_closed() {
+        for tamper in [Some(serde_json::json!(2)), Some(serde_json::json!(4)), None] {
             let mut data = corpus_with_valid_proof(100, 0, 100.0);
             let proof = data["proof_carrying_effects"].as_object_mut().unwrap();
             match tamper {
@@ -1407,16 +1396,19 @@ mod tests {
             }
             let findings = validate_l1_proof_carrying_effects(&data);
             assert_eq!(findings.len(), 1, "{findings:?}");
-            assert!(findings[0].contains("receipt count"), "{findings:?}");
+            assert!(
+                findings[0].contains("effect_receipts_verified")
+                    && findings[0].contains("does not match re-derived"),
+                "{findings:?}"
+            );
         }
     }
 
+    /// Declared invalid_receipts must equal the re-derived value (0 for a
+    /// genuine chain); a nonzero or missing declaration is a mismatch.
     #[test]
-    fn proof_carrying_effects_invalid_receipts_nonzero_or_missing_fails_closed() {
-        for (tamper, expected) in [
-            (Some(serde_json::json!(1)), "1 invalid receipt(s)"),
-            (None, "invalid receipt count missing"),
-        ] {
+    fn proof_carrying_effects_declared_invalid_mismatch_fails_closed() {
+        for tamper in [Some(serde_json::json!(1)), None] {
             let mut data = corpus_with_valid_proof(100, 0, 100.0);
             let proof = data["proof_carrying_effects"].as_object_mut().unwrap();
             match tamper {
@@ -1429,12 +1421,19 @@ mod tests {
             }
             let findings = validate_l1_proof_carrying_effects(&data);
             assert_eq!(findings.len(), 1, "{findings:?}");
-            assert!(findings[0].contains(expected), "{findings:?}");
+            assert!(
+                findings[0].contains("invalid_receipts")
+                    && findings[0].contains("does not match re-derived"),
+                "{findings:?}"
+            );
         }
     }
 
+    /// Declaring the chain unverified (or omitting the flag) while the
+    /// embedded chain actually re-derives is itself a mismatch — the
+    /// declared summary must be honest in both directions.
     #[test]
-    fn proof_carrying_effects_unverified_chain_fails_closed() {
+    fn proof_carrying_effects_declared_chain_flag_mismatch_fails_closed() {
         for tamper in [Some(serde_json::json!(false)), None] {
             let mut data = corpus_with_valid_proof(100, 0, 100.0);
             let proof = data["proof_carrying_effects"].as_object_mut().unwrap();
@@ -1449,10 +1448,27 @@ mod tests {
             let findings = validate_l1_proof_carrying_effects(&data);
             assert_eq!(findings.len(), 1, "{findings:?}");
             assert!(
-                findings[0].contains("receipt chain did not verify"),
+                findings[0].contains("receipt_chain_verified")
+                    && findings[0].contains("does not match re-derived"),
                 "{findings:?}"
             );
         }
+    }
+
+    /// Tampering with an embedded entry breaks re-derivation: the chain
+    /// finding plus the now-dishonest declared flag both fail closed.
+    #[test]
+    fn proof_carrying_effects_tampered_entry_fails_rederivation() {
+        let mut data = corpus_with_valid_proof(100, 0, 100.0);
+        data["proof_carrying_effects"]["receipt_chain_entries"][1]["receipt"]["trace_id"] =
+            serde_json::json!("rewritten-history");
+        let findings = validate_l1_proof_carrying_effects(&data);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.contains("failed re-derivation")),
+            "{findings:?}"
+        );
     }
 
     fn write_corpus_fixture(root: &Path, data: &Value) {

@@ -20,7 +20,7 @@ mod cli_golden_helpers;
 #[path = "operator_json_contract_registry.rs"]
 mod operator_json_contract_registry;
 
-use cli_golden_helpers::{pretty_json_stdout, with_scrubbed_snapshot_settings};
+use cli_golden_helpers::with_scrubbed_snapshot_settings;
 
 fn with_json_snapshot_settings<R>(snapshot_dir: &str, assertion: impl FnOnce() -> R) -> R {
     let mut settings = Settings::clone_current();
@@ -283,6 +283,45 @@ fn canonicalize_fleet_reconcile_json(mut value: Value, fleet_state_dir: &Path) -
     value
 }
 
+/// bd-qr5i2.4: a genuine, re-derivable v2 proof-carrying evidence block for
+/// the close-condition GREEN fixture (v1 declared-summary acceptance is
+/// retired; the gate re-derives the embedded chain).
+fn l1_v2_proof_block() -> Value {
+    use frankenengine_node::runtime::effect_receipt::{
+        EffectKind, EffectReceipt, EffectReceiptChain,
+    };
+    use frankenengine_node::storage::cas::content_hash;
+
+    let mut chain = EffectReceiptChain::new();
+    for (seq, kind) in [
+        (0_u64, EffectKind::FsRead),
+        (1, EffectKind::FsWrite),
+        (2, EffectKind::HttpRequest),
+    ] {
+        let receipt = EffectReceipt::allowed(
+            seq,
+            "close-condition-golden",
+            kind,
+            "cap-l1-acceptance",
+            content_hash(b"pre-state"),
+            content_hash(b"args"),
+            content_hash(b"result"),
+            content_hash(b"post-state"),
+            1_774_000_000_000,
+        );
+        chain.append(receipt).expect("append acceptance receipt");
+    }
+    json!({
+        "schema_version": "franken-node/l1-proof-carrying-effects/v2",
+        "required_subjects": ["fs.read", "fs.write", "http.request"],
+        "verified_subjects": ["fs.read", "fs.write", "http.request"],
+        "effect_receipts_verified": 3,
+        "invalid_receipts": 0,
+        "receipt_chain_verified": true,
+        "receipt_chain_entries": chain.entries()
+    })
+}
+
 fn write_close_condition_fixture(root: &Path) -> io::Result<()> {
     fn write_fixture(path: &Path, contents: &str) -> io::Result<()> {
         ensure_parent_dir(path)?;
@@ -328,32 +367,25 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
         &root.join("docs/PRODUCT_CHARTER.md"),
         "Dual-oracle close condition requires all dimensions to be green.\n",
     )?;
+    // bd-qr5i2.4: v1 declared-summary acceptance is retired; the GREEN
+    // close-condition golden fixture carries v2 evidence with a genuine
+    // re-derivable receipt chain built through the production API.
+    let corpus = json!({
+        "corpus": { "corpus_version": "compat-corpus-golden" },
+        "thresholds": { "overall_pass_rate_min_pct": 95.0 },
+        "totals": {
+            "total_test_cases": 100,
+            "passed_test_cases": 98,
+            "failed_test_cases": 2,
+            "errored_test_cases": 0,
+            "skipped_test_cases": 0,
+            "overall_pass_rate_pct": 98.0
+        },
+        "proof_carrying_effects": l1_v2_proof_block()
+    });
     write_fixture(
         &root.join("artifacts/13/compatibility_corpus_results.json"),
-        r#"{
-  "corpus": {
-    "corpus_version": "compat-corpus-golden"
-  },
-  "thresholds": {
-    "overall_pass_rate_min_pct": 95.0
-  },
-  "totals": {
-    "total_test_cases": 100,
-    "passed_test_cases": 98,
-    "failed_test_cases": 2,
-    "errored_test_cases": 0,
-    "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 98.0
-  },
-  "proof_carrying_effects": {
-    "schema_version": "franken-node/l1-proof-carrying-effects/v1",
-    "required_subjects": ["fs.read", "fs.write", "http.request"],
-    "verified_subjects": ["fs.read", "fs.write", "http.request"],
-    "effect_receipts_verified": 3,
-    "invalid_receipts": 0,
-    "receipt_chain_verified": true
-  }
-}"#,
+        &serde_json::to_string_pretty(&corpus).expect("corpus fixture render"),
     )?;
     write_fixture(
         &root.join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),
@@ -369,27 +401,6 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
 }"#,
     )?;
     Ok(())
-}
-
-/// Helper to run CLI commands that may fail gracefully.
-fn run_cli_command_with_fallback(
-    args: &[&str],
-    expect_json: bool,
-    command_name: &str,
-) -> Result<String, String> {
-    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
-    let output = cmd.args(args).output().expect("command execution");
-
-    if output.status.success() {
-        if expect_json {
-            Ok(pretty_json_stdout(command_name, &output.stdout))
-        } else {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        }
-    } else {
-        // Return stderr for failed commands
-        Err(String::from_utf8_lossy(&output.stderr).into_owned())
-    }
 }
 
 // === help commands (guaranteed to work) ===

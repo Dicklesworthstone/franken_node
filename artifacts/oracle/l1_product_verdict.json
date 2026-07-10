@@ -9,7 +9,101 @@
     "tests_failed": 0,
     "tests_skipped": 0,
     "coverage_pct": null,
-    "details_ref": "tests/conformance/lockstep_runner_release_gate.rs"
+    "details_ref": "tests/conformance/lockstep_runner_release_gate.rs",
+    "proof_carrying_effects": {
+      "schema_version": "franken-node/l1-proof-carrying-effects/v2",
+      "trace_id": "franken_node:0",
+      "produced_at": "2026-07-10T20:23:27.196644752+00:00",
+      "producer": "franken-node ops proof-carrying-evidence",
+      "verified_subjects": [
+        "fs.read",
+        "fs.write",
+        "http.request"
+      ],
+      "effect_receipts_verified": 3,
+      "invalid_receipts": 0,
+      "receipt_chain_verified": true,
+      "receipt_chain_entries": [
+        {
+          "index": 0,
+          "prev_chain_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "receipt_hash": "sha256:da981953d2c311ed08f18fbe2efe83d405585f58d4191bb40476a967a0b37d4d",
+          "chain_hash": "sha256:182759915ed614925c24f5a87eca414b9f65053c9ba1fbfbf4037f3ecba5f354",
+          "receipt": {
+            "schema_version": "effect-receipt-v1.1",
+            "seq": 0,
+            "trace_id": "franken_node:0",
+            "effect_kind": "fs_write",
+            "policy_outcome": {
+              "outcome": "allowed",
+              "capability_ref": "host-io:fs_write"
+            },
+            "pre_state_hash": "sha256:798ea774ac289235b6cc3e6ff9f8ab4345a6bcfd42e8470b82884ab39b391502",
+            "args_hash": "sha256:d08efae13dcb63a7f827bcd1a5208d8e6df242e234b3802e3904505ddc58a799",
+            "result_hash": "sha256:798ea774ac289235b6cc3e6ff9f8ab4345a6bcfd42e8470b82884ab39b391502",
+            "post_state_hash": "sha256:798ea774ac289235b6cc3e6ff9f8ab4345a6bcfd42e8470b82884ab39b391502",
+            "input_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "output_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "declassification_ref": null,
+            "flow_policy_verdict": "label_clean",
+            "recorded_at_millis": 1783715007113
+          }
+        },
+        {
+          "index": 1,
+          "prev_chain_hash": "sha256:182759915ed614925c24f5a87eca414b9f65053c9ba1fbfbf4037f3ecba5f354",
+          "receipt_hash": "sha256:5f4f844574dd6451cc993349bfd0893c1e88557b1551c5c9e356a5a10cfa9116",
+          "chain_hash": "sha256:0153006d20a618052f038d88de53d139b19f729ffc818a517060be9a853fe528",
+          "receipt": {
+            "schema_version": "effect-receipt-v1.1",
+            "seq": 1,
+            "trace_id": "franken_node:0",
+            "effect_kind": "fs_read",
+            "policy_outcome": {
+              "outcome": "allowed",
+              "capability_ref": "host-io:fs_read"
+            },
+            "pre_state_hash": "sha256:798ea774ac289235b6cc3e6ff9f8ab4345a6bcfd42e8470b82884ab39b391502",
+            "args_hash": "sha256:d08efae13dcb63a7f827bcd1a5208d8e6df242e234b3802e3904505ddc58a799",
+            "result_hash": "sha256:798ea774ac289235b6cc3e6ff9f8ab4345a6bcfd42e8470b82884ab39b391502",
+            "post_state_hash": "sha256:798ea774ac289235b6cc3e6ff9f8ab4345a6bcfd42e8470b82884ab39b391502",
+            "input_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "output_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "declassification_ref": null,
+            "flow_policy_verdict": "label_clean",
+            "recorded_at_millis": 1783715007113
+          }
+        },
+        {
+          "index": 2,
+          "prev_chain_hash": "sha256:0153006d20a618052f038d88de53d139b19f729ffc818a517060be9a853fe528",
+          "receipt_hash": "sha256:4a138e15cb306bc7a952bc8107ace45c77a3b9ecfe8260cfcabcc589f6f0d4dc",
+          "chain_hash": "sha256:0e9d67018dcdbfb29fc0bb5063e1d48248d441713d1d2120b16633f80b9a66f9",
+          "receipt": {
+            "schema_version": "effect-receipt-v1.1",
+            "seq": 2,
+            "trace_id": "franken_node:0",
+            "effect_kind": "http_request",
+            "policy_outcome": {
+              "outcome": "allowed",
+              "capability_ref": "host-io:network_send"
+            },
+            "pre_state_hash": "sha256:262dfe873f09b71cd60b060a36c89ce76af70d19b1a7453b1de7a462f45c2e7b",
+            "args_hash": "sha256:c36f469f4a606e1953b4958cd9f1f002f26de53b76a03c2bf0d0fa1b9624ee3e",
+            "result_hash": "sha256:47e324768a7c7865c8cf11869c0a67ede7e4c8e7196a77ceb1731cfa73351731",
+            "post_state_hash": "sha256:47e324768a7c7865c8cf11869c0a67ede7e4c8e7196a77ceb1731cfa73351731",
+            "input_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "output_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "declassification_ref": null,
+            "flow_policy_verdict": "label_clean",
+            "recorded_at_millis": 1783715007113
+          }
+        }
+      ]
+    }
   },
   "subjects": [
     "compatibility_corpus_pass_gate",
@@ -20,6 +114,7 @@
   "notes": [
     "Backfilled 2026-05-21 from the reality-check bridge plan. Prior content was the literal placeholder `{\"verdict\": \"GREEN\"}`; this enrichment matches the schema documented in docs/DUAL_ORACLE_CLOSE_CONDITION.md.",
     "tests_passed reflects the workspace-root tests/ tree at 2026-05-20 (1538). Add a CI hook to regenerate this file from the actual lockstep oracle run output before relying on it for release sign-off.",
-    "coverage_pct is null pending wiring up a real coverage harness on the L1 path. Track this work via Track 10.2."
+    "coverage_pct is null pending wiring up a real coverage harness on the L1 path. Track this work via Track 10.2.",
+    "proof_carrying_effects regenerated 2026-07-10 from a REAL native-engine run via `franken-node ops proof-carrying-evidence` (bd-qr5i2.4): v2 evidence with embedded receipt_chain_entries that both the Rust doctor gate and the Python CI gate re-derive; v1 declared-summary acceptance is retired."
   ]
 }

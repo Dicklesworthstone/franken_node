@@ -78,34 +78,16 @@ frankenengine-extension-host = { path = "../../franken_engine/crates/franken-ext
         &root.path().join("docs/PRODUCT_CHARTER.md"),
         "Dual-oracle close condition requires all dimensions to be green.\n",
     );
-    write_fixture(
-        &root
-            .path()
-            .join("artifacts/13/compatibility_corpus_results.json"),
-        r#"{
-  "corpus": {
-    "corpus_version": "compat-corpus-test"
-  },
-  "thresholds": {
-    "overall_pass_rate_min_pct": 95.0
-  },
-  "totals": {
-    "total_test_cases": 100,
-    "passed_test_cases": 98,
-    "failed_test_cases": 2,
-    "errored_test_cases": 0,
-    "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 98.0
-  },
-  "proof_carrying_effects": {
-    "schema_version": "franken-node/l1-proof-carrying-effects/v1",
-    "required_subjects": ["fs.read", "fs.write", "http.request"],
-    "verified_subjects": ["fs.read", "fs.write", "http.request"],
-    "effect_receipts_verified": 3,
-    "invalid_receipts": 0,
-    "receipt_chain_verified": true
-  }
-}"#,
+    // bd-qr5i2.4: v1 declared-summary acceptance is retired, so the GREEN
+    // baseline fixture carries v2 evidence with a genuine re-derivable
+    // receipt chain built through the production API.
+    write_v2_compatibility_fixture(
+        root.path(),
+        v2_proof_block(
+            &l1_acceptance_chain_entries(),
+            serde_json::json!(["fs.read", "fs.write", "http.request"]),
+            3,
+        ),
     );
     if include_ci_gate {
         write_fixture(
@@ -153,36 +135,31 @@ fn write_parity_only_compatibility_fixture(root: &Path) {
     );
 }
 
-/// Proof-carrying host-effect evidence is fully valid, but the compatibility
-/// (lockstep parity) corpus is below the required pass-rate threshold. Exercises
-/// the `proven-but-parity-RED => FAIL` arm of the acceptance-bar conjunction.
+/// Proof-carrying host-effect evidence is fully valid (v2, genuine chain),
+/// but the compatibility (lockstep parity) corpus is below the required
+/// pass-rate threshold. Exercises the `proven-but-parity-RED => FAIL` arm of
+/// the acceptance-bar conjunction.
 fn write_proof_carrying_but_parity_red_compatibility_fixture(root: &Path) {
+    let corpus = serde_json::json!({
+        "corpus": { "corpus_version": "compat-corpus-test" },
+        "thresholds": { "overall_pass_rate_min_pct": 95.0 },
+        "totals": {
+            "total_test_cases": 100,
+            "passed_test_cases": 90,
+            "failed_test_cases": 10,
+            "errored_test_cases": 0,
+            "skipped_test_cases": 0,
+            "overall_pass_rate_pct": 90.0
+        },
+        "proof_carrying_effects": v2_proof_block(
+            &l1_acceptance_chain_entries(),
+            serde_json::json!(["fs.read", "fs.write", "http.request"]),
+            3,
+        )
+    });
     write_fixture(
         &root.join("artifacts/13/compatibility_corpus_results.json"),
-        r#"{
-  "corpus": {
-    "corpus_version": "compat-corpus-test"
-  },
-  "thresholds": {
-    "overall_pass_rate_min_pct": 95.0
-  },
-  "totals": {
-    "total_test_cases": 100,
-    "passed_test_cases": 90,
-    "failed_test_cases": 10,
-    "errored_test_cases": 0,
-    "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 90.0
-  },
-  "proof_carrying_effects": {
-    "schema_version": "franken-node/l1-proof-carrying-effects/v1",
-    "required_subjects": ["fs.read", "fs.write", "http.request"],
-    "verified_subjects": ["fs.read", "fs.write", "http.request"],
-    "effect_receipts_verified": 3,
-    "invalid_receipts": 0,
-    "receipt_chain_verified": true
-  }
-}"#,
+        &serde_json::to_string_pretty(&corpus).expect("corpus fixture render"),
     );
 }
 
@@ -997,6 +974,33 @@ fn l1_blocking_findings_contain(receipt: &Value, needle: &str) -> bool {
         .expect("L1 blocking findings")
         .iter()
         .any(|finding| finding.as_str().is_some_and(|text| text.contains(needle)))
+}
+
+/// bd-qr5i2.4: v1 declared-summary evidence is retired — a fully-populated
+/// v1 block that used to pass now fails closed with an unsupported-schema
+/// finding pointing the operator at the producer CLI.
+#[test]
+fn doctor_close_condition_refuses_retired_v1_evidence() {
+    let root = fixture_root();
+    write_v2_compatibility_fixture(
+        root.path(),
+        serde_json::json!({
+            "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+            "required_subjects": ["fs.read", "fs.write", "http.request"],
+            "verified_subjects": ["fs.read", "fs.write", "http.request"],
+            "effect_receipts_verified": 3,
+            "invalid_receipts": 0,
+            "receipt_chain_verified": true
+        }),
+    );
+    let receipt = run_close_condition_receipt(root.path(), 77);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
+    assert!(
+        l1_blocking_findings_contain(&receipt, "is unsupported"),
+        "retired v1 evidence must fail closed with the unsupported-schema finding: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
 }
 
 /// GREEN arm: v2 evidence with a genuine, re-derivable receipt chain covering

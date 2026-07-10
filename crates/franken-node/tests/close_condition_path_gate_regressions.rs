@@ -25,6 +25,45 @@ fn write_fixture(path: &Path, contents: &str) {
     fs::write(path, contents).expect("fixture file");
 }
 
+/// bd-qr5i2.4: a genuine, re-derivable v2 proof-carrying evidence block (v1
+/// declared-summary acceptance is retired; the L1 gate re-derives the
+/// embedded chain).
+fn l1_v2_proof_block() -> serde_json::Value {
+    use frankenengine_node::runtime::effect_receipt::{
+        EffectKind, EffectReceipt, EffectReceiptChain,
+    };
+    use frankenengine_node::storage::cas::content_hash;
+
+    let mut chain = EffectReceiptChain::new();
+    for (seq, kind) in [
+        (0_u64, EffectKind::FsRead),
+        (1, EffectKind::FsWrite),
+        (2, EffectKind::HttpRequest),
+    ] {
+        let receipt = EffectReceipt::allowed(
+            seq,
+            "close-condition-path-gate",
+            kind,
+            "cap-l1-acceptance",
+            content_hash(b"pre-state"),
+            content_hash(b"args"),
+            content_hash(b"result"),
+            content_hash(b"post-state"),
+            1_774_000_000_000,
+        );
+        chain.append(receipt).expect("append acceptance receipt");
+    }
+    serde_json::json!({
+        "schema_version": "franken-node/l1-proof-carrying-effects/v2",
+        "required_subjects": ["fs.read", "fs.write", "http.request"],
+        "verified_subjects": ["fs.read", "fs.write", "http.request"],
+        "effect_receipts_verified": 3,
+        "invalid_receipts": 0,
+        "receipt_chain_verified": true,
+        "receipt_chain_entries": chain.entries()
+    })
+}
+
 fn fixture_root_with_engine_paths(engine_path: &str, extension_host_path: &str) -> FixtureRoot {
     let temp_dir = TempDir::new().expect("fixture root");
     let root = temp_dir.path().join("workspace/franken_node");
@@ -67,31 +106,25 @@ frankenengine-extension-host = {{ path = "{extension_host_path}" }}
         &root.join("docs/PRODUCT_CHARTER.md"),
         "Dual-oracle close condition requires all dimensions to be green.\n",
     );
+    // bd-qr5i2.4: v1 declared-summary acceptance is retired; keep L1 GREEN
+    // with v2 evidence carrying a genuine re-derivable receipt chain so these
+    // regressions keep isolating the L2 path-gate behavior.
+    let corpus = serde_json::json!({
+        "corpus": { "corpus_version": "compat-corpus-test" },
+        "proof_carrying_effects": l1_v2_proof_block(),
+        "thresholds": { "overall_pass_rate_min_pct": 95.0 },
+        "totals": {
+            "total_test_cases": 100,
+            "passed_test_cases": 98,
+            "failed_test_cases": 2,
+            "errored_test_cases": 0,
+            "skipped_test_cases": 0,
+            "overall_pass_rate_pct": 98.0
+        }
+    });
     write_fixture(
         &root.join("artifacts/13/compatibility_corpus_results.json"),
-        r#"{
-  "corpus": {
-    "corpus_version": "compat-corpus-test"
-  },
-  "proof_carrying_effects": {
-    "schema_version": "franken-node/l1-proof-carrying-effects/v1",
-    "verified_subjects": ["fs.read", "fs.write", "http.request"],
-    "effect_receipts_verified": 3,
-    "invalid_receipts": 0,
-    "receipt_chain_verified": true
-  },
-  "thresholds": {
-    "overall_pass_rate_min_pct": 95.0
-  },
-  "totals": {
-    "total_test_cases": 100,
-    "passed_test_cases": 98,
-    "failed_test_cases": 2,
-    "errored_test_cases": 0,
-    "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 98.0
-  }
-}"#,
+        &serde_json::to_string_pretty(&corpus).expect("corpus fixture render"),
     );
     write_fixture(
         &root.join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),

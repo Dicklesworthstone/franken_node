@@ -76,11 +76,15 @@ finding. SIEM filters should pin on these codes, not message text.
 
 ### Current evidence contract and tracked hardening
 
-Two `proof_carrying_effects` schema versions are accepted:
+Only the **v2** `proof_carrying_effects` schema is accepted:
 
-- **v1** (`franken-node/l1-proof-carrying-effects/v1`) — legacy *declared*
-  summary; the gate validates every field fail-closed but cannot re-derive
-  the underlying receipts. Retained only until the real-run producer lands.
+- **v1** (`franken-node/l1-proof-carrying-effects/v1`) — RETIRED
+  (bd-qr5i2.4). The legacy *declared* summary carried no receipts the gate
+  could re-derive, so its acceptance is withdrawn in both the Rust doctor
+  gate and the Python CI gate; a v1 block now fails closed with an
+  unsupported-schema finding. The schema id stays registered in
+  `schema_versions.rs` (the registry is append-only) for historical
+  artifacts.
 - **v2** (`franken-node/l1-proof-carrying-effects/v2`) — adds mandatory
   `receipt_chain_entries` (serialized `EffectReceiptChainEntry` array). The
   gate **re-derives** the evidence natively: chain integrity
@@ -141,12 +145,13 @@ Each oracle dimension produces a verdict artifact:
     "coverage_pct": "<float>",
     "details_ref": "<path to detailed report>",
     "proof_carrying_effects": {
-      "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+      "schema_version": "franken-node/l1-proof-carrying-effects/v2",
       "required_subjects": ["fs.read", "fs.write", "http.request"],
       "verified_subjects": ["fs.read", "fs.write", "http.request"],
       "effect_receipts_verified": 3,
       "invalid_receipts": 0,
-      "receipt_chain_verified": true
+      "receipt_chain_verified": true,
+      "receipt_chain_entries": ["… serialized EffectReceiptChainEntry array — see producer output …"]
     }
   },
   "blocking_findings": []
@@ -162,14 +167,21 @@ The Rust `doctor close-condition` L1 evaluator also consumes
 
 ```json
 {
-  "schema_version": "franken-node/l1-proof-carrying-effects/v1",
+  "schema_version": "franken-node/l1-proof-carrying-effects/v2",
   "required_subjects": ["fs.read", "fs.write", "http.request"],
   "verified_subjects": ["fs.read", "fs.write", "http.request"],
   "effect_receipts_verified": 3,
   "invalid_receipts": 0,
-  "receipt_chain_verified": true
+  "receipt_chain_verified": true,
+  "receipt_chain_entries": ["… serialized EffectReceiptChainEntry array — see producer output …"]
 }
 ```
+
+Generate/refresh this block from a real run with
+`franken-node ops proof-carrying-evidence --merge-corpus
+artifacts/13/compatibility_corpus_results.json`; the declared summary
+fields must equal the values re-derived from the embedded entries, which
+the producer guarantees by construction.
 
 Parity-only evidence is not enough. A GREEN compatibility pass rate with missing,
 partial, invalid, or chain-unverified `proof_carrying_effects` evidence makes the

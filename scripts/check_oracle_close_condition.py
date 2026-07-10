@@ -427,40 +427,20 @@ def validate_l1_proof_carrying_evidence(data: dict) -> list[str]:
         return ["L1 proof_carrying_effects evidence missing"]
 
     # v2 embeds the receipt chain and is re-derived rather than trusted
-    # (bd-qr5i2.3, mirroring the Rust doctor gate's v2 path). v1 remains the
-    # legacy declared-summary path until bd-qr5i2.4 retires it.
+    # (bd-qr5i2.3, mirroring the Rust doctor gate's v2 path). v1 acceptance
+    # is RETIRED (bd-qr5i2.4): a declared-only summary can no longer pass —
+    # regenerate the artifact from a real run with
+    # `franken-node ops proof-carrying-evidence`. The v1 schema id stays
+    # registered in schema_versions.rs (the registry is append-only); only
+    # its acceptance here is withdrawn.
     if proof.get("schema_version") == L1_PROOF_EVIDENCE_SCHEMA_V2:
         return _validate_proof_carrying_v2(proof)
 
-    errors = []
-    if proof.get("schema_version") != L1_PROOF_EVIDENCE_SCHEMA:
-        errors.append("L1 proof_carrying_effects schema_version missing or unsupported")
-
-    verified_subjects = proof.get("verified_subjects")
-    if not isinstance(verified_subjects, list):
-        verified_subjects = []
-    verified_subjects = {subject for subject in verified_subjects if isinstance(subject, str)}
-    for subject in REQUIRED_L1_PROOF_SUBJECTS:
-        if subject not in verified_subjects:
-            errors.append(f"L1 proof_carrying_effects missing subject {subject}")
-
-    receipts_verified = proof.get("effect_receipts_verified")
-    if not isinstance(receipts_verified, int) or receipts_verified < len(REQUIRED_L1_PROOF_SUBJECTS):
-        errors.append(
-            "L1 proof_carrying_effects effect_receipts_verified below required "
-            f"{len(REQUIRED_L1_PROOF_SUBJECTS)}"
-        )
-
-    invalid_receipts = proof.get("invalid_receipts")
-    if not isinstance(invalid_receipts, int):
-        errors.append("L1 proof_carrying_effects invalid_receipts missing or invalid")
-    elif invalid_receipts != 0:
-        errors.append(f"L1 proof_carrying_effects reports {invalid_receipts} invalid receipt(s)")
-
-    if proof.get("receipt_chain_verified") is not True:
-        errors.append("L1 proof_carrying_effects receipt_chain_verified is not true")
-
-    return errors
+    return [
+        f"L1 proof_carrying_effects schema_version {proof.get('schema_version')!r} is "
+        f"unsupported: only {L1_PROOF_EVIDENCE_SCHEMA_V2} is accepted (v1 declared-summary "
+        "acceptance retired; regenerate via `franken-node ops proof-carrying-evidence`)"
+    ]
 
 
 def check_dimension(artifacts_dir: Path, dim: dict) -> dict:
