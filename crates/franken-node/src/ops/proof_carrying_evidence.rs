@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::runtime::effect_receipt::EffectReceiptChainEntry;
+use crate::runtime::nversion_oracle::DivergenceReport;
 
 /// Producer identity recorded in the emitted evidence block.
 pub const PROOF_CARRYING_EVIDENCE_PRODUCER: &str = "franken-node ops proof-carrying-evidence";
@@ -34,6 +35,10 @@ pub const PROOF_CARRYING_EVIDENCE_PRODUCER: &str = "franken-node ops proof-carry
 /// Key under which the compatibility-corpus results artifact carries the
 /// proof-carrying evidence block (the path the close-condition gate reads).
 pub const PROOF_CARRYING_EFFECTS_KEY: &str = "proof_carrying_effects";
+
+/// Key under which the L1 product verdict artifact's `evidence` object
+/// carries the lockstep-oracle verdict block (bd-ry7d1).
+pub const LOCKSTEP_VERDICT_KEY: &str = "lockstep_verdict";
 
 /// Upper bound for the corpus-results artifact read (parser-bomb defense).
 const MAX_CORPUS_RESULTS_BYTES: u64 = 16 * 1024 * 1024;
@@ -253,6 +258,286 @@ pub fn produce_proof_carrying_effects_evidence() -> Result<ProofCarryingEffectsE
     })
 }
 
+/// The `lockstep_verdict` v1 evidence block (bd-ry7d1).
+///
+/// The summary fields (`oracle_verdict`, `runtimes`, `checks_total`,
+/// `divergence_count`) are DERIVED from the embedded `report` using the same
+/// rules the close-condition gate applies on read, so a well-formed producer
+/// artifact re-derives cleanly and a tampered one fails closed at the gate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockstepVerdictEvidence {
+    /// Always [`crate::schema_versions::L1_LOCKSTEP_VERDICT_V1`].
+    pub schema_version: String,
+    /// Trace id of the producing oracle run (matches `report.trace_id`).
+    pub trace_id: String,
+    /// RFC 3339 timestamp of evidence production.
+    pub produced_at: String,
+    /// Producer identity ([`PROOF_CARRYING_EVIDENCE_PRODUCER`]).
+    pub producer: String,
+    /// CAS content hash of the guest program source both runtimes executed.
+    pub guest_program_content_hash: String,
+    /// Sorted runtime ids that really executed (from `report.runtimes`).
+    pub runtimes: Vec<String>,
+    /// `report.verdict.label()` — always "pass" on emit; the producer
+    /// refuses to emit evidence for a diverged run.
+    pub oracle_verdict: String,
+    /// Count of cross-runtime checks in the embedded report.
+    pub checks_total: u64,
+    /// Count of divergences in the embedded report (always 0 on emit).
+    pub divergence_count: u64,
+    /// The full lockstep-oracle divergence report. Gates re-derive the
+    /// verdict from this — runtimes (≥2 distinct executors, ≥1 reference and
+    /// ≥1 franken), checks (all `Agree`), and divergences (none) — rather
+    /// than trusting the declared summary above.
+    pub report: DivergenceReport,
+}
+
+/// Execute one deterministic guest program on TWO real runtimes — bun as the
+/// independent reference leg (subprocess) and the native in-process
+/// franken_engine as the franken leg — feed both outputs through the
+/// N-version [`crate::runtime::nversion_oracle::RuntimeOracle`], and emit the
+/// lockstep verdict evidence with the full report embedded.
+///
+/// This runs the oracle legs directly instead of going through
+/// `runtime::lockstep_harness`, whose franken leg spawns a standalone
+/// `franken-engine` CLI binary that does not exist anywhere in the ecosystem
+/// (bd-zi9hj); the oracle machinery itself is identical.
+///
+/// Fail-closed: a missing/failed bun binary, a fallback-runtime engine run,
+/// a nonzero exit on either leg, or ANY oracle verdict other than `Pass`
+/// aborts evidence production with an error rather than emitting weaker
+/// evidence.
+#[cfg(feature = "engine")]
+pub fn produce_lockstep_verdict_evidence() -> Result<LockstepVerdictEvidence> {
+    use crate::config::{Config, PreferredRuntime, Profile};
+    use crate::ops::engine_dispatcher::EngineDispatcher;
+    use crate::runtime::nversion_oracle::{
+        BoundaryScope, CheckOutcome, RiskTier, RuntimeEntry, RuntimeOracle,
+    };
+    use crate::schema_versions::L1_LOCKSTEP_VERDICT_V1;
+    use std::process::Command;
+
+    // Deterministic pure-compute guest: no fs / network / clock / randomness,
+    // so byte-identical output across conforming runtimes is the contract
+    // under test, not an accident of environment.
+    const GUEST_SOURCE: &str = "const values = [];\n\
+         for (let i = 1; i <= 8; i += 1) { values.push(i * i); }\n\
+         console.log('l1-lockstep:' + values.join(','));\n";
+
+    let sandbox = tempfile::TempDir::new().context("create lockstep producer sandbox")?;
+    let app_path = sandbox.path().join("l1_lockstep_guest.js");
+    std::fs::write(&app_path, GUEST_SOURCE).context("write lockstep guest program")?;
+
+    // Reference leg: real bun subprocess. bun's absence is a hard error —
+    // a single-runtime "lockstep" run is not a cross-check.
+    let bun_version_output = Command::new("bun")
+        .arg("--version")
+        .output()
+        .context("bun is required for the lockstep reference leg (bun --version failed)")?;
+    if !bun_version_output.status.success() {
+        bail!("bun --version exited nonzero; cannot pin the reference-leg runtime version");
+    }
+    let bun_version = String::from_utf8_lossy(&bun_version_output.stdout)
+        .trim()
+        .to_string();
+    let bun_run = Command::new("bun")
+        .arg(&app_path)
+        .current_dir(sandbox.path())
+        .output()
+        .context("failed executing the lockstep guest under bun")?;
+    if !bun_run.status.success() {
+        bail!(
+            "bun exited nonzero ({:?}) on the lockstep guest; stderr: {}",
+            bun_run.status.code(),
+            String::from_utf8_lossy(&bun_run.stderr)
+        );
+    }
+    let mut bun_output = bun_run.stdout.clone();
+    bun_output.extend_from_slice(&bun_run.stderr);
+
+    // Franken leg: the native in-process engine through the public dispatch
+    // path (the same surface `franken-node run` executes). The placeholder
+    // only satisfies dispatch-plan resolution; execution is native.
+    let engine_dir = tempfile::TempDir::new().context("create engine placeholder directory")?;
+    let engine_placeholder = engine_dir.path().join("franken-engine-native-placeholder");
+    std::fs::write(&engine_placeholder, b"#!/bin/sh\nexit 0\n")
+        .context("write engine placeholder for dispatch-plan resolution")?;
+    let config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    let dispatcher =
+        EngineDispatcher::new(Some(engine_placeholder), PreferredRuntime::FrankenEngine);
+    let dispatch = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .context("lockstep guest run failed to dispatch on the native engine")?;
+    if dispatch.used_fallback_runtime {
+        bail!(
+            "franken leg fell back to runtime '{}'; the lockstep verdict requires the native franken_engine path",
+            dispatch.runtime
+        );
+    }
+    if dispatch.terminated_by_signal || dispatch.exit_code != Some(0) {
+        bail!(
+            "native engine leg did not exit cleanly (exit_code={:?}, signal={}); stderr: {}",
+            dispatch.exit_code,
+            dispatch.terminated_by_signal,
+            dispatch.captured_output.stderr
+        );
+    }
+    let mut franken_output = dispatch.captured_output.stdout.clone().into_bytes();
+    franken_output.extend_from_slice(dispatch.captured_output.stderr.as_bytes());
+
+    // Feed both legs through the real N-version oracle.
+    let trace_id = format!("l1-lockstep:{}", uuid::Uuid::now_v7());
+    let mut oracle = RuntimeOracle::new(&trace_id, 100);
+    oracle
+        .register_runtime(RuntimeEntry {
+            runtime_id: "bun".to_string(),
+            runtime_name: "bun".to_string(),
+            version: bun_version,
+            is_reference: true,
+        })
+        .map_err(|err| anyhow::anyhow!("oracle registration failed for bun: {err}"))?;
+    oracle
+        .register_runtime(RuntimeEntry {
+            runtime_id: "franken-engine-native".to_string(),
+            runtime_name: "franken-engine-native".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            is_reference: false,
+        })
+        .map_err(|err| anyhow::anyhow!("oracle registration failed for franken leg: {err}"))?;
+
+    let mut outputs = std::collections::BTreeMap::new();
+    outputs.insert("bun".to_string(), bun_output);
+    outputs.insert("franken-engine-native".to_string(), franken_output);
+
+    let check_id = format!("{trace_id}:check-0");
+    let check = oracle
+        .run_cross_check(
+            &check_id,
+            BoundaryScope::IO,
+            GUEST_SOURCE.as_bytes(),
+            &outputs,
+        )
+        .map_err(|err| anyhow::anyhow!("oracle cross-check failed: {err}"))?;
+    if let Some(CheckOutcome::Diverge {
+        outputs: diverged_outputs,
+    }) = check.outcome
+    {
+        oracle.classify_divergence(
+            &format!("{trace_id}:div-0"),
+            &check_id,
+            BoundaryScope::IO,
+            RiskTier::High,
+            &diverged_outputs,
+        );
+    }
+
+    let now_epoch_secs = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    let report = oracle.generate_report(now_epoch_secs);
+    if report.verdict != crate::runtime::nversion_oracle::OracleVerdict::Pass {
+        let rendered_outputs = report
+            .divergences
+            .iter()
+            .flat_map(|divergence| divergence.runtime_outputs.iter())
+            .map(|(runtime, output)| format!("{runtime}={:?}", String::from_utf8_lossy(output)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        bail!(
+            "lockstep oracle verdict is {} (not pass); refusing to emit L1 lockstep verdict \
+             evidence. Diverged outputs: {rendered_outputs}",
+            report.verdict.label()
+        );
+    }
+
+    Ok(LockstepVerdictEvidence {
+        schema_version: L1_LOCKSTEP_VERDICT_V1.to_string(),
+        trace_id: report.trace_id.clone(),
+        produced_at: chrono::Utc::now().to_rfc3339(),
+        producer: PROOF_CARRYING_EVIDENCE_PRODUCER.to_string(),
+        guest_program_content_hash: crate::storage::cas::content_hash(GUEST_SOURCE.as_bytes())
+            .as_str()
+            .to_string(),
+        runtimes: report.runtimes.keys().cloned().collect(),
+        oracle_verdict: report.verdict.label().to_string(),
+        checks_total: report.checks.len() as u64,
+        divergence_count: report.divergences.len() as u64,
+        report,
+    })
+}
+
+/// Merge both produced L1 evidence blocks into the L1 product verdict
+/// artifact (`artifacts/oracle/l1_product_verdict.json`) — the file the
+/// Python CI gate reads and, after bd-ry7d1, the Rust doctor gate consumes
+/// and binds against the corpus-results copy. Sets the declared verdict to
+/// GREEN, which is justified by construction: both producers fail closed
+/// before this point on any shortfall, and both gates re-derive the evidence
+/// rather than trusting the declaration.
+pub fn merge_into_l1_verdict(
+    verdict_path: &Path,
+    proof_evidence: &ProofCarryingEffectsEvidence,
+    lockstep_evidence: &LockstepVerdictEvidence,
+) -> Result<()> {
+    if lockstep_evidence.oracle_verdict != "pass" {
+        bail!(
+            "refusing to merge a non-pass lockstep verdict ({}) into {}",
+            lockstep_evidence.oracle_verdict,
+            verdict_path.display()
+        );
+    }
+    let raw = crate::bounded_read_to_string(verdict_path, MAX_CORPUS_RESULTS_BYTES)
+        .with_context(|| format!("read L1 verdict artifact {}", verdict_path.display()))?;
+    let mut data: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parse L1 verdict artifact {}", verdict_path.display()))?;
+    let Some(object) = data.as_object_mut() else {
+        bail!(
+            "L1 verdict artifact {} must be a JSON object",
+            verdict_path.display()
+        );
+    };
+    object.insert(
+        "verdict".to_string(),
+        serde_json::Value::String("GREEN".to_string()),
+    );
+    object.insert(
+        "timestamp".to_string(),
+        serde_json::Value::String(lockstep_evidence.produced_at.clone()),
+    );
+    let evidence = object
+        .entry("evidence".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(evidence_object) = evidence.as_object_mut() else {
+        bail!(
+            "L1 verdict artifact {} field `evidence` must be a JSON object",
+            verdict_path.display()
+        );
+    };
+    evidence_object.insert(
+        PROOF_CARRYING_EFFECTS_KEY.to_string(),
+        serde_json::to_value(proof_evidence).context("serialize proof-carrying evidence")?,
+    );
+    evidence_object.insert(
+        LOCKSTEP_VERDICT_KEY.to_string(),
+        serde_json::to_value(lockstep_evidence).context("serialize lockstep verdict evidence")?,
+    );
+    evidence_object.insert(
+        "details_ref".to_string(),
+        serde_json::Value::String(
+            "crates/franken-node/src/ops/proof_carrying_evidence.rs".to_string(),
+        ),
+    );
+    std::fs::write(
+        verdict_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&data).context("render L1 verdict artifact")?
+        ),
+    )
+    .with_context(|| format!("write L1 verdict artifact {}", verdict_path.display()))?;
+    Ok(())
+}
+
 /// Merge produced evidence into a compatibility-corpus results JSON artifact
 /// (the file the close-condition gate reads), replacing any existing
 /// `proof_carrying_effects` block in place. The rest of the artifact —
@@ -362,6 +647,137 @@ mod tests {
         std::fs::write(&corpus_path, "[1, 2, 3]").expect("write corpus fixture");
         let err = merge_into_corpus_results(&corpus_path, &sample_evidence())
             .expect_err("non-object corpus must refuse");
+        assert!(err.to_string().contains("must be a JSON object"));
+    }
+
+    /// A lockstep evidence block whose embedded report is built through the
+    /// real oracle API (two distinct runtimes, one agreeing check, no
+    /// divergences) — internally consistent by construction.
+    fn sample_lockstep_evidence() -> LockstepVerdictEvidence {
+        use crate::runtime::nversion_oracle::{BoundaryScope, RuntimeEntry, RuntimeOracle};
+
+        let mut oracle = RuntimeOracle::new("l1-lockstep:unit", 100);
+        oracle
+            .register_runtime(RuntimeEntry {
+                runtime_id: "bun".to_string(),
+                runtime_name: "bun".to_string(),
+                version: "1.0-test".to_string(),
+                is_reference: true,
+            })
+            .expect("register bun");
+        oracle
+            .register_runtime(RuntimeEntry {
+                runtime_id: "franken-engine-native".to_string(),
+                runtime_name: "franken-engine-native".to_string(),
+                version: "0.1-test".to_string(),
+                is_reference: false,
+            })
+            .expect("register franken leg");
+        let mut outputs = std::collections::BTreeMap::new();
+        outputs.insert("bun".to_string(), b"l1-lockstep:ok\n".to_vec());
+        outputs.insert(
+            "franken-engine-native".to_string(),
+            b"l1-lockstep:ok\n".to_vec(),
+        );
+        oracle
+            .run_cross_check(
+                "l1-lockstep:unit:check-0",
+                BoundaryScope::IO,
+                b"src",
+                &outputs,
+            )
+            .expect("cross check");
+        let report = oracle.generate_report(1_774_000_000);
+        LockstepVerdictEvidence {
+            schema_version: crate::schema_versions::L1_LOCKSTEP_VERDICT_V1.to_string(),
+            trace_id: report.trace_id.clone(),
+            produced_at: "2026-07-10T00:00:00+00:00".to_string(),
+            producer: PROOF_CARRYING_EVIDENCE_PRODUCER.to_string(),
+            guest_program_content_hash: crate::storage::cas::content_hash(b"src")
+                .as_str()
+                .to_string(),
+            runtimes: report.runtimes.keys().cloned().collect(),
+            oracle_verdict: report.verdict.label().to_string(),
+            checks_total: report.checks.len() as u64,
+            divergence_count: report.divergences.len() as u64,
+            report,
+        }
+    }
+
+    #[test]
+    fn sample_lockstep_evidence_is_pass_with_two_runtimes() {
+        let evidence = sample_lockstep_evidence();
+        assert_eq!(evidence.oracle_verdict, "pass");
+        assert_eq!(evidence.runtimes.len(), 2);
+        assert_eq!(evidence.checks_total, 1);
+        assert_eq!(evidence.divergence_count, 0);
+    }
+
+    #[test]
+    fn merge_l1_verdict_writes_green_with_both_evidence_blocks() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let verdict_path = dir.path().join("l1_product_verdict.json");
+        std::fs::write(
+            &verdict_path,
+            r#"{"dimension": "l1_product", "verdict": "RED", "owner_track": "10.2", "evidence": {"tests_passed": 7}}"#,
+        )
+        .expect("write verdict fixture");
+
+        merge_into_l1_verdict(
+            &verdict_path,
+            &sample_evidence(),
+            &sample_lockstep_evidence(),
+        )
+        .expect("merge l1 verdict");
+
+        let merged: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&verdict_path).expect("read merged verdict"),
+        )
+        .expect("parse merged verdict");
+        assert_eq!(merged["verdict"], "GREEN");
+        assert_eq!(merged["dimension"], "l1_product");
+        assert_eq!(merged["evidence"]["tests_passed"], 7);
+        assert_eq!(
+            merged["evidence"][PROOF_CARRYING_EFFECTS_KEY]["schema_version"],
+            crate::schema_versions::L1_PROOF_CARRYING_EFFECTS_V2
+        );
+        assert_eq!(
+            merged["evidence"][LOCKSTEP_VERDICT_KEY]["schema_version"],
+            crate::schema_versions::L1_LOCKSTEP_VERDICT_V1
+        );
+        assert_eq!(
+            merged["evidence"][LOCKSTEP_VERDICT_KEY]["oracle_verdict"],
+            "pass"
+        );
+        assert_eq!(
+            merged["evidence"][LOCKSTEP_VERDICT_KEY]["report"]["verdict"],
+            "Pass"
+        );
+    }
+
+    #[test]
+    fn merge_l1_verdict_refuses_non_pass_lockstep() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let verdict_path = dir.path().join("l1_product_verdict.json");
+        std::fs::write(&verdict_path, r#"{"verdict": "GREEN"}"#).expect("write verdict fixture");
+        let mut lockstep = sample_lockstep_evidence();
+        lockstep.oracle_verdict = "block_release".to_string();
+        let err = merge_into_l1_verdict(&verdict_path, &sample_evidence(), &lockstep)
+            .expect_err("non-pass lockstep must refuse");
+        assert!(err.to_string().contains("non-pass lockstep verdict"));
+    }
+
+    #[test]
+    fn merge_l1_verdict_refuses_non_object_artifact() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let verdict_path = dir.path().join("l1_product_verdict.json");
+        std::fs::write(&verdict_path, "[]").expect("write verdict fixture");
+        let err = merge_into_l1_verdict(
+            &verdict_path,
+            &sample_evidence(),
+            &sample_lockstep_evidence(),
+        )
+        .expect_err("non-object artifact must refuse");
         assert!(err.to_string().contains("must be a JSON object"));
     }
 }

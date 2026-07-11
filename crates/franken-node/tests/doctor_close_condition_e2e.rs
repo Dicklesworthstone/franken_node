@@ -89,6 +89,9 @@ frankenengine-extension-host = { path = "../../franken_engine/crates/franken-ext
             3,
         ),
     );
+    // bd-ry7d1: the gate also consumes the L1 verdict artifact and binds it
+    // to the corpus copy, so the GREEN baseline writes both.
+    write_bound_l1_verdict_fixture(root.path());
     if include_ci_gate {
         write_fixture(
             &root
@@ -453,6 +456,7 @@ fn doctor_close_condition_reports_red_when_cargo_scan_exceeds_cap() {
 fn doctor_close_condition_fails_l1_without_proof_carrying_effect_evidence() {
     let root = fixture_root();
     write_parity_only_compatibility_fixture(root.path());
+    write_bound_l1_verdict_fixture(root.path());
     let (signing_key_path, _) =
         write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 62);
     let signing_key_path = signing_key_path.display().to_string();
@@ -513,6 +517,7 @@ fn doctor_close_condition_fails_l1_without_proof_carrying_effect_evidence() {
 fn doctor_close_condition_fails_l1_when_proof_carrying_but_parity_red() {
     let root = fixture_root();
     write_proof_carrying_but_parity_red_compatibility_fixture(root.path());
+    write_bound_l1_verdict_fixture(root.path());
     let (signing_key_path, _) =
         write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 63);
     let signing_key_path = signing_key_path.display().to_string();
@@ -572,6 +577,7 @@ fn doctor_close_condition_fails_l1_when_proof_carrying_but_parity_red() {
 fn doctor_close_condition_fails_l1_when_both_parity_and_proof_missing() {
     let root = fixture_root();
     write_unverified_and_unproven_compatibility_fixture(root.path());
+    write_bound_l1_verdict_fixture(root.path());
     let (signing_key_path, _) =
         write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 64);
     let signing_key_path = signing_key_path.display().to_string();
@@ -775,6 +781,7 @@ fn doctor_close_condition_structured_logs_emit_acceptance_pass_codes() {
 fn doctor_close_condition_structured_logs_emit_fail_closed_codes() {
     let root = fixture_root();
     write_parity_only_compatibility_fixture(root.path());
+    write_bound_l1_verdict_fixture(root.path());
     let (signing_key_path, _) =
         write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 72);
     let signing_key_path = signing_key_path.display().to_string();
@@ -939,6 +946,92 @@ fn v2_proof_block(
     })
 }
 
+// ── bd-ry7d1: the L1 verdict artifact (lockstep leg + corpus binding) ──
+
+/// A lockstep verdict block whose embedded report is built through the REAL
+/// nversion-oracle API (two distinct runtimes, one agreeing check, zero
+/// divergences) — internally consistent, so the gate's re-derivation accepts
+/// it.
+fn l1_lockstep_verdict_block() -> Value {
+    use frankenengine_node::runtime::nversion_oracle::{
+        BoundaryScope, RuntimeEntry, RuntimeOracle,
+    };
+
+    let mut oracle = RuntimeOracle::new("l1-lockstep:doctor-e2e", 100);
+    oracle
+        .register_runtime(RuntimeEntry {
+            runtime_id: "bun".to_string(),
+            runtime_name: "bun".to_string(),
+            version: "1.0-fixture".to_string(),
+            is_reference: true,
+        })
+        .expect("register bun leg");
+    oracle
+        .register_runtime(RuntimeEntry {
+            runtime_id: "franken-engine-native".to_string(),
+            runtime_name: "franken-engine-native".to_string(),
+            version: "0.1-fixture".to_string(),
+            is_reference: false,
+        })
+        .expect("register franken leg");
+    let mut outputs = std::collections::BTreeMap::new();
+    outputs.insert("bun".to_string(), b"l1-lockstep:ok\n".to_vec());
+    outputs.insert(
+        "franken-engine-native".to_string(),
+        b"l1-lockstep:ok\n".to_vec(),
+    );
+    oracle
+        .run_cross_check(
+            "l1-lockstep:doctor-e2e:check-0",
+            BoundaryScope::IO,
+            b"guest-src",
+            &outputs,
+        )
+        .expect("cross check");
+    let report = oracle.generate_report(1_774_000_000);
+    serde_json::json!({
+        "schema_version": "franken-node/l1-lockstep-verdict/v1",
+        "trace_id": report.trace_id,
+        "produced_at": "2026-07-10T00:00:00+00:00",
+        "producer": "doctor-close-condition-e2e",
+        "guest_program_content_hash":
+            frankenengine_node::storage::cas::content_hash(b"guest-src").as_str(),
+        "runtimes": report.runtimes.keys().cloned().collect::<Vec<_>>(),
+        "oracle_verdict": report.verdict.label(),
+        "checks_total": report.checks.len(),
+        "divergence_count": report.divergences.len(),
+        "report": report,
+    })
+}
+
+/// Write the L1 product verdict artifact BOUND to the current corpus fixture:
+/// its `proof_carrying_effects` copy is read back from
+/// `artifacts/13/compatibility_corpus_results.json`, so the gate's cross-file
+/// binding holds by construction. Call after (re)writing the corpus fixture.
+fn write_bound_l1_verdict_fixture(root: &Path) {
+    let corpus: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("artifacts/13/compatibility_corpus_results.json"))
+            .expect("corpus fixture must exist before binding the verdict artifact"),
+    )
+    .expect("parse corpus fixture");
+    let mut evidence = serde_json::Map::new();
+    if let Some(proof) = corpus.get("proof_carrying_effects") {
+        evidence.insert("proof_carrying_effects".to_string(), proof.clone());
+    }
+    evidence.insert("lockstep_verdict".to_string(), l1_lockstep_verdict_block());
+    let artifact = serde_json::json!({
+        "dimension": "l1_product",
+        "verdict": "GREEN",
+        "owner_track": "10.2",
+        "timestamp": "2026-07-10T00:00:00+00:00",
+        "evidence": Value::Object(evidence),
+    });
+    write_fixture(
+        &root.join("artifacts/oracle/l1_product_verdict.json"),
+        &serde_json::to_string_pretty(&artifact).expect("render verdict artifact"),
+    );
+}
+
 fn run_close_condition_receipt(root: &Path, seed: u8) -> Value {
     let (signing_key_path, _) =
         write_test_signing_key(root, ".franken-node/keys/oracle-close.key", seed);
@@ -993,6 +1086,7 @@ fn doctor_close_condition_refuses_retired_v1_evidence() {
             "receipt_chain_verified": true
         }),
     );
+    write_bound_l1_verdict_fixture(root.path());
     let receipt = run_close_condition_receipt(root.path(), 77);
     assert_eq!(receipt["composite_verdict"], "RED");
     assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
@@ -1017,6 +1111,7 @@ fn doctor_close_condition_passes_l1_with_v2_rederived_receipt_chain() {
             3,
         ),
     );
+    write_bound_l1_verdict_fixture(root.path());
     let receipt = run_close_condition_receipt(root.path(), 71);
     assert_eq!(
         receipt["composite_verdict"],
@@ -1046,6 +1141,7 @@ fn doctor_close_condition_fails_l1_when_v2_chain_entry_tampered() {
             3,
         ),
     );
+    write_bound_l1_verdict_fixture(root.path());
     let receipt = run_close_condition_receipt(root.path(), 72);
     assert_eq!(receipt["composite_verdict"], "RED");
     assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
@@ -1071,6 +1167,7 @@ fn doctor_close_condition_fails_l1_when_v2_declared_count_inflated() {
             4,
         ),
     );
+    write_bound_l1_verdict_fixture(root.path());
     let receipt = run_close_condition_receipt(root.path(), 73);
     assert_eq!(receipt["composite_verdict"], "RED");
     assert!(
@@ -1113,6 +1210,7 @@ fn doctor_close_condition_fails_l1_when_v2_chain_missing_http_subject() {
             2,
         ),
     );
+    write_bound_l1_verdict_fixture(root.path());
     let receipt = run_close_condition_receipt(root.path(), 74);
     assert_eq!(receipt["composite_verdict"], "RED");
     assert!(
@@ -1160,6 +1258,7 @@ fn real_run_producer_evidence_passes_v2_close_condition_gate() {
         root.path(),
         serde_json::to_value(&evidence).expect("serialize producer evidence"),
     );
+    write_bound_l1_verdict_fixture(root.path());
     let receipt = run_close_condition_receipt(root.path(), 75);
     assert_eq!(
         receipt["composite_verdict"],
@@ -1248,11 +1347,214 @@ fn ops_proof_carrying_evidence_cli_merges_corpus_and_gate_passes() {
         "merging must preserve the parity totals"
     );
 
+    // bd-ry7d1: the corpus now carries FRESH producer evidence while the
+    // fixture's verdict artifact still holds the baseline copy — rebind so
+    // the cross-file binding reflects an operator who regenerated both.
+    write_bound_l1_verdict_fixture(root.path());
     let receipt = run_close_condition_receipt(root.path(), 76);
     assert_eq!(
         receipt["composite_verdict"],
         "GREEN",
         "CLI-merged real evidence must re-derive GREEN at the gate: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+}
+
+// ── bd-ry7d1: verdict-artifact consumption, corpus binding, lockstep CLI ──
+
+/// Without the L1 verdict artifact (the file the Python CI gate reads), the
+/// Rust gate fails closed — the two gates consume one input set now.
+#[test]
+fn doctor_close_condition_fails_l1_when_verdict_artifact_unreadable() {
+    let root = fixture_root();
+    write_fixture(
+        &root.path().join("artifacts/oracle/l1_product_verdict.json"),
+        "not json",
+    );
+    let receipt = run_close_condition_receipt(root.path(), 81);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
+    assert!(
+        l1_blocking_findings_contain(&receipt, "L1 verdict artifact unreadable"),
+        "gate must fail closed when the verdict artifact cannot be read: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+}
+
+/// The cross-file binding: a verdict artifact whose proof-carrying copy has
+/// drifted from the corpus-results copy fails closed — the two gate inputs
+/// can no longer pass while disagreeing.
+#[test]
+fn doctor_close_condition_fails_l1_when_gate_inputs_drift() {
+    let root = fixture_root();
+    let path = root.path().join("artifacts/oracle/l1_product_verdict.json");
+    let mut artifact: Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("verdict artifact"))
+            .expect("parse verdict artifact");
+    artifact["evidence"]["proof_carrying_effects"]["effect_receipts_verified"] =
+        serde_json::json!(99);
+    write_fixture(
+        &path,
+        &serde_json::to_string_pretty(&artifact).expect("render drifted artifact"),
+    );
+    let receipt = run_close_condition_receipt(root.path(), 82);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert!(
+        l1_blocking_findings_contain(&receipt, "does not match the corpus-results copy"),
+        "drifted gate inputs must fail closed: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+}
+
+/// A diverged lockstep report — even one whose declared summary is honest —
+/// fails the L1 bar end to end.
+#[test]
+fn doctor_close_condition_fails_l1_when_lockstep_report_diverged() {
+    use frankenengine_node::runtime::nversion_oracle::{
+        BoundaryScope, RiskTier, RuntimeEntry, RuntimeOracle,
+    };
+
+    let mut oracle = RuntimeOracle::new("l1-lockstep:doctor-e2e-diverged", 100);
+    for (id, is_reference) in [("bun", true), ("franken-engine-native", false)] {
+        oracle
+            .register_runtime(RuntimeEntry {
+                runtime_id: id.to_string(),
+                runtime_name: id.to_string(),
+                version: "test".to_string(),
+                is_reference,
+            })
+            .expect("register runtime");
+    }
+    let mut outputs = std::collections::BTreeMap::new();
+    outputs.insert("bun".to_string(), b"left\n".to_vec());
+    outputs.insert("franken-engine-native".to_string(), b"right\n".to_vec());
+    oracle
+        .run_cross_check(
+            "l1-lockstep:doctor-e2e-diverged:check-0",
+            BoundaryScope::IO,
+            b"guest-src",
+            &outputs,
+        )
+        .expect("cross check");
+    oracle.classify_divergence(
+        "l1-lockstep:doctor-e2e-diverged:div-0",
+        "l1-lockstep:doctor-e2e-diverged:check-0",
+        BoundaryScope::IO,
+        RiskTier::High,
+        &outputs,
+    );
+    let report = oracle.generate_report(1_774_000_000);
+    let diverged_block = serde_json::json!({
+        "schema_version": "franken-node/l1-lockstep-verdict/v1",
+        "trace_id": report.trace_id,
+        "produced_at": "2026-07-10T00:00:00+00:00",
+        "producer": "doctor-close-condition-e2e",
+        "guest_program_content_hash":
+            frankenengine_node::storage::cas::content_hash(b"guest-src").as_str(),
+        "runtimes": report.runtimes.keys().cloned().collect::<Vec<_>>(),
+        "oracle_verdict": report.verdict.label(),
+        "checks_total": report.checks.len(),
+        "divergence_count": report.divergences.len(),
+        "report": report,
+    });
+
+    let root = fixture_root();
+    let path = root.path().join("artifacts/oracle/l1_product_verdict.json");
+    let mut artifact: Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("verdict artifact"))
+            .expect("parse verdict artifact");
+    artifact["evidence"]["lockstep_verdict"] = diverged_block;
+    write_fixture(
+        &path,
+        &serde_json::to_string_pretty(&artifact).expect("render diverged artifact"),
+    );
+
+    let receipt = run_close_condition_receipt(root.path(), 83);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert!(
+        l1_blocking_findings_contain(&receipt, "diverged across runtimes"),
+        "diverged lockstep report must fail closed: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+    assert!(
+        l1_blocking_findings_contain(&receipt, "not pass"),
+        "non-pass re-derived verdict must fail closed: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+}
+
+/// The full bd-ry7d1 operator loop: `ops proof-carrying-evidence
+/// --merge-corpus --merge-l1-verdict` runs the REAL native-engine effect run
+/// AND a REAL bun-vs-native-engine lockstep-oracle pass, regenerates both
+/// gate inputs bound together, and `doctor close-condition` re-derives GREEN.
+/// This is the exact command the committed artifacts are regenerated with.
+#[test]
+#[cfg(feature = "engine")]
+fn ops_proof_carrying_evidence_cli_merges_l1_verdict_and_gate_passes() {
+    // The lockstep reference leg is a real bun subprocess; without bun this
+    // host cannot produce a genuine cross-runtime verdict, so the flow is
+    // untestable here (the producer itself fails closed in that case).
+    let bun_available = std::process::Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !bun_available {
+        eprintln!(
+            "SKIP ops_proof_carrying_evidence_cli_merges_l1_verdict_and_gate_passes: \
+             bun is not on PATH; the lockstep reference leg requires it"
+        );
+        return;
+    }
+
+    let root = fixture_root();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .args([
+            "ops",
+            "proof-carrying-evidence",
+            "--merge-corpus",
+            "artifacts/13/compatibility_corpus_results.json",
+            "--merge-l1-verdict",
+            "artifacts/oracle/l1_product_verdict.json",
+            "--json",
+        ])
+        .output()
+        .expect("ops proof-carrying-evidence should run");
+    assert!(
+        output.status.success(),
+        "producer CLI with --merge-l1-verdict must succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let emitted: Value =
+        serde_json::from_slice(&output.stdout).expect("producer CLI stdout must be JSON");
+    assert_eq!(
+        emitted["proof_carrying_effects"]["schema_version"],
+        "franken-node/l1-proof-carrying-effects/v2"
+    );
+    assert_eq!(
+        emitted["lockstep_verdict"]["schema_version"],
+        "franken-node/l1-lockstep-verdict/v1"
+    );
+    assert_eq!(emitted["lockstep_verdict"]["oracle_verdict"], "pass");
+
+    let verdict_artifact: Value = serde_json::from_str(
+        &fs::read_to_string(root.path().join("artifacts/oracle/l1_product_verdict.json"))
+            .expect("read merged verdict artifact"),
+    )
+    .expect("parse merged verdict artifact");
+    assert_eq!(verdict_artifact["verdict"], "GREEN");
+    assert_eq!(
+        verdict_artifact["evidence"]["lockstep_verdict"]["report"]["verdict"], "Pass",
+        "the embedded report must carry a real Pass verdict"
+    );
+
+    let receipt = run_close_condition_receipt(root.path(), 84);
+    assert_eq!(
+        receipt["composite_verdict"],
+        "GREEN",
+        "regenerated-and-bound gate inputs must re-derive GREEN: {}",
         serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
     );
 }

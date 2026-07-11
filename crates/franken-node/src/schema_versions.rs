@@ -95,6 +95,14 @@ pub const L1_PROOF_CARRYING_EFFECTS_V2: &str = "franken-node/l1-proof-carrying-e
 /// `FIRST_TRANCHE_OPERATION_CONTRACTS`, `ops::close_condition` enforces it
 /// fail-closed, and the Python CI gate mirrors it.
 pub const L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS: &[&str] = &["fs.read", "fs.write", "http.request"];
+/// Schema for the `lockstep_verdict` evidence block carried by
+/// `artifacts/oracle/l1_product_verdict.json` (bd-ry7d1). Produced by a REAL
+/// dual-runtime lockstep-oracle run (`ops::proof_carrying_evidence`), it
+/// embeds the full `runtime::nversion_oracle::DivergenceReport`; the
+/// close-condition gate and the Python CI mirror RE-DERIVE the verdict from
+/// the embedded report (runtimes, checks, divergences) and fail closed on
+/// any declared↔derived mismatch — a declared "pass" is never trusted.
+pub const L1_LOCKSTEP_VERDICT_V1: &str = "franken-node/l1-lockstep-verdict/v1";
 
 // ── Verifier & Evidence ────────────────────────────────────────────
 pub const VERIFIER_SDK_API: &str = "1.0.0";
@@ -271,6 +279,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("compat_module_resolve_error", COMPAT_MODULE_RESOLVE_ERROR),
         ("l1_proof_carrying_effects", L1_PROOF_CARRYING_EFFECTS),
         ("l1_proof_carrying_effects_v2", L1_PROOF_CARRYING_EFFECTS_V2),
+        ("l1_lockstep_verdict_v1", L1_LOCKSTEP_VERDICT_V1),
         // Verifier & Evidence
         ("verifier_sdk_api", VERIFIER_SDK_API),
         ("verifier_sdk_schema_tag", VERIFIER_SDK_SCHEMA_TAG),

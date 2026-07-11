@@ -4144,7 +4144,7 @@
   "proof_carrying_effects": {
     "schema_version": "franken-node/l1-proof-carrying-effects/v2",
     "trace_id": "franken_node:0",
-    "produced_at": "2026-07-10T20:23:27.196644752+00:00",
+    "produced_at": "2026-07-10T23:35:06.377908079+00:00",
     "producer": "franken-node ops proof-carrying-evidence",
     "verified_subjects": [
       "fs.read",
@@ -4158,8 +4158,8 @@
       {
         "index": 0,
         "prev_chain_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "receipt_hash": "sha256:da981953d2c311ed08f18fbe2efe83d405585f58d4191bb40476a967a0b37d4d",
-        "chain_hash": "sha256:182759915ed614925c24f5a87eca414b9f65053c9ba1fbfbf4037f3ecba5f354",
+        "receipt_hash": "sha256:894a40707689ab2e1a5cf8e59dbb2691c8db24b02fc453c1cec4e144d4ad2557",
+        "chain_hash": "sha256:989d22063037ef067c5f371301ccc7cd75f7f2fce10c90d10f140b81a66e1994",
         "receipt": {
           "schema_version": "effect-receipt-v1.1",
           "seq": 0,
@@ -4178,14 +4178,14 @@
           "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
           "declassification_ref": null,
           "flow_policy_verdict": "label_clean",
-          "recorded_at_millis": 1783715007113
+          "recorded_at_millis": 1783726506293
         }
       },
       {
         "index": 1,
-        "prev_chain_hash": "sha256:182759915ed614925c24f5a87eca414b9f65053c9ba1fbfbf4037f3ecba5f354",
-        "receipt_hash": "sha256:5f4f844574dd6451cc993349bfd0893c1e88557b1551c5c9e356a5a10cfa9116",
-        "chain_hash": "sha256:0153006d20a618052f038d88de53d139b19f729ffc818a517060be9a853fe528",
+        "prev_chain_hash": "sha256:989d22063037ef067c5f371301ccc7cd75f7f2fce10c90d10f140b81a66e1994",
+        "receipt_hash": "sha256:da3198389e45746bb52de54cce315fbeb188121cedb86c1745b5307439c59b03",
+        "chain_hash": "sha256:4a6490c637b6d22e75977090554ebf344350ce2a551d0d38111e2a4841c11527",
         "receipt": {
           "schema_version": "effect-receipt-v1.1",
           "seq": 1,
@@ -4204,14 +4204,14 @@
           "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
           "declassification_ref": null,
           "flow_policy_verdict": "label_clean",
-          "recorded_at_millis": 1783715007113
+          "recorded_at_millis": 1783726506293
         }
       },
       {
         "index": 2,
-        "prev_chain_hash": "sha256:0153006d20a618052f038d88de53d139b19f729ffc818a517060be9a853fe528",
-        "receipt_hash": "sha256:4a138e15cb306bc7a952bc8107ace45c77a3b9ecfe8260cfcabcc589f6f0d4dc",
-        "chain_hash": "sha256:0e9d67018dcdbfb29fc0bb5063e1d48248d441713d1d2120b16633f80b9a66f9",
+        "prev_chain_hash": "sha256:4a6490c637b6d22e75977090554ebf344350ce2a551d0d38111e2a4841c11527",
+        "receipt_hash": "sha256:a8e63e35ac8fc2db82da63c5d1b6445a40ebcffcfb06d40439792f0415ea0bf4",
+        "chain_hash": "sha256:529fe1216ed26e72eb060929986cc6a5473a9e5bc057a632a1bda12d75513272",
         "receipt": {
           "schema_version": "effect-receipt-v1.1",
           "seq": 2,
@@ -4221,8 +4221,8 @@
             "outcome": "allowed",
             "capability_ref": "host-io:network_send"
           },
-          "pre_state_hash": "sha256:262dfe873f09b71cd60b060a36c89ce76af70d19b1a7453b1de7a462f45c2e7b",
-          "args_hash": "sha256:c36f469f4a606e1953b4958cd9f1f002f26de53b76a03c2bf0d0fa1b9624ee3e",
+          "pre_state_hash": "sha256:3a659d3b971e4055af774bcb9a16ff659d1b96f1b8d8deab59afe005963e4145",
+          "args_hash": "sha256:34172bb20dd763320ee9a13af242a37f9eacfe6af4600904f0b52b76ecede87c",
           "result_hash": "sha256:47e324768a7c7865c8cf11869c0a67ede7e4c8e7196a77ceb1731cfa73351731",
           "post_state_hash": "sha256:47e324768a7c7865c8cf11869c0a67ede7e4c8e7196a77ceb1731cfa73351731",
           "input_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4230,7 +4230,7 @@
           "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
           "declassification_ref": null,
           "flow_policy_verdict": "label_clean",
-          "recorded_at_millis": 1783715007113
+          "recorded_at_millis": 1783726506293
         }
       }
     ]

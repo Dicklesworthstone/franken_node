@@ -124,9 +124,57 @@ constants) makes preimage drift between the two implementations break CI
 immediately. Reference fixtures: `tests/fixtures/oracle_gate/pass_v2/` and
 `tests/fixtures/oracle_gate/fail_v2_tampered/`.
 
-Regeneration of the committed artifacts (and v1 retirement) is tracked as
-bd-qr5i2.4; unifying the Rust and Python gate inputs and wiring the real
-lockstep-oracle verdict into the parity leg is tracked as bd-ry7d1.
+The committed artifacts are regenerated from real runs (bd-qr5i2.4), and the
+Rust and Python gate inputs are unified with the real lockstep-oracle verdict
+wired into the L1 leg (bd-ry7d1) — see the sections below.
+
+## Lockstep Verdict Evidence (bd-ry7d1)
+
+The `l1_product` verdict artifact's `evidence` object must also carry a
+`lockstep_verdict` block (`franken-node/l1-lockstep-verdict/v1`) produced by a
+**real dual-runtime lockstep-oracle run**: bun as the independent reference
+leg (subprocess) and the native in-process franken_engine as the franken leg,
+both executing one deterministic guest program and compared through
+`runtime::nversion_oracle::RuntimeOracle`. The block embeds the full
+`DivergenceReport`; a declared `"pass"` is never trusted. Both gates
+RE-DERIVE the verdict from the embedded report and fail closed unless:
+
+- ≥ 2 registered runtimes with ≥ 2 distinct executor names (self-agreement is
+  not a cross-check), at least one reference leg and one franken leg;
+- ≥ 1 cross-runtime check, every check outcome `Agree`;
+- zero divergences and a `Pass` verdict consistent with all of the above;
+- every declared summary field (`oracle_verdict`, `trace_id`, `runtimes`,
+  `checks_total`, `divergence_count`) equals its re-derived counterpart.
+
+## Unified Gate Inputs (bd-ry7d1)
+
+Both gate implementations consume ONE input set and bind it together:
+
+- The Rust doctor gate (`ops::close_condition::evaluate_l1_product_oracle`)
+  reads `artifacts/13/compatibility_corpus_results.json` (parity pass rate +
+  proof evidence) **and** `artifacts/oracle/l1_product_verdict.json` (declared
+  verdict, lockstep verdict), and fails closed unless the verdict artifact's
+  `proof_carrying_effects` copy is value-identical to the corpus-results copy.
+- The Python CI gate (`scripts/check_oracle_close_condition.py`) reads the
+  verdict triple, re-derives the proof chain and the lockstep verdict, and
+  enforces the same corpus binding (on by default against the live repo;
+  `--corpus-results PATH` for custom layouts).
+- The section-10.N gate (`scripts/verify_section_10n.py`, 10N-ORACLE) RUNS
+  the Python gate — its committed output at
+  `artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json` is what the
+  Rust gate's release-policy leg consumes, closing the loop.
+
+Regenerate BOTH L1 gate inputs from real runs with one command:
+
+```bash
+franken-node ops proof-carrying-evidence \
+    --merge-corpus artifacts/13/compatibility_corpus_results.json \
+    --merge-l1-verdict artifacts/oracle/l1_product_verdict.json
+```
+
+The producer fails closed (nothing is written) on any lockstep divergence,
+missing bun reference runtime, fallback-runtime engine run, or proof-evidence
+shortfall.
 
 ## Verdict Artifact Schema
 
@@ -152,14 +200,27 @@ Each oracle dimension produces a verdict artifact:
       "invalid_receipts": 0,
       "receipt_chain_verified": true,
       "receipt_chain_entries": ["… serialized EffectReceiptChainEntry array — see producer output …"]
+    },
+    "lockstep_verdict": {
+      "schema_version": "franken-node/l1-lockstep-verdict/v1",
+      "trace_id": "l1-lockstep:<uuid>",
+      "produced_at": "<ISO-8601 UTC>",
+      "producer": "franken-node ops proof-carrying-evidence",
+      "guest_program_content_hash": "sha256:<CAS content hash>",
+      "runtimes": ["bun", "franken-engine-native"],
+      "oracle_verdict": "pass",
+      "checks_total": 1,
+      "divergence_count": 0,
+      "report": "… full serialized runtime::nversion_oracle::DivergenceReport …"
     }
   },
   "blocking_findings": []
 }
 ```
 
-The `proof_carrying_effects` evidence object is mandatory for the
-`l1_product` verdict artifact and is ignored for non-L1 dimensions.
+The `proof_carrying_effects` and `lockstep_verdict` evidence objects are
+mandatory for the `l1_product` verdict artifact and are ignored for non-L1
+dimensions.
 
 The Rust `doctor close-condition` L1 evaluator also consumes
 `artifacts/13/compatibility_corpus_results.json`. That artifact must include a

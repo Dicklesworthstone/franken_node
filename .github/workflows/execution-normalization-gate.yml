@@ -17,6 +17,9 @@ on:
       - "scripts/ownership_waivers.json"
       - "scripts/lib/test_logger.py"
       - "tests/e2e/semantic_boundary_policy_suite.sh"
+      - "tests/test_check_oracle_close_condition.py"
+      - "artifacts/oracle/**"
+      - "artifacts/13/compatibility_corpus_results.json"
   push:
     branches: [main]
     paths:

@@ -7615,10 +7615,19 @@ fn run_execution_receipts_root(project_root: &Path) -> Result<PathBuf> {
 #[cfg(feature = "engine")]
 fn handle_ops_proof_carrying_evidence(args: &OpsProofCarryingEvidenceArgs) -> Result<()> {
     use ops::proof_carrying_evidence::{
-        merge_into_corpus_results, produce_proof_carrying_effects_evidence,
+        merge_into_corpus_results, merge_into_l1_verdict, produce_lockstep_verdict_evidence,
+        produce_proof_carrying_effects_evidence,
     };
 
     let evidence = produce_proof_carrying_effects_evidence()?;
+    // bd-ry7d1: the L1 verdict artifact additionally requires a REAL
+    // dual-runtime lockstep-oracle pass; run it before any file is written so
+    // a diverged run leaves every artifact untouched (fail-closed).
+    let lockstep_evidence = if args.merge_l1_verdict.is_some() {
+        Some(produce_lockstep_verdict_evidence()?)
+    } else {
+        None
+    };
     if let Some(out) = args.out.as_deref() {
         if let Some(parent) = out.parent()
             && !parent.as_os_str().is_empty()
@@ -7636,7 +7645,22 @@ fn handle_ops_proof_carrying_evidence(args: &OpsProofCarryingEvidenceArgs) -> Re
     if let Some(corpus) = args.merge_corpus.as_deref() {
         merge_into_corpus_results(corpus, &evidence)?;
     }
+    if let (Some(verdict_path), Some(lockstep)) =
+        (args.merge_l1_verdict.as_deref(), lockstep_evidence.as_ref())
+    {
+        merge_into_l1_verdict(verdict_path, &evidence, lockstep)?;
+    }
     if args.json {
+        if let Some(lockstep) = lockstep_evidence.as_ref() {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "proof_carrying_effects": evidence,
+                    "lockstep_verdict": lockstep,
+                }))?
+            );
+            return Ok(());
+        }
         println!("{}", serde_json::to_string_pretty(&evidence)?);
     } else {
         let mut rendered = format!(
@@ -7654,11 +7678,26 @@ fn handle_ops_proof_carrying_evidence(args: &OpsProofCarryingEvidenceArgs) -> Re
             evidence.receipt_chain_verified,
             evidence.receipt_chain_entries.len(),
         );
+        if let Some(lockstep) = lockstep_evidence.as_ref() {
+            rendered.push_str(&format!(
+                "\nlockstep oracle verdict: {} (runtimes: {}; checks: {}; divergences: {})",
+                lockstep.oracle_verdict,
+                lockstep.runtimes.join(", "),
+                lockstep.checks_total,
+                lockstep.divergence_count,
+            ));
+        }
         if let Some(out) = args.out.as_deref() {
             rendered.push_str(&format!("\nwritten to: {}", out.display()));
         }
         if let Some(corpus) = args.merge_corpus.as_deref() {
             rendered.push_str(&format!("\nmerged into: {}", corpus.display()));
+        }
+        if let Some(verdict_path) = args.merge_l1_verdict.as_deref() {
+            rendered.push_str(&format!(
+                "\nL1 verdict artifact updated: {}",
+                verdict_path.display()
+            ));
         }
         emit_operator_surface_output("ops-proof-carrying-evidence", &rendered)?;
     }

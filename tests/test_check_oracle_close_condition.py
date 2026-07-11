@@ -31,15 +31,71 @@ def test_dimension_ids():
 
 def l1_proof_evidence():
     """v2 evidence with a genuine re-derivable chain (v1 declared-summary
-    acceptance is retired, bd-qr5i2.4)."""
+    acceptance is retired, bd-qr5i2.4), plus the real-lockstep verdict block
+    required since bd-ry7d1."""
     return {
         "evidence": {
             "proof_carrying_effects": v2_proof(
                 acceptance_chain_entries(),
                 ["fs.read", "fs.write", "http.request"],
                 3,
-            )
+            ),
+            "lockstep_verdict": l1_lockstep_evidence(),
         }
+    }
+
+
+def lockstep_report(trace_id="l1-lockstep:pytest"):
+    """A structurally consistent nversion-oracle DivergenceReport: two
+    distinct runtimes (one reference, one franken), one agreeing check, no
+    divergences, Pass verdict — mirroring what the Rust producer embeds."""
+    return {
+        "schema_version": mod.NVERSION_ORACLE_REPORT_SCHEMA,
+        "trace_id": trace_id,
+        "runtimes": {
+            "bun": {
+                "runtime_id": "bun",
+                "runtime_name": "bun",
+                "version": "1.0-test",
+                "is_reference": True,
+            },
+            "franken-engine-native": {
+                "runtime_id": "franken-engine-native",
+                "runtime_name": "franken-engine-native",
+                "version": "0.1-test",
+                "is_reference": False,
+            },
+        },
+        "checks": [
+            {
+                "check_id": f"{trace_id}:check-0",
+                "boundary_scope": "IO",
+                "input": list(b"guest-src"),
+                "trace_id": trace_id,
+                "outcome": {"Agree": {"canonical_output": list(b"l1-lockstep:ok\n")}},
+            }
+        ],
+        "divergences": [],
+        "voting_results": [],
+        "receipts": [],
+        "verdict": "Pass",
+        "event_log": [],
+    }
+
+
+def l1_lockstep_evidence(trace_id="l1-lockstep:pytest"):
+    report = lockstep_report(trace_id)
+    return {
+        "schema_version": mod.L1_LOCKSTEP_VERDICT_SCHEMA,
+        "trace_id": trace_id,
+        "produced_at": "2026-07-10T00:00:00+00:00",
+        "producer": "pytest",
+        "guest_program_content_hash": _content_hash(b"guest-src"),
+        "runtimes": sorted(report["runtimes"].keys()),
+        "oracle_verdict": "pass",
+        "checks_total": len(report["checks"]),
+        "divergence_count": len(report["divergences"]),
+        "report": report,
     }
 
 
@@ -442,3 +498,161 @@ class TestProofCarryingV2:
         result = mod.check_dimension(ORACLE_GATE_FIXTURES / "fail_v2_tampered", dim)
         assert result["error"] is not None
         assert "failed re-derivation" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# lockstep_verdict: the gate re-derives the verdict from the embedded
+# nversion-oracle report (bd-ry7d1, mirroring the Rust doctor gate)
+# ---------------------------------------------------------------------------
+
+
+class TestLockstepVerdict:
+    def test_consistent_pass_block_yields_no_errors(self):
+        data = {"evidence": {"lockstep_verdict": l1_lockstep_evidence()}}
+        assert mod.validate_l1_lockstep_verdict(data) == []
+
+    def test_missing_block_fails_closed(self):
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {}})
+        assert any("lockstep_verdict missing" in e for e in errors)
+
+    def test_unsupported_schema_fails_closed(self):
+        block = l1_lockstep_evidence()
+        block["schema_version"] = "franken-node/l1-lockstep-verdict/v0"
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("is unsupported" in e for e in errors)
+
+    def test_missing_report_fails_closed(self):
+        block = l1_lockstep_evidence()
+        del block["report"]
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("missing embedded report" in e for e in errors)
+
+    def test_malformed_report_fails_closed(self):
+        block = l1_lockstep_evidence()
+        block["report"]["runtimes"] = "not-an-object"
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("failed to parse" in e for e in errors)
+
+    def test_single_runtime_fails_closed(self):
+        block = l1_lockstep_evidence()
+        del block["report"]["runtimes"]["bun"]
+        block["runtimes"] = ["franken-engine-native"]
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("requires at least 2" in e for e in errors)
+        assert any("no reference runtime leg" in e for e in errors)
+
+    def test_self_agreement_fails_closed(self):
+        block = l1_lockstep_evidence()
+        for entry in block["report"]["runtimes"].values():
+            entry["runtime_name"] = "bun"
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("self-agreement" in e for e in errors)
+
+    def test_diverged_check_fails_closed(self):
+        block = l1_lockstep_evidence()
+        block["report"]["checks"][0]["outcome"] = {
+            "Diverge": {"outputs": {"bun": [1], "franken-engine-native": [2]}}
+        }
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("diverged across runtimes" in e for e in errors)
+
+    def test_missing_check_outcome_fails_closed(self):
+        block = l1_lockstep_evidence()
+        block["report"]["checks"][0]["outcome"] = None
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("no recorded outcome" in e for e in errors)
+
+    def test_nonempty_divergences_fail_closed(self):
+        block = l1_lockstep_evidence()
+        block["report"]["divergences"] = [{"divergence_id": "div-0"}]
+        block["divergence_count"] = 1
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("divergence(s); the L1 bar requires zero" in e for e in errors)
+
+    def test_non_pass_verdict_fails_closed(self):
+        block = l1_lockstep_evidence()
+        block["report"]["verdict"] = {"BlockRelease": {"blocking_divergence_ids": ["div-0"]}}
+        block["oracle_verdict"] = "block_release"
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("verdict is block_release (not pass)" in e for e in errors)
+
+    def test_declared_verdict_mismatch_fails_closed(self):
+        block = l1_lockstep_evidence()
+        block["oracle_verdict"] = "block_release"
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any(
+            "declared oracle_verdict" in e and "does not match re-derived" in e
+            for e in errors
+        )
+
+    def test_declared_runtimes_mismatch_fails_closed(self):
+        block = l1_lockstep_evidence()
+        block["runtimes"] = ["bun"]
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("declared runtimes" in e for e in errors)
+
+    def test_declared_counts_mismatch_fails_closed(self):
+        block = l1_lockstep_evidence()
+        block["checks_total"] = 7
+        block["divergence_count"] = 3
+        errors = mod.validate_l1_lockstep_verdict({"evidence": {"lockstep_verdict": block}})
+        assert any("declared checks_total 7" in e for e in errors)
+        assert any("declared divergence_count 3" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# corpus binding: the verdict artifact's proof block must equal the
+# corpus-results copy (bd-ry7d1)
+# ---------------------------------------------------------------------------
+
+
+class TestCorpusBinding:
+    def _write_corpus(self, tmp_path, proof):
+        corpus_path = tmp_path / "compatibility_corpus_results.json"
+        corpus_path.write_text(json.dumps({"proof_carrying_effects": proof}))
+        return corpus_path
+
+    def test_matching_copies_yield_no_errors(self, tmp_path):
+        payload = green_payload("l1_product")
+        corpus_path = self._write_corpus(
+            tmp_path, payload["evidence"]["proof_carrying_effects"]
+        )
+        assert mod.validate_l1_corpus_binding(payload, corpus_path) == []
+
+    def test_drifted_copies_fail_closed(self, tmp_path):
+        payload = green_payload("l1_product")
+        drifted = copy.deepcopy(payload["evidence"]["proof_carrying_effects"])
+        drifted["effect_receipts_verified"] = 99
+        corpus_path = self._write_corpus(tmp_path, drifted)
+        errors = mod.validate_l1_corpus_binding(payload, corpus_path)
+        assert any("does not match the corpus-results copy" in e for e in errors)
+
+    def test_missing_artifact_copy_fails_closed(self, tmp_path):
+        payload = {"evidence": {}}
+        corpus_path = self._write_corpus(tmp_path, {"schema_version": "x"})
+        errors = mod.validate_l1_corpus_binding(payload, corpus_path)
+        assert any("proof_carrying_effects missing" in e for e in errors)
+
+    def test_missing_corpus_copy_fails_closed(self, tmp_path):
+        payload = green_payload("l1_product")
+        corpus_path = tmp_path / "compatibility_corpus_results.json"
+        corpus_path.write_text(json.dumps({"totals": {}}))
+        errors = mod.validate_l1_corpus_binding(payload, corpus_path)
+        assert any("binding unverifiable" in e for e in errors)
+
+    def test_unreadable_corpus_fails_closed(self, tmp_path):
+        payload = green_payload("l1_product")
+        errors = mod.validate_l1_corpus_binding(payload, tmp_path / "nope.json")
+        assert any("binding input unreadable" in e for e in errors)
+
+    def test_check_dimension_enforces_binding_when_path_given(self, tmp_path):
+        dim = next(d for d in mod.REQUIRED_DIMENSIONS if d["id"] == "l1_product")
+        payload = green_payload("l1_product")
+        (tmp_path / dim["artifact"]).write_text(json.dumps(payload))
+        drifted = copy.deepcopy(payload["evidence"]["proof_carrying_effects"])
+        drifted["invalid_receipts"] = 5
+        corpus_path = tmp_path / "compatibility_corpus_results.json"
+        corpus_path.write_text(json.dumps({"proof_carrying_effects": drifted}))
+        result = mod.check_dimension(tmp_path, dim, corpus_path)
+        assert result["error"] is not None
+        assert "does not match the corpus-results copy" in result["error"]

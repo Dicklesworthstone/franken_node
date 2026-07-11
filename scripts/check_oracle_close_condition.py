@@ -33,6 +33,13 @@ DEFAULT_ARTIFACTS_DIR = ROOT / "artifacts" / "oracle"
 L1_PROOF_EVIDENCE_SCHEMA = "franken-node/l1-proof-carrying-effects/v1"
 L1_PROOF_EVIDENCE_SCHEMA_V2 = "franken-node/l1-proof-carrying-effects/v2"
 REQUIRED_L1_PROOF_SUBJECTS = ("fs.read", "fs.write", "http.request")
+# bd-ry7d1: the L1 lockstep-oracle verdict evidence block. Mirrors
+# schema_versions::L1_LOCKSTEP_VERDICT_V1 and the re-derivation rules in
+# ops/close_condition.rs::validate_l1_lockstep_verdict — update both sides
+# together.
+L1_LOCKSTEP_VERDICT_SCHEMA = "franken-node/l1-lockstep-verdict/v1"
+# Mirrors runtime::nversion_oracle::SCHEMA_VERSION.
+NVERSION_ORACLE_REPORT_SCHEMA = "nvo-v1.0"
 
 # ---------------------------------------------------------------------------
 # v2 re-derivation (bd-qr5i2.3): the gate does not trust the declared summary.
@@ -394,6 +401,227 @@ def _validate_proof_carrying_v2(proof: dict) -> list[str]:
 
     return errors
 
+# ---------------------------------------------------------------------------
+# bd-ry7d1: lockstep verdict re-derivation. Mirrors
+# ops/close_condition.rs::validate_l1_lockstep_verdict — the gate re-derives
+# the verdict from the embedded nversion-oracle DivergenceReport (runtimes,
+# checks, divergences) instead of trusting the declared "pass", and fails
+# closed on any declared↔derived mismatch.
+# ---------------------------------------------------------------------------
+
+
+def _parse_lockstep_report(report) -> dict:
+    """Structurally parse the embedded DivergenceReport, mirroring the strict
+    serde parse on the Rust side: a missing/ill-typed field consumed by the
+    acceptance bar makes the whole report unparseable (single finding)."""
+    if not isinstance(report, dict):
+        raise ValueError("report must be an object")
+    parsed = {}
+    schema_version = report.get("schema_version")
+    if not isinstance(schema_version, str):
+        raise ValueError("report schema_version must be a string")
+    parsed["schema_version"] = schema_version
+    trace_id = report.get("trace_id")
+    if not isinstance(trace_id, str):
+        raise ValueError("report trace_id must be a string")
+    parsed["trace_id"] = trace_id
+    runtimes = report.get("runtimes")
+    if not isinstance(runtimes, dict):
+        raise ValueError("report runtimes must be an object")
+    parsed_runtimes = {}
+    for runtime_id, entry in runtimes.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"runtime {runtime_id!r} entry must be an object")
+        runtime_name = entry.get("runtime_name")
+        is_reference = entry.get("is_reference")
+        if not isinstance(runtime_name, str):
+            raise ValueError(f"runtime {runtime_id!r} runtime_name must be a string")
+        if not isinstance(is_reference, bool):
+            raise ValueError(f"runtime {runtime_id!r} is_reference must be a bool")
+        parsed_runtimes[runtime_id] = {
+            "runtime_name": runtime_name,
+            "is_reference": is_reference,
+        }
+    parsed["runtimes"] = parsed_runtimes
+    checks = report.get("checks")
+    if not isinstance(checks, list):
+        raise ValueError("report checks must be an array")
+    parsed_checks = []
+    for position, check in enumerate(checks):
+        if not isinstance(check, dict):
+            raise ValueError(f"check {position} must be an object")
+        check_id = check.get("check_id")
+        if not isinstance(check_id, str):
+            raise ValueError(f"check {position} check_id must be a string")
+        outcome = check.get("outcome")
+        if outcome is not None:
+            if not isinstance(outcome, dict) or len(outcome) != 1:
+                raise ValueError(f"check {check_id!r} outcome is malformed")
+            (outcome_kind,) = outcome.keys()
+            if outcome_kind not in ("Agree", "Diverge"):
+                raise ValueError(f"check {check_id!r} outcome {outcome_kind!r} is unknown")
+        parsed_checks.append({"check_id": check_id, "outcome": outcome})
+    parsed["checks"] = parsed_checks
+    divergences = report.get("divergences")
+    if not isinstance(divergences, list):
+        raise ValueError("report divergences must be an array")
+    parsed["divergences"] = divergences
+    verdict = report.get("verdict")
+    if verdict == "Pass":
+        parsed["verdict_label"] = "pass"
+    elif isinstance(verdict, dict) and len(verdict) == 1 and "BlockRelease" in verdict:
+        parsed["verdict_label"] = "block_release"
+    elif isinstance(verdict, dict) and len(verdict) == 1 and "RequiresReceipt" in verdict:
+        parsed["verdict_label"] = "requires_receipt"
+    else:
+        raise ValueError(f"report verdict {verdict!r} is unknown")
+    return parsed
+
+
+def validate_l1_lockstep_verdict(data: dict) -> list[str]:
+    """Mirror ops/close_condition.rs::validate_l1_lockstep_verdict."""
+    evidence = data.get("evidence")
+    if not isinstance(evidence, dict):
+        # The missing-evidence finding is already emitted by the
+        # proof-carrying validator; do not double-report here.
+        return []
+    block = evidence.get("lockstep_verdict")
+    if block is None:
+        return [
+            "L1 evidence.lockstep_verdict missing; the L1 lockstep leg requires a real "
+            "lockstep-oracle verdict (regenerate via `franken-node ops "
+            "proof-carrying-evidence --merge-l1-verdict`)"
+        ]
+    if not isinstance(block, dict):
+        return ["L1 lockstep_verdict evidence must be an object"]
+    schema_version = block.get("schema_version")
+    if schema_version != L1_LOCKSTEP_VERDICT_SCHEMA:
+        return [
+            f"L1 lockstep_verdict schema_version {schema_version!r} is unsupported: only "
+            f"{L1_LOCKSTEP_VERDICT_SCHEMA} is accepted"
+        ]
+    if "report" not in block:
+        return [
+            "L1 lockstep_verdict missing embedded report; v1 requires the full divergence "
+            "report for re-derivation"
+        ]
+    try:
+        report = _parse_lockstep_report(block.get("report"))
+    except ValueError as err:
+        return [f"L1 lockstep_verdict embedded report failed to parse: {err}"]
+
+    errors = []
+    if report["schema_version"] != NVERSION_ORACLE_REPORT_SCHEMA:
+        errors.append(
+            f"L1 lockstep report schema_version {report['schema_version']} is not the "
+            f"supported {NVERSION_ORACLE_REPORT_SCHEMA}"
+        )
+
+    runtimes = report["runtimes"]
+    if len(runtimes) < 2:
+        errors.append(
+            f"L1 lockstep report registered only {len(runtimes)} runtime(s); a lockstep "
+            "verdict requires at least 2"
+        )
+    distinct_names = {entry["runtime_name"] for entry in runtimes.values()}
+    if len(runtimes) >= 2 and len(distinct_names) < 2:
+        errors.append(
+            "L1 lockstep report runtimes share one executor name; self-agreement is not a "
+            "cross-check"
+        )
+    if not any(entry["is_reference"] for entry in runtimes.values()):
+        errors.append("L1 lockstep report has no reference runtime leg (is_reference=true)")
+    if not any(not entry["is_reference"] for entry in runtimes.values()):
+        errors.append("L1 lockstep report has no franken runtime leg (is_reference=false)")
+
+    if not report["checks"]:
+        errors.append("L1 lockstep report contains no cross-runtime checks")
+    for check in report["checks"]:
+        if check["outcome"] is None:
+            errors.append(f"L1 lockstep check {check['check_id']} has no recorded outcome")
+        elif "Diverge" in check["outcome"]:
+            errors.append(f"L1 lockstep check {check['check_id']} diverged across runtimes")
+
+    if report["divergences"]:
+        errors.append(
+            f"L1 lockstep report carries {len(report['divergences'])} divergence(s); the L1 "
+            "bar requires zero"
+        )
+    if report["verdict_label"] != "pass":
+        errors.append(f"L1 lockstep report verdict is {report['verdict_label']} (not pass)")
+
+    declared_verdict = block.get("oracle_verdict")
+    if declared_verdict != report["verdict_label"]:
+        errors.append(
+            f"L1 lockstep declared oracle_verdict {declared_verdict!r} does not match "
+            f"re-derived {report['verdict_label']}"
+        )
+    declared_trace = block.get("trace_id")
+    if declared_trace != report["trace_id"]:
+        errors.append(
+            f"L1 lockstep declared trace_id {declared_trace!r} does not match report "
+            f"trace_id {report['trace_id']}"
+        )
+    declared_runtimes_raw = block.get("runtimes")
+    declared_runtimes = (
+        {runtime for runtime in declared_runtimes_raw if isinstance(runtime, str)}
+        if isinstance(declared_runtimes_raw, list)
+        else set()
+    )
+    if declared_runtimes != set(runtimes.keys()):
+        errors.append(
+            f"L1 lockstep declared runtimes {sorted(declared_runtimes)} do not match "
+            f"re-derived {sorted(runtimes.keys())}"
+        )
+    declared_checks = block.get("checks_total")
+    if not _is_u64(declared_checks) or declared_checks != len(report["checks"]):
+        errors.append(
+            f"L1 lockstep declared checks_total {declared_checks!r} does not match "
+            f"re-derived {len(report['checks'])}"
+        )
+    declared_divergences = block.get("divergence_count")
+    if not _is_u64(declared_divergences) or declared_divergences != len(report["divergences"]):
+        errors.append(
+            f"L1 lockstep declared divergence_count {declared_divergences!r} does not match "
+            f"re-derived {len(report['divergences'])}"
+        )
+
+    return errors
+
+
+def validate_l1_corpus_binding(data: dict, corpus_results_path: Path) -> list[str]:
+    """bd-ry7d1 cross-file binding: the verdict artifact's
+    proof_carrying_effects copy must be value-identical to the
+    compatibility-corpus results copy the Rust gate's pass-rate leg reads."""
+    try:
+        with open(corpus_results_path) as corpus_file:
+            corpus = json.load(corpus_file)
+    except (OSError, json.JSONDecodeError) as err:
+        return [f"L1 corpus-results binding input unreadable: {err}"]
+    if not isinstance(corpus, dict):
+        return ["L1 corpus-results binding input must be a JSON object"]
+    corpus_proof = corpus.get("proof_carrying_effects")
+    evidence = data.get("evidence")
+    artifact_proof = evidence.get("proof_carrying_effects") if isinstance(evidence, dict) else None
+    if artifact_proof is None:
+        return [
+            "L1 verdict artifact evidence.proof_carrying_effects missing (binding to the "
+            "corpus-results copy is required)"
+        ]
+    if corpus_proof is None:
+        return [
+            "L1 verdict artifact proof_carrying_effects binding unverifiable: corpus results "
+            "carry no proof_carrying_effects block"
+        ]
+    if corpus_proof != artifact_proof:
+        return [
+            "L1 verdict artifact proof_carrying_effects does not match the corpus-results "
+            "copy (the two gate inputs have drifted; regenerate both via `franken-node ops "
+            "proof-carrying-evidence --merge-corpus --merge-l1-verdict`)"
+        ]
+    return []
+
+
 REQUIRED_DIMENSIONS = [
     {
         "id": "l1_product",
@@ -443,7 +671,7 @@ def validate_l1_proof_carrying_evidence(data: dict) -> list[str]:
     ]
 
 
-def check_dimension(artifacts_dir: Path, dim: dict) -> dict:
+def check_dimension(artifacts_dir: Path, dim: dict, corpus_results_path=None) -> dict:
     """Check a single oracle dimension."""
     artifact_path = artifacts_dir / dim["artifact"]
     result = {
@@ -479,6 +707,9 @@ def check_dimension(artifacts_dir: Path, dim: dict) -> dict:
         errors.append(f"Verdict is {verdict}, expected GREEN")
     if dim["id"] == "l1_product":
         errors.extend(validate_l1_proof_carrying_evidence(data))
+        errors.extend(validate_l1_lockstep_verdict(data))
+        if corpus_results_path is not None:
+            errors.extend(validate_l1_corpus_binding(data, corpus_results_path))
     if errors:
         result["error"] = "; ".join(errors)
 
@@ -489,17 +720,26 @@ def main():
     logger = configure_test_logging("check_oracle_close_condition")
     json_output = "--json" in sys.argv
     artifacts_dir = DEFAULT_ARTIFACTS_DIR
+    corpus_results_path = None
 
     for i, arg in enumerate(sys.argv):
         if arg == "--artifacts-dir" and i + 1 < len(sys.argv):
             artifacts_dir = Path(sys.argv[i + 1])
+        if arg == "--corpus-results" and i + 1 < len(sys.argv):
+            corpus_results_path = Path(sys.argv[i + 1])
+
+    # bd-ry7d1: on the live repo (default artifacts dir), the corpus binding
+    # is enforced by default so the Rust and Python gate inputs cannot drift;
+    # explicit --corpus-results opts in for custom layouts.
+    if corpus_results_path is None and artifacts_dir == DEFAULT_ARTIFACTS_DIR:
+        corpus_results_path = ROOT / "artifacts" / "13" / "compatibility_corpus_results.json"
 
     timestamp = datetime.now(timezone.utc).isoformat()
     dimensions = {}
     failing = []
 
     for dim in REQUIRED_DIMENSIONS:
-        result = check_dimension(artifacts_dir, dim)
+        result = check_dimension(artifacts_dir, dim, corpus_results_path)
         dimensions[dim["id"]] = result
 
         if result.get("error") or result["verdict"] != "GREEN":
@@ -516,6 +756,7 @@ def main():
         "verdict": verdict,
         "timestamp": timestamp,
         "artifacts_dir": str(artifacts_dir),
+        "corpus_results": str(corpus_results_path) if corpus_results_path else None,
         "dimensions": {
             k: {
                 "present": v["present"],

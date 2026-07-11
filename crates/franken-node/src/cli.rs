@@ -1539,6 +1539,13 @@ pub struct OpsProofCarryingEvidenceArgs {
     /// JSON artifact (replaces its `proof_carrying_effects` block in place).
     #[arg(long = "merge-corpus", value_parser = parse_safe_content_pathbuf)]
     pub merge_corpus: Option<PathBuf>,
+
+    /// Also run a REAL dual-runtime lockstep-oracle pass (bun reference leg
+    /// vs native franken_engine leg) and merge both evidence blocks into
+    /// this L1 product verdict artifact (bd-ry7d1). Fails closed on any
+    /// divergence rather than writing a weaker verdict.
+    #[arg(long = "merge-l1-verdict", value_parser = parse_safe_content_pathbuf)]
+    pub merge_l1_verdict: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

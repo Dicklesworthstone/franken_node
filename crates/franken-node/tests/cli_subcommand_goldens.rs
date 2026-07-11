@@ -322,6 +322,54 @@ fn l1_v2_proof_block() -> Value {
     })
 }
 
+/// bd-ry7d1: a deterministic lockstep verdict block built through the real
+/// nversion-oracle API for the close-condition GREEN golden fixture.
+fn l1_lockstep_verdict_block() -> Value {
+    use frankenengine_node::runtime::nversion_oracle::{
+        BoundaryScope, RuntimeEntry, RuntimeOracle,
+    };
+
+    let mut oracle = RuntimeOracle::new("l1-lockstep:close-condition-golden", 100);
+    for (id, is_reference) in [("bun", true), ("franken-engine-native", false)] {
+        oracle
+            .register_runtime(RuntimeEntry {
+                runtime_id: id.to_string(),
+                runtime_name: id.to_string(),
+                version: "golden".to_string(),
+                is_reference,
+            })
+            .expect("register runtime");
+    }
+    let mut outputs = std::collections::BTreeMap::new();
+    outputs.insert("bun".to_string(), b"l1-lockstep:ok\n".to_vec());
+    outputs.insert(
+        "franken-engine-native".to_string(),
+        b"l1-lockstep:ok\n".to_vec(),
+    );
+    oracle
+        .run_cross_check(
+            "l1-lockstep:close-condition-golden:check-0",
+            BoundaryScope::IO,
+            b"guest-src",
+            &outputs,
+        )
+        .expect("cross check");
+    let report = oracle.generate_report(1_774_000_000);
+    json!({
+        "schema_version": "franken-node/l1-lockstep-verdict/v1",
+        "trace_id": report.trace_id,
+        "produced_at": "2026-02-21T00:00:00Z",
+        "producer": "close-condition-golden",
+        "guest_program_content_hash":
+            frankenengine_node::storage::cas::content_hash(b"guest-src").as_str(),
+        "runtimes": report.runtimes.keys().cloned().collect::<Vec<_>>(),
+        "oracle_verdict": report.verdict.label(),
+        "checks_total": report.checks.len(),
+        "divergence_count": report.divergences.len(),
+        "report": report,
+    })
+}
+
 fn write_close_condition_fixture(root: &Path) -> io::Result<()> {
     fn write_fixture(path: &Path, contents: &str) -> io::Result<()> {
         ensure_parent_dir(path)?;
@@ -386,6 +434,24 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
     write_fixture(
         &root.join("artifacts/13/compatibility_corpus_results.json"),
         &serde_json::to_string_pretty(&corpus).expect("corpus fixture render"),
+    )?;
+    // bd-ry7d1: the gate also consumes the L1 verdict artifact and binds its
+    // proof-carrying copy to the corpus copy; the lockstep block below is
+    // deterministic (fixed trace id, outputs, and epoch), so the golden
+    // output stays stable.
+    write_fixture(
+        &root.join("artifacts/oracle/l1_product_verdict.json"),
+        &serde_json::to_string_pretty(&json!({
+            "dimension": "l1_product",
+            "verdict": "GREEN",
+            "owner_track": "10.2",
+            "timestamp": "2026-02-21T00:00:00Z",
+            "evidence": {
+                "proof_carrying_effects": corpus["proof_carrying_effects"].clone(),
+                "lockstep_verdict": l1_lockstep_verdict_block(),
+            },
+        }))
+        .expect("verdict artifact render"),
     )?;
     write_fixture(
         &root.join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),

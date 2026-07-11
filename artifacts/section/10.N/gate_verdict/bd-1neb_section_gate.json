@@ -2,7 +2,7 @@
   "gate": "section_10n_verification",
   "section": "10.N",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T08:41:00.397163+00:00",
+  "timestamp": "2026-07-10T23:36:16.356003+00:00",
   "checks": [
     {
       "check_id": "10N-REG",
@@ -27,10 +27,8 @@
       "check_id": "10N-ORACLE",
       "status": "PASS",
       "details": {
-        "present": [
-          "scripts/check_oracle_close_condition.py",
-          "docs/DUAL_ORACLE_CLOSE_CONDITION.md"
-        ]
+        "exit_code": 0,
+        "verdict": "PASS"
       }
     },
     {
@@ -38,8 +36,7 @@
       "status": "INFO",
       "details": {
         "exit_code": 1,
-        "verdict": "FAIL",
-        "findings": 38,
+        "stdout_lines": 0,
         "note": "Findings detected (informational)"
       }
     }
