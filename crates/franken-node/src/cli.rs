@@ -269,6 +269,15 @@ pub struct RunArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// Emit only the guest program's console output (stdout/stderr) and its
+    /// exit code, suppressing the appended run-receipt summary and
+    /// host-effect-ledger lines. For output-sensitive consumers such as the
+    /// lockstep harness, where appended runtime metadata would register as
+    /// behavioral divergence against reference runtimes (bd-zi9hj). Policy
+    /// gates, receipts, and quarantine behavior are unchanged.
+    #[arg(long, conflicts_with = "json")]
+    pub console_only: bool,
+
     /// Emit structured diagnostic log events as JSONL to stderr.
     #[arg(long)]
     pub structured_logs_jsonl: bool,

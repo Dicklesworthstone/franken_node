@@ -103,6 +103,17 @@ pub struct LockstepHarness {
 }
 
 #[derive(Debug)]
+/// One lockstep leg's captured execution. `comparison` carries the bytes the
+/// cross-runtime oracle equates (guest stdout/stderr + exit code);
+/// `syscall_audit` carries the sanitized strace boundary trace, preserved as
+/// audit evidence in divergence fixtures but never compared (bd-zi9hj —
+/// traces are runtime-implementation artifacts and differ across engines by
+/// construction).
+struct RuntimeLegOutput {
+    comparison: Vec<u8>,
+    syscall_audit: Vec<u8>,
+}
+
 struct PipeDrainResult {
     bytes: Vec<u8>,
     cap_reached: bool,
@@ -186,7 +197,21 @@ impl LockstepHarness {
 
     fn resolve_runtime_binary(runtime: &str) -> String {
         Self::resolve_runtime_binary_with(runtime, &|configured_hint| {
-            crate::ops::engine_dispatcher::resolve_engine_binary_path(configured_hint)
+            // bd-zi9hj: no `franken-engine` CLI binary ships anywhere (the
+            // engine repo has no such [[bin]]), so the old resolver produced
+            // a leg that could never execute. The real franken execution
+            // surface is THIS binary's `run` path (in-process native
+            // engine): spawn ourselves. An operator-configured explicit
+            // engine binary still wins when it resolves.
+            let configured =
+                crate::ops::engine_dispatcher::resolve_engine_binary_path(configured_hint);
+            if Path::new(&configured).is_file() {
+                return configured;
+            }
+            std::env::current_exe().map_or_else(
+                |_| "franken-node".to_string(),
+                |exe| exe.display().to_string(),
+            )
         })
     }
 
@@ -478,7 +503,7 @@ impl LockstepHarness {
         let mut handles = Vec::new();
         for rt in self.runtimes.clone() {
             let app_path_buf = app_path.to_path_buf();
-            let handle = thread::spawn(move || -> Result<(String, Vec<u8>)> {
+            let handle = thread::spawn(move || -> Result<(String, RuntimeLegOutput)> {
                 let output = Self::execute_runtime(&rt, &app_path_buf)?;
                 Ok((rt, output))
             });
@@ -486,10 +511,12 @@ impl LockstepHarness {
         }
 
         let mut outputs = BTreeMap::new();
+        let mut syscall_audits: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for handle in handles {
             match handle.join() {
-                Ok(Ok((rt, out))) => {
-                    outputs.insert(rt, out);
+                Ok(Ok((rt, leg))) => {
+                    syscall_audits.insert(rt.clone(), leg.syscall_audit);
+                    outputs.insert(rt, leg.comparison);
                 }
                 Ok(Err(e)) => anyhow::bail!("Runtime execution error: {}", e),
                 Err(_) => anyhow::bail!("Runtime execution panicked"),
@@ -532,7 +559,7 @@ impl LockstepHarness {
         // Generate and print the report
         let report = oracle.generate_report(0);
         if emit_fixtures && !report.divergences.is_empty() {
-            for path in Self::emit_divergence_fixtures(app_path, &report)? {
+            for path in Self::emit_divergence_fixtures(app_path, &report, &syscall_audits)? {
                 eprintln!("lockstep divergence fixture written: {}", path.display());
             }
         }
@@ -563,6 +590,7 @@ impl LockstepHarness {
     fn emit_divergence_fixtures(
         app_path: &Path,
         report: &DivergenceReport,
+        syscall_audits: &BTreeMap<String, Vec<u8>>,
     ) -> Result<Vec<PathBuf>> {
         let output_dir = Self::fixture_output_dir(app_path);
         std::fs::create_dir_all(&output_dir).with_context(|| {
@@ -584,7 +612,8 @@ impl LockstepHarness {
                 "{}_min.json",
                 Self::sanitize_fixture_token(&divergence.divergence_id)
             ));
-            let fixture = Self::divergence_fixture_value(app_path, report, divergence);
+            let fixture =
+                Self::divergence_fixture_value(app_path, report, divergence, syscall_audits);
             let payload = serde_json::to_string_pretty(&fixture)
                 .context("failed serializing generated lockstep divergence fixture")?;
             Self::write_divergence_fixture_atomic(&path, &format!("{payload}\n"))?;
@@ -729,6 +758,7 @@ impl LockstepHarness {
         app_path: &Path,
         report: &DivergenceReport,
         divergence: &SemanticDivergence,
+        syscall_audits: &BTreeMap<String, Vec<u8>>,
     ) -> serde_json::Value {
         let runtime_outputs = divergence
             .runtime_outputs
@@ -739,6 +769,22 @@ impl LockstepHarness {
                     serde_json::json!({
                         "encoding": "base64",
                         "value": BASE64_STANDARD.encode(output),
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+
+        // bd-zi9hj: sanitized per-runtime syscall boundary traces travel with
+        // the fixture as audit evidence; they are not part of the compared
+        // output (see execute_runtime).
+        let syscall_boundaries_audit = syscall_audits
+            .iter()
+            .map(|(runtime, audit)| {
+                (
+                    runtime.clone(),
+                    serde_json::json!({
+                        "encoding": "base64",
+                        "value": BASE64_STANDARD.encode(audit),
                     }),
                 )
             })
@@ -769,6 +815,7 @@ impl LockstepHarness {
                 "oracle_verdict": report.verdict.label(),
                 "risk_tier": divergence.risk_tier.label(),
                 "runtime_outputs": runtime_outputs,
+                "syscall_boundaries_audit": syscall_boundaries_audit,
             },
             "oracle_source": "lockstep-oracle",
             "tags": [
@@ -808,7 +855,7 @@ impl LockstepHarness {
         }
     }
 
-    fn execute_runtime(runtime: &str, app_path: &Path) -> Result<Vec<u8>> {
+    fn execute_runtime(runtime: &str, app_path: &Path) -> Result<RuntimeLegOutput> {
         let bin_path = Self::resolve_runtime_binary(runtime);
         let runtime_target = Self::resolve_runtime_target(runtime, app_path)?;
 
@@ -833,6 +880,28 @@ impl LockstepHarness {
 
         if Self::is_franken_runtime(runtime) {
             cmd.arg("run").arg(app_path);
+            // bd-zi9hj: when the franken leg is this very binary (the
+            // default — no external engine CLI ships), run output-pure:
+            // only the guest program's console output and exit code, so the
+            // cross-runtime comparison sees guest behavior rather than
+            // appended runtime metadata (receipt summary / host-effect
+            // ledger lines). `--runtime franken-engine` forces the native
+            // in-process engine (never node/bun fallback, which would make
+            // the "franken" leg a second reference leg), and `--engine-bin`
+            // pointed at ourselves satisfies the dispatcher's availability
+            // gate — the in-process engine is this binary. An operator-
+            // configured external engine binary keeps the legacy
+            // `run <app>` interface, which is all we can assume about it.
+            let leg_is_self = std::env::current_exe()
+                .map(|exe| exe.display().to_string() == bin_path)
+                .unwrap_or(false);
+            if leg_is_self {
+                cmd.arg("--console-only")
+                    .arg("--runtime")
+                    .arg("franken-engine")
+                    .arg("--engine-bin")
+                    .arg(&bin_path);
+            }
         } else {
             cmd.arg(&runtime_target);
         }
@@ -920,54 +989,52 @@ impl LockstepHarness {
             );
         }
 
-        let mut combined_output = Vec::new();
+        let mut comparison = Vec::new();
         extend_bounded(
-            &mut combined_output,
+            &mut comparison,
             &stdout_result.bytes,
             MAX_COMBINED_OUTPUT_BYTES,
         );
         extend_bounded(
-            &mut combined_output,
+            &mut comparison,
             b"\n--- STDERR ---\n",
             MAX_COMBINED_OUTPUT_BYTES,
         );
         extend_bounded(
-            &mut combined_output,
+            &mut comparison,
             &stderr_result.bytes,
             MAX_COMBINED_OUTPUT_BYTES,
         );
         extend_bounded(
-            &mut combined_output,
+            &mut comparison,
             b"\n--- EXIT CODE ---\n",
             MAX_COMBINED_OUTPUT_BYTES,
         );
         if is_timeout {
-            extend_bounded(&mut combined_output, b"TIMEOUT", MAX_COMBINED_OUTPUT_BYTES);
+            extend_bounded(&mut comparison, b"TIMEOUT", MAX_COMBINED_OUTPUT_BYTES);
         } else {
             extend_bounded(
-                &mut combined_output,
+                &mut comparison,
                 exit_code.to_string().as_bytes(),
                 MAX_COMBINED_OUTPUT_BYTES,
             );
         }
 
-        // Append deterministic strace output to detect behavioral divergences
-        extend_bounded(
-            &mut combined_output,
-            b"\n--- SYSTEM CALL BOUNDARIES ---\n",
-            MAX_COMBINED_OUTPUT_BYTES,
-        );
+        // bd-zi9hj: the sanitized strace boundary trace is captured as audit
+        // evidence (attached to divergence fixtures) but deliberately kept
+        // OUT of the compared bytes. Syscall traces are runtime-
+        // implementation artifacts — execve paths, loader opens, cache
+        // probes — that can never be byte-equal across distinct engines, so
+        // comparing them made every cross-runtime check diverge by
+        // construction (empirically: node-vs-bun on `console.log("hello")`
+        // produced block_release from the trace section alone).
         let strace_content = Self::read_strace_output(strace_output_file.path(), runtime)?;
-        // Filter out non-deterministic pointers/PIDs from strace output using simple heuristics
-        // so we don't get false positive divergences for different runtimes doing the same thing.
-        let deterministic_strace = Self::sanitize_strace_output(&strace_content);
-        extend_bounded(
-            &mut combined_output,
-            &deterministic_strace,
-            MAX_COMBINED_OUTPUT_BYTES,
-        );
+        let syscall_audit = Self::sanitize_strace_output(&strace_content);
 
-        Ok(combined_output)
+        Ok(RuntimeLegOutput {
+            comparison,
+            syscall_audit,
+        })
     }
 
     fn has_timed_out(elapsed: Duration, timeout: Duration) -> bool {
@@ -2260,8 +2327,9 @@ mod tests {
             blocking_divergence_ids: vec!["div-1".to_string()],
         });
 
-        let written = LockstepHarness::emit_divergence_fixtures(&app_path, &report)
-            .expect("fixture emission should succeed");
+        let written =
+            LockstepHarness::emit_divergence_fixtures(&app_path, &report, &BTreeMap::new())
+                .expect("fixture emission should succeed");
         assert_eq!(written.len(), 1);
         assert!(written[0].ends_with("fixtures/lockstep/div-1_min.json"));
 
@@ -2293,7 +2361,7 @@ mod tests {
             let app_path = app_path.clone();
             let report = Arc::clone(&report);
             handles.push(thread::spawn(move || {
-                LockstepHarness::emit_divergence_fixtures(&app_path, &report)
+                LockstepHarness::emit_divergence_fixtures(&app_path, &report, &BTreeMap::new())
             }));
         }
 
@@ -2337,7 +2405,7 @@ mod tests {
             .expect("open competing lock file");
         lock_file.try_lock().expect("hold competing writer lock");
 
-        let err = LockstepHarness::emit_divergence_fixtures(&app_path, &report)
+        let err = LockstepHarness::emit_divergence_fixtures(&app_path, &report, &BTreeMap::new())
             .expect_err("held flock must prevent fixture emission");
         let message = format!("{err:#}");
         assert!(message.contains("timed out locking lockstep divergence fixture lock"));

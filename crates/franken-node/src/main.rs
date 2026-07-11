@@ -9236,6 +9236,7 @@ fn emit_run_completion_output(
     receipt: &RunExecutionReceipt,
     receipt_path: &Path,
     json: bool,
+    console_only: bool,
 ) -> Result<()> {
     if json {
         let output = RunCommandOutput {
@@ -9258,6 +9259,13 @@ fn emit_run_completion_output(
     }
     if !dispatch.captured_output.stderr.is_empty() {
         eprint!("{}", dispatch.captured_output.stderr);
+    }
+    // bd-zi9hj: console-only mode ends at the guest's own streams — the
+    // receipt summary and ledger lines below are runtime metadata that would
+    // register as behavioral divergence when a reference runtime (bun/node)
+    // is compared against this run in lockstep. Receipts are still persisted.
+    if console_only {
+        return Ok(());
     }
     println!(
         "{}",
@@ -26874,6 +26882,7 @@ fn main() -> Result<()> {
                 app_path,
                 policy,
                 json,
+                console_only,
                 structured_logs_jsonl,
                 trace_id,
                 config,
@@ -26898,7 +26907,12 @@ fn main() -> Result<()> {
                 &resolved.config,
                 now_unix_secs(),
             )?;
-            emit_run_preflight_report(&preflight, json)?;
+            // bd-zi9hj: in console-only mode the advisory preflight banner is
+            // suppressed (it writes to stderr and would register as guest
+            // divergence in lockstep comparison); blocking still blocks below.
+            if !console_only {
+                emit_run_preflight_report(&preflight, json)?;
+            }
             if preflight.verdict.is_blocked() {
                 return Err(run_preflight_block_error(&preflight).into());
             }
@@ -27024,7 +27038,14 @@ fn main() -> Result<()> {
                 );
             }
 
-            emit_run_completion_output(&preflight, &dispatch, &receipt, &receipt_path, json)?;
+            emit_run_completion_output(
+                &preflight,
+                &dispatch,
+                &receipt,
+                &receipt_path,
+                json,
+                console_only,
+            )?;
 
             if dispatch.terminated_by_signal {
                 anyhow::bail!(

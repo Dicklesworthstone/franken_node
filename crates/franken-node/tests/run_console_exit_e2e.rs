@@ -204,6 +204,115 @@ fn run_exit_code_is_derived_not_constant() {
     );
 }
 
+/// bd-zi9hj: `run --console-only` emits ONLY the guest program's console
+/// output and its exit code — no receipt-summary line, no host-effect-ledger
+/// lines, no preflight banner. This output purity is the contract the
+/// lockstep harness's franken leg depends on: any appended runtime metadata
+/// would register as cross-runtime divergence against bun/node.
+#[test]
+fn console_only_run_emits_guest_streams_verbatim() {
+    let (_dir, outcome) = run_app(
+        "console.log(\"pure-console-contract\");\n",
+        &["--console-only"],
+    );
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "clean console run must exit 0; stderr=\n{}",
+        outcome.stderr
+    );
+    assert_eq!(
+        outcome.stdout, "pure-console-contract\n",
+        "stdout must be exactly the guest console output, nothing appended"
+    );
+    assert!(
+        outcome.stderr.is_empty(),
+        "console-only stderr must carry only guest stderr (none here), got:\n{}",
+        outcome.stderr
+    );
+}
+
+/// bd-zi9hj: the operator-facing `verify lockstep --runtimes bun,franken-node`
+/// franken leg historically spawned a `franken-engine` binary that does not
+/// exist anywhere (the engine repo ships no such [[bin]]), so the leg had
+/// never executed — strace's own noise became the leg output and every check
+/// diverged. The leg now runs THIS binary in console-only mode through the
+/// in-process native engine. Positive control: identical guest behavior must
+/// agree. Negative control: a genuinely divergent program must still block
+/// release, proving the comparison is discriminating rather than vacuous.
+#[test]
+fn verify_lockstep_franken_leg_executes_against_bun() {
+    for (tool, probe_arg) in [("bun", "--version"), ("strace", "-V")] {
+        if Command::new(tool).arg(probe_arg).output().is_err() {
+            eprintln!(
+                "skipping verify_lockstep_franken_leg_executes_against_bun: {tool} unavailable"
+            );
+            return;
+        }
+    }
+
+    let (dir, run_outcome) = run_app("console.log(\"lockstep-parity\");\n", &["--console-only"]);
+    assert_eq!(
+        run_outcome.exit_code,
+        Some(0),
+        "fixture must run cleanly before lockstep; stderr=\n{}",
+        run_outcome.stderr
+    );
+
+    let agree = Command::new(franken_node_bin())
+        .args([
+            "verify",
+            "lockstep",
+            "app.js",
+            "--runtimes",
+            "bun,franken-node",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn verify lockstep");
+    let agree_stdout = String::from_utf8_lossy(&agree.stdout);
+    assert!(
+        agree.status.success(),
+        "identical guest behavior must pass lockstep; stdout=\n{}\nstderr=\n{}",
+        agree_stdout,
+        String::from_utf8_lossy(&agree.stderr)
+    );
+    assert!(
+        agree_stdout.contains("\"verdict\": \"Pass\""),
+        "lockstep report must record Pass, got:\n{agree_stdout}"
+    );
+
+    std::fs::write(
+        dir.path().join("divergent.js"),
+        "console.log(typeof Bun !== \"undefined\" ? \"engine-bun\" : \"engine-other\");\n",
+    )
+    .expect("write divergent fixture");
+    let diverge = Command::new(franken_node_bin())
+        .args([
+            "verify",
+            "lockstep",
+            "divergent.js",
+            "--runtimes",
+            "bun,franken-node",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn verify lockstep divergent");
+    assert!(
+        !diverge.status.success(),
+        "a genuinely divergent program must fail lockstep"
+    );
+    let diverge_all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&diverge.stdout),
+        String::from_utf8_lossy(&diverge.stderr)
+    );
+    assert!(
+        diverge_all.contains("block_release"),
+        "divergence must block release, got:\n{diverge_all}"
+    );
+}
+
 #[test]
 fn run_emits_correlated_structured_logs() {
     let trace_id = "run-console-exit-e2e-trace-7f3a";
