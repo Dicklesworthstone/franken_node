@@ -12,7 +12,7 @@ registered before they appear in source or scripts.
 | `FN-EFFECT` | `FN-EFFECT-001` effect receipt started; `FN-EFFECT-002` effect receipt chained | `FN-EFFECT-ERR-001` effect receipt invalid | `franken_node_effect_receipts_total{effect_kind,verdict}` |
 | `FN-CAS` | `FN-CAS-001` CAS put started; `FN-CAS-002` CAS integrity verified | `FN-CAS-ERR-001` CAS integrity mismatch | `franken_node_cas_blobs_total{operation,verdict}` |
 | `FN-TTR` | `FN-TTR-001` replay bundle loaded; `FN-TTR-002` replay verdict emitted | `FN-TTR-ERR-001` replay divergence | `franken_node_ttr_replays_total{verdict}` |
-| `FN-FLOW` | `FN-FLOW-001` flow label attached; `FN-FLOW-002` flow sink allowed | `FN-FLOW-ERR-001` flow sink blocked | `franken_node_flow_blocks_total{sink,label_class}` |
+| `FN-FLOW` | `FN-FLOW-001` flow source registered; `FN-FLOW-002` flow transform propagated; `FN-FLOW-003` flow sink blocked; `FN-FLOW-004` flow declassification accepted; `FN-FLOW-005` flow non-exfiltration proof ready | `FN-FLOW-ERR-001` flow sink refused | `franken_node_flow_blocks_total{sink,label_class}` |
 | `FN-SENTINEL` | `FN-SENTINEL-001` sentinel observation ingested; `FN-SENTINEL-002` sentinel action selected | `FN-SENTINEL-ERR-001` guardrail override | `franken_node_sentinel_escalations_total{action}` |
 | `FN-CONFORMAL` | `FN-CONFORMAL-001` conformal set emitted; `FN-CONFORMAL-002` ACI quantile updated | `FN-CONFORMAL-ERR-001` coverage under target | `franken_node_conformal_coverage_observations_total{risk_class,covered}` |
 | `FN-CAP` | `FN-CAP-001` capability proof issued; `FN-CAP-002` capability proof verified | `FN-CAP-ERR-001` capability proof rejected | `franken_node_capability_proofs_total{scope,verdict}` |

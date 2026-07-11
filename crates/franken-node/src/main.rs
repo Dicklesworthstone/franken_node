@@ -11570,6 +11570,50 @@ fn render_run_structured_logs_jsonl(
             );
             lines.push_str(&serde_json::to_string(&effect_line)?);
             lines.push('\n');
+
+            // bd-plhag: surface the information-flow verdict as its registered
+            // TNR event when the receipt carries a real (non-empty) label set.
+            // FN-FLOW-001 = a labeled datum crossed the boundary; FN-FLOW-003 =
+            // a forbidden-labeled effect was blocked (denied); FN-FLOW-004 = an
+            // otherwise-forbidden flow rode a declassification receipt.
+            use runtime::effect_receipt::{
+                EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT, FlowPolicyVerdict,
+            };
+            let carries_label =
+                entry.receipt.label_set_commitment != EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT;
+            let flow_event = match entry.receipt.flow_policy_verdict {
+                FlowPolicyVerdict::Blocked => Some(("FN-FLOW-003", "flow sink blocked")),
+                FlowPolicyVerdict::Declassified => {
+                    Some(("FN-FLOW-004", "flow declassification accepted"))
+                }
+                FlowPolicyVerdict::LabelClean if carries_label => {
+                    Some(("FN-FLOW-001", "flow label attached"))
+                }
+                FlowPolicyVerdict::LabelClean => None,
+            };
+            if let Some((event_code, message)) = flow_event {
+                let flow_line = run_structured_log_line_with_details(
+                    &now,
+                    event_code,
+                    &format!(
+                        "{message}: kind={} verdict={} index={}",
+                        entry.receipt.effect_kind.label(),
+                        entry.receipt.flow_policy_verdict.label(),
+                        entry.index
+                    ),
+                    trace_id,
+                    "host-effect-flow",
+                    Some(serde_json::json!({
+                        "effect_kind": entry.receipt.effect_kind.label(),
+                        "flow_policy_verdict": entry.receipt.flow_policy_verdict.label(),
+                        "label_set_commitment": entry.receipt.label_set_commitment,
+                        "declassification_ref": entry.receipt.declassification_ref,
+                        "index": entry.index,
+                    })),
+                );
+                lines.push_str(&serde_json::to_string(&flow_line)?);
+                lines.push('\n');
+            }
         }
     }
 

@@ -780,7 +780,13 @@ impl DeclassificationReceipt {
     }
 }
 
-fn label_set_commitment(labels: &BTreeSet<String>) -> Result<String, LineageError> {
+/// Canonical commitment over a taint label set. Returns BARE lowercase hex
+/// (no `sha256:` prefix); callers that need the content-hash-prefixed form
+/// (e.g. an [`crate::runtime::effect_receipt::EffectReceipt`] lineage field)
+/// must prepend `sha256:` themselves. The scheme is schema-versioned and
+/// deterministic, so the declassification path and the run-flow path produce
+/// identical commitments for the same label set.
+pub fn label_set_commitment(labels: &BTreeSet<String>) -> Result<String, LineageError> {
     if labels.is_empty() {
         return Err(declassification_invalid(
             "label set commitment requires at least one label",
@@ -798,6 +804,64 @@ fn label_set_commitment(labels: &BTreeSet<String>) -> Result<String, LineageErro
             ),
         })?;
     Ok(sha256_hex(&canonical_bytes))
+}
+
+/// Stable taint label attached to bytes read from a recognized secret-bearing
+/// file (see [`classify_sensitive_source_path`]). Kept coarse on purpose: the
+/// run-path flow lane over-approximates (any read of a secret file taints the
+/// run's later egress), which is safe for an exfiltration control — it never
+/// produces a false "clean" verdict.
+pub const SECRET_FILE_LABEL: &str = "ifl-src:secret-file";
+
+/// The `sha256:`-prefixed label-set commitment for the single-label secret
+/// set `{SECRET_FILE_LABEL}`. This is the exact value the run-path ledger
+/// writes into a secret-carrying effect's `label_set_commitment`, and the
+/// value an offline verifier discloses as a forbidden commitment in a
+/// [`NonExfiltrationClaim`]. Deterministic; both sides must agree byte-for-byte.
+#[must_use]
+pub fn secret_file_label_set_commitment() -> String {
+    let mut labels = BTreeSet::new();
+    labels.insert(SECRET_FILE_LABEL.to_string());
+    // A non-empty label set always commits; the constant set makes this total.
+    let bare = label_set_commitment(&labels)
+        .expect("secret-file label set is non-empty and always commits");
+    format!("sha256:{bare}")
+}
+
+/// Classify a host `fs.read` path as a sensitive information-flow source.
+///
+/// Returns the taint label to attach when the read targets a file that
+/// conventionally holds credentials or key material (`.env` family, PEM/key
+/// files, SSH keys, `.npmrc`/`.netrc`, PKCS#12 bundles, cloud credentials).
+/// Matching is on the path's final component, case-insensitively, so it is
+/// stable across absolute/relative forms. Returns `None` for ordinary files.
+#[must_use]
+pub fn classify_sensitive_source_path(path: &str) -> Option<&'static str> {
+    let basename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .trim()
+        .to_ascii_lowercase();
+    if basename.is_empty() {
+        return None;
+    }
+    let is_secret = basename == ".env"
+        || basename.starts_with(".env.")
+        || basename == ".npmrc"
+        || basename == ".netrc"
+        || basename == "credentials"
+        || basename == "id_rsa"
+        || basename == "id_ed25519"
+        || basename == "id_ecdsa"
+        || basename == "id_dsa"
+        || basename.ends_with(".pem")
+        || basename.ends_with(".key")
+        || basename.ends_with(".p12")
+        || basename.ends_with(".pfx")
+        || basename.ends_with(".pkcs12")
+        || basename.ends_with(".keystore");
+    is_secret.then_some(SECRET_FILE_LABEL)
 }
 
 fn validate_declassification_text(
@@ -3316,6 +3380,72 @@ pub mod invariants {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_sensitive_source_path_matches_secret_files() {
+        // Recognized secret-bearing files, across absolute/relative forms.
+        for path in [
+            ".env",
+            "app/.env.production",
+            "/srv/app/.env",
+            "config/id_rsa",
+            "keys/service.pem",
+            "certs/server.KEY",
+            "/home/u/.npmrc",
+            ".netrc",
+            "secrets/credentials",
+            "store/app.p12",
+            "bundle.PFX",
+        ] {
+            assert_eq!(
+                classify_sensitive_source_path(path),
+                Some(SECRET_FILE_LABEL),
+                "expected {path} classified as a sensitive source"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_sensitive_source_path_ignores_ordinary_files() {
+        for path in [
+            "out.txt",
+            "src/main.rs",
+            "environment.md",
+            "readme.env.example.md",
+            "package.json",
+            "",
+            "/",
+        ] {
+            assert_eq!(
+                classify_sensitive_source_path(path),
+                None,
+                "expected {path} to be an ordinary (non-secret) source"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_file_label_set_commitment_is_deterministic_and_canonical() {
+        let a = secret_file_label_set_commitment();
+        let b = secret_file_label_set_commitment();
+        assert_eq!(a, b, "commitment must be deterministic");
+        let hex = a
+            .strip_prefix("sha256:")
+            .expect("commitment is sha256:-prefixed");
+        assert_eq!(hex.len(), 64, "commitment hex must be 64 chars");
+        assert!(
+            hex.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "commitment must be lowercase hex"
+        );
+        // It must equal the canonical commitment over exactly {SECRET_FILE_LABEL}.
+        let mut labels = BTreeSet::new();
+        labels.insert(SECRET_FILE_LABEL.to_string());
+        assert_eq!(
+            a,
+            format!("sha256:{}", label_set_commitment(&labels).unwrap())
+        );
+    }
 
     fn default_config() -> SentinelConfig {
         SentinelConfig::default()

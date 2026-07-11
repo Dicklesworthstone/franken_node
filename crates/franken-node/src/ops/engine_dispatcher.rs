@@ -2395,9 +2395,24 @@ impl EngineDispatcher {
             frankenengine_extension_host::host_io::HostIoOutcome,
         )],
     ) -> HostEffectLedger {
-        use crate::runtime::effect_receipt::{EffectKind, EffectReceipt, EffectReceiptChain};
+        use crate::runtime::effect_receipt::{
+            EFFECT_RECEIPT_EMPTY_LINEAGE_HASH, EffectKind, EffectLineageFields, EffectReceipt,
+            EffectReceiptChain, FlowPolicyVerdict,
+        };
+        use crate::security::lineage_tracker::{
+            classify_sensitive_source_path, secret_file_label_set_commitment,
+        };
         use crate::storage::cas::content_hash;
         use frankenengine_extension_host::host_io::{HostIoRequest, HostIoResponse};
+
+        // True when `needle` occurs as a contiguous subsequence of `haystack`.
+        fn slice_contains(haystack: &[u8], needle: &[u8]) -> bool {
+            !needle.is_empty()
+                && needle.len() <= haystack.len()
+                && haystack
+                    .windows(needle.len())
+                    .any(|window| window == needle)
+        }
 
         // Single monotonic recording timestamp for the whole run; this module
         // owns the clock read (the receipt layer never reads the wall clock).
@@ -2407,9 +2422,34 @@ impl EngineDispatcher {
         let mut allowed_count = 0usize;
         let mut denied_count = 0usize;
 
+        // bd-plhag: run-scoped information-flow labeling by CONTENT CONTAINMENT.
+        // Bytes read from recognized secret-bearing files are retained here; a
+        // later effect whose OUTBOUND bytes CONTAIN one of these samples is
+        // recorded as carrying the secret label. Containment (not exact hash) is
+        // required because an http egress payload is the *framed* request
+        // (headers + body), so the raw secret appears as a substring, not the
+        // whole payload; an fs_write payload is the raw bytes, a trivial case of
+        // containment. This is byte-accurate for verbatim flows and honestly
+        // does NOT label an egress that carries unrelated bytes. It cannot
+        // follow a secret through an in-guest transform (base64, concat, …) —
+        // that needs per-datum lineage the transcript does not carry (engine
+        // side, out of scope; documented follow-up).
+        const MIN_SECRET_SAMPLE_LEN: usize = 8;
+        const MAX_SECRET_SAMPLE_LEN: usize = 64 * 1024;
+        const MAX_SECRET_SAMPLES: usize = 16;
+        let mut secret_samples: Vec<Vec<u8>> = Vec::new();
+
         for (index, (request, outcome)) in transcript.iter().enumerate() {
             let seq = u64::try_from(index).unwrap_or(u64::MAX);
             let capability_ref = format!("host-io:{}", request.required_capability().as_str());
+
+            // A read of a recognized secret file is a sensitive information-flow
+            // source; its bytes' content hash is registered (below) so later
+            // effects that re-emit those exact bytes inherit the label.
+            let sensitive_read = matches!(
+                request,
+                HostIoRequest::FsRead { path } if classify_sensitive_source_path(path).is_some()
+            );
 
             // Effect kind + the operation's target (args) and the bytes it would
             // consume as input, derived from the real request.
@@ -2451,6 +2491,20 @@ impl EngineDispatcher {
             };
             let args_hash = content_hash(&args_bytes);
 
+            // bd-plhag: does this effect carry secret-labeled content? A
+            // sensitive read carries it by definition; any other effect carries
+            // it when its OUTBOUND bytes (fs_write data / framed egress payload)
+            // CONTAIN a previously-registered secret sample. The `sha256:`-
+            // prefixed commitment matches the effect-receipt lineage-field
+            // convention and the value an offline verifier discloses as forbidden.
+            let carries_secret = sensitive_read
+                || (!input_bytes.is_empty()
+                    && secret_samples
+                        .iter()
+                        .any(|sample| slice_contains(&input_bytes, sample)));
+            let taint_commitment: Option<String> =
+                carries_secret.then(secret_file_label_set_commitment);
+
             let receipt = match outcome {
                 Ok(response) => {
                     // Bytes the effect produced/left as state, from the real outcome.
@@ -2470,8 +2524,39 @@ impl EngineDispatcher {
                         HostIoResponse::FsRead { bytes } => bytes.clone(),
                         _ => input_bytes.clone(),
                     };
+                    // Register a sensitive read's bytes so a later effect that
+                    // re-emits them inherits the secret label by containment.
+                    // Bounded: skip trivially short reads (coincidental-substring
+                    // false positives) and oversized/over-many samples.
+                    if sensitive_read
+                        && secret_samples.len() < MAX_SECRET_SAMPLES
+                        && (MIN_SECRET_SAMPLE_LEN..=MAX_SECRET_SAMPLE_LEN)
+                            .contains(&pre_bytes.len())
+                    {
+                        secret_samples.push(pre_bytes.clone());
+                    }
                     allowed_count = allowed_count.saturating_add(1);
-                    EffectReceipt::allowed(
+                    // An ALLOWED effect that carries the secret is recorded
+                    // label-clean with the real commitment: the runtime did not
+                    // block it (a read is not a sink; an egress the SSRF gate
+                    // permitted ran). If a verifier considers that effect kind an
+                    // external sink, the SDK non-exfiltration check flags it as a
+                    // violation — honest DETECTION that the ledger does not
+                    // retroactively pretend was prevention. Byte-level prevention
+                    // at an allowed sink is a gate-level follow-up.
+                    let lineage = match &taint_commitment {
+                        Some(commitment) => EffectLineageFields {
+                            input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                            output_lineage_hash: Some(
+                                EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                            ),
+                            label_set_commitment: commitment.clone(),
+                            declassification_ref: None,
+                            flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+                        },
+                        None => EffectLineageFields::label_clean_allowed(),
+                    };
+                    EffectReceipt::allowed_with_lineage(
                         seq,
                         trace_id,
                         effect_kind,
@@ -2481,11 +2566,25 @@ impl EngineDispatcher {
                         content_hash(&produced),
                         content_hash(&produced),
                         recorded_at_millis,
+                        lineage,
                     )
                 }
                 Err(err) => {
                     denied_count = denied_count.saturating_add(1);
-                    EffectReceipt::denied(
+                    // A DENIED effect that carries the secret is a flow BLOCK: it
+                    // did not execute and it was refused while holding forbidden
+                    // labels. This is exactly the "blocked_before_sink" shape the
+                    // SDK non-exfiltration check recognizes (a Blocked verdict
+                    // requires a denied effect). A denial with no secret content
+                    // stays label-clean.
+                    let lineage = match &taint_commitment {
+                        Some(commitment) => EffectLineageFields::blocked(
+                            EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                            commitment.clone(),
+                        ),
+                        None => EffectLineageFields::label_clean_denied(),
+                    };
+                    EffectReceipt::denied_with_lineage(
                         seq,
                         trace_id,
                         effect_kind,
@@ -2493,6 +2592,7 @@ impl EngineDispatcher {
                         content_hash(&input_bytes),
                         args_hash,
                         recorded_at_millis,
+                        lineage,
                     )
                 }
             };
