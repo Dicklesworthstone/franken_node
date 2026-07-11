@@ -25,6 +25,7 @@ pub const AUTHORITY_AUDIT: &str = "aa-v1.0";
 pub const SPECULATION_PROOF_EXECUTOR: &str = "speculation-proof-v1.0";
 pub const EFFECT_RECEIPT: &str = "effect-receipt-v1.1";
 pub const HOST_EFFECT_LEDGER: &str = "host-effect-ledger-v1.0";
+pub const RUN_SENTINEL_REPORT: &str = "runtime_sentinel.run_report.v1";
 
 // ── Control Plane ──────────────────────────────────────────────────
 pub const TRANSITION_ABORT: &str = "ta-v1.0";
@@ -227,6 +228,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("speculation_proof_executor", SPECULATION_PROOF_EXECUTOR),
         ("effect_receipt", EFFECT_RECEIPT),
         ("host_effect_ledger", HOST_EFFECT_LEDGER),
+        ("run_sentinel_report", RUN_SENTINEL_REPORT),
         // Control Plane
         ("transition_abort", TRANSITION_ABORT),
         ("control_lane_policy", CONTROL_LANE_POLICY),

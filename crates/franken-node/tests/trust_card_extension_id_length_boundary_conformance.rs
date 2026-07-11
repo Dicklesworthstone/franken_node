@@ -177,7 +177,7 @@ fn trust_card_extension_id_empty_string_is_rejected() {
 #[test]
 fn extension_id_length_boundary_conformance_report() {
     // Generate conformance report for extension ID length boundary testing
-    let test_cases = vec![
+    let test_cases = [
         ("at-max-boundary", MAX_EXTENSION_ID_LEN, true),
         ("under-boundary", MAX_EXTENSION_ID_LEN - 1, true),
         ("exceed-boundary", MAX_EXTENSION_ID_LEN + 1, false),

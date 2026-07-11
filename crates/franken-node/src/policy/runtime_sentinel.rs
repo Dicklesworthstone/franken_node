@@ -937,6 +937,367 @@ impl SentinelObservationLog {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// bd-bg2hy: live-run sentinel feed — dispatcher → observation → e-process →
+// expected-loss decision → (on escalation) signed evidence receipt.
+//
+// Engine-split note: the engine's `ExpectedLossSelector` keeps owning VM-level
+// containment (the run exit code). This feed consumes only the PRODUCT-side
+// host-effect ledger the dispatcher already builds, so the boundary is the
+// same one bd-plhag/bd-n1bym established for information-flow labeling.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use super::bayesian_diagnostics::{
+    EProcessError, EProcessUpdate, LikelihoodRatioEvidence, RuntimeSentinelEProcess,
+};
+use crate::runtime::effect_receipt::{
+    EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT, EffectKind, EffectReceiptChainEntry,
+    FlowPolicyVerdict, PolicyOutcome,
+};
+
+/// Schema version for the per-run sentinel report surfaced by `run --json`
+/// (re-exported from the authoritative [`crate::schema_versions`] registry).
+pub const RUN_SENTINEL_REPORT_SCHEMA_VERSION: &str = crate::schema_versions::RUN_SENTINEL_REPORT;
+
+/// Anytime-valid false-alarm ceiling for run-path escalation: 1% in ppm.
+/// Escalation requires the Ville bound `1/e_value` to fall to or below this.
+pub const SENTINEL_RUN_ALPHA_PPM: u64 = 10_000;
+
+/// Prior probability of malice for a run subject, in basis points (1%).
+/// The e-process starts at e = 1; posterior odds are `prior_odds × e`, so a
+/// run with only neutral evidence keeps the 1% prior and selects `Allow`.
+pub const SENTINEL_RUN_PRIOR_MALICE_BP: u16 = 100;
+
+/// Likelihood ratio (ppm) for an allowed, label-clean effect: exactly neutral,
+/// so a clean run's e-value stays at 1 and can never drift toward escalation.
+pub const LR_ALLOWED_CLEAN_PPM: u64 = 1_000_000;
+/// Likelihood ratio (ppm) for an allowed read of a recognized secret source
+/// (1.5×): touching secrets is weakly informative — a run that only reads its
+/// own `.env` stays far below both the alpha bound and the `Harden` boundary.
+pub const LR_SENSITIVE_SOURCE_READ_PPM: u64 = 1_500_000;
+/// Likelihood ratio (ppm) for a policy-denied effect (3×): a single denial
+/// leaves the false-alarm bound at ~33%, far above alpha; repeated denials
+/// compound (5 denials ≈ e = 243) and legitimately walk up the ladder.
+pub const LR_POLICY_DENIAL_PPM: u64 = 3_000_000;
+/// Likelihood ratio (ppm) for a secret-labeled payload at an egress-capable
+/// sink (500×), whether blocked (prevention) or allowed (detection): a single
+/// exfiltration attempt pushes the false-alarm bound to 0.2% ≤ alpha and the
+/// posterior past the `Quarantine` expected-loss boundary.
+pub const LR_SECRET_EXFIL_PPM: u64 = 500_000_000;
+
+const MAG_ALLOWED_CLEAN_BP: u16 = 100;
+const MAG_SENSITIVE_READ_BP: u16 = 1_500;
+const MAG_POLICY_DENIAL_BP: u16 = 4_000;
+const MAG_SECRET_EXFIL_BP: u16 = 9_500;
+
+/// Signal source tag for evidence derived from the signed host-effect ledger.
+const RUN_SIGNAL_SOURCE: &str = "run:host-effect-ledger";
+
+/// Cap on denial-reason characters copied into a signal detail string.
+const MAX_DENIAL_REASON_CHARS: usize = 120;
+
+/// Errors raised while deriving the per-run sentinel report.
+#[derive(Debug, thiserror::Error)]
+pub enum RunSentinelFeedError {
+    #[error("run sentinel observation error: {0}")]
+    Observation(#[from] SentinelObservationError),
+    #[error("run sentinel e-process error: {0:?}")]
+    EProcess(EProcessError),
+    #[error("run sentinel decision error: {0}")]
+    Decision(#[from] SentinelDecisionError),
+}
+
+impl From<EProcessError> for RunSentinelFeedError {
+    fn from(err: EProcessError) -> Self {
+        Self::EProcess(err)
+    }
+}
+
+/// One host-effect ledger entry translated into sentinel evidence: the
+/// canonical observation signal plus the fixed-point likelihood ratio the
+/// e-process multiplies in for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunEffectSignal {
+    pub signal: SentinelSignal,
+    pub likelihood_ratio_ppm: u64,
+}
+
+/// Deterministically classify one signed host-effect ledger entry into a
+/// sentinel signal + likelihood ratio.
+///
+/// The classification consumes only fields already committed into the signed
+/// receipt (outcome, flow verdict, label-set commitment, effect kind), so a
+/// verifier replaying the ledger re-derives the identical evidence stream.
+///
+/// # Errors
+/// Returns [`SentinelObservationError`] if a derived signal fails validation.
+pub fn sentinel_signal_for_effect_entry(
+    entry: &EffectReceiptChainEntry,
+) -> Result<RunEffectSignal, SentinelObservationError> {
+    let receipt = &entry.receipt;
+    let kind_label = receipt.effect_kind.label();
+    // Constant-time per the repo-wide hash-comparison posture (the commitment
+    // is public ledger data, but every hash check goes through ct_eq).
+    let carries_secret_labels = !crate::security::constant_time::ct_eq(
+        &receipt.label_set_commitment,
+        EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT,
+    );
+    let egress_capable_sink = matches!(
+        receipt.effect_kind,
+        EffectKind::FsWrite | EffectKind::NetConnect | EffectKind::HttpRequest | EffectKind::Spawn
+    );
+
+    let (kind, magnitude_bp, likelihood_ratio_ppm, detail) = match &receipt.policy_outcome {
+        // A flow BLOCK: the effect held forbidden labels and was refused
+        // before the sink — the strongest single piece of malice evidence.
+        _ if matches!(receipt.flow_policy_verdict, FlowPolicyVerdict::Blocked) => (
+            SentinelSignalKind::EffectReceiptAnomaly,
+            MAG_SECRET_EXFIL_BP,
+            LR_SECRET_EXFIL_PPM,
+            format!(
+                "secret-labeled {kind_label} blocked before sink;seq={}",
+                receipt.seq
+            ),
+        ),
+        PolicyOutcome::Denied { reason } => (
+            SentinelSignalKind::PolicyViolation,
+            MAG_POLICY_DENIAL_BP,
+            LR_POLICY_DENIAL_PPM,
+            format!(
+                "denied {kind_label};seq={};reason={}",
+                receipt.seq,
+                sanitize_detail(reason)
+            ),
+        ),
+        PolicyOutcome::Allowed { .. }
+            if carries_secret_labels
+                && matches!(receipt.flow_policy_verdict, FlowPolicyVerdict::LabelClean)
+                && egress_capable_sink =>
+        {
+            // Honest DETECTION: secret-labeled bytes reached a sink the
+            // endpoint gates allowed. The ledger records it; the sentinel
+            // treats it as exfiltration evidence of the same strength as a
+            // blocked attempt.
+            (
+                SentinelSignalKind::EffectReceiptAnomaly,
+                MAG_SECRET_EXFIL_BP,
+                LR_SECRET_EXFIL_PPM,
+                format!(
+                    "secret-labeled bytes reached allowed {kind_label} sink;seq={}",
+                    receipt.seq
+                ),
+            )
+        }
+        PolicyOutcome::Allowed { .. } if carries_secret_labels => (
+            // A sensitive-source read (or declassified flow): weakly
+            // informative on its own.
+            SentinelSignalKind::CapabilityInvocation,
+            MAG_SENSITIVE_READ_BP,
+            LR_SENSITIVE_SOURCE_READ_PPM,
+            format!("sensitive source {kind_label};seq={}", receipt.seq),
+        ),
+        PolicyOutcome::Allowed { .. } => (
+            SentinelSignalKind::CapabilityInvocation,
+            MAG_ALLOWED_CLEAN_BP,
+            LR_ALLOWED_CLEAN_PPM,
+            format!("allowed {kind_label};seq={}", receipt.seq),
+        ),
+    };
+
+    Ok(RunEffectSignal {
+        signal: SentinelSignal::new(kind, RUN_SIGNAL_SOURCE, magnitude_bp, detail)?,
+        likelihood_ratio_ppm,
+    })
+}
+
+/// Posterior malice probability (basis points) implied by an e-value under
+/// the run-path prior [`SENTINEL_RUN_PRIOR_MALICE_BP`].
+///
+/// `posterior_odds = prior_odds × e` with prior odds `1/99` (1% prior), then
+/// `posterior = odds / (1 + odds)`. Pure integer arithmetic; deterministic.
+#[must_use]
+pub fn run_posterior_malice_bp(e_value_ppm: u64) -> u16 {
+    let odds_ppm = u128::from(e_value_ppm) / 99;
+    let numerator = odds_ppm.saturating_mul(u128::from(PROBABILITY_SCALE_BP));
+    let denominator = odds_ppm.saturating_add(1_000_000);
+    u16::try_from(numerator / denominator)
+        .unwrap_or(PROBABILITY_SCALE_BP)
+        .min(PROBABILITY_SCALE_BP)
+}
+
+/// The per-run Bayesian Runtime Sentinel report surfaced under
+/// `dispatch.sentinel` in `run --json`.
+///
+/// Everything here is re-derivable by a verifier from the signed host-effect
+/// ledger alone: the observation is canonical (FN-SENTINEL-001), each
+/// e-process update is fixed-point (FN-SENTINEL-002), the expected-loss
+/// decision is deterministic (FN-SENTINEL-007), and an escalation carries an
+/// Ed25519-signed evidence entry embedding the e-value (FN-SENTINEL-008)
+/// verifiable against `escalation_verifying_key_hex`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSentinelReport {
+    pub schema_version: String,
+    pub trace_id: String,
+    /// The run subject the observation is keyed by (the run target).
+    pub subject_id: String,
+    /// The canonical observation ingested for this run (FN-SENTINEL-001).
+    pub observation: RuntimeSentinelObservation,
+    /// Content address of the canonical observation bytes.
+    pub observation_hash: String,
+    /// Chained digest over the run's observation log.
+    pub observation_log_digest: String,
+    /// One fixed-point update per evidence item, in order (FN-SENTINEL-002).
+    pub e_process_updates: Vec<EProcessUpdate>,
+    /// Final anytime-valid e-value after all evidence, scaled by 1e6.
+    pub e_value_ppm: u64,
+    /// Ville false-alarm bound implied by the final e-value, in ppm.
+    pub false_alarm_bound_ppm: u64,
+    /// Posterior malice probability under the run prior, in basis points.
+    pub posterior_malice_bp: u16,
+    /// The alpha the escalation test used ([`SENTINEL_RUN_ALPHA_PPM`]).
+    pub alpha_ppm: u64,
+    /// True iff the false-alarm bound fell to/below alpha AND the selected
+    /// expected-loss action is above `Allow`.
+    pub escalated: bool,
+    /// Expected-loss containment decision (FN-SENTINEL-007). `None` only when
+    /// the run produced zero host effects (no evidence to decide on).
+    pub decision: Option<SentinelActionDecision>,
+    /// Signed escalation evidence entry (FN-SENTINEL-008); present iff
+    /// `escalated`. The payload embeds the full decision including e-value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_receipt: Option<EvidenceEntry>,
+    /// Hex Ed25519 verifying key for `escalation_receipt` (ephemeral run key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_verifying_key_hex: Option<String>,
+}
+
+/// Feed the Runtime Sentinel from a run's signed host-effect ledger entries
+/// and produce the per-run report.
+///
+/// The caller (the run dispatcher) owns the clock discipline and supplies the
+/// observation timestamp, decision time, and the ephemeral run signing key.
+/// Epoch is pinned to 0: the run path carries no control epoch.
+///
+/// # Errors
+/// Returns [`RunSentinelFeedError`] if observation ingestion, an e-process
+/// update, or the expected-loss decision fails validation.
+#[allow(clippy::too_many_arguments)]
+pub fn run_sentinel_report_from_ledger(
+    trace_id: &str,
+    subject_id: &str,
+    observed_at_rfc3339: &str,
+    decision_time_rfc3339: &str,
+    timestamp_ms: u64,
+    entries: &[EffectReceiptChainEntry],
+    signing_key: &SigningKey,
+) -> Result<RunSentinelReport, RunSentinelFeedError> {
+    let mut observation = RuntimeSentinelObservation::new(subject_id, 0, 0, observed_at_rfc3339);
+    let mut evidence_stream: Vec<(String, u64, String)> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let derived = sentinel_signal_for_effect_entry(entry)?;
+        let signal_id = format!(
+            "{}:{}",
+            derived.signal.kind.as_str(),
+            entry.receipt.effect_kind.label()
+        );
+        evidence_stream.push((
+            signal_id,
+            derived.likelihood_ratio_ppm,
+            entry.chain_hash.clone(),
+        ));
+        observation.push_signal(derived.signal)?;
+    }
+
+    // FN-SENTINEL-001: canonical observation accepted into the replay log.
+    let mut log = SentinelObservationLog::new();
+    log.ingest(observation.clone())?;
+    let observation_hash = observation.observation_hash()?;
+    let observation_log_digest = log.digest()?;
+
+    // FN-SENTINEL-002: one fixed-point e-process update per evidence item.
+    let mut e_process = RuntimeSentinelEProcess::new();
+    let mut e_process_updates = Vec::with_capacity(evidence_stream.len());
+    for (index, (signal_id, likelihood_ratio_ppm, effect_chain_hash)) in
+        evidence_stream.into_iter().enumerate()
+    {
+        let sequence = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+        let mut metadata = BTreeMap::new();
+        metadata.insert("effect_chain_hash".to_string(), effect_chain_hash);
+        let evidence = LikelihoodRatioEvidence::new(signal_id, sequence, likelihood_ratio_ppm)
+            .with_metadata(metadata);
+        e_process_updates.push(e_process.observe(&evidence)?);
+    }
+
+    let e_value_ppm = e_process.e_value_ppm;
+    let false_alarm_bound_ppm = e_process.false_alarm_bound_ppm();
+    let posterior_malice_bp = run_posterior_malice_bp(e_value_ppm);
+
+    // FN-SENTINEL-007: deterministic expected-loss containment decision.
+    let decision = if e_process.evidence_count == 0 {
+        None
+    } else {
+        let input = SentinelDecisionInput::new(
+            subject_id,
+            trace_id,
+            0,
+            posterior_malice_bp,
+            e_value_ppm,
+            false_alarm_bound_ppm,
+            e_process.evidence_count,
+            observation_hash.clone(),
+            observation_log_digest.clone(),
+        );
+        Some(SentinelExpectedLossPolicy::default().decide(input, None)?)
+    };
+
+    let escalated = e_process.should_escalate(SENTINEL_RUN_ALPHA_PPM)
+        && decision
+            .as_ref()
+            .is_some_and(|d| d.selected_action > SentinelContainmentAction::Allow);
+
+    // FN-SENTINEL-008: sign the escalation as an evidence-ledger entry.
+    let (escalation_receipt, escalation_verifying_key_hex) = if escalated {
+        let signed = decision
+            .as_ref()
+            .expect("escalated implies a decision is present")
+            .to_signed_evidence_entry(decision_time_rfc3339, timestamp_ms, signing_key)?;
+        (
+            Some(signed),
+            Some(hex::encode(signing_key.verifying_key().to_bytes())),
+        )
+    } else {
+        (None, None)
+    };
+
+    Ok(RunSentinelReport {
+        schema_version: RUN_SENTINEL_REPORT_SCHEMA_VERSION.to_string(),
+        trace_id: trace_id.to_string(),
+        subject_id: subject_id.to_string(),
+        observation,
+        observation_hash,
+        observation_log_digest,
+        e_process_updates,
+        e_value_ppm,
+        false_alarm_bound_ppm,
+        posterior_malice_bp,
+        alpha_ppm: SENTINEL_RUN_ALPHA_PPM,
+        escalated,
+        decision,
+        escalation_receipt,
+        escalation_verifying_key_hex,
+    })
+}
+
+/// Strip control characters (canonical-framing hazard) and bound the length
+/// of an untrusted denial-reason string before embedding it in a signal.
+fn sanitize_detail(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_DENIAL_REASON_CHARS)
+        .collect()
+}
+
 /// Reject control / null characters that would make canonical framing ambiguous.
 fn reject_control_chars(field: &'static str, value: &str) -> Result<(), SentinelObservationError> {
     if value.chars().any(|c| c.is_control()) {
@@ -1350,5 +1711,277 @@ mod tests {
         reverse.ingest(obs1).unwrap();
 
         assert_eq!(forward.digest().unwrap(), reverse.digest().unwrap());
+    }
+
+    // ── bd-bg2hy: live-run sentinel feed ────────────────────────────────
+
+    mod run_feed {
+        use super::super::*;
+        use crate::observability::evidence_ledger::verify_evidence_entry;
+        use crate::runtime::effect_receipt::{
+            EFFECT_RECEIPT_EMPTY_LINEAGE_HASH, EffectKind, EffectLineageFields, EffectReceipt,
+            EffectReceiptChain, EffectReceiptChainEntry, FlowPolicyVerdict,
+        };
+        use crate::security::lineage_tracker::secret_file_label_set_commitment;
+        use crate::storage::cas::content_hash;
+
+        const TRACE: &str = "trace-bd-bg2hy";
+        const OBSERVED_AT: &str = "2026-07-11T00:00:00Z";
+
+        fn run_key() -> SigningKey {
+            SigningKey::from_bytes(&[42_u8; 32])
+        }
+
+        fn chain_entries(receipts: Vec<EffectReceipt>) -> Vec<EffectReceiptChainEntry> {
+            let mut chain = EffectReceiptChain::new();
+            for receipt in receipts {
+                chain.append(receipt).expect("append receipt");
+            }
+            chain.entries().to_vec()
+        }
+
+        fn allowed_clean(seq: u64, kind: EffectKind) -> EffectReceipt {
+            EffectReceipt::allowed(
+                seq,
+                TRACE,
+                kind,
+                "host-io:cap",
+                content_hash(b"pre"),
+                content_hash(b"args"),
+                content_hash(b"out"),
+                content_hash(b"out"),
+                1,
+            )
+        }
+
+        fn secret_lineage_allowed() -> EffectLineageFields {
+            EffectLineageFields {
+                input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                output_lineage_hash: Some(EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string()),
+                label_set_commitment: secret_file_label_set_commitment(),
+                declassification_ref: None,
+                flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+            }
+        }
+
+        fn allowed_secret(seq: u64, kind: EffectKind) -> EffectReceipt {
+            EffectReceipt::allowed_with_lineage(
+                seq,
+                TRACE,
+                kind,
+                "host-io:cap",
+                content_hash(b"secret"),
+                content_hash(b"args"),
+                content_hash(b"out"),
+                content_hash(b"out"),
+                1,
+                secret_lineage_allowed(),
+            )
+        }
+
+        fn denied_clean(seq: u64, kind: EffectKind) -> EffectReceipt {
+            EffectReceipt::denied_with_lineage(
+                seq,
+                TRACE,
+                kind,
+                "capability denied",
+                content_hash(b"in"),
+                content_hash(b"args"),
+                1,
+                EffectLineageFields::label_clean_denied(),
+            )
+        }
+
+        fn denied_blocked_secret(seq: u64, kind: EffectKind) -> EffectReceipt {
+            EffectReceipt::denied_with_lineage(
+                seq,
+                TRACE,
+                kind,
+                "flow gate: secret-labeled egress refused",
+                content_hash(b"secret"),
+                content_hash(b"args"),
+                1,
+                EffectLineageFields::blocked(
+                    EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                    secret_file_label_set_commitment(),
+                ),
+            )
+        }
+
+        fn feed(entries: &[EffectReceiptChainEntry]) -> RunSentinelReport {
+            run_sentinel_report_from_ledger(
+                TRACE,
+                "app/index.js",
+                OBSERVED_AT,
+                OBSERVED_AT,
+                1,
+                entries,
+                &run_key(),
+            )
+            .expect("run sentinel feed")
+        }
+
+        #[test]
+        fn clean_ledger_selects_allow_without_escalation() {
+            let entries = chain_entries(vec![
+                allowed_clean(0, EffectKind::FsWrite),
+                allowed_clean(1, EffectKind::FsRead),
+                allowed_clean(2, EffectKind::HttpRequest),
+            ]);
+            let report = feed(&entries);
+
+            assert_eq!(report.e_value_ppm, 1_000_000, "clean evidence is neutral");
+            assert_eq!(report.e_process_updates.len(), 3);
+            assert_eq!(report.posterior_malice_bp, 99, "prior is preserved");
+            let decision = report.decision.expect("decision present");
+            assert_eq!(decision.selected_action, SentinelContainmentAction::Allow);
+            assert!(!report.escalated);
+            assert!(report.escalation_receipt.is_none());
+            assert_eq!(report.observation.signals.len(), 3);
+        }
+
+        #[test]
+        fn single_plain_denial_stays_allow_below_alpha() {
+            let entries = chain_entries(vec![
+                allowed_clean(0, EffectKind::FsRead),
+                denied_clean(1, EffectKind::FsWrite),
+            ]);
+            let report = feed(&entries);
+
+            assert_eq!(report.e_value_ppm, 3_000_000);
+            assert!(report.false_alarm_bound_ppm > SENTINEL_RUN_ALPHA_PPM);
+            assert_eq!(
+                report.decision.expect("decision").selected_action,
+                SentinelContainmentAction::Allow
+            );
+            assert!(!report.escalated);
+        }
+
+        #[test]
+        fn blocked_secret_egress_escalates_to_quarantine_with_signed_receipt() {
+            let entries = chain_entries(vec![
+                allowed_secret(0, EffectKind::FsRead),
+                denied_blocked_secret(1, EffectKind::HttpRequest),
+            ]);
+            let report = feed(&entries);
+
+            // 1.5 × 500 = 750: bound 1334 ppm ≤ alpha, posterior past Quarantine.
+            assert_eq!(report.e_value_ppm, 750_000_000);
+            assert!(report.false_alarm_bound_ppm <= SENTINEL_RUN_ALPHA_PPM);
+            assert_eq!(report.posterior_malice_bp, 8833);
+            let decision = report.decision.as_ref().expect("decision");
+            assert_eq!(
+                decision.selected_action,
+                SentinelContainmentAction::Quarantine
+            );
+            assert!(report.escalated);
+
+            let receipt = report.escalation_receipt.as_ref().expect("signed receipt");
+            verify_evidence_entry(receipt, &run_key().verifying_key())
+                .expect("escalation receipt signature verifies");
+            assert_eq!(
+                receipt.payload["event_code"],
+                FN_SENTINEL_ESCALATION_RECEIPT_SIGNED
+            );
+            assert_eq!(
+                receipt.payload["decision"]["e_value_ppm"],
+                serde_json::json!(750_000_000_u64),
+                "escalation receipt carries the e-value"
+            );
+            assert_eq!(
+                report.escalation_verifying_key_hex.as_deref(),
+                Some(hex::encode(run_key().verifying_key().to_bytes()).as_str())
+            );
+        }
+
+        #[test]
+        fn allowed_secret_sink_is_detected_as_exfil_evidence() {
+            let entries = chain_entries(vec![
+                allowed_secret(0, EffectKind::FsRead),
+                allowed_secret(1, EffectKind::HttpRequest),
+            ]);
+            let report = feed(&entries);
+
+            assert_eq!(report.e_value_ppm, 750_000_000);
+            assert!(report.escalated, "detection at an allowed sink escalates");
+            assert_eq!(
+                report.decision.expect("decision").selected_action,
+                SentinelContainmentAction::Quarantine
+            );
+        }
+
+        #[test]
+        fn empty_ledger_produces_report_without_decision() {
+            let report = feed(&[]);
+            assert_eq!(report.e_value_ppm, 1_000_000);
+            assert!(report.decision.is_none());
+            assert!(!report.escalated);
+            assert!(report.escalation_receipt.is_none());
+        }
+
+        #[test]
+        fn feed_is_deterministic_across_calls() {
+            let entries = chain_entries(vec![
+                allowed_secret(0, EffectKind::FsRead),
+                denied_blocked_secret(1, EffectKind::HttpRequest),
+            ]);
+            let a = serde_json::to_string(&feed(&entries)).unwrap();
+            let b = serde_json::to_string(&feed(&entries)).unwrap();
+            assert_eq!(a, b);
+        }
+
+        #[test]
+        fn classification_matrix_matches_lineage_and_outcome() {
+            let entries = chain_entries(vec![
+                allowed_clean(0, EffectKind::FsRead),
+                allowed_secret(1, EffectKind::FsRead),
+                allowed_secret(2, EffectKind::FsWrite),
+                denied_clean(3, EffectKind::HttpRequest),
+                denied_blocked_secret(4, EffectKind::HttpRequest),
+            ]);
+            let classified: Vec<(SentinelSignalKind, u64)> = entries
+                .iter()
+                .map(|entry| {
+                    let derived = sentinel_signal_for_effect_entry(entry).unwrap();
+                    (derived.signal.kind, derived.likelihood_ratio_ppm)
+                })
+                .collect();
+            assert_eq!(
+                classified,
+                vec![
+                    (
+                        SentinelSignalKind::CapabilityInvocation,
+                        LR_ALLOWED_CLEAN_PPM
+                    ),
+                    (
+                        SentinelSignalKind::CapabilityInvocation,
+                        LR_SENSITIVE_SOURCE_READ_PPM
+                    ),
+                    (
+                        SentinelSignalKind::EffectReceiptAnomaly,
+                        LR_SECRET_EXFIL_PPM
+                    ),
+                    (SentinelSignalKind::PolicyViolation, LR_POLICY_DENIAL_PPM),
+                    (
+                        SentinelSignalKind::EffectReceiptAnomaly,
+                        LR_SECRET_EXFIL_PPM
+                    ),
+                ]
+            );
+        }
+
+        #[test]
+        fn posterior_mapping_is_monotone_and_bounded() {
+            assert_eq!(run_posterior_malice_bp(0), 0);
+            assert_eq!(run_posterior_malice_bp(1_000_000), 99);
+            assert_eq!(run_posterior_malice_bp(750_000_000), 8833);
+            assert_eq!(run_posterior_malice_bp(u64::MAX), 9999);
+            let mut prev = 0_u16;
+            for e in [0_u64, 500_000, 1_000_000, 3_000_000, 750_000_000, u64::MAX] {
+                let p = run_posterior_malice_bp(e);
+                assert!(p >= prev);
+                prev = p;
+            }
+        }
     }
 }

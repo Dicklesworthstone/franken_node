@@ -101,7 +101,7 @@ mod frozen_canonical_byte_layout_golden_tests {
         );
 
         // Pin expected count - this will fail first time, showing the actual count
-        let expected_count = 133; // Update this when adding schemas
+        let expected_count = 137; // Update this when adding schemas
         if entry_count != expected_count {
             panic!(
                 "Schema registry has {} entries, expected {}. \
@@ -122,8 +122,11 @@ mod frozen_canonical_byte_layout_golden_tests {
         );
 
         // Golden hash baseline - any change indicates schema registry modification
+        // (re-blessed for bd-bg2hy: +run_sentinel_report AND folding in three
+        // prior unblessed registry additions — the pinned 133 had silently
+        // drifted from the real 136 before this bead; now 137)
         let expected_hash =
-            "sha256:39695e607c783fb47c77c3abd116d151be817abde91759211362bd3a75ec363f";
+            "sha256:ce056c7a2aaa12e682ddf7c81dcca4ae1e52c5521b04ed06722209d7565e58c7";
         assert_eq!(
             count_hash, expected_hash,
             "Schema registry entry count hash changed - this indicates API surface modification.\
@@ -272,8 +275,10 @@ mod frozen_canonical_byte_layout_golden_tests {
         );
 
         // Golden hash baseline - any change indicates schema registry structure modification
+        // (re-blessed for bd-bg2hy: +run_sentinel_report + three prior
+        // unblessed additions; see the entry-count golden above)
         let expected_hash =
-            "sha256:c2bf06316f4a5e05b9610b6fb69362430befef6328266f47acaa5a123184dbc7";
+            "sha256:502de87979e6cddb61cf400cead6b9bb55a15aeee915c0876bfabf62620dac98";
         assert_eq!(
             structure_hash, expected_hash,
             "Schema registry structure hash changed - this indicates schema modification (add/remove/rename).\

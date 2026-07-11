@@ -118,6 +118,17 @@ pub struct RunDispatchReport {
     /// external-runtime fallbacks). Auto-surfaced in `run --json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_effect_ledger: Option<HostEffectLedger>,
+    /// bd-bg2hy: the Bayesian Runtime Sentinel's per-run report — observation
+    /// ingest (FN-SENTINEL-001), fixed-point e-process updates
+    /// (FN-SENTINEL-002), the expected-loss containment decision
+    /// (FN-SENTINEL-007), and, when the anytime-valid false-alarm bound falls
+    /// below alpha with a non-`Allow` action, a signed escalation receipt
+    /// carrying the e-value (FN-SENTINEL-008). Derived deterministically from
+    /// `host_effect_ledger`; `None` when the ledger is `None` (non-native
+    /// runs) or, fail-open for the report only, when the feed itself errors
+    /// (surfaced as a warning, never fabricated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sentinel: Option<crate::policy::runtime_sentinel::RunSentinelReport>,
 }
 
 /// bd-5r99w.12: the trust-native effect ledger surfaced by `franken-node run`.
@@ -1597,6 +1608,48 @@ impl EngineDispatcher {
         let exit_code = inputs.output.status.code();
         let terminated_by_signal = exit_code.is_none();
 
+        // bd-bg2hy: feed the Bayesian Runtime Sentinel from the signed host-
+        // effect ledger. The feed is a pure function of the ledger entries
+        // (plus the run clock this module owns), so the report is re-derivable
+        // by a verifier from the ledger alone. The escalation receipt is
+        // signed with an ephemeral run key whose verifying key is surfaced in
+        // the report. A feed failure is surfaced as a warning and an absent
+        // report — never a fabricated one.
+        let sentinel = inputs.host_effect_ledger.as_ref().and_then(|ledger| {
+            let run_signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+            match crate::policy::runtime_sentinel::run_sentinel_report_from_ledger(
+                &ledger.trace_id,
+                &inputs.target.display().to_string(),
+                &inputs.started_at.to_rfc3339(),
+                &finished_at.to_rfc3339(),
+                u64::try_from(finished_at.timestamp_millis()).unwrap_or(0),
+                &ledger.entries,
+                &run_signing_key,
+            ) {
+                Ok(report) => {
+                    tracing::info!(
+                        e_value_ppm = report.e_value_ppm,
+                        false_alarm_bound_ppm = report.false_alarm_bound_ppm,
+                        posterior_malice_bp = report.posterior_malice_bp,
+                        escalated = report.escalated,
+                        selected_action = report
+                            .decision
+                            .as_ref()
+                            .map_or("none", |d| d.selected_action.as_str()),
+                        "Runtime Sentinel fed from host-effect ledger"
+                    );
+                    Some(report)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "Runtime Sentinel feed failed; omitting sentinel report"
+                    );
+                    None
+                }
+            }
+        });
+
         RunDispatchReport {
             runtime: inputs.runtime.to_string(),
             runtime_path: inputs.runtime_path.display().to_string(),
@@ -1611,6 +1664,7 @@ impl EngineDispatcher {
             telemetry: inputs.telemetry,
             captured_output: captured_output_from(inputs.output),
             host_effect_ledger: inputs.host_effect_ledger,
+            sentinel,
         }
     }
 
@@ -4875,6 +4929,7 @@ mod tests {
                     telemetry: report_inputs.telemetry.clone(),
                     captured_output: captured,
                     host_effect_ledger: report_inputs.host_effect_ledger.clone(),
+                    sentinel: None,
                 };
 
                 // Test report serialization safety
@@ -5481,6 +5536,7 @@ mod tests {
                         stderr: "test stderr".to_string(),
                     },
                     host_effect_ledger: None,
+                    sentinel: None,
                 };
 
                 // Test dispatch report serialization with poisoned telemetry

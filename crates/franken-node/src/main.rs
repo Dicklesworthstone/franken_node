@@ -9277,6 +9277,18 @@ fn emit_run_completion_output(
     {
         println!("{}", render_host_effect_ledger_human(ledger));
     }
+    // bd-bg2hy: surface the Runtime Sentinel verdict in human output.
+    if let Some(sentinel) = dispatch.sentinel.as_ref()
+        && let Some(decision) = sentinel.decision.as_ref()
+    {
+        println!(
+            "runtime sentinel: action={} posterior_malice_bp={} e_value_ppm={} escalated={}",
+            decision.selected_action.as_str(),
+            sentinel.posterior_malice_bp,
+            sentinel.e_value_ppm,
+            sentinel.escalated,
+        );
+    }
     Ok(())
 }
 
@@ -11614,6 +11626,114 @@ fn render_run_structured_logs_jsonl(
                 lines.push_str(&serde_json::to_string(&flow_line)?);
                 lines.push('\n');
             }
+        }
+    }
+
+    // bd-bg2hy: mirror the Runtime Sentinel's per-run feed as its registered
+    // TNR events so SIEM filters can pin sentinel activity without parsing the
+    // `--json` report. The report under `dispatch.sentinel` stays the
+    // authority; these lines follow its derivation order: observation ingest
+    // (FN-SENTINEL-001) → one e-process update per evidence item
+    // (FN-SENTINEL-002) → expected-loss selection (FN-SENTINEL-007) → signed
+    // escalation receipt when the run escalated (FN-SENTINEL-008).
+    if let Some(sentinel) = dispatch.sentinel.as_ref() {
+        use crate::policy::bayesian_diagnostics::{
+            FN_SENTINEL_E_PROCESS_UPDATED, FN_SENTINEL_OBSERVATION_INGESTED,
+        };
+        use frankenengine_node::policy::runtime_sentinel::{
+            FN_SENTINEL_ESCALATION_RECEIPT_SIGNED, FN_SENTINEL_EXPECTED_LOSS_SELECTED,
+        };
+
+        let observation_line = run_structured_log_line_with_details(
+            &now,
+            FN_SENTINEL_OBSERVATION_INGESTED,
+            &format!(
+                "sentinel observation ingested: signals={} subject={}",
+                sentinel.observation.signals.len(),
+                sentinel.subject_id
+            ),
+            trace_id,
+            "sentinel",
+            Some(serde_json::json!({
+                "subject_id": sentinel.subject_id,
+                "signal_count": sentinel.observation.signals.len(),
+                "observation_hash": sentinel.observation_hash,
+                "observation_log_digest": sentinel.observation_log_digest,
+            })),
+        );
+        lines.push_str(&serde_json::to_string(&observation_line)?);
+        lines.push('\n');
+
+        for update in &sentinel.e_process_updates {
+            let update_line = run_structured_log_line_with_details(
+                &now,
+                FN_SENTINEL_E_PROCESS_UPDATED,
+                &format!(
+                    "sentinel e-process updated: sequence={} signal={} e_value_ppm={}",
+                    update.sequence, update.signal_id, update.posterior_e_value_ppm
+                ),
+                trace_id,
+                "sentinel",
+                Some(serde_json::json!({
+                    "sequence": update.sequence,
+                    "signal_id": update.signal_id,
+                    "likelihood_ratio_ppm": update.likelihood_ratio_ppm,
+                    "prior_e_value_ppm": update.prior_e_value_ppm,
+                    "posterior_e_value_ppm": update.posterior_e_value_ppm,
+                    "false_alarm_bound_ppm": update.false_alarm_bound_ppm,
+                })),
+            );
+            lines.push_str(&serde_json::to_string(&update_line)?);
+            lines.push('\n');
+        }
+
+        if let Some(decision) = sentinel.decision.as_ref() {
+            let decision_line = run_structured_log_line_with_details(
+                &now,
+                FN_SENTINEL_EXPECTED_LOSS_SELECTED,
+                &format!(
+                    "sentinel expected-loss action selected: action={} posterior_malice_bp={} e_value_ppm={}",
+                    decision.selected_action.as_str(),
+                    decision.posterior_malice_bp,
+                    decision.e_value_ppm
+                ),
+                trace_id,
+                "sentinel",
+                Some(serde_json::json!({
+                    "decision_id": decision.decision_id,
+                    "selected_action": decision.selected_action.as_str(),
+                    "raw_selected_action": decision.raw_selected_action.as_str(),
+                    "guardrail_applied": decision.guardrail_applied,
+                    "posterior_malice_bp": decision.posterior_malice_bp,
+                    "e_value_ppm": decision.e_value_ppm,
+                    "false_alarm_bound_ppm": decision.false_alarm_bound_ppm,
+                    "alpha_ppm": sentinel.alpha_ppm,
+                    "escalated": sentinel.escalated,
+                })),
+            );
+            lines.push_str(&serde_json::to_string(&decision_line)?);
+            lines.push('\n');
+        }
+
+        if let Some(receipt_entry) = sentinel.escalation_receipt.as_ref() {
+            let escalation_line = run_structured_log_line_with_details(
+                &now,
+                FN_SENTINEL_ESCALATION_RECEIPT_SIGNED,
+                &format!(
+                    "sentinel escalation receipt signed: decision={} e_value_ppm={}",
+                    receipt_entry.decision_id, sentinel.e_value_ppm
+                ),
+                trace_id,
+                "sentinel",
+                Some(serde_json::json!({
+                    "decision_id": receipt_entry.decision_id,
+                    "e_value_ppm": sentinel.e_value_ppm,
+                    "false_alarm_bound_ppm": sentinel.false_alarm_bound_ppm,
+                    "verifying_key_hex": sentinel.escalation_verifying_key_hex,
+                })),
+            );
+            lines.push_str(&serde_json::to_string(&escalation_line)?);
+            lines.push('\n');
         }
     }
 
@@ -28270,6 +28390,7 @@ mod run_trust_gate_tests {
                 stderr: String::new(),
             },
             host_effect_ledger: None,
+            sentinel: None,
         }
     }
 

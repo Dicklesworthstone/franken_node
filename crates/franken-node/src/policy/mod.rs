@@ -1,20 +1,42 @@
+// bd-bg2hy: the Bayesian Runtime Sentinel family (`runtime_sentinel`,
+// `bayesian_diagnostics`, and the `HardeningLevel` half of
+// `hardening_state_machine`) is compiled unconditionally because the
+// default-feature `run` path feeds it per live run. Every other policy
+// submodule stays behind `policy-engine`, mirroring the selective-gating
+// idiom already used inside `hardening_state_machine.rs`.
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod approval_workflow;
 pub mod bayesian_diagnostics;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod compat_gates;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod compatibility_gate;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod controller_boundary_checks;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod correctness_envelope;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod decision_engine;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod evidence_emission;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod guardrail_monitor;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod hardening_auto_trigger;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod hardening_clamps;
 pub mod hardening_state_machine;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod integrity_sweep_scheduler;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod object_class_tuning;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod perf_budget_guard;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod policy_explainer;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod resource_admission;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod retroactive_hardening;
 pub mod runtime_sentinel;
 

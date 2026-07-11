@@ -88,6 +88,7 @@ fn run_dispatch_report_json_keeps_receipt_fields_stable() {
             stderr: String::new(),
         },
         host_effect_ledger: None,
+        sentinel: None,
     };
 
     let encoded = serde_json::to_value(&report).unwrap();
@@ -122,6 +123,7 @@ fn run_dispatch_report_json_round_trips_without_format_drift() {
             stderr: "terminated".to_string(),
         },
         host_effect_ledger: None,
+        sentinel: None,
     };
 
     let encoded = serde_json::to_string(&report).unwrap();

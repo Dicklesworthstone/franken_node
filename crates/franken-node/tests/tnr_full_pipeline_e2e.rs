@@ -40,10 +40,16 @@
 //!     detects it, but the runtime does not yet block it — a gate-level
 //!     follow-up), following a secret through in-guest transforms (needs
 //!     engine-side per-datum lineage), and operator declassification input.
-//!   * Bayesian sentinel escalation (`policy::runtime_sentinel` /
-//!     `policy::bayesian_diagnostics` are not fed observations by the
-//!     dispatcher; containment comes from the engine's expected-loss
-//!     selector).
+//!   * Bayesian sentinel escalation IS now fed on the run path (bd-bg2hy):
+//!     the dispatcher derives canonical observations from the signed ledger
+//!     (FN-SENTINEL-001), updates the fixed-point e-process per effect
+//!     (FN-SENTINEL-002), selects an expected-loss action (FN-SENTINEL-007),
+//!     and on a planted-malicious workload signs an escalation receipt
+//!     carrying the e-value (FN-SENTINEL-008) — asserted in both variants
+//!     below. Still open: the sentinel's action is operator-facing evidence
+//!     only; it does not yet drive product-side enforcement (the exit code
+//!     stays with the engine's expected-loss selector, and auto-quarantine
+//!     wiring from a sentinel escalation is a follow-up).
 //!   * FN-EFFECT-002 is emitted per ledger entry on the run path (bd-ihtox)
 //!     and FN-TTR-001/002 on the incident replay path (bd-x8d9t) — both
 //!     pinned by the ordered-event assertions under the pipeline trace id.
@@ -757,13 +763,59 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
         &format!("effects={} kinds={kinds:?}", ledger["effect_count"]),
     );
 
+    // ---- L2.75 SENTINEL (bd-bg2hy): the dispatcher feeds the Bayesian
+    // Runtime Sentinel from the signed ledger. A clean run is neutral
+    // evidence: the anytime-valid e-value stays at 1.0, the expected-loss
+    // action is Allow, and no escalation receipt is signed.
+    let sentinel = &run.report["dispatch"]["sentinel"];
+    assert!(
+        !sentinel.is_null(),
+        "native run must surface the sentinel report"
+    );
+    assert_eq!(
+        sentinel["schema_version"],
+        json!("runtime_sentinel.run_report.v1")
+    );
+    assert_eq!(
+        sentinel["e_value_ppm"],
+        json!(1_000_000),
+        "clean evidence is exactly neutral: {sentinel}"
+    );
+    assert_eq!(sentinel["decision"]["selected_action"], json!("allow"));
+    assert_eq!(sentinel["escalated"], json!(false));
+    assert!(
+        sentinel["escalation_receipt"].is_null(),
+        "no escalation receipt on a clean run"
+    );
+    assert_eq!(
+        sentinel["e_process_updates"]
+            .as_array()
+            .expect("e_process_updates")
+            .len() as u64,
+        ledger["effect_count"].as_u64().expect("effect_count"),
+        "one e-process update per ledger entry"
+    );
+    layer_pass(
+        "L2.75 SENTINEL fed from ledger (clean)",
+        "e_value=1.0, action=allow, escalated=false",
+    );
+
     // ---- L3 LOG: ordered event codes, one trace id across the stream. The
     // host crossings surface as registered FN-EFFECT-002 events (bd-ihtox),
-    // one per ledger entry, between dispatch (RUN-003) and receipt (RUN-004).
+    // one per ledger entry, between dispatch (RUN-003) and receipt (RUN-004);
+    // the sentinel feed surfaces as FN-SENTINEL-001/002/007 (bd-bg2hy).
     let events = structured_events(&run.stderr);
     assert_event_order(
         &events,
-        &["RUN-001", "RUN-003", "FN-EFFECT-002", "RUN-004"],
+        &[
+            "RUN-001",
+            "RUN-003",
+            "FN-EFFECT-002",
+            "FN-SENTINEL-001",
+            "FN-SENTINEL-002",
+            "FN-SENTINEL-007",
+            "RUN-004",
+        ],
         CLEAN_TRACE_ID,
     );
     let effect_events = events
@@ -775,8 +827,21 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
         ledger["effect_count"].as_u64().expect("effect_count"),
         "one FN-EFFECT-002 event per ledger entry"
     );
+    let sentinel_updates = events
+        .iter()
+        .filter(|(code, _)| code == "FN-SENTINEL-002")
+        .count();
+    assert_eq!(
+        sentinel_updates as u64,
+        ledger["effect_count"].as_u64().expect("effect_count"),
+        "one FN-SENTINEL-002 e-process update per ledger entry"
+    );
+    assert!(
+        !events.iter().any(|(code, _)| code == "FN-SENTINEL-008"),
+        "a clean run must not emit an escalation receipt event"
+    );
     layer_pass(
-        "L3 LOG ordered RUN-*/FN-EFFECT-002 events, single trace id",
+        "L3 LOG ordered RUN-*/FN-EFFECT-002/FN-SENTINEL-* events, single trace id",
         &format!("events={} effect_events={effect_events}", events.len()),
     );
 
@@ -803,13 +868,16 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
 
 /// The contained variant: the guest reads a recognized secret file (`.env`)
 /// and attempts to exfiltrate its contents by POSTing them to the
-/// cloud-metadata endpoint. Two layered controls fire: the SSRF egress gate
-/// denies that endpoint BEFORE any socket opens, and the information-flow lane
+/// cloud-metadata endpoint. Three layered controls fire: the SSRF egress gate
+/// denies that endpoint BEFORE any socket opens, the information-flow lane
 /// (bd-plhag) recognizes that the denied egress carries the secret's bytes and
-/// records it as a flow BLOCK. The denial is surfaced in the signed ledger
-/// (not masked by the exit code); the verifier SDK then proves OFFLINE that
-/// the forbidden label was blocked before the sink, and the full downstream
-/// pipeline — replay, counterfactual, LTV — runs over that evidence.
+/// records it as a flow BLOCK, and the Bayesian Runtime Sentinel (bd-bg2hy)
+/// compounds the evidence into a real containment-ladder escalation with a
+/// signed FN-SENTINEL-008 receipt carrying the e-value. The denial is surfaced
+/// in the signed ledger (not masked by the exit code); the verifier SDK then
+/// proves OFFLINE that the forbidden label was blocked before the sink, and
+/// the full downstream pipeline — replay, counterfactual, LTV — runs over
+/// that evidence.
 #[test]
 fn tnr_full_pipeline_denied_exfil_variant_contained() {
     let app = "const fs = require('fs');\n\
@@ -826,12 +894,14 @@ fn tnr_full_pipeline_denied_exfil_variant_contained() {
 
     let run = run_app(workspace.path(), EXFIL_TRACE_ID, "legacy-risky");
 
-    // ---- L1 RUN: denial is containment-neutral (Allow → exit 0); the
-    // fail-closed refusal happens pre-socket and lives in the ledger.
+    // ---- L1 RUN: denial is containment-neutral for the ENGINE verdict
+    // (Allow → exit 0); the fail-closed refusal happens pre-socket and lives
+    // in the ledger. The product-side SENTINEL escalation asserted below is
+    // operator-facing signed evidence, not the exit verdict.
     assert_eq!(
         run.exit_code,
         Some(0),
-        "a single denied effect must not escalate containment; stderr:\n{}",
+        "a single denied effect must not escalate engine containment; stderr:\n{}",
         run.stderr
     );
     layer_pass(
@@ -914,12 +984,84 @@ fn tnr_full_pipeline_denied_exfil_variant_contained() {
         "flow_policy_verdict=blocked, SDK=blocked_before_sink",
     );
 
+    // ---- L2.75 SENTINEL (bd-bg2hy): the planted-malicious workload drives a
+    // REAL escalation. The sensitive `.env` read (likelihood ratio 1.5×) and
+    // the blocked secret egress (500×) compound to an e-value of exactly 750:
+    // the anytime-valid false-alarm bound (1/750 ≈ 0.13%) falls below alpha
+    // (1%) and the expected-loss ladder selects quarantine. The escalation is
+    // a SIGNED evidence entry carrying the e-value, verified OFFLINE here
+    // against the run's surfaced verifying key.
+    let sentinel = &run.report["dispatch"]["sentinel"];
+    assert!(!sentinel.is_null(), "sentinel report must be present");
+    assert_eq!(
+        sentinel["e_value_ppm"],
+        json!(750_000_000_u64),
+        "sensitive read (1.5) × blocked exfil (500) = e 750: {sentinel}"
+    );
+    assert_eq!(sentinel["posterior_malice_bp"], json!(8_833));
+    assert_eq!(
+        sentinel["decision"]["selected_action"],
+        json!("quarantine"),
+        "expected-loss ladder must select quarantine for the exfil run"
+    );
+    assert_eq!(sentinel["escalated"], json!(true));
+    let receipt_entry: frankenengine_node::observability::evidence_ledger::EvidenceEntry =
+        serde_json::from_value(sentinel["escalation_receipt"].clone())
+            .expect("escalation receipt deserializes as an evidence entry");
+    let vk_hex = sentinel["escalation_verifying_key_hex"]
+        .as_str()
+        .expect("escalation verifying key surfaced");
+    let vk_bytes: [u8; 32] = hex::decode(vk_hex)
+        .expect("verifying key hex decodes")
+        .try_into()
+        .expect("verifying key is 32 bytes");
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&vk_bytes).expect("valid Ed25519 key");
+    frankenengine_node::observability::evidence_ledger::verify_evidence_entry(
+        &receipt_entry,
+        &verifying_key,
+    )
+    .expect("escalation receipt signature verifies offline");
+    assert_eq!(
+        receipt_entry.payload["event_code"],
+        json!("FN-SENTINEL-008")
+    );
+    assert_eq!(
+        receipt_entry.payload["decision"]["e_value_ppm"],
+        json!(750_000_000_u64),
+        "the signed escalation receipt carries the e-value"
+    );
+    // The receipt is bound to its SOURCE ledger's trace id (the engine-side
+    // workflow trace, same id the effect receipts carry) — internal
+    // consistency, not the CLI --trace-id. Correlation to the CLI trace id is
+    // the FN-SENTINEL-008 structured-log event asserted below.
+    assert_eq!(
+        ledger["trace_id"],
+        json!(receipt_entry.trace_id),
+        "escalation receipt must be bound to the ledger's workflow trace"
+    );
+    assert_eq!(sentinel["trace_id"], json!(receipt_entry.trace_id));
+    layer_pass(
+        "L2.75 SENTINEL escalation on planted-malicious run",
+        "e_value=750, action=quarantine, FN-SENTINEL-008 receipt verified offline",
+    );
+
     // ---- L3 LOG: same ordered contract, exfil trace id; the denied
-    // crossing surfaces as an FN-EFFECT-002 event too (denial is evidence).
+    // crossing surfaces as an FN-EFFECT-002 event too (denial is evidence),
+    // and the sentinel escalation surfaces as FN-SENTINEL-008.
     let events = structured_events(&run.stderr);
     assert_event_order(
         &events,
-        &["RUN-001", "RUN-003", "FN-EFFECT-002", "RUN-004"],
+        &[
+            "RUN-001",
+            "RUN-003",
+            "FN-EFFECT-002",
+            "FN-SENTINEL-001",
+            "FN-SENTINEL-002",
+            "FN-SENTINEL-007",
+            "FN-SENTINEL-008",
+            "RUN-004",
+        ],
         EXFIL_TRACE_ID,
     );
     let effect_events = events

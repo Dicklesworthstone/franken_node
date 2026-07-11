@@ -1637,7 +1637,9 @@ pub mod operator_json_contracts;
 pub mod ops;
 #[cfg(feature = "advanced-features")]
 pub mod perf;
-#[cfg(feature = "policy-engine")]
+// bd-bg2hy: `policy` is compiled unconditionally so the default-feature run
+// path can feed the Bayesian Runtime Sentinel; heavyweight policy submodules
+// remain gated behind `policy-engine` inside `policy/mod.rs`.
 pub mod policy;
 #[cfg(feature = "admin-tools")]
 pub mod registry;
