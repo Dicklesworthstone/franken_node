@@ -4,6 +4,7 @@ pub mod closed_bead_compliance;
 pub mod doctor;
 pub mod engine_dispatcher;
 pub mod evidence_index;
+pub mod flow_gated_host_io;
 #[cfg(feature = "admin-tools")]
 pub mod mitigation_synthesis;
 pub mod operator_transcripts;

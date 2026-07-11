@@ -2274,13 +2274,22 @@ impl EngineDispatcher {
                 let gated = SsrfGatedHostIo::from_network_policy(
                     provider,
                     &config.security.network_policy,
-                    run_egress_trace,
+                    run_egress_trace.clone(),
                 );
-                orchestrator.set_host_io(Arc::new(gated), Some(recorder));
+                // bd-n1bym: wrap the SSRF (endpoint) gate with the information-
+                // flow (data) gate so a secret-carrying network egress is refused
+                // BEFORE endpoint evaluation. This turns the ledger's post-hoc
+                // exfil DETECTION (bd-plhag) into PREVENTION even for an egress
+                // to an SSRF-allowed endpoint: a guest that reads a secret file
+                // and POSTs it out is denied pre-socket, and the denial is
+                // recorded as a flow block in the signed host-effect ledger.
+                let flow_gated =
+                    crate::ops::flow_gated_host_io::FlowGatedHostIo::new(gated, run_egress_trace);
+                orchestrator.set_host_io(Arc::new(flow_gated), Some(recorder));
                 tracing::info!(
                     execution_mode = "native",
                     sandbox_root = %sandbox_root.display(),
-                    "Installed SSRF-gated sandboxed host-I/O provider for effect ledger"
+                    "Installed flow-gated + SSRF-gated sandboxed host-I/O provider for effect ledger"
                 );
             }
             Err(err) => {

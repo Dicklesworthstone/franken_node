@@ -961,35 +961,30 @@ fn run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag() {
     );
 }
 
-/// bd-plhag (detection at an allowed sink): the same secret read, but the
-/// guest POSTs it to an operator-allowlisted loopback endpoint that the SSRF
-/// gate PERMITS. The runtime does not block it (byte-level prevention at an
-/// allowed sink is a gate-level follow-up), so the ledger honestly records an
-/// ALLOWED egress that carries the secret label with a label-clean verdict.
-/// The verifier SDK then DETECTS the exfiltration — the non-exfiltration claim
-/// fails closed — proving the ledger is faithful evidence even when the
-/// endpoint gate did not catch the leak.
+/// bd-n1bym (PREVENTION at an allowed sink): the same secret read, but the
+/// guest POSTs it to an operator-allowlisted loopback endpoint the SSRF gate
+/// PERMITS. The information-flow gate — wrapped OUTSIDE the SSRF gate — refuses
+/// the egress before any socket opens because its bytes carry the secret this
+/// run read. The leak never physically happens: the loopback listener receives
+/// no connection, the ledger records a DENIED flow-blocked egress, and the
+/// verifier SDK proves "blocked_before_sink". (Under bd-plhag alone this same
+/// scenario leaked and was only DETECTED after the fact; bd-n1bym converts the
+/// detection into prevention.)
 #[test]
 #[cfg(feature = "engine")]
-fn run_detects_secret_egress_to_allowed_sink_bd_plhag() {
+fn run_blocks_secret_egress_to_allowed_sink_bd_n1bym() {
     use frankenengine_node::security::lineage_tracker::secret_file_label_set_commitment;
-    use std::io::{Read, Write};
+    use std::io::ErrorKind;
     use std::net::TcpListener;
 
-    // A loopback sink that accepts the POST and reads it to EOF, then replies.
+    // A loopback sink at an allowlisted address. The flow gate denies pre-socket,
+    // so NOTHING should ever connect — the listener is non-blocking and we assert
+    // no connection arrived (the physical proof the secret never left).
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    listener
+        .set_nonblocking(true)
+        .expect("non-blocking listener");
     let addr = listener.local_addr().expect("listener addr");
-    let server = std::thread::spawn(move || {
-        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("read timeout");
-        let mut received = Vec::new();
-        let _ = stream.read_to_end(&mut received);
-        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
-        let _ = stream.flush();
-        received
-    });
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     std::fs::write(
@@ -1017,7 +1012,8 @@ fn run_detects_secret_egress_to_allowed_sink_bd_plhag() {
         .push(NetworkAllowlistEntry {
             host: "127.0.0.1".to_string(),
             port: None,
-            reason: "bd-plhag e2e: permit the loopback sink so SSRF allows it".to_string(),
+            reason: "bd-n1bym e2e: SSRF allows loopback; the flow gate must still block"
+                .to_string(),
         });
 
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
@@ -1025,15 +1021,15 @@ fn run_detects_secret_egress_to_allowed_sink_bd_plhag() {
     let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
     let report = dispatcher
         .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
-        .expect("native run with an allowlisted secret egress should complete");
+        .expect("native run with a flow-blocked secret egress should still complete");
 
-    // The secret bytes really reached the sink (the leak physically happened).
-    let received = server.join().expect("server thread");
-    let wire = String::from_utf8_lossy(&received);
-    assert!(
-        wire.contains("plhag-flow-e2e-do-not-exfiltrate"),
-        "the loopback sink must observe the exfiltrated secret in the POST body, got {wire:?}"
-    );
+    // Physical proof the secret never left: no connection reached the sink.
+    match listener.accept() {
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+        other => {
+            panic!("the flow gate must prevent the egress; the sink saw a connection: {other:?}")
+        }
+    }
 
     let ledger = report
         .host_effect_ledger
@@ -1048,21 +1044,23 @@ fn run_detects_secret_egress_to_allowed_sink_bd_plhag() {
     assert!(
         matches!(
             egress.receipt.policy_outcome,
-            frankenengine_node::runtime::effect_receipt::PolicyOutcome::Allowed { .. }
+            frankenengine_node::runtime::effect_receipt::PolicyOutcome::Denied { .. }
         ),
-        "the allowlisted loopback endpoint must be SSRF-allowed"
+        "the flow gate must DENY the secret egress even though SSRF allows the endpoint"
     );
-    // Honest: the runtime did NOT block it; the ledger records a label-clean
-    // allowed egress that nonetheless carries the secret commitment.
-    assert_eq!(egress.receipt.flow_policy_verdict.label(), "label_clean");
+    assert_eq!(
+        egress.receipt.flow_policy_verdict.label(),
+        "blocked",
+        "the prevented secret egress is a flow block"
+    );
     assert_eq!(egress.receipt.label_set_commitment, secret_commitment);
+    assert!(ledger.denied_count >= 1);
 
-    // The verifier SDK DETECTS the exfiltration: a forbidden label reached the
-    // disclosed sink without a block or declassification → claim fails closed.
+    // The verifier SDK proves OFFLINE that the secret was blocked before the sink.
     let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
     let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
         serde_json::from_str(&entries_json).expect("verifier SDK accepts the ledger wire shape");
-    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-plhag-detect");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-n1bym-prevent");
     let chain = sdk
         .verify_effect_chain_entries(&sdk_entries)
         .expect("verifier SDK re-derives the effect chain offline");
@@ -1071,11 +1069,15 @@ fn run_detects_secret_egress_to_allowed_sink_bd_plhag() {
         external_sink_effect_kinds: vec!["http_request".to_string()],
         allowed_declassification_refs: vec![],
     };
-    let verdict =
-        frankenengine_verifier_sdk::bundle::verify_non_exfiltration_claim_in_report(&chain, &claim);
+    let non_exfil =
+        frankenengine_verifier_sdk::bundle::verify_non_exfiltration_claim_in_report(&chain, &claim)
+            .expect("non-exfiltration claim verifies: the secret was blocked before the sink");
     assert!(
-        verdict.is_err(),
-        "the SDK must fail the non-exfiltration claim: the secret reached an allowed sink unblocked, got {verdict:?}"
+        non_exfil
+            .examined_effects
+            .iter()
+            .any(|e| e.effect_kind == "http_request" && e.proof_outcome == "blocked_before_sink"),
+        "the SDK must classify the flow-blocked secret egress as blocked_before_sink"
     );
 }
 
