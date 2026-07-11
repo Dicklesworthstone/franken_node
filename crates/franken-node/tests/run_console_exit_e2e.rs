@@ -13,20 +13,23 @@
 //!   real, level-split console output. Reintroducing the dump trips the
 //!   debug-dump-marker assertions.
 //! * `bd-5r99w.2` replaced `synthetic_success_status()` (always exit 0) with an
-//!   exit code derived from the runtime's containment verdict. The two fixtures
+//!   exit code derived from the runtime's containment verdict. The fixtures
 //!   below produce *different* real exit codes from the SAME binary — a clean
-//!   in-budget program exits 0 (Allow), a fail-closed program exits non-zero —
-//!   so a reintroduced synthetic constant makes one of them go RED.
+//!   in-budget program exits 0 (Allow), a guest with an uncaught exception
+//!   exits non-zero — so a reintroduced synthetic constant makes one go RED.
 //!
-//! Honest scope: the trust-native runtime is capability-metered and host I/O
-//! (e.g. `console.log`) is granted engine-side. The default profiles do not
-//! grant console, so a *successful* console run that captures stdout/stderr
-//! byte-for-byte is gated on the host-effect runtime-of-record work
-//! (bd-f5b04.2.6, two-repo, blocked). This suite therefore proves what the
-//! franken_node product layer provably does today: it surfaces the engine's
-//! real Allow→0 verdict (with the signed receipt recording it) and fails closed
-//! with a real non-zero exit — and a denied host effect, rather than being
-//! masked as success, is surfaced as the failure it is.
+//! Honest scope (bd-w1xhn reconciliation): console output is now a surfaced
+//! effect — `franken-node run` relays the guest's real stdout/stderr per the
+//! README's run contract, so a bare `console.log` program dispatches Allow→0
+//! with its output captured (the June-era premise "default profiles do not
+//! grant console" no longer holds). The fail-closed story moved to where the
+//! capability metering actually lives: an ungranted host effect (e.g. network
+//! egress to a denied endpoint) is refused before execution and recorded in
+//! the signed host-effect ledger (`denied_count`, per-entry `Denied`
+//! outcomes, tamper-evident chain head), while the process exit code derives
+//! from the CONTAINMENT verdict (`exit_code_for_containment_severity`:
+//! Allow→0 … Quarantine→95) — a single denied effect deliberately does not
+//! escalate containment, so it must be surfaced by the ledger, never masked.
 
 #![cfg(feature = "engine")]
 
@@ -105,9 +108,18 @@ const DEBUG_DUMP_MARKERS: &[&str] = &["Native execution completed", "Orchestrato
 /// runtime admits it (containment Allow) and `run` completes with exit 0.
 const COMPUTE_APP: &str = "const total = 40 + 2;\nconst doubled = total * 2;\n";
 
-/// A program that requests a host effect (`console.log`) the default profiles do
-/// not grant, so the engine denies it and `run` fails closed.
-const CONSOLE_APP: &str = "console.log(\"hello\");\n";
+/// A guest program with an uncaught exception: the interpreter surfaces the
+/// failure and `run` exits non-zero (real error path, not a verdict constant).
+const THROW_APP: &str = "throw new Error(\"boom\");\n";
+
+/// A program attempting network egress to the cloud-metadata endpoint, which
+/// the capability/SSRF gates refuse under every default profile. The denial
+/// is deterministic and happens BEFORE any socket opens, so this fixture
+/// needs no network and cannot flake on connectivity.
+const DENIED_EGRESS_APP: &str = "const http = require(\"http\");\n\
+    http.get(\"http://169.254.169.254/latest/meta-data/\", (res) => {\n\
+    console.log(\"unexpected\", res.statusCode);\n\
+    });\n";
 
 fn assert_no_debug_dump(stream: &str, label: &str) {
     for marker in DEBUG_DUMP_MARKERS {
@@ -161,31 +173,61 @@ fn clean_compute_run_surfaces_real_exit_zero_and_signed_receipt() {
     assert_no_debug_dump(&outcome.stdout, "process stdout");
 }
 
+/// bd-w1xhn: a denied host effect must be surfaced fail-VISIBLY in the signed
+/// host-effect ledger, never silently dropped. The exit code derives from the
+/// containment verdict (a single denied effect does not escalate containment,
+/// so a clean guest still exits 0) — the tamper-evident record of the refusal
+/// is the ledger's `denied_count` and per-entry `Denied` outcome.
 #[test]
-fn denied_host_effect_fails_closed_with_real_nonzero_exit() {
-    // The OLD synthetic_success_status() would have reported exit 0 here; the
-    // bd-5r99w.2 fix surfaces the real failure. A denied host effect must NOT be
-    // masked as success.
-    let (_dir, outcome) = run_app(CONSOLE_APP, &[]);
-    assert_ne!(
+fn denied_host_effect_is_surfaced_in_signed_ledger_not_masked() {
+    let (_dir, outcome) = run_app(DENIED_EGRESS_APP, &["--json"]);
+    let report: Value = serde_json::from_str(&outcome.stdout).unwrap_or_else(|e| {
+        panic!(
+            "run --json must emit a report: {e}\nexit={:?}\nstdout=\n{}\nstderr=\n{}",
+            outcome.exit_code, outcome.stdout, outcome.stderr
+        )
+    });
+
+    let ledger = &report["dispatch"]["host_effect_ledger"];
+    assert!(
+        !ledger.is_null(),
+        "a run attempting a host effect must surface a host-effect ledger; dispatch=\n{}",
+        serde_json::to_string_pretty(&report["dispatch"]).unwrap_or_default()
+    );
+    let denied = ledger["denied_count"].as_u64().unwrap_or(0);
+    assert!(
+        denied >= 1,
+        "the refused egress must be recorded as a denied effect, got ledger=\n{}",
+        serde_json::to_string_pretty(ledger).unwrap_or_default()
+    );
+    assert!(
+        ledger["chain_head_hash"]
+            .as_str()
+            .is_some_and(|h| h.starts_with("sha256:")),
+        "the denial must be committed under the tamper-evident chain head, got ledger=\n{}",
+        serde_json::to_string_pretty(ledger).unwrap_or_default()
+    );
+    // Containment stayed Allow (a single denied effect is refused, not
+    // escalated), so the guest ran to completion and the process exits 0.
+    assert_eq!(
         outcome.exit_code,
         Some(0),
-        "a denied/failed host effect must surface a real non-zero exit, never synthetic 0;\nstdout=\n{}\nstderr=\n{}",
-        outcome.stdout,
+        "containment Allow must yield exit 0; the denial lives in the ledger; stderr=\n{}",
         outcome.stderr
     );
-    // Whatever is emitted, it must be the real diagnostic, not the debug dump.
     assert_no_debug_dump(&outcome.stdout, "process stdout");
 }
 
 #[test]
 fn run_exit_code_is_derived_not_constant() {
     // The SAME binary yields DIFFERENT real exit codes for the two fixtures: a
-    // clean program (0) and a fail-closed program (non-zero). A reintroduced
-    // synthetic constant could not satisfy both, so this is the structural
-    // anti-regression for bd-5r99w.2.
+    // clean program (0) and a guest whose uncaught exception surfaces as a
+    // real non-zero exit. A reintroduced synthetic constant could not satisfy
+    // both, so this is the structural anti-regression for bd-5r99w.2
+    // (fixture reconciled by bd-w1xhn: console denial no longer fails a run —
+    // see denied_host_effect_is_surfaced_in_signed_ledger_not_masked).
     let (_d1, clean) = run_app(COMPUTE_APP, &[]);
-    let (_d2, failed) = run_app(CONSOLE_APP, &[]);
+    let (_d2, failed) = run_app(THROW_APP, &[]);
     assert_eq!(
         clean.exit_code,
         Some(0),
@@ -195,12 +237,19 @@ fn run_exit_code_is_derived_not_constant() {
     assert_ne!(
         failed.exit_code,
         Some(0),
-        "fail-closed run exits non-zero; stderr=\n{}",
+        "an uncaught guest exception must exit non-zero; stderr=\n{}",
         failed.stderr
     );
     assert_ne!(
         clean.exit_code, failed.exit_code,
-        "the exit code must be derived from the per-run verdict, not a constant"
+        "the exit code must be derived from the per-run outcome, not a constant"
+    );
+    assert!(
+        failed.stderr.contains("uncaught exception")
+            || failed.stderr.contains("execution failed")
+            || failed.stderr.contains("Engine execution failed"),
+        "the failure diagnostic must be the real interpreter error, got:\n{}",
+        failed.stderr
     );
 }
 
