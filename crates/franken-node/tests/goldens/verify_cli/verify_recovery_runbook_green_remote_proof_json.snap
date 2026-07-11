@@ -1,0 +1,212 @@
+---
+source: crates/franken-node/tests/cli_subcommand_goldens.rs
+---
+{
+  "schema_version": "franken-node/validation-readiness/report/v1",
+  "command": "ops validation-readiness",
+  "trace_id": "trace-recovery-runbook",
+  "generated_at_utc": "2026-02-21T12:00:00Z",
+  "overall_status": "warn",
+  "status_counts": {
+    "pass": 8,
+    "warn": 3,
+    "fail": 0
+  },
+  "checks": [
+    {
+      "code": "VR-SCHEMA-001",
+      "event_code": "VB-009",
+      "scope": "validation_readiness.schema",
+      "status": "pass",
+      "message": "Validation-readiness input schema is supported.",
+      "remediation": "No action required."
+    },
+    {
+      "code": "VR-BROKER-002",
+      "event_code": "VB-009",
+      "scope": "validation_broker.state",
+      "status": "pass",
+      "message": "Validation broker state supplied (receipts=0, proof_statuses=1).",
+      "remediation": "No action required."
+    },
+    {
+      "code": "VR-BEAD-003",
+      "event_code": "VB-009",
+      "scope": "beads.validation_receipts",
+      "status": "pass",
+      "message": "Tracked Beads have fresh receipts or explicit source-only waivers.",
+      "remediation": "No action required."
+    },
+    {
+      "code": "VR-RECEIPT-004",
+      "event_code": "VB-009",
+      "scope": "validation_broker.receipt_freshness",
+      "status": "warn",
+      "message": "No validation receipts were supplied for freshness checks.",
+      "remediation": "Include receipt paths or a broker snapshot before relying on this report."
+    },
+    {
+      "code": "VR-PROOF-005",
+      "event_code": "VB-009",
+      "scope": "validation_broker.proof_status",
+      "status": "pass",
+      "message": "Validation proofs are terminal and have no product failures.",
+      "remediation": "No action required."
+    },
+    {
+      "code": "VR-PROOF-COALESCER-009",
+      "event_code": "VPCO-001",
+      "scope": "validation_proof_coalescer.lease_state",
+      "status": "pass",
+      "message": "No validation proof coalescer decisions were supplied.",
+      "remediation": "No action required."
+    },
+    {
+      "code": "VR-SWARM-SCHEDULER-010",
+      "event_code": "VSS-001",
+      "scope": "validation_swarm_scheduler.slo",
+      "status": "pass",
+      "message": "No swarm-scheduler decisions were supplied.",
+      "remediation": "No action required."
+    },
+    {
+      "code": "VR-SWARM-ADMISSION-011",
+      "event_code": "SVA-000",
+      "scope": "validation_swarm_admission.decisions",
+      "status": "pass",
+      "message": "No swarm-admission decisions were supplied.",
+      "remediation": "No action required."
+    },
+    {
+      "code": "VR-RCH-006",
+      "event_code": "VB-009",
+      "scope": "rch.worker_readiness",
+      "status": "warn",
+      "message": "No RCH worker observations or remote receipts were supplied.",
+      "remediation": "Include broker receipts or worker capability observations for RCH readiness."
+    },
+    {
+      "code": "VR-PROOF-LANE-008",
+      "event_code": "PLR-001",
+      "scope": "proof_lane_readiness.preflight",
+      "status": "pass",
+      "message": "No proof-lane readiness capsules were supplied.",
+      "remediation": "No action required."
+    },
+    {
+      "code": "VR-RESOURCE-007",
+      "event_code": "VB-009",
+      "scope": "resource_governor.contention",
+      "status": "warn",
+      "message": "No resource-governor observation was supplied.",
+      "remediation": "Run `franken-node ops resource-governor --json` before launching expensive validation."
+    }
+  ],
+  "summary": {
+    "tracked_beads": 0,
+    "receipts": 0,
+    "proof_statuses": 1,
+    "proof_counts": {
+      "queued": 0,
+      "leased": 0,
+      "running": 0,
+      "reused": 0,
+      "passed": 1,
+      "failed": 0,
+      "source_only": 0,
+      "cancelled": 0,
+      "unknown": 0
+    },
+    "proof_coalescer": {
+      "producer_proofs": 0,
+      "waiters": 0,
+      "stale_leases": 0,
+      "fenced_leases": 0,
+      "capacity_rejections": 0,
+      "cache_handoffs": 0,
+      "rejected": 0
+    },
+    "proof_cache_hits": 0,
+    "stale_receipt_count": 0,
+    "malformed_receipt_count": 0,
+    "missing_required_receipts": 0,
+    "product_failure_count": 0,
+    "worker_failure_count": 0,
+    "resource_failure_count": 0,
+    "rch_remote_receipts": 0,
+    "rch_remote_missing_worker_id": 0,
+    "last_successful_cargo_proof_at": null,
+    "contention_state": "unknown",
+    "proof_lane_readiness": [],
+    "swarm_scheduler": {
+      "decisions": 0,
+      "queue_age_p95_ms": 0,
+      "queue_age_max_ms": 0,
+      "slot_utilization": 0.0,
+      "fairness_index": 1.0,
+      "slo_breach_status": "no_data",
+      "breached_decisions": 0,
+      "capacity_waits": 0,
+      "work_steals": 0,
+      "source_only_blockers": 0,
+      "product_failures": 0,
+      "worker_infra_retries": 0,
+      "decision_details": []
+    },
+    "swarm_admission": {
+      "schema_version": "franken-node/validation-swarm-admission/readiness/v1",
+      "decisions": 0,
+      "run": 0,
+      "coalesce": 0,
+      "defer": 0,
+      "handoff": 0,
+      "blocked": 0,
+      "stale_inputs": 0,
+      "fail_closed": 0,
+      "green_proof_eligible": 0,
+      "rch_jobs_budgeted": 0,
+      "decision_details": []
+    },
+    "control_tower": {
+      "rows": 1,
+      "green_proofs": 1,
+      "wait_or_join": 0,
+      "source_only_blockers": 0,
+      "worker_infrastructure": 0,
+      "product_failures": 0,
+      "invalid_artifacts": 0,
+      "stale_leases": 0,
+      "no_known_proofs": 0,
+      "capacity_waits": 0,
+      "entries": [
+        {
+          "bead_id": "bead-green-remote",
+          "agent_name": "unknown",
+          "decision": "green_proof",
+          "scheduler_decision": null,
+          "reason_code": "VCT_STATUS_OBSERVED",
+          "event_code": "VCT-010",
+          "required_action": "reuse_green_receipt",
+          "next_action": "reuse_green_receipt",
+          "proof_source": "fresh_execution",
+          "proof_debt_class": "none",
+          "fairness_bucket": "n/a",
+          "stale_risk": "none",
+          "proof_work_key": null,
+          "command_digest": "dc402626a25748c306811b0dae1e1e0fcc2accf7f375bd18ca0b4d77ac2a6ce1",
+          "coalescer_state": "n/a",
+          "green_proof_eligible": true,
+          "recorder_path": null,
+          "recovery_artifact_path": null,
+          "latest_artifact_path": null,
+          "rch_slots_total": null,
+          "rch_slots_available": null,
+          "rch_queue_depth": 0
+        }
+      ]
+    },
+    "flight_recorder_refs": 0,
+    "failed_attempt_details": [],
+    "pending_recoveries": []
+  }
+}

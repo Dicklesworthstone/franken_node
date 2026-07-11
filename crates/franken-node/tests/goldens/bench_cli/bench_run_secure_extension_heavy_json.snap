@@ -155,7 +155,7 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
     {
       "dimension": "performance_under_hardening",
       "name": "secure-extension-heavy",
-      "raw_value": 393.582628263279,
+      "raw_value": 393.58262826327905,
       "unit": "ms",
       "raw_samples": [
         {
@@ -196,13 +196,14 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
       ],
       "confidence_interval": {
         "lower": 385.3127899356244,
-        "upper": 401.8524665909336
+        "upper": 401.8524665909337
       },
       "score": 81,
       "iterations": 5,
-      "variance_pct": 1.6924920531402654
+      "variance_pct": 1.6924920531402692,
+      "data_source": "measured-pipeline"
     }
   ],
   "aggregate_score": 81,
-  "provenance_hash": "sha256:ef01f7e61e73184e626dd9134b8604b3b7792f820a7afc5cfc18316b5e62080d"
+  "provenance_hash": "sha256:bdf6ff1219e10630092d025b3a2b2ff3533069c0f2916c5ce7fd5866f3f704f7"
 }

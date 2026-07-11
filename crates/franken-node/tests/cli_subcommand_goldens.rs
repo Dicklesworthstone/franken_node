@@ -8,6 +8,8 @@
 //! Run with UPDATE_GOLDENS=1 or `cargo insta review` to accept initial outputs.
 
 use assert_cmd::Command;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use frankenengine_node::supply_chain::artifact_signing::{build_and_sign_manifest, sign_artifact};
 use insta::{Settings, assert_json_snapshot, assert_snapshot};
 use serde_json::{Value, json};
@@ -81,7 +83,56 @@ fn write_proof_pipeline_readiness_fixture(root: &Path) -> io::Result<String> {
     Ok("proof-readiness.json".to_string())
 }
 
+/// Doctor check scopes whose pass/fail reflects live host load (concurrent
+/// builds, disk headroom, RCH reachability, stray benchmark artifacts) rather
+/// than the CLI contract under test. Mirrors `ENV_SENSITIVE_SCOPES` in
+/// `doctor_policy_activation_e2e.rs`; the golden must exclude them to stay
+/// deterministic across hosts.
+const ENV_SENSITIVE_DOCTOR_SCOPES: [&str; 3] = [
+    "workspace.pressure",
+    "benchmark.validation",
+    "resource_governor.monitoring",
+];
+
+fn is_env_sensitive_doctor_entry(value: &Value) -> bool {
+    value["scope"]
+        .as_str()
+        .is_some_and(|scope| ENV_SENSITIVE_DOCTOR_SCOPES.contains(&scope))
+}
+
 fn canonicalize_doctor_json(value: &mut Value, cwd: &Path) {
+    scrub_doctor_json(value, cwd);
+
+    // Drop environment-sensitive checks and their structured-log twins, then
+    // recompute the aggregate fields from the surviving deterministic checks
+    // so live workspace/benchmark pressure cannot perturb the snapshot.
+    for key in ["checks", "structured_logs"] {
+        if let Some(entries) = value[key].as_array_mut() {
+            entries.retain(|entry| !is_env_sensitive_doctor_entry(entry));
+        }
+    }
+    let (mut pass, mut warn, mut fail) = (0_u64, 0_u64, 0_u64);
+    if let Some(checks) = value["checks"].as_array() {
+        for check in checks {
+            match check["status"].as_str() {
+                Some("pass") => pass += 1,
+                Some("warn") => warn += 1,
+                Some("fail") => fail += 1,
+                _ => {}
+            }
+        }
+    }
+    value["status_counts"] = json!({ "pass": pass, "warn": warn, "fail": fail });
+    value["overall_status"] = json!(if fail > 0 {
+        "fail"
+    } else if warn > 0 {
+        "warn"
+    } else {
+        "pass"
+    });
+}
+
+fn scrub_doctor_json(value: &mut Value, cwd: &Path) {
     match value {
         Value::Object(map) => {
             for (key, nested) in map.iter_mut() {
@@ -89,13 +140,13 @@ fn canonicalize_doctor_json(value: &mut Value, cwd: &Path) {
                     "generated_at_utc" | "timestamp" => *nested = json!("[TIMESTAMP]"),
                     "duration_ms" => *nested = json!("[DURATION_MS]"),
                     "source_path" if !nested.is_null() => *nested = json!("[PATH]"),
-                    _ => canonicalize_doctor_json(nested, cwd),
+                    _ => scrub_doctor_json(nested, cwd),
                 }
             }
         }
         Value::Array(items) => {
             for item in items {
-                canonicalize_doctor_json(item, cwd);
+                scrub_doctor_json(item, cwd);
             }
         }
         Value::String(text) => {
@@ -510,6 +561,9 @@ fn doctor_help_output() {
     let assertion = cmd
         .env("NO_COLOR", "1")
         .env("CLICOLOR", "0")
+        // clap renders `[env: NAME=value]` with the live value when the
+        // fallback variable is set (bd-lmbt0); strip it for hermeticity.
+        .env_remove("FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT")
         .args(["doctor", "--help"])
         .assert()
         .success();
@@ -595,6 +649,9 @@ fn doctor_json_output() -> Result<(), Box<dyn Error>> {
     let assertion = cmd
         .current_dir(temp.path())
         .env_remove("FRANKEN_NODE_PROFILE")
+        // bd-lmbt0 env fallback would inject host-specific policy-activation
+        // checks into the report; strip it for hermeticity.
+        .env_remove("FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT")
         .args([
             "doctor",
             "--json",
@@ -904,6 +961,18 @@ fn cli_json_golden_fleet_reconcile_output() -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
     let fleet_state_dir = temp.path().join("fleet-state");
     let signing_key_path = write_seed_signing_key(temp.path(), "keys/fleet.key", 31)?;
+    // f6916d153 removed the embedded registry signing key from the default
+    // profiles, so config validation fails closed in a bare directory. Supply
+    // the fixture trust/security keys explicitly (same shape as
+    // trust_cli_e2e::explicit_fixture_registry_config).
+    fs::write(
+        temp.path().join("franken_node.toml"),
+        format!(
+            "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"{}\"\n\n\
+             [security]\nauthorized_api_keys = [\"fnode-fixture-cli-goldens\"]\n",
+            BASE64_STANDARD.encode(b"franken-node-trust-card-registry-key-v1"),
+        ),
+    )?;
 
     let mut cmd = Command::cargo_bin("franken-node")?;
     let assertion = cmd

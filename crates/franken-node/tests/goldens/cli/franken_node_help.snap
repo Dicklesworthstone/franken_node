@@ -6,20 +6,25 @@ franken-node: trust-native JavaScript[PATH] runtime platform
 Usage: franken-node <COMMAND>
 
 Commands:
-  init        Bootstrap config, policy profile, and workspace metadata
-  run         Run app under policy-governed runtime controls
-  runtime     Runtime lane and epoch inspection[PATH]
-  migrate     Migration audit, rewrite, and validation workflows
-  verify      Compatibility verification across runtimes
-  trust       Extension trust management
-  remotecap   Remote capability token issuance and inspection
-  trust-card  Trust-card API[PATH] parity surfaces
-  fleet       Fleet control plane operations
-  incident    Incident replay and forensics
-  registry    Extension registry operations
-  bench       Benchmark suite execution
-  doctor      Diagnose environment and policy setup
-  help        Print this message or the help of the given subcommand(s)
+  init            Bootstrap config, policy profile, and workspace metadata
+  run             Run app under policy-governed runtime controls
+  runtime         Runtime lane and epoch inspection[PATH]
+  safe-mode       Safe-mode operator lifecycle control
+  proofs          Proof-pipeline queue and worker operator controls
+  migrate         Migration audit, rewrite, and validation workflows
+  migrate-report  Export one-command migration assessment report
+  verify          Compatibility verification across runtimes
+  trust           Extension trust management
+  remotecap       Remote capability token issuance and inspection
+  trust-card      Trust-card API[PATH] parity surfaces
+  fleet           Fleet control plane operations
+  incident        Incident replay and forensics
+  ops             Runtime operations and health inspection
+  registry        Extension registry operations
+  bench           Benchmark suite execution
+  debug           Debug policy evaluation and trace execution steps
+  doctor          Diagnose environment and policy setup
+  help            Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
