@@ -11,9 +11,16 @@ on:
       - "scripts/reproduce.py"
       - "scripts/check_tnr_ci_verification_gate.py"
       - "scripts/verify_all_verification_targets.sh"
+      - "scripts/**"
       - "tests/test_reproduce.py"
       - "tests/test_check_tnr_ci_verification_gate.py"
       - "tests/test_check_tnr_observability_contract.py"
+      # bd-vyloj: the observability contract scans crates/franken-node/src for
+      # concrete FN-* event codes, so any source change that could introduce a
+      # new (unregistered) code MUST re-run this gate — otherwise drift lands
+      # invisibly, as it did for 24 codes across FN-ACCEPT/COMPAT/IFL/MCP/
+      # MIGCERT/SENTINEL. The scan roots are crates/franken-node/src and scripts.
+      - "crates/franken-node/src/**"
       - ".github/workflows/tnr-ci-verification-gate.yml"
   workflow_dispatch: {}
 

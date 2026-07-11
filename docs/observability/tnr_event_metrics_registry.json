@@ -16,7 +16,8 @@
     "FN-FLEETLOG",
     "FN-RESOLVE",
     "FN-CORPUS",
-    "FN-CALIB"
+    "FN-CALIB",
+    "FN-ACCEPT"
   ],
   "subsystems": [
     {
@@ -25,7 +26,11 @@
       "owner_surface": "api/compat_gate + runtime/lockstep_harness",
       "event_codes": [
         {"code": "FN-COMPAT-001", "name": "compat_contract_loaded", "description": "Canonical compat operation contract loaded for evaluation."},
-        {"code": "FN-COMPAT-002", "name": "compat_oracle_green", "description": "Node/Bun/franken parity oracle returned a green verdict."}
+        {"code": "FN-COMPAT-002", "name": "compat_oracle_green", "description": "Node/Bun/franken parity oracle returned a green verdict."},
+        {"code": "FN-COMPAT-003", "name": "compat_oracle_red", "description": "Parity oracle returned a non-green (red) verdict for an operation."},
+        {"code": "FN-COMPAT-004", "name": "compat_divergence_fixture_emitted", "description": "A divergence fixture was emitted for a failing compat operation."},
+        {"code": "FN-COMPAT-005", "name": "compat_leg_unavailable", "description": "A compat runtime leg (node/bun/franken) was unavailable and excluded."},
+        {"code": "FN-COMPAT-006", "name": "compat_leg_error", "description": "A compat runtime leg errored during evaluation."}
       ],
       "error_codes": [
         {"code": "FN-COMPAT-ERR-001", "name": "compat_oracle_divergence", "description": "Parity oracle found an unresolved semantic divergence."}
@@ -103,7 +108,13 @@
       "owner_surface": "policy/bayesian_diagnostics + policy/decision_engine",
       "event_codes": [
         {"code": "FN-SENTINEL-001", "name": "sentinel_observation_ingested", "description": "Runtime sentinel ingested a canonical observation."},
-        {"code": "FN-SENTINEL-002", "name": "sentinel_action_selected", "description": "Sentinel selected an expected-loss-minimizing action."}
+        {"code": "FN-SENTINEL-002", "name": "sentinel_action_selected", "description": "Sentinel selected an expected-loss-minimizing action."},
+        {"code": "FN-SENTINEL-003", "name": "sentinel_guardrail_precedence", "description": "A hard guardrail took precedence over probabilistic action selection."},
+        {"code": "FN-SENTINEL-004", "name": "sentinel_ledger_receipt_appended", "description": "A sentinel decision receipt was appended to the evidence ledger."},
+        {"code": "FN-SENTINEL-005", "name": "sentinel_hardening_monotonic", "description": "Sentinel hardening state advanced monotonically."},
+        {"code": "FN-SENTINEL-006", "name": "sentinel_replay_verified", "description": "A sentinel decision replay verified against its recorded receipt."},
+        {"code": "FN-SENTINEL-007", "name": "sentinel_expected_loss_selected", "description": "The expected-loss selector chose a containment action."},
+        {"code": "FN-SENTINEL-008", "name": "sentinel_escalation_receipt_signed", "description": "A sentinel escalation receipt was signed with its e-value."}
       ],
       "error_codes": [
         {"code": "FN-SENTINEL-ERR-001", "name": "sentinel_guardrail_override", "description": "Hard guardrail precedence overrode probabilistic action selection."}
@@ -148,7 +159,9 @@
       "owner_surface": "migration + sdk/verifier",
       "event_codes": [
         {"code": "FN-MIGCERT-001", "name": "migration_certificate_started", "description": "Bounded migration certificate generation started."},
-        {"code": "FN-MIGCERT-002", "name": "migration_certificate_verified", "description": "Migration certificate verified against its declared bound."}
+        {"code": "FN-MIGCERT-002", "name": "migration_certificate_verified", "description": "Migration certificate verified against its declared bound."},
+        {"code": "FN-MIGCERT-003", "name": "migration_differential_witness_verified", "description": "Differential migration witness verified within the certificate bound."},
+        {"code": "FN-MIGCERT-004", "name": "migration_sdk_certified", "description": "Migration artifact certified through the verifier SDK path."}
       ],
       "error_codes": [
         {"code": "FN-MIGCERT-ERR-001", "name": "migration_witness_diverged", "description": "Differential witness diverged or exceeded the certificate bound."}
@@ -163,7 +176,10 @@
       "owner_surface": "api/mcp + control_plane/audience_token",
       "event_codes": [
         {"code": "FN-MCP-001", "name": "mcp_tool_invoked", "description": "MCP tool invocation accepted for dispatch."},
-        {"code": "FN-MCP-002", "name": "mcp_mutation_receipted", "description": "Mutating MCP tool emitted an agent-action receipt."}
+        {"code": "FN-MCP-002", "name": "mcp_mutation_receipted", "description": "Mutating MCP tool emitted an agent-action receipt."},
+        {"code": "FN-MCP-003", "name": "mcp_tool_rejected", "description": "An MCP tool invocation was rejected before dispatch."},
+        {"code": "FN-MCP-004", "name": "mcp_mutation_dispatched", "description": "A mutating MCP tool was dispatched after scope checks."},
+        {"code": "FN-MCP-005", "name": "mcp_session_replay_built", "description": "An MCP mutation session replay digest was built."}
       ],
       "error_codes": [
         {"code": "FN-MCP-ERR-001", "name": "mcp_scope_denied", "description": "MCP mutation denied by audience-token scope."}
@@ -246,6 +262,23 @@
       "metrics": [
         {"name": "franken_node_calibration_runs_total", "type": "counter", "labels": ["profile", "verdict"], "description": "Calibration runs by profile and verdict."}
       ]
+    },
+    {
+      "id": "FN-ACCEPT",
+      "surface_label": "acceptance_gate",
+      "owner_surface": "ops/close_condition",
+      "event_codes": [
+        {"code": "FN-ACCEPT-001", "name": "acceptance_gate_evaluated", "description": "The proof-carrying acceptance gate was evaluated for a close condition."},
+        {"code": "FN-ACCEPT-002", "name": "acceptance_gate_pass", "description": "The acceptance gate returned a pass verdict."},
+        {"code": "FN-ACCEPT-003", "name": "acceptance_gate_fail_closed", "description": "The acceptance gate failed closed on an unsatisfied subject."},
+        {"code": "FN-ACCEPT-004", "name": "acceptance_gate_blocking_finding", "description": "A blocking acceptance finding was recorded against the close condition."}
+      ],
+      "error_codes": [
+        {"code": "FN-ACCEPT-ERR-001", "name": "acceptance_gate_input_invalid", "description": "Acceptance gate input failed canonical validation and was refused."}
+      ],
+      "metrics": [
+        {"name": "franken_node_acceptance_gate_evaluations_total", "type": "counter", "labels": ["verdict"], "description": "Acceptance gate evaluations by verdict."}
+      ]
     }
   ],
   "legacy_namespaces": [
@@ -254,7 +287,7 @@
     {"id": "FN-BM", "code_ranges": [{"prefix": "FN-BM", "start": 1, "end": 6}], "description": "Bounded masking legacy event-code namespace."},
     {"id": "FN-CK", "code_ranges": [{"prefix": "FN-CK", "start": 1, "end": 8}], "description": "Checkpoint-placement legacy event-code namespace."},
     {"id": "FN-CX", "code_ranges": [{"prefix": "FN-CX", "start": 1, "end": 10}], "description": "Cancellable-task protocol legacy event-code namespace."},
-    {"id": "FN-IFL", "code_ranges": [{"prefix": "FN-IFL", "start": 1, "end": 13}], "description": "Information-flow lineage existing namespace."},
+    {"id": "FN-IFL", "code_ranges": [{"prefix": "FN-IFL", "start": 1, "end": 18}], "description": "Information-flow lineage existing namespace."},
     {"id": "FN-LB", "code_ranges": [{"prefix": "FN-LB", "start": 1, "end": 11}], "description": "Lab runtime existing namespace."},
     {"id": "FN-NV", "code_ranges": [{"prefix": "FN-NV", "start": 1, "end": 12}], "description": "N-version oracle existing namespace."},
     {"id": "FN-OB", "code_ranges": [{"prefix": "FN-OB", "start": 1, "end": 13}], "description": "Obligation channel existing namespace."},

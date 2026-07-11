@@ -35,6 +35,7 @@ REQUIRED_SUBSYSTEMS = {
     "FN-RESOLVE",
     "FN-CORPUS",
     "FN-CALIB",
+    "FN-ACCEPT",
 }
 EVENT_CODE_RE = re.compile(r"\bFN-[A-Z0-9]+(?:-[A-Z0-9]+)*-(?:ERR-)?\d{3}\b")
 METRIC_RE = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
