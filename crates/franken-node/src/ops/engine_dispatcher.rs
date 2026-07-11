@@ -374,8 +374,12 @@ impl EngineDispatchError {
     }
 }
 
+/// bd-rpo4f: public so the CLI boundary (`main.rs`) can downcast the
+/// `anyhow::Error` returned by [`EngineDispatcher::dispatch_run`] and map
+/// `RequestedRuntimeUnavailable` to the operator-contract exit code 127.
+/// Library code must never terminate the process itself.
 #[derive(Debug)]
-enum DispatchResolutionError {
+pub enum DispatchResolutionError {
     RequestedRuntimeUnavailable(ActionableError),
     Resolution(anyhow::Error),
 }
@@ -1272,9 +1276,12 @@ impl EngineDispatcher {
             &|path| path.exists(),
         ) {
             Ok(plan) => plan,
-            Err(DispatchResolutionError::RequestedRuntimeUnavailable(error)) => {
-                eprintln!("{error}");
-                std::process::exit(127);
+            // bd-rpo4f: return the typed error instead of exiting the process
+            // from library code (a `std::process::exit(127)` here killed test
+            // harnesses and embedders mid-suite). The CLI boundary in main.rs
+            // downcasts this and owns the exit-127 operator contract.
+            Err(err @ DispatchResolutionError::RequestedRuntimeUnavailable(_)) => {
+                return Err(anyhow::Error::new(err));
             }
             Err(DispatchResolutionError::Resolution(err)) => return Err(err),
         };
@@ -2967,17 +2974,18 @@ mod tests {
     /// Verifies that fallback path enforces same security controls as primary path
     /// and rejects malicious inputs even when franken-engine is unavailable.
     // FIXME(bd-o776s): this test constructs `EngineDispatcher::new(Some(missing_engine),
-    // PreferredRuntime::FrankenEngine)` and calls `dispatch_run`. Prod hardened the
-    // explicit-runtime path: when the operator-requested runtime is unavailable,
-    // `dispatch_run` now fails fast via `std::process::exit(127)` (engine_dispatcher.rs:1277,
-    // the `RequestedRuntimeUnavailable` arm) instead of returning an `Err`. Because the test
-    // points at a deliberately non-existent engine path, that exit fires deterministically on
-    // every host and terminates the whole test binary uncatchably (in-process `process::exit`
-    // cannot be caught by `catch_unwind`), aborting the entire inline-test lane (observed EXIT
-    // 127, no summary). The test must be restructured to drive the security-control fallback
-    // path WITHOUT requesting an unavailable explicit runtime (e.g. an injectable exit seam, or
-    // a runtime that resolves to a real FallbackFrankenEngineUnavailable plan), which is a prod
-    // change out of this test-only scope. Gated until then.
+    // PreferredRuntime::FrankenEngine)` and calls `dispatch_run`. bd-rpo4f removed the
+    // in-library `std::process::exit(127)` — `dispatch_run` now returns the typed
+    // `DispatchResolutionError::RequestedRuntimeUnavailable` error, so running this test
+    // no longer kills the test binary. It stays gated for a different reason: its premise
+    // is stale. An explicitly requested-but-missing `PreferredRuntime::FrankenEngine`
+    // yields the unavailable error and never enters the RuntimeFallback path, so the
+    // fallback security-control assertions below (SSRF strict-profile rejection wording,
+    // node/bun runtime errors) can never be reached this way. Driving a real
+    // `FallbackFrankenEngineUnavailable` plan hermetically needs `PreferredRuntime::Auto`
+    // with an environment-injection seam for the engine candidates and the
+    // FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK opt-in (see the bd-yom8c FIXMEs
+    // below) — that seam is the remaining prod change before this can be ungated.
     #[test]
     #[cfg(any())]
     #[cfg(feature = "engine")]

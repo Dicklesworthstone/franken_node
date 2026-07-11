@@ -15,7 +15,10 @@
 
 use frankenengine_node::{
     config::{Config, NetworkAllowlistEntry, PreferredRuntime, Profile},
-    ops::{engine_dispatcher::EngineDispatcher, telemetry_bridge::TelemetryBridge},
+    ops::{
+        engine_dispatcher::{DispatchResolutionError, EngineDispatcher},
+        telemetry_bridge::TelemetryBridge,
+    },
     storage::frankensqlite_adapter::FrankensqliteAdapter,
 };
 use std::path::{Path, PathBuf};
@@ -72,6 +75,9 @@ fn create_fixture_engine_binary(dir: &Path) -> PathBuf {
 }
 
 /// Create a slow franken-engine fixture binary for timeout testing.
+/// See `create_failing_fixture_engine_binary` for the `not(engine)` gating
+/// rationale (bd-4f4f0/bd-rpo4f).
+#[cfg(not(feature = "engine"))]
 fn create_slow_fixture_engine_binary(dir: &Path, delay_secs: u64) -> PathBuf {
     let engine_path = dir.join("slow-franken-engine");
     #[cfg(unix)]
@@ -192,7 +198,16 @@ fn test_native_engine_execution_with_telemetry() {
 
     let config = balanced_config();
 
-    let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine);
+    // bd-rpo4f: pin an explicit fixture engine placeholder so the dispatch
+    // resolution gate passes deterministically on every host. With the
+    // `engine` feature, execution is native and in-process — the placeholder
+    // is never spawned; it only satisfies the availability check, which can
+    // never resolve from candidates because no `franken-engine` binary is
+    // shipped anywhere (bd-zi9hj). Previously `None` made this test
+    // host-dependent (and unreachable: the suite died at the first
+    // unavailable-resolution exit(127) before this test reported).
+    let fixture_engine = create_fixture_engine_binary(temp_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(fixture_engine), PreferredRuntime::FrankenEngine);
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
@@ -1313,7 +1328,15 @@ fn test_native_engine_error_handling_propagation() {
 
     let config = balanced_config();
 
-    let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine);
+    // bd-rpo4f: pin an explicit fixture engine placeholder so dispatch
+    // resolution succeeds deterministically on every host (previously
+    // `None` depended on host PATH/candidate state, and on engine-less
+    // machines resolution failed first, masking the source-read error this
+    // test asserts — historically via an in-library exit(127) that killed
+    // the whole suite). The --engine-bin hint takes precedence over env,
+    // config, and candidates, so host state cannot leak in.
+    let fixture_engine = create_fixture_engine_binary(temp_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(fixture_engine), PreferredRuntime::FrankenEngine);
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
@@ -1355,7 +1378,15 @@ fn test_native_engine_error_handling_propagation() {
     }
 }
 
+/// bd-rpo4f follow-through, same disease as the bd-4f4f0 exit-code sibling
+/// below: the external-process dispatch path for the FrankenEngine plan only
+/// exists WITHOUT the `engine` feature — with it, execution is native and
+/// in-process, the slow fixture binary is never spawned, and a fast
+/// `console.log` app completes instantly, so `result.is_err()` can never
+/// hold. This failure was invisible until bd-rpo4f removed the in-library
+/// exit(127) that aborted the suite before this test reported.
 #[test]
+#[cfg(not(feature = "engine"))]
 fn test_engine_timeout_handling_with_fixture_binary() {
     // Set a short timeout for testing (5 seconds instead of default 5 minutes)
     unsafe {
@@ -1452,12 +1483,52 @@ fn test_engine_timeout_handling_with_fixture_binary() {
     );
 }
 
+/// bd-rpo4f: an unavailable requested runtime must surface as a typed,
+/// downcastable `Err` from `dispatch_run` — never a `std::process::exit`
+/// from library code. Before the fix this exact in-process call terminated
+/// the whole test binary with exit 127 mid-suite ("test exited abnormally"),
+/// silently skipping every test after it on hosts without a resolvable
+/// engine binary. The downcast assertion pins the seam main.rs uses to map
+/// this error to the CLI-level exit 127.
+#[test]
+fn test_requested_runtime_unavailable_returns_typed_error_in_process() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app_path = create_test_app(
+        temp_dir.path(),
+        "unavailable_runtime.js",
+        r#"console.log("never runs: requested engine is missing");"#,
+    );
+    // An explicit --engine-bin hint takes precedence over env, config, and
+    // candidates, so pointing at a nonexistent path fails resolution
+    // deterministically regardless of host state.
+    let missing_engine = temp_dir.path().join("missing-franken-engine");
+    let config = balanced_config();
+    let dispatcher = EngineDispatcher::new(Some(missing_engine), PreferredRuntime::FrankenEngine);
+
+    let result = dispatcher.dispatch_run(&app_path, &config, &config.profile.to_string(), &[], 0);
+
+    let err = result.expect_err("missing requested engine must be an Err, not a process exit");
+    let message = err.to_string();
+    assert!(
+        message.contains("franken-engine") && message.contains("not found"),
+        "unavailable-runtime error must stay actionable, got: {message}"
+    );
+    assert!(
+        matches!(
+            err.downcast_ref::<DispatchResolutionError>(),
+            Some(DispatchResolutionError::RequestedRuntimeUnavailable(_))
+        ),
+        "CLI boundary must be able to downcast the typed unavailable error"
+    );
+}
+
 /// bd-4f4f0: requesting `--runtime franken-engine` with a missing engine
 /// binary is a fail-closed CLI contract — the process exits 127 with an
 /// actionable message. Asserted through the REAL binary in a subprocess
-/// because `dispatch_run` terminates the process for an unavailable
-/// requested runtime (`std::process::exit(127)`); an in-process call would
-/// abort the test harness itself. (The old in-process variant passed the
+/// because the 127 mapping lives at the CLI boundary in main.rs
+/// (bd-rpo4f moved it there; `dispatch_run` itself now returns the typed
+/// `DispatchResolutionError::RequestedRuntimeUnavailable` instead of
+/// terminating the process). (The old in-process variant passed the
 /// invalid policy mode "test" and, since bd-233ja's fail-closed policy-mode
 /// validation, asserted on the wrong error entirely.)
 #[test]

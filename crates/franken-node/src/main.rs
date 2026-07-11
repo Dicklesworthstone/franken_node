@@ -26968,13 +26968,30 @@ fn main() -> Result<()> {
 
             let dispatcher =
                 ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime);
-            let dispatch = dispatcher.dispatch_run(
+            let dispatch = match dispatcher.dispatch_run(
                 &app_path,
                 &resolved.config,
                 &policy,
                 &trusted_extension_ids,
                 now_unix_secs(),
-            )?;
+            ) {
+                Ok(dispatch) => dispatch,
+                Err(err) => {
+                    // bd-rpo4f: `dispatch_run` surfaces requested-runtime
+                    // unavailability as a typed error instead of exiting the
+                    // process from library code. The CLI boundary owns the
+                    // operator contract: actionable message on stderr, exit
+                    // 127 (pinned by test_native_engine_missing_binary_error_handling).
+                    if let Some(
+                        unavailable @ ops::engine_dispatcher::DispatchResolutionError::RequestedRuntimeUnavailable(_),
+                    ) = err.downcast_ref::<ops::engine_dispatcher::DispatchResolutionError>()
+                    {
+                        eprintln!("{unavailable}");
+                        std::process::exit(127);
+                    }
+                    return Err(err);
+                }
+            };
             let ssrf_violations = extract_ssrf_violations(dispatch.telemetry.as_ref());
             let auto_quarantined_extensions = maybe_auto_quarantine_run_dependencies(
                 &project_root,
