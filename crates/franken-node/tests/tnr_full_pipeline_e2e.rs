@@ -21,11 +21,14 @@
 //!               succeed through the real CLI against the same state root.
 //!   L5 VSDK     The public verifier SDK re-derives the effect chain OFFLINE
 //!               from the ledger entries alone (zero trust in this runtime).
-//!   L6 LTV      The run's receipt chain hashes + the bundle integrity hash
-//!               become MMR leaves; the root is re-attested (prefix-proof
-//!               chain) and witness-cosigned with a real 2-of-3 Ed25519
-//!               threshold; anteriority verifies as-of now and the receipt
-//!               appends to the evidence ledger.
+//!   L6 LTV      `franken-node ltv attest` (bd-rgkd2) binds the run's receipt
+//!               chain hashes + the sealed bundle into self-contained SDK LTV
+//!               evidence (real 2-of-3 Ed25519 witness cosign over a
+//!               re-attested root), the product evidence ledger accepts the
+//!               cosigned witness receipt, and `ltv verify-as-of` re-derives
+//!               the whole claim OFFLINE through the verifier SDK — both CLI
+//!               legs run as real subprocesses under the pipeline trace id,
+//!               with a fail-closed anti-backdating arm.
 //!
 //! HONEST SCOPE (verified against source 2026-07-11, bd-f5b04.8.1): the
 //! following bead-vision layers are NOT yet reachable from a live `run` and
@@ -65,19 +68,10 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use frankenengine_node::control_plane::mmr_proofs::{
-    MMR_ROOT_WITNESS_ARTIFACT_ID, MMR_ROOT_WITNESS_CONNECTOR_ID, MmrCheckpoint,
-    MmrRootReattestationChain, MmrRootWitnessReceipt, mmr_root_reattestation,
-    mmr_root_witness_artifact, mmr_root_witness_statement, verify_root_reattestation_chain,
-    verify_root_witness_anteriority,
-};
-use frankenengine_node::crypto::ED25519_V1_CRYPTO_SUITE;
+use frankenengine_node::control_plane::mmr_proofs::MmrRootWitnessReceipt;
 use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity};
-use frankenengine_node::security::threshold_sig::{
-    PartialSignature, SignerKey, ThresholdConfig, sign,
-};
 use frankenengine_node::tools::replay_bundle::{
     EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
     IncidentEvidencePackage, IncidentSeverity,
@@ -536,129 +530,199 @@ fn witness_signing_key(index: u8) -> ed25519_dalek::SigningKey {
     ed25519_dalek::SigningKey::from_bytes(&[0x51 + index; 32])
 }
 
-/// In-process LTV leg (no CLI surface exists yet — bd follow-up filed): the
-/// run's receipt chain hashes plus the bundle integrity hash become MMR
-/// leaves; the root is re-attested via a real prefix proof and cosigned by a
-/// real 2-of-3 Ed25519 witness threshold; anteriority verifies as-of now and
-/// the receipt appends to the evidence ledger.
-fn ltv_leg(ledger: &Value, bundle_integrity_hash: &str, trace_id: &str) {
-    let entries = ledger["entries"].as_array().expect("ledger entries");
-    let mut leaves: Vec<String> = entries
-        .iter()
-        .map(|entry| {
-            entry["chain_hash"]
-                .as_str()
-                .expect("chain_hash")
-                .to_string()
-        })
-        .collect();
-    leaves.push(bundle_integrity_hash.to_string());
-    assert!(leaves.len() >= 2, "LTV leg needs at least two leaves");
-
-    // Prefix checkpoint = effect chain only; super checkpoint additionally
-    // commits the sealed bundle. The prefix proof shows the log only grew.
-    let mut prefix_checkpoint = MmrCheckpoint::enabled();
-    for leaf in &leaves[..leaves.len() - 1] {
-        prefix_checkpoint
-            .append_marker_hash(leaf)
-            .expect("append prefix leaf");
-    }
-    let mut super_checkpoint = MmrCheckpoint::enabled();
-    for leaf in &leaves {
-        super_checkpoint
-            .append_marker_hash(leaf)
-            .expect("append super leaf");
-    }
-
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_secs();
-
-    let reattestation = mmr_root_reattestation(
-        &prefix_checkpoint,
-        &super_checkpoint,
-        now_secs,
-        ED25519_V1_CRYPTO_SUITE,
+/// CLI LTV leg (bd-rgkd2): `ltv attest` binds the run's signed effect chain
+/// hashes + the sealed bundle into self-contained SDK LTV evidence, cosigned
+/// by a real 2-of-3 Ed25519 witness threshold over a re-attested root; the
+/// product evidence ledger accepts the cosigned witness receipt off the CLI
+/// wire shape; `ltv verify-as-of` re-derives the whole claim OFFLINE through
+/// the verifier SDK; a backdated as-of fails closed with FN-LTV-ERR-001.
+fn ltv_leg(
+    workspace: &Path,
+    run_report: &Value,
+    bundle_file: &str,
+    bundle_integrity_hash: &str,
+    trace_id: &str,
+) {
+    std::fs::write(
+        workspace.join("run-report.json"),
+        serde_json::to_string(run_report).expect("serialize run report"),
     )
-    .expect("re-attest run receipt root under the current root");
-    let chain = MmrRootReattestationChain {
-        origin_root: prefix_checkpoint.root().expect("prefix root").clone(),
-        attestations: vec![reattestation],
-    };
-    let newest_root = verify_root_reattestation_chain(&chain)
-        .expect("re-attestation chain verifies without trusting the producer");
-    assert_eq!(
-        &newest_root,
-        super_checkpoint.root().expect("super root"),
-        "chain must land on the super root committing chain + bundle"
+    .expect("persist run report for ltv attest");
+    for index in 0..3_u8 {
+        let key_path = workspace.join(format!("keys/ltv-witness-{index}.key"));
+        std::fs::create_dir_all(key_path.parent().expect("key parent")).expect("key dir");
+        std::fs::write(
+            &key_path,
+            hex::encode(witness_signing_key(index).to_bytes()),
+        )
+        .expect("write witness key");
+    }
+
+    let attest_output = run_cli(
+        workspace,
+        &[
+            "ltv",
+            "attest",
+            "--bundle",
+            bundle_file,
+            "--trusted-public-key",
+            "keys/replay-trust-anchor.pub",
+            "--run-report",
+            "run-report.json",
+            "--witness-key",
+            "keys/ltv-witness-0.key",
+            "--witness-key",
+            "keys/ltv-witness-1.key",
+            "--witness-key",
+            "keys/ltv-witness-2.key",
+            "--witness-threshold",
+            "2",
+            "--witness-group-id",
+            "tnr-e2e-witnesses",
+            "--witness-policy-id",
+            "ltv-policy-v1",
+            "--out",
+            "ltv-evidence.json",
+            "--json",
+            "--structured-logs-jsonl",
+            "--trace-id",
+            trace_id,
+        ],
     );
+    assert!(
+        attest_output.status.success(),
+        "ltv attest failed: {}",
+        String::from_utf8_lossy(&attest_output.stderr)
+    );
+    let attest_stderr = String::from_utf8_lossy(&attest_output.stderr).into_owned();
+    let attest_events = structured_events(&attest_stderr);
+    assert_event_order(&attest_events, &["FN-LTV-002", "FN-LTV-001"], trace_id);
+    let attest_stdout = String::from_utf8_lossy(&attest_output.stdout);
+    let attest: Value = serde_json::from_str(attest_stdout.trim())
+        .unwrap_or_else(|err| panic!("ltv attest --json must emit JSON ({err}):\n{attest_stdout}"));
+    assert_eq!(
+        attest["schema_version"],
+        json!("franken-node/ltv-attest-cli/v1")
+    );
+    assert_eq!(
+        attest["artifact_hash"],
+        json!(bundle_integrity_hash),
+        "the attested artifact must be the sealed bundle"
+    );
+    let ledger_entry_count = run_report["dispatch"]["host_effect_ledger"]["entries"]
+        .as_array()
+        .expect("ledger entries")
+        .len() as u64;
+    assert_eq!(
+        attest["origin_tree_size"],
+        json!(ledger_entry_count + 1),
+        "origin tree must commit the bundle marker plus every effect chain hash"
+    );
+    assert_eq!(attest["witnesses"], json!(3));
+    assert_eq!(attest["witness_threshold"], json!(2));
     layer_pass(
-        "L6 LTV root re-attestation (prefix proof)",
+        "L6 LTV attest (CLI, chain+bundle leaves)",
         &format!(
-            "leaves={} newest_tree_size={}",
-            leaves.len(),
-            newest_root.tree_size
+            "origin_tree_size={} witnesses=3/2 FN-LTV-002→001 on trace",
+            attest["origin_tree_size"]
         ),
     );
 
-    // Real 2-of-3 witness threshold cosign over the canonical statement.
-    let statement =
-        mmr_root_witness_statement(&newest_root, now_secs, "tnr-e2e-witnesses", "ltv-policy-v1")
-            .expect("witness statement");
-    let mut signer_keys = Vec::new();
-    let mut signing_keys = Vec::new();
-    for index in 0..3_u8 {
-        let key = witness_signing_key(index);
-        signer_keys.push(SignerKey {
-            key_id: format!("tnr-ltv-witness-{index}"),
-            public_key_hex: hex::encode(key.verifying_key().to_bytes()),
-        });
-        signing_keys.push(key);
-    }
-    let threshold_config = ThresholdConfig {
-        threshold: 2,
-        total_signers: 3,
-        signer_keys,
-    };
-    let signatures: Vec<PartialSignature> = signing_keys
-        .iter()
-        .zip(threshold_config.signer_keys.iter())
-        .take(2)
-        .map(|(signing_key, signer_key)| {
-            sign(
-                signing_key,
-                &signer_key.key_id,
-                MMR_ROOT_WITNESS_ARTIFACT_ID,
-                MMR_ROOT_WITNESS_CONNECTOR_ID,
-                &statement.content_hash,
-            )
-        })
-        .collect();
-    let witness_artifact =
-        mmr_root_witness_artifact(&statement, signatures).expect("witness artifact");
-    let receipt = MmrRootWitnessReceipt {
-        statement,
-        threshold_config,
-        witness_artifact,
-        trace_id: trace_id.to_string(),
-        timestamp: "2026-07-11T10:06:00Z".to_string(),
-    };
-
-    let verification = verify_root_witness_anteriority(&receipt, now_secs + 1)
-        .expect("witnessed root must verify anterior to as-of");
-    assert!(verification.valid_signatures >= 2);
-
+    // The CLI evidence's cosigned witness receipt is wire-compatible with the
+    // product evidence ledger's proof-of-anteriority consumer.
+    let evidence_json: Value = serde_json::from_str(
+        &std::fs::read_to_string(workspace.join("ltv-evidence.json")).expect("read ltv evidence"),
+    )
+    .expect("ltv evidence is canonical JSON");
+    let receipt: MmrRootWitnessReceipt =
+        serde_json::from_value(evidence_json["witness_receipt"].clone())
+            .expect("CLI witness receipt must deserialize as the product receipt type");
+    let as_of = evidence_json["as_of_unix_seconds"].as_u64().expect("as_of");
     let mut evidence_ledger = EvidenceLedger::new(LedgerCapacity::new(16, 1 << 20));
-    evidence_ledger
-        .append_mmr_root_witness_receipt(&receipt, now_secs + 1)
+    let (_, verification) = evidence_ledger
+        .append_mmr_root_witness_receipt(&receipt, as_of + 1)
         .expect("witness receipt appends as proof-of-anteriority evidence");
+    assert!(verification.valid_signatures >= 2);
     layer_pass(
-        "L6 LTV witness cosign + anteriority",
+        "L6 LTV witness receipt → evidence ledger",
         &format!(
             "valid_signatures={}/{} observed_at<=as_of",
             verification.valid_signatures, verification.threshold
         ),
+    );
+
+    let verify_output = run_cli(
+        workspace,
+        &[
+            "ltv",
+            "verify-as-of",
+            "--evidence",
+            "ltv-evidence.json",
+            "--json",
+            "--structured-logs-jsonl",
+            "--trace-id",
+            trace_id,
+        ],
+    );
+    assert!(
+        verify_output.status.success(),
+        "ltv verify-as-of failed: {}",
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+    let verify_stderr = String::from_utf8_lossy(&verify_output.stderr).into_owned();
+    let verify_events = structured_events(&verify_stderr);
+    assert_event_order(&verify_events, &["FN-LTV-003"], trace_id);
+    let verify_stdout = String::from_utf8_lossy(&verify_output.stdout);
+    let verdict: Value = serde_json::from_str(verify_stdout.trim()).unwrap_or_else(|err| {
+        panic!("ltv verify-as-of --json must emit JSON ({err}):\n{verify_stdout}")
+    });
+    assert_eq!(
+        verdict["schema_version"],
+        json!("franken-node/ltv-verify-as-of-cli/v1")
+    );
+    assert_eq!(verdict["verdict"], json!("Pass"));
+    assert!(
+        verdict["sdk_transcript"]
+            .as_array()
+            .expect("sdk transcript")
+            .iter()
+            .any(|event| event["event_code"] == json!("FN_LTV_WITNESS_ANTERIORITY_PROVEN")),
+        "offline SDK transcript must prove witness anteriority: {verdict}"
+    );
+    layer_pass(
+        "L6 LTV verify-as-of (offline SDK via CLI)",
+        "verdict=Pass anteriority proven FN-LTV-003 on trace",
+    );
+
+    // Anti-backdating arm: an as-of before the witness observation must fail
+    // closed with the registered error event.
+    let backdated_output = run_cli(
+        workspace,
+        &[
+            "ltv",
+            "verify-as-of",
+            "--evidence",
+            "ltv-evidence.json",
+            "--as-of",
+            "1000",
+            "--json",
+            "--structured-logs-jsonl",
+            "--trace-id",
+            trace_id,
+        ],
+    );
+    assert!(
+        !backdated_output.status.success(),
+        "backdated as-of must fail closed"
+    );
+    let backdated_stderr = String::from_utf8_lossy(&backdated_output.stderr);
+    assert!(
+        backdated_stderr.contains("FN-LTV-ERR-001"),
+        "backdated verify must emit FN-LTV-ERR-001: {backdated_stderr}"
+    );
+    layer_pass(
+        "L6 LTV anti-backdating (as-of=1000)",
+        "exit!=0 FN-LTV-ERR-001 emitted",
     );
 }
 
@@ -858,8 +922,14 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
         &ledger,
     );
 
-    // ---- L6 LTV: MMR re-attestation + witness cosign over chain + bundle.
-    ltv_leg(&ledger, &bundle_integrity_hash, CLEAN_TRACE_ID);
+    // ---- L6 LTV: CLI attest + offline SDK verify over chain + bundle.
+    ltv_leg(
+        workspace.path(),
+        &run.report,
+        "INC-TNR-CLEAN-0001.fnbundle",
+        &bundle_integrity_hash,
+        CLEAN_TRACE_ID,
+    );
 
     println!(
         "[TNR-E2E] ================ CLEAN PIPELINE: ALL LAYERS PASS (trace_id={CLEAN_TRACE_ID})"
@@ -1088,7 +1158,13 @@ fn tnr_full_pipeline_denied_exfil_variant_contained() {
         EXFIL_TRACE_ID,
         &ledger,
     );
-    ltv_leg(&ledger, &bundle_integrity_hash, EXFIL_TRACE_ID);
+    ltv_leg(
+        workspace.path(),
+        &run.report,
+        "INC-TNR-EXFIL-0001.fnbundle",
+        &bundle_integrity_hash,
+        EXFIL_TRACE_ID,
+    );
 
     println!(
         "[TNR-E2E] ================ EXFIL VARIANT: CONTAINED + ALL LAYERS PASS (trace_id={EXFIL_TRACE_ID})"

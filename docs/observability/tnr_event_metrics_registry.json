@@ -194,7 +194,8 @@
       "owner_surface": "crypto/schemes + control_plane/mmr_proofs",
       "event_codes": [
         {"code": "FN-LTV-001", "name": "ltv_anchor_dual_signed", "description": "Critical evidence anchor dual-signed under active suites."},
-        {"code": "FN-LTV-002", "name": "ltv_root_reattested", "description": "MMR root re-attested under a currently valid suite."}
+        {"code": "FN-LTV-002", "name": "ltv_root_reattested", "description": "MMR root re-attested under a currently valid suite."},
+        {"code": "FN-LTV-003", "name": "ltv_verify_as_of_completed", "description": "Offline verifier SDK completed a verify-as-of-T evaluation of LTV evidence."}
       ],
       "error_codes": [
         {"code": "FN-LTV-ERR-001", "name": "ltv_anteriority_unproven", "description": "Verifier could not prove anteriority for the requested time."}

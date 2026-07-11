@@ -161,6 +161,10 @@ pub enum Command {
     #[command(subcommand)]
     Incident(IncidentCommand),
 
+    /// Long-term verifiability attestation and offline verification.
+    #[command(subcommand)]
+    Ltv(LtvCommand),
+
     /// Runtime operations and health inspection.
     #[command(subcommand)]
     Ops(OpsCommand),
@@ -1704,6 +1708,107 @@ pub struct IncidentListArgs {
     /// Emit machine-readable JSON output (one object per incident).
     #[arg(long)]
     pub json: bool,
+}
+
+// -- ltv --
+
+#[derive(Debug, Subcommand)]
+pub enum LtvCommand {
+    /// Produce self-contained long-term verification evidence from a
+    /// signature-verified incident bundle.
+    Attest(LtvAttestArgs),
+
+    /// Verify long-term evidence as of a claimed time through the offline
+    /// verifier SDK.
+    #[command(name = "verify-as-of")]
+    VerifyAsOf(LtvVerifyAsOfArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct LtvAttestArgs {
+    /// Path to the incident bundle whose long-term anteriority is attested.
+    #[arg(long)]
+    pub bundle: PathBuf,
+
+    /// Trusted Ed25519 public key file for bundle signature verification.
+    #[arg(long = "trusted-public-key", alias = "trust-anchor")]
+    pub trusted_public_key: Option<PathBuf>,
+
+    /// Directory containing trusted Ed25519 public keys for bundle verification.
+    #[arg(long = "key-dir", alias = "trusted-key-dir")]
+    pub trusted_key_dir: Option<PathBuf>,
+
+    /// Optional `run --json` report whose host-effect ledger chain hashes are
+    /// committed as co-markers next to the bundle in the origin tree.
+    #[arg(long = "run-report")]
+    pub run_report: Option<PathBuf>,
+
+    /// Witness signing key file (raw Ed25519 32-byte key; hex, base64, or
+    /// supported JSON wrapper). Repeat once per independent witness.
+    #[arg(long = "witness-key", required = true)]
+    pub witness_keys: Vec<PathBuf>,
+
+    /// Minimum number of valid witness signatures the receipt requires
+    /// (defaults to every supplied witness key).
+    #[arg(long)]
+    pub witness_threshold: Option<u32>,
+
+    /// Witness group identifier recorded on the cosigned statement.
+    #[arg(long, default_value = "operator-witnesses")]
+    pub witness_group_id: String,
+
+    /// Witness policy identifier recorded on the cosigned statement.
+    #[arg(long, default_value = "ltv-policy-v1")]
+    pub witness_policy_id: String,
+
+    /// Verification target time as unix seconds (defaults to now).
+    #[arg(long)]
+    pub as_of: Option<u64>,
+
+    /// Output path for the produced evidence JSON.
+    #[arg(long)]
+    pub out: PathBuf,
+
+    /// Emit the attestation summary as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Emit structured diagnostic log events as JSONL to stderr
+    /// (FN-LTV-002 root re-attested, FN-LTV-001 anchor cosigned).
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
+    /// Stable trace ID for correlating attestation events across commands.
+    #[arg(long, default_value = "ltv-attest")]
+    pub trace_id: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct LtvVerifyAsOfArgs {
+    /// Path to the evidence JSON produced by `ltv attest`.
+    #[arg(long)]
+    pub evidence: PathBuf,
+
+    /// Override the evidence's verification target time (unix seconds).
+    #[arg(long)]
+    pub as_of: Option<u64>,
+
+    /// Verifier identity recorded on the SDK verification result.
+    #[arg(long, default_value = "verifier://franken-node-ltv-cli")]
+    pub verifier_identity: String,
+
+    /// Emit the verification result as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Emit structured diagnostic log events as JSONL to stderr
+    /// (FN-LTV-003 verify completed, FN-LTV-ERR-001 anteriority unproven).
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
+    /// Stable trace ID for correlating verification events across commands.
+    #[arg(long, default_value = "ltv-verify-as-of")]
+    pub trace_id: String,
 }
 
 // -- registry --

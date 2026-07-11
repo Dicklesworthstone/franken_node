@@ -109,15 +109,16 @@ use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugEvidenceArgs, DebugEvidenceKind,
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
     DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorWorkspacePressureArgs,
-    FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
-    OpsConfigAuditArgs, OpsMetricsFormat, OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs,
-    OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
-    ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
-    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
-    RuntimeLaneCommand, SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs,
-    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
-    VerifyMigrationArgs, VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs,
-    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
+    FleetAgentArgs, FleetCommand, IncidentCommand, LtvCommand, MigrateCommand, MigrateReportArgs,
+    OpsCommand, OpsConfigAuditArgs, OpsMetricsFormat, OpsProofCarryingEvidenceArgs,
+    OpsResourceGovernorArgs, OpsValidationCloseoutArgs, OpsValidationReadinessArgs,
+    ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand, ProofWorkersRestartArgs,
+    ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
+    RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, SafeModeCommand,
+    SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand, TrustCommand,
+    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
+    load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -17091,6 +17092,380 @@ fn resolve_incident_evidence_path(
         .join(INCIDENT_EVIDENCE_FILE_NAME))
 }
 
+// bd-rgkd2: operator-facing LTV surface. `ltv attest` turns a
+// signature-verified incident bundle (plus, optionally, its run's host-effect
+// chain hashes) into self-contained SDK LTV evidence via the verifier SDK's
+// public builder; `ltv verify-as-of` re-verifies that evidence offline through
+// `VerifierSdk::verify_as_of_ltv`. All LTV hashing lives in the SDK crate.
+const LTV_ATTEST_CLI_SCHEMA: &str = "franken-node/ltv-attest-cli/v1";
+const LTV_VERIFY_AS_OF_CLI_SCHEMA: &str = "franken-node/ltv-verify-as-of-cli/v1";
+const LTV_CLI_CRYPTO_SUITE: &str = "ed25519-v1";
+const MAX_LTV_RUN_REPORT_BYTES: u64 = 64 << 20;
+const MAX_LTV_EVIDENCE_BYTES: u64 = 16 << 20;
+
+fn ltv_structured_log_line(
+    event_code: &str,
+    message: String,
+    trace_id: &str,
+    span_id: &str,
+    details: serde_json::Value,
+) -> RunStructuredLogLine {
+    RunStructuredLogLine {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        level: if event_code.contains("-ERR-") {
+            "error"
+        } else {
+            "info"
+        },
+        event_code: event_code.to_string(),
+        message,
+        trace_id: trace_id.to_string(),
+        span_id: span_id.to_string(),
+        surface: "CLI-LTV",
+        details: Some(details),
+    }
+}
+
+/// Chain hashes from a saved `run --json` report's signed host-effect ledger.
+fn run_report_chain_hashes(path: &Path) -> Result<Vec<String>> {
+    let raw = crate::bounded_read(path, MAX_LTV_RUN_REPORT_BYTES)
+        .with_context(|| format!("failed reading run report {}", path.display()))?;
+    let report: serde_json::Value = serde_json::from_slice(&raw)
+        .with_context(|| format!("run report {} is not valid JSON", path.display()))?;
+    let entries = report["dispatch"]["host_effect_ledger"]["entries"]
+        .as_array()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "run report {} carries no dispatch.host_effect_ledger.entries array",
+                path.display()
+            )
+        })?;
+    let mut chain_hashes = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let chain_hash = entry["chain_hash"].as_str().ok_or_else(|| {
+            anyhow::anyhow!("run report ledger entry {index} carries no chain_hash")
+        })?;
+        // The ledger wire shape is `sha256:<hex>`; the SDK builder consumes
+        // bare canonical digests and re-validates them.
+        let bare = chain_hash.strip_prefix("sha256:").ok_or_else(|| {
+            anyhow::anyhow!(
+                "run report ledger entry {index} chain_hash `{chain_hash}` is not sha256:<hex>"
+            )
+        })?;
+        chain_hashes.push(bare.to_string());
+    }
+    Ok(chain_hashes)
+}
+
+fn load_ltv_witness_signers(
+    paths: &[PathBuf],
+) -> Result<Vec<frankenengine_verifier_sdk::LongTermWitnessSigner>> {
+    let mut signers = Vec::with_capacity(paths.len());
+    let mut seen_key_ids = BTreeSet::new();
+    for path in paths {
+        let material =
+            load_ed25519_signing_material_from_path(path, "ltv witness signing key", "cli")?;
+        let key_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "witness key {} has no UTF-8 file stem to use as a key id",
+                    path.display()
+                )
+            })?;
+        if !seen_key_ids.insert(key_id.clone()) {
+            anyhow::bail!(
+                "duplicate witness key id `{key_id}`; witness key file stems must be unique"
+            );
+        }
+        signers.push(frankenengine_verifier_sdk::LongTermWitnessSigner {
+            key_id,
+            signing_key: material.signing_key,
+        });
+    }
+    Ok(signers)
+}
+
+fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
+    eprintln!("franken-node ltv attest: bundle={}", args.bundle.display());
+    let trusted_key_ids = replay_trusted_key_ids(
+        args.trusted_public_key.as_deref(),
+        args.trusted_key_dir.as_deref(),
+    )?;
+    let bundle = read_bundle_from_path_with_trusted_keys(&args.bundle, &trusted_key_ids)
+        .with_context(|| format!("failed reading replay bundle {}", args.bundle.display()))?;
+
+    let claimed_at = DateTime::parse_from_rfc3339(&bundle.created_at)
+        .with_context(|| format!("bundle created_at `{}` is not RFC 3339", bundle.created_at))?
+        .timestamp();
+    let claimed_at_unix_seconds = u64::try_from(claimed_at).map_err(|_| {
+        anyhow::anyhow!(
+            "bundle created_at `{}` precedes the unix epoch",
+            bundle.created_at
+        )
+    })?;
+
+    let co_marker_hashes = match args.run_report.as_deref() {
+        Some(path) => run_report_chain_hashes(path)?,
+        None => Vec::new(),
+    };
+    let witness_signers = load_ltv_witness_signers(&args.witness_keys)?;
+    let witness_threshold = match args.witness_threshold {
+        Some(threshold) => threshold,
+        None => u32::try_from(witness_signers.len())
+            .map_err(|_| anyhow::anyhow!("too many witness keys"))?,
+    };
+
+    let now_unix_seconds = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock precedes the unix epoch")?
+        .as_secs();
+    let as_of_unix_seconds = args.as_of.unwrap_or(now_unix_seconds);
+
+    let request = frankenengine_verifier_sdk::LongTermEvidenceRequest {
+        artifact_id: bundle.bundle_id.to_string(),
+        artifact_hash: bundle.integrity_hash.clone(),
+        crypto_suite: LTV_CLI_CRYPTO_SUITE.to_string(),
+        claimed_at_unix_seconds,
+        co_marker_hashes,
+        reattestation_appended_marker_hashes: Vec::new(),
+        reattested_at_unix_seconds: now_unix_seconds,
+        observed_at_unix_seconds: now_unix_seconds,
+        as_of_unix_seconds,
+        suite_valid_from_unix_seconds: claimed_at_unix_seconds,
+        witness_group_id: args.witness_group_id.clone(),
+        witness_policy_id: args.witness_policy_id.clone(),
+        witness_threshold,
+        trace_id: args.trace_id.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    let evidence = frankenengine_verifier_sdk::build_long_term_verification_evidence(
+        &request,
+        &witness_signers,
+    )
+    .map_err(|reason| anyhow::anyhow!("ltv attest failed to build evidence: {reason}"))?;
+
+    let rendered = serde_json::to_string_pretty(&evidence)?;
+    std::fs::write(&args.out, rendered.as_bytes())
+        .with_context(|| format!("failed writing LTV evidence to {}", args.out.display()))?;
+
+    let origin_root = &evidence.reattestation_chain.origin_root;
+    let attested_root = &evidence.witness_receipt.statement.root;
+    if args.structured_logs_jsonl {
+        let reattested = ltv_structured_log_line(
+            "FN-LTV-002",
+            format!(
+                "MMR root re-attested: origin_tree_size={} attested_tree_size={} suite={}",
+                origin_root.tree_size, attested_root.tree_size, evidence.artifact.crypto_suite
+            ),
+            &args.trace_id,
+            "ltv-attest",
+            serde_json::json!({
+                "artifact_id": &evidence.artifact.artifact_id,
+                "artifact_hash": &evidence.artifact.artifact_hash,
+                "origin_root_hash": &origin_root.root_hash,
+                "attested_root_hash": &attested_root.root_hash,
+                "crypto_suite": &evidence.artifact.crypto_suite,
+                "reattested_at_unix_seconds": now_unix_seconds,
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&reattested)?);
+        let cosigned = ltv_structured_log_line(
+            "FN-LTV-001",
+            format!(
+                "evidence anchor cosigned: witnesses={} threshold={}",
+                evidence.witness_receipt.witness_artifact.signatures.len(),
+                evidence.witness_receipt.threshold_config.threshold
+            ),
+            &args.trace_id,
+            "ltv-attest",
+            serde_json::json!({
+                "witness_group_id": &evidence.witness_receipt.statement.witness_group_id,
+                "witness_policy_id": &evidence.witness_receipt.statement.witness_policy_id,
+                "content_hash": &evidence.witness_receipt.statement.content_hash,
+                "witnesses": evidence.witness_receipt.witness_artifact.signatures.len(),
+                "threshold": evidence.witness_receipt.threshold_config.threshold,
+                "observed_at_unix_seconds": now_unix_seconds,
+                "as_of_unix_seconds": as_of_unix_seconds,
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&cosigned)?);
+    }
+    eprintln!(
+        "ltv attest result: artifact_id={} origin_tree_size={} attested_root={} witnesses={}/{} out={}",
+        evidence.artifact.artifact_id,
+        origin_root.tree_size,
+        attested_root.root_hash,
+        evidence.witness_receipt.witness_artifact.signatures.len(),
+        evidence.witness_receipt.threshold_config.total_signers,
+        args.out.display()
+    );
+
+    if args.json {
+        let payload = serde_json::json!({
+            "command": "ltv.attest",
+            "schema_version": LTV_ATTEST_CLI_SCHEMA,
+            "artifact_id": &evidence.artifact.artifact_id,
+            "artifact_hash": &evidence.artifact.artifact_hash,
+            "claimed_at_unix_seconds": claimed_at_unix_seconds,
+            "origin_tree_size": origin_root.tree_size,
+            "attested_tree_size": attested_root.tree_size,
+            "attested_root_hash": &attested_root.root_hash,
+            "witnesses": evidence.witness_receipt.witness_artifact.signatures.len(),
+            "witness_threshold": evidence.witness_receipt.threshold_config.threshold,
+            "observed_at_unix_seconds": now_unix_seconds,
+            "as_of_unix_seconds": as_of_unix_seconds,
+            "evidence_path": args.out.display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "ltv attest: artifact_id={} attested_root={} witnesses={}/{} evidence={}",
+            evidence.artifact.artifact_id,
+            attested_root.root_hash,
+            evidence.witness_receipt.witness_artifact.signatures.len(),
+            evidence.witness_receipt.threshold_config.total_signers,
+            args.out.display()
+        );
+    }
+    Ok(())
+}
+
+fn handle_ltv_verify_as_of_command(args: &cli::LtvVerifyAsOfArgs) -> Result<()> {
+    eprintln!(
+        "franken-node ltv verify-as-of: evidence={}",
+        args.evidence.display()
+    );
+    let raw = crate::bounded_read(&args.evidence, MAX_LTV_EVIDENCE_BYTES)
+        .with_context(|| format!("failed reading LTV evidence {}", args.evidence.display()))?;
+    let mut evidence: frankenengine_verifier_sdk::LongTermVerificationEvidence =
+        serde_json::from_slice(&raw).with_context(|| {
+            format!(
+                "LTV evidence {} does not parse as {}",
+                args.evidence.display(),
+                frankenengine_verifier_sdk::LONG_TERM_VERIFICATION_SCHEMA_VERSION
+            )
+        })?;
+    if let Some(as_of) = args.as_of {
+        evidence.as_of_unix_seconds = as_of;
+    }
+
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new(args.verifier_identity.as_str());
+    let result = sdk
+        .verify_as_of_ltv(&evidence)
+        .map_err(|err| anyhow::anyhow!("verifier SDK refused the LTV evidence: {err}"))?;
+    let passed = matches!(
+        result.verdict,
+        frankenengine_verifier_sdk::VerificationVerdict::Pass
+    );
+    let failed_assertions: Vec<String> = result
+        .checked_assertions
+        .iter()
+        .filter(|assertion| !assertion.passed)
+        .map(|assertion| assertion.assertion.clone())
+        .collect();
+    let anteriority_unproven = failed_assertions.iter().any(|assertion| {
+        matches!(
+            assertion.as_str(),
+            "ltv_witness_anterior_to_as_of" | "ltv_witness_precedes_key_compromise_records"
+        )
+    });
+
+    if args.structured_logs_jsonl {
+        let completed = ltv_structured_log_line(
+            "FN-LTV-003",
+            format!(
+                "ltv verify-as-of completed: verdict={:?} assertions={}",
+                result.verdict,
+                result.checked_assertions.len()
+            ),
+            &args.trace_id,
+            "ltv-verify-as-of",
+            serde_json::json!({
+                "verdict": format!("{:?}", result.verdict),
+                "as_of_unix_seconds": evidence.as_of_unix_seconds,
+                "artifact_id": &evidence.artifact.artifact_id,
+                "artifact_binding_hash": &result.artifact_binding_hash,
+                "failed_assertions": &failed_assertions,
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&completed)?);
+        if anteriority_unproven {
+            let unproven = ltv_structured_log_line(
+                "FN-LTV-ERR-001",
+                format!(
+                    "anteriority unproven for as_of={}: {}",
+                    evidence.as_of_unix_seconds,
+                    failed_assertions.join(", ")
+                ),
+                &args.trace_id,
+                "ltv-verify-as-of",
+                serde_json::json!({
+                    "as_of_unix_seconds": evidence.as_of_unix_seconds,
+                    "failed_assertions": &failed_assertions,
+                }),
+            );
+            eprintln!("{}", serde_json::to_string(&unproven)?);
+        }
+    }
+    eprintln!(
+        "ltv verify-as-of result: verdict={:?} assertions={} as_of={}",
+        result.verdict,
+        result.checked_assertions.len(),
+        evidence.as_of_unix_seconds
+    );
+
+    if args.json {
+        let sdk_transcript: Vec<serde_json::Value> =
+            frankenengine_verifier_sdk::long_term_verification_audit_events(&result)
+                .iter()
+                .map(|event| {
+                    serde_json::json!({
+                        "event_code": event.event_code,
+                        "detail": event.detail,
+                    })
+                })
+                .collect();
+        let payload = serde_json::json!({
+            "command": "ltv.verify-as-of",
+            "schema_version": LTV_VERIFY_AS_OF_CLI_SCHEMA,
+            "verdict": format!("{:?}", result.verdict),
+            "as_of_unix_seconds": evidence.as_of_unix_seconds,
+            "artifact_id": &evidence.artifact.artifact_id,
+            "artifact_binding_hash": &result.artifact_binding_hash,
+            "checked_assertions": result
+                .checked_assertions
+                .iter()
+                .map(|assertion| {
+                    serde_json::json!({
+                        "assertion": assertion.assertion,
+                        "passed": assertion.passed,
+                        "detail": assertion.detail,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "sdk_transcript": sdk_transcript,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "ltv verify-as-of: verdict={:?} artifact_id={} as_of={}",
+            result.verdict, evidence.artifact.artifact_id, evidence.as_of_unix_seconds
+        );
+    }
+
+    if !passed {
+        anyhow::bail!(
+            "LTV verification failed for evidence {}: {}",
+            args.evidence.display(),
+            failed_assertions.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> {
     // Prepare receipt export context upfront - fails immediately if receipt export
     // is requested but signing material is unavailable (sign-or-fail).
@@ -27784,6 +28159,15 @@ fn main() -> Result<()> {
             }
             FleetCommand::Agent(args) => {
                 run_fleet_agent(&args)?;
+            }
+        },
+
+        Command::Ltv(sub) => match sub {
+            LtvCommand::Attest(args) => {
+                handle_ltv_attest_command(&args)?;
+            }
+            LtvCommand::VerifyAsOf(args) => {
+                handle_ltv_verify_as_of_command(&args)?;
             }
         },
 

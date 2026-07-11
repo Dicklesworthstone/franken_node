@@ -709,6 +709,13 @@ every leaf command available in the current build.
 | `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. Required: `--policy`. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. |
 | `franken-node incident list` | List recorded incidents. Filter: `--severity`. |
 
+### Long-term verifiability (LTV)
+
+| Command | Purpose |
+|---|---|
+| `franken-node ltv attest` | Build self-contained long-term verification evidence from a signature-verified incident bundle: the bundle (plus, with `--run-report`, its run's host-effect chain hashes) becomes Merkle leaves, the root is re-attested and threshold-cosigned by operator witness keys. **Required: `--bundle`, `--out`, at least one `--witness-key`, and a trust anchor (`--trusted-public-key` or `--key-dir`).** |
+| `franken-node ltv verify-as-of` | Re-verify LTV evidence offline through the verifier SDK (`verify_as_of_ltv`): inclusion, re-attestation chain, witness threshold, and anteriority against `--as-of`. Fails closed (non-zero exit) on any failed assertion. Required: `--evidence`. |
+
 ### Runtime, safe-mode, and proofs
 
 | Command | Purpose |

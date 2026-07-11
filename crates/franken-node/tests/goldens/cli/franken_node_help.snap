@@ -19,6 +19,7 @@ Commands:
   trust-card      Trust-card API[PATH] parity surfaces
   fleet           Fleet control plane operations
   incident        Incident replay and forensics
+  ltv             Long-term verifiability attestation and offline verification
   ops             Runtime operations and health inspection
   registry        Extension registry operations
   bench           Benchmark suite execution

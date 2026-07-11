@@ -151,6 +151,10 @@ asupersync = { version = "0.3.4", optional = true }
 hdrhistogram = { version = "7.5", default-features = false, optional = true }
 frankentui.workspace = true
 fs2 = "0.4.3"
+# bd-rgkd2: the product binary produces LTV evidence through the SDK's public
+# builder and verifies it via verify_as_of_ltv, so all LTV crypto stays in one
+# crate. The SDK never depends on the product; verifier independence holds.
+frankenengine-verifier-sdk = { path = "../../sdk/verifier" }
 frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine", optional = true }
 frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host", optional = true }
 tracing = { workspace = true }
@@ -178,7 +182,6 @@ uds_windows = "1"
 assert_cmd = "2.0.16"
 assert2 = "0.4.0"
 fsqlite = { path = "../../../frankensqlite/crates/fsqlite", default-features = false, features = ["native"] }
-frankenengine-verifier-sdk = { path = "../../sdk/verifier" }
 fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false }
 tokio = { workspace = true, features = ["sync", "time"] }
 regex = "1.11.1"

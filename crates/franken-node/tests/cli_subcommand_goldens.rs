@@ -619,6 +619,17 @@ fn incident_help_output() {
 }
 
 #[test]
+fn ltv_help_output() {
+    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let assertion = cmd.args(["ltv", "--help"]).assert().success();
+
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
+    with_scrubbed_snapshot_settings("ltv_cli", || {
+        assert_snapshot!("ltv_help", stdout);
+    });
+}
+
+#[test]
 fn bench_run_secure_extension_heavy_json_output() -> Result<(), Box<dyn Error>> {
     let mut cmd = Command::cargo_bin("franken-node")?;
     let assertion = cmd

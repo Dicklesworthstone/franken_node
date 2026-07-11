@@ -3206,6 +3206,291 @@ fn long_term_len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
 
+// ---------------------------------------------------------------------------
+// Long-term verification evidence producer (public builder)
+// ---------------------------------------------------------------------------
+
+/// One producer-side witness signer used to threshold-cosign the root
+/// witness statement of a [`LongTermVerificationEvidence`].
+pub struct LongTermWitnessSigner {
+    pub key_id: String,
+    pub signing_key: SigningKey,
+}
+
+impl fmt::Debug for LongTermWitnessSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LongTermWitnessSigner")
+            .field("key_id", &self.key_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Producer-side request describing the artifact, log markers, timeline, and
+/// witness policy from which [`build_long_term_verification_evidence`]
+/// assembles self-contained LTV evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongTermEvidenceRequest {
+    /// Identifier of the artifact whose anteriority is being attested.
+    pub artifact_id: String,
+    /// Canonical lowercase sha256 digest of the artifact bytes.
+    pub artifact_hash: String,
+    /// Crypto suite discriminator under which the artifact was produced.
+    pub crypto_suite: String,
+    /// Unix time at which the artifact claims to have existed.
+    pub claimed_at_unix_seconds: u64,
+    /// Additional canonical sha256 marker hashes committed alongside the
+    /// artifact in the origin tree (for example, effect receipt chain
+    /// hashes); the artifact marker leaf always sits at leaf index 0.
+    pub co_marker_hashes: Vec<String>,
+    /// Marker hashes appended to the log between the origin root and the
+    /// re-attested root; empty re-attests the origin root unchanged.
+    pub reattestation_appended_marker_hashes: Vec<String>,
+    /// Unix time the re-attestation link is issued.
+    pub reattested_at_unix_seconds: u64,
+    /// Unix time the independent witnesses observed the re-attested root.
+    pub observed_at_unix_seconds: u64,
+    /// Verification target time; the witness observation must be anterior.
+    pub as_of_unix_seconds: u64,
+    /// Unix time from which the crypto suite is on record as valid.
+    pub suite_valid_from_unix_seconds: u64,
+    pub witness_group_id: String,
+    pub witness_policy_id: String,
+    /// Minimum number of valid witness signatures the receipt requires.
+    pub witness_threshold: u32,
+    pub trace_id: String,
+    /// RFC 3339 timestamp recorded on the witness receipt.
+    pub timestamp: String,
+}
+
+/// Assemble self-contained [`LongTermVerificationEvidence`] on the producer
+/// side, failing closed unless the exact assertion set behind
+/// [`VerifierSdk::verify_as_of_ltv`] accepts the result.
+///
+/// The origin tree commits the artifact marker leaf at index 0 followed by
+/// one leaf per `co_marker_hashes` entry; the single re-attestation link
+/// extends the origin tree with `reattestation_appended_marker_hashes` (or
+/// re-attests it unchanged) and every supplied signer cosigns the canonical
+/// witness statement over the newest root. All LTV hashing stays inside this
+/// crate so producers and verifiers can never drift.
+///
+/// # Errors
+///
+/// Returns a description of the first violated constraint: no signers, a
+/// zero or unsatisfiable threshold, a non-canonical marker hash, an invalid
+/// artifact field, or produced evidence that fails any of the verifier's own
+/// LTV assertions.
+pub fn build_long_term_verification_evidence(
+    request: &LongTermEvidenceRequest,
+    witness_signers: &[LongTermWitnessSigner],
+) -> Result<LongTermVerificationEvidence, String> {
+    if witness_signers.is_empty() {
+        return Err("at least one witness signer is required".to_string());
+    }
+    if request.witness_threshold == 0 {
+        return Err("witness_threshold must be > 0".to_string());
+    }
+    let total_signers =
+        u32::try_from(witness_signers.len()).map_err(|_| "too many witness signers".to_string())?;
+    if request.witness_threshold > total_signers {
+        return Err(format!(
+            "witness_threshold {} exceeds supplied signer count {}",
+            request.witness_threshold, total_signers
+        ));
+    }
+    for marker in request
+        .co_marker_hashes
+        .iter()
+        .chain(&request.reattestation_appended_marker_hashes)
+    {
+        if !is_canonical_sha256_hex(marker) {
+            return Err(format!(
+                "marker hash `{marker}` must be a canonical lowercase sha256 digest"
+            ));
+        }
+    }
+
+    let mut artifact = LongTermArtifactEvidence {
+        artifact_id: request.artifact_id.clone(),
+        artifact_hash: request.artifact_hash.clone(),
+        crypto_suite: request.crypto_suite.clone(),
+        claimed_at_unix_seconds: request.claimed_at_unix_seconds,
+        marker_hash: String::new(),
+    };
+    artifact.marker_hash = long_term_artifact_marker_hash(&artifact);
+    validate_long_term_artifact(&artifact)?;
+
+    let mut origin_leaf_hashes = Vec::with_capacity(1 + request.co_marker_hashes.len());
+    origin_leaf_hashes.push(long_term_marker_leaf_hash(&artifact.marker_hash));
+    origin_leaf_hashes.extend(
+        request
+            .co_marker_hashes
+            .iter()
+            .map(|marker| long_term_marker_leaf_hash(marker)),
+    );
+    let origin_root_hash = long_term_merkle_root_from_leaf_hashes(&origin_leaf_hashes)
+        .ok_or_else(|| "origin root computation failed".to_string())?;
+    let origin_root = LongTermMmrRoot {
+        tree_size: long_term_len_to_u64(origin_leaf_hashes.len()),
+        root_hash: origin_root_hash,
+    };
+    let inclusion_proof = LongTermMmrInclusionProof {
+        leaf_index: 0,
+        tree_size: origin_root.tree_size,
+        leaf_hash: origin_leaf_hashes[0].clone(),
+        audit_path: long_term_audit_path(&origin_leaf_hashes, 0)?,
+    };
+
+    let mut super_leaf_hashes = origin_leaf_hashes.clone();
+    super_leaf_hashes.extend(
+        request
+            .reattestation_appended_marker_hashes
+            .iter()
+            .map(|marker| long_term_marker_leaf_hash(marker)),
+    );
+    let attested_root_hash = long_term_merkle_root_from_leaf_hashes(&super_leaf_hashes)
+        .ok_or_else(|| "attested root computation failed".to_string())?;
+    let attested_root = LongTermMmrRoot {
+        tree_size: long_term_len_to_u64(super_leaf_hashes.len()),
+        root_hash: attested_root_hash,
+    };
+    let mut reattestation = LongTermMmrRootReattestation {
+        schema_version: MMR_ROOT_REATTESTATION_SCHEMA_VERSION.to_string(),
+        previous_root: origin_root.clone(),
+        attested_root: attested_root.clone(),
+        prefix_proof: LongTermMmrPrefixProof {
+            prefix_size: origin_root.tree_size,
+            super_tree_size: attested_root.tree_size,
+            prefix_root_hash: origin_root.root_hash.clone(),
+            super_root_hash: attested_root.root_hash.clone(),
+            prefix_root_from_super: origin_root.root_hash.clone(),
+            super_leaf_hashes,
+        },
+        issued_at_unix_seconds: request.reattested_at_unix_seconds,
+        crypto_suite: request.crypto_suite.clone(),
+        attestation_hash: String::new(),
+    };
+    reattestation.attestation_hash = compute_long_term_reattestation_hash(&reattestation);
+
+    let mut statement = LongTermMmrRootWitnessStatement {
+        schema_version: MMR_ROOT_WITNESS_SCHEMA_VERSION.to_string(),
+        root: attested_root,
+        observed_at_unix_seconds: request.observed_at_unix_seconds,
+        witness_group_id: request.witness_group_id.clone(),
+        witness_policy_id: request.witness_policy_id.clone(),
+        content_hash: String::new(),
+    };
+    statement.content_hash = compute_long_term_witness_content_hash(&statement);
+
+    let signer_keys = witness_signers
+        .iter()
+        .map(|signer| LongTermSignerKey {
+            key_id: signer.key_id.clone(),
+            public_key_hex: hex::encode(signer.signing_key.verifying_key().to_bytes()),
+        })
+        .collect();
+    let threshold_config = LongTermThresholdConfig {
+        threshold: request.witness_threshold,
+        total_signers,
+        signer_keys,
+    };
+    let message = long_term_threshold_signing_message(
+        MMR_ROOT_WITNESS_ARTIFACT_ID,
+        MMR_ROOT_WITNESS_CONNECTOR_ID,
+        &statement.content_hash,
+    );
+    let signatures = witness_signers
+        .iter()
+        .map(|signer| LongTermPartialSignature {
+            signer_id: signer.key_id.clone(),
+            key_id: signer.key_id.clone(),
+            signature_hex: hex::encode(signer.signing_key.sign(&message).to_bytes()),
+        })
+        .collect();
+    let witness_artifact = LongTermPublicationArtifact {
+        artifact_id: MMR_ROOT_WITNESS_ARTIFACT_ID.to_string(),
+        connector_id: MMR_ROOT_WITNESS_CONNECTOR_ID.to_string(),
+        content_hash: statement.content_hash.clone(),
+        signatures,
+    };
+
+    let evidence = LongTermVerificationEvidence {
+        schema_version: LONG_TERM_VERIFICATION_SCHEMA_VERSION.to_string(),
+        as_of_unix_seconds: request.as_of_unix_seconds,
+        artifact,
+        suite_records: vec![LongTermCryptoSuiteRecord {
+            crypto_suite: request.crypto_suite.clone(),
+            valid_from_unix_seconds: request.suite_valid_from_unix_seconds,
+            valid_until_unix_seconds: None,
+            compromised_at_unix_seconds: None,
+        }],
+        inclusion_proof,
+        reattestation_chain: LongTermMmrRootReattestationChain {
+            origin_root,
+            attestations: vec![reattestation],
+        },
+        witness_receipt: LongTermMmrRootWitnessReceipt {
+            statement,
+            threshold_config,
+            witness_artifact,
+            trace_id: request.trace_id.clone(),
+            timestamp: request.timestamp.clone(),
+        },
+    };
+
+    let verification = verify_long_term_evidence(&evidence);
+    if let Some(failed) = verification
+        .checked_assertions
+        .iter()
+        .find(|assertion| !assertion.passed)
+    {
+        return Err(format!(
+            "produced evidence fails its own verification: {}: {}",
+            failed.assertion, failed.detail
+        ));
+    }
+    Ok(evidence)
+}
+
+/// Audit path for `leaf_index` in the same duplicate-last-odd binary tree
+/// shape that inclusion verification recomputes.
+fn long_term_audit_path(leaf_hashes: &[String], leaf_index: usize) -> Result<Vec<String>, String> {
+    if leaf_index >= leaf_hashes.len() {
+        return Err(format!(
+            "leaf_index={leaf_index} is outside a tree of {} leaves",
+            leaf_hashes.len()
+        ));
+    }
+    let mut path = Vec::new();
+    let mut level = leaf_hashes.to_vec();
+    let mut index = leaf_index;
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            let last = level
+                .last()
+                .cloned()
+                .ok_or_else(|| "audit path level unexpectedly empty".to_string())?;
+            level.push(last);
+        }
+        let sibling_index = if index.is_multiple_of(2) {
+            index + 1
+        } else {
+            index - 1
+        };
+        let sibling = level
+            .get(sibling_index)
+            .cloned()
+            .ok_or_else(|| "audit path sibling out of bounds".to_string())?;
+        path.push(sibling);
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for pair in level.chunks(2) {
+            next.push(long_term_hash_pair(&pair[0], &pair[1])?);
+        }
+        level = next;
+        index /= 2;
+    }
+    Ok(path)
+}
+
 #[derive(Debug)]
 struct MigrationEquivalenceVerification {
     checked_assertions: Vec<AssertionResult>,
@@ -5038,6 +5323,137 @@ mod tests {
             ) && assertion.passed
                 && assertion.detail == LONG_TERM_VERIFICATION_PASS_DETAIL
         }));
+    }
+
+    fn builder_witness_signers(count: u8) -> Vec<LongTermWitnessSigner> {
+        (0..count)
+            .map(|index| LongTermWitnessSigner {
+                key_id: format!("builder-witness-{index}"),
+                signing_key: SigningKey::from_bytes(&[0x21 + index; 32]),
+            })
+            .collect()
+    }
+
+    fn builder_reference_request() -> LongTermEvidenceRequest {
+        LongTermEvidenceRequest {
+            artifact_id: "builder-artifact-alpha".to_string(),
+            artifact_hash: bundle::hash(b"builder-artifact-bytes"),
+            crypto_suite: "ed25519-v1".to_string(),
+            claimed_at_unix_seconds: 1_000,
+            // Two co-markers make the origin tree three leaves wide, so the
+            // audit path has to walk a duplicated-odd level.
+            co_marker_hashes: vec![
+                bundle::hash(b"builder-chain-entry-0"),
+                bundle::hash(b"builder-chain-entry-1"),
+            ],
+            reattestation_appended_marker_hashes: vec![bundle::hash(b"builder-appended-marker")],
+            reattested_at_unix_seconds: 1_500,
+            observed_at_unix_seconds: 1_700,
+            as_of_unix_seconds: 1_900,
+            suite_valid_from_unix_seconds: 900,
+            witness_group_id: "builder-witnesses".to_string(),
+            witness_policy_id: "builder-policy-v1".to_string(),
+            witness_threshold: 2,
+            trace_id: "trace-builder-alpha".to_string(),
+            timestamp: "2026-07-11T19:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn public_builder_produces_evidence_verify_as_of_ltv_accepts() {
+        let request = builder_reference_request();
+        let signers = builder_witness_signers(3);
+        let evidence = build_long_term_verification_evidence(&request, &signers)
+            .expect("builder should assemble self-verifying evidence");
+
+        assert_eq!(
+            evidence.schema_version,
+            LONG_TERM_VERIFICATION_SCHEMA_VERSION
+        );
+        assert_eq!(evidence.reattestation_chain.origin_root.tree_size, 3);
+        assert_eq!(
+            evidence.witness_receipt.statement.root.tree_size, 4,
+            "appended marker must grow the re-attested tree"
+        );
+
+        let sdk = create_verifier_sdk("verifier://builder");
+        let result = verify_as_of_ltv_for_test(
+            &sdk,
+            &evidence,
+            "builder-produced LTV evidence should verify",
+        );
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+        assert_eq!(result.artifact_binding_hash, evidence.artifact.marker_hash);
+    }
+
+    #[test]
+    fn public_builder_equal_size_reattestation_verifies() {
+        let mut request = builder_reference_request();
+        request.reattestation_appended_marker_hashes.clear();
+        let signers = builder_witness_signers(2);
+        let evidence = build_long_term_verification_evidence(&request, &signers)
+            .expect("unchanged-root re-attestation should build");
+        assert_eq!(
+            evidence.reattestation_chain.origin_root,
+            evidence.witness_receipt.statement.root
+        );
+
+        let sdk = create_verifier_sdk("verifier://builder");
+        let result =
+            verify_as_of_ltv_for_test(&sdk, &evidence, "equal-size re-attestation should verify");
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+    }
+
+    #[test]
+    fn public_builder_evidence_fails_closed_after_tamper() {
+        let request = builder_reference_request();
+        let signers = builder_witness_signers(3);
+        let mut evidence = build_long_term_verification_evidence(&request, &signers)
+            .expect("builder should assemble self-verifying evidence");
+        evidence.artifact.artifact_hash = bundle::hash(b"tampered-artifact-bytes");
+
+        let sdk = create_verifier_sdk("verifier://builder");
+        let result = sdk
+            .verify_as_of_ltv(&evidence)
+            .expect("tampered evidence still yields a signed fail result");
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "ltv_artifact_marker_recomputed" && !assertion.passed
+        }));
+    }
+
+    #[test]
+    fn public_builder_rejects_invalid_producer_inputs() {
+        let request = builder_reference_request();
+        assert!(
+            build_long_term_verification_evidence(&request, &[])
+                .expect_err("no signers must be rejected")
+                .contains("witness signer")
+        );
+
+        let mut over_threshold = builder_reference_request();
+        over_threshold.witness_threshold = 4;
+        assert!(
+            build_long_term_verification_evidence(&over_threshold, &builder_witness_signers(3))
+                .expect_err("threshold above signer count must be rejected")
+                .contains("witness_threshold")
+        );
+
+        let mut bad_marker = builder_reference_request();
+        bad_marker.co_marker_hashes = vec!["not-a-digest".to_string()];
+        assert!(
+            build_long_term_verification_evidence(&bad_marker, &builder_witness_signers(2))
+                .expect_err("non-canonical marker must be rejected")
+                .contains("canonical lowercase sha256")
+        );
+
+        let mut anachronistic = builder_reference_request();
+        anachronistic.observed_at_unix_seconds = anachronistic.as_of_unix_seconds + 1;
+        assert!(
+            build_long_term_verification_evidence(&anachronistic, &builder_witness_signers(2))
+                .expect_err("witness after as-of must fail the self-check")
+                .contains("ltv_witness_anterior_to_as_of")
+        );
     }
 
     #[test]
