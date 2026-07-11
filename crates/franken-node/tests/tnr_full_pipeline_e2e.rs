@@ -41,11 +41,11 @@
 //!     dispatcher; containment comes from the engine's expected-loss
 //!     selector).
 //!   * FN-EFFECT-002 is emitted per ledger entry on the run path (bd-ihtox)
-//!     and pinned by the ordered-event assertion. FN-EFFECT-001 (receipt
-//!     STARTED — needs an in-flight emission site inside the dispatcher),
-//!     FN-CAS-* and FN-TTR-* remain registered in
-//!     docs/observability/tnr_event_metrics_registry.md but unemitted
-//!     (bd-x8d9t covers FN-TTR on the incident replay path).
+//!     and FN-TTR-001/002 on the incident replay path (bd-x8d9t) — both
+//!     pinned by the ordered-event assertions under the pipeline trace id.
+//!     FN-EFFECT-001 (receipt STARTED — needs an in-flight emission site
+//!     inside the dispatcher) and FN-CAS-* remain registered in
+//!     docs/observability/tnr_event_metrics_registry.md but unemitted.
 //!
 //! Run this lane directly with: `scripts/run_tnr_full_pipeline.sh`
 
@@ -411,6 +411,9 @@ fn incident_chain_leg(
             &bundle_file,
             "--trusted-public-key",
             &trust_anchor_arg,
+            "--structured-logs-jsonl",
+            "--trace-id",
+            trace_id,
         ],
     );
     assert!(
@@ -418,16 +421,21 @@ fn incident_chain_leg(
         "incident replay failed: {}",
         String::from_utf8_lossy(&replay_output.stderr)
     );
-    let (matched, replayed_events) =
-        parse_replay_result(&String::from_utf8_lossy(&replay_output.stderr));
+    let replay_stderr = String::from_utf8_lossy(&replay_output.stderr).into_owned();
+    let (matched, replayed_events) = parse_replay_result(&replay_stderr);
     assert!(matched, "replay must re-derive the recorded sequence");
     assert_eq!(
         replayed_events, event_count,
         "replay must cover every receipt-event"
     );
+    // bd-x8d9t: the replay lifecycle surfaces as registered FN-TTR events
+    // under the SAME trace id as the run that produced the receipts —
+    // cross-command trace continuity for the whole pipeline.
+    let replay_events = structured_events(&replay_stderr);
+    assert_event_order(&replay_events, &["FN-TTR-001", "FN-TTR-002"], trace_id);
     layer_pass(
         "L4 REPLAY incident replay",
-        &format!("matched=true event_count={replayed_events}"),
+        &format!("matched=true event_count={replayed_events} FN-TTR-001→002 on trace"),
     );
 
     let counterfactual_output = run_cli(

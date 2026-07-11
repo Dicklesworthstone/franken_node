@@ -1641,6 +1641,15 @@ pub struct IncidentReplayArgs {
     /// timeline event count).
     #[arg(long)]
     pub verbose: bool,
+
+    /// Emit structured diagnostic log events as JSONL to stderr
+    /// (FN-TTR-001 bundle loaded, FN-TTR-002 verdict emitted).
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
+    /// Stable trace ID for correlating replay events across commands.
+    #[arg(long, default_value = "incident-replay")]
+    pub trace_id: String,
 }
 
 #[derive(Debug, Parser)]

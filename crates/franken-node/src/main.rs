@@ -17059,6 +17059,74 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         args.trusted_key_dir.as_deref(),
     )?;
     let summary = incident_replay_cli_summary(&args.bundle, &trusted_key_ids)?;
+    // bd-x8d9t: mirror the replay lifecycle into the registered TNR event
+    // stream (docs/observability/tnr_event_metrics_registry.md) so one
+    // --trace-id correlates a run's effects with the replay of its incident
+    // bundle. FN-TTR-001 = bundle loaded + signature-verified; FN-TTR-002 =
+    // verdict emitted; FN-TTR-ERR-001 precedes the fail-closed mismatch exit.
+    let ttr_structured_log_line =
+        |event_code: &str, message: String, details: serde_json::Value| -> RunStructuredLogLine {
+            RunStructuredLogLine {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                level: if event_code.contains("-ERR-") {
+                    "error"
+                } else {
+                    "info"
+                },
+                event_code: event_code.to_string(),
+                message,
+                trace_id: args.trace_id.clone(),
+                span_id: "incident-replay".to_string(),
+                surface: "CLI-INCIDENT",
+                details: Some(details),
+            }
+        };
+    if args.structured_logs_jsonl {
+        let loaded = ttr_structured_log_line(
+            "FN-TTR-001",
+            format!(
+                "replay bundle loaded: incident_id={} timeline_events={}",
+                summary.incident_id,
+                summary.timeline.len()
+            ),
+            serde_json::json!({
+                "incident_id": &summary.incident_id,
+                "bundle": args.bundle.display().to_string(),
+                "timeline_events": summary.timeline.len(),
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&loaded)?);
+        let verdict = ttr_structured_log_line(
+            "FN-TTR-002",
+            format!(
+                "replay verdict emitted: matched={} event_count={}",
+                summary.matched, summary.event_count
+            ),
+            serde_json::json!({
+                "incident_id": &summary.incident_id,
+                "matched": summary.matched,
+                "event_count": summary.event_count,
+                "expected_sequence_hash": &summary.expected_sequence_hash,
+                "replayed_sequence_hash": &summary.replayed_sequence_hash,
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&verdict)?);
+        if !summary.matched {
+            let diverged = ttr_structured_log_line(
+                "FN-TTR-ERR-001",
+                format!(
+                    "replay divergence: expected={} replayed={}",
+                    summary.expected_sequence_hash, summary.replayed_sequence_hash
+                ),
+                serde_json::json!({
+                    "incident_id": &summary.incident_id,
+                    "expected_sequence_hash": &summary.expected_sequence_hash,
+                    "replayed_sequence_hash": &summary.replayed_sequence_hash,
+                }),
+            );
+            eprintln!("{}", serde_json::to_string(&diverged)?);
+        }
+    }
     // Preserve the machine-parseable stderr contract consumed by
     // tests/incident_cli_e2e.rs (`parse_replay_result`) regardless of --json.
     eprintln!(
