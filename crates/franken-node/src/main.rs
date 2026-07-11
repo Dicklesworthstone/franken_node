@@ -11533,6 +11533,46 @@ fn render_run_structured_logs_jsonl(
     lines.push_str(&serde_json::to_string(&dispatch_line)?);
     lines.push('\n');
 
+    // bd-ihtox: surface each host-effect receipt as the registered TNR event
+    // FN-EFFECT-002 ("effect receipt chained",
+    // docs/observability/tnr_event_metrics_registry.md) so SIEM filters can
+    // pin host crossings without parsing the `--json` report. The signed
+    // ledger remains the authority; these lines mirror its entries in chain
+    // order and carry the CLI trace id like every other run event.
+    if let Some(ledger) = dispatch.host_effect_ledger.as_ref() {
+        for entry in &ledger.entries {
+            let (outcome, outcome_detail) = match &entry.receipt.policy_outcome {
+                runtime::effect_receipt::PolicyOutcome::Allowed { capability_ref } => {
+                    ("allowed", capability_ref.as_str())
+                }
+                runtime::effect_receipt::PolicyOutcome::Denied { reason } => {
+                    ("denied", reason.as_str())
+                }
+            };
+            let effect_line = run_structured_log_line_with_details(
+                &now,
+                "FN-EFFECT-002",
+                &format!(
+                    "host effect receipt chained: kind={} outcome={outcome} index={}",
+                    entry.receipt.effect_kind.label(),
+                    entry.index
+                ),
+                trace_id,
+                "host-effect",
+                Some(serde_json::json!({
+                    "effect_kind": entry.receipt.effect_kind.label(),
+                    "outcome": outcome,
+                    "outcome_detail": outcome_detail,
+                    "index": entry.index,
+                    "chain_hash": entry.chain_hash,
+                    "chain_head_hash": ledger.chain_head_hash,
+                })),
+            );
+            lines.push_str(&serde_json::to_string(&effect_line)?);
+            lines.push('\n');
+        }
+    }
+
     if let Some(compat) = receipt.core.compat_preflight.as_ref() {
         let status = compat
             .get("status")

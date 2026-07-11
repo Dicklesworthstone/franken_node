@@ -13,7 +13,8 @@
 //!               (`dispatch.host_effect_ledger` in `run --json`): tamper-
 //!               evident hash chain, allowed/denied accounting, sha256 head.
 //!   L3 LOG      One `--trace-id` correlates the ordered structured-log
-//!               event stream (RUN-001 → RUN-003 → RUN-004 on stderr JSONL).
+//!               event stream (RUN-001 → RUN-003 → FN-EFFECT-002 per host
+//!               crossing → RUN-004 on stderr JSONL).
 //!   L4 REPLAY   The run's receipts become incident evidence; `incident
 //!               bundle --verify` → `incident replay` (matched, thrice-stable
 //!               upstream) → `incident counterfactual --policy strict` all
@@ -39,10 +40,12 @@
 //!     `policy::bayesian_diagnostics` are not fed observations by the
 //!     dispatcher; containment comes from the engine's expected-loss
 //!     selector).
-//!   * FN-EFFECT-*/FN-CAS-*/FN-TTR-* event codes are registered in
-//!     docs/observability/tnr_event_metrics_registry.md but not yet emitted
-//!     by any runtime path; the ordered-event assertion pins the RUN-* codes
-//!     that ARE the run contract today.
+//!   * FN-EFFECT-002 is emitted per ledger entry on the run path (bd-ihtox)
+//!     and pinned by the ordered-event assertion. FN-EFFECT-001 (receipt
+//!     STARTED — needs an in-flight emission site inside the dispatcher),
+//!     FN-CAS-* and FN-TTR-* remain registered in
+//!     docs/observability/tnr_event_metrics_registry.md but unemitted
+//!     (bd-x8d9t covers FN-TTR on the incident replay path).
 //!
 //! Run this lane directly with: `scripts/run_tnr_full_pipeline.sh`
 
@@ -742,12 +745,27 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
         &format!("effects={} kinds={kinds:?}", ledger["effect_count"]),
     );
 
-    // ---- L3 LOG: ordered event codes, one trace id across the stream.
+    // ---- L3 LOG: ordered event codes, one trace id across the stream. The
+    // host crossings surface as registered FN-EFFECT-002 events (bd-ihtox),
+    // one per ledger entry, between dispatch (RUN-003) and receipt (RUN-004).
     let events = structured_events(&run.stderr);
-    assert_event_order(&events, &["RUN-001", "RUN-003", "RUN-004"], CLEAN_TRACE_ID);
+    assert_event_order(
+        &events,
+        &["RUN-001", "RUN-003", "FN-EFFECT-002", "RUN-004"],
+        CLEAN_TRACE_ID,
+    );
+    let effect_events = events
+        .iter()
+        .filter(|(code, _)| code == "FN-EFFECT-002")
+        .count();
+    assert_eq!(
+        effect_events as u64,
+        ledger["effect_count"].as_u64().expect("effect_count"),
+        "one FN-EFFECT-002 event per ledger entry"
+    );
     layer_pass(
-        "L3 LOG ordered RUN-* events, single trace id",
-        &format!("events={}", events.len()),
+        "L3 LOG ordered RUN-*/FN-EFFECT-002 events, single trace id",
+        &format!("events={} effect_events={effect_events}", events.len()),
     );
 
     // ---- L5 VSDK: offline re-derivation (before replay so the auditor's
@@ -830,10 +848,27 @@ fn tnr_full_pipeline_denied_exfil_variant_contained() {
         &format!("denied_count={denied}"),
     );
 
-    // ---- L3 LOG: same ordered contract, exfil trace id.
+    // ---- L3 LOG: same ordered contract, exfil trace id; the denied
+    // crossing surfaces as an FN-EFFECT-002 event too (denial is evidence).
     let events = structured_events(&run.stderr);
-    assert_event_order(&events, &["RUN-001", "RUN-003", "RUN-004"], EXFIL_TRACE_ID);
-    layer_pass("L3 LOG ordered RUN-* events, single trace id", "");
+    assert_event_order(
+        &events,
+        &["RUN-001", "RUN-003", "FN-EFFECT-002", "RUN-004"],
+        EXFIL_TRACE_ID,
+    );
+    let effect_events = events
+        .iter()
+        .filter(|(code, _)| code == "FN-EFFECT-002")
+        .count();
+    assert_eq!(
+        effect_events as u64,
+        ledger["effect_count"].as_u64().expect("effect_count"),
+        "one FN-EFFECT-002 event per ledger entry (denied included)"
+    );
+    layer_pass(
+        "L3 LOG ordered RUN-*/FN-EFFECT-002 events, single trace id",
+        &format!("effect_events={effect_events}"),
+    );
 
     // ---- L5 VSDK: the denial chain re-derives offline too.
     verifier_sdk_leg(&ledger);
