@@ -39,11 +39,26 @@ fn run_cli_in_workspace(workspace: &Path, args: &[&str]) -> Output {
         .unwrap_or_else(|err| panic!("failed running `{}`: {err}", args.join(" ")))
 }
 
+/// Minimal config satisfying the fail-closed validation boundaries that
+/// `Config::resolve` enforces on the incident paths: a parseable
+/// `trust.registry_signing_key` (bd-2nptp; base64 of 32 deterministic 0x42
+/// bytes) and explicit `security.authorized_api_keys` (bd-khzgd). A bare
+/// `profile` line dies in config validation before the incident-evidence
+/// errors these tests assert (bd-t4hzx). `[security]` stays LAST so
+/// `configure_replay_bundle_signing_key` can append into it.
+const FAIL_CLOSED_BASE_CONFIG: &str = "profile = \"balanced\"\n\
+     \n\
+     [trust]\n\
+     registry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\
+     \n\
+     [security]\n\
+     authorized_api_keys = [\"fnode-e2e-incident-cli-key\"]\n";
+
 fn config_only_workspace() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     fs::write(
         dir.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n",
+        FAIL_CLOSED_BASE_CONFIG,
     )
     .expect("write config");
     dir
@@ -83,7 +98,9 @@ fn replay_bundle_trusted_key_id() -> String {
 fn configure_replay_bundle_signing_key(workspace: &Path) {
     fs::write(
         workspace.join("franken_node.toml"),
-        "profile = \"balanced\"\n\n[security]\ndecision_receipt_signing_key_path = \"keys/receipt-signing.key\"\n",
+        format!(
+            "{FAIL_CLOSED_BASE_CONFIG}decision_receipt_signing_key_path = \"keys/receipt-signing.key\"\n"
+        ),
     )
     .expect("write config with signing key");
     write_receipt_signing_key(&workspace.join("keys/receipt-signing.key"));
@@ -910,8 +927,17 @@ fn incident_bundle_rejects_empty_events_array() {
         "bundle creation should fail with empty events array"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("evidence package validation failed"));
-    assert!(stderr.contains("events array cannot be empty"));
+    assert!(
+        stderr.contains("failed reading authoritative incident evidence"),
+        "unexpected stderr: {stderr}"
+    );
+    // evidence_refs is validated before events; this fixture empties both, so
+    // the refs refusal is the one that fires (both are fail-closed).
+    assert!(
+        stderr.contains("incident evidence evidence_refs must be non-empty")
+            || stderr.contains("incident evidence events must be non-empty"),
+        "unexpected stderr: {stderr}"
+    );
 
     // Bundle file should not be created
     assert!(
@@ -950,9 +976,9 @@ fn incident_bundle_rejects_mismatched_incident_id() {
         "bundle creation should fail with mismatched incident ID"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("incident ID mismatch"));
-    assert!(stderr.contains("expected: INC-MISMATCH"));
-    assert!(stderr.contains("found in evidence: INC-DIFFERENT-ID"));
+    assert!(stderr.contains("incident evidence incident_id mismatch"));
+    assert!(stderr.contains("expected `INC-MISMATCH`"));
+    assert!(stderr.contains("found `INC-DIFFERENT-ID`"));
 
     // Bundle file should not be created
     assert!(
@@ -991,8 +1017,7 @@ fn incident_bundle_rejects_duplicate_event_ids() {
         "bundle creation should fail with duplicate event IDs"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("duplicate event ID detected"));
-    assert!(stderr.contains("evt-duplicate"));
+    assert!(stderr.contains("incident evidence contains duplicate event_id `evt-duplicate`"));
 
     // Bundle file should not be created
     assert!(
@@ -1031,8 +1056,7 @@ fn incident_bundle_rejects_invalid_parent_event_references() {
         "bundle creation should fail with invalid parent event reference"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid parent event reference"));
-    assert!(stderr.contains("evt-nonexistent"));
+    assert!(stderr.contains("references missing parent_event_id `evt-nonexistent`"));
 
     // Bundle file should not be created
     assert!(
@@ -1071,8 +1095,9 @@ fn incident_bundle_rejects_invalid_provenance_refs() {
         "bundle creation should fail with invalid provenance reference"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid provenance reference"));
-    assert!(stderr.contains("path traversal"));
+    assert!(stderr.contains(
+        "incident evidence reference `../../../etc/passwd` must be relative to the incident root"
+    ));
 
     // Bundle file should not be created
     assert!(
