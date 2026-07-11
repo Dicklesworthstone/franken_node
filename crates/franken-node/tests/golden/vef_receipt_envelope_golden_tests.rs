@@ -438,7 +438,7 @@ fn test_receipt_chain_config_variations() {
     ];
 
     for (test_name, config) in config_test_cases {
-        let config_json = serde_json::to_value(&config).expect("Should serialize config");
+        let config_json = serde_json::to_value(config).expect("Should serialize config");
 
         golden::assert_scrubbed_json_golden(
             &format!("vef_receipt_envelope/chain_config/{}", test_name),

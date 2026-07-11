@@ -740,7 +740,7 @@ fn test_frame_parser_compatibility(
 
     let mut successful = 0;
     for frame in &test_frames {
-        if let Ok(_) = check_frame(frame, config, "2026-04-20T12:00:00Z") {
+        if check_frame(frame, config, "2026-04-20T12:00:00Z").is_ok() {
             successful += 1;
         }
     }

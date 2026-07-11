@@ -300,10 +300,10 @@ fn neutralize_live_workspace_pressure(report: &mut Value) {
         .and_then(Value::as_array_mut)
     {
         for log in logs.iter_mut() {
-            if log.get("check_code").and_then(Value::as_str) == Some("DR-WORKSPACE-001") {
-                if let Some(value) = log.get_mut("status") {
-                    *value = Value::String(LIVE.to_string());
-                }
+            if log.get("check_code").and_then(Value::as_str) == Some("DR-WORKSPACE-001")
+                && let Some(value) = log.get_mut("status")
+            {
+                *value = Value::String(LIVE.to_string());
             }
         }
     }
