@@ -66,6 +66,10 @@ pub const FN_SENTINEL_EXPECTED_LOSS_SELECTED: &str = "FN-SENTINEL-007";
 /// Runtime Sentinel produced a signed escalation receipt payload.
 pub const FN_SENTINEL_ESCALATION_RECEIPT_SIGNED: &str = "FN-SENTINEL-008";
 
+/// A Sentinel escalation drove product-side enforcement (bd-fp1je):
+/// run-subject auto-quarantine and/or trust-card risk bump.
+pub const FN_SENTINEL_ESCALATION_ENFORCED: &str = "FN-SENTINEL-009";
+
 const PROBABILITY_SCALE_BP: u16 = 10_000;
 const PPM_PER_BP: u64 = 100;
 

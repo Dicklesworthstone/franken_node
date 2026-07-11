@@ -114,7 +114,8 @@
         {"code": "FN-SENTINEL-005", "name": "sentinel_hardening_monotonic", "description": "Sentinel hardening state advanced monotonically."},
         {"code": "FN-SENTINEL-006", "name": "sentinel_replay_verified", "description": "A sentinel decision replay verified against its recorded receipt."},
         {"code": "FN-SENTINEL-007", "name": "sentinel_expected_loss_selected", "description": "The expected-loss selector chose a containment action."},
-        {"code": "FN-SENTINEL-008", "name": "sentinel_escalation_receipt_signed", "description": "A sentinel escalation receipt was signed with its e-value."}
+        {"code": "FN-SENTINEL-008", "name": "sentinel_escalation_receipt_signed", "description": "A sentinel escalation receipt was signed with its e-value."},
+        {"code": "FN-SENTINEL-009", "name": "sentinel_escalation_enforced", "description": "A Sentinel escalation drove product-side enforcement (run-subject auto-quarantine and/or trust-card risk bump)."}
       ],
       "error_codes": [
         {"code": "FN-SENTINEL-ERR-001", "name": "sentinel_guardrail_override", "description": "Hard guardrail precedence overrode probabilistic action selection."}

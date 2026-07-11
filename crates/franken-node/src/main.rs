@@ -297,6 +297,14 @@ const INCIDENT_EVIDENCE_FILE_NAME: &str = "evidence.v1.json";
 const RUN_EXECUTION_RECEIPT_SCHEMA_VERSION: &str = "franken-node/run-execution-receipt/v1";
 const RUN_EXECUTION_RECEIPT_DEFAULT_MAX_RECEIPTS: usize = 100;
 const RUN_EXECUTION_RECEIPT_AUTO_QUARANTINE_THRESHOLD: usize = 1;
+// bd-fp1je: durable sentinel run-subject quarantine records, keyed by the
+// sha256 of the run target's bytes, consulted fail-closed by the run
+// preflight and released only by an explicit `trust release`.
+const SENTINEL_QUARANTINE_RECORD_SCHEMA_VERSION: &str =
+    "franken-node/sentinel-quarantine-record/v1";
+const SENTINEL_QUARANTINE_STATE_RELATIVE_DIR: &str = ".franken-node/state/sentinel/quarantine";
+const MAX_SENTINEL_QUARANTINE_RECORD_BYTES: u64 = 1 << 20;
+const MAX_SENTINEL_QUARANTINE_SUBJECT_BYTES: u64 = 64 << 20;
 const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
 const TRUST_SCAN_OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const TRUST_SCAN_DEPS_DEV_BASE_URL: &str = "https://api.deps.dev/v3alpha";
@@ -617,6 +625,9 @@ enum TrustViolationKind {
     RegistryCorrupt,
     Revoked,
     Quarantined,
+    /// bd-fp1je: the run target itself is under an active Sentinel
+    /// quarantine record; blocks in every policy mode until released.
+    SentinelQuarantined,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -675,6 +686,57 @@ struct RunExecutionTelemetrySummary {
     recent_event_codes: Vec<String>,
 }
 
+/// bd-fp1je: what the run did (or would do) about a Sentinel escalation.
+/// `enforced` means a durable run-subject quarantine record was written (or
+/// already active) and any Trusted dependency trust cards were quarantined;
+/// `recommend-only` means `trust.quarantine_on_high_risk` is disabled for the
+/// resolved profile, so the escalation stays operator-facing evidence.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct SentinelEnforcementSummary {
+    mode: String,
+    decision_id: String,
+    selected_action: String,
+    e_value_ppm: u64,
+    false_alarm_bound_ppm: u64,
+    app_content_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quarantine_record_path: Option<String>,
+    quarantine_record_preexisting: bool,
+    quarantined_extensions: Vec<String>,
+    release_command: String,
+}
+
+/// Durable proof-carrying record of a Sentinel-driven run-subject quarantine.
+/// The embedded FN-SENTINEL-008 escalation receipt (plus its ephemeral
+/// verifying key) makes the enforcement decision offline-verifiable. Release
+/// never deletes the file; it flips `released` with an audited operator entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct SentinelQuarantineRecord {
+    schema_version: String,
+    subject_id: String,
+    app_content_hash: String,
+    trace_id: String,
+    decision_id: String,
+    selected_action: String,
+    e_value_ppm: u64,
+    false_alarm_bound_ppm: u64,
+    posterior_malice_bp: u16,
+    policy_mode: String,
+    profile: String,
+    quarantined_at: String,
+    escalation_receipt: frankenengine_node::observability::evidence_ledger::EvidenceEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    escalation_verifying_key_hex: Option<String>,
+    release_command: String,
+    released: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    released_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_operator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 struct RunExecutionReceiptCore {
     receipt_id: String,
@@ -696,6 +758,8 @@ struct RunExecutionReceiptCore {
     compat_preflight: Option<serde_json::Value>,
     violation_count: usize,
     auto_quarantined_extensions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sentinel_enforcement: Option<SentinelEnforcementSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -7575,6 +7639,7 @@ fn build_run_execution_receipt(
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
     ssrf_violations: Vec<String>,
     auto_quarantined_extensions: Vec<String>,
+    sentinel_enforcement: Option<SentinelEnforcementSummary>,
     lockstep_verdict: Option<serde_json::Value>,
     compat_preflight: Option<serde_json::Value>,
 ) -> Result<RunExecutionReceipt> {
@@ -7598,6 +7663,7 @@ fn build_run_execution_receipt(
         compat_preflight,
         violation_count,
         auto_quarantined_extensions,
+        sentinel_enforcement,
     };
     let seed_hash = compute_run_execution_receipt_seed_hash(&core)?;
     core.receipt_id = deterministic_run_execution_receipt_id(&seed_hash);
@@ -9145,7 +9211,32 @@ fn maybe_auto_quarantine_run_dependencies(
     {
         return Ok(Vec::new());
     }
+    quarantine_trusted_run_dependencies(
+        project_root,
+        config,
+        preflight,
+        now_secs,
+        &format!(
+            "Automatically quarantined after runtime policy violations ({violation_count} violation(s))"
+        ),
+        "trace-cli-run-auto-quarantine",
+        None,
+    )
+}
 
+/// Quarantine + risk-bump every Trusted dependency of the current run in the
+/// authoritative trust registry. Shared by the SSRF-violation trigger above
+/// and the Sentinel escalation trigger (bd-fp1je), which differ only in the
+/// recorded rationale and evidence binding.
+fn quarantine_trusted_run_dependencies(
+    project_root: &Path,
+    config: &config::Config,
+    preflight: &RunPreFlightReport,
+    now_secs: u64,
+    risk_summary: &str,
+    trace: &str,
+    evidence_refs: Option<Vec<VerifiedEvidenceRef>>,
+) -> Result<Vec<String>> {
     let registry_path = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
     if !registry_path.is_file() {
         tracing::warn!(
@@ -9193,15 +9284,13 @@ fn maybe_auto_quarantine_run_dependencies(
                     reputation_trend: Some(ReputationTrend::Declining),
                     user_facing_risk_assessment: Some(RiskAssessment {
                         level: RiskLevel::High,
-                        summary: format!(
-                            "Automatically quarantined after runtime policy violations ({violation_count} violation(s))"
-                        ),
+                        summary: risk_summary.to_string(),
                     }),
                     last_verified_timestamp: Some(now_rfc3339.clone()),
-                    evidence_refs: None,
+                    evidence_refs: evidence_refs.clone(),
                 },
                 now_secs,
-                "trace-cli-run-auto-quarantine",
+                trace,
             )
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         quarantined.push(extension_id);
@@ -9211,6 +9300,335 @@ fn maybe_auto_quarantine_run_dependencies(
         .persist_authoritative_state(&registry_path)
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     Ok(quarantined)
+}
+
+// ---------------------------------------------------------------------------
+// bd-fp1je: Sentinel escalation -> product-side enforcement
+// ---------------------------------------------------------------------------
+
+/// Content address of the run target's bytes; the identity a sentinel
+/// quarantine record is keyed by (paths can move, bytes are what escalated).
+fn sentinel_subject_content_hash(app_path: &Path) -> Result<String> {
+    let bytes = crate::bounded_read(app_path, MAX_SENTINEL_QUARANTINE_SUBJECT_BYTES).with_context(
+        || {
+            format!(
+                "failed reading run target {} for sentinel subject hashing",
+                app_path.display()
+            )
+        },
+    )?;
+    Ok(format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&bytes))
+    ))
+}
+
+fn sentinel_quarantine_record_path(project_root: &Path, app_content_hash: &str) -> Result<PathBuf> {
+    let hex_digest = app_content_hash.strip_prefix("sha256:").ok_or_else(|| {
+        anyhow::anyhow!("sentinel subject hash `{app_content_hash}` is not sha256:<hex>")
+    })?;
+    Ok(project_root
+        .join(SENTINEL_QUARANTINE_STATE_RELATIVE_DIR)
+        .join(format!("{hex_digest}.json")))
+}
+
+fn load_sentinel_quarantine_record(path: &Path) -> Result<Option<SentinelQuarantineRecord>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw =
+        crate::bounded_read(path, MAX_SENTINEL_QUARANTINE_RECORD_BYTES).with_context(|| {
+            format!(
+                "failed reading sentinel quarantine record {}",
+                path.display()
+            )
+        })?;
+    let record: SentinelQuarantineRecord = serde_json::from_slice(&raw).with_context(|| {
+        format!(
+            "sentinel quarantine record {} is corrupt; refusing to guess (fail closed)",
+            path.display()
+        )
+    })?;
+    Ok(Some(record))
+}
+
+fn persist_sentinel_quarantine_record(
+    path: &Path,
+    record: &SentinelQuarantineRecord,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed creating sentinel quarantine dir {}",
+                parent.display()
+            )
+        })?;
+    }
+    let rendered = serde_json::to_string_pretty(record)?;
+    std::fs::write(path, rendered.as_bytes()).with_context(|| {
+        format!(
+            "failed writing sentinel quarantine record {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn sentinel_release_command(app_path: &str) -> String {
+    format!(
+        "franken-node trust release --app {app_path} --operator-id <operator> --reason \"<remediation summary>\""
+    )
+}
+
+/// bd-fp1je: consume a run's Sentinel escalation and drive product-side
+/// enforcement. Writes are gated by the profile-differentiated
+/// `trust.quarantine_on_high_risk` knob (strict/balanced act, legacy-risky
+/// recommends); the run's own exit code stays with the engine's expected-loss
+/// selector. Enforcement is idempotent per subject: an existing ACTIVE
+/// quarantine record is preserved (first decision wins), a released one is
+/// superseded by a fresh escalation.
+#[allow(clippy::too_many_arguments)]
+fn maybe_enforce_sentinel_escalation(
+    project_root: &Path,
+    config: &config::Config,
+    profile: Profile,
+    policy_mode: &str,
+    app_path: &Path,
+    preflight: &RunPreFlightReport,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+    now_secs: u64,
+) -> Result<Option<SentinelEnforcementSummary>> {
+    let Some(sentinel) = dispatch.sentinel.as_ref() else {
+        return Ok(None);
+    };
+    if !sentinel.escalated {
+        return Ok(None);
+    }
+    let (Some(decision), Some(escalation_receipt)) = (
+        sentinel.decision.as_ref(),
+        sentinel.escalation_receipt.as_ref(),
+    ) else {
+        // `escalated` guarantees both today; stay fail-safe if that drifts.
+        return Ok(None);
+    };
+
+    let app_content_hash = sentinel_subject_content_hash(app_path)?;
+    let release_command = sentinel_release_command(&app_path.display().to_string());
+    if !config.trust.quarantine_on_high_risk {
+        return Ok(Some(SentinelEnforcementSummary {
+            mode: "recommend-only".to_string(),
+            decision_id: decision.decision_id.clone(),
+            selected_action: decision.selected_action.as_str().to_string(),
+            e_value_ppm: sentinel.e_value_ppm,
+            false_alarm_bound_ppm: sentinel.false_alarm_bound_ppm,
+            app_content_hash,
+            quarantine_record_path: None,
+            quarantine_record_preexisting: false,
+            quarantined_extensions: Vec::new(),
+            release_command,
+        }));
+    }
+
+    let record_path = sentinel_quarantine_record_path(project_root, &app_content_hash)?;
+    let preexisting_active =
+        load_sentinel_quarantine_record(&record_path)?.is_some_and(|existing| !existing.released);
+    if !preexisting_active {
+        let record = SentinelQuarantineRecord {
+            schema_version: SENTINEL_QUARANTINE_RECORD_SCHEMA_VERSION.to_string(),
+            subject_id: sentinel.subject_id.clone(),
+            app_content_hash: app_content_hash.clone(),
+            trace_id: sentinel.trace_id.clone(),
+            decision_id: decision.decision_id.clone(),
+            selected_action: decision.selected_action.as_str().to_string(),
+            e_value_ppm: sentinel.e_value_ppm,
+            false_alarm_bound_ppm: sentinel.false_alarm_bound_ppm,
+            posterior_malice_bp: sentinel.posterior_malice_bp,
+            policy_mode: policy_mode.to_string(),
+            profile: profile.to_string(),
+            quarantined_at: rfc3339_timestamp_from_secs(now_secs),
+            escalation_receipt: escalation_receipt.clone(),
+            escalation_verifying_key_hex: sentinel.escalation_verifying_key_hex.clone(),
+            release_command: release_command.clone(),
+            released: false,
+            released_at: None,
+            release_operator: None,
+            release_reason: None,
+        };
+        persist_sentinel_quarantine_record(&record_path, &record)?;
+    }
+
+    let quarantined_extensions = quarantine_trusted_run_dependencies(
+        project_root,
+        config,
+        preflight,
+        now_secs,
+        &format!(
+            "Automatically quarantined after Runtime Sentinel escalation (decision {}, action {}, e_value_ppm {})",
+            decision.decision_id,
+            decision.selected_action.as_str(),
+            sentinel.e_value_ppm
+        ),
+        "trace-cli-run-sentinel-enforcement",
+        Some(vec![VerifiedEvidenceRef {
+            evidence_id: format!("sentinel-escalation:{}", decision.decision_id),
+            evidence_type: EvidenceType::ReputationSignal,
+            verified_at_epoch: now_secs,
+            verification_receipt_hash: decision.evidence_hash.clone(),
+        }]),
+    )?;
+
+    Ok(Some(SentinelEnforcementSummary {
+        mode: "enforced".to_string(),
+        decision_id: decision.decision_id.clone(),
+        selected_action: decision.selected_action.as_str().to_string(),
+        e_value_ppm: sentinel.e_value_ppm,
+        false_alarm_bound_ppm: sentinel.false_alarm_bound_ppm,
+        app_content_hash,
+        quarantine_record_path: Some(record_path.display().to_string()),
+        quarantine_record_preexisting: preexisting_active,
+        quarantined_extensions,
+        release_command,
+    }))
+}
+
+/// bd-fp1je: fail-closed sentinel subject gate. An ACTIVE sentinel quarantine
+/// record for this run target blocks the preflight in EVERY policy mode (the
+/// same posture as revoked dependencies); the violation detail names the
+/// exact release command.
+fn apply_sentinel_subject_quarantine_gate(
+    verdict: PreFlightVerdict,
+    project_root: &Path,
+    app_path: &Path,
+) -> Result<PreFlightVerdict> {
+    let app_content_hash = match sentinel_subject_content_hash(app_path) {
+        Ok(hash) => hash,
+        Err(err) => {
+            // The dispatcher fails on an unreadable target anyway; an
+            // unhashable subject cannot match a stored record.
+            tracing::warn!(
+                app_path = %app_path.display(),
+                error = %err,
+                "skipping sentinel quarantine gate: run target is unhashable"
+            );
+            return Ok(verdict);
+        }
+    };
+    let record_path = sentinel_quarantine_record_path(project_root, &app_content_hash)?;
+    let Some(record) = load_sentinel_quarantine_record(&record_path)? else {
+        return Ok(verdict);
+    };
+    if record.released {
+        return Ok(verdict);
+    }
+
+    let detail = format!(
+        "run target {} is quarantined by the Runtime Sentinel (decision {}, action {}, e_value_ppm {}, quarantined_at {}); release with `{}` after remediation",
+        app_path.display(),
+        record.decision_id,
+        record.selected_action,
+        record.e_value_ppm,
+        record.quarantined_at,
+        record.release_command
+    );
+    let violation = TrustViolation {
+        dependency_name: None,
+        extension_id: None,
+        kind: TrustViolationKind::SentinelQuarantined,
+        detail: detail.clone(),
+    };
+    Ok(match verdict {
+        PreFlightVerdict::Blocked {
+            reason,
+            warnings,
+            mut violations,
+            results,
+        } => {
+            violations.insert(0, violation);
+            PreFlightVerdict::Blocked {
+                reason: format!("{detail}; {reason}"),
+                warnings,
+                violations,
+                results,
+            }
+        }
+        PreFlightVerdict::Passed {
+            warnings, results, ..
+        } => PreFlightVerdict::Blocked {
+            reason: detail,
+            warnings,
+            violations: vec![violation],
+            results,
+        },
+        PreFlightVerdict::Skipped { reason } => PreFlightVerdict::Blocked {
+            reason: detail,
+            warnings: vec![reason],
+            violations: vec![violation],
+            results: Vec::new(),
+        },
+    })
+}
+
+fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
+    if args.operator_id.trim().is_empty() || args.reason.trim().is_empty() {
+        anyhow::bail!("trust release requires non-empty --operator-id and --reason");
+    }
+    let project_root = run_project_root(&args.app);
+    let app_content_hash = sentinel_subject_content_hash(&args.app)?;
+    let record_path = sentinel_quarantine_record_path(&project_root, &app_content_hash)?;
+    let Some(mut record) = load_sentinel_quarantine_record(&record_path)? else {
+        return Err(ActionableError::new(
+            format!(
+                "no sentinel quarantine record exists for {} ({})",
+                args.app.display(),
+                app_content_hash
+            ),
+            "franken-node run <app> --json   # inspect receipt.sentinel_enforcement",
+        )
+        .into());
+    };
+    if record.released {
+        anyhow::bail!(
+            "sentinel quarantine for {} was already released at {} by {}",
+            args.app.display(),
+            record.released_at.as_deref().unwrap_or("<unknown>"),
+            record.release_operator.as_deref().unwrap_or("<unknown>")
+        );
+    }
+
+    let released_at = chrono::Utc::now().to_rfc3339();
+    record.released = true;
+    record.released_at = Some(released_at.clone());
+    record.release_operator = Some(args.operator_id.clone());
+    record.release_reason = Some(args.reason.clone());
+    persist_sentinel_quarantine_record(&record_path, &record)?;
+
+    eprintln!(
+        "trust release: sentinel quarantine lifted for {} (decision {}, operator {})",
+        args.app.display(),
+        record.decision_id,
+        args.operator_id
+    );
+    if args.json {
+        let payload = serde_json::json!({
+            "command": "trust.release",
+            "schema_version": "franken-node/trust-release-cli/v1",
+            "app_path": args.app.display().to_string(),
+            "app_content_hash": app_content_hash,
+            "decision_id": record.decision_id,
+            "released_at": released_at,
+            "release_operator": args.operator_id,
+            "release_reason": args.reason,
+            "record_path": record_path.display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "trust release: {} released (was decision {})",
+            args.app.display(),
+            record.decision_id
+        );
+    }
+    Ok(())
 }
 
 fn render_run_execution_receipt_summary(
@@ -11736,6 +12154,37 @@ fn render_run_structured_logs_jsonl(
             lines.push_str(&serde_json::to_string(&escalation_line)?);
             lines.push('\n');
         }
+    }
+
+    // bd-fp1je: emitted only when the escalation actually drove product-side
+    // action; recommend-only stays visible in the `--json` receipt alone.
+    if let Some(enforcement) = receipt.core.sentinel_enforcement.as_ref()
+        && enforcement.mode == "enforced"
+    {
+        use frankenengine_node::policy::runtime_sentinel::FN_SENTINEL_ESCALATION_ENFORCED;
+        let enforcement_line = run_structured_log_line_with_details(
+            &now,
+            FN_SENTINEL_ESCALATION_ENFORCED,
+            &format!(
+                "sentinel escalation enforced: action={} subject_quarantined={} deps_quarantined={}",
+                enforcement.selected_action,
+                enforcement.quarantine_record_path.is_some(),
+                enforcement.quarantined_extensions.len()
+            ),
+            trace_id,
+            "sentinel",
+            Some(serde_json::json!({
+                "decision_id": enforcement.decision_id,
+                "selected_action": enforcement.selected_action,
+                "app_content_hash": enforcement.app_content_hash,
+                "quarantine_record_path": enforcement.quarantine_record_path,
+                "quarantine_record_preexisting": enforcement.quarantine_record_preexisting,
+                "quarantined_extensions": enforcement.quarantined_extensions,
+                "release_command": enforcement.release_command,
+            })),
+        );
+        lines.push_str(&serde_json::to_string(&enforcement_line)?);
+        lines.push('\n');
     }
 
     if let Some(compat) = receipt.core.compat_preflight.as_ref() {
@@ -16980,6 +17429,10 @@ fn evaluate_run_trust_preflight(
             }
         }
     };
+
+    // bd-fp1je: the sentinel subject gate composes over the dependency
+    // verdict and fails closed in every policy mode.
+    let verdict = apply_sentinel_subject_quarantine_gate(verdict, &project_root, app_path)?;
 
     let receipt = build_run_preflight_receipt(
         app_path,
@@ -27661,6 +28114,19 @@ fn main() -> Result<()> {
                 ssrf_violations.len(),
                 now_unix_secs(),
             )?;
+            // bd-fp1je: a Sentinel escalation drives product-side enforcement
+            // (run-subject auto-quarantine + trust-card risk bump) per the
+            // resolved profile's `trust.quarantine_on_high_risk`.
+            let sentinel_enforcement = maybe_enforce_sentinel_escalation(
+                &project_root,
+                &resolved.config,
+                resolved.selected_profile,
+                &policy,
+                &app_path,
+                &preflight,
+                &dispatch,
+                now_unix_secs(),
+            )?;
             let receipt = build_run_execution_receipt(
                 &app_path,
                 &policy,
@@ -27669,6 +28135,7 @@ fn main() -> Result<()> {
                 &dispatch,
                 ssrf_violations,
                 auto_quarantined_extensions,
+                sentinel_enforcement,
                 lockstep_verdict,
                 compat_preflight_report,
             )?;
@@ -27949,6 +28416,9 @@ fn main() -> Result<()> {
                         ctx,
                     )?;
                 }
+            }
+            TrustCommand::Release(args) => {
+                handle_trust_release_command(&args)?;
             }
             TrustCommand::Sync(args) => {
                 let now_secs = now_unix_secs();
@@ -29050,6 +29520,7 @@ mod run_trust_gate_tests {
             Vec::new(),
             None,
             None,
+            None,
         )
         .expect("first receipt");
         let second = build_run_execution_receipt(
@@ -29060,6 +29531,7 @@ mod run_trust_gate_tests {
             &dispatch,
             ssrf_violations,
             Vec::new(),
+            None,
             None,
             None,
         )
@@ -29137,6 +29609,7 @@ mod run_trust_gate_tests {
             Vec::new(),
             None,
             None,
+            None,
         )
         .expect("receipt");
 
@@ -29171,6 +29644,7 @@ mod run_trust_gate_tests {
             Vec::new(),
             None,
             None,
+            None,
         )
         .expect("receipt one");
         let receipt_two = build_run_execution_receipt(
@@ -29188,6 +29662,7 @@ mod run_trust_gate_tests {
             Vec::new(),
             None,
             None,
+            None,
         )
         .expect("receipt two");
         let receipt_three = build_run_execution_receipt(
@@ -29203,6 +29678,7 @@ mod run_trust_gate_tests {
             ),
             Vec::new(),
             Vec::new(),
+            None,
             None,
             None,
         )
@@ -30639,6 +31115,7 @@ mod run_trust_gate_tests {
                 &dispatch,
                 vec![], // ssrf_violations
                 vec![], // auto_quarantined_extensions
+                None,   // sentinel_enforcement
                 None,   // lockstep_verdict
                 None,   // compat_preflight
             )
@@ -30673,6 +31150,7 @@ mod run_trust_gate_tests {
                 &dispatch,
                 vec![],
                 vec![],
+                None,
                 None,
                 None,
             )

@@ -973,8 +973,30 @@ pub enum TrustCommand {
     /// Quarantine a suspicious artifact fleet-wide.
     Quarantine(TrustQuarantineArgs),
 
+    /// Release a Runtime Sentinel run-subject quarantine after remediation.
+    Release(TrustReleaseArgs),
+
     /// Sync trust state from upstream sources.
     Sync(TrustSyncArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustReleaseArgs {
+    /// Path to the previously quarantined run target (entry file).
+    #[arg(long)]
+    pub app: PathBuf,
+
+    /// Operator identity recorded on the release.
+    #[arg(long)]
+    pub operator_id: String,
+
+    /// Remediation rationale recorded on the release.
+    #[arg(long)]
+    pub reason: String,
+
+    /// Emit the release report as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]

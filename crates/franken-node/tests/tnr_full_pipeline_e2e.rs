@@ -43,16 +43,18 @@
 //!     detects it, but the runtime does not yet block it — a gate-level
 //!     follow-up), following a secret through in-guest transforms (needs
 //!     engine-side per-datum lineage), and operator declassification input.
-//!   * Bayesian sentinel escalation IS now fed on the run path (bd-bg2hy):
-//!     the dispatcher derives canonical observations from the signed ledger
-//!     (FN-SENTINEL-001), updates the fixed-point e-process per effect
-//!     (FN-SENTINEL-002), selects an expected-loss action (FN-SENTINEL-007),
-//!     and on a planted-malicious workload signs an escalation receipt
-//!     carrying the e-value (FN-SENTINEL-008) — asserted in both variants
-//!     below. Still open: the sentinel's action is operator-facing evidence
-//!     only; it does not yet drive product-side enforcement (the exit code
-//!     stays with the engine's expected-loss selector, and auto-quarantine
-//!     wiring from a sentinel escalation is a follow-up).
+//!   * Bayesian sentinel escalation IS now fed on the run path (bd-bg2hy)
+//!     AND drives product-side enforcement (bd-fp1je): the dispatcher derives
+//!     canonical observations from the signed ledger (FN-SENTINEL-001),
+//!     updates the fixed-point e-process per effect (FN-SENTINEL-002),
+//!     selects an expected-loss action (FN-SENTINEL-007), signs an escalation
+//!     receipt (FN-SENTINEL-008), and — under a profile whose
+//!     `trust.quarantine_on_high_risk` is enabled — writes a durable
+//!     content-hash-keyed run-subject quarantine record, risk-bumps the run's
+//!     Trusted dependency trust cards, and emits FN-SENTINEL-009; a rerun of
+//!     that subject then fails CLOSED at the trust preflight until an audited
+//!     `trust release` (L7 below). Still open: fleet-scope action (the run
+//!     path is single-node and lacks zone/incident context).
 //!   * FN-EFFECT-002 is emitted per ledger entry on the run path (bd-ihtox)
 //!     and FN-TTR-001/002 on the incident replay path (bd-x8d9t) — both
 //!     pinned by the ordered-event assertions under the pipeline trace id.
@@ -144,6 +146,20 @@ fn bootstrap_workspace(app_src: &str, profile: &str) -> tempfile::TempDir {
     config = config.replace(
         "allowlist = []",
         "allowlist = [{ host = \"127.0.0.1\", reason = \"tnr full-pipeline e2e: permit the loopback test sink\" }]",
+    );
+    // bd-fp1je: the legacy-risky profile default is recommend-only (strict/
+    // balanced already enforce); force enforcement writes on so the pipeline
+    // can assert the sentinel auto-quarantine loop end-to-end regardless of
+    // profile.
+    assert!(
+        config.contains("quarantine_on_high_risk = "),
+        "init-generated config no longer serializes trust.quarantine_on_high_risk; \
+         update the tnr_full_pipeline_e2e config patch: {config}"
+    );
+    // legacy-risky serializes `= false`; strict/balanced already `= true`.
+    config = config.replace(
+        "quarantine_on_high_risk = false",
+        "quarantine_on_high_risk = true",
     );
     std::fs::write(&config_path, config).expect("write patched config");
 
@@ -726,6 +742,162 @@ fn ltv_leg(
     );
 }
 
+/// bd-fp1je enforcement loop: the escalating run wrote a durable sentinel
+/// quarantine record and emitted FN-SENTINEL-009; a rerun of the same app
+/// fails CLOSED at the trust preflight naming the release command;
+/// `trust release` lifts it with an audited operator entry; the subject then
+/// runs again and re-quarantines (released records never mask new
+/// escalations).
+fn sentinel_enforcement_leg(workspace: &Path, run: &RunReport, trace_id: &str) {
+    let enforcement = &run.report["receipt"]["sentinel_enforcement"];
+    assert_eq!(
+        enforcement["mode"],
+        json!("enforced"),
+        "escalated run must enforce under quarantine_on_high_risk=true: {enforcement}"
+    );
+    let decision_id = run.report["dispatch"]["sentinel"]["decision"]["decision_id"]
+        .as_str()
+        .expect("sentinel decision id")
+        .to_string();
+    assert_eq!(enforcement["decision_id"], json!(&decision_id));
+    let record_path_str = enforcement["quarantine_record_path"]
+        .as_str()
+        .expect("quarantine record path");
+    let record_path = {
+        let path = Path::new(record_path_str);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace.join(path)
+        }
+    };
+    let record: Value = serde_json::from_str(
+        &std::fs::read_to_string(&record_path).expect("read sentinel quarantine record"),
+    )
+    .expect("sentinel quarantine record is canonical JSON");
+    assert_eq!(
+        record["schema_version"],
+        json!("franken-node/sentinel-quarantine-record/v1")
+    );
+    assert_eq!(record["released"], json!(false));
+    assert_eq!(record["decision_id"], json!(&decision_id));
+    assert!(
+        record["escalation_receipt"].is_object(),
+        "record must embed the signed FN-SENTINEL-008 escalation receipt"
+    );
+    let run_events = structured_events(&run.stderr);
+    assert_event_order(
+        &run_events,
+        &["FN-SENTINEL-008", "FN-SENTINEL-009"],
+        trace_id,
+    );
+    layer_pass(
+        "L7 ENFORCE escalation → subject quarantine record",
+        &format!("decision={decision_id} FN-SENTINEL-009 on trace"),
+    );
+
+    // Fail-closed rerun: the preflight refuses the quarantined subject in
+    // every policy mode and names the exact release command.
+    let blocked = Command::new(franken_node_bin())
+        .current_dir(workspace)
+        .args([
+            "run",
+            "app.js",
+            "--policy",
+            "legacy-risky",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--json",
+            "--trace-id",
+            trace_id,
+        ])
+        .output()
+        .expect("spawn blocked rerun");
+    assert!(
+        !blocked.status.success(),
+        "rerun of a sentinel-quarantined app must fail closed; stdout:\n{}",
+        String::from_utf8_lossy(&blocked.stdout)
+    );
+    let blocked_stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(
+        blocked_stderr.contains("quarantined by the Runtime Sentinel"),
+        "block reason must name the sentinel quarantine: {blocked_stderr}"
+    );
+    assert!(
+        blocked_stderr.contains("trust release"),
+        "block reason must name the release command: {blocked_stderr}"
+    );
+    layer_pass(
+        "L7 ENFORCE rerun blocked at preflight",
+        "exit!=0, reason names sentinel quarantine + release command",
+    );
+
+    // Audited operator release, then the subject runs again.
+    let release = run_cli(
+        workspace,
+        &[
+            "trust",
+            "release",
+            "--app",
+            "app.js",
+            "--operator-id",
+            "tnr-e2e-operator",
+            "--reason",
+            "containment remediated in e2e",
+            "--json",
+        ],
+    );
+    assert!(
+        release.status.success(),
+        "trust release failed: {}",
+        String::from_utf8_lossy(&release.stderr)
+    );
+    let release_stdout = String::from_utf8_lossy(&release.stdout);
+    let release_json: Value = serde_json::from_str(release_stdout.trim()).unwrap_or_else(|err| {
+        panic!("trust release --json must emit JSON ({err}):\n{release_stdout}")
+    });
+    assert_eq!(
+        release_json["schema_version"],
+        json!("franken-node/trust-release-cli/v1")
+    );
+    assert_eq!(release_json["decision_id"], json!(&decision_id));
+    let released: Value =
+        serde_json::from_str(&std::fs::read_to_string(&record_path).expect("re-read record"))
+            .expect("released record is canonical JSON");
+    assert_eq!(released["released"], json!(true));
+    assert_eq!(released["release_operator"], json!("tnr-e2e-operator"));
+    layer_pass(
+        "L7 ENFORCE trust release lifts quarantine",
+        "released=true with audited operator entry",
+    );
+
+    let rerun = run_app(workspace, trace_id, "legacy-risky");
+    assert_eq!(
+        rerun.exit_code,
+        Some(0),
+        "released subject must run again; stderr:\n{}",
+        rerun.stderr
+    );
+    let rerun_enforcement = &rerun.report["receipt"]["sentinel_enforcement"];
+    assert_eq!(rerun_enforcement["mode"], json!("enforced"));
+    assert_eq!(
+        rerun_enforcement["quarantine_record_preexisting"],
+        json!(false),
+        "a released record must be superseded by a fresh quarantine, not reused"
+    );
+    let requarantined: Value = serde_json::from_str(
+        &std::fs::read_to_string(&record_path).expect("re-read record after rerun"),
+    )
+    .expect("re-quarantined record is canonical JSON");
+    assert_eq!(requarantined["released"], json!(false));
+    layer_pass(
+        "L7 ENFORCE re-escalation re-quarantines after release",
+        "record active again with fresh decision",
+    );
+}
+
 /// The clean pipeline: fs write + fs read + allowed loopback http egress,
 /// every layer green, all under one trace id.
 #[test]
@@ -862,6 +1034,13 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
     layer_pass(
         "L2.75 SENTINEL fed from ledger (clean)",
         "e_value=1.0, action=allow, escalated=false",
+    );
+    // bd-fp1je: enforcement only fires on escalation; a clean run must not
+    // carry an enforcement summary even with quarantine_on_high_risk=true.
+    assert!(
+        run.report["receipt"]["sentinel_enforcement"].is_null(),
+        "a clean run must not trigger sentinel enforcement: {}",
+        run.report["receipt"]["sentinel_enforcement"]
     );
 
     // ---- L3 LOG: ordered event codes, one trace id across the stream. The
@@ -1165,6 +1344,11 @@ fn tnr_full_pipeline_denied_exfil_variant_contained() {
         &bundle_integrity_hash,
         EXFIL_TRACE_ID,
     );
+
+    // ---- L7 ENFORCE (bd-fp1je): the escalation drives product-side
+    // enforcement and the loop closes: quarantine -> blocked rerun ->
+    // audited release -> re-quarantine on re-escalation.
+    sentinel_enforcement_leg(workspace.path(), &run, EXFIL_TRACE_ID);
 
     println!(
         "[TNR-E2E] ================ EXFIL VARIANT: CONTAINED + ALL LAYERS PASS (trace_id={EXFIL_TRACE_ID})"
