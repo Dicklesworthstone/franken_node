@@ -7,8 +7,8 @@
     "corpus_version": "compat-corpus-v1-af34cb312425",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-12T08:47:47.600857446+00:00",
-    "result_digest": "sha256:6b49abff90343fb080d913129b2bd2efffee0cbc68afc2e72ad55a37424e2df5",
+    "generated_at_utc": "2026-07-12T12:29:51.807662078+00:00",
+    "result_digest": "sha256:9ff870b93356f9c6f2713565346c4b7955d618ebb23717fb949086433b7e49a4",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
     "policy_mode": "legacy-risky",
@@ -26,30 +26,30 @@
   },
   "totals": {
     "total_test_cases": 560,
-    "passed_test_cases": 93,
-    "failed_test_cases": 467,
+    "passed_test_cases": 114,
+    "failed_test_cases": 446,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 16.61
+    "overall_pass_rate_pct": 20.36
   },
   "bands": [
     {
       "band": "core",
       "total": 254,
-      "passed": 58,
-      "pass_rate_pct": 22.83
+      "passed": 69,
+      "pass_rate_pct": 27.17
     },
     {
       "band": "edge",
       "total": 56,
-      "passed": 8,
-      "pass_rate_pct": 14.29
+      "passed": 9,
+      "pass_rate_pct": 16.07
     },
     {
       "band": "high-value",
       "total": 250,
-      "passed": 27,
-      "pass_rate_pct": 10.8
+      "passed": 36,
+      "pass_rate_pct": 14.4
     }
   ],
   "api_families": [
@@ -128,8 +128,8 @@
     {
       "family": "timers",
       "total": 30,
-      "passed": 7,
-      "pass_rate_pct": 23.33
+      "passed": 28,
+      "pass_rate_pct": 93.33
     },
     {
       "family": "tls",
@@ -3278,7 +3278,7 @@
       "api_family": "timers",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0003",
@@ -3306,49 +3306,49 @@
       "api_family": "timers",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0007",
       "api_family": "timers",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0008",
       "api_family": "timers",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0009",
       "api_family": "timers",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0010",
       "api_family": "timers",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0011",
       "api_family": "timers",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0012",
       "api_family": "timers",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0013",
@@ -3362,35 +3362,35 @@
       "api_family": "timers",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0015",
       "api_family": "timers",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0016",
       "api_family": "timers",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0017",
       "api_family": "timers",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0018",
       "api_family": "timers",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0019",
@@ -3418,14 +3418,14 @@
       "api_family": "timers",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0023",
       "api_family": "timers",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0024",
@@ -3439,42 +3439,42 @@
       "api_family": "timers",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0026",
       "api_family": "timers",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0027",
       "api_family": "timers",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0028",
       "api_family": "timers",
       "band": "core",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0029",
       "api_family": "timers",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0030",
       "api_family": "timers",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::tls::0001",
@@ -6435,7 +6435,7 @@
     {
       "test_id": "tc::stream::0024",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: parse: UnsupportedSyntax: for statement requires a parenthesized header (source=0024_stream_readable_symbol_asynciterator.js, ",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '∅' does not include",
       "investigation_bead_id": "bd-m8vaa",
       "investigation_status": "open"
     },
@@ -6587,164 +6587,17 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::timers::0002",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0006",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0007",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0008",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0009",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0010",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0011",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0012",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0014",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '∅' does not include",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0015",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '∅' does not include",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0016",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '∅' does not include",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0017",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0018",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::timers::0019",
       "api_family": "timers",
       "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
+      "investigation_bead_id": "bd-7hdlv",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::timers::0020",
       "api_family": "timers",
       "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0022",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0023",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0025",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0026",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0027",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: parse: UnsupportedSyntax: for statement requires a parenthesized header (source=0027_timers_promises_setinterval.js, line=2, c",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0028",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0029",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '∅' does not include",
-      "investigation_bead_id": "bd-7q6j1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0030",
-      "api_family": "timers",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got string",
-      "investigation_bead_id": "bd-7q6j1",
+      "investigation_bead_id": "bd-7hdlv",
       "investigation_status": "open"
     },
     {
@@ -7354,7 +7207,7 @@
     "threshold_met": false,
     "release_blocked": true,
     "regression_detected": false,
-    "release_blocked_reason": "genuine lockstep-oracle-run measured 16.61% overall (required 95.00%); families below the 80% floor: [buffer 0.00%, child_process 0.00%, cluster 0.00%, crypto 0.00%, events 0.00%, fs 14.00%, http 0.00%, net 0.00%, stream 0.00%, timers 23.33%, tls 0.00%, url 0.00%, zlib 0.00%]"
+    "release_blocked_reason": "genuine lockstep-oracle-run measured 20.36% overall (required 95.00%); families below the 80% floor: [buffer 0.00%, child_process 0.00%, cluster 0.00%, crypto 0.00%, events 0.00%, fs 14.00%, http 0.00%, net 0.00%, stream 0.00%, tls 0.00%, url 0.00%, zlib 0.00%]"
   },
   "reproducibility": {
     "deterministic_seed": "compat-corpus-generator-v1",

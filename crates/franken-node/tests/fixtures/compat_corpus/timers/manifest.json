@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "timers",
   "description": "Genuine lockstep compatibility fixtures: timer scheduling, ordering, and cancellation semantics.",
-  "investigation_bead_id": "bd-7q6j1",
+  "investigation_bead_id": "bd-7hdlv",
   "lockstep": {
     "runtimes": [
       "bun",
