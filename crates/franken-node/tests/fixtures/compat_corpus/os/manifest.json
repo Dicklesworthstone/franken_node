@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "os",
   "description": "Genuine lockstep compatibility fixtures: host-environment predicates and constants.",
-  "investigation_bead_id": "bd-ydo7m",
+  "investigation_bead_id": "bd-y30zw",
   "lockstep": {
     "runtimes": [
       "bun",

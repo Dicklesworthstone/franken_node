@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "querystring",
   "description": "Genuine lockstep compatibility fixtures: querystring parse/stringify/escape semantics.",
-  "investigation_bead_id": "bd-qvf1f",
+  "investigation_bead_id": "bd-n8eta",
   "lockstep": {
     "runtimes": [
       "bun",
