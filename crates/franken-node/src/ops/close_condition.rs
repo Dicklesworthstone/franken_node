@@ -1624,7 +1624,11 @@ pub fn canonical_json_value(value: &Value) -> String {
     }
 }
 
-fn close_condition_receipt_signed_preimage(canonical_json: &str) -> Vec<u8> {
+/// The signed/tamper-evidence preimage over a receipt's canonical JSON:
+/// domain separator, little-endian u64 length prefix, then the canonical
+/// bytes. Public so conformance harnesses pin the EXACT production preimage
+/// (bd-38iny) instead of re-implementing (and silently drifting from) it.
+pub fn close_condition_receipt_signed_preimage(canonical_json: &str) -> Vec<u8> {
     let canonical_len = u64::try_from(canonical_json.len()).unwrap_or(u64::MAX);
     let mut preimage = Vec::with_capacity(
         CLOSE_CONDITION_RECEIPT_PREIMAGE_DOMAIN
