@@ -1,0 +1,561 @@
+{
+  "schema_version": "compat-corpus-fixture-v1",
+  "api_family": "crypto",
+  "description": "Genuine lockstep compatibility fixtures: hashing, HMAC, ciphers, KDFs, and randomness predicates.",
+  "investigation_bead_id": "bd-c36e6",
+  "lockstep": {
+    "runtimes": [
+      "bun",
+      "franken-node"
+    ],
+    "runtime_exclusions": [
+      {
+        "runtime": "node",
+        "reason": "Default corpus runs exclude node because this checkout may resolve node to the Bun shim; explicit real-Node triad runs must opt in."
+      }
+    ],
+    "harness": "franken-node ops compat-corpus-run --corpus-root crates/franken-node/tests/fixtures/compat_corpus --out artifacts/13/compatibility_corpus_results.json"
+  },
+  "cases": [
+    {
+      "id": "tc::crypto::0001",
+      "file": "0001_crypto_createhash.js",
+      "api": "crypto.createHash",
+      "requirement": "SHA-256 of a fixed ASCII string produces the well-known hex digest.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0002",
+      "file": "0002_crypto_createhash.js",
+      "api": "crypto.createHash",
+      "requirement": "SHA-1 of a fixed sentence produces the standard hex digest.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0003",
+      "file": "0003_crypto_createhash.js",
+      "api": "crypto.createHash",
+      "requirement": "SHA-512 of a fixed string produces the standard 128-hex-char digest.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0004",
+      "file": "0004_crypto_createhash.js",
+      "api": "crypto.createHash",
+      "requirement": "MD5 of a fixed string produces the standard hex digest.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0005",
+      "file": "0005_crypto_hash_digest.js",
+      "api": "crypto.Hash#digest",
+      "requirement": "digest('base64') and digest('base64url') encode the same SHA-256 bytes in the respective alphabets.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0006",
+      "file": "0006_crypto_hash_update.js",
+      "api": "crypto.Hash#update",
+      "requirement": "Hash update() returns the hash object, so update calls chain fluently.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0007",
+      "file": "0007_crypto_hash_update.js",
+      "api": "crypto.Hash#update",
+      "requirement": "Hashing data in multiple update() calls equals hashing the concatenation in one call.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0008",
+      "file": "0008_crypto_hash_update.js",
+      "api": "crypto.Hash#update",
+      "requirement": "update() with a Buffer input hashes identically to the equivalent UTF-8 string input.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0009",
+      "file": "0009_crypto_hash_update.js",
+      "api": "crypto.Hash#update",
+      "requirement": "update(string, 'hex') decodes the input encoding before hashing, matching the raw-bytes hash.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0010",
+      "file": "0010_crypto_hash_digest.js",
+      "api": "crypto.Hash#digest",
+      "requirement": "digest() with no encoding returns a 32-byte Buffer for SHA-256.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0011",
+      "file": "0011_crypto_createhash.js",
+      "api": "crypto.createHash",
+      "requirement": "Digest of the empty input equals the standard empty-message SHA-256 and SHA-1 constants.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0012",
+      "file": "0012_crypto_hash_copy.js",
+      "api": "crypto.Hash#copy",
+      "requirement": "hash.copy() clones internal state so the copy can diverge without affecting the original.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::crypto::0013",
+      "file": "0013_crypto_createhash.js",
+      "api": "crypto.createHash",
+      "requirement": "Hashing a ~10KB repeated-pattern string is deterministic and matches its computed length.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0014",
+      "file": "0014_crypto_createhmac.js",
+      "api": "crypto.createHmac",
+      "requirement": "HMAC-SHA256 with a fixed key over a fixed message produces the well-known hex MAC.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0015",
+      "file": "0015_crypto_createhmac.js",
+      "api": "crypto.createHmac",
+      "requirement": "HMAC-SHA1 with a fixed key and message yields a deterministic 40-hex-char MAC.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0016",
+      "file": "0016_crypto_createhmac.js",
+      "api": "crypto.createHmac",
+      "requirement": "HMAC-SHA512 supports chained update() calls over message fragments.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0017",
+      "file": "0017_crypto_createhmac.js",
+      "api": "crypto.createHmac",
+      "requirement": "A Buffer key and the equivalent UTF-8 string key produce the same HMAC.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0018",
+      "file": "0018_crypto_hmac_digest.js",
+      "api": "crypto.Hmac#digest",
+      "requirement": "HMAC digest('base64') emits the MAC bytes in padded base64.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0019",
+      "file": "0019_crypto_timingsafeequal.js",
+      "api": "crypto.timingSafeEqual",
+      "requirement": "timingSafeEqual returns true for byte-identical equal-length buffers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0020",
+      "file": "0020_crypto_timingsafeequal.js",
+      "api": "crypto.timingSafeEqual",
+      "requirement": "timingSafeEqual returns false for equal-length buffers that differ in any byte.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0021",
+      "file": "0021_crypto_timingsafeequal.js",
+      "api": "crypto.timingSafeEqual",
+      "requirement": "timingSafeEqual with different-length inputs throws a RangeError with code ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0022",
+      "file": "0022_crypto_randombytes.js",
+      "api": "crypto.randomBytes",
+      "requirement": "randomBytes(n) returns a Buffer of exactly n bytes, including n = 0.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0023",
+      "file": "0023_crypto_constants.js",
+      "api": "crypto.constants",
+      "requirement": "crypto.constants exposes documented OpenSSL constants such as RSA_PKCS1_PADDING === 1.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0024",
+      "file": "0024_crypto_randomuuid.js",
+      "api": "crypto.randomUUID",
+      "requirement": "randomUUID returns a 36-char lowercase RFC 4122 UUID string in 8-4-4-4-12 hex layout.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0025",
+      "file": "0025_crypto_randomuuid.js",
+      "api": "crypto.randomUUID",
+      "requirement": "randomUUID emits version 4 (position 14 is '4') with an RFC 4122 variant nibble (8, 9, a, or b).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0026",
+      "file": "0026_crypto_randomint.js",
+      "api": "crypto.randomInt",
+      "requirement": "randomInt(max) returns an integer uniformly in [0, max).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0027",
+      "file": "0027_crypto_randomint.js",
+      "api": "crypto.randomInt",
+      "requirement": "randomInt(min, max) stays in [min, max); a width-1 range always yields min.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0028",
+      "file": "0028_crypto_randomfillsync.js",
+      "api": "crypto.randomFillSync",
+      "requirement": "randomFillSync fills the provided buffer in place and returns the same object.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::crypto::0029",
+      "file": "0029_crypto_pbkdf2sync.js",
+      "api": "crypto.pbkdf2Sync",
+      "requirement": "pbkdf2Sync with fixed password, salt, iterations, and SHA-256 derives a deterministic 32-byte key.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0030",
+      "file": "0030_crypto_randomint.js",
+      "api": "crypto.randomInt",
+      "requirement": "randomInt with an empty range (min === max) throws a RangeError.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0031",
+      "file": "0031_crypto_pbkdf2.js",
+      "api": "crypto.pbkdf2",
+      "requirement": "Async pbkdf2 invokes its callback with (null, key) and the same deterministic key as the sync form.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0032",
+      "file": "0032_crypto_scryptsync.js",
+      "api": "crypto.scryptSync",
+      "requirement": "scryptSync with default cost parameters derives a deterministic key of the requested length.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0033",
+      "file": "0033_crypto_scryptsync.js",
+      "api": "crypto.scryptSync",
+      "requirement": "scryptSync honors explicit N, r, p cost options, changing the derived key deterministically.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0034",
+      "file": "0034_crypto_createcipheriv.js",
+      "api": "crypto.createCipheriv",
+      "requirement": "AES-256-CBC with a fixed key and IV produces deterministic PKCS#7-padded ciphertext.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0035",
+      "file": "0035_crypto_createdecipheriv.js",
+      "api": "crypto.createDecipheriv",
+      "requirement": "AES-256-CBC decryption with the same key and IV round-trips the plaintext exactly.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::crypto::0036",
+      "file": "0036_crypto_createcipheriv.js",
+      "api": "crypto.createCipheriv",
+      "requirement": "AES-128-CTR is a stream mode: ciphertext length equals plaintext length and it round-trips.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0037",
+      "file": "0037_crypto_cipheriv_getauthtag.js",
+      "api": "crypto.Cipheriv#getAuthTag",
+      "requirement": "AES-256-GCM with fixed key and IV yields deterministic ciphertext and a 16-byte auth tag.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0038",
+      "file": "0038_crypto_cipheriv_update.js",
+      "api": "crypto.Cipheriv#update",
+      "requirement": "Encrypting via multiple update() chunks produces the same ciphertext as a single update.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0039",
+      "file": "0039_crypto_createdecipheriv.js",
+      "api": "crypto.createDecipheriv",
+      "requirement": "CBC decryption with the wrong key fails the padding check and throws at final().",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0040",
+      "file": "0040_crypto_getciphers.js",
+      "api": "crypto.getCiphers",
+      "requirement": "getCiphers returns an array listing standard algorithms like aes-256-cbc and aes-128-ctr.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::crypto::0041",
+      "file": "0041_crypto_generatekeypairsync.js",
+      "api": "crypto.generateKeyPairSync",
+      "requirement": "generateKeyPairSync('ec') returns KeyObjects typed public/private with asymmetricKeyType 'ec'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0042",
+      "file": "0042_crypto_createsign.js",
+      "api": "crypto.createSign",
+      "requirement": "createSign/createVerify round-trip: an ECDSA signature verifies for the signed data and fails for tampered data.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::crypto::0043",
+      "file": "0043_crypto_sign.js",
+      "api": "crypto.sign",
+      "requirement": "Ed25519 one-shot sign/verify: signatures are 64 bytes, verify true for the message and false otherwise.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0044",
+      "file": "0044_crypto_gethashes.js",
+      "api": "crypto.getHashes",
+      "requirement": "getHashes returns an array including sha256 and sha512.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::crypto::0045",
+      "file": "0045_crypto_createhash.js",
+      "api": "crypto.createHash",
+      "requirement": "createHash with an unsupported algorithm name throws an Error.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    }
+  ]
+}

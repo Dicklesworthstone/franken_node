@@ -1410,6 +1410,11 @@ pub enum OpsCommand {
     /// Produce L1 proof-carrying host-effect evidence (v2) from a real native-engine run.
     #[command(name = "proof-carrying-evidence")]
     ProofCarryingEvidence(OpsProofCarryingEvidenceArgs),
+    /// Run the committed compatibility corpus across bun and the native
+    /// engine, adjudicating every case through the lockstep oracle, and emit
+    /// genuine per-test results with digest-bound provenance (bd-kfseq).
+    #[command(name = "compat-corpus-run")]
+    CompatCorpusRun(OpsCompatCorpusRunArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1581,6 +1586,29 @@ pub struct OpsProofCarryingEvidenceArgs {
     /// divergence rather than writing a weaker verdict.
     #[arg(long = "merge-l1-verdict", value_parser = parse_safe_content_pathbuf)]
     pub merge_l1_verdict: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsCompatCorpusRunArgs {
+    /// Emit the run summary as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Corpus root containing one compat-corpus-fixture-v1 directory per
+    /// Node API family.
+    #[arg(long = "corpus-root", value_parser = parse_safe_content_pathbuf)]
+    pub corpus_root: PathBuf,
+
+    /// Write the compatibility-corpus results artifact to this path. When
+    /// the file already exists its identity, thresholds, event-code, and
+    /// proof-carrying-effects blocks are carried forward.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub out: PathBuf,
+
+    /// Per-case, per-runtime-leg timeout in seconds. A leg that exceeds it
+    /// is killed and the case recorded as a genuine `fail` (timeout).
+    #[arg(long = "case-timeout-secs", default_value_t = 10)]
+    pub case_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

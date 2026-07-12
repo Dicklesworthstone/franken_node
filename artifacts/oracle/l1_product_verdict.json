@@ -3,7 +3,7 @@
   "dimension": "l1_product",
   "verdict": "GREEN",
   "owner_track": "10.2",
-  "timestamp": "2026-07-10T23:35:06.514032584+00:00",
+  "timestamp": "2026-07-12T02:56:35.879646234+00:00",
   "evidence": {
     "tests_passed": 1538,
     "tests_failed": 0,
@@ -13,7 +13,7 @@
     "proof_carrying_effects": {
       "schema_version": "franken-node/l1-proof-carrying-effects/v2",
       "trace_id": "franken_node:0",
-      "produced_at": "2026-07-10T23:35:06.377908079+00:00",
+      "produced_at": "2026-07-12T02:56:35.749905804+00:00",
       "producer": "franken-node ops proof-carrying-evidence",
       "verified_subjects": [
         "fs.read",
@@ -27,8 +27,8 @@
         {
           "index": 0,
           "prev_chain_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-          "receipt_hash": "sha256:894a40707689ab2e1a5cf8e59dbb2691c8db24b02fc453c1cec4e144d4ad2557",
-          "chain_hash": "sha256:989d22063037ef067c5f371301ccc7cd75f7f2fce10c90d10f140b81a66e1994",
+          "receipt_hash": "sha256:1a9e43ed8f0d0f1b232eedc759989903059e87039ad13d3f3321314ae6f0cebc",
+          "chain_hash": "sha256:61c066c91b5da31f8f79c9fd8430265e455e2a6d04e3f5032f2a95a7c208a511",
           "receipt": {
             "schema_version": "effect-receipt-v1.1",
             "seq": 0,
@@ -47,14 +47,14 @@
             "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "declassification_ref": null,
             "flow_policy_verdict": "label_clean",
-            "recorded_at_millis": 1783726506293
+            "recorded_at_millis": 1783824995665
           }
         },
         {
           "index": 1,
-          "prev_chain_hash": "sha256:989d22063037ef067c5f371301ccc7cd75f7f2fce10c90d10f140b81a66e1994",
-          "receipt_hash": "sha256:da3198389e45746bb52de54cce315fbeb188121cedb86c1745b5307439c59b03",
-          "chain_hash": "sha256:4a6490c637b6d22e75977090554ebf344350ce2a551d0d38111e2a4841c11527",
+          "prev_chain_hash": "sha256:61c066c91b5da31f8f79c9fd8430265e455e2a6d04e3f5032f2a95a7c208a511",
+          "receipt_hash": "sha256:e3a518a70c6d809f7c383228f45c9adc786ebadc2975aff4a3806591b09bdcd8",
+          "chain_hash": "sha256:19b8b2a37b45297eabed68241c174e1119b8c728d01a7f65ed747a3727776dea",
           "receipt": {
             "schema_version": "effect-receipt-v1.1",
             "seq": 1,
@@ -73,14 +73,14 @@
             "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "declassification_ref": null,
             "flow_policy_verdict": "label_clean",
-            "recorded_at_millis": 1783726506293
+            "recorded_at_millis": 1783824995665
           }
         },
         {
           "index": 2,
-          "prev_chain_hash": "sha256:4a6490c637b6d22e75977090554ebf344350ce2a551d0d38111e2a4841c11527",
-          "receipt_hash": "sha256:a8e63e35ac8fc2db82da63c5d1b6445a40ebcffcfb06d40439792f0415ea0bf4",
-          "chain_hash": "sha256:529fe1216ed26e72eb060929986cc6a5473a9e5bc057a632a1bda12d75513272",
+          "prev_chain_hash": "sha256:19b8b2a37b45297eabed68241c174e1119b8c728d01a7f65ed747a3727776dea",
+          "receipt_hash": "sha256:eafe485cd7c265f92ae0f59fdf6e0978b3d351fd8f940b15d55e594e87661e7a",
+          "chain_hash": "sha256:a51b12a7dbab31e8089bcbf72fabf2f1c2a284d27ce3196977463d1bd4965292",
           "receipt": {
             "schema_version": "effect-receipt-v1.1",
             "seq": 2,
@@ -90,8 +90,8 @@
               "outcome": "allowed",
               "capability_ref": "host-io:network_send"
             },
-            "pre_state_hash": "sha256:3a659d3b971e4055af774bcb9a16ff659d1b96f1b8d8deab59afe005963e4145",
-            "args_hash": "sha256:34172bb20dd763320ee9a13af242a37f9eacfe6af4600904f0b52b76ecede87c",
+            "pre_state_hash": "sha256:ac406c4080f1cd6aeea1f6b67136596797e79b5da38419f325564aa11eae38df",
+            "args_hash": "sha256:19e2c04a1753f7c9f3ca072b607f2fde46fb72755e1e8b009f458d881e67f194",
             "result_hash": "sha256:47e324768a7c7865c8cf11869c0a67ede7e4c8e7196a77ceb1731cfa73351731",
             "post_state_hash": "sha256:47e324768a7c7865c8cf11869c0a67ede7e4c8e7196a77ceb1731cfa73351731",
             "input_lineage_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -99,15 +99,15 @@
             "label_set_commitment": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "declassification_ref": null,
             "flow_policy_verdict": "label_clean",
-            "recorded_at_millis": 1783726506293
+            "recorded_at_millis": 1783824995665
           }
         }
       ]
     },
     "lockstep_verdict": {
       "schema_version": "franken-node/l1-lockstep-verdict/v1",
-      "trace_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7",
-      "produced_at": "2026-07-10T23:35:06.514032584+00:00",
+      "trace_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52",
+      "produced_at": "2026-07-12T02:56:35.879646234+00:00",
       "producer": "franken-node ops proof-carrying-evidence",
       "guest_program_content_hash": "sha256:7dbe0e755ba1b4d9bcee1bc06a37e371bead8fabab0c0d4a738257e7a4e42325",
       "runtimes": [
@@ -119,7 +119,7 @@
       "divergence_count": 0,
       "report": {
         "schema_version": "nvo-v1.0",
-        "trace_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7",
+        "trace_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52",
         "runtimes": {
           "bun": {
             "runtime_id": "bun",
@@ -136,7 +136,7 @@
         },
         "checks": [
           {
-            "check_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7:check-0",
+            "check_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52:check-0",
             "boundary_scope": "IO",
             "input": [
               99,
@@ -263,7 +263,7 @@
               59,
               10
             ],
-            "trace_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7",
+            "trace_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52",
             "outcome": {
               "Agree": {
                 "canonical_output": [
@@ -312,13 +312,13 @@
         "event_log": [
           {
             "event_code": "FN-NV-001",
-            "trace_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7",
+            "trace_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52",
             "message": "Oracle created",
             "details": {}
           },
           {
             "event_code": "FN-NV-002",
-            "trace_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7",
+            "trace_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52",
             "message": "Runtime registered",
             "details": {
               "runtime_id": "bun"
@@ -326,7 +326,7 @@
           },
           {
             "event_code": "FN-NV-002",
-            "trace_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7",
+            "trace_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52",
             "message": "Runtime registered",
             "details": {
               "runtime_id": "franken-engine-native"
@@ -334,16 +334,16 @@
           },
           {
             "event_code": "FN-NV-003",
-            "trace_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7",
+            "trace_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52",
             "message": "Cross-runtime check started",
             "details": {
               "boundary_scope": "io",
-              "check_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7:check-0"
+              "check_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52:check-0"
             }
           },
           {
             "event_code": "FN-NV-012",
-            "trace_id": "l1-lockstep:019f4e62-8211-7933-b752-387a797c99e7",
+            "trace_id": "l1-lockstep:019f5441-5627-75d0-8057-b26e8db53a52",
             "message": "Oracle report generated",
             "details": {
               "divergence_count": "0",

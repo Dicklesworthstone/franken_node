@@ -1,0 +1,621 @@
+{
+  "schema_version": "compat-corpus-fixture-v1",
+  "api_family": "fs",
+  "description": "Genuine lockstep compatibility fixtures: filesystem read/write/metadata/stream surfaces.",
+  "investigation_bead_id": "bd-b0hm6",
+  "lockstep": {
+    "runtimes": [
+      "bun",
+      "franken-node"
+    ],
+    "runtime_exclusions": [
+      {
+        "runtime": "node",
+        "reason": "Default corpus runs exclude node because this checkout may resolve node to the Bun shim; explicit real-Node triad runs must opt in."
+      }
+    ],
+    "harness": "franken-node ops compat-corpus-run --corpus-root crates/franken-node/tests/fixtures/compat_corpus --out artifacts/13/compatibility_corpus_results.json"
+  },
+  "cases": [
+    {
+      "id": "tc::fs::0001",
+      "file": "0001_fs_writefilesync.js",
+      "api": "fs.writeFileSync",
+      "requirement": "writeFileSync creates a file whose exact utf8 contents readFileSync returns as a string.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::fs::0002",
+      "file": "0002_fs_readfile.js",
+      "api": "fs.readFile",
+      "requirement": "readFile callback form invokes (err, data) with err === null and the decoded utf8 string on success.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::fs::0003",
+      "file": "0003_fs_writefile.js",
+      "api": "fs.writeFile",
+      "requirement": "writeFile callback form writes the full contents and invokes the callback with err === null on success.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::fs::0004",
+      "file": "0004_fs_readfilesync.js",
+      "api": "fs.readFileSync",
+      "requirement": "readFileSync without an encoding returns a Buffer whose toString() yields the utf8 contents.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::fs::0005",
+      "file": "0005_fs_appendfilesync.js",
+      "api": "fs.appendFileSync",
+      "requirement": "appendFileSync appends data to the end of an existing file without truncating prior contents.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0006",
+      "file": "0006_fs_existssync.js",
+      "api": "fs.existsSync",
+      "requirement": "existsSync returns true for a path that refers to an existing file.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0007",
+      "file": "0007_fs_existssync.js",
+      "api": "fs.existsSync",
+      "requirement": "existsSync returns false (never throws) for a path that does not exist.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0008",
+      "file": "0008_fs_mkdirsync.js",
+      "api": "fs.mkdirSync",
+      "requirement": "mkdirSync creates a directory usable immediately for stat and child file writes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0009",
+      "file": "0009_fs_mkdirsync.js",
+      "api": "fs.mkdirSync",
+      "requirement": "mkdirSync with recursive:true creates all missing intermediate directories in a nested path.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0010",
+      "file": "0010_fs_readdirsync.js",
+      "api": "fs.readdirSync",
+      "requirement": "readdirSync lists exactly the entries created in a directory (verified via sorted join).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0011",
+      "file": "0011_fs_readdirsync.js",
+      "api": "fs.readdirSync",
+      "requirement": "readdirSync with withFileTypes:true returns Dirent objects whose isFile/isDirectory predicates distinguish files from directories.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0012",
+      "file": "0012_fs_statsync.js",
+      "api": "fs.statSync",
+      "requirement": "statSync on a regular file reports isFile() true and isDirectory() false.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0013",
+      "file": "0013_fs_statsync.js",
+      "api": "fs.statSync",
+      "requirement": "statSync size reports the exact byte length of content the script itself wrote.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0014",
+      "file": "0014_fs_symlinksync.js",
+      "api": "fs.symlinkSync",
+      "requirement": "symlinkSync creates a symlink that lstatSync identifies, statSync follows, readlinkSync resolves, and reads follow to the target.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0015",
+      "file": "0015_fs_renamesync.js",
+      "api": "fs.renameSync",
+      "requirement": "renameSync moves a file so the old path no longer exists and the new path has the same contents.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0016",
+      "file": "0016_fs_copyfilesync.js",
+      "api": "fs.copyFileSync",
+      "requirement": "copyFileSync duplicates file contents to the destination while leaving the source intact.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0017",
+      "file": "0017_fs_unlinksync.js",
+      "api": "fs.unlinkSync",
+      "requirement": "unlinkSync removes a file so existsSync subsequently reports false.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0018",
+      "file": "0018_fs_rmsync.js",
+      "api": "fs.rmSync",
+      "requirement": "rmSync with recursive:true removes a non-empty directory tree.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0019",
+      "file": "0019_fs_rmdirsync.js",
+      "api": "fs.rmdirSync",
+      "requirement": "rmdirSync removes an empty directory.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0020",
+      "file": "0020_fs_truncatesync.js",
+      "api": "fs.truncateSync",
+      "requirement": "truncateSync shortens a file to the requested byte length, discarding the tail.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0021",
+      "file": "0021_fs_writesync.js",
+      "api": "fs.writeSync",
+      "requirement": "openSync('w')/writeSync/closeSync writes bytes through a numeric fd and returns the count written.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0022",
+      "file": "0022_fs_readsync.js",
+      "api": "fs.readSync",
+      "requirement": "readSync reads the requested byte range from an fd at an explicit position into a Buffer and returns bytes read.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0023",
+      "file": "0023_fs_fsyncsync.js",
+      "api": "fs.fsyncSync",
+      "requirement": "fsyncSync on an open fd succeeds and the flushed contents are readable after close.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0024",
+      "file": "0024_fs_accesssync.js",
+      "api": "fs.accessSync",
+      "requirement": "accessSync with fs.constants.F_OK returns without throwing for an existing file.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0025",
+      "file": "0025_fs_chmodsync.js",
+      "api": "fs.chmodSync",
+      "requirement": "chmodSync sets the permission bits observable via statSync mode masked with 0o777.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0026",
+      "file": "0026_fs_utimessync.js",
+      "api": "fs.utimesSync",
+      "requirement": "utimesSync sets the file mtime to an explicit epoch that statSync then reports exactly.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0027",
+      "file": "0027_fs_realpathsync.js",
+      "api": "fs.realpathSync",
+      "requirement": "realpathSync resolves a relative path to an absolute path ending in the file's own name.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0028",
+      "file": "0028_fs_promises_readfile.js",
+      "api": "fs.promises.readFile",
+      "requirement": "fs.promises.readFile resolves with the utf8 string contents of the file.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0029",
+      "file": "0029_fs_promises_writefile.js",
+      "api": "fs.promises.writeFile",
+      "requirement": "fs.promises.writeFile resolves after persisting contents readable by readFileSync.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0030",
+      "file": "0030_fs_promises_readdir.js",
+      "api": "fs.promises.readdir",
+      "requirement": "fs.promises.mkdir then readdir resolves with the names of files created in the new directory.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0031",
+      "file": "0031_fs_readfilesync.js",
+      "api": "fs.readFileSync",
+      "requirement": "readFileSync on a missing path throws an error with code ENOENT.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0032",
+      "file": "0032_fs_mkdirsync.js",
+      "api": "fs.mkdirSync",
+      "requirement": "mkdirSync on an already-existing directory (without recursive) throws an error with code EEXIST.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0033",
+      "file": "0033_fs_readfilesync.js",
+      "api": "fs.readFileSync",
+      "requirement": "readFileSync through a path whose parent component is a regular file throws an error with code ENOTDIR.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0034",
+      "file": "0034_fs_readfilesync.js",
+      "api": "fs.readFileSync",
+      "requirement": "readFileSync on a directory throws an error with code EISDIR.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0035",
+      "file": "0035_fs_unlinksync.js",
+      "api": "fs.unlinkSync",
+      "requirement": "unlinkSync on a missing path throws an error with code ENOENT.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0036",
+      "file": "0036_fs_readfilesync.js",
+      "api": "fs.readFileSync",
+      "requirement": "readFileSync with 'base64' encoding returns the base64 encoding of the file's bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0037",
+      "file": "0037_fs_readfilesync.js",
+      "api": "fs.readFileSync",
+      "requirement": "readFileSync with 'hex' encoding returns the lowercase hex encoding of the file's bytes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0038",
+      "file": "0038_fs_writefilesync.js",
+      "api": "fs.writeFileSync",
+      "requirement": "writeFileSync accepts a Buffer and the exact bytes round-trip through readFileSync.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0039",
+      "file": "0039_fs_writefilesync.js",
+      "api": "fs.writeFileSync",
+      "requirement": "JSON serialized to a file parses back to an equivalent value after a readFileSync round-trip.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::fs::0040",
+      "file": "0040_fs_readfilesync.js",
+      "api": "fs.readFileSync",
+      "requirement": "Multi-line utf8 content round-trips with newline boundaries preserved exactly.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0041",
+      "file": "0041_fs_writefilesync.js",
+      "api": "fs.writeFileSync",
+      "requirement": "Writing an empty string produces a zero-length file (string length 0, stat size 0).",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0042",
+      "file": "0042_fs_readdirsync.js",
+      "api": "fs.readdirSync",
+      "requirement": "readdirSync includes dotfiles in its listing.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0043",
+      "file": "0043_fs_writefilesync.js",
+      "api": "fs.writeFileSync",
+      "requirement": "writeFileSync with flag:'a' appends to an existing file instead of truncating it.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0044",
+      "file": "0044_fs_createreadstream.js",
+      "api": "fs.createReadStream",
+      "requirement": "createReadStream emits 'data' chunks that concatenate to the full file contents, then emits 'end'.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::fs::0045",
+      "file": "0045_fs_createwritestream.js",
+      "api": "fs.createWriteStream",
+      "requirement": "createWriteStream write/end persists all chunks and emits 'finish', after which the file is readable.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::fs::0046",
+      "file": "0046_fs_constants.js",
+      "api": "fs.constants",
+      "requirement": "fs.constants exposes POSIX access constants F_OK=0, R_OK=4, W_OK=2, X_OK=1.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0047",
+      "file": "0047_fs_writefilesync.js",
+      "api": "fs.writeFileSync",
+      "requirement": "writeFileSync on an existing file truncates and fully replaces prior longer contents.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::fs::0048",
+      "file": "0048_fs_readdirsync.js",
+      "api": "fs.readdirSync",
+      "requirement": "readdirSync on a freshly created empty directory returns an empty array.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0049",
+      "file": "0049_fs_mkdtempsync.js",
+      "api": "fs.mkdtempSync",
+      "requirement": "mkdtempSync creates a new directory whose name begins with the given prefix.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::fs::0050",
+      "file": "0050_fs_rmsync.js",
+      "api": "fs.rmSync",
+      "requirement": "rmSync with force:true on a nonexistent path is a silent no-op instead of throwing.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    }
+  ]
+}

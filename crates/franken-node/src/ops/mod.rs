@@ -1,6 +1,7 @@
 pub mod cleanup_executor;
 pub mod close_condition;
 pub mod closed_bead_compliance;
+pub mod compat_corpus_run;
 pub mod doctor;
 pub mod engine_dispatcher;
 pub mod evidence_index;

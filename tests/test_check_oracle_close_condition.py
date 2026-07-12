@@ -607,9 +607,47 @@ class TestLockstepVerdict:
 
 
 class TestCorpusBinding:
-    def _write_corpus(self, tmp_path, proof):
+    @staticmethod
+    def _green_corpus_document(proof):
+        """A corpus copy that satisfies the bd-kfseq gate-parity legs: genuine
+        provenance, digest-bound per_test_results, re-derivable totals, zero
+        errored cases, and a pass rate at the threshold."""
+        from scripts.check_compatibility_corpus_pass_gate import (
+            ONLINE_PROVENANCE,
+            compute_result_digest,
+        )
+
+        per_tests = [
+            {
+                "test_id": f"tc::fs::{index:04d}",
+                "api_family": "fs",
+                "band": "core",
+                "risk_band": "critical",
+                "status": "pass",
+            }
+            for index in range(1, 21)
+        ]
+        return {
+            "corpus": {
+                "provenance": ONLINE_PROVENANCE,
+                "result_digest": compute_result_digest(per_tests),
+            },
+            "totals": {
+                "total_test_cases": len(per_tests),
+                "passed_test_cases": len(per_tests),
+                "errored_test_cases": 0,
+            },
+            "thresholds": {"overall_pass_rate_min_pct": 95.0},
+            "per_test_results": per_tests,
+            "proof_carrying_effects": proof,
+        }
+
+    def _write_corpus(self, tmp_path, proof, mutate=None):
+        document = self._green_corpus_document(proof)
+        if mutate is not None:
+            mutate(document)
         corpus_path = tmp_path / "compatibility_corpus_results.json"
-        corpus_path.write_text(json.dumps({"proof_carrying_effects": proof}))
+        corpus_path.write_text(json.dumps(document))
         return corpus_path
 
     def test_matching_copies_yield_no_errors(self, tmp_path):
@@ -656,3 +694,73 @@ class TestCorpusBinding:
         result = mod.check_dimension(tmp_path, dim, corpus_path)
         assert result["error"] is not None
         assert "does not match the corpus-results copy" in result["error"]
+
+    # -- bd-kfseq gate parity: the Python close-condition gate re-derives the
+    # same L1 corpus pass-rate bar as the Rust gate over the bound copy. --
+
+    def test_authored_provenance_fails_closed(self, tmp_path):
+        payload = green_payload("l1_product")
+
+        def mutate(document):
+            document["corpus"]["provenance"] = "authored-fixture-expectations"
+
+        corpus_path = self._write_corpus(
+            tmp_path, payload["evidence"]["proof_carrying_effects"], mutate
+        )
+        errors = mod.validate_l1_corpus_binding(payload, corpus_path)
+        assert any("not a genuine oracle run" in e for e in errors)
+
+    def test_tampered_digest_fails_closed(self, tmp_path):
+        payload = green_payload("l1_product")
+
+        def mutate(document):
+            document["corpus"]["result_digest"] = "sha256:" + "0" * 64
+
+        corpus_path = self._write_corpus(
+            tmp_path, payload["evidence"]["proof_carrying_effects"], mutate
+        )
+        errors = mod.validate_l1_corpus_binding(payload, corpus_path)
+        assert any("does not match the digest recomputed" in e for e in errors)
+
+    def test_pass_rate_below_threshold_fails_closed(self, tmp_path):
+        from scripts.check_compatibility_corpus_pass_gate import compute_result_digest
+
+        payload = green_payload("l1_product")
+
+        def mutate(document):
+            for row in document["per_test_results"][:5]:
+                row["status"] = "fail"
+            document["totals"]["passed_test_cases"] = 15
+            document["corpus"]["result_digest"] = compute_result_digest(
+                document["per_test_results"]
+            )
+
+        corpus_path = self._write_corpus(
+            tmp_path, payload["evidence"]["proof_carrying_effects"], mutate
+        )
+        errors = mod.validate_l1_corpus_binding(payload, corpus_path)
+        assert any("below required" in e for e in errors)
+
+    def test_errored_cases_fail_closed(self, tmp_path):
+        payload = green_payload("l1_product")
+
+        def mutate(document):
+            document["totals"]["errored_test_cases"] = 2
+
+        corpus_path = self._write_corpus(
+            tmp_path, payload["evidence"]["proof_carrying_effects"], mutate
+        )
+        errors = mod.validate_l1_corpus_binding(payload, corpus_path)
+        assert any("errored test cases" in e for e in errors)
+
+    def test_totals_drift_fails_closed(self, tmp_path):
+        payload = green_payload("l1_product")
+
+        def mutate(document):
+            document["totals"]["total_test_cases"] = 99
+
+        corpus_path = self._write_corpus(
+            tmp_path, payload["evidence"]["proof_carrying_effects"], mutate
+        )
+        errors = mod.validate_l1_corpus_binding(payload, corpus_path)
+        assert any("does not match declared total_test_cases" in e for e in errors)

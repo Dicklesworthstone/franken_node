@@ -624,9 +624,7 @@ fn validate_l1_corpus_provenance(data: &Value, provenance: Option<&str>) -> Vec<
                 // Content-hash comparison uses the crate's constant-time helper
                 // per the hardening watchlist, even though both operands are
                 // public here.
-                Some(declared)
-                    if !crate::security::constant_time::ct_eq(declared, &recomputed) =>
-                {
+                Some(declared) if !crate::security::constant_time::ct_eq(declared, &recomputed) => {
                     findings.push(format!(
                         "compatibility corpus result_digest `{declared}` does not match the \
                          digest recomputed from per_test_results `{recomputed}`"

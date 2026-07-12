@@ -1,0 +1,501 @@
+{
+  "schema_version": "compat-corpus-fixture-v1",
+  "api_family": "tls",
+  "description": "Genuine lockstep compatibility fixtures: TLS handshake, certificate, and encrypted-channel semantics over loopback.",
+  "investigation_bead_id": "bd-6yzk6",
+  "lockstep": {
+    "runtimes": [
+      "bun",
+      "franken-node"
+    ],
+    "runtime_exclusions": [
+      {
+        "runtime": "node",
+        "reason": "Default corpus runs exclude node because this checkout may resolve node to the Bun shim; explicit real-Node triad runs must opt in."
+      }
+    ],
+    "harness": "franken-node ops compat-corpus-run --corpus-root crates/franken-node/tests/fixtures/compat_corpus --out artifacts/13/compatibility_corpus_results.json"
+  },
+  "cases": [
+    {
+      "id": "tc::tls::0001",
+      "file": "0001_tls_rootcertificates.js",
+      "api": "tls.rootCertificates",
+      "requirement": "The bundled root certificate list is a non-empty array of PEM strings.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0002",
+      "file": "0002_tls_getciphers.js",
+      "api": "tls.getCiphers",
+      "requirement": "getCiphers returns a non-empty lowercase cipher list.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::tls::0003",
+      "file": "0003_tls_createsecurecontext.js",
+      "api": "tls.createSecureContext",
+      "requirement": "createSecureContext accepts a cert/key pair without throwing.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0004",
+      "file": "0004_tls_checkserveridentity.js",
+      "api": "tls.checkServerIdentity",
+      "requirement": "checkServerIdentity accepts a matching CN and rejects a mismatch.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0005",
+      "file": "0005_tls_handshake_roundtrip.js",
+      "api": "tls handshake roundtrip",
+      "requirement": "A TLS client completes a handshake against a self-signed server and exchanges data.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::tls::0006",
+      "file": "0006_tls_tlssocket_authorized.js",
+      "api": "tls.TLSSocket.authorized",
+      "requirement": "A self-signed peer leaves authorized=false when rejectUnauthorized is false.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0007",
+      "file": "0007_tls_tlssocket_authorizationerror.js",
+      "api": "tls.TLSSocket.authorizationError",
+      "requirement": "The self-signed chain is classified with a depth-zero self-signed authorization error.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0008",
+      "file": "0008_tls_tlssocket_getpeercertificate.js",
+      "api": "tls.TLSSocket.getPeerCertificate",
+      "requirement": "getPeerCertificate exposes the server certificate subject CN.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0009",
+      "file": "0009_tls_tlssocket_encrypted.js",
+      "api": "tls.TLSSocket.encrypted",
+      "requirement": "A TLS socket reports encrypted=true.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0010",
+      "file": "0010_tls_tlssocket_getprotocol.js",
+      "api": "tls.TLSSocket.getProtocol",
+      "requirement": "The negotiated protocol is a modern TLS version string.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0011",
+      "file": "0011_tls_tlssocket_getcipher.js",
+      "api": "tls.TLSSocket.getCipher",
+      "requirement": "getCipher exposes the negotiated cipher name and version strings.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0012",
+      "file": "0012_tls_secureconnect_event.js",
+      "api": "tls secureConnect event",
+      "requirement": "The client emits secureConnect when the handshake completes.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0013",
+      "file": "0013_tls_server_secureconnection_event.js",
+      "api": "tls.Server secureConnection event",
+      "requirement": "The server emits secureConnection with the encrypted socket.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0014",
+      "file": "0014_tls_client_write_to_server.js",
+      "api": "tls client write to server",
+      "requirement": "Client bytes cross the encrypted channel intact.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::tls::0015",
+      "file": "0015_tls_server_write_to_client.js",
+      "api": "tls server write to client",
+      "requirement": "Server bytes cross the encrypted channel intact.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "critical"
+    },
+    {
+      "id": "tc::tls::0016",
+      "file": "0016_tls_end_close_ordering.js",
+      "api": "tls end/close ordering",
+      "requirement": "The client sees end before close on server-initiated shutdown.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0017",
+      "file": "0017_tls_binary_roundtrip.js",
+      "api": "tls binary roundtrip",
+      "requirement": "Binary bytes survive the encrypted echo roundtrip.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0018",
+      "file": "0018_tls_multiple_writes.js",
+      "api": "tls multiple writes",
+      "requirement": "Multiple encrypted writes are delivered fully and in order.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0019",
+      "file": "0019_tls_large_payload.js",
+      "api": "tls large payload",
+      "requirement": "A 32KiB payload crosses the TLS channel completely.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0020",
+      "file": "0020_tls_sni_servername.js",
+      "api": "tls SNI servername",
+      "requirement": "The server-side TLS socket exposes the client's requested servername.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0021",
+      "file": "0021_tls_alpn_negotiation.js",
+      "api": "tls ALPN negotiation",
+      "requirement": "ALPN selects the first mutually supported protocol.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0022",
+      "file": "0022_tls_issuer_cn.js",
+      "api": "tls issuer CN",
+      "requirement": "A self-signed certificate reports the same issuer and subject CN.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0023",
+      "file": "0023_tls_certificate_validity_fields.js",
+      "api": "tls certificate validity fields",
+      "requirement": "Peer certificate exposes valid_from and valid_to strings.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::tls::0024",
+      "file": "0024_tls_connect_securecontext_option.js",
+      "api": "tls.connect secureContext option",
+      "requirement": "A pre-built secureContext is accepted by tls.connect.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0025",
+      "file": "0025_tls_tlssocket_issessionreused.js",
+      "api": "tls.TLSSocket.isSessionReused",
+      "requirement": "The first connection does not reuse a session.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::tls::0026",
+      "file": "0026_tls_default_verification_fails_closed.js",
+      "api": "tls default verification fails closed",
+      "requirement": "With default rejectUnauthorized, a self-signed server is refused with a certificate error.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0027",
+      "file": "0027_tls_tlssocket_instanceof_net_socket.js",
+      "api": "tls.TLSSocket instanceof net.Socket",
+      "requirement": "A TLSSocket is an instance of net.Socket.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0028",
+      "file": "0028_tls_minversion_tlsv1_2.js",
+      "api": "tls minVersion TLSv1.2",
+      "requirement": "A client pinned to minVersion TLSv1.2 still completes the handshake.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0029",
+      "file": "0029_tls_two_sequential_connections.js",
+      "api": "tls two sequential connections",
+      "requirement": "Two sequential TLS connections both complete roundtrips.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "high"
+    },
+    {
+      "id": "tc::tls::0030",
+      "file": "0030_tls_client_end_to_server.js",
+      "api": "tls client end to server",
+      "requirement": "A client end() is observed as end by the server socket.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0031",
+      "file": "0031_tls_server_address.js",
+      "api": "tls.Server.address",
+      "requirement": "A TLS server reports a numeric bound port on loopback.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "core",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0032",
+      "file": "0032_tls_connect_servername_default.js",
+      "api": "tls.connect servername default",
+      "requirement": "Connecting by IP with rejectUnauthorized:false still exposes the peer certificate.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0033",
+      "file": "0033_tls_tlssocket_remoteaddress.js",
+      "api": "tls.TLSSocket.remoteAddress",
+      "requirement": "The TLS client socket reports the loopback remote address.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::tls::0034",
+      "file": "0034_tls_uppercase_echo.js",
+      "api": "tls uppercase echo",
+      "requirement": "The server can transform encrypted data and return it.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0035",
+      "file": "0035_tls_setencoding.js",
+      "api": "tls setEncoding",
+      "requirement": "setEncoding('utf8') yields string chunks on the TLS socket.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "high-value",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::tls::0036",
+      "file": "0036_tls_getpeercertificate_detailed.js",
+      "api": "tls.getPeerCertificate detailed",
+      "requirement": "The detailed form exposes the raw certificate buffer.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::tls::0037",
+      "file": "0037_tls_connect_requestcert_server_side.js",
+      "api": "tls.connect requestCert server side",
+      "requirement": "A server requesting a client certificate still handshakes when none is required strictly.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0038",
+      "file": "0038_tls_default_min_version.js",
+      "api": "tls.DEFAULT_MIN_VERSION",
+      "requirement": "The module exposes a default minimum TLS version string.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
+    },
+    {
+      "id": "tc::tls::0039",
+      "file": "0039_tls_connect_with_url_less_host_default.js",
+      "api": "tls.connect with URL-less host default",
+      "requirement": "Omitting host defaults to localhost for loopback servers.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "medium"
+    },
+    {
+      "id": "tc::tls::0040",
+      "file": "0040_tls_tlssocket_getsession.js",
+      "api": "tls.TLSSocket.getSession",
+      "requirement": "getSession returns a Buffer once connected.",
+      "divergence_axes": [
+        "output",
+        "exit"
+      ],
+      "band": "edge",
+      "risk_band": "low"
+    }
+  ]
+}

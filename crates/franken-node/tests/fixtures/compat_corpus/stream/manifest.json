@@ -1,6 +1,7 @@
 {
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "stream",
+  "investigation_bead_id": "bd-m8vaa",
   "description": "Lockstep compatibility fixtures for Node stream.Readable, stream.Writable, and stream.Transform event ordering and backpressure semantics.",
   "lockstep": {
     "runtimes": ["bun", "franken-node"],

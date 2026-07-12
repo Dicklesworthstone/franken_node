@@ -110,13 +110,13 @@ use crate::cli::{
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
     DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorWorkspacePressureArgs,
     FleetAgentArgs, FleetCommand, IncidentCommand, LtvCommand, MigrateCommand, MigrateReportArgs,
-    OpsCommand, OpsConfigAuditArgs, OpsMetricsFormat, OpsProofCarryingEvidenceArgs,
-    OpsResourceGovernorArgs, OpsValidationCloseoutArgs, OpsValidationReadinessArgs,
-    ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand, ProofWorkersRestartArgs,
-    ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
-    RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, SafeModeCommand,
-    SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand, TrustCommand,
-    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    OpsCommand, OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsMetricsFormat,
+    OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
+    OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand,
+    ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
+    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
+    SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
+    TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
     VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
     load_doctor_policy_activation_input,
 };
@@ -7778,6 +7778,97 @@ fn handle_ops_proof_carrying_evidence(_args: &OpsProofCarryingEvidenceArgs) -> R
     anyhow::bail!(
         "ops proof-carrying-evidence requires the `engine` feature: the evidence is \
          produced by a real native franken_engine run and cannot be fabricated"
+    )
+}
+
+/// bd-kfseq: run the committed compatibility corpus across bun (reference
+/// leg) and the native franken_engine (this binary's own `run
+/// --console-only` path), adjudicate every case through the lockstep oracle,
+/// and write the genuine, digest-bound corpus results artifact.
+#[cfg(feature = "engine")]
+fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
+    use ops::compat_corpus_run::{
+        build_corpus_results_document, content_addressed_corpus_version, corpus_generated_at_utc,
+        discover_corpus, run_corpus,
+    };
+
+    let cases = discover_corpus(&args.corpus_root)?;
+    let corpus_version = content_addressed_corpus_version(&cases)?;
+    let (outcomes, bun_version) = run_corpus(
+        &cases,
+        std::time::Duration::from_secs(args.case_timeout_secs.clamp(1, 600)),
+    )?;
+
+    let existing = match std::fs::read_to_string(&args.out) {
+        Ok(raw) => Some(
+            serde_json::from_str::<serde_json::Value>(&raw).with_context(|| {
+                format!(
+                    "existing corpus results artifact {} is not valid JSON; refusing to overwrite",
+                    args.out.display()
+                )
+            })?,
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("read existing artifact {}", args.out.display()));
+        }
+    };
+
+    let document = build_corpus_results_document(
+        existing.as_ref(),
+        &outcomes,
+        &corpus_version,
+        &bun_version,
+        &corpus_generated_at_utc(),
+        &args.corpus_root.display().to_string(),
+    )?;
+
+    if let Some(parent) = args.out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create artifact directory {}", parent.display()))?;
+    }
+    std::fs::write(
+        &args.out,
+        format!("{}\n", serde_json::to_string_pretty(&document)?),
+    )
+    .with_context(|| format!("write corpus results artifact {}", args.out.display()))?;
+
+    let totals = document.get("totals").cloned().unwrap_or_default();
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "corpus_version": corpus_version,
+                "reference_runtime": format!("bun {bun_version}"),
+                "totals": totals,
+                "ci_gate": document.get("ci_gate"),
+                "out": args.out.display().to_string(),
+            }))?
+        );
+    } else {
+        let rendered = format!(
+            "compatibility corpus lockstep run (genuine)\n\
+             corpus version: {corpus_version}\n\
+             reference runtime: bun {bun_version}\n\
+             totals: {totals}\n\
+             written to: {}",
+            args.out.display()
+        );
+        emit_operator_surface_output("ops-compat-corpus-run", &rendered)?;
+    }
+    Ok(())
+}
+
+/// Without the `engine` feature the franken leg cannot execute natively, so
+/// the corpus runner fails closed instead of measuring a fallback runtime.
+#[cfg(not(feature = "engine"))]
+fn handle_ops_compat_corpus_run(_args: &OpsCompatCorpusRunArgs) -> Result<()> {
+    anyhow::bail!(
+        "ops compat-corpus-run requires the `engine` feature: the franken leg must be \
+         the real native engine, not a fallback runtime"
     )
 }
 
@@ -28711,6 +28802,9 @@ fn main() -> Result<()> {
             }
             OpsCommand::ProofCarryingEvidence(args) => {
                 handle_ops_proof_carrying_evidence(&args)?;
+            }
+            OpsCommand::CompatCorpusRun(args) => {
+                handle_ops_compat_corpus_run(&args)?;
             }
         },
 

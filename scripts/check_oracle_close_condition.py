@@ -15,6 +15,7 @@ Exit codes:
 """
 
 import hashlib
+import hmac
 import json
 import sys
 from pathlib import Path
@@ -592,7 +593,16 @@ def validate_l1_lockstep_verdict(data: dict) -> list[str]:
 def validate_l1_corpus_binding(data: dict, corpus_results_path: Path) -> list[str]:
     """bd-ry7d1 cross-file binding: the verdict artifact's
     proof_carrying_effects copy must be value-identical to the
-    compatibility-corpus results copy the Rust gate's pass-rate leg reads."""
+    compatibility-corpus results copy the Rust gate's pass-rate leg reads.
+
+    bd-kfseq gate parity: the SAME corpus copy is then held to the SAME L1
+    bar the Rust close-condition leg enforces — genuine
+    `lockstep-oracle-run` provenance, a `result_digest` that recomputes from
+    `per_test_results`, totals that re-derive, zero errored cases, and a
+    measured pass rate at or above the threshold. Before this, the Python
+    close-condition gate could report GREEN over a corpus the Rust gate
+    refused, which is exactly the two-gates-drift bd-ry7d1 exists to prevent.
+    """
     try:
         with open(corpus_results_path) as corpus_file:
             corpus = json.load(corpus_file)
@@ -600,6 +610,7 @@ def validate_l1_corpus_binding(data: dict, corpus_results_path: Path) -> list[st
         return [f"L1 corpus-results binding input unreadable: {err}"]
     if not isinstance(corpus, dict):
         return ["L1 corpus-results binding input must be a JSON object"]
+    errors = []
     corpus_proof = corpus.get("proof_carrying_effects")
     evidence = data.get("evidence")
     artifact_proof = evidence.get("proof_carrying_effects") if isinstance(evidence, dict) else None
@@ -619,7 +630,80 @@ def validate_l1_corpus_binding(data: dict, corpus_results_path: Path) -> list[st
             "copy (the two gate inputs have drifted; regenerate both via `franken-node ops "
             "proof-carrying-evidence --merge-corpus --merge-l1-verdict`)"
         ]
-    return []
+    errors.extend(_validate_l1_corpus_pass_rate(corpus))
+    return errors
+
+
+def _validate_l1_corpus_pass_rate(corpus: dict) -> list[str]:
+    """Re-derive the L1 corpus pass-rate leg from the bound corpus copy,
+    mirroring `ops/close_condition.rs::validate_l1_corpus_provenance` plus the
+    threshold/errored checks of `evaluate_l1_product_oracle` — update both
+    sides together (bd-ihusm / bd-kfseq)."""
+    from scripts.check_compatibility_corpus_pass_gate import (
+        ONLINE_PROVENANCE,
+        compute_result_digest,
+    )
+
+    errors = []
+    corpus_meta = corpus.get("corpus", {})
+    provenance = corpus_meta.get("provenance") if isinstance(corpus_meta, dict) else None
+    if provenance != ONLINE_PROVENANCE:
+        errors.append(
+            f"L1 compatibility corpus provenance {provenance!r} is not a genuine oracle run "
+            f"(expected {ONLINE_PROVENANCE!r}); the pass rate cannot be consumed as real"
+        )
+
+    per_tests = corpus.get("per_test_results")
+    if not isinstance(per_tests, list) or not per_tests:
+        errors.append(
+            "L1 compatibility corpus has no per_test_results; the pass rate cannot be "
+            "re-derived or digest-verified"
+        )
+        return errors
+
+    declared_digest = corpus_meta.get("result_digest") if isinstance(corpus_meta, dict) else None
+    recomputed_digest = compute_result_digest(per_tests)
+    # Constant-time comparison per the hardening watchlist (content-hash
+    # compares mirror the Rust gate's ct_eq even over public operands).
+    if not hmac.compare_digest(str(declared_digest or ""), recomputed_digest):
+        errors.append(
+            f"L1 compatibility corpus result_digest {declared_digest!r} does not match the "
+            f"digest recomputed from per_test_results {recomputed_digest!r}"
+        )
+
+    totals = corpus.get("totals", {})
+    declared_total = int(totals.get("total_test_cases", 0)) if isinstance(totals, dict) else 0
+    declared_passed = int(totals.get("passed_test_cases", 0)) if isinstance(totals, dict) else 0
+    errored = int(totals.get("errored_test_cases", 0)) if isinstance(totals, dict) else 0
+    recomputed_passed = sum(1 for row in per_tests if row.get("status") == "pass")
+    if len(per_tests) != declared_total:
+        errors.append(
+            f"L1 compatibility corpus per_test_results count {len(per_tests)} does not match "
+            f"declared total_test_cases {declared_total}"
+        )
+    if recomputed_passed != declared_passed:
+        errors.append(
+            f"L1 compatibility corpus declared passed_test_cases {declared_passed} does not "
+            f"match the {recomputed_passed} passes in per_test_results"
+        )
+    if errored > 0:
+        errors.append(f"L1 compatibility corpus has {errored} errored test cases")
+
+    thresholds = corpus.get("thresholds", {})
+    required_pct = (
+        float(thresholds.get("overall_pass_rate_min_pct", 95.0))
+        if isinstance(thresholds, dict)
+        else 95.0
+    )
+    measured_pct = (
+        round((recomputed_passed / len(per_tests)) * 100.0, 2) if per_tests else 0.0
+    )
+    if measured_pct < required_pct:
+        errors.append(
+            f"L1 compatibility corpus pass rate {measured_pct:.2f}% is below required "
+            f"{required_pct:.2f}%"
+        )
+    return errors
 
 
 REQUIRED_DIMENSIONS = [

@@ -1865,3 +1865,13 @@ required-features = ["advanced-features", "test-support"]
 [[test]]
 name = "doctor_policy_activation_e2e"
 path = "tests/doctor_policy_activation_e2e.rs"
+
+# compat_corpus_run_e2e (bd-kfseq): genuine compatibility-corpus lockstep
+# runner. Pure contract tests (manifest discovery fail-closed validation,
+# results-document digest binding / honest gate evaluation / ratchet
+# semantics) plus a mock-free CLI e2e that runs a tiny corpus across a real
+# bun reference leg and the native engine leg (skips itself when bun is not
+# on PATH). No required-features: the e2e self-gates on `engine` via cfg.
+[[test]]
+name = "compat_corpus_run_e2e"
+path = "tests/compat_corpus_run_e2e.rs"
