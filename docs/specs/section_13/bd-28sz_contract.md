@@ -13,6 +13,8 @@ Enforce a hard release gate requiring compatibility corpus pass performance at o
 - `INV-CCG-TRACKING`: Every failing test is mapped to an investigation bead with explicit status.
 - `INV-CCG-REPRODUCIBILITY`: Corpus results are versioned and reproducible for the same `corpus_version` and `franken_node_version`.
 - `INV-CCG-RATCHET`: Decrease versus previous release corpus pass rate is treated as regression and escalated.
+- `INV-CCG-PROVENANCE` (bd-ihusm): The corpus must attest a genuine measurement via `corpus.provenance`. Only `"lockstep-oracle-run"` is accepted by the release gate; any other value (for example `"authored-fixture-expectations"`) or an absent field is refused fail-closed, so synthesized or hand-authored results can never satisfy the L1 pass-rate leg.
+- `INV-CCG-DIGEST-BINDING` (bd-ihusm): `corpus.result_digest` MUST recompute from `per_test_results` under the canonical `ccg_corpus_result_digest_v1` scheme (domain-separated, field-separated, sorted). A fabricated or silently-edited digest fails both the Python CI gate and the Rust close-condition L1 leg, and the declared `totals` are re-derived from `per_test_results` rather than trusted as-is.
 
 ## Required Data Contract
 

@@ -908,11 +908,107 @@ fn effect_receipt_hash_cross_language_parity_pin_bd_qr5i2_3() {
     );
 }
 
+/// bd-ihusm: the corpus result-digest algorithm must byte-match the Python
+/// gate (`scripts/check_compatibility_corpus_pass_gate.py`). This vector +
+/// digest is pinned identically on both sides; drift on either fails.
+#[test]
+fn ccg_result_digest_cross_language_pin_bd_ihusm() {
+    let vector = vec![
+        serde_json::json!({
+            "test_id": "tc::fs::0001", "api_family": "fs", "band": "core",
+            "risk_band": "critical", "status": "pass"
+        }),
+        serde_json::json!({
+            "test_id": "tc::http::0002", "api_family": "http", "band": "high-value",
+            "risk_band": "high", "status": "fail"
+        }),
+    ];
+    let expected = "sha256:06e98e8bb825890faefa66f04c5e9682ed86738c3eac75725db7f636881257b0";
+    let digest =
+        frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(
+            &vector,
+        );
+    assert_eq!(digest, expected, "digest drifted from the Python gate");
+    // Order-independent: the digest sorts rows before hashing.
+    let reversed: Vec<Value> = vector.iter().rev().cloned().collect();
+    assert_eq!(
+        frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(
+            &reversed
+        ),
+        expected,
+        "digest must be independent of per_test_results insertion order"
+    );
+}
+
+/// bd-ihusm: a corpus whose provenance is authored/synthesized (the real
+/// committed artifact's honest state) must fail the L1 leg closed even when
+/// every other leg is valid — synthesized totals can never satisfy the ship
+/// gate.
+#[test]
+fn doctor_close_condition_fails_l1_on_authored_corpus_provenance_bd_ihusm() {
+    let root = fixture_root();
+    // Start from the valid GREEN baseline, then flip provenance to the honest
+    // "authored" label the real artifact carries.
+    let corpus_path = root
+        .path()
+        .join("artifacts/13/compatibility_corpus_results.json");
+    let mut corpus: Value =
+        serde_json::from_str(&fs::read_to_string(&corpus_path).expect("read baseline corpus"))
+            .expect("parse baseline corpus");
+    corpus["corpus"]["provenance"] = serde_json::json!("authored-fixture-expectations");
+    write_fixture(
+        &corpus_path,
+        &serde_json::to_string_pretty(&corpus).expect("render corpus"),
+    );
+
+    let receipt = run_close_condition_receipt(root.path(), 91);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
+    assert_eq!(
+        receipt["L1_product_oracle"]["corpus_provenance"], "authored-fixture-expectations",
+        "the honest provenance must be surfaced on the oracle output"
+    );
+    assert!(
+        l1_blocking_findings_contain(&receipt, "is not a genuine oracle run"),
+        "L1 must refuse authored provenance: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
+    );
+}
+
+/// bd-ihusm: deterministic per-test results for a valid oracle-run corpus
+/// fixture (the first `passed` records pass, the rest fail). Real fixtures
+/// carry these so the L1 leg can re-derive the pass rate and verify the digest.
+fn online_per_test_results(passed: u64, failed: u64) -> Vec<Value> {
+    (0..passed + failed)
+        .map(|index| {
+            serde_json::json!({
+                "test_id": format!("tc::fs::{index:04}"),
+                "api_family": "fs",
+                "band": "core",
+                "risk_band": "critical",
+                "status": if index < passed { "pass" } else { "fail" },
+            })
+        })
+        .collect()
+}
+
+/// bd-ihusm: corpus metadata attesting a genuine oracle run, with a digest
+/// recomputed from `per_tests` by the same helper the gate uses — so the
+/// fixture represents a valid (not synthesized) artifact.
+fn online_corpus_meta(per_tests: &[Value]) -> Value {
+    serde_json::json!({
+        "corpus_version": "compat-corpus-test",
+        "provenance": frankenengine_node::ops::close_condition::COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
+        "result_digest": frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(per_tests),
+    })
+}
+
 /// Write a green-parity corpus fixture whose `proof_carrying_effects` block
 /// is the supplied v2 evidence object.
 fn write_v2_compatibility_fixture(root: &Path, proof_carrying_effects: Value) {
+    let per_tests = online_per_test_results(98, 2);
     let corpus = serde_json::json!({
-        "corpus": { "corpus_version": "compat-corpus-test" },
+        "corpus": online_corpus_meta(&per_tests),
         "thresholds": { "overall_pass_rate_min_pct": 95.0 },
         "totals": {
             "total_test_cases": 100,
@@ -922,6 +1018,7 @@ fn write_v2_compatibility_fixture(root: &Path, proof_carrying_effects: Value) {
             "skipped_test_cases": 0,
             "overall_pass_rate_pct": 98.0
         },
+        "per_test_results": per_tests,
         "proof_carrying_effects": proof_carrying_effects
     });
     write_fixture(

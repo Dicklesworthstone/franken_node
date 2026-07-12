@@ -64,6 +64,8 @@ struct RawL1ProductOracle {
     verdict: String,
     source_path: String,
     corpus_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    corpus_provenance: Option<String>,
     total_test_cases: u64,
     passed_test_cases: u64,
     failed_test_cases: u64,
@@ -165,6 +167,7 @@ impl From<RawCloseConditionReceipt> for CloseConditionReceipt {
             verdict: l1_verdict,
             source_path: raw.l1_product_oracle.source_path,
             corpus_version: raw.l1_product_oracle.corpus_version,
+            corpus_provenance: raw.l1_product_oracle.corpus_provenance,
             total_test_cases: raw.l1_product_oracle.total_test_cases,
             passed_test_cases: raw.l1_product_oracle.passed_test_cases,
             failed_test_cases: raw.l1_product_oracle.failed_test_cases,

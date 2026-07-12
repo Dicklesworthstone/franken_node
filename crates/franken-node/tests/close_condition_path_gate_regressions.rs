@@ -157,8 +157,25 @@ frankenengine-extension-host = {{ path = "{extension_host_path}" }}
     // bd-qr5i2.4: v1 declared-summary acceptance is retired; keep L1 GREEN
     // with v2 evidence carrying a genuine re-derivable receipt chain so these
     // regressions keep isolating the L2 path-gate behavior.
+    // bd-ihusm: L1 also requires a genuine-oracle-run provenance plus a
+    // digest-bound per-test result set, so the GREEN baseline carries both.
+    let per_test_results: Vec<serde_json::Value> = (0..100)
+        .map(|index| {
+            serde_json::json!({
+                "test_id": format!("tc::fs::{index:04}"),
+                "api_family": "fs",
+                "band": "core",
+                "risk_band": "critical",
+                "status": if index < 98 { "pass" } else { "fail" },
+            })
+        })
+        .collect();
     let corpus = serde_json::json!({
-        "corpus": { "corpus_version": "compat-corpus-test" },
+        "corpus": {
+            "corpus_version": "compat-corpus-test",
+            "provenance": frankenengine_node::ops::close_condition::COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
+            "result_digest": frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(&per_test_results),
+        },
         "proof_carrying_effects": l1_v2_proof_block(),
         "thresholds": { "overall_pass_rate_min_pct": 95.0 },
         "totals": {
@@ -168,7 +185,8 @@ frankenengine-extension-host = {{ path = "{extension_host_path}" }}
             "errored_test_cases": 0,
             "skipped_test_cases": 0,
             "overall_pass_rate_pct": 98.0
-        }
+        },
+        "per_test_results": per_test_results
     });
     write_fixture(
         &root.join("artifacts/13/compatibility_corpus_results.json"),

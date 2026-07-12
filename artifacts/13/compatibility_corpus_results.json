@@ -8,7 +8,8 @@
     "franken_node_version": "0.1.0-dev",
     "lockstep_oracle_version": "oracle-v0.3.2",
     "generated_at_utc": "2026-04-20T21:40:00.000000+00:00",
-    "result_digest": "sha256:bd28szccg560streamdataset"
+    "result_digest": "sha256:7c2cc9a4f27399efc6030cabba74e92ef78a7fc8e9c4466265233763b6ba9f46",
+    "provenance": "authored-fixture-expectations"
   },
   "thresholds": {
     "overall_pass_rate_min_pct": 95.0,
@@ -4127,13 +4128,15 @@
     "workflow_name": "compatibility-corpus-pass-gate",
     "workflow_path": ".github/workflows/compatibility-corpus-pass-gate.yml",
     "threshold_met": true,
-    "release_blocked": false,
-    "regression_detected": false
+    "release_blocked": true,
+    "regression_detected": false,
+    "release_blocked_reason": "corpus.provenance is 'authored-fixture-expectations', not a genuine 'lockstep-oracle-run' (bd-ihusm / INV-CCG-PROVENANCE); the pass rate is not backed by a live oracle run"
   },
   "reproducibility": {
     "deterministic_seed": "ccg-seed-2026-02-20",
     "same_inputs_same_digest": true,
-    "external_repro_command": "python3 scripts/check_compatibility_corpus_pass_gate.py --json"
+    "external_repro_command": "python3 scripts/check_compatibility_corpus_pass_gate.py --json",
+    "result_digest_algorithm": "ccg_corpus_result_digest_v1 (domain+field-separated sha256 over sorted per_test_results)"
   },
   "event_codes": [
     "CCG-001",

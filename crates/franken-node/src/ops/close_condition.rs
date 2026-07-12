@@ -25,6 +25,12 @@ const SECTION_10N_GATE_VERDICT_PATH: &str =
 /// consumes it too, so the two gates can no longer enforce the dual-oracle
 /// close condition over disjoint input sets.
 const L1_PRODUCT_VERDICT_PATH: &str = "artifacts/oracle/l1_product_verdict.json";
+/// bd-ihusm: the only corpus provenance the L1 ship-gate accepts. A corpus
+/// whose `corpus.provenance` is anything else (or absent) is treated as
+/// unmeasured evidence and fails closed — synthesized/authored results can
+/// never be consumed as a genuine compatibility pass rate.
+pub const COMPATIBILITY_CORPUS_ONLINE_PROVENANCE: &str = "lockstep-oracle-run";
+const CCG_RESULT_DIGEST_DOMAIN: &[u8] = b"ccg_corpus_result_digest_v1:";
 const CLOSE_CONDITION_TIMESTAMP_ENV: &str = "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC";
 pub const MAX_CLOSE_CONDITION_CARGO_FILES: usize = 256;
 pub const MAX_CLOSE_CONDITION_SCAN_FILES: usize = 4_096;
@@ -61,6 +67,11 @@ pub struct L1ProductOracle {
     pub verdict: OracleColor,
     pub source_path: String,
     pub corpus_version: Option<String>,
+    /// bd-ihusm: how the corpus results were produced. Surfaced so a consumer
+    /// can see at a glance whether the pass rate came from a genuine oracle
+    /// run or from authored/synthesized fixtures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_provenance: Option<String>,
     pub total_test_cases: u64,
     pub passed_test_cases: u64,
     pub failed_test_cases: u64,
@@ -69,6 +80,38 @@ pub struct L1ProductOracle {
     pub pass_rate_pct: f64,
     pub required_pass_rate_pct: f64,
     pub blocking_findings: Vec<String>,
+}
+
+/// Recompute the canonical content digest over a corpus's per-test results.
+/// Both this gate and `scripts/check_compatibility_corpus_pass_gate.py` derive
+/// the SAME bytes (domain-separated, field-separated, sorted) so a fabricated
+/// or silently-edited `result_digest` fails closed.
+pub fn compute_compatibility_corpus_result_digest(per_test_results: &[Value]) -> String {
+    let mut rows: Vec<[String; 5]> = per_test_results
+        .iter()
+        .map(|row| {
+            [
+                get_str(row, &["test_id"]).unwrap_or_default().to_string(),
+                get_str(row, &["api_family"])
+                    .unwrap_or_default()
+                    .to_string(),
+                get_str(row, &["band"]).unwrap_or_default().to_string(),
+                get_str(row, &["risk_band"]).unwrap_or_default().to_string(),
+                get_str(row, &["status"]).unwrap_or_default().to_string(),
+            ]
+        })
+        .collect();
+    rows.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(CCG_RESULT_DIGEST_DOMAIN);
+    for row in &rows {
+        for field in row {
+            hasher.update(field.as_bytes());
+            hasher.update([0x1f]);
+        }
+        hasher.update([0x1e]);
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -468,6 +511,7 @@ fn evaluate_l1_product_oracle(root: &Path) -> L1ProductOracle {
                 verdict: OracleColor::Red,
                 source_path,
                 corpus_version: None,
+                corpus_provenance: None,
                 total_test_cases: 0,
                 passed_test_cases: 0,
                 failed_test_cases: 0,
@@ -489,6 +533,17 @@ fn evaluate_l1_product_oracle(root: &Path) -> L1ProductOracle {
     let required_pass_rate_pct =
         get_f64(&data, &["thresholds", "overall_pass_rate_min_pct"]).unwrap_or(95.0);
     let corpus_version = get_str(&data, &["corpus", "corpus_version"]).map(ToString::to_string);
+    let corpus_provenance = get_str(&data, &["corpus", "provenance"]).map(ToString::to_string);
+
+    // bd-ihusm: the L1 pass rate is only real if the corpus attests a genuine
+    // lockstep-oracle run AND its results are digest-bound. A corpus with
+    // authored/synthesized (or absent) provenance, or whose `result_digest`
+    // does not recompute from `per_test_results`, is refused — synthesized
+    // totals can no longer be consumed as if real.
+    blocking_findings.extend(validate_l1_corpus_provenance(
+        &data,
+        corpus_provenance.as_deref(),
+    ));
 
     if total_test_cases == 0 {
         blocking_findings.push("compatibility corpus has zero test cases".to_string());
@@ -514,6 +569,7 @@ fn evaluate_l1_product_oracle(root: &Path) -> L1ProductOracle {
         },
         source_path,
         corpus_version,
+        corpus_provenance,
         total_test_cases,
         passed_test_cases,
         failed_test_cases,
@@ -523,6 +579,84 @@ fn evaluate_l1_product_oracle(root: &Path) -> L1ProductOracle {
         required_pass_rate_pct,
         blocking_findings,
     }
+}
+
+/// bd-ihusm: refuse a corpus that does not attest a genuine oracle run or
+/// whose per-test results are not digest-bound. Fail-closed on every gap so a
+/// synthesized artifact can never satisfy the L1 pass-rate leg.
+fn validate_l1_corpus_provenance(data: &Value, provenance: Option<&str>) -> Vec<String> {
+    let mut findings = Vec::new();
+    match provenance {
+        None => {
+            findings.push(
+                "compatibility corpus is missing `corpus.provenance`; L1 requires a genuine \
+                 lockstep-oracle run (expected provenance `lockstep-oracle-run`)"
+                    .to_string(),
+            );
+        }
+        Some(value) if value != COMPATIBILITY_CORPUS_ONLINE_PROVENANCE => {
+            findings.push(format!(
+                "compatibility corpus provenance `{value}` is not a genuine oracle run; L1 \
+                 refuses to consume it as a real pass rate (expected \
+                 `{COMPATIBILITY_CORPUS_ONLINE_PROVENANCE}`)"
+            ));
+        }
+        Some(_) => {}
+    }
+
+    // Bind the declared totals to the per-test results via a recomputed
+    // digest, whatever the provenance claims. A genuine-run artifact must
+    // carry per_test_results whose canonical digest matches `result_digest`.
+    match data.get("per_test_results").and_then(Value::as_array) {
+        None => findings.push(
+            "compatibility corpus has no `per_test_results`; the pass rate cannot be \
+             re-derived or digest-verified"
+                .to_string(),
+        ),
+        Some(per_test_results) => {
+            let recomputed = compute_compatibility_corpus_result_digest(per_test_results);
+            match get_str(data, &["corpus", "result_digest"]) {
+                None => findings.push(
+                    "compatibility corpus is missing `corpus.result_digest`; results are not \
+                     content-bound"
+                        .to_string(),
+                ),
+                // Content-hash comparison uses the crate's constant-time helper
+                // per the hardening watchlist, even though both operands are
+                // public here.
+                Some(declared)
+                    if !crate::security::constant_time::ct_eq(declared, &recomputed) =>
+                {
+                    findings.push(format!(
+                        "compatibility corpus result_digest `{declared}` does not match the \
+                         digest recomputed from per_test_results `{recomputed}`"
+                    ));
+                }
+                Some(_) => {}
+            }
+
+            let recomputed_passed = per_test_results
+                .iter()
+                .filter(|row| get_str(row, &["status"]) == Some("pass"))
+                .count() as u64;
+            let declared_passed = get_u64(data, &["totals", "passed_test_cases"]).unwrap_or(0);
+            let declared_total = get_u64(data, &["totals", "total_test_cases"]).unwrap_or(0);
+            if per_test_results.len() as u64 != declared_total {
+                findings.push(format!(
+                    "compatibility corpus per_test_results count {} does not match declared \
+                     total_test_cases {declared_total}",
+                    per_test_results.len()
+                ));
+            }
+            if recomputed_passed != declared_passed {
+                findings.push(format!(
+                    "compatibility corpus declared passed_test_cases {declared_passed} does not \
+                     match the {recomputed_passed} passes in per_test_results"
+                ));
+            }
+        }
+    }
+    findings
 }
 
 fn validate_l1_proof_carrying_effects(data: &Value) -> Vec<String> {
@@ -2154,6 +2288,7 @@ mod tests {
                     verdict: l1_verdict,
                     source_path: COMPATIBILITY_CORPUS_RESULTS_PATH.to_string(),
                     corpus_version: Some("compat-corpus-test".to_string()),
+                    corpus_provenance: Some(COMPATIBILITY_CORPUS_ONLINE_PROVENANCE.to_string()),
                     total_test_cases: 100,
                     passed_test_cases: 100,
                     failed_test_cases: 0,

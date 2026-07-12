@@ -469,8 +469,25 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
     // bd-qr5i2.4: v1 declared-summary acceptance is retired; the GREEN
     // close-condition golden fixture carries v2 evidence with a genuine
     // re-derivable receipt chain built through the production API.
+    // bd-ihusm: L1 also requires a genuine-oracle-run provenance and a
+    // digest-bound per-test result set for the GREEN golden.
+    let per_test_results: Vec<Value> = (0..100)
+        .map(|index| {
+            json!({
+                "test_id": format!("tc::fs::{index:04}"),
+                "api_family": "fs",
+                "band": "core",
+                "risk_band": "critical",
+                "status": if index < 98 { "pass" } else { "fail" },
+            })
+        })
+        .collect();
     let corpus = json!({
-        "corpus": { "corpus_version": "compat-corpus-golden" },
+        "corpus": {
+            "corpus_version": "compat-corpus-golden",
+            "provenance": frankenengine_node::ops::close_condition::COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
+            "result_digest": frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(&per_test_results),
+        },
         "thresholds": { "overall_pass_rate_min_pct": 95.0 },
         "totals": {
             "total_test_cases": 100,
@@ -480,6 +497,7 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
             "skipped_test_cases": 0,
             "overall_pass_rate_pct": 98.0
         },
+        "per_test_results": per_test_results,
         "proof_carrying_effects": l1_v2_proof_block()
     });
     write_fixture(
