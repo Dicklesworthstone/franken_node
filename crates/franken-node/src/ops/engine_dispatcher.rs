@@ -2466,7 +2466,33 @@ impl EngineDispatcher {
             classify_sensitive_source_path, secret_file_label_set_commitment,
         };
         use crate::storage::cas::content_hash;
-        use frankenengine_extension_host::host_io::{HostIoRequest, HostIoResponse};
+        use frankenengine_extension_host::host_io::{
+            HostIoCapability, HostIoRequest, HostIoResponse,
+        };
+
+        // Canonically frame one filesystem-receipt argument. Each field is
+        // prefixed with its big-endian byte length, so operation/path/argument
+        // boundaries cannot collide (for example, `["ab", "c"]` and
+        // `["a", "bc"]` necessarily commit to different byte strings).
+        fn push_length_prefixed(buffer: &mut Vec<u8>, field: &[u8]) {
+            let length = u64::try_from(field.len()).unwrap_or(u64::MAX);
+            buffer.extend_from_slice(&length.to_be_bytes());
+            buffer.extend_from_slice(field);
+        }
+
+        fn fs_meta_receipt_args(
+            operation: frankenengine_extension_host::host_io::FsOperation,
+            path: &str,
+            arguments: &[String],
+        ) -> Vec<u8> {
+            let mut encoded = Vec::new();
+            push_length_prefixed(&mut encoded, operation.as_str().as_bytes());
+            push_length_prefixed(&mut encoded, path.as_bytes());
+            for argument in arguments {
+                push_length_prefixed(&mut encoded, argument.as_bytes());
+            }
+            encoded
+        }
 
         // True when `needle` occurs as a contiguous subsequence of `haystack`.
         fn slice_contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -2522,6 +2548,28 @@ impl EngineDispatcher {
                 }
                 HostIoRequest::FsWrite { path, data } => {
                     (EffectKind::FsWrite, path.as_bytes().to_vec(), data.clone())
+                }
+                HostIoRequest::FsMeta {
+                    operation,
+                    path,
+                    arguments,
+                    data,
+                } => {
+                    let effect_kind = match operation.required_capability() {
+                        HostIoCapability::FsRead => EffectKind::FsRead,
+                        HostIoCapability::FsWrite => EffectKind::FsWrite,
+                        // FsOperation currently yields only the two filesystem
+                        // classes. Keep this match total and non-panicking so a
+                        // future capability-class expansion still produces an
+                        // auditable receipt instead of crashing the dispatcher.
+                        HostIoCapability::NetworkSend => EffectKind::HttpRequest,
+                        HostIoCapability::NetworkRecv => EffectKind::HttpRequest,
+                    };
+                    (
+                        effect_kind,
+                        fs_meta_receipt_args(*operation, path, arguments),
+                        data.clone(),
+                    )
                 }
                 // bd-656a2: the JS http.get/http.request lowering surfaces guest
                 // egress as a NetworkSend. Map it to EffectKind::HttpRequest (label
@@ -2580,6 +2628,17 @@ impl EngineDispatcher {
                         HostIoResponse::FsWrite { .. } | HostIoResponse::NetworkSend { .. } => {
                             input_bytes.clone()
                         }
+                        // `FsMetaResult` uses only ordered structs/vectors and
+                        // externally-tagged enums. JSON is therefore a stable,
+                        // platform-neutral commitment to the typed result.
+                        HostIoResponse::FsMeta { result } => match serde_json::to_vec(result) {
+                            Ok(encoded) => encoded,
+                            // The current typed result contains no fallible JSON
+                            // values. Preserve a deterministic receipt commitment
+                            // rather than introducing a panic if that invariant is
+                            // ever violated by a future variant.
+                            Err(_) => b"fs-meta-result-serialization-error".to_vec(),
+                        },
                     };
                     // For a read, the bytes read ARE the pre-existing input state;
                     // for other effects the consumed input is the request payload.
@@ -6771,6 +6830,121 @@ mod tests {
         assert_ne!(
             ledger.chain_head_hash,
             "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        );
+
+        crate::runtime::effect_receipt::EffectReceiptChain::verify_entries_integrity(
+            &ledger.entries,
+        )
+        .expect("franken_node-side chain integrity");
+        assert_ledger_sdk_verifiable(&ledger);
+    }
+
+    /// bd-b0hm6: widened filesystem operations keep the existing read/write
+    /// receipt schema while committing to their concrete operation, arguments,
+    /// byte input, typed result, and typed filesystem denial.
+    #[test]
+    #[cfg(feature = "engine")]
+    fn host_effect_ledger_commits_fs_meta_without_schema_expansion_bd_b0hm6() {
+        use crate::runtime::effect_receipt::PolicyOutcome;
+        use crate::storage::cas::content_hash;
+        use frankenengine_extension_host::host_io::{
+            FsMetaResult, FsMetadata, FsOperation, HostIoError, HostIoOutcome, HostIoRequest,
+            HostIoResponse,
+        };
+
+        let metadata_result = FsMetaResult::Metadata(FsMetadata {
+            size: 41,
+            mode: 0o100_640,
+            modified_millis: 1_725_000_000_123,
+            is_file: true,
+            is_directory: false,
+            is_symbolic_link: false,
+        });
+        let append_data = b"secret-shaped local bytes".to_vec();
+        let transcript: Vec<(HostIoRequest, HostIoOutcome)> = vec![
+            (
+                HostIoRequest::FsMeta {
+                    operation: FsOperation::Stat,
+                    path: "report.txt".to_string(),
+                    arguments: Vec::new(),
+                    data: Vec::new(),
+                },
+                Ok(HostIoResponse::FsMeta {
+                    result: metadata_result.clone(),
+                }),
+            ),
+            (
+                HostIoRequest::FsMeta {
+                    operation: FsOperation::Append,
+                    path: "report.txt".to_string(),
+                    arguments: vec!["flag=a".to_string()],
+                    data: append_data.clone(),
+                },
+                Ok(HostIoResponse::FsMeta {
+                    result: FsMetaResult::Unit,
+                }),
+            ),
+            (
+                HostIoRequest::FsMeta {
+                    operation: FsOperation::Access,
+                    path: "missing.txt".to_string(),
+                    arguments: vec!["mode=0".to_string()],
+                    data: Vec::new(),
+                },
+                Err(HostIoError::Fs {
+                    code: "ENOENT".to_string(),
+                    detail: "missing target".to_string(),
+                }),
+            ),
+        ];
+
+        let ledger = EngineDispatcher::build_host_effect_ledger("trace-bd-b0hm6", &transcript);
+        assert_eq!(ledger.effect_count, 3);
+        assert_eq!(ledger.allowed_count, 2);
+        assert_eq!(ledger.denied_count, 1);
+        assert_eq!(ledger.entries[0].receipt.effect_kind.label(), "fs_read");
+        assert_eq!(ledger.entries[1].receipt.effect_kind.label(), "fs_write");
+        assert_eq!(ledger.entries[2].receipt.effect_kind.label(), "fs_read");
+        assert_eq!(
+            ledger.entries[0].receipt.result_hash.as_ref(),
+            Some(&content_hash(
+                &serde_json::to_vec(&metadata_result).expect("serialize metadata result")
+            )),
+            "typed metadata result must be the produced-bytes commitment"
+        );
+        assert_eq!(
+            ledger.entries[1].receipt.pre_state_hash,
+            content_hash(&append_data),
+            "write-class FsMeta data must be the input commitment"
+        );
+        assert!(matches!(
+            &ledger.entries[2].receipt.policy_outcome,
+            PolicyOutcome::Denied { reason }
+                if reason == "host filesystem error ENOENT: missing target"
+        ));
+
+        // Every field is length-prefixed: ambiguous plain concatenations must
+        // never collide in the signed args commitment.
+        let collision_probe = |arguments: Vec<String>| {
+            let probe = vec![(
+                HostIoRequest::FsMeta {
+                    operation: FsOperation::Access,
+                    path: "target".to_string(),
+                    arguments,
+                    data: Vec::new(),
+                },
+                Ok(HostIoResponse::FsMeta {
+                    result: FsMetaResult::Unit,
+                }),
+            )];
+            EngineDispatcher::build_host_effect_ledger("trace-frame-probe", &probe).entries[0]
+                .receipt
+                .args_hash
+                .clone()
+        };
+        assert_ne!(
+            collision_probe(vec!["ab".to_string(), "c".to_string()]),
+            collision_probe(vec!["a".to_string(), "bc".to_string()])
         );
 
         crate::runtime::effect_receipt::EffectReceiptChain::verify_entries_integrity(

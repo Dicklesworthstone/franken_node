@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "fs",
   "description": "Genuine lockstep compatibility fixtures: filesystem read/write/metadata/stream surfaces.",
-  "investigation_bead_id": "bd-b0hm6",
+  "investigation_bead_id": "bd-zco6t",
   "lockstep": {
     "runtimes": [
       "bun",

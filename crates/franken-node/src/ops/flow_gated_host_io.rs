@@ -157,12 +157,16 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
                 }
                 outcome
             }
-            // Inbound receive and local filesystem writes are not external
-            // network sinks: delegate unchanged (the ledger still labels a
-            // secret-carrying fs_write for evidence).
-            HostIoRequest::NetworkRecv { .. } | HostIoRequest::FsWrite { .. } => {
-                self.inner.perform(request, granted)
-            }
+            // Inbound receive and local filesystem mutations are not external
+            // network sinks: delegate unchanged (the ledger still labels
+            // secret-carrying write-class input for evidence). `FsMeta`
+            // arguments are operation metadata, not bytes read from a file;
+            // even read-class metadata results therefore must not become
+            // secret samples. Its `data` field is used only by write-class
+            // operations such as append and remains a local sink here.
+            HostIoRequest::NetworkRecv { .. }
+            | HostIoRequest::FsWrite { .. }
+            | HostIoRequest::FsMeta { .. } => self.inner.perform(request, granted),
         }
     }
 }

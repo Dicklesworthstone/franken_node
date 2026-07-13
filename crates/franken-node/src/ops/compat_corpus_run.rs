@@ -417,8 +417,10 @@ pub fn run_corpus(
     let current_exe = std::env::current_exe().context("resolve current executable")?;
 
     // Bootstrap ONE fail-closed-valid workspace template exactly as an
-    // operator would (`franken-node init`), then clone it per franken leg so
-    // `run` passes config validation in every sandbox.
+    // operator would (`franken-node init`), then clone it into BOTH legs. The
+    // franken leg needs this for config validation, while the bun leg needs the
+    // same visible filesystem scaffold so guest `readdir('.')` observations
+    // compare the runtime semantics rather than two different sandboxes.
     let template = tempfile::TempDir::new().context("create workspace template dir")?;
     let init = Command::new(&current_exe)
         .args(["init", "--profile", "balanced", "--out-dir", "."])
@@ -449,8 +451,11 @@ pub fn run_corpus(
             .parent()
             .with_context(|| format!("corpus case `{}` has no parent directory", case.test_id))?;
 
-        // Reference leg sandbox.
+        // Reference leg sandbox: same workspace scaffold as the franken leg so
+        // filesystem-observing fixtures receive identical ambient inputs.
         let bun_dir = tempfile::TempDir::new().context("create bun leg sandbox")?;
+        copy_dir_recursive(template.path(), bun_dir.path(), 0)
+            .context("clone workspace template into bun leg sandbox")?;
         std::fs::write(bun_dir.path().join(&file_name), &source_bytes)
             .context("stage bun leg case file")?;
         stage_support_files(family_dir, bun_dir.path())?;
