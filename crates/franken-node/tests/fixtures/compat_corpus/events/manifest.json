@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "events",
   "description": "Genuine lockstep compatibility fixtures: EventEmitter registration, ordering, and meta-events.",
-  "investigation_bead_id": "bd-78x8l",
+  "investigation_bead_id": "bd-asw4m",
   "lockstep": {
     "runtimes": [
       "bun",
