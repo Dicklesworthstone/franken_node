@@ -8,11 +8,12 @@
 //! - map_config_to_orchestrator_config()
 //! - OptimizationConfig/ExtensionHostConfig profile mappings
 
-use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
+use frankenengine_engine::{ast::ParseGoal, lowering_pipeline::AmbientAuthorityGrant};
 use frankenengine_node::{
     config::{Config, Profile},
     ops::engine_dispatcher::EngineDispatcher,
 };
+use std::path::Path;
 
 fn config_with_profile(profile: Profile) -> Config {
     Config {
@@ -36,6 +37,31 @@ fn process_shape_ambient_grant_is_legacy_risky_only_bd_y30zw() {
         EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::LegacyRisky),
         AmbientAuthorityGrant::TrustedProcessShape
     );
+}
+
+#[test]
+#[cfg(feature = "engine")]
+fn mjs_entrypoints_select_module_goal_bd_ergy0() {
+    let config = config_with_profile(Profile::LegacyRisky);
+    assert_eq!(
+        EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+            &config,
+            Path::new("fixture.mjs"),
+        )
+        .parse_goal,
+        ParseGoal::Module
+    );
+    for script_path in ["fixture.js", "fixture.cjs", "fixture", "fixture.MJS"] {
+        assert_eq!(
+            EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+                &config,
+                Path::new(script_path),
+            )
+            .parse_goal,
+            ParseGoal::Script,
+            "{script_path} must retain ScriptGoal"
+        );
+    }
 }
 
 /// Conformance test: Strict profile must produce conservative security settings

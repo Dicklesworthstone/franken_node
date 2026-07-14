@@ -11,6 +11,8 @@ use crate::{
 use anyhow::{Context, Result};
 use chrono::Utc;
 #[cfg(feature = "engine")]
+use frankenengine_engine::ast::ParseGoal;
+#[cfg(feature = "engine")]
 use frankenengine_engine::execution_orchestrator::{
     ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
 };
@@ -2117,7 +2119,6 @@ impl EngineDispatcher {
     /// These operate on different phases and dimensions - no conflicts possible.
     #[cfg(feature = "engine")]
     fn map_config_to_orchestrator_config(config: &Config) -> OrchestratorConfig {
-        use frankenengine_engine::ast::ParseGoal;
         use frankenengine_engine::execution_orchestrator::{LossMatrixPreset, OrchestratorConfig};
         use frankenengine_engine::parser::ParserOptions;
         use frankenengine_engine::security_epoch::SecurityEpoch;
@@ -2259,7 +2260,8 @@ impl EngineDispatcher {
         };
 
         // Configure orchestrator with policy settings
-        let mut orchestrator_config = Self::map_config_to_orchestrator_config(config); // bd-wlkks: Map from franken-node config
+        let mut orchestrator_config =
+            Self::map_config_to_orchestrator_config_for_entrypoint(config, app_path); // bd-wlkks/bd-ergy0
         orchestrator_config.policy_id =
             Self::generate_opaque_policy_id(config.profile, Some(policy_mode)); // bd-3rlp8: Opaque policy ID with policy_mode
         // bd-656a2: capture a stable trace label for the SSRF gate's audit records
@@ -2838,6 +2840,39 @@ impl EngineDispatcher {
     #[cfg(feature = "engine")]
     pub fn map_config_to_orchestrator_config_for_tests(config: &Config) -> OrchestratorConfig {
         Self::map_config_to_orchestrator_config(config)
+    }
+
+    #[cfg(feature = "engine")]
+    fn parse_goal_for_entrypoint(app_path: &Path) -> ParseGoal {
+        if matches!(
+            app_path
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("mjs")
+        ) {
+            ParseGoal::Module
+        } else {
+            ParseGoal::Script
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    fn map_config_to_orchestrator_config_for_entrypoint(
+        config: &Config,
+        app_path: &Path,
+    ) -> OrchestratorConfig {
+        let mut orchestrator_config = Self::map_config_to_orchestrator_config(config);
+        orchestrator_config.parse_goal = Self::parse_goal_for_entrypoint(app_path);
+        orchestrator_config
+    }
+
+    /// Test helper: expose the exact entrypoint-aware orchestrator mapping used by `run`.
+    #[cfg(feature = "engine")]
+    pub fn map_config_to_orchestrator_config_for_entrypoint_for_tests(
+        config: &Config,
+        app_path: &Path,
+    ) -> OrchestratorConfig {
+        Self::map_config_to_orchestrator_config_for_entrypoint(config, app_path)
     }
 
     #[cfg(feature = "engine")]
