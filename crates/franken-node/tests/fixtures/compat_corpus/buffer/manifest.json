@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "buffer",
   "description": "Genuine lockstep compatibility fixtures: Buffer construction, encoding, and binary accessors.",
-  "investigation_bead_id": "bd-ys3f4",
+  "investigation_bead_id": "bd-8qvy6",
   "lockstep": {
     "runtimes": [
       "bun",

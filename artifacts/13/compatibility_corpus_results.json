@@ -7,8 +7,8 @@
     "corpus_version": "compat-corpus-v1-af34cb312425",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-14T01:36:36.388610124+00:00",
-    "result_digest": "sha256:27d37b747ba674335bf1ed58a42f12c0e356c78e921816eeb375f4f77b4a50ca",
+    "generated_at_utc": "2026-07-14T04:43:14.465134429+00:00",
+    "result_digest": "sha256:ad0bc0bc73dd5229d2706eff989565513db6d872074cf6a996d38ae828838852",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
     "policy_mode": "legacy-risky",
@@ -26,18 +26,18 @@
   },
   "totals": {
     "total_test_cases": 560,
-    "passed_test_cases": 173,
-    "failed_test_cases": 387,
+    "passed_test_cases": 203,
+    "failed_test_cases": 357,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 30.89
+    "overall_pass_rate_pct": 36.25
   },
   "bands": [
     {
       "band": "core",
       "total": 254,
-      "passed": 102,
-      "pass_rate_pct": 40.16
+      "passed": 120,
+      "pass_rate_pct": 47.24
     },
     {
       "band": "edge",
@@ -48,16 +48,16 @@
     {
       "band": "high-value",
       "total": 250,
-      "passed": 55,
-      "pass_rate_pct": 22.0
+      "passed": 67,
+      "pass_rate_pct": 26.8
     }
   ],
   "api_families": [
     {
       "family": "buffer",
       "total": 30,
-      "passed": 0,
-      "pass_rate_pct": 0.0
+      "passed": 27,
+      "pass_rate_pct": 90.0
     },
     {
       "family": "child_process",
@@ -86,8 +86,8 @@
     {
       "family": "fs",
       "total": 50,
-      "passed": 42,
-      "pass_rate_pct": 84.0
+      "passed": 44,
+      "pass_rate_pct": 88.0
     },
     {
       "family": "http",
@@ -104,8 +104,8 @@
     {
       "family": "os",
       "total": 30,
-      "passed": 27,
-      "pass_rate_pct": 90.0
+      "passed": 28,
+      "pass_rate_pct": 93.33
     },
     {
       "family": "path",
@@ -156,189 +156,189 @@
       "api_family": "buffer",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0002",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0003",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0004",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0005",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0006",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0007",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0008",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0009",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0010",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0011",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0012",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0013",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0014",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0015",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0016",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0017",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0018",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0019",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0020",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0021",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0022",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0023",
       "api_family": "buffer",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0024",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0025",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0026",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0027",
       "api_family": "buffer",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0028",
@@ -1262,7 +1262,7 @@
       "api_family": "fs",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::fs::0005",
@@ -1500,7 +1500,7 @@
       "api_family": "fs",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::fs::0039",
@@ -2424,7 +2424,7 @@
       "api_family": "os",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::path::0001",
@@ -4074,213 +4074,24 @@
   ],
   "failing_tests_tracking": [
     {
-      "test_id": "tc::buffer::0001",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0002",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0003",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0004",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0005",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0006",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0007",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0008",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0009",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0010",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0011",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0012",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0013",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0014",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0015",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0016",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0017",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0018",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0019",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0020",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0021",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0022",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0023",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0024",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0025",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0026",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0027",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::buffer::0028",
       "api_family": "buffer",
       "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-ys3f4",
+      "investigation_bead_id": "bd-8qvy6",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::buffer::0029",
       "api_family": "buffer",
       "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-ys3f4",
+      "investigation_bead_id": "bd-8qvy6",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::buffer::0030",
       "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-ys3f4",
+      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "investigation_bead_id": "bd-8qvy6",
       "investigation_status": "open"
     },
     {
@@ -4991,13 +4802,6 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::fs::0004",
-      "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
-      "investigation_bead_id": "bd-zco6t",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::fs::0021",
       "api_family": "fs",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
@@ -5022,13 +4826,6 @@
       "test_id": "tc::fs::0030",
       "api_family": "fs",
       "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-zco6t",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::fs::0038",
-      "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
@@ -5687,13 +5484,6 @@
       "test_id": "tc::os::0028",
       "api_family": "os",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'process.pid' requires effect 'process.shape_read' but caller's profile '∅' d",
-      "investigation_bead_id": "bd-y30zw",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::os::0030",
-      "api_family": "os",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
       "investigation_bead_id": "bd-y30zw",
       "investigation_status": "open"
     },
@@ -6794,7 +6584,7 @@
     "threshold_met": false,
     "release_blocked": true,
     "regression_detected": false,
-    "release_blocked_reason": "genuine lockstep-oracle-run measured 30.89% overall (required 95.00%); families below the 80% floor: [buffer 0.00%, child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%, net 0.00%, stream 0.00%, tls 0.00%, url 0.00%, zlib 0.00%]"
+    "release_blocked_reason": "genuine lockstep-oracle-run measured 36.25% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%, net 0.00%, stream 0.00%, tls 0.00%, url 0.00%, zlib 0.00%]"
   },
   "reproducibility": {
     "deterministic_seed": "compat-corpus-generator-v1",

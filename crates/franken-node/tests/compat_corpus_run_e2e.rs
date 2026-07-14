@@ -383,8 +383,8 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
             ),
             (
                 "tc::path::0002",
-                "buffer_global.js",
-                "console.log(Buffer.from('abc').toString('hex'));\n",
+                "runtime_fingerprint.js",
+                "console.log(typeof Bun);\n",
                 "core",
                 "high",
             ),
@@ -437,8 +437,8 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
     );
 
     // Genuinely measured statuses: the pure-compute case agrees across
-    // runtimes; the Buffer case is a real engine gap today and must be a
-    // measured fail bound to the family's investigation bead.
+    // runtimes; the deliberate reference-runtime fingerprint differs and
+    // must be a measured fail bound to the family's investigation bead.
     let status_of = |id: &str| {
         rows.iter()
             .find(|row| row["test_id"] == id)
