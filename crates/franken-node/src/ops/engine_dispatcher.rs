@@ -15,6 +15,8 @@ use frankenengine_engine::execution_orchestrator::{
     ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
 };
 #[cfg(feature = "engine")]
+use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
+#[cfg(feature = "engine")]
 use frankenengine_engine::runtime_config::RuntimeConfig as EngineRuntimeConfig;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -2265,8 +2267,13 @@ impl EngineDispatcher {
         let run_egress_trace = orchestrator_config.policy_id.clone();
         let runtime_config = Self::map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
 
+        let ambient_authority_grant = Self::map_profile_to_ambient_authority_grant(config.profile);
         let mut orchestrator =
-            ExecutionOrchestrator::new_with_runtime_config(orchestrator_config, runtime_config);
+            ExecutionOrchestrator::new_with_runtime_config_and_ambient_authority_grant(
+                orchestrator_config,
+                runtime_config,
+                ambient_authority_grant,
+            );
 
         // bd-5r99w.12: install a sandboxed real-I/O host provider + recorder so the
         // run actually PERFORMS the program's authorized host effects (and records
@@ -2831,6 +2838,22 @@ impl EngineDispatcher {
     #[cfg(feature = "engine")]
     pub fn map_config_to_orchestrator_config_for_tests(config: &Config) -> OrchestratorConfig {
         Self::map_config_to_orchestrator_config(config)
+    }
+
+    #[cfg(feature = "engine")]
+    fn map_profile_to_ambient_authority_grant(profile: Profile) -> AmbientAuthorityGrant {
+        match profile {
+            Profile::LegacyRisky => AmbientAuthorityGrant::TrustedProcessShape,
+            Profile::Strict | Profile::Balanced => AmbientAuthorityGrant::DenyAll,
+        }
+    }
+
+    /// Test helper: expose the resolved profile's lowering-time ambient grant.
+    #[cfg(feature = "engine")]
+    pub fn map_profile_to_ambient_authority_grant_for_tests(
+        profile: Profile,
+    ) -> AmbientAuthorityGrant {
+        Self::map_profile_to_ambient_authority_grant(profile)
     }
 
     /// Test helper: get validated capabilities for profile (enforces trust boundary)
@@ -6670,6 +6693,112 @@ mod tests {
             "Logs should contain native engine lifecycle events: {}",
             logs
         );
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn bd_y30zw_legacy_risky_grants_only_static_process_shape_reads() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let app = temp_dir.path().join("process_shape.js");
+        std::fs::write(
+            &app,
+            "console.log(process.platform);\nconsole.log(typeof process.pid);\nconsole.log(process.pid);\n",
+        )
+        .expect("write process-shape fixture");
+        let config = Config::for_profile(Profile::LegacyRisky);
+        let socket_path = temp_dir.path().join("process-shape.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start telemetry bridge");
+
+        let (output, _telemetry, _ledger) =
+            EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
+                .expect("legacy-risky native run accepts static process shape");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("utf8"),
+            "linux\nnumber\n1\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn bd_y30zw_config_profile_not_policy_string_controls_process_shape_grant() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let app = temp_dir.path().join("process_shape_spoof.js");
+        std::fs::write(&app, "console.log(process.platform);\n")
+            .expect("write process-shape fixture");
+        let config = Config::for_profile(Profile::Balanced);
+        let socket_path = temp_dir.path().join("process-shape-spoof.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start telemetry bridge");
+
+        let error = EngineDispatcher::run_engine_native(
+            &app,
+            &config,
+            // A mismatched compatibility-looking string must not widen the
+            // resolved Balanced config's authority.
+            "legacy-risky",
+            handle,
+        )
+        .expect_err("balanced profile must deny ambient process shape");
+        assert!(
+            error.to_string().contains("process.shape_read"),
+            "unexpected denial: {error}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn bd_y30zw_strict_and_balanced_profiles_deny_static_process_shape_reads() {
+        for (profile, policy_mode) in [(Profile::Strict, "strict"), (Profile::Balanced, "balanced")]
+        {
+            let temp_dir = tempfile::tempdir().expect("create temp dir");
+            let app = temp_dir.path().join("process_shape_denied.js");
+            std::fs::write(&app, "console.log(process.pid);\n")
+                .expect("write denied process-shape fixture");
+            let config = Config::for_profile(profile);
+            let socket_path = temp_dir.path().join("process-shape-denied.sock");
+            let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+            let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
+            let handle = bridge.start().expect("start telemetry bridge");
+
+            let error = EngineDispatcher::run_engine_native(&app, &config, policy_mode, handle)
+                .expect_err("non-legacy profiles must deny ambient process shape");
+            assert!(
+                error.to_string().contains("process.shape_read"),
+                "unexpected {policy_mode} denial: {error}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn bd_y30zw_legacy_process_shape_grant_does_not_expose_the_process_object() {
+        for (label, source) in [
+            ("bare", "console.log(process);\n"),
+            ("alias", "const p = process; console.log(p.platform);\n"),
+            ("computed", "console.log(process['platform']);\n"),
+            ("env", "console.log(process.env.PATH);\n"),
+            ("computed-env", "console.log(process['env']['PATH']);\n"),
+            (
+                "grant-laundering",
+                "console.log(process.platform);\nconsole.log(process['env']['PATH']);\n",
+            ),
+        ] {
+            let temp_dir = tempfile::tempdir().expect("create temp dir");
+            let app = temp_dir.path().join(format!("process_shape_{label}.js"));
+            std::fs::write(&app, source).expect("write process-shape attack fixture");
+            let config = Config::for_profile(Profile::LegacyRisky);
+            let socket_path = temp_dir.path().join(format!("process-shape-{label}.sock"));
+            let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+            let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
+            let handle = bridge.start().expect("start telemetry bridge");
+
+            EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
+                .expect_err("legacy process-shape grant must not expose ambient object access");
+        }
     }
 
     /// Round-trip a host-effect ledger through the PUBLIC verifier SDK exactly as

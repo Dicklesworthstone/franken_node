@@ -8,6 +8,7 @@
 //! - map_config_to_orchestrator_config()
 //! - OptimizationConfig/ExtensionHostConfig profile mappings
 
+use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
 use frankenengine_node::{
     config::{Config, Profile},
     ops::engine_dispatcher::EngineDispatcher,
@@ -18,6 +19,23 @@ fn config_with_profile(profile: Profile) -> Config {
         profile,
         ..Config::default()
     }
+}
+
+#[test]
+#[cfg(feature = "engine")]
+fn process_shape_ambient_grant_is_legacy_risky_only_bd_y30zw() {
+    assert_eq!(
+        EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::Strict),
+        AmbientAuthorityGrant::DenyAll
+    );
+    assert_eq!(
+        EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::Balanced),
+        AmbientAuthorityGrant::DenyAll
+    );
+    assert_eq!(
+        EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::LegacyRisky),
+        AmbientAuthorityGrant::TrustedProcessShape
+    );
 }
 
 /// Conformance test: Strict profile must produce conservative security settings
