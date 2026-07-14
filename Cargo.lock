@@ -2085,6 +2085,7 @@ dependencies = [
  "simdutf8",
  "smallvec",
  "tracing",
+ "web-time",
  "xxhash-rust",
 ]
 
@@ -2123,6 +2124,7 @@ dependencies = [
  "pollster",
  "smallvec",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
