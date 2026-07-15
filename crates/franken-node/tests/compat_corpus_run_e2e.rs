@@ -388,8 +388,20 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
                 "core",
                 "high",
             ),
+            (
+                "tc::path::0003",
+                "relative_support_import.mjs",
+                "import { message } from './_support.mjs'; console.log(message);\n",
+                "core",
+                "critical",
+            ),
         ],
     );
+    std::fs::write(
+        corpus_root.join("path/_support.mjs"),
+        "export const message = 'support-ok';\n",
+    )
+    .expect("write staged support module");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
         .args([
@@ -421,7 +433,7 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
         artifact["corpus"]["provenance"],
         COMPATIBILITY_CORPUS_ONLINE_PROVENANCE
     );
-    assert_eq!(artifact["totals"]["total_test_cases"], 2);
+    assert_eq!(artifact["totals"]["total_test_cases"], 3);
     assert_eq!(artifact["totals"]["errored_test_cases"], 0);
 
     // The digest must recompute from the emitted rows (the same check the
@@ -447,6 +459,7 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
     };
     assert_eq!(status_of("tc::path::0001"), "pass");
     assert_eq!(status_of("tc::path::0002"), "fail");
+    assert_eq!(status_of("tc::path::0003"), "pass");
     let tracking = artifact["failing_tests_tracking"]
         .as_array()
         .expect("tracking");

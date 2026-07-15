@@ -1179,6 +1179,20 @@ impl Default for EngineDispatcher {
 }
 
 impl EngineDispatcher {
+    /// Anchor a concrete application entrypoint to the directory from which the
+    /// operator invoked `franken-node`, without resolving symlinks.  Keeping
+    /// this lexical preserves the operator-selected module and host-I/O root;
+    /// the engine separately canonicalizes imported candidates when enforcing
+    /// containment.
+    #[cfg(feature = "engine")]
+    fn lexical_execution_app_path(app_path: &Path, current_dir: &Path) -> PathBuf {
+        if app_path.is_absolute() {
+            app_path.to_path_buf()
+        } else {
+            current_dir.join(app_path)
+        }
+    }
+
     /// Create a dispatcher with optional engine-binary and runtime overrides.
     pub fn new(path: Option<PathBuf>, requested_runtime: PreferredRuntime) -> Self {
         Self {
@@ -2226,27 +2240,46 @@ impl EngineDispatcher {
 
         let setup_start = Instant::now();
 
+        // `run` accepts relative entrypoints and the compatibility runner uses
+        // a basename plus a sandbox cwd.  Preserve that concrete filesystem
+        // identity in the package: forwarding the basename as `source_file`
+        // makes `Path::parent()` an empty path in the engine, so relative
+        // imports fail before resolution can enforce its module-root boundary.
+        // Do not canonicalize here; a symlinked entrypoint must keep the
+        // operator-selected directory as both its module and host-I/O root.
+        let execution_app_path = if app_path.is_absolute() {
+            app_path.to_path_buf()
+        } else {
+            let current_dir =
+                std::env::current_dir().map_err(|error| EngineProcessError::Spawn {
+                    message: format!("Failed to resolve current working directory: {error}"),
+                    telemetry_report: None,
+                })?;
+            Self::lexical_execution_app_path(app_path, &current_dir)
+        };
+
         // Read the application source code
-        let source_code = fs::read_to_string(app_path).map_err(|e| EngineProcessError::Spawn {
-            message: format!(
-                "Failed to read application source at {}: {}",
-                app_path.display(),
-                e
-            ),
-            telemetry_report: None,
-        })?;
+        let source_code =
+            fs::read_to_string(&execution_app_path).map_err(|e| EngineProcessError::Spawn {
+                message: format!(
+                    "Failed to read application source at {}: {}",
+                    execution_app_path.display(),
+                    e
+                ),
+                telemetry_report: None,
+            })?;
 
         // Create extension package from source
         let package = ExtensionPackage {
             extension_id: format!(
                 "franken_node_app_{}",
-                app_path
+                execution_app_path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
             ),
             source: source_code,
-            source_file: Some(app_path.to_string_lossy().to_string()),
+            source_file: Some(execution_app_path.to_string_lossy().to_string()),
             capabilities: {
                 let caps = Self::map_profile_to_capabilities(config.profile);
                 Self::validate_capabilities(&caps).map_err(|e| EngineProcessError::Spawn {
@@ -2261,7 +2294,7 @@ impl EngineDispatcher {
 
         // Configure orchestrator with policy settings
         let mut orchestrator_config =
-            Self::map_config_to_orchestrator_config_for_entrypoint(config, app_path); // bd-wlkks/bd-ergy0
+            Self::map_config_to_orchestrator_config_for_entrypoint(config, &execution_app_path); // bd-wlkks/bd-ergy0
         orchestrator_config.policy_id =
             Self::generate_opaque_policy_id(config.profile, Some(policy_mode)); // bd-3rlp8: Opaque policy ID with policy_mode
         // bd-656a2: capture a stable trace label for the SSRF gate's audit records
@@ -2287,7 +2320,7 @@ impl EngineDispatcher {
         // cannot be established the run proceeds with no provider installed —
         // host effects then fail closed (the ledger is honestly empty), never
         // faked.
-        let sandbox_root = app_path
+        let sandbox_root = execution_app_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
@@ -2924,6 +2957,45 @@ mod tests {
     };
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_su8dy_anchors_relative_entrypoints_without_resolving_paths() {
+        let current_dir = std::env::temp_dir().join("franken-node-bd-su8dy-sandbox");
+        assert!(current_dir.is_absolute());
+
+        assert_eq!(
+            EngineDispatcher::lexical_execution_app_path(Path::new("fixture.mjs"), &current_dir,),
+            current_dir.join("fixture.mjs")
+        );
+        assert_eq!(
+            EngineDispatcher::lexical_execution_app_path(
+                Path::new("nested/fixture.mjs"),
+                &current_dir,
+            ),
+            current_dir.join("nested/fixture.mjs")
+        );
+
+        let absolute_entrypoint = current_dir.join("absolute.mjs");
+        assert_eq!(
+            EngineDispatcher::lexical_execution_app_path(
+                &absolute_entrypoint,
+                Path::new("ignored"),
+            ),
+            absolute_entrypoint
+        );
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn bd_su8dy_root_level_absolute_entrypoint_keeps_root_parent() {
+        let entrypoint = Path::new("/fixture.mjs");
+        let anchored =
+            EngineDispatcher::lexical_execution_app_path(entrypoint, Path::new("/ignored"));
+
+        assert_eq!(anchored, entrypoint);
+        assert_eq!(anchored.parent(), Some(Path::new("/")));
+    }
 
     #[test]
     fn test_dispatch_run_rejects_revoked_extension_toctou() {
