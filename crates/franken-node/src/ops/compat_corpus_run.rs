@@ -611,6 +611,7 @@ fn validate_case_spec(case: &CorpusCaseSpec) -> Result<()> {
 }
 
 #[cfg(unix)]
+#[allow(clippy::useless_conversion)] // rustix descriptor-id widths vary across supported Unix targets.
 fn descriptor_identity(stat: &Stat) -> Result<DescriptorIdentity> {
     Ok(DescriptorIdentity {
         device: u64::try_from(stat.st_dev).context("descriptor device id does not fit u64")?,
@@ -880,6 +881,7 @@ fn open_verified_relative_directory(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)] // Keep each security boundary and byte limit explicit at the call site.
 fn read_verified_relative_file(
     root: &OwnedFd,
     relative_path: &Path,
