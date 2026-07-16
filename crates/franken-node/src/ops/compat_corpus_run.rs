@@ -240,9 +240,13 @@ fn validated_case_relative_path(case_id: &str, raw: &str) -> Result<PathBuf> {
 }
 
 /// Content-addressed corpus version: `compat-corpus-v1-<12 hex>` over the
-/// sorted `(test_id, file bytes)` set, so identical corpus content yields an
-/// identical version string on any machine (INV-CCG-REPRODUCIBILITY).
-pub fn content_addressed_corpus_version(cases: &[ResolvedCase]) -> Result<String> {
+/// sorted case sources and every underscore-prefixed support file staged beside
+/// them, so identical executable corpus content yields an identical version
+/// string on any machine (INV-CCG-REPRODUCIBILITY).
+pub fn content_addressed_corpus_version(
+    corpus_root: &Path,
+    cases: &[ResolvedCase],
+) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(b"ccg_corpus_content_version_v1:");
     let mut ordered: Vec<&ResolvedCase> = cases.iter().collect();
@@ -255,8 +259,100 @@ pub fn content_addressed_corpus_version(cases: &[ResolvedCase]) -> Result<String
         hasher.update(&bytes);
         hasher.update([0x1e]);
     }
+
+    // A support module is executable input even though it has no manifest case
+    // of its own. Hash the exact set that `stage_support_files` copies, once per
+    // family directory, under corpus-root-relative names. Length prefixes make
+    // the framing unambiguous, and sorting removes read_dir traversal order.
+    let mut family_dirs = BTreeMap::<String, PathBuf>::new();
+    for case in cases {
+        let family_dir = case
+            .source_path
+            .parent()
+            .with_context(|| format!("corpus case `{}` has no parent directory", case.test_id))?;
+        let relative_family = corpus_relative_path(corpus_root, family_dir)?;
+        if let Some(existing) =
+            family_dirs.insert(relative_family.clone(), family_dir.to_path_buf())
+            && existing != family_dir
+        {
+            bail!("corpus family path `{relative_family}` resolves to multiple directories");
+        }
+    }
+
+    let mut support_files = Vec::new();
+    for (relative_family, family_dir) in family_dirs {
+        for (name, source_path) in staged_support_files(&family_dir)? {
+            let relative_path = if relative_family.is_empty() {
+                name
+            } else {
+                format!("{relative_family}/{name}")
+            };
+            support_files.push((relative_path, source_path));
+        }
+    }
+    support_files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    // Preserve the historical digest for corpora with no staged helpers while
+    // giving helper-bearing corpora an explicitly domain-separated extension.
+    if !support_files.is_empty() {
+        hasher.update(b"ccg_corpus_staged_support_files_v1:");
+        hasher.update((support_files.len() as u64).to_be_bytes());
+        for (relative_path, source_path) in support_files {
+            let bytes = bounded_read_bytes(&source_path, MAX_CASE_FILE_BYTES)
+                .with_context(|| format!("read corpus support file {}", source_path.display()))?;
+            hasher.update((relative_path.len() as u64).to_be_bytes());
+            hasher.update(relative_path.as_bytes());
+            hasher.update((bytes.len() as u64).to_be_bytes());
+            hasher.update(&bytes);
+        }
+    }
+
     let digest = hex::encode(hasher.finalize());
     Ok(format!("compat-corpus-v1-{}", &digest[..12]))
+}
+
+fn corpus_relative_path(corpus_root: &Path, path: &Path) -> Result<String> {
+    let relative = path.strip_prefix(corpus_root).with_context(|| {
+        format!(
+            "corpus family directory {} is outside corpus root {}",
+            path.display(),
+            corpus_root.display()
+        )
+    })?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            bail!(
+                "corpus-relative support path {} is not canonical",
+                relative.display()
+            );
+        };
+        components.push(component.to_str().with_context(|| {
+            format!(
+                "corpus-relative support path {} is not UTF-8",
+                relative.display()
+            )
+        })?);
+    }
+    Ok(components.join("/"))
+}
+
+fn staged_support_files(family_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut support_files = Vec::new();
+    for entry in std::fs::read_dir(family_dir)
+        .with_context(|| format!("read corpus family dir {}", family_dir.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if name_str.starts_with('_') && entry.file_type()?.is_file() {
+            support_files.push((name_str.to_string(), entry.path()));
+        }
+    }
+    support_files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(support_files)
 }
 
 fn bounded_read_bytes(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
@@ -574,18 +670,9 @@ fn classify_failure(bun: &LegCapture, franken: &LegCapture) -> String {
 /// that import them resolve identically on both runtimes.
 #[cfg(feature = "engine")]
 fn stage_support_files(family_dir: &Path, sandbox: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(family_dir)
-        .with_context(|| format!("read corpus family dir {}", family_dir.display()))?
-    {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        if name_str.starts_with('_') && entry.file_type()?.is_file() {
-            std::fs::copy(entry.path(), sandbox.join(name_str))
-                .with_context(|| format!("stage support file {name_str}"))?;
-        }
+    for (name, source_path) in staged_support_files(family_dir)? {
+        std::fs::copy(source_path, sandbox.join(&name))
+            .with_context(|| format!("stage support file {name}"))?;
     }
     Ok(())
 }

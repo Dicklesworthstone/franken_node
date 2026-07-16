@@ -7793,7 +7793,7 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
     };
 
     let cases = discover_corpus(&args.corpus_root)?;
-    let corpus_version = content_addressed_corpus_version(&cases)?;
+    let corpus_version = content_addressed_corpus_version(&args.corpus_root, &cases)?;
     let (outcomes, bun_version) = run_corpus(
         &cases,
         std::time::Duration::from_secs(args.case_timeout_secs.clamp(1, 600)),

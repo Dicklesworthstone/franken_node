@@ -14,7 +14,7 @@ use frankenengine_node::ops::close_condition::{
     COMPATIBILITY_CORPUS_ONLINE_PROVENANCE, compute_compatibility_corpus_result_digest,
 };
 use frankenengine_node::ops::compat_corpus_run::{
-    CaseOutcome, build_corpus_results_document, discover_corpus,
+    CaseOutcome, build_corpus_results_document, content_addressed_corpus_version, discover_corpus,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -157,6 +157,174 @@ fn discover_corpus_refuses_invalid_band_and_traversal_and_missing_file() {
     .expect("write");
     let err = discover_corpus(root.path()).expect_err("missing fixture must refuse");
     assert!(err.to_string().contains("fixture missing"));
+}
+
+fn corpus_version(root: &Path) -> String {
+    let cases = discover_corpus(root).expect("discover version fixture");
+    content_addressed_corpus_version(root, &cases).expect("hash version fixture")
+}
+
+fn write_version_family(root: &Path, dir_name: &str, id: &str, source: &str) {
+    write_family(
+        root,
+        dir_name,
+        "stream",
+        "bd-b37oe",
+        &[(id, "case.mjs", source, "core", "critical")],
+    );
+}
+
+#[test]
+fn corpus_version_binds_staged_support_content_and_set() {
+    let without_support = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        without_support.path(),
+        "stream",
+        "tc::stream::0001",
+        "console.log('case');\n",
+    );
+
+    let support_a = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        support_a.path(),
+        "stream",
+        "tc::stream::0001",
+        "console.log('case');\n",
+    );
+    std::fs::write(
+        support_a.path().join("stream/_support.mjs"),
+        "export const value = 'a';\n",
+    )
+    .expect("write support a");
+
+    let support_b = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        support_b.path(),
+        "stream",
+        "tc::stream::0001",
+        "console.log('case');\n",
+    );
+    std::fs::write(
+        support_b.path().join("stream/_support.mjs"),
+        "export const value = 'b';\n",
+    )
+    .expect("write support b");
+
+    let two_support_files = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        two_support_files.path(),
+        "stream",
+        "tc::stream::0001",
+        "console.log('case');\n",
+    );
+    std::fs::write(
+        two_support_files.path().join("stream/_support.mjs"),
+        "export const value = 'a';\n",
+    )
+    .expect("write first support");
+    std::fs::write(
+        two_support_files.path().join("stream/_second.mjs"),
+        "export const second = true;\n",
+    )
+    .expect("write second support");
+
+    let versions = [
+        corpus_version(without_support.path()),
+        corpus_version(support_a.path()),
+        corpus_version(support_b.path()),
+        corpus_version(two_support_files.path()),
+    ];
+    assert_eq!(
+        versions[0], "compat-corpus-v1-0534d91c1dee",
+        "a corpus without staged helpers retains the historical v1 digest"
+    );
+    let unique: std::collections::BTreeSet<_> = versions.iter().collect();
+    assert_eq!(
+        unique.len(),
+        versions.len(),
+        "helper presence, content, and set must all affect the version: {versions:?}"
+    );
+}
+
+#[test]
+fn corpus_version_support_paths_are_relative_and_order_independent() {
+    let first = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        first.path(),
+        "beta",
+        "tc::stream::0002",
+        "console.log('beta');\n",
+    );
+    std::fs::write(first.path().join("beta/_z.mjs"), "export default 2;\n")
+        .expect("write beta support");
+    write_version_family(
+        first.path(),
+        "alpha",
+        "tc::stream::0001",
+        "console.log('alpha');\n",
+    );
+    std::fs::write(first.path().join("alpha/_z.mjs"), "export default 3;\n")
+        .expect("write alpha z support");
+    std::fs::write(first.path().join("alpha/_a.mjs"), "export default 1;\n")
+        .expect("write alpha a support");
+
+    let second = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        second.path(),
+        "alpha",
+        "tc::stream::0001",
+        "console.log('alpha');\n",
+    );
+    std::fs::write(second.path().join("alpha/_a.mjs"), "export default 1;\n")
+        .expect("write alpha a support");
+    std::fs::write(second.path().join("alpha/_z.mjs"), "export default 3;\n")
+        .expect("write alpha z support");
+    write_version_family(
+        second.path(),
+        "beta",
+        "tc::stream::0002",
+        "console.log('beta');\n",
+    );
+    std::fs::write(second.path().join("beta/_z.mjs"), "export default 2;\n")
+        .expect("write beta support");
+
+    assert_eq!(
+        corpus_version(first.path()),
+        corpus_version(second.path()),
+        "filesystem creation/traversal order must not affect the version"
+    );
+
+    let renamed = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        renamed.path(),
+        "alpha",
+        "tc::stream::0001",
+        "console.log('alpha');\n",
+    );
+    std::fs::write(
+        renamed.path().join("alpha/_renamed.mjs"),
+        "export default 1;\n",
+    )
+    .expect("write renamed support");
+
+    let alpha_only = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        alpha_only.path(),
+        "alpha",
+        "tc::stream::0001",
+        "console.log('alpha');\n",
+    );
+    std::fs::write(
+        alpha_only.path().join("alpha/_a.mjs"),
+        "export default 1;\n",
+    )
+    .expect("write alpha-only support");
+
+    assert_ne!(
+        corpus_version(alpha_only.path()),
+        corpus_version(renamed.path()),
+        "the staged helper's corpus-relative path must affect the version"
+    );
 }
 
 fn outcome(
