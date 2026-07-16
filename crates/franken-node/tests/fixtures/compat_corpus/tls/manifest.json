@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "tls",
   "description": "Genuine lockstep compatibility fixtures: TLS handshake, certificate, and encrypted-channel semantics over loopback.",
-  "investigation_bead_id": "bd-6yzk6",
+  "investigation_bead_id": "bd-387cw",
   "lockstep": {
     "runtimes": [
       "bun",
