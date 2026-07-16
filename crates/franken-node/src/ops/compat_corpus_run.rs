@@ -34,6 +34,13 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use rustix::fd::OwnedFd;
+#[cfg(unix)]
+use rustix::fs::{
+    AtFlags, Dir, FileType as DescriptorFileType, Mode, OFlags, Stat, fstat, open, openat, statat,
+};
+
 use crate::ops::close_condition::{
     COMPATIBILITY_CORPUS_ONLINE_PROVENANCE, compute_compatibility_corpus_result_digest,
 };
@@ -52,7 +59,7 @@ pub const MAX_SUPPORT_FILES_PER_FAMILY: usize = 64;
 pub const MAX_SUPPORT_FILES_TOTAL: usize = 128;
 /// Upper bound on the combined support-file bytes captured in one snapshot.
 pub const MAX_SUPPORT_TOTAL_BYTES: usize = 4_194_304;
-/// Upper bound on all executable case and support bytes held by one snapshot.
+/// Upper bound on all manifest, case, and support bytes held by one snapshot.
 pub const MAX_CORPUS_SNAPSHOT_BYTES: usize = 134_217_728;
 /// Upper bound on captured bytes per runtime leg (stdout + stderr).
 pub const MAX_LEG_OUTPUT_BYTES: usize = 1_048_576;
@@ -106,8 +113,15 @@ pub struct ResolvedCase {
 /// legs. All filesystem reads happen while constructing this value.
 #[derive(Debug)]
 pub struct CorpusSnapshot {
+    manifests: Vec<SnapshotManifest>,
     cases: Vec<SnapshotCase>,
     families: BTreeMap<String, SnapshotFamily>,
+}
+
+#[derive(Debug)]
+struct SnapshotManifest {
+    corpus_relative_path: String,
+    bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -146,136 +160,876 @@ pub struct CaseOutcome {
     pub investigation_bead_id: Option<String>,
 }
 
-/// Discover and validate every family manifest under the corpus root.
+impl CorpusSnapshot {
+    /// Parsed case metadata captured from the same descriptor-rooted input
+    /// snapshot as the executable bytes.
+    pub fn resolved_cases(&self) -> impl ExactSizeIterator<Item = &ResolvedCase> {
+        self.cases.iter().map(|case| &case.case)
+    }
+}
+
+/// Open, parse, and capture the complete corpus through one pinned root
+/// directory descriptor. No ambient pathname is reopened after the root is
+/// established, and every descendant component is opened with no-follow
+/// semantics before its descriptor identity is verified.
 ///
-/// Directories are visited in sorted order; case ids and case files must be
-/// unique across the whole corpus. Every case path must stay inside its
-/// family directory (no absolute paths, no `..`).
-pub fn discover_corpus(corpus_root: &Path) -> Result<Vec<ResolvedCase>> {
-    let root_metadata = std::fs::symlink_metadata(corpus_root)
-        .with_context(|| format!("inspect corpus root {}", corpus_root.display()))?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        bail!("corpus root {} is not a directory", corpus_root.display());
+/// This is a bounded sequential capture, not an atomic multi-file filesystem
+/// snapshot. Each opened file is checked for ordinary in-place mutation using
+/// its pre/post-read descriptor fingerprint.
+#[cfg(unix)]
+pub fn capture_corpus(corpus_root: &Path) -> Result<CorpusSnapshot> {
+    capture_corpus_with_probe(corpus_root, &mut NoopCaptureProbe)
+}
+
+/// Unsupported targets refuse before touching the corpus. A reviewed native
+/// handle/reparse-point implementation is required before enabling this path.
+#[cfg(not(unix))]
+pub fn capture_corpus(_corpus_root: &Path) -> Result<CorpusSnapshot> {
+    bail!(
+        "descriptor-relative no-follow corpus capture is unavailable on this target; refusing to run"
+    )
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureKind {
+    Root,
+    FamilyDirectory,
+    Manifest,
+    CaseParent,
+    Case,
+    SupportDirectory,
+    Support,
+}
+
+#[cfg(unix)]
+trait CaptureProbe {
+    fn after_stat_before_open(&mut self, _kind: CaptureKind, _relative_path: &Path) -> Result<()> {
+        Ok(())
     }
 
-    let mut family_dirs = Vec::new();
-    for entry in std::fs::read_dir(corpus_root)
-        .with_context(|| format!("read corpus root {}", corpus_root.display()))?
-    {
-        let entry = entry
-            .with_context(|| format!("read corpus root entry under {}", corpus_root.display()))?;
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("inspect corpus root entry {}", entry.path().display()))?;
-        if file_type.is_symlink() {
+    fn after_open_before_read(&mut self, _kind: CaptureKind, _relative_path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn after_first_read(&mut self, _kind: CaptureKind, _relative_path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn after_root_open(&mut self, _corpus_root: &Path) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+struct NoopCaptureProbe;
+
+#[cfg(unix)]
+impl CaptureProbe for NoopCaptureProbe {}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DescriptorIdentity {
+    device: u64,
+    inode: u64,
+    file_type: DescriptorFileType,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DescriptorFingerprint {
+    identity: DescriptorIdentity,
+    size: u64,
+    modified_seconds: i128,
+    modified_nanoseconds: i128,
+    changed_seconds: i128,
+    changed_nanoseconds: i128,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ObservedDirectoryEntry {
+    name: String,
+    inode: u64,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct OpenCorpusFamily {
+    key: String,
+    descriptor: OwnedFd,
+}
+
+#[cfg(unix)]
+fn capture_corpus_with_probe(
+    corpus_root: &Path,
+    probe: &mut impl CaptureProbe,
+) -> Result<CorpusSnapshot> {
+    let (root_descriptor, root_identity) = open_corpus_root(corpus_root, probe)?;
+    probe.after_root_open(corpus_root)?;
+    let mut directory_identities = BTreeMap::from([(PathBuf::new(), root_identity)]);
+
+    let mut open_families = Vec::new();
+    for entry in read_descriptor_directory(&root_descriptor, "corpus root")? {
+        let relative = PathBuf::from(&entry.name);
+        let expected = stat_descriptor_entry(&root_descriptor, &entry.name, &relative)?;
+        let expected_fingerprint = descriptor_fingerprint(&expected)?;
+        if entry.inode != 0 && entry.inode != expected_fingerprint.identity.inode {
             bail!(
-                "corpus root contains a symlink entry: {}",
-                entry.path().display()
+                "corpus root entry `{}` changed during corpus capture",
+                entry.name
             );
         }
-        if file_type.is_dir() {
-            family_dirs.push(entry.path());
+        match expected_fingerprint.identity.file_type {
+            DescriptorFileType::Directory => {
+                let descriptor = open_verified_directory(
+                    &root_descriptor,
+                    &entry.name,
+                    &relative,
+                    CaptureKind::FamilyDirectory,
+                    Some(&expected),
+                    probe,
+                    &mut directory_identities,
+                )?;
+                open_families.push(OpenCorpusFamily {
+                    key: entry.name,
+                    descriptor,
+                });
+            }
+            DescriptorFileType::RegularFile => {}
+            DescriptorFileType::Symlink => {
+                bail!(
+                    "corpus root contains a symlink entry: {}",
+                    corpus_root.join(entry.name).display()
+                );
+            }
+            _ => {
+                bail!(
+                    "corpus root contains a nonregular entry: {}",
+                    corpus_root.join(entry.name).display()
+                );
+            }
         }
     }
-    family_dirs.sort();
 
-    let mut cases = Vec::new();
+    let mut snapshot_bytes = 0usize;
+    let mut manifests = Vec::with_capacity(open_families.len());
+    let mut snapshot_cases = Vec::new();
     let mut seen_ids = BTreeSet::new();
-    for dir in family_dirs {
-        let manifest_path = dir.join("manifest.json");
-        let manifest_metadata = std::fs::symlink_metadata(&manifest_path);
-        if !manifest_metadata
-            .as_ref()
-            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-        {
-            bail!(
-                "corpus family directory {} has no regular non-symlink manifest.json",
-                dir.display()
-            );
-        }
-        let raw = crate::bounded_read_to_string(&manifest_path, MAX_FAMILY_MANIFEST_BYTES)
-            .with_context(|| format!("read corpus manifest {}", manifest_path.display()))?;
-        let manifest: CorpusFamilyManifest = serde_json::from_str(&raw)
-            .with_context(|| format!("parse corpus manifest {}", manifest_path.display()))?;
-        if manifest.schema_version != CORPUS_FIXTURE_SCHEMA_VERSION {
-            bail!(
-                "corpus manifest {} has schema_version `{}`; only `{}` is supported",
-                manifest_path.display(),
-                manifest.schema_version,
-                CORPUS_FIXTURE_SCHEMA_VERSION
-            );
-        }
-        if manifest.api_family.trim().is_empty() {
-            bail!(
-                "corpus manifest {} has an empty api_family",
-                manifest_path.display()
-            );
-        }
-        if manifest.cases.is_empty() {
-            bail!("corpus manifest {} has no cases", manifest_path.display());
-        }
-        // Multiple directories MAY contribute to one family (the pinned
-        // `stream/` fixture set plus its extension directory), so families
-        // repeat across manifests; only ids/files must be globally unique.
+    let mut seen_paths = BTreeSet::new();
+    let mut staged_paths = BTreeMap::<String, BTreeSet<PathBuf>>::new();
+    let mut support_dirs = BTreeMap::<String, BTreeSet<PathBuf>>::new();
+
+    for family in &open_families {
+        let manifest_relative = Path::new(&family.key).join("manifest.json");
+        let manifest_bytes = read_verified_regular_file(
+            &family.descriptor,
+            "manifest.json",
+            &manifest_relative,
+            CaptureKind::Manifest,
+            MAX_FAMILY_MANIFEST_BYTES
+                .try_into()
+                .context("manifest byte bound does not fit usize")?,
+            None,
+            probe,
+        )
+        .with_context(|| {
+            format!(
+                "corpus family directory {} has no readable regular non-symlink manifest.json",
+                corpus_root.join(&family.key).display()
+            )
+        })?;
+        add_bounded_bytes(
+            &mut snapshot_bytes,
+            manifest_bytes.len(),
+            MAX_CORPUS_SNAPSHOT_BYTES,
+            "corpus executable-input snapshot",
+        )?;
+        let manifest: CorpusFamilyManifest =
+            serde_json::from_slice(&manifest_bytes).with_context(|| {
+                format!(
+                    "parse corpus manifest {}",
+                    corpus_root.join(&manifest_relative).display()
+                )
+            })?;
+        validate_family_manifest(&manifest, corpus_root, &manifest_relative)?;
+        manifests.push(SnapshotManifest {
+            corpus_relative_path: normalized_relative_path(&manifest_relative, "corpus manifest")?,
+            bytes: manifest_bytes,
+        });
+
         for case in &manifest.cases {
             if !seen_ids.insert(case.id.clone()) {
                 bail!("duplicate corpus case id `{}`", case.id);
             }
-            if !VALID_BANDS.contains(&case.band.as_str()) {
+            validate_case_spec(case)?;
+            let staged_relative_path = validated_case_relative_path(&case.id, &case.file)?;
+            let corpus_relative_path = Path::new(&family.key).join(&staged_relative_path);
+            if !seen_paths.insert(corpus_relative_path.clone()) {
                 bail!(
-                    "corpus case `{}` has invalid band `{}` (expected one of {:?})",
-                    case.id,
-                    case.band,
-                    VALID_BANDS
+                    "corpus case file appears twice across manifests: {}",
+                    corpus_root.join(&corpus_relative_path).display()
                 );
             }
-            if !VALID_RISK_BANDS.contains(&case.risk_band.as_str()) {
-                bail!(
-                    "corpus case `{}` has invalid risk_band `{}` (expected one of {:?})",
-                    case.id,
-                    case.risk_band,
-                    VALID_RISK_BANDS
-                );
-            }
-            let relative = validated_case_relative_path(&case.id, &case.file)?;
-            let source_path = dir.join(&relative);
-            if !source_path.is_file() {
-                bail!(
-                    "corpus case `{}` fixture missing: {}",
-                    case.id,
-                    source_path.display()
-                );
-            }
-            if cases.len() >= MAX_CORPUS_TOTAL_CASES {
+            if snapshot_cases.len() >= MAX_CORPUS_TOTAL_CASES {
                 bail!("corpus exceeds the {MAX_CORPUS_TOTAL_CASES}-case bound; refusing to run");
             }
-            cases.push(ResolvedCase {
-                test_id: case.id.clone(),
-                api_family: manifest.api_family.clone(),
-                band: case.band.clone(),
-                risk_band: case.risk_band.clone(),
-                source_path,
-                investigation_bead_id: manifest.investigation_bead_id.clone(),
+            let source_bytes = read_verified_relative_file(
+                &family.descriptor,
+                &staged_relative_path,
+                &corpus_relative_path,
+                CaptureKind::CaseParent,
+                CaptureKind::Case,
+                MAX_CASE_FILE_BYTES,
+                probe,
+                &mut directory_identities,
+            )
+            .with_context(|| {
+                format!(
+                    "corpus case `{}` fixture missing or unsafe: {}",
+                    case.id,
+                    corpus_root.join(&corpus_relative_path).display()
+                )
+            })?;
+            add_bounded_bytes(
+                &mut snapshot_bytes,
+                source_bytes.len(),
+                MAX_CORPUS_SNAPSHOT_BYTES,
+                "corpus executable-input snapshot",
+            )?;
+
+            if !staged_paths
+                .entry(family.key.clone())
+                .or_default()
+                .insert(staged_relative_path.clone())
+            {
+                bail!(
+                    "multiple corpus cases stage to `{}` in family `{}`",
+                    staged_relative_path.display(),
+                    family.key
+                );
+            }
+            let family_support_dirs = support_dirs.entry(family.key.clone()).or_default();
+            family_support_dirs.insert(PathBuf::new());
+            let mut support_parent = staged_relative_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty());
+            while let Some(relative_parent) = support_parent {
+                let next_parent = relative_parent
+                    .parent()
+                    .filter(|ancestor| !ancestor.as_os_str().is_empty());
+                family_support_dirs.insert(relative_parent.to_path_buf());
+                support_parent = next_parent;
+            }
+
+            snapshot_cases.push(SnapshotCase {
+                case: ResolvedCase {
+                    test_id: case.id.clone(),
+                    api_family: manifest.api_family.clone(),
+                    band: case.band.clone(),
+                    risk_band: case.risk_band.clone(),
+                    source_path: corpus_root.join(&corpus_relative_path),
+                    investigation_bead_id: manifest.investigation_bead_id.clone(),
+                },
+                family_key: family.key.clone(),
+                corpus_relative_path: normalized_relative_path(
+                    &corpus_relative_path,
+                    "corpus case",
+                )?,
+                staged_relative_path,
+                source_bytes,
             });
         }
     }
 
-    if cases.is_empty() {
+    if snapshot_cases.is_empty() {
         bail!(
             "corpus root {} contains no family manifests",
             corpus_root.display()
         );
     }
-    let mut seen_paths = BTreeSet::new();
-    for case in &cases {
-        if !seen_paths.insert(case.source_path.clone()) {
-            bail!(
-                "corpus case file appears twice across manifests: {}",
-                case.source_path.display()
-            );
+
+    let mut support_total_bytes = 0usize;
+    let mut support_file_count = 0usize;
+    let mut families = BTreeMap::new();
+    for family in &open_families {
+        let family_support_dirs = support_dirs
+            .remove(&family.key)
+            .context("snapshot family support-directory set is missing")?;
+        let family_staged_paths = staged_paths
+            .get_mut(&family.key)
+            .context("snapshot family staging set is missing")?;
+        let mut support_files = Vec::new();
+        for relative_dir in family_support_dirs {
+            let corpus_relative_dir = Path::new(&family.key).join(&relative_dir);
+            let support_descriptor = open_verified_relative_directory(
+                &family.descriptor,
+                &relative_dir,
+                &corpus_relative_dir,
+                CaptureKind::SupportDirectory,
+                probe,
+                &mut directory_identities,
+            )?;
+            for entry in read_descriptor_directory(
+                &support_descriptor,
+                &format!("corpus support directory {}", corpus_relative_dir.display()),
+            )? {
+                if !entry.name.starts_with('_') {
+                    continue;
+                }
+                let staged_relative_path = relative_dir.join(&entry.name);
+                let corpus_relative = Path::new(&family.key).join(&staged_relative_path);
+                let expected =
+                    stat_descriptor_entry(&support_descriptor, &entry.name, &corpus_relative)?;
+                let fingerprint = descriptor_fingerprint(&expected)?;
+                if entry.inode != 0 && entry.inode != fingerprint.identity.inode {
+                    bail!(
+                        "corpus support input `{}` changed during corpus capture",
+                        corpus_relative.display()
+                    );
+                }
+                match fingerprint.identity.file_type {
+                    DescriptorFileType::Directory => continue,
+                    DescriptorFileType::RegularFile => {}
+                    _ => {
+                        bail!(
+                            "corpus support input is not a regular non-symlink file: {}",
+                            corpus_root.join(&corpus_relative).display()
+                        );
+                    }
+                }
+                if support_files.len() >= MAX_SUPPORT_FILES_PER_FAMILY {
+                    bail!(
+                        "corpus family `{}` exceeds its support-file bound; maximum is {MAX_SUPPORT_FILES_PER_FAMILY}",
+                        family.key,
+                    );
+                }
+                if support_file_count >= MAX_SUPPORT_FILES_TOTAL {
+                    bail!("corpus has more than {MAX_SUPPORT_FILES_TOTAL} support files");
+                }
+                if !family_staged_paths.insert(staged_relative_path.clone()) {
+                    bail!(
+                        "corpus case/support staging collision at `{}` in family `{}`",
+                        staged_relative_path.display(),
+                        family.key
+                    );
+                }
+                let bytes = read_verified_regular_file(
+                    &support_descriptor,
+                    &entry.name,
+                    &corpus_relative,
+                    CaptureKind::Support,
+                    MAX_CASE_FILE_BYTES,
+                    Some(&expected),
+                    probe,
+                )?;
+                support_file_count = support_file_count
+                    .checked_add(1)
+                    .context("corpus support-file count overflow")?;
+                add_bounded_bytes(
+                    &mut support_total_bytes,
+                    bytes.len(),
+                    MAX_SUPPORT_TOTAL_BYTES,
+                    "corpus support-file snapshot",
+                )?;
+                add_bounded_bytes(
+                    &mut snapshot_bytes,
+                    bytes.len(),
+                    MAX_CORPUS_SNAPSHOT_BYTES,
+                    "corpus executable-input snapshot",
+                )?;
+                support_files.push(SnapshotSupportFile {
+                    corpus_relative_path: normalized_relative_path(
+                        &corpus_relative,
+                        "corpus support file",
+                    )?,
+                    staged_relative_path,
+                    bytes,
+                });
+            }
+        }
+        support_files
+            .sort_by(|left, right| left.corpus_relative_path.cmp(&right.corpus_relative_path));
+        families.insert(family.key.clone(), SnapshotFamily { support_files });
+    }
+
+    manifests.sort_by(|left, right| left.corpus_relative_path.cmp(&right.corpus_relative_path));
+    Ok(CorpusSnapshot {
+        manifests,
+        cases: snapshot_cases,
+        families,
+    })
+}
+
+fn validate_family_manifest(
+    manifest: &CorpusFamilyManifest,
+    corpus_root: &Path,
+    manifest_relative: &Path,
+) -> Result<()> {
+    let manifest_display = corpus_root.join(manifest_relative);
+    if manifest.schema_version != CORPUS_FIXTURE_SCHEMA_VERSION {
+        bail!(
+            "corpus manifest {} has schema_version `{}`; only `{}` is supported",
+            manifest_display.display(),
+            manifest.schema_version,
+            CORPUS_FIXTURE_SCHEMA_VERSION
+        );
+    }
+    if manifest.api_family.trim().is_empty() {
+        bail!(
+            "corpus manifest {} has an empty api_family",
+            manifest_display.display()
+        );
+    }
+    if manifest.cases.is_empty() {
+        bail!(
+            "corpus manifest {} has no cases",
+            manifest_display.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_case_spec(case: &CorpusCaseSpec) -> Result<()> {
+    if !VALID_BANDS.contains(&case.band.as_str()) {
+        bail!(
+            "corpus case `{}` has invalid band `{}` (expected one of {:?})",
+            case.id,
+            case.band,
+            VALID_BANDS
+        );
+    }
+    if !VALID_RISK_BANDS.contains(&case.risk_band.as_str()) {
+        bail!(
+            "corpus case `{}` has invalid risk_band `{}` (expected one of {:?})",
+            case.id,
+            case.risk_band,
+            VALID_RISK_BANDS
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn descriptor_identity(stat: &Stat) -> Result<DescriptorIdentity> {
+    Ok(DescriptorIdentity {
+        device: u64::try_from(stat.st_dev).context("descriptor device id does not fit u64")?,
+        inode: u64::try_from(stat.st_ino).context("descriptor inode does not fit u64")?,
+        file_type: DescriptorFileType::from_raw_mode(stat.st_mode),
+    })
+}
+
+#[cfg(unix)]
+fn descriptor_fingerprint(stat: &Stat) -> Result<DescriptorFingerprint> {
+    Ok(DescriptorFingerprint {
+        identity: descriptor_identity(stat)?,
+        size: u64::try_from(stat.st_size).context("descriptor size is negative or too large")?,
+        modified_seconds: i128::from(stat.st_mtime),
+        modified_nanoseconds: i128::from(stat.st_mtime_nsec),
+        changed_seconds: i128::from(stat.st_ctime),
+        changed_nanoseconds: i128::from(stat.st_ctime_nsec),
+    })
+}
+
+#[cfg(unix)]
+fn ensure_expected_identity(expected: &Stat, opened: &Stat, relative_path: &Path) -> Result<()> {
+    if descriptor_identity(expected)? != descriptor_identity(opened)? {
+        bail!(
+            "corpus input `{}` changed during corpus capture",
+            relative_path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stat_descriptor_entry(parent: &OwnedFd, name: &str, relative_path: &Path) -> Result<Stat> {
+    statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).with_context(|| {
+        format!(
+            "inspect descriptor-relative corpus input `{}`",
+            relative_path.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn directory_open_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+}
+
+#[cfg(unix)]
+fn regular_open_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC
+}
+
+#[cfg(unix)]
+fn open_corpus_root(
+    corpus_root: &Path,
+    probe: &mut impl CaptureProbe,
+) -> Result<(OwnedFd, DescriptorIdentity)> {
+    if corpus_root.as_os_str().is_empty() {
+        bail!("corpus root path is empty");
+    }
+    let (mut current, mut opened_path) = if corpus_root.is_absolute() {
+        (
+            open("/", directory_open_flags(), Mode::empty())
+                .context("open absolute filesystem root descriptor")?,
+            PathBuf::from("/"),
+        )
+    } else {
+        (
+            open(".", directory_open_flags(), Mode::empty())
+                .context("open current-directory descriptor")?,
+            PathBuf::new(),
+        )
+    };
+
+    let mut saw_component = false;
+    for component in corpus_root.components() {
+        match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(name) => {
+                saw_component = true;
+                opened_path.push(name);
+                let name = name.to_str().with_context(|| {
+                    format!(
+                        "corpus root component is not UTF-8: {}",
+                        opened_path.display()
+                    )
+                })?;
+                let expected =
+                    statat(&current, name, AtFlags::SYMLINK_NOFOLLOW).with_context(|| {
+                        format!("inspect corpus root component {}", opened_path.display())
+                    })?;
+                if descriptor_identity(&expected)?.file_type != DescriptorFileType::Directory {
+                    bail!(
+                        "corpus root component is not a regular non-symlink directory: {}",
+                        opened_path.display()
+                    );
+                }
+                probe.after_stat_before_open(CaptureKind::Root, &opened_path)?;
+                let next = openat(&current, name, directory_open_flags(), Mode::empty())
+                    .with_context(|| {
+                        format!(
+                            "open no-follow corpus root component {}",
+                            opened_path.display()
+                        )
+                    })?;
+                probe.after_open_before_read(CaptureKind::Root, &opened_path)?;
+                let opened = fstat(&next).with_context(|| {
+                    format!(
+                        "inspect opened corpus root component {}",
+                        opened_path.display()
+                    )
+                })?;
+                ensure_expected_identity(&expected, &opened, &opened_path)?;
+                current = next;
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                bail!(
+                    "corpus root {} must not contain parent or prefix components",
+                    corpus_root.display()
+                );
+            }
         }
     }
-    Ok(cases)
+    if !saw_component && corpus_root != Path::new(".") && corpus_root != Path::new("/") {
+        bail!(
+            "corpus root {} has no usable components",
+            corpus_root.display()
+        );
+    }
+    let identity =
+        descriptor_identity(&fstat(&current).context("inspect corpus root descriptor")?)?;
+    Ok((current, identity))
+}
+
+#[cfg(unix)]
+fn read_descriptor_directory(
+    descriptor: &OwnedFd,
+    label: &str,
+) -> Result<Vec<ObservedDirectoryEntry>> {
+    let mut entries = Vec::new();
+    let directory = Dir::read_from(descriptor)
+        .with_context(|| format!("open descriptor-backed directory iterator for {label}"))?;
+    for entry in directory {
+        let entry = entry.with_context(|| format!("read descriptor-backed entry from {label}"))?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .with_context(|| format!("{label} contains a non-UTF-8 entry"))?;
+        if name == "." || name == ".." {
+            continue;
+        }
+        entries.push(ObservedDirectoryEntry {
+            name: name.to_string(),
+            inode: entry.ino(),
+        });
+    }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(entries)
+}
+
+#[cfg(unix)]
+fn open_verified_directory(
+    parent: &OwnedFd,
+    name: &str,
+    relative_path: &Path,
+    kind: CaptureKind,
+    known_expected: Option<&Stat>,
+    probe: &mut impl CaptureProbe,
+    directory_identities: &mut BTreeMap<PathBuf, DescriptorIdentity>,
+) -> Result<OwnedFd> {
+    let observed;
+    let expected = match known_expected {
+        Some(expected) => expected,
+        None => {
+            observed = stat_descriptor_entry(parent, name, relative_path)?;
+            &observed
+        }
+    };
+    if descriptor_identity(expected)?.file_type != DescriptorFileType::Directory {
+        bail!(
+            "corpus directory input is not a regular non-symlink directory: {}",
+            relative_path.display()
+        );
+    }
+    probe.after_stat_before_open(kind, relative_path)?;
+    let descriptor =
+        openat(parent, name, directory_open_flags(), Mode::empty()).with_context(|| {
+            format!(
+                "open descriptor-relative no-follow corpus directory `{}`",
+                relative_path.display()
+            )
+        })?;
+    probe.after_open_before_read(kind, relative_path)?;
+    let opened = fstat(&descriptor).with_context(|| {
+        format!(
+            "inspect opened corpus directory descriptor `{}`",
+            relative_path.display()
+        )
+    })?;
+    ensure_expected_identity(expected, &opened, relative_path)?;
+    let identity = descriptor_identity(&opened)?;
+    if let Some(previous) = directory_identities.insert(relative_path.to_path_buf(), identity)
+        && previous != identity
+    {
+        bail!(
+            "corpus directory `{}` changed during corpus capture",
+            relative_path.display()
+        );
+    }
+    Ok(descriptor)
+}
+
+#[cfg(unix)]
+fn open_verified_relative_directory(
+    root: &OwnedFd,
+    relative_path: &Path,
+    corpus_relative_path: &Path,
+    kind: CaptureKind,
+    probe: &mut impl CaptureProbe,
+    directory_identities: &mut BTreeMap<PathBuf, DescriptorIdentity>,
+) -> Result<OwnedFd> {
+    let mut current = open_verified_directory(
+        root,
+        ".",
+        corpus_relative_path
+            .components()
+            .next()
+            .map(|component| PathBuf::from(component.as_os_str()))
+            .as_deref()
+            .unwrap_or_else(|| Path::new("")),
+        kind,
+        None,
+        probe,
+        directory_identities,
+    )?;
+    let mut walked = PathBuf::new();
+    let family_prefix = corpus_relative_path
+        .components()
+        .next()
+        .map(|component| PathBuf::from(component.as_os_str()))
+        .context("corpus-relative directory has no family component")?;
+    for component in relative_path.components() {
+        let Component::Normal(name) = component else {
+            bail!(
+                "corpus relative directory {} contains an invalid component",
+                relative_path.display()
+            );
+        };
+        walked.push(name);
+        let full_relative = family_prefix.join(&walked);
+        let name = name.to_str().with_context(|| {
+            format!(
+                "corpus directory path is not UTF-8: {}",
+                full_relative.display()
+            )
+        })?;
+        current = open_verified_directory(
+            &current,
+            name,
+            &full_relative,
+            kind,
+            None,
+            probe,
+            directory_identities,
+        )?;
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn read_verified_relative_file(
+    root: &OwnedFd,
+    relative_path: &Path,
+    corpus_relative_path: &Path,
+    directory_kind: CaptureKind,
+    file_kind: CaptureKind,
+    max_bytes: usize,
+    probe: &mut impl CaptureProbe,
+    directory_identities: &mut BTreeMap<PathBuf, DescriptorIdentity>,
+) -> Result<Vec<u8>> {
+    let file_name = relative_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| {
+            format!(
+                "corpus file path has no UTF-8 filename: {}",
+                relative_path.display()
+            )
+        })?;
+    let parent_relative = relative_path.parent().unwrap_or_else(|| Path::new(""));
+    let corpus_parent = corpus_relative_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let parent = open_verified_relative_directory(
+        root,
+        parent_relative,
+        corpus_parent,
+        directory_kind,
+        probe,
+        directory_identities,
+    )?;
+    read_verified_regular_file(
+        &parent,
+        file_name,
+        corpus_relative_path,
+        file_kind,
+        max_bytes,
+        None,
+        probe,
+    )
+}
+
+#[cfg(unix)]
+fn read_verified_regular_file(
+    parent: &OwnedFd,
+    name: &str,
+    relative_path: &Path,
+    kind: CaptureKind,
+    max_bytes: usize,
+    known_expected: Option<&Stat>,
+    probe: &mut impl CaptureProbe,
+) -> Result<Vec<u8>> {
+    let observed;
+    let expected = match known_expected {
+        Some(expected) => expected,
+        None => {
+            observed = stat_descriptor_entry(parent, name, relative_path)?;
+            &observed
+        }
+    };
+    let expected_fingerprint = descriptor_fingerprint(expected)?;
+    if expected_fingerprint.identity.file_type != DescriptorFileType::RegularFile {
+        bail!(
+            "corpus file input is not a regular non-symlink file: {}",
+            relative_path.display()
+        );
+    }
+    let max_bytes_u64 =
+        u64::try_from(max_bytes).context("corpus file byte bound does not fit u64")?;
+    if expected_fingerprint.size > max_bytes_u64 {
+        bail!(
+            "{} exceeds the {max_bytes}-byte bound",
+            relative_path.display()
+        );
+    }
+    probe.after_stat_before_open(kind, relative_path)?;
+    let descriptor =
+        openat(parent, name, regular_open_flags(), Mode::empty()).with_context(|| {
+            format!(
+                "open descriptor-relative no-follow corpus file `{}`",
+                relative_path.display()
+            )
+        })?;
+    probe.after_open_before_read(kind, relative_path)?;
+    let opened = fstat(&descriptor).with_context(|| {
+        format!(
+            "inspect opened corpus file descriptor `{}`",
+            relative_path.display()
+        )
+    })?;
+    ensure_expected_identity(expected, &opened, relative_path)?;
+    let before_read = descriptor_fingerprint(&opened)?;
+    if before_read.identity.file_type != DescriptorFileType::RegularFile {
+        bail!(
+            "corpus file input is not regular after open: {}",
+            relative_path.display()
+        );
+    }
+
+    let mut file = std::fs::File::from(descriptor);
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(before_read.size)
+            .unwrap_or(max_bytes)
+            .min(max_bytes),
+    );
+    let mut buffer = [0u8; 8_192];
+    let mut invoked_first_read_probe = false;
+    loop {
+        let remaining = max_bytes
+            .checked_add(1)
+            .and_then(|bound| bound.checked_sub(bytes.len()))
+            .context("corpus bounded-read length overflow")?;
+        if remaining == 0 {
+            break;
+        }
+        let read_len = remaining.min(buffer.len());
+        let count = file.read(&mut buffer[..read_len]).with_context(|| {
+            format!(
+                "read opened corpus descriptor `{}`",
+                relative_path.display()
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        if !invoked_first_read_probe {
+            probe.after_first_read(kind, relative_path)?;
+            invoked_first_read_probe = true;
+        }
+    }
+    if bytes.len() > max_bytes {
+        bail!(
+            "{} exceeds the {max_bytes}-byte bound",
+            relative_path.display()
+        );
+    }
+    let after_read = descriptor_fingerprint(&fstat(&file).with_context(|| {
+        format!(
+            "inspect corpus descriptor after read `{}`",
+            relative_path.display()
+        )
+    })?)?;
+    if before_read != after_read {
+        bail!(
+            "corpus input `{}` changed while it was being captured",
+            relative_path.display()
+        );
+    }
+    Ok(bytes)
 }
 
 fn validated_case_relative_path(case_id: &str, raw: &str) -> Result<PathBuf> {
@@ -300,198 +1054,6 @@ fn validated_case_relative_path(case_id: &str, raw: &str) -> Result<PathBuf> {
     Ok(relative)
 }
 
-/// Capture all executable corpus inputs exactly once after fail-closed path
-/// validation. Hashing and both runtime legs consume only the returned bytes.
-pub fn snapshot_corpus(corpus_root: &Path, cases: &[ResolvedCase]) -> Result<CorpusSnapshot> {
-    if cases.is_empty() {
-        bail!("cannot snapshot an empty corpus");
-    }
-    let root_metadata = std::fs::symlink_metadata(corpus_root)
-        .with_context(|| format!("inspect corpus root {}", corpus_root.display()))?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        bail!(
-            "corpus root {} must be a regular directory, not a symlink",
-            corpus_root.display()
-        );
-    }
-    let canonical_root = std::fs::canonicalize(corpus_root)
-        .with_context(|| format!("canonicalize corpus root {}", corpus_root.display()))?;
-
-    let mut snapshot_cases = Vec::with_capacity(cases.len());
-    let mut family_dirs = BTreeMap::<String, PathBuf>::new();
-    let mut staged_paths = BTreeMap::<String, BTreeSet<PathBuf>>::new();
-    let mut support_dirs = BTreeMap::<String, BTreeSet<PathBuf>>::new();
-    let mut snapshot_bytes = 0usize;
-    for case in cases {
-        let (family_key, staged_relative_path) =
-            split_case_relative_path(corpus_root, &case.source_path)?;
-        let corpus_relative_path = Path::new(&family_key).join(&staged_relative_path);
-        let validated_path = validate_snapshot_file(
-            corpus_root,
-            &canonical_root,
-            &corpus_relative_path,
-            &format!("corpus case `{}`", case.test_id),
-        )?;
-        let source_bytes = bounded_read_bytes(&validated_path, MAX_CASE_FILE_BYTES)
-            .with_context(|| format!("read corpus case {}", validated_path.display()))?;
-        add_bounded_bytes(
-            &mut snapshot_bytes,
-            source_bytes.len(),
-            MAX_CORPUS_SNAPSHOT_BYTES,
-            "corpus executable-input snapshot",
-        )?;
-
-        let family_dir = corpus_root.join(&family_key);
-        if let Some(existing) = family_dirs.insert(family_key.clone(), family_dir.clone())
-            && existing != family_dir
-        {
-            bail!("corpus family `{family_key}` resolves to multiple directories");
-        }
-        if !staged_paths
-            .entry(family_key.clone())
-            .or_default()
-            .insert(staged_relative_path.clone())
-        {
-            bail!(
-                "multiple corpus cases stage to `{}` in family `{family_key}`",
-                staged_relative_path.display()
-            );
-        }
-        let family_support_dirs = support_dirs.entry(family_key.clone()).or_default();
-        family_support_dirs.insert(PathBuf::new());
-        let mut support_parent = staged_relative_path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty());
-        while let Some(relative_parent) = support_parent {
-            let next_parent = relative_parent
-                .parent()
-                .filter(|ancestor| !ancestor.as_os_str().is_empty());
-            family_support_dirs.insert(relative_parent.to_path_buf());
-            support_parent = next_parent;
-        }
-        snapshot_cases.push(SnapshotCase {
-            case: case.clone(),
-            family_key,
-            corpus_relative_path: normalized_relative_path(&corpus_relative_path, "corpus case")?,
-            staged_relative_path,
-            source_bytes,
-        });
-    }
-
-    let mut support_total_bytes = 0usize;
-    let mut support_file_count = 0usize;
-    let mut families = BTreeMap::new();
-    for (family_key, family_dir) in family_dirs {
-        let family_support_dirs = support_dirs
-            .remove(&family_key)
-            .context("snapshot family support-directory set is missing")?;
-        let mut support_paths = Vec::new();
-        for relative_dir in family_support_dirs {
-            let support_dir = family_dir.join(&relative_dir);
-            for (name, source_path) in staged_support_files(&support_dir)? {
-                support_paths.push((relative_dir.join(name), source_path));
-            }
-        }
-        support_paths.sort_by(|left, right| left.0.cmp(&right.0));
-        if support_paths.len() > MAX_SUPPORT_FILES_PER_FAMILY {
-            bail!(
-                "corpus family `{family_key}` has {} support files; maximum is {MAX_SUPPORT_FILES_PER_FAMILY}",
-                support_paths.len()
-            );
-        }
-        support_file_count = support_file_count
-            .checked_add(support_paths.len())
-            .context("corpus support-file count overflow")?;
-        if support_file_count > MAX_SUPPORT_FILES_TOTAL {
-            bail!(
-                "corpus has {support_file_count} support files; maximum is {MAX_SUPPORT_FILES_TOTAL}"
-            );
-        }
-        let family_staged_paths = staged_paths
-            .get_mut(&family_key)
-            .context("snapshot family staging set is missing")?;
-        let mut support_files = Vec::with_capacity(support_paths.len());
-        for (staged_relative_path, source_path) in support_paths {
-            if !family_staged_paths.insert(staged_relative_path.clone()) {
-                bail!(
-                    "corpus case/support staging collision at `{}` in family `{family_key}`",
-                    staged_relative_path.display()
-                );
-            }
-            let corpus_relative = Path::new(&family_key).join(&staged_relative_path);
-            let normalized_corpus_relative =
-                normalized_relative_path(&corpus_relative, "corpus support file")?;
-            let validated_path = validate_snapshot_file(
-                corpus_root,
-                &canonical_root,
-                &corpus_relative,
-                &format!("corpus support file `{}`", staged_relative_path.display()),
-            )?;
-            debug_assert_eq!(validated_path, source_path);
-            let bytes =
-                bounded_read_bytes(&validated_path, MAX_CASE_FILE_BYTES).with_context(|| {
-                    format!("read corpus support file {}", validated_path.display())
-                })?;
-            add_bounded_bytes(
-                &mut support_total_bytes,
-                bytes.len(),
-                MAX_SUPPORT_TOTAL_BYTES,
-                "corpus support-file snapshot",
-            )?;
-            add_bounded_bytes(
-                &mut snapshot_bytes,
-                bytes.len(),
-                MAX_CORPUS_SNAPSHOT_BYTES,
-                "corpus executable-input snapshot",
-            )?;
-            support_files.push(SnapshotSupportFile {
-                corpus_relative_path: normalized_corpus_relative,
-                staged_relative_path,
-                bytes,
-            });
-        }
-        families.insert(family_key, SnapshotFamily { support_files });
-    }
-
-    Ok(CorpusSnapshot {
-        cases: snapshot_cases,
-        families,
-    })
-}
-
-fn split_case_relative_path(corpus_root: &Path, source_path: &Path) -> Result<(String, PathBuf)> {
-    let relative = source_path.strip_prefix(corpus_root).with_context(|| {
-        format!(
-            "corpus case path {} is outside corpus root {}",
-            source_path.display(),
-            corpus_root.display()
-        )
-    })?;
-    let mut components = relative.components();
-    let Some(Component::Normal(family)) = components.next() else {
-        bail!(
-            "corpus case path {} has no family directory",
-            relative.display()
-        );
-    };
-    let family_key = family
-        .to_str()
-        .with_context(|| format!("corpus family path {} is not UTF-8", relative.display()))?
-        .to_string();
-    let staged_relative_path: PathBuf = components.collect();
-    if staged_relative_path.as_os_str().is_empty()
-        || staged_relative_path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        bail!(
-            "corpus case path {} has an invalid family-relative path",
-            relative.display()
-        );
-    }
-    Ok((family_key, staged_relative_path))
-}
-
 fn normalized_relative_path(path: &Path, label: &str) -> Result<String> {
     let mut normalized = Vec::new();
     for component in path.components() {
@@ -508,50 +1070,6 @@ fn normalized_relative_path(path: &Path, label: &str) -> Result<String> {
         bail!("{label} path is empty");
     }
     Ok(normalized.join("/"))
-}
-
-fn validate_snapshot_file(
-    corpus_root: &Path,
-    canonical_root: &Path,
-    relative: &Path,
-    label: &str,
-) -> Result<PathBuf> {
-    let mut current = corpus_root.to_path_buf();
-    let components: Vec<_> = relative.components().collect();
-    if components.is_empty() {
-        bail!("{label} has an empty corpus-relative path");
-    }
-    for (index, component) in components.iter().enumerate() {
-        let Component::Normal(component) = component else {
-            bail!("{label} path must stay within the corpus root");
-        };
-        current.push(component);
-        let metadata = std::fs::symlink_metadata(&current)
-            .with_context(|| format!("inspect {label} path component {}", current.display()))?;
-        if metadata.file_type().is_symlink() {
-            bail!("{label} contains symlink component: {}", current.display());
-        }
-        let is_last = index + 1 == components.len();
-        if is_last && !metadata.is_file() {
-            bail!("{label} is not a regular file: {}", current.display());
-        }
-        if !is_last && !metadata.is_dir() {
-            bail!(
-                "{label} has a non-directory parent component: {}",
-                current.display()
-            );
-        }
-    }
-    let canonical = std::fs::canonicalize(&current)
-        .with_context(|| format!("canonicalize {label} {}", current.display()))?;
-    if !canonical.starts_with(canonical_root) {
-        bail!(
-            "{label} escapes corpus root {}: {}",
-            canonical_root.display(),
-            canonical.display()
-        );
-    }
-    Ok(current)
 }
 
 fn add_bounded_bytes(total: &mut usize, added: usize, limit: usize, label: &str) -> Result<()> {
@@ -571,6 +1089,13 @@ fn add_bounded_bytes(total: &mut usize, added: usize, limit: usize, label: &str)
 pub fn content_addressed_corpus_version(snapshot: &CorpusSnapshot) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(b"ccg_corpus_content_version_v2\0");
+    hasher.update(b"manifests\0");
+    hash_count(&mut hasher, snapshot.manifests.len())?;
+    for manifest in &snapshot.manifests {
+        hash_field(&mut hasher, manifest.corpus_relative_path.as_bytes())?;
+        hash_field(&mut hasher, &manifest.bytes)?;
+    }
+    hasher.update(b"cases\0");
     hash_count(&mut hasher, snapshot.cases.len())?;
     let mut ordered: Vec<&SnapshotCase> = snapshot.cases.iter().collect();
     ordered.sort_by(|a, b| a.case.test_id.cmp(&b.case.test_id));
@@ -619,45 +1144,6 @@ fn hash_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<()> {
     hash_count(hasher, bytes.len())?;
     hasher.update(bytes);
     Ok(())
-}
-
-fn staged_support_files(family_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let mut support_files = Vec::new();
-    for entry in std::fs::read_dir(family_dir)
-        .with_context(|| format!("read corpus family dir {}", family_dir.display()))?
-    {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        if name_str.starts_with('_') {
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                continue;
-            }
-            if file_type.is_symlink() || !file_type.is_file() {
-                bail!(
-                    "corpus support input is not a regular non-symlink file: {}",
-                    entry.path().display()
-                );
-            }
-            support_files.push((name_str.to_string(), entry.path()));
-        }
-    }
-    support_files.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(support_files)
-}
-
-fn bounded_read_bytes(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
-    let file = std::fs::File::open(path)?;
-    let mut bytes = Vec::new();
-    let mut handle = file.take(max_bytes as u64 + 1);
-    handle.read_to_end(&mut bytes)?;
-    if bytes.len() > max_bytes {
-        bail!("{} exceeds the {max_bytes}-byte bound", path.display());
-    }
-    Ok(bytes)
 }
 
 /// One captured runtime leg: comparison bytes (stdout + stderr + exit marker)
@@ -1409,9 +1895,88 @@ pub fn corpus_generated_at_utc() -> String {
     std::env::var(CORPUS_TIMESTAMP_ENV).unwrap_or_else(|_| chrono::Utc::now().to_rfc3339())
 }
 
-#[cfg(all(test, feature = "engine"))]
+#[cfg(all(test, feature = "engine", unix))]
 mod snapshot_staging_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TestCapturePhase {
+        AfterStatBeforeOpen,
+        AfterOpenBeforeRead,
+        AfterFirstRead,
+        AfterRootOpen,
+    }
+
+    #[cfg(unix)]
+    struct TestCaptureProbe<F>(F);
+
+    #[cfg(unix)]
+    impl<F> CaptureProbe for TestCaptureProbe<F>
+    where
+        F: FnMut(TestCapturePhase, CaptureKind, &Path) -> Result<()>,
+    {
+        fn after_stat_before_open(
+            &mut self,
+            kind: CaptureKind,
+            relative_path: &Path,
+        ) -> Result<()> {
+            (self.0)(TestCapturePhase::AfterStatBeforeOpen, kind, relative_path)
+        }
+
+        fn after_open_before_read(
+            &mut self,
+            kind: CaptureKind,
+            relative_path: &Path,
+        ) -> Result<()> {
+            (self.0)(TestCapturePhase::AfterOpenBeforeRead, kind, relative_path)
+        }
+
+        fn after_first_read(&mut self, kind: CaptureKind, relative_path: &Path) -> Result<()> {
+            (self.0)(TestCapturePhase::AfterFirstRead, kind, relative_path)
+        }
+
+        fn after_root_open(&mut self, corpus_root: &Path) -> Result<()> {
+            (self.0)(
+                TestCapturePhase::AfterRootOpen,
+                CaptureKind::Root,
+                corpus_root,
+            )
+        }
+    }
+
+    fn write_test_manifest(root: &Path, case_file: &str) {
+        std::fs::write(
+            root.join("stream/manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": CORPUS_FIXTURE_SCHEMA_VERSION,
+                "api_family": "stream",
+                "investigation_bead_id": "bd-0em5z",
+                "cases": [{
+                    "id": "tc::stream::descriptor-capture",
+                    "file": case_file,
+                    "band": "core",
+                    "risk_band": "critical"
+                }]
+            }))
+            .expect("serialize test manifest"),
+        )
+        .expect("write test manifest");
+    }
+
+    #[cfg(unix)]
+    fn write_descriptor_test_corpus_at(root: &Path, source: &[u8]) {
+        std::fs::create_dir_all(root.join("stream")).expect("create descriptor-test family");
+        std::fs::write(root.join("stream/case.mjs"), source).expect("write descriptor-test case");
+        write_test_manifest(root, "case.mjs");
+    }
+
+    #[cfg(unix)]
+    fn write_descriptor_test_corpus(source: &[u8]) -> tempfile::TempDir {
+        let corpus = tempfile::TempDir::new().expect("descriptor-test tempdir");
+        write_descriptor_test_corpus_at(corpus.path(), source);
+        corpus
+    }
 
     #[test]
     fn both_runtime_legs_stage_identical_frozen_nested_inputs() {
@@ -1424,15 +1989,8 @@ mod snapshot_staging_tests {
         let original_support = b"export const value = 'before';\n";
         std::fs::write(&case_path, original_case).expect("write original case");
         std::fs::write(&support_path, original_support).expect("write original support");
-        let cases = vec![ResolvedCase {
-            test_id: "tc::stream::frozen-staging".to_string(),
-            api_family: "stream".to_string(),
-            band: "core".to_string(),
-            risk_band: "critical".to_string(),
-            source_path: case_path.clone(),
-            investigation_bead_id: Some("bd-nc5b8".to_string()),
-        }];
-        let snapshot = snapshot_corpus(corpus.path(), &cases).expect("capture snapshot");
+        write_test_manifest(corpus.path(), "nested/case.mjs");
+        let snapshot = capture_corpus(corpus.path()).expect("capture snapshot");
 
         std::fs::write(&case_path, b"console.log('after');\n").expect("mutate case");
         std::fs::write(&support_path, b"export const value = 'after';\n").expect("mutate support");
@@ -1470,6 +2028,279 @@ mod snapshot_staging_tests {
 
     #[cfg(unix)]
     #[test]
+    fn descriptor_capture_rejects_case_inode_replacement_between_stat_and_open() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let corpus = write_descriptor_test_corpus(b"console.log('original');\n");
+        let case_path = corpus.path().join("stream/case.mjs");
+        let displaced_path = corpus.path().join("stream/case.before-open.mjs");
+        let triggered = Rc::new(Cell::new(false));
+        let probe_triggered = Rc::clone(&triggered);
+        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
+            if !probe_triggered.get()
+                && phase == TestCapturePhase::AfterStatBeforeOpen
+                && kind == CaptureKind::Case
+                && relative_path == Path::new("stream/case.mjs")
+            {
+                std::fs::rename(&case_path, &displaced_path)
+                    .context("displace case after descriptor-relative stat")?;
+                std::fs::write(&case_path, b"console.log('replacement');\n")
+                    .context("replace case before descriptor-relative open")?;
+                probe_triggered.set(true);
+            }
+            Ok(())
+        });
+
+        let error = capture_corpus_with_probe(corpus.path(), &mut probe)
+            .expect_err("inode replacement must fail closed");
+        assert!(triggered.get(), "the replacement probe must run");
+        assert!(
+            format!("{error:#}").contains("changed during corpus capture"),
+            "unexpected replacement error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_capture_rejects_symlink_substitution_before_open() {
+        use std::cell::Cell;
+        use std::os::unix::fs::symlink;
+        use std::rc::Rc;
+
+        let corpus = write_descriptor_test_corpus(b"console.log('original');\n");
+        let outside = tempfile::TempDir::new().expect("outside tempdir");
+        let outside_path = outside.path().join("outside.mjs");
+        std::fs::write(&outside_path, b"console.log('outside-secret');\n")
+            .expect("write outside case");
+        let case_path = corpus.path().join("stream/case.mjs");
+        let displaced_path = corpus.path().join("stream/case.before-symlink.mjs");
+        let reached_open = Rc::new(Cell::new(false));
+        let probe_reached_open = Rc::clone(&reached_open);
+        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
+            if kind == CaptureKind::Case && relative_path == Path::new("stream/case.mjs") {
+                if phase == TestCapturePhase::AfterStatBeforeOpen {
+                    std::fs::rename(&case_path, &displaced_path)
+                        .context("displace case before symlink substitution")?;
+                    symlink(&outside_path, &case_path)
+                        .context("substitute outside symlink before open")?;
+                } else if phase == TestCapturePhase::AfterOpenBeforeRead {
+                    probe_reached_open.set(true);
+                }
+            }
+            Ok(())
+        });
+
+        let error = capture_corpus_with_probe(corpus.path(), &mut probe)
+            .expect_err("symlink substitution must fail closed");
+        assert!(
+            !reached_open.get(),
+            "a no-follow open must reject the symlink before the opened-descriptor hook"
+        );
+        assert!(
+            format!("{error:#}").contains("open descriptor-relative no-follow corpus file"),
+            "unexpected symlink-substitution error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_capture_reads_opened_inode_after_symlink_swap_and_restore() {
+        use std::cell::Cell;
+        use std::os::unix::fs::symlink;
+        use std::rc::Rc;
+
+        let original = b"console.log('opened-inode');\n";
+        let corpus = write_descriptor_test_corpus(original);
+        let outside = tempfile::TempDir::new().expect("outside tempdir");
+        let outside_path = outside.path().join("outside.mjs");
+        std::fs::write(&outside_path, b"console.log('outside-secret');\n")
+            .expect("write outside case");
+        let case_path = corpus.path().join("stream/case.mjs");
+        let displaced_path = corpus.path().join("stream/case.opened.mjs");
+        let transient_link_path = corpus.path().join("stream/case.transient-link.mjs");
+        let probe_state = Rc::new(Cell::new(0_u8));
+        let observed_state = Rc::clone(&probe_state);
+        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
+            if kind == CaptureKind::Case && relative_path == Path::new("stream/case.mjs") {
+                if probe_state.get() == 0 && phase == TestCapturePhase::AfterOpenBeforeRead {
+                    std::fs::rename(&case_path, &displaced_path)
+                        .context("displace case after descriptor open")?;
+                    symlink(&outside_path, &case_path)
+                        .context("replace ambient case path after descriptor open")?;
+                    probe_state.set(1);
+                } else if probe_state.get() == 1 && phase == TestCapturePhase::AfterFirstRead {
+                    std::fs::rename(&case_path, &transient_link_path)
+                        .context("move transient symlink before restoring case path")?;
+                    std::fs::rename(&displaced_path, &case_path)
+                        .context("restore original case path after first descriptor read")?;
+                    probe_state.set(2);
+                }
+            }
+            Ok(())
+        });
+
+        let snapshot = capture_corpus_with_probe(corpus.path(), &mut probe)
+            .expect("the already-opened descriptor remains authoritative");
+        assert_eq!(
+            observed_state.get(),
+            2,
+            "the ambient symlink swap and restoration must both run"
+        );
+        assert_eq!(
+            snapshot.cases[0].source_bytes, original,
+            "capture must read the opened inode, never the transient pathname target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_capture_rejects_support_inode_replacement_between_stat_and_open() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let corpus = write_descriptor_test_corpus(b"console.log('case');\n");
+        let support_path = corpus.path().join("stream/_support.mjs");
+        let displaced_path = corpus.path().join("stream/_support.before-open.mjs");
+        std::fs::write(&support_path, b"export const value = 'original';\n")
+            .expect("write original support");
+        let triggered = Rc::new(Cell::new(false));
+        let probe_triggered = Rc::clone(&triggered);
+        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
+            if !probe_triggered.get()
+                && phase == TestCapturePhase::AfterStatBeforeOpen
+                && kind == CaptureKind::Support
+                && relative_path == Path::new("stream/_support.mjs")
+            {
+                std::fs::rename(&support_path, &displaced_path)
+                    .context("displace support after descriptor-relative stat")?;
+                std::fs::write(&support_path, b"export const value = 'replacement';\n")
+                    .context("replace support before descriptor-relative open")?;
+                probe_triggered.set(true);
+            }
+            Ok(())
+        });
+
+        let error = capture_corpus_with_probe(corpus.path(), &mut probe)
+            .expect_err("support inode replacement must fail closed");
+        assert!(triggered.get(), "the support replacement probe must run");
+        assert!(
+            format!("{error:#}").contains("changed during corpus capture"),
+            "unexpected support-replacement error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_capture_keeps_root_pinned_after_ambient_root_replacement() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let parent = tempfile::TempDir::new().expect("parent tempdir");
+        let corpus_root = parent.path().join("corpus");
+        let displaced_root = parent.path().join("corpus.opened");
+        let original = b"console.log('pinned-root');\n";
+        write_descriptor_test_corpus_at(&corpus_root, original);
+        let root_for_probe = corpus_root.clone();
+        let triggered = Rc::new(Cell::new(false));
+        let probe_triggered = Rc::clone(&triggered);
+        let mut probe = TestCaptureProbe(move |phase, kind, observed_root| {
+            if !probe_triggered.get()
+                && phase == TestCapturePhase::AfterRootOpen
+                && kind == CaptureKind::Root
+                && observed_root == root_for_probe
+            {
+                std::fs::rename(&root_for_probe, &displaced_root)
+                    .context("displace corpus root after descriptor open")?;
+                std::fs::create_dir_all(&root_for_probe)
+                    .context("create ambient replacement corpus root")?;
+                std::fs::write(root_for_probe.join("decoy.txt"), b"ambient replacement\n")
+                    .context("write replacement-root marker")?;
+                probe_triggered.set(true);
+            }
+            Ok(())
+        });
+
+        let snapshot = capture_corpus_with_probe(&corpus_root, &mut probe)
+            .expect("the pinned root descriptor remains authoritative");
+        assert!(triggered.get(), "the root replacement probe must run");
+        assert_eq!(
+            snapshot.cases[0].source_bytes, original,
+            "capture must remain under the originally opened root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_capture_rejects_in_place_change_after_first_read() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let original = vec![b'x'; 16_384];
+        let corpus = write_descriptor_test_corpus(&original);
+        let case_path = corpus.path().join("stream/case.mjs");
+        let triggered = Rc::new(Cell::new(false));
+        let probe_triggered = Rc::clone(&triggered);
+        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
+            if !probe_triggered.get()
+                && phase == TestCapturePhase::AfterFirstRead
+                && kind == CaptureKind::Case
+                && relative_path == Path::new("stream/case.mjs")
+            {
+                std::fs::write(&case_path, b"changed during descriptor read\n")
+                    .context("mutate case after first descriptor read")?;
+                probe_triggered.set(true);
+            }
+            Ok(())
+        });
+
+        let error = capture_corpus_with_probe(corpus.path(), &mut probe)
+            .expect_err("in-place mutation must fail closed");
+        assert!(triggered.get(), "the in-place mutation probe must run");
+        assert!(
+            format!("{error:#}").contains("changed while it was being captured"),
+            "unexpected in-place mutation error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_capture_rejects_manifest_replacement_between_stat_and_open() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let corpus = write_descriptor_test_corpus(b"console.log('case');\n");
+        let manifest_path = corpus.path().join("stream/manifest.json");
+        let displaced_path = corpus.path().join("stream/manifest.before-open.json");
+        let original_manifest = std::fs::read(&manifest_path).expect("read original manifest");
+        let triggered = Rc::new(Cell::new(false));
+        let probe_triggered = Rc::clone(&triggered);
+        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
+            if !probe_triggered.get()
+                && phase == TestCapturePhase::AfterStatBeforeOpen
+                && kind == CaptureKind::Manifest
+                && relative_path == Path::new("stream/manifest.json")
+            {
+                std::fs::rename(&manifest_path, &displaced_path)
+                    .context("displace manifest after descriptor-relative stat")?;
+                std::fs::write(&manifest_path, &original_manifest)
+                    .context("replace manifest before descriptor-relative open")?;
+                probe_triggered.set(true);
+            }
+            Ok(())
+        });
+
+        let error = capture_corpus_with_probe(corpus.path(), &mut probe)
+            .expect_err("manifest inode replacement must fail closed");
+        assert!(triggered.get(), "the manifest replacement probe must run");
+        assert!(
+            format!("{error:#}").contains("changed during corpus capture"),
+            "unexpected manifest-replacement error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn snapshot_refuses_nonregular_case_and_support_inputs() {
         use std::os::unix::net::UnixListener;
 
@@ -1478,17 +2309,10 @@ mod snapshot_staging_tests {
         std::fs::create_dir_all(&case_family).expect("create case family");
         let case_socket = case_family.join("case.mjs");
         let _case_listener = UnixListener::bind(&case_socket).expect("bind case socket");
-        let cases = vec![ResolvedCase {
-            test_id: "tc::stream::socket-case".to_string(),
-            api_family: "stream".to_string(),
-            band: "core".to_string(),
-            risk_band: "critical".to_string(),
-            source_path: case_socket,
-            investigation_bead_id: Some("bd-nc5b8".to_string()),
-        }];
-        let error = snapshot_corpus(case_corpus.path(), &cases)
-            .expect_err("nonregular case input must refuse");
-        assert!(error.to_string().contains("not a regular file"));
+        write_test_manifest(case_corpus.path(), "case.mjs");
+        let error =
+            capture_corpus(case_corpus.path()).expect_err("nonregular case input must refuse");
+        assert!(error.to_string().contains("missing or unsafe"));
 
         let support_corpus = tempfile::TempDir::new().expect("support corpus tempdir");
         let support_family = support_corpus.path().join("stream");
@@ -1497,16 +2321,24 @@ mod snapshot_staging_tests {
         std::fs::write(&support_case, b"console.log('case');\n").expect("write support case");
         let support_socket = support_family.join("_support.mjs");
         let _support_listener = UnixListener::bind(&support_socket).expect("bind support socket");
-        let cases = vec![ResolvedCase {
-            test_id: "tc::stream::socket-support".to_string(),
-            api_family: "stream".to_string(),
-            band: "core".to_string(),
-            risk_band: "critical".to_string(),
-            source_path: support_case,
-            investigation_bead_id: Some("bd-nc5b8".to_string()),
-        }];
-        let error = snapshot_corpus(support_corpus.path(), &cases)
+        write_test_manifest(support_corpus.path(), "case.mjs");
+        let error = capture_corpus(support_corpus.path())
             .expect_err("nonregular support input must refuse");
         assert!(error.to_string().contains("not a regular non-symlink file"));
+    }
+}
+
+#[cfg(all(test, feature = "engine", not(unix)))]
+mod unsupported_descriptor_capture_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_targets_refuse_before_resolving_the_corpus_path() {
+        let error = capture_corpus(Path::new("definitely-not-a-corpus"))
+            .expect_err("unsupported targets must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "descriptor-relative no-follow corpus capture is unavailable on this target; refusing to run"
+        );
     }
 }
