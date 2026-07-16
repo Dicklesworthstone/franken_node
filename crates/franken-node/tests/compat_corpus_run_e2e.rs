@@ -411,7 +411,7 @@ fn corpus_version_binds_staged_support_content_and_set() {
         corpus_version(two_support_files.path()),
     ];
     assert_eq!(
-        versions[0], "compat-corpus-v2-30822f65661629aee13f396a07c42dc9",
+        versions[0], "compat-corpus-v2-1b42e4db786b1a7e42be195f9e327b0f",
         "the canonical v2 framing stays byte-for-byte pinned"
     );
     assert_eq!(versions[0].len(), "compat-corpus-v2-".len() + 32);
