@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "net",
   "description": "Genuine lockstep compatibility fixtures: TCP socket and server semantics over loopback.",
-  "investigation_bead_id": "bd-cgzxg",
+  "investigation_bead_id": "bd-sul35",
   "lockstep": {
     "runtimes": [
       "bun",

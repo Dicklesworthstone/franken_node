@@ -4,11 +4,11 @@
   "section": "13",
   "trace_id": "trace-bd-28sz-corpus-gate",
   "corpus": {
-    "corpus_version": "compat-corpus-v1-af34cb312425",
+    "corpus_version": "compat-corpus-v2-99b30ba9ef28268ee0eddc69e3fb0fca",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-15T02:55:21.423529405+00:00",
-    "result_digest": "sha256:41326a4663cdd2dd95c3e01cd473f6ccf82d4bd3e0e3a22ac75b81c0bbbf6797",
+    "generated_at_utc": "2026-07-16T13:57:04.045007067+00:00",
+    "result_digest": "sha256:cd405c41355e1deff084431717fc66436e9f2386449b3278c627cfcecee635eb",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
     "policy_mode": "legacy-risky",
@@ -26,38 +26,38 @@
   },
   "totals": {
     "total_test_cases": 560,
-    "passed_test_cases": 238,
-    "failed_test_cases": 322,
+    "passed_test_cases": 281,
+    "failed_test_cases": 279,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 42.5
+    "overall_pass_rate_pct": 50.18
   },
   "bands": [
     {
       "band": "core",
       "total": 254,
-      "passed": 121,
-      "pass_rate_pct": 47.64
+      "passed": 139,
+      "pass_rate_pct": 54.72
     },
     {
       "band": "edge",
       "total": 56,
-      "passed": 17,
-      "pass_rate_pct": 30.36
+      "passed": 27,
+      "pass_rate_pct": 48.21
     },
     {
       "band": "high-value",
       "total": 250,
-      "passed": 100,
-      "pass_rate_pct": 40.0
+      "passed": 115,
+      "pass_rate_pct": 46.0
     }
   ],
   "api_families": [
     {
       "family": "buffer",
       "total": 30,
-      "passed": 27,
-      "pass_rate_pct": 90.0
+      "passed": 30,
+      "pass_rate_pct": 100.0
     },
     {
       "family": "child_process",
@@ -98,8 +98,8 @@
     {
       "family": "net",
       "total": 40,
-      "passed": 0,
-      "pass_rate_pct": 0.0
+      "passed": 37,
+      "pass_rate_pct": 92.5
     },
     {
       "family": "os",
@@ -116,8 +116,8 @@
     {
       "family": "querystring",
       "total": 20,
-      "passed": 17,
-      "pass_rate_pct": 85.0
+      "passed": 20,
+      "pass_rate_pct": 100.0
     },
     {
       "family": "stream",
@@ -345,21 +345,21 @@
       "api_family": "buffer",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0029",
       "api_family": "buffer",
       "band": "edge",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::buffer::0030",
       "api_family": "buffer",
       "band": "edge",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::child_process::0001",
@@ -1941,28 +1941,28 @@
       "api_family": "net",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0002",
       "api_family": "net",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0003",
       "api_family": "net",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0004",
       "api_family": "net",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0005",
@@ -1976,126 +1976,126 @@
       "api_family": "net",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0007",
       "api_family": "net",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0008",
       "api_family": "net",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0009",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0010",
       "api_family": "net",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0011",
       "api_family": "net",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0012",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0013",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0014",
       "api_family": "net",
       "band": "edge",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0015",
       "api_family": "net",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0016",
       "api_family": "net",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0017",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0018",
       "api_family": "net",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0019",
       "api_family": "net",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0020",
       "api_family": "net",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0021",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0022",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0023",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0024",
@@ -2109,49 +2109,49 @@
       "api_family": "net",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0026",
       "api_family": "net",
       "band": "edge",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0027",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0028",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0029",
       "api_family": "net",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0030",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0031",
       "api_family": "net",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0032",
@@ -2165,56 +2165,56 @@
       "api_family": "net",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0034",
       "api_family": "net",
       "band": "edge",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0035",
       "api_family": "net",
       "band": "edge",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0036",
       "api_family": "net",
       "band": "edge",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0037",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0038",
       "api_family": "net",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0039",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::net::0040",
       "api_family": "net",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::os::0001",
@@ -2739,7 +2739,7 @@
       "api_family": "querystring",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::querystring::0011",
@@ -2760,7 +2760,7 @@
       "api_family": "querystring",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::querystring::0014",
@@ -2809,7 +2809,7 @@
       "api_family": "querystring",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0001",
@@ -4074,27 +4074,6 @@
   ],
   "failing_tests_tracking": [
     {
-      "test_id": "tc::buffer::0028",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-8qvy6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0029",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-8qvy6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::buffer::0030",
-      "api_family": "buffer",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-8qvy6",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::child_process::0001",
       "api_family": "child_process",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
@@ -5180,304 +5159,24 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::net::0001",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0002",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0003",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0004",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::net::0005",
       "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0006",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0007",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0008",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0009",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0010",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0011",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0012",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0013",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0014",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0015",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0016",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0017",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0018",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0019",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0020",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0021",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0022",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0023",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
+      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "investigation_bead_id": "bd-sul35",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::net::0024",
       "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0025",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0026",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0027",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0028",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0029",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0030",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0031",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
+      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "investigation_bead_id": "bd-sul35",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::net::0032",
       "api_family": "net",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0033",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0034",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0035",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0036",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0037",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0038",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0039",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::net::0040",
-      "api_family": "net",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-cgzxg",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::querystring::0010",
-      "api_family": "querystring",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-n8eta",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::querystring::0013",
-      "api_family": "querystring",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-n8eta",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::querystring::0020",
-      "api_family": "querystring",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-n8eta",
+      "investigation_bead_id": "bd-sul35",
       "investigation_status": "open"
     },
     {
@@ -5700,14 +5399,14 @@
     {
       "test_id": "tc::stream::0042",
       "api_family": "stream",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected Readable.read() without a size in this stream slice, got explicit size",
       "investigation_bead_id": "bd-m8vaa",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0043",
       "api_family": "stream",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected Readable.read() without a size in this stream slice, got explicit size",
       "investigation_bead_id": "bd-m8vaa",
       "investigation_status": "open"
     },
@@ -6330,7 +6029,7 @@
   ],
   "previous_release": {
     "release_version": "0.1.0",
-    "overall_pass_rate_pct": 41.07,
+    "overall_pass_rate_pct": 42.5,
     "corpus_version": "compat-corpus-v1-af34cb312425"
   },
   "ci_gate": {
@@ -6339,7 +6038,7 @@
     "threshold_met": false,
     "release_blocked": true,
     "regression_detected": false,
-    "release_blocked_reason": "genuine lockstep-oracle-run measured 42.50% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%, net 0.00%, stream 47.69%, tls 0.00%, url 0.00%, zlib 0.00%]"
+    "release_blocked_reason": "genuine lockstep-oracle-run measured 50.18% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%, stream 47.69%, tls 0.00%, url 0.00%, zlib 0.00%]"
   },
   "reproducibility": {
     "deterministic_seed": "compat-corpus-generator-v1",
