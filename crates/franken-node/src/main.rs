@@ -7789,13 +7789,14 @@ fn handle_ops_proof_carrying_evidence(_args: &OpsProofCarryingEvidenceArgs) -> R
 fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
     use ops::compat_corpus_run::{
         build_corpus_results_document, content_addressed_corpus_version, corpus_generated_at_utc,
-        discover_corpus, run_corpus,
+        discover_corpus, run_corpus, snapshot_corpus,
     };
 
     let cases = discover_corpus(&args.corpus_root)?;
-    let corpus_version = content_addressed_corpus_version(&args.corpus_root, &cases)?;
+    let snapshot = snapshot_corpus(&args.corpus_root, &cases)?;
+    let corpus_version = content_addressed_corpus_version(&snapshot)?;
     let (outcomes, bun_version) = run_corpus(
-        &cases,
+        &snapshot,
         std::time::Duration::from_secs(args.case_timeout_secs.clamp(1, 600)),
     )?;
 

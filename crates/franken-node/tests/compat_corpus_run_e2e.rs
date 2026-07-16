@@ -14,7 +14,9 @@ use frankenengine_node::ops::close_condition::{
     COMPATIBILITY_CORPUS_ONLINE_PROVENANCE, compute_compatibility_corpus_result_digest,
 };
 use frankenengine_node::ops::compat_corpus_run::{
-    CaseOutcome, build_corpus_results_document, content_addressed_corpus_version, discover_corpus,
+    CaseOutcome, MAX_CASE_FILE_BYTES, MAX_SUPPORT_FILES_PER_FAMILY, MAX_SUPPORT_FILES_TOTAL,
+    MAX_SUPPORT_TOTAL_BYTES, build_corpus_results_document, content_addressed_corpus_version,
+    discover_corpus, snapshot_corpus,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -30,7 +32,11 @@ fn write_family(
     std::fs::create_dir_all(&dir).expect("create family dir");
     let mut manifest_cases = Vec::new();
     for (id, file, source, band, risk) in cases {
-        std::fs::write(dir.join(file), source).expect("write case file");
+        let case_path = dir.join(file);
+        if let Some(parent) = case_path.parent() {
+            std::fs::create_dir_all(parent).expect("create case parent");
+        }
+        std::fs::write(case_path, source).expect("write case file");
         manifest_cases.push(json!({
             "id": id,
             "file": file,
@@ -159,9 +165,170 @@ fn discover_corpus_refuses_invalid_band_and_traversal_and_missing_file() {
     assert!(err.to_string().contains("fixture missing"));
 }
 
+fn write_manifest_only(root: &Path, dir_name: &str, id: &str, file: &str) {
+    let dir = root.join(dir_name);
+    std::fs::create_dir_all(&dir).expect("create manifest-only family");
+    let manifest = json!({
+        "schema_version": "compat-corpus-fixture-v1",
+        "api_family": "stream",
+        "investigation_bead_id": "bd-nc5b8",
+        "cases": [{
+            "id": id,
+            "file": file,
+            "band": "core",
+            "risk_band": "critical",
+        }],
+    });
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).expect("render manifest-only family"),
+    )
+    .expect("write manifest-only family");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_refuses_case_parent_and_support_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let outside = tempfile::TempDir::new().expect("outside tempdir");
+    std::fs::write(outside.path().join("case.mjs"), "console.log('outside');\n")
+        .expect("write outside case");
+
+    let manifest_link = tempfile::TempDir::new().expect("manifest-link tempdir");
+    let manifest_family = manifest_link.path().join("stream");
+    std::fs::create_dir_all(&manifest_family).expect("create manifest-link family");
+    let outside_manifest = json!({
+        "schema_version": "compat-corpus-fixture-v1",
+        "api_family": "stream",
+        "cases": [{
+            "id": "tc::stream::manifest-link",
+            "file": "case.mjs",
+            "band": "core",
+            "risk_band": "critical",
+        }],
+    });
+    std::fs::write(
+        outside.path().join("manifest.json"),
+        serde_json::to_vec(&outside_manifest).expect("render outside manifest"),
+    )
+    .expect("write outside manifest");
+    symlink(
+        outside.path().join("manifest.json"),
+        manifest_family.join("manifest.json"),
+    )
+    .expect("symlink manifest");
+    let error = discover_corpus(manifest_link.path()).expect_err("manifest symlink must refuse");
+    assert!(error.to_string().contains("non-symlink manifest"));
+
+    let direct = tempfile::TempDir::new().expect("direct tempdir");
+    write_manifest_only(direct.path(), "stream", "tc::stream::direct", "case.mjs");
+    symlink(
+        outside.path().join("case.mjs"),
+        direct.path().join("stream/case.mjs"),
+    )
+    .expect("symlink direct case");
+    let cases = discover_corpus(direct.path()).expect("discover direct symlink case");
+    let error = snapshot_corpus(direct.path(), &cases).expect_err("direct symlink must refuse");
+    assert!(error.to_string().contains("symlink component"));
+
+    let parent = tempfile::TempDir::new().expect("parent tempdir");
+    write_manifest_only(
+        parent.path(),
+        "stream",
+        "tc::stream::parent",
+        "nested/case.mjs",
+    );
+    symlink(outside.path(), parent.path().join("stream/nested")).expect("symlink parent directory");
+    let cases = discover_corpus(parent.path()).expect("discover parent symlink case");
+    let error = snapshot_corpus(parent.path(), &cases).expect_err("parent symlink must refuse");
+    assert!(error.to_string().contains("symlink component"));
+
+    let support = tempfile::TempDir::new().expect("support tempdir");
+    write_version_family(
+        support.path(),
+        "stream",
+        "tc::stream::support",
+        "console.log('case');\n",
+    );
+    symlink(
+        outside.path().join("case.mjs"),
+        support.path().join("stream/_support.mjs"),
+    )
+    .expect("symlink support file");
+    let cases = discover_corpus(support.path()).expect("discover support symlink corpus");
+    let error = snapshot_corpus(support.path(), &cases).expect_err("support symlink must refuse");
+    assert!(error.to_string().contains("non-symlink"));
+}
+
+#[test]
+fn snapshot_refuses_case_support_staging_collision() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    write_family(
+        root.path(),
+        "stream",
+        "stream",
+        "bd-nc5b8",
+        &[(
+            "tc::stream::collision",
+            "_support.mjs",
+            "console.log('case');\n",
+            "core",
+            "critical",
+        )],
+    );
+    let cases = discover_corpus(root.path()).expect("discover collision corpus");
+    let error = snapshot_corpus(root.path(), &cases).expect_err("collision must refuse");
+    assert!(error.to_string().contains("case/support staging collision"));
+}
+
+#[test]
+fn snapshot_freezes_case_and_support_bytes_after_capture() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        root.path(),
+        "stream",
+        "tc::stream::freeze",
+        "console.log('before');\n",
+    );
+    std::fs::write(
+        root.path().join("stream/_support.mjs"),
+        "export const value = 'before';\n",
+    )
+    .expect("write original support");
+    let cases = discover_corpus(root.path()).expect("discover freeze corpus");
+    let snapshot = snapshot_corpus(root.path(), &cases).expect("capture snapshot");
+    let captured_version =
+        content_addressed_corpus_version(&snapshot).expect("hash captured snapshot");
+
+    std::fs::write(
+        root.path().join("stream/case.mjs"),
+        "console.log('after');\n",
+    )
+    .expect("mutate case after snapshot");
+    std::fs::write(
+        root.path().join("stream/_support.mjs"),
+        "export const value = 'after';\n",
+    )
+    .expect("mutate support after snapshot");
+
+    assert_eq!(
+        content_addressed_corpus_version(&snapshot).expect("rehash captured snapshot"),
+        captured_version,
+        "an existing snapshot must never re-read mutable corpus files"
+    );
+    let refreshed = snapshot_corpus(root.path(), &cases).expect("refresh snapshot");
+    assert_ne!(
+        content_addressed_corpus_version(&refreshed).expect("hash refreshed snapshot"),
+        captured_version,
+        "a new snapshot must observe the changed executable inputs"
+    );
+}
+
 fn corpus_version(root: &Path) -> String {
     let cases = discover_corpus(root).expect("discover version fixture");
-    content_addressed_corpus_version(root, &cases).expect("hash version fixture")
+    let snapshot = snapshot_corpus(root, &cases).expect("snapshot version fixture");
+    content_addressed_corpus_version(&snapshot).expect("hash version fixture")
 }
 
 fn write_version_family(root: &Path, dir_name: &str, id: &str, source: &str) {
@@ -235,9 +402,10 @@ fn corpus_version_binds_staged_support_content_and_set() {
         corpus_version(two_support_files.path()),
     ];
     assert_eq!(
-        versions[0], "compat-corpus-v1-0534d91c1dee",
-        "a corpus without staged helpers retains the historical v1 digest"
+        versions[0], "compat-corpus-v2-ba8b4bb95fd72d131fde268bf0e53106",
+        "the canonical v2 framing stays byte-for-byte pinned"
     );
+    assert_eq!(versions[0].len(), "compat-corpus-v2-".len() + 32);
     let unique: std::collections::BTreeSet<_> = versions.iter().collect();
     assert_eq!(
         unique.len(),
@@ -325,6 +493,174 @@ fn corpus_version_support_paths_are_relative_and_order_independent() {
         corpus_version(renamed.path()),
         "the staged helper's corpus-relative path must affect the version"
     );
+}
+
+#[test]
+fn corpus_version_binds_case_path_metadata_and_length_boundaries() {
+    let path_a = tempfile::TempDir::new().expect("tempdir");
+    write_family(
+        path_a.path(),
+        "stream",
+        "stream",
+        "bd-v1ccz",
+        &[(
+            "tc::stream::path",
+            "a/case.mjs",
+            "console.log('same');\n",
+            "core",
+            "critical",
+        )],
+    );
+    let path_b = tempfile::TempDir::new().expect("tempdir");
+    write_family(
+        path_b.path(),
+        "stream",
+        "stream",
+        "bd-v1ccz",
+        &[(
+            "tc::stream::path",
+            "b/case.mjs",
+            "console.log('same');\n",
+            "core",
+            "critical",
+        )],
+    );
+    assert_ne!(
+        corpus_version(path_a.path()),
+        corpus_version(path_b.path()),
+        "a behavior-relevant staged case path must affect the version"
+    );
+
+    let metadata_a = tempfile::TempDir::new().expect("tempdir");
+    write_family(
+        metadata_a.path(),
+        "family",
+        "stream",
+        "bd-v1ccz",
+        &[(
+            "tc::metadata::0001",
+            "case.mjs",
+            "console.log('same');\n",
+            "core",
+            "critical",
+        )],
+    );
+    let metadata_b = tempfile::TempDir::new().expect("tempdir");
+    write_family(
+        metadata_b.path(),
+        "family",
+        "timers",
+        "bd-v1ccz",
+        &[(
+            "tc::metadata::0001",
+            "case.mjs",
+            "console.log('same');\n",
+            "edge",
+            "low",
+        )],
+    );
+    assert_ne!(
+        corpus_version(metadata_a.path()),
+        corpus_version(metadata_b.path()),
+        "family and gate metadata must affect the version"
+    );
+
+    // These two case records collide under the legacy delimiter framing:
+    // `id='a', bytes='b\\x1f'` versus `id='a\\x1fb', bytes=''`.
+    let boundary_a = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(boundary_a.path(), "stream", "a", "b\u{001f}");
+    let boundary_b = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(boundary_b.path(), "stream", "a\u{001f}b", "");
+    assert_ne!(
+        corpus_version(boundary_a.path()),
+        corpus_version(boundary_b.path()),
+        "v2 length framing must separate legacy delimiter-boundary collisions"
+    );
+}
+
+fn write_support_files(root: &Path, family: &str, count: usize, bytes: &[u8]) {
+    for index in 0..count {
+        std::fs::write(
+            root.join(family).join(format!("_support_{index:03}.mjs")),
+            bytes,
+        )
+        .expect("write bounded support fixture");
+    }
+}
+
+#[test]
+fn snapshot_enforces_per_family_and_global_support_count_bounds() {
+    let exact = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        exact.path(),
+        "stream",
+        "tc::support::exact",
+        "console.log('case');\n",
+    );
+    write_support_files(exact.path(), "stream", MAX_SUPPORT_FILES_PER_FAMILY, b"");
+    let cases = discover_corpus(exact.path()).expect("discover exact support count");
+    snapshot_corpus(exact.path(), &cases).expect("exact per-family support limit succeeds");
+
+    let over_family = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        over_family.path(),
+        "stream",
+        "tc::support::over-family",
+        "console.log('case');\n",
+    );
+    write_support_files(
+        over_family.path(),
+        "stream",
+        MAX_SUPPORT_FILES_PER_FAMILY + 1,
+        b"",
+    );
+    let cases = discover_corpus(over_family.path()).expect("discover over-family count");
+    let error = snapshot_corpus(over_family.path(), &cases).expect_err("family count must refuse");
+    assert!(error.to_string().contains("maximum is"));
+
+    let over_global = tempfile::TempDir::new().expect("tempdir");
+    let family_count = 3;
+    let helpers_per_family = MAX_SUPPORT_FILES_TOTAL / family_count + 1;
+    assert!(helpers_per_family <= MAX_SUPPORT_FILES_PER_FAMILY);
+    for family_index in 0..family_count {
+        let family = format!("family-{family_index}");
+        let id = format!("tc::support::global::{family_index}");
+        write_version_family(over_global.path(), &family, &id, "console.log('case');\n");
+        write_support_files(over_global.path(), &family, helpers_per_family, b"");
+    }
+    let cases = discover_corpus(over_global.path()).expect("discover global count corpus");
+    let error = snapshot_corpus(over_global.path(), &cases).expect_err("global count must refuse");
+    assert!(error.to_string().contains("corpus has"));
+}
+
+#[test]
+fn snapshot_enforces_combined_support_byte_bound() {
+    assert_eq!(MAX_SUPPORT_TOTAL_BYTES % MAX_CASE_FILE_BYTES, 0);
+    let files_at_limit = MAX_SUPPORT_TOTAL_BYTES / MAX_CASE_FILE_BYTES;
+    let payload = vec![b'x'; MAX_CASE_FILE_BYTES];
+
+    let exact = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        exact.path(),
+        "stream",
+        "tc::support-bytes::exact",
+        "console.log('case');\n",
+    );
+    write_support_files(exact.path(), "stream", files_at_limit, &payload);
+    let cases = discover_corpus(exact.path()).expect("discover exact byte corpus");
+    snapshot_corpus(exact.path(), &cases).expect("exact support byte limit succeeds");
+
+    let over = tempfile::TempDir::new().expect("tempdir");
+    write_version_family(
+        over.path(),
+        "stream",
+        "tc::support-bytes::over",
+        "console.log('case');\n",
+    );
+    write_support_files(over.path(), "stream", files_at_limit + 1, &payload);
+    let cases = discover_corpus(over.path()).expect("discover over-byte corpus");
+    let error = snapshot_corpus(over.path(), &cases).expect_err("support bytes must refuse");
+    assert!(error.to_string().contains("support-file snapshot exceeds"));
 }
 
 fn outcome(
@@ -517,6 +853,82 @@ fn document_builder_refuses_empty_and_unknown_statuses() {
     assert!(err.to_string().contains("unexpected status"));
 }
 
+#[cfg(all(feature = "engine", unix))]
+#[test]
+fn compat_corpus_run_preflights_template_collisions_before_bun() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let work = tempfile::TempDir::new().expect("tempdir");
+    let corpus_root = work.path().join("corpus");
+    write_family(
+        &corpus_root,
+        "collision",
+        "path",
+        "bd-nc5b8",
+        &[
+            (
+                "tc::path::safe-before-collision",
+                "safe.mjs",
+                "console.log('must-not-run');\n",
+                "core",
+                "critical",
+            ),
+            (
+                "tc::path::template-collision",
+                "franken_node.toml",
+                "console.log('must-not-run');\n",
+                "core",
+                "critical",
+            ),
+        ],
+    );
+
+    let fake_bin = work.path().join("fake-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_bun = fake_bin.join("bun");
+    std::fs::write(
+        &fake_bun,
+        "#!/bin/sh\nprintf invoked > \"$BUN_MARKER\"\nexit 99\n",
+    )
+    .expect("write fake bun");
+    let mut permissions = std::fs::metadata(&fake_bun)
+        .expect("fake bun metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&fake_bun, permissions).expect("make fake bun executable");
+    let marker = work.path().join("bun-invoked");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args([
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--out",
+            "artifacts/corpus_results.json",
+            "--json",
+        ])
+        .current_dir(work.path())
+        .env("PATH", &fake_bin)
+        .env("BUN_MARKER", &marker)
+        .output()
+        .expect("spawn collision preflight");
+    assert!(!output.status.success(), "template collision must refuse");
+    let diagnostic = format!(
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        diagnostic.contains("would overwrite workspace template entry"),
+        "unexpected collision diagnostic: {diagnostic}"
+    );
+    assert!(
+        !marker.exists(),
+        "Bun must not be invoked before all staging targets pass preflight"
+    );
+}
+
 /// Mock-free e2e: the real binary runs a tiny corpus across bun and the
 /// native engine and emits a genuine, digest-bound artifact.
 #[cfg(feature = "engine")]
@@ -563,6 +975,27 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
                 "core",
                 "critical",
             ),
+            (
+                "tc::path::0004",
+                "nested/relative_support_import.mjs",
+                "import { message } from '../_support.mjs'; console.log(message);\n",
+                "core",
+                "critical",
+            ),
+            (
+                "tc::path::0005",
+                "nested/local_support_import.mjs",
+                "import { localMessage } from './_local.mjs'; console.log(localMessage);\n",
+                "core",
+                "critical",
+            ),
+            (
+                "tc::path::0006",
+                "nested/deep/parent_support_import.mjs",
+                "import { localMessage } from '../_local.mjs'; console.log(localMessage);\n",
+                "core",
+                "critical",
+            ),
         ],
     );
     std::fs::write(
@@ -570,6 +1003,11 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
         "export const message = 'support-ok';\n",
     )
     .expect("write staged support module");
+    std::fs::write(
+        corpus_root.join("path/nested/_local.mjs"),
+        "export const localMessage = 'local-support-ok';\n",
+    )
+    .expect("write nested staged support module");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
         .args([
@@ -601,7 +1039,7 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
         artifact["corpus"]["provenance"],
         COMPATIBILITY_CORPUS_ONLINE_PROVENANCE
     );
-    assert_eq!(artifact["totals"]["total_test_cases"], 3);
+    assert_eq!(artifact["totals"]["total_test_cases"], 6);
     assert_eq!(artifact["totals"]["errored_test_cases"], 0);
 
     // The digest must recompute from the emitted rows (the same check the
@@ -628,6 +1066,9 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
     assert_eq!(status_of("tc::path::0001"), "pass");
     assert_eq!(status_of("tc::path::0002"), "fail");
     assert_eq!(status_of("tc::path::0003"), "pass");
+    assert_eq!(status_of("tc::path::0004"), "pass");
+    assert_eq!(status_of("tc::path::0005"), "pass");
+    assert_eq!(status_of("tc::path::0006"), "pass");
     let tracking = artifact["failing_tests_tracking"]
         .as_array()
         .expect("tracking");
@@ -639,7 +1080,7 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
         "failing case must be tracked against the family bead: {tracking:?}"
     );
 
-    // Honest gate state for a 50% run: blocked, no fabricated pass.
+    // Honest gate state for an 83.33% run: blocked, no fabricated pass.
     assert_eq!(artifact["ci_gate"]["threshold_met"], false);
     assert_eq!(artifact["ci_gate"]["release_blocked"], true);
 }

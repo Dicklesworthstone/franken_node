@@ -28,6 +28,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+#[cfg(feature = "engine")]
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -44,6 +46,14 @@ pub const MAX_CORPUS_TOTAL_CASES: usize = 4_096;
 pub const MAX_FAMILY_MANIFEST_BYTES: u64 = 1_048_576;
 /// Upper bound for one case source read (parser-bomb defense).
 pub const MAX_CASE_FILE_BYTES: usize = 262_144;
+/// Upper bound on underscore-prefixed support files staged for one family.
+pub const MAX_SUPPORT_FILES_PER_FAMILY: usize = 64;
+/// Upper bound on support-file path/count overhead across the whole corpus.
+pub const MAX_SUPPORT_FILES_TOTAL: usize = 128;
+/// Upper bound on the combined support-file bytes captured in one snapshot.
+pub const MAX_SUPPORT_TOTAL_BYTES: usize = 4_194_304;
+/// Upper bound on all executable case and support bytes held by one snapshot.
+pub const MAX_CORPUS_SNAPSHOT_BYTES: usize = 134_217_728;
 /// Upper bound on captured bytes per runtime leg (stdout + stderr).
 pub const MAX_LEG_OUTPUT_BYTES: usize = 1_048_576;
 /// Environment override for the artifact's `generated_at_utc` (deterministic
@@ -92,6 +102,35 @@ pub struct ResolvedCase {
     pub investigation_bead_id: Option<String>,
 }
 
+/// Immutable executable-input snapshot shared by versioning and both runtime
+/// legs. All filesystem reads happen while constructing this value.
+#[derive(Debug)]
+pub struct CorpusSnapshot {
+    cases: Vec<SnapshotCase>,
+    families: BTreeMap<String, SnapshotFamily>,
+}
+
+#[derive(Debug)]
+struct SnapshotCase {
+    case: ResolvedCase,
+    family_key: String,
+    corpus_relative_path: String,
+    staged_relative_path: PathBuf,
+    source_bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct SnapshotFamily {
+    support_files: Vec<SnapshotSupportFile>,
+}
+
+#[derive(Debug)]
+struct SnapshotSupportFile {
+    corpus_relative_path: String,
+    staged_relative_path: PathBuf,
+    bytes: Vec<u8>,
+}
+
 /// Measured outcome for one case.
 #[derive(Clone, Debug)]
 pub struct CaseOutcome {
@@ -113,25 +152,44 @@ pub struct CaseOutcome {
 /// unique across the whole corpus. Every case path must stay inside its
 /// family directory (no absolute paths, no `..`).
 pub fn discover_corpus(corpus_root: &Path) -> Result<Vec<ResolvedCase>> {
-    if !corpus_root.is_dir() {
+    let root_metadata = std::fs::symlink_metadata(corpus_root)
+        .with_context(|| format!("inspect corpus root {}", corpus_root.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         bail!("corpus root {} is not a directory", corpus_root.display());
     }
 
-    let mut family_dirs: Vec<PathBuf> = std::fs::read_dir(corpus_root)
+    let mut family_dirs = Vec::new();
+    for entry in std::fs::read_dir(corpus_root)
         .with_context(|| format!("read corpus root {}", corpus_root.display()))?
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect();
+    {
+        let entry = entry
+            .with_context(|| format!("read corpus root entry under {}", corpus_root.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("inspect corpus root entry {}", entry.path().display()))?;
+        if file_type.is_symlink() {
+            bail!(
+                "corpus root contains a symlink entry: {}",
+                entry.path().display()
+            );
+        }
+        if file_type.is_dir() {
+            family_dirs.push(entry.path());
+        }
+    }
     family_dirs.sort();
 
     let mut cases = Vec::new();
     let mut seen_ids = BTreeSet::new();
     for dir in family_dirs {
         let manifest_path = dir.join("manifest.json");
-        if !manifest_path.is_file() {
+        let manifest_metadata = std::fs::symlink_metadata(&manifest_path);
+        if !manifest_metadata
+            .as_ref()
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
             bail!(
-                "corpus family directory {} has no manifest.json",
+                "corpus family directory {} has no regular non-symlink manifest.json",
                 dir.display()
             );
         }
@@ -230,7 +288,10 @@ fn validated_case_relative_path(case_id: &str, raw: &str) -> Result<PathBuf> {
         || relative.components().any(|component| {
             matches!(
                 component,
-                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                Component::CurDir
+                    | Component::ParentDir
+                    | Component::Prefix(_)
+                    | Component::RootDir
             )
         })
     {
@@ -239,102 +300,325 @@ fn validated_case_relative_path(case_id: &str, raw: &str) -> Result<PathBuf> {
     Ok(relative)
 }
 
-/// Content-addressed corpus version: `compat-corpus-v1-<12 hex>` over the
-/// sorted case sources and every underscore-prefixed support file staged beside
-/// them, so identical executable corpus content yields an identical version
-/// string on any machine (INV-CCG-REPRODUCIBILITY).
-pub fn content_addressed_corpus_version(
-    corpus_root: &Path,
-    cases: &[ResolvedCase],
-) -> Result<String> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"ccg_corpus_content_version_v1:");
-    let mut ordered: Vec<&ResolvedCase> = cases.iter().collect();
-    ordered.sort_by(|a, b| a.test_id.cmp(&b.test_id));
-    for case in ordered {
-        let bytes = bounded_read_bytes(&case.source_path, MAX_CASE_FILE_BYTES)
-            .with_context(|| format!("read corpus case {}", case.source_path.display()))?;
-        hasher.update(case.test_id.as_bytes());
-        hasher.update([0x1f]);
-        hasher.update(&bytes);
-        hasher.update([0x1e]);
+/// Capture all executable corpus inputs exactly once after fail-closed path
+/// validation. Hashing and both runtime legs consume only the returned bytes.
+pub fn snapshot_corpus(corpus_root: &Path, cases: &[ResolvedCase]) -> Result<CorpusSnapshot> {
+    if cases.is_empty() {
+        bail!("cannot snapshot an empty corpus");
     }
+    let root_metadata = std::fs::symlink_metadata(corpus_root)
+        .with_context(|| format!("inspect corpus root {}", corpus_root.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        bail!(
+            "corpus root {} must be a regular directory, not a symlink",
+            corpus_root.display()
+        );
+    }
+    let canonical_root = std::fs::canonicalize(corpus_root)
+        .with_context(|| format!("canonicalize corpus root {}", corpus_root.display()))?;
 
-    // A support module is executable input even though it has no manifest case
-    // of its own. Hash the exact set that `stage_support_files` copies, once per
-    // family directory, under corpus-root-relative names. Length prefixes make
-    // the framing unambiguous, and sorting removes read_dir traversal order.
+    let mut snapshot_cases = Vec::with_capacity(cases.len());
     let mut family_dirs = BTreeMap::<String, PathBuf>::new();
+    let mut staged_paths = BTreeMap::<String, BTreeSet<PathBuf>>::new();
+    let mut support_dirs = BTreeMap::<String, BTreeSet<PathBuf>>::new();
+    let mut snapshot_bytes = 0usize;
     for case in cases {
-        let family_dir = case
-            .source_path
-            .parent()
-            .with_context(|| format!("corpus case `{}` has no parent directory", case.test_id))?;
-        let relative_family = corpus_relative_path(corpus_root, family_dir)?;
-        if let Some(existing) =
-            family_dirs.insert(relative_family.clone(), family_dir.to_path_buf())
+        let (family_key, staged_relative_path) =
+            split_case_relative_path(corpus_root, &case.source_path)?;
+        let corpus_relative_path = Path::new(&family_key).join(&staged_relative_path);
+        let validated_path = validate_snapshot_file(
+            corpus_root,
+            &canonical_root,
+            &corpus_relative_path,
+            &format!("corpus case `{}`", case.test_id),
+        )?;
+        let source_bytes = bounded_read_bytes(&validated_path, MAX_CASE_FILE_BYTES)
+            .with_context(|| format!("read corpus case {}", validated_path.display()))?;
+        add_bounded_bytes(
+            &mut snapshot_bytes,
+            source_bytes.len(),
+            MAX_CORPUS_SNAPSHOT_BYTES,
+            "corpus executable-input snapshot",
+        )?;
+
+        let family_dir = corpus_root.join(&family_key);
+        if let Some(existing) = family_dirs.insert(family_key.clone(), family_dir.clone())
             && existing != family_dir
         {
-            bail!("corpus family path `{relative_family}` resolves to multiple directories");
+            bail!("corpus family `{family_key}` resolves to multiple directories");
         }
+        if !staged_paths
+            .entry(family_key.clone())
+            .or_default()
+            .insert(staged_relative_path.clone())
+        {
+            bail!(
+                "multiple corpus cases stage to `{}` in family `{family_key}`",
+                staged_relative_path.display()
+            );
+        }
+        let family_support_dirs = support_dirs.entry(family_key.clone()).or_default();
+        family_support_dirs.insert(PathBuf::new());
+        let mut support_parent = staged_relative_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        while let Some(relative_parent) = support_parent {
+            let next_parent = relative_parent
+                .parent()
+                .filter(|ancestor| !ancestor.as_os_str().is_empty());
+            family_support_dirs.insert(relative_parent.to_path_buf());
+            support_parent = next_parent;
+        }
+        snapshot_cases.push(SnapshotCase {
+            case: case.clone(),
+            family_key,
+            corpus_relative_path: normalized_relative_path(&corpus_relative_path, "corpus case")?,
+            staged_relative_path,
+            source_bytes,
+        });
     }
 
-    let mut support_files = Vec::new();
-    for (relative_family, family_dir) in family_dirs {
-        for (name, source_path) in staged_support_files(&family_dir)? {
-            let relative_path = if relative_family.is_empty() {
-                name
-            } else {
-                format!("{relative_family}/{name}")
-            };
-            support_files.push((relative_path, source_path));
+    let mut support_total_bytes = 0usize;
+    let mut support_file_count = 0usize;
+    let mut families = BTreeMap::new();
+    for (family_key, family_dir) in family_dirs {
+        let family_support_dirs = support_dirs
+            .remove(&family_key)
+            .context("snapshot family support-directory set is missing")?;
+        let mut support_paths = Vec::new();
+        for relative_dir in family_support_dirs {
+            let support_dir = family_dir.join(&relative_dir);
+            for (name, source_path) in staged_support_files(&support_dir)? {
+                support_paths.push((relative_dir.join(name), source_path));
+            }
+        }
+        support_paths.sort_by(|left, right| left.0.cmp(&right.0));
+        if support_paths.len() > MAX_SUPPORT_FILES_PER_FAMILY {
+            bail!(
+                "corpus family `{family_key}` has {} support files; maximum is {MAX_SUPPORT_FILES_PER_FAMILY}",
+                support_paths.len()
+            );
+        }
+        support_file_count = support_file_count
+            .checked_add(support_paths.len())
+            .context("corpus support-file count overflow")?;
+        if support_file_count > MAX_SUPPORT_FILES_TOTAL {
+            bail!(
+                "corpus has {support_file_count} support files; maximum is {MAX_SUPPORT_FILES_TOTAL}"
+            );
+        }
+        let family_staged_paths = staged_paths
+            .get_mut(&family_key)
+            .context("snapshot family staging set is missing")?;
+        let mut support_files = Vec::with_capacity(support_paths.len());
+        for (staged_relative_path, source_path) in support_paths {
+            if !family_staged_paths.insert(staged_relative_path.clone()) {
+                bail!(
+                    "corpus case/support staging collision at `{}` in family `{family_key}`",
+                    staged_relative_path.display()
+                );
+            }
+            let corpus_relative = Path::new(&family_key).join(&staged_relative_path);
+            let normalized_corpus_relative =
+                normalized_relative_path(&corpus_relative, "corpus support file")?;
+            let validated_path = validate_snapshot_file(
+                corpus_root,
+                &canonical_root,
+                &corpus_relative,
+                &format!("corpus support file `{}`", staged_relative_path.display()),
+            )?;
+            debug_assert_eq!(validated_path, source_path);
+            let bytes =
+                bounded_read_bytes(&validated_path, MAX_CASE_FILE_BYTES).with_context(|| {
+                    format!("read corpus support file {}", validated_path.display())
+                })?;
+            add_bounded_bytes(
+                &mut support_total_bytes,
+                bytes.len(),
+                MAX_SUPPORT_TOTAL_BYTES,
+                "corpus support-file snapshot",
+            )?;
+            add_bounded_bytes(
+                &mut snapshot_bytes,
+                bytes.len(),
+                MAX_CORPUS_SNAPSHOT_BYTES,
+                "corpus executable-input snapshot",
+            )?;
+            support_files.push(SnapshotSupportFile {
+                corpus_relative_path: normalized_corpus_relative,
+                staged_relative_path,
+                bytes,
+            });
+        }
+        families.insert(family_key, SnapshotFamily { support_files });
+    }
+
+    Ok(CorpusSnapshot {
+        cases: snapshot_cases,
+        families,
+    })
+}
+
+fn split_case_relative_path(corpus_root: &Path, source_path: &Path) -> Result<(String, PathBuf)> {
+    let relative = source_path.strip_prefix(corpus_root).with_context(|| {
+        format!(
+            "corpus case path {} is outside corpus root {}",
+            source_path.display(),
+            corpus_root.display()
+        )
+    })?;
+    let mut components = relative.components();
+    let Some(Component::Normal(family)) = components.next() else {
+        bail!(
+            "corpus case path {} has no family directory",
+            relative.display()
+        );
+    };
+    let family_key = family
+        .to_str()
+        .with_context(|| format!("corpus family path {} is not UTF-8", relative.display()))?
+        .to_string();
+    let staged_relative_path: PathBuf = components.collect();
+    if staged_relative_path.as_os_str().is_empty()
+        || staged_relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!(
+            "corpus case path {} has an invalid family-relative path",
+            relative.display()
+        );
+    }
+    Ok((family_key, staged_relative_path))
+}
+
+fn normalized_relative_path(path: &Path, label: &str) -> Result<String> {
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            bail!("{label} path {} is not canonical", path.display());
+        };
+        normalized.push(
+            component
+                .to_str()
+                .with_context(|| format!("{label} path {} is not UTF-8", path.display()))?,
+        );
+    }
+    if normalized.is_empty() {
+        bail!("{label} path is empty");
+    }
+    Ok(normalized.join("/"))
+}
+
+fn validate_snapshot_file(
+    corpus_root: &Path,
+    canonical_root: &Path,
+    relative: &Path,
+    label: &str,
+) -> Result<PathBuf> {
+    let mut current = corpus_root.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    if components.is_empty() {
+        bail!("{label} has an empty corpus-relative path");
+    }
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(component) = component else {
+            bail!("{label} path must stay within the corpus root");
+        };
+        current.push(component);
+        let metadata = std::fs::symlink_metadata(&current)
+            .with_context(|| format!("inspect {label} path component {}", current.display()))?;
+        if metadata.file_type().is_symlink() {
+            bail!("{label} contains symlink component: {}", current.display());
+        }
+        let is_last = index + 1 == components.len();
+        if is_last && !metadata.is_file() {
+            bail!("{label} is not a regular file: {}", current.display());
+        }
+        if !is_last && !metadata.is_dir() {
+            bail!(
+                "{label} has a non-directory parent component: {}",
+                current.display()
+            );
         }
     }
-    support_files.sort_by(|left, right| left.0.cmp(&right.0));
+    let canonical = std::fs::canonicalize(&current)
+        .with_context(|| format!("canonicalize {label} {}", current.display()))?;
+    if !canonical.starts_with(canonical_root) {
+        bail!(
+            "{label} escapes corpus root {}: {}",
+            canonical_root.display(),
+            canonical.display()
+        );
+    }
+    Ok(current)
+}
 
-    // Preserve the historical digest for corpora with no staged helpers while
-    // giving helper-bearing corpora an explicitly domain-separated extension.
-    if !support_files.is_empty() {
-        hasher.update(b"ccg_corpus_staged_support_files_v1:");
-        hasher.update((support_files.len() as u64).to_be_bytes());
-        for (relative_path, source_path) in support_files {
-            let bytes = bounded_read_bytes(&source_path, MAX_CASE_FILE_BYTES)
-                .with_context(|| format!("read corpus support file {}", source_path.display()))?;
-            hasher.update((relative_path.len() as u64).to_be_bytes());
-            hasher.update(relative_path.as_bytes());
-            hasher.update((bytes.len() as u64).to_be_bytes());
-            hasher.update(&bytes);
+fn add_bounded_bytes(total: &mut usize, added: usize, limit: usize, label: &str) -> Result<()> {
+    let next = total
+        .checked_add(added)
+        .with_context(|| format!("{label} byte count overflow"))?;
+    if next > limit {
+        bail!("{label} exceeds the {limit}-byte bound");
+    }
+    *total = next;
+    Ok(())
+}
+
+/// Content-addressed corpus version over every behavior- and evidence-relevant
+/// field in the immutable snapshot. V2 uses canonical count/length framing and
+/// exposes 128 digest bits.
+pub fn content_addressed_corpus_version(snapshot: &CorpusSnapshot) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ccg_corpus_content_version_v2\0");
+    hash_count(&mut hasher, snapshot.cases.len())?;
+    let mut ordered: Vec<&SnapshotCase> = snapshot.cases.iter().collect();
+    ordered.sort_by(|a, b| a.case.test_id.cmp(&b.case.test_id));
+    for case in ordered {
+        hasher.update(b"case\0");
+        hash_field(&mut hasher, case.case.test_id.as_bytes())?;
+        hash_field(&mut hasher, case.corpus_relative_path.as_bytes())?;
+        hash_field(&mut hasher, case.case.api_family.as_bytes())?;
+        hash_field(&mut hasher, case.case.band.as_bytes())?;
+        hash_field(&mut hasher, case.case.risk_band.as_bytes())?;
+        match case.case.investigation_bead_id.as_deref() {
+            Some(bead_id) => {
+                hasher.update([1]);
+                hash_field(&mut hasher, bead_id.as_bytes())?;
+            }
+            None => hasher.update([0]),
+        }
+        hash_field(&mut hasher, &case.source_bytes)?;
+    }
+
+    let support_count: usize = snapshot
+        .families
+        .values()
+        .map(|family| family.support_files.len())
+        .sum();
+    hasher.update(b"supports\0");
+    hash_count(&mut hasher, support_count)?;
+    for family in snapshot.families.values() {
+        for support in &family.support_files {
+            hash_field(&mut hasher, support.corpus_relative_path.as_bytes())?;
+            hash_field(&mut hasher, &support.bytes)?;
         }
     }
 
     let digest = hex::encode(hasher.finalize());
-    Ok(format!("compat-corpus-v1-{}", &digest[..12]))
+    Ok(format!("compat-corpus-v2-{}", &digest[..32]))
 }
 
-fn corpus_relative_path(corpus_root: &Path, path: &Path) -> Result<String> {
-    let relative = path.strip_prefix(corpus_root).with_context(|| {
-        format!(
-            "corpus family directory {} is outside corpus root {}",
-            path.display(),
-            corpus_root.display()
-        )
-    })?;
-    let mut components = Vec::new();
-    for component in relative.components() {
-        let Component::Normal(component) = component else {
-            bail!(
-                "corpus-relative support path {} is not canonical",
-                relative.display()
-            );
-        };
-        components.push(component.to_str().with_context(|| {
-            format!(
-                "corpus-relative support path {} is not UTF-8",
-                relative.display()
-            )
-        })?);
-    }
-    Ok(components.join("/"))
+fn hash_count(hasher: &mut Sha256, count: usize) -> Result<()> {
+    let count = u64::try_from(count).context("corpus hash count does not fit u64")?;
+    hasher.update(count.to_be_bytes());
+    Ok(())
+}
+
+fn hash_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<()> {
+    hash_count(hasher, bytes.len())?;
+    hasher.update(bytes);
+    Ok(())
 }
 
 fn staged_support_files(family_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
@@ -347,7 +631,17 @@ fn staged_support_files(family_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
         let Some(name_str) = name.to_str() else {
             continue;
         };
-        if name_str.starts_with('_') && entry.file_type()?.is_file() {
+        if name_str.starts_with('_') {
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                continue;
+            }
+            if file_type.is_symlink() || !file_type.is_file() {
+                bail!(
+                    "corpus support input is not a regular non-symlink file: {}",
+                    entry.path().display()
+                );
+            }
             support_files.push((name_str.to_string(), entry.path()));
         }
     }
@@ -486,29 +780,16 @@ fn sanitize_reason_excerpt(bytes: &[u8]) -> String {
 /// aborts before any case runs.
 #[cfg(feature = "engine")]
 pub fn run_corpus(
-    cases: &[ResolvedCase],
+    snapshot: &CorpusSnapshot,
     case_timeout: Duration,
 ) -> Result<(Vec<CaseOutcome>, String)> {
     use crate::runtime::nversion_oracle::{
         BoundaryScope, CheckOutcome, RuntimeEntry, RuntimeOracle,
     };
 
-    if cases.is_empty() {
+    if snapshot.cases.is_empty() {
         bail!("no corpus cases to run");
     }
-
-    // Reference leg availability + version pin (fail-closed like the
-    // single-guest lockstep producer).
-    let bun_version_output = Command::new("bun")
-        .arg("--version")
-        .output()
-        .context("bun is required for the corpus reference leg (bun --version failed)")?;
-    if !bun_version_output.status.success() {
-        bail!("bun --version exited nonzero; cannot pin the reference-leg runtime version");
-    }
-    let bun_version = String::from_utf8_lossy(&bun_version_output.stdout)
-        .trim()
-        .to_string();
 
     let current_exe = std::env::current_exe().context("resolve current executable")?;
 
@@ -530,33 +811,43 @@ pub fn run_corpus(
             String::from_utf8_lossy(&init.stderr)
         );
     }
+    preflight_snapshot_targets(snapshot, template.path())?;
 
-    let mut outcomes = Vec::with_capacity(cases.len());
-    for case in cases {
-        let source_bytes = bounded_read_bytes(&case.source_path, MAX_CASE_FILE_BYTES)
-            .with_context(|| format!("read corpus case {}", case.source_path.display()))?;
-        let file_name = case
-            .source_path
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .with_context(|| format!("corpus case `{}` has a non-UTF8 file name", case.test_id))?
-            .to_string();
+    // Reference-leg availability and version pin are checked only after every
+    // staged destination has passed collision preflight, so an invalid later
+    // case cannot cause an earlier external runtime invocation.
+    let bun_version_output = Command::new("bun")
+        .arg("--version")
+        .output()
+        .context("bun is required for the corpus reference leg (bun --version failed)")?;
+    if !bun_version_output.status.success() {
+        bail!("bun --version exited nonzero; cannot pin the reference-leg runtime version");
+    }
+    let bun_version = String::from_utf8_lossy(&bun_version_output.stdout)
+        .trim()
+        .to_string();
 
-        let family_dir = case
-            .source_path
-            .parent()
-            .with_context(|| format!("corpus case `{}` has no parent directory", case.test_id))?;
+    let mut outcomes = Vec::with_capacity(snapshot.cases.len());
+    for snapshot_case in &snapshot.cases {
+        let case = &snapshot_case.case;
+        let family = snapshot
+            .families
+            .get(&snapshot_case.family_key)
+            .with_context(|| {
+                format!("snapshot family `{}` is missing", snapshot_case.family_key)
+            })?;
 
         // Reference leg sandbox: same workspace scaffold as the franken leg so
         // filesystem-observing fixtures receive identical ambient inputs.
         let bun_dir = tempfile::TempDir::new().context("create bun leg sandbox")?;
         copy_dir_recursive(template.path(), bun_dir.path(), 0)
             .context("clone workspace template into bun leg sandbox")?;
-        std::fs::write(bun_dir.path().join(&file_name), &source_bytes)
-            .context("stage bun leg case file")?;
-        stage_support_files(family_dir, bun_dir.path())?;
+        stage_snapshot_case(snapshot_case, family, bun_dir.path())
+            .context("stage bun leg executable inputs")?;
         let mut bun_cmd = Command::new("bun");
-        bun_cmd.arg(&file_name).current_dir(bun_dir.path());
+        bun_cmd
+            .arg(&snapshot_case.staged_relative_path)
+            .current_dir(bun_dir.path());
         let bun_leg = run_leg(bun_cmd, case_timeout)
             .with_context(|| format!("bun leg failed to launch for case `{}`", case.test_id))?;
 
@@ -564,13 +855,12 @@ pub fn run_corpus(
         let franken_dir = tempfile::TempDir::new().context("create franken leg sandbox")?;
         copy_dir_recursive(template.path(), franken_dir.path(), 0)
             .context("clone workspace template into franken leg sandbox")?;
-        std::fs::write(franken_dir.path().join(&file_name), &source_bytes)
-            .context("stage franken leg case file")?;
-        stage_support_files(family_dir, franken_dir.path())?;
+        stage_snapshot_case(snapshot_case, family, franken_dir.path())
+            .context("stage franken leg executable inputs")?;
         let mut franken_cmd = Command::new(&current_exe);
         franken_cmd
             .arg("run")
-            .arg(&file_name)
+            .arg(&snapshot_case.staged_relative_path)
             .arg("--console-only")
             .arg("--policy")
             .arg("legacy-risky")
@@ -611,7 +901,7 @@ pub fn run_corpus(
             .run_cross_check(
                 &format!("ccg:{}:check", case.test_id),
                 BoundaryScope::IO,
-                &source_bytes,
+                &snapshot_case.source_bytes,
                 &outputs,
             )
             .map_err(|err| anyhow::anyhow!("oracle cross-check failed: {err}"))?;
@@ -665,14 +955,106 @@ fn classify_failure(bun: &LegCapture, franken: &LegCapture) -> String {
     }
 }
 
-/// Stage a family directory's shared support files (underscore-prefixed
-/// siblings such as `_stream_harness.mjs`) into a leg sandbox so fixtures
-/// that import them resolve identically on both runtimes.
 #[cfg(feature = "engine")]
-fn stage_support_files(family_dir: &Path, sandbox: &Path) -> Result<()> {
-    for (name, source_path) in staged_support_files(family_dir)? {
-        std::fs::copy(source_path, sandbox.join(&name))
-            .with_context(|| format!("stage support file {name}"))?;
+fn stage_snapshot_case(case: &SnapshotCase, family: &SnapshotFamily, sandbox: &Path) -> Result<()> {
+    write_staged_input(
+        sandbox,
+        &case.staged_relative_path,
+        &case.source_bytes,
+        "corpus case",
+    )?;
+    for support in &family.support_files {
+        write_staged_input(
+            sandbox,
+            &support.staged_relative_path,
+            &support.bytes,
+            "corpus support file",
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn write_staged_input(
+    sandbox: &Path,
+    relative_path: &Path,
+    bytes: &[u8],
+    kind: &str,
+) -> Result<()> {
+    let target = sandbox.join(relative_path);
+    let parent = target
+        .parent()
+        .with_context(|| format!("{kind} target {} has no parent", target.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create {kind} parent {}", parent.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .with_context(|| {
+            format!(
+                "stage {kind} {} without overwriting an existing sandbox entry",
+                target.display()
+            )
+        })?;
+    file.write_all(bytes)
+        .with_context(|| format!("write staged {kind} {}", target.display()))?;
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn preflight_snapshot_targets(snapshot: &CorpusSnapshot, template: &Path) -> Result<()> {
+    for case in &snapshot.cases {
+        preflight_staged_path(
+            template,
+            &case.staged_relative_path,
+            &format!("corpus case `{}`", case.case.test_id),
+        )?;
+    }
+    for family in snapshot.families.values() {
+        for support in &family.support_files {
+            preflight_staged_path(
+                template,
+                &support.staged_relative_path,
+                &format!("corpus support file `{}`", support.corpus_relative_path),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn preflight_staged_path(template: &Path, relative_path: &Path, label: &str) -> Result<()> {
+    let mut current = template.to_path_buf();
+    let components: Vec<_> = relative_path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(component) = component else {
+            bail!("{label} has a non-canonical staged path");
+        };
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                let is_last = index + 1 == components.len();
+                if is_last {
+                    bail!(
+                        "{label} would overwrite workspace template entry {}",
+                        current.display()
+                    );
+                }
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    bail!(
+                        "{label} has a colliding workspace template parent {}",
+                        current.display()
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect {label} staging target {}", current.display())
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -1025,4 +1407,106 @@ pub fn build_corpus_results_document(
 /// Resolve the artifact timestamp, honoring the deterministic override.
 pub fn corpus_generated_at_utc() -> String {
     std::env::var(CORPUS_TIMESTAMP_ENV).unwrap_or_else(|_| chrono::Utc::now().to_rfc3339())
+}
+
+#[cfg(all(test, feature = "engine"))]
+mod snapshot_staging_tests {
+    use super::*;
+
+    #[test]
+    fn both_runtime_legs_stage_identical_frozen_nested_inputs() {
+        let corpus = tempfile::TempDir::new().expect("corpus tempdir");
+        let nested = corpus.path().join("stream/nested");
+        std::fs::create_dir_all(&nested).expect("create nested family directory");
+        let case_path = nested.join("case.mjs");
+        let support_path = nested.join("_local.mjs");
+        let original_case = b"import { value } from './_local.mjs'; console.log(value);\n";
+        let original_support = b"export const value = 'before';\n";
+        std::fs::write(&case_path, original_case).expect("write original case");
+        std::fs::write(&support_path, original_support).expect("write original support");
+        let cases = vec![ResolvedCase {
+            test_id: "tc::stream::frozen-staging".to_string(),
+            api_family: "stream".to_string(),
+            band: "core".to_string(),
+            risk_band: "critical".to_string(),
+            source_path: case_path.clone(),
+            investigation_bead_id: Some("bd-nc5b8".to_string()),
+        }];
+        let snapshot = snapshot_corpus(corpus.path(), &cases).expect("capture snapshot");
+
+        std::fs::write(&case_path, b"console.log('after');\n").expect("mutate case");
+        std::fs::write(&support_path, b"export const value = 'after';\n").expect("mutate support");
+
+        let snapshot_case = snapshot.cases.first().expect("snapshot case");
+        let family = snapshot.families.get("stream").expect("snapshot family");
+        let bun_leg = tempfile::TempDir::new().expect("bun leg tempdir");
+        let franken_leg = tempfile::TempDir::new().expect("franken leg tempdir");
+        stage_snapshot_case(snapshot_case, family, bun_leg.path()).expect("stage bun leg");
+        stage_snapshot_case(snapshot_case, family, franken_leg.path()).expect("stage franken leg");
+
+        for (relative, expected) in [
+            (Path::new("nested/case.mjs"), original_case.as_slice()),
+            (Path::new("nested/_local.mjs"), original_support.as_slice()),
+        ] {
+            let bun_bytes = std::fs::read(bun_leg.path().join(relative)).expect("read bun input");
+            let franken_bytes =
+                std::fs::read(franken_leg.path().join(relative)).expect("read franken input");
+            assert_eq!(bun_bytes, expected);
+            assert_eq!(franken_bytes, expected);
+            assert_eq!(bun_bytes, franken_bytes);
+        }
+    }
+
+    #[test]
+    fn aggregate_snapshot_bound_accepts_exact_limit_and_refuses_one_more_byte() {
+        let mut total = MAX_CORPUS_SNAPSHOT_BYTES - 1;
+        add_bounded_bytes(&mut total, 1, MAX_CORPUS_SNAPSHOT_BYTES, "test snapshot")
+            .expect("exact aggregate limit succeeds");
+        assert_eq!(total, MAX_CORPUS_SNAPSHOT_BYTES);
+        let error = add_bounded_bytes(&mut total, 1, MAX_CORPUS_SNAPSHOT_BYTES, "test snapshot")
+            .expect_err("one byte over aggregate limit refuses");
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_refuses_nonregular_case_and_support_inputs() {
+        use std::os::unix::net::UnixListener;
+
+        let case_corpus = tempfile::TempDir::new().expect("case corpus tempdir");
+        let case_family = case_corpus.path().join("stream");
+        std::fs::create_dir_all(&case_family).expect("create case family");
+        let case_socket = case_family.join("case.mjs");
+        let _case_listener = UnixListener::bind(&case_socket).expect("bind case socket");
+        let cases = vec![ResolvedCase {
+            test_id: "tc::stream::socket-case".to_string(),
+            api_family: "stream".to_string(),
+            band: "core".to_string(),
+            risk_band: "critical".to_string(),
+            source_path: case_socket,
+            investigation_bead_id: Some("bd-nc5b8".to_string()),
+        }];
+        let error = snapshot_corpus(case_corpus.path(), &cases)
+            .expect_err("nonregular case input must refuse");
+        assert!(error.to_string().contains("not a regular file"));
+
+        let support_corpus = tempfile::TempDir::new().expect("support corpus tempdir");
+        let support_family = support_corpus.path().join("stream");
+        std::fs::create_dir_all(&support_family).expect("create support family");
+        let support_case = support_family.join("case.mjs");
+        std::fs::write(&support_case, b"console.log('case');\n").expect("write support case");
+        let support_socket = support_family.join("_support.mjs");
+        let _support_listener = UnixListener::bind(&support_socket).expect("bind support socket");
+        let cases = vec![ResolvedCase {
+            test_id: "tc::stream::socket-support".to_string(),
+            api_family: "stream".to_string(),
+            band: "core".to_string(),
+            risk_band: "critical".to_string(),
+            source_path: support_case,
+            investigation_bead_id: Some("bd-nc5b8".to_string()),
+        }];
+        let error = snapshot_corpus(support_corpus.path(), &cases)
+            .expect_err("nonregular support input must refuse");
+        assert!(error.to_string().contains("not a regular non-symlink file"));
+    }
 }
