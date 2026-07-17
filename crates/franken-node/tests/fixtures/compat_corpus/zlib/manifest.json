@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "zlib",
   "description": "Genuine lockstep compatibility fixtures: gzip/deflate/brotli roundtrips and constants.",
-  "investigation_bead_id": "bd-vhdqy",
+  "investigation_bead_id": "bd-znj5l",
   "lockstep": {
     "runtimes": [
       "bun",

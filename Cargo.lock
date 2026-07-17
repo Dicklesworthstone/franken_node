@@ -1742,6 +1742,7 @@ dependencies = [
  "uuid",
  "wait-timeout",
  "wait4",
+ "zlib-rs",
  "zstd",
 ]
 

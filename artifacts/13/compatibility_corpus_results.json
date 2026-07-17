@@ -4,11 +4,11 @@
   "section": "13",
   "trace_id": "trace-bd-28sz-corpus-gate",
   "corpus": {
-    "corpus_version": "compat-corpus-v2-5457a2d4fd91a574886e6b4d4d8fee72",
+    "corpus_version": "compat-corpus-v2-a0a73c2b2b55e52388337425e1f84c4d",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-17T07:58:21.851057648+00:00",
-    "result_digest": "sha256:742623d8475d05e5efdd477eeb1f09f17cc702ec611389730204d99d43fd4d81",
+    "generated_at_utc": "2026-07-17T10:58:17.035554021+00:00",
+    "result_digest": "sha256:61eb0e64148329b533468ab3ed538312724b137cbeeff3a019c6b120b4a27f71",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
     "policy_mode": "legacy-risky",
@@ -26,30 +26,30 @@
   },
   "totals": {
     "total_test_cases": 560,
-    "passed_test_cases": 361,
-    "failed_test_cases": 199,
+    "passed_test_cases": 378,
+    "failed_test_cases": 182,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 64.46
+    "overall_pass_rate_pct": 67.5
   },
   "bands": [
     {
       "band": "core",
       "total": 254,
-      "passed": 159,
-      "pass_rate_pct": 62.6
+      "passed": 169,
+      "pass_rate_pct": 66.54
     },
     {
       "band": "edge",
       "total": 56,
-      "passed": 37,
-      "pass_rate_pct": 66.07
+      "passed": 38,
+      "pass_rate_pct": 67.86
     },
     {
       "band": "high-value",
       "total": 250,
-      "passed": 165,
-      "pass_rate_pct": 66.0
+      "passed": 171,
+      "pass_rate_pct": 68.4
     }
   ],
   "api_families": [
@@ -146,8 +146,8 @@
     {
       "family": "zlib",
       "total": 20,
-      "passed": 0,
-      "pass_rate_pct": 0.0
+      "passed": 17,
+      "pass_rate_pct": 85.0
     }
   ],
   "per_test_results": [
@@ -3936,21 +3936,21 @@
       "api_family": "zlib",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0002",
       "api_family": "zlib",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0003",
       "api_family": "zlib",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0004",
@@ -3964,28 +3964,28 @@
       "api_family": "zlib",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0006",
       "api_family": "zlib",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0007",
       "api_family": "zlib",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0008",
       "api_family": "zlib",
       "band": "edge",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0009",
@@ -3999,42 +3999,42 @@
       "api_family": "zlib",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0011",
       "api_family": "zlib",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0012",
       "api_family": "zlib",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0013",
       "api_family": "zlib",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0014",
       "api_family": "zlib",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0015",
       "api_family": "zlib",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0016",
@@ -4048,28 +4048,28 @@
       "api_family": "zlib",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0018",
       "api_family": "zlib",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0019",
       "api_family": "zlib",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::zlib::0020",
       "api_family": "zlib",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     }
   ],
   "failing_tests_tracking": [
@@ -5327,150 +5327,31 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::zlib::0001",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0002",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0003",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::zlib::0004",
       "api_family": "zlib",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0005",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0006",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0007",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0008",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
+      "investigation_bead_id": "bd-znj5l",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::zlib::0009",
       "api_family": "zlib",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0010",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0011",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0012",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0013",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0014",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0015",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
+      "investigation_bead_id": "bd-znj5l",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::zlib::0016",
       "api_family": "zlib",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0017",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0018",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0019",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::zlib::0020",
-      "api_family": "zlib",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-vhdqy",
+      "investigation_bead_id": "bd-znj5l",
       "investigation_status": "open"
     }
   ],
   "previous_release": {
     "release_version": "0.1.0",
-    "overall_pass_rate_pct": 60.54,
-    "corpus_version": "compat-corpus-v2-7502c244a761c2b34af9ae8dbb6ff1a8"
+    "overall_pass_rate_pct": 67.5,
+    "corpus_version": "compat-corpus-v2-5457a2d4fd91a574886e6b4d4d8fee72"
   },
   "ci_gate": {
     "workflow_name": "compatibility-corpus-pass-gate",
@@ -5478,7 +5359,7 @@
     "threshold_met": false,
     "release_blocked": true,
     "regression_detected": false,
-    "release_blocked_reason": "genuine lockstep-oracle-run measured 64.46% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%, zlib 0.00%]"
+    "release_blocked_reason": "genuine lockstep-oracle-run measured 67.50% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%]"
   },
   "reproducibility": {
     "deterministic_seed": "compat-corpus-generator-v1",
