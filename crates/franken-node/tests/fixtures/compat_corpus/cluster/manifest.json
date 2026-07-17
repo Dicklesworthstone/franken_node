@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "cluster",
   "description": "Genuine lockstep compatibility fixtures: cluster primary-side surface and worker lifecycle.",
-  "investigation_bead_id": "bd-hrur9",
+  "investigation_bead_id": "bd-zyp0c",
   "lockstep": {
     "runtimes": [
       "bun",
