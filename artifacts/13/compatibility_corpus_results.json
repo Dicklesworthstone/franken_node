@@ -4,10 +4,10 @@
   "section": "13",
   "trace_id": "trace-bd-28sz-corpus-gate",
   "corpus": {
-    "corpus_version": "compat-corpus-v2-9dbbf7c44b98125ab7aec4fb9e132da0",
+    "corpus_version": "compat-corpus-v2-7502c244a761c2b34af9ae8dbb6ff1a8",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-17T05:38:46.141361135+00:00",
+    "generated_at_utc": "2026-07-17T05:55:45.487113381+00:00",
     "result_digest": "sha256:02f4c3ed192b0eefbd47e6449d320af16fdfdb71c26349e0f2f4ed5d4b109aef",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
@@ -5183,77 +5183,77 @@
       "test_id": "tc::stream::0048",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected iterable, got object",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0053",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected top-level await to settle before the event loop became idle, got pending module Promise with",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0003",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected array or string source for Readable.from, got object",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0013",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'process' requires effect 'runtime.global' but caller's profile '{process.sha",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0024",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected iterable, got object",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0025",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0026",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0028",
       "api_family": "stream",
       "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0031",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0040",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected live Writable that has not ended, got write after end",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0041",
       "api_family": "stream",
       "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-m8vaa",
+      "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
@@ -5623,7 +5623,7 @@
   ],
   "previous_release": {
     "release_version": "0.1.0",
-    "overall_pass_rate_pct": 58.04,
+    "overall_pass_rate_pct": 60.54,
     "corpus_version": "compat-corpus-v2-9dbbf7c44b98125ab7aec4fb9e132da0"
   },
   "ci_gate": {

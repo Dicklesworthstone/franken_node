@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "stream",
   "description": "Genuine lockstep compatibility fixtures: Readable/Writable/Transform event ordering and backpressure (extension set beyond the pinned stream/ fixtures).",
-  "investigation_bead_id": "bd-m8vaa",
+  "investigation_bead_id": "bd-m8vaa.1",
   "lockstep": {
     "runtimes": [
       "bun",
