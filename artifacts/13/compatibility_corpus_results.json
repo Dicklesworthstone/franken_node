@@ -7,8 +7,8 @@
     "corpus_version": "compat-corpus-v2-9dbbf7c44b98125ab7aec4fb9e132da0",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-17T03:28:15.961926204+00:00",
-    "result_digest": "sha256:5f2b7160bf9105405a711c0820d45d3ab5c09bf9c74d36850a6c6ed5454ac94b",
+    "generated_at_utc": "2026-07-17T05:38:46.141361135+00:00",
+    "result_digest": "sha256:02f4c3ed192b0eefbd47e6449d320af16fdfdb71c26349e0f2f4ed5d4b109aef",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
     "policy_mode": "legacy-risky",
@@ -26,11 +26,11 @@
   },
   "totals": {
     "total_test_cases": 560,
-    "passed_test_cases": 325,
-    "failed_test_cases": 235,
+    "passed_test_cases": 339,
+    "failed_test_cases": 221,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 58.04
+    "overall_pass_rate_pct": 60.54
   },
   "bands": [
     {
@@ -48,8 +48,8 @@
     {
       "band": "high-value",
       "total": 250,
-      "passed": 143,
-      "pass_rate_pct": 57.2
+      "passed": 157,
+      "pass_rate_pct": 62.8
     }
   ],
   "api_families": [
@@ -122,8 +122,8 @@
     {
       "family": "stream",
       "total": 65,
-      "passed": 40,
-      "pass_rate_pct": 61.54
+      "passed": 54,
+      "pass_rate_pct": 83.08
     },
     {
       "family": "timers",
@@ -2907,14 +2907,14 @@
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0015",
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0016",
@@ -2942,14 +2942,14 @@
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0020",
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0021",
@@ -3075,14 +3075,14 @@
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0039",
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0040",
@@ -3124,7 +3124,7 @@
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0046",
@@ -3201,42 +3201,42 @@
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0057",
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0058",
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0059",
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0060",
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0061",
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0062",
@@ -3264,7 +3264,7 @@
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0001",
@@ -5194,55 +5194,6 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::stream::0056",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'node:stream': bare specifiers not supported",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0057",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'node:stream': bare specifiers not supported",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0058",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'node:stream': bare specifiers not supported",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0059",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'node:stream': bare specifiers not supported",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0060",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'node:stream/promises': bare specifiers not supported",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0061",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'node:stream': bare specifiers not supported",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0065",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'node:stream': bare specifiers not supported",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::stream::0003",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected array or string source for Readable.from, got object",
@@ -5253,34 +5204,6 @@
       "test_id": "tc::stream::0013",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'process' requires effect 'runtime.global' but caller's profile '{process.sha",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0014",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0015",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0019",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0020",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
       "investigation_bead_id": "bd-m8vaa",
       "investigation_status": "open"
     },
@@ -5320,20 +5243,6 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::stream::0038",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0039",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::stream::0040",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected live Writable that has not ended, got write after end",
@@ -5344,13 +5253,6 @@
       "test_id": "tc::stream::0041",
       "api_family": "stream",
       "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0045",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
       "investigation_bead_id": "bd-m8vaa",
       "investigation_status": "open"
     },
@@ -5721,7 +5623,7 @@
   ],
   "previous_release": {
     "release_version": "0.1.0",
-    "overall_pass_rate_pct": 57.14,
+    "overall_pass_rate_pct": 58.04,
     "corpus_version": "compat-corpus-v2-9dbbf7c44b98125ab7aec4fb9e132da0"
   },
   "ci_gate": {
@@ -5730,7 +5632,7 @@
     "threshold_met": false,
     "release_blocked": true,
     "regression_detected": false,
-    "release_blocked_reason": "genuine lockstep-oracle-run measured 58.04% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%, stream 61.54%, url 0.00%, zlib 0.00%]"
+    "release_blocked_reason": "genuine lockstep-oracle-run measured 60.54% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%, url 0.00%, zlib 0.00%]"
   },
   "reproducibility": {
     "deterministic_seed": "compat-corpus-generator-v1",
