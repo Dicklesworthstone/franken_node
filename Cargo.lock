@@ -412,9 +412,9 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.3.6"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0350965ddf8c00001227d5e019613c1bbafe14d26b716f58d69a1c8204687dab"
+checksum = "6a0fe489d94bfbe149633d223838bd47bf393368c8aa529e34eac8473943aaa7"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -1384,7 +1384,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "frankenengine-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -1682,17 +1682,19 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "rand 0.8.6",
+ "ryu-js",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror",
  "toml 0.8.23",
+ "unicode-id-start",
  "uuid",
 ]
 
 [[package]]
 name = "frankenengine-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "bumpalo",
@@ -1724,6 +1726,7 @@ dependencies = [
  "rand 0.8.6",
  "regex",
  "rustix",
+ "ryu-js",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1735,6 +1738,7 @@ dependencies = [
  "thiserror",
  "toml 0.8.23",
  "unicode-normalization",
+ "url",
  "uuid",
  "wait-timeout",
  "wait4",
@@ -2721,7 +2725,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3874,7 +3878,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3935,6 +3939,12 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
 
 [[package]]
 name = "same-file"
@@ -4446,7 +4456,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4822,6 +4832,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "unicode-id-start"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81b79ad29b5e19de4260020f8919b443b2ef0277d242ce532ec7b7a2cc8b6007"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5148,7 +5164,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

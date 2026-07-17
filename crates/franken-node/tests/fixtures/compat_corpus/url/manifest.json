@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "url",
   "description": "Genuine lockstep compatibility fixtures: WHATWG URL parsing, resolution, and URLSearchParams.",
-  "investigation_bead_id": "bd-nv5x6",
+  "investigation_bead_id": "bd-4awsz",
   "lockstep": {
     "runtimes": [
       "bun",
