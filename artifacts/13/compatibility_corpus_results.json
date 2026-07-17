@@ -7,8 +7,8 @@
     "corpus_version": "compat-corpus-v2-9dbbf7c44b98125ab7aec4fb9e132da0",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-16T21:58:51.117454491+00:00",
-    "result_digest": "sha256:46495da834fb5d6ef170576811033f2d1f260a3815e96f431e1d6ffcbd14bf46",
+    "generated_at_utc": "2026-07-17T00:08:59.273043687+00:00",
+    "result_digest": "sha256:de814c99f7b07fe0e098b719c30e52857fc9a22e2cea174f7a3cae92f45836d6",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
     "policy_mode": "legacy-risky",
@@ -26,11 +26,11 @@
   },
   "totals": {
     "total_test_cases": 560,
-    "passed_test_cases": 318,
-    "failed_test_cases": 242,
+    "passed_test_cases": 320,
+    "failed_test_cases": 240,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 56.79
+    "overall_pass_rate_pct": 57.14
   },
   "bands": [
     {
@@ -48,8 +48,8 @@
     {
       "band": "high-value",
       "total": 250,
-      "passed": 136,
-      "pass_rate_pct": 54.4
+      "passed": 138,
+      "pass_rate_pct": 55.2
     }
   ],
   "api_families": [
@@ -122,8 +122,8 @@
     {
       "family": "stream",
       "total": 65,
-      "passed": 33,
-      "pass_rate_pct": 50.77
+      "passed": 35,
+      "pass_rate_pct": 53.85
     },
     {
       "family": "timers",
@@ -2928,7 +2928,7 @@
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0018",
@@ -3243,7 +3243,7 @@
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::stream::0063",
@@ -5236,13 +5236,6 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::stream::0062",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::stream::0063",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: module resolution failed for 'node:stream': bare specifiers not supported",
@@ -5295,13 +5288,6 @@
       "test_id": "tc::stream::0016",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-m8vaa",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::stream::0017",
-      "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined",
       "investigation_bead_id": "bd-m8vaa",
       "investigation_status": "open"
     },
@@ -5779,7 +5765,7 @@
     "threshold_met": false,
     "release_blocked": true,
     "regression_detected": false,
-    "release_blocked_reason": "genuine lockstep-oracle-run measured 56.79% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%, stream 50.77%, url 0.00%, zlib 0.00%]"
+    "release_blocked_reason": "genuine lockstep-oracle-run measured 57.14% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, cluster 0.00%, crypto 0.00%, http 0.00%, stream 53.85%, url 0.00%, zlib 0.00%]"
   },
   "reproducibility": {
     "deterministic_seed": "compat-corpus-generator-v1",
