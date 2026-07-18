@@ -38,6 +38,35 @@ const STANDARD_SECURITY_EPOCH: u64 = 2; // Standard security epoch (Balanced pro
 #[cfg(feature = "engine")]
 const CURRENT_SECURITY_EPOCH: u64 = 3; // Latest security epoch (Strict profile)
 
+/// Native engine execution can traverse deeply nested parser/lowering/interpreter
+/// frames. Give that one bounded worker an explicit stack so its correctness does
+/// not depend on the process-wide `RUST_MIN_STACK` ambient setting.
+#[cfg(feature = "engine")]
+const NATIVE_ENGINE_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(feature = "engine")]
+const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
+
+#[cfg(feature = "engine")]
+fn spawn_native_engine_worker(
+    worker: impl FnOnce() + Send + 'static,
+) -> io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name(NATIVE_ENGINE_WORKER_NAME.to_string())
+        .stack_size(NATIVE_ENGINE_WORKER_STACK_BYTES)
+        .spawn(worker)
+}
+
+#[cfg(feature = "engine")]
+fn native_engine_worker_spawn_error(app_path: PathBuf, error: &io::Error) -> EngineDispatchError {
+    EngineDispatchError::EngineExecutionError {
+        app_path,
+        error_message: format!(
+            "failed to spawn native engine worker `{NATIVE_ENGINE_WORKER_NAME}` with a {NATIVE_ENGINE_WORKER_STACK_BYTES}-byte stack: {error}; check system thread and memory limits"
+        ),
+        phase: "worker startup".to_string(),
+    }
+}
+
 /// Validate runtime path to prevent command injection attacks
 fn validate_runtime_path(runtime_path: &Path) -> Result<()> {
     let path_str = runtime_path.to_string_lossy();
@@ -1724,7 +1753,7 @@ impl EngineDispatcher {
         let config_for_thread = config.clone();
         let policy_mode_for_thread = policy_mode.to_string();
 
-        let execution_thread = thread::spawn(move || {
+        let execution_thread = match spawn_native_engine_worker(move || {
             let result = Self::run_engine_native(
                 &app_path_for_thread,
                 &config_for_thread,
@@ -1732,7 +1761,17 @@ impl EngineDispatcher {
                 telemetry_handle,
             );
             let _ = result_tx.send(result);
-        });
+        }) {
+            Ok(execution_thread) => execution_thread,
+            Err(error) => {
+                // A failed worker launch cannot produce a result or panic signal.
+                // Restore the process hook before returning through the same
+                // actionable, fail-closed dispatch channel as execution failures.
+                panic::set_hook(original_hook);
+                let dispatch_error = native_engine_worker_spawn_error(app_path_buf, &error);
+                return Err(dispatch_error.to_actionable().into());
+            }
+        };
 
         let start_time = Instant::now();
         let result = loop {
@@ -2957,6 +2996,106 @@ mod tests {
     };
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_l3c75_native_engine_worker_has_explicit_stack_and_name() {
+        use std::sync::mpsc;
+
+        assert_eq!(NATIVE_ENGINE_WORKER_STACK_BYTES, 8 * 1024 * 1024);
+
+        let (thread_name_tx, thread_name_rx) = mpsc::channel();
+        let worker = spawn_native_engine_worker(move || {
+            let thread_name = thread::current().name().map(str::to_owned);
+            thread_name_tx
+                .send(thread_name)
+                .expect("test receiver remains connected");
+        })
+        .expect("explicitly configured native worker should spawn");
+
+        assert_eq!(
+            thread_name_rx.recv().expect("worker reports its name"),
+            Some(NATIVE_ENGINE_WORKER_NAME.to_string())
+        );
+        worker
+            .join()
+            .expect("native worker completes without panic");
+
+        // `Builder::stack_size` takes precedence over the ambient
+        // `RUST_MIN_STACK` fallback used by plain `thread::spawn`; this test does
+        // not need to mutate process-wide environment state to prove the worker
+        // path selects the fixed, bounded configuration above.
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_l3c75_native_worker_keeps_timeout_monitor_non_blocking() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = spawn_native_engine_worker(move || {
+            started_tx
+                .send(())
+                .expect("test receiver remains connected");
+            release_rx.recv().expect("test releases worker");
+            result_tx
+                .send("completed")
+                .expect("test receiver remains connected");
+        })
+        .expect("explicitly configured native worker should spawn");
+
+        started_rx.recv().expect("worker reports startup");
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_millis(1)),
+            Err(RecvTimeoutError::Timeout),
+            "worker construction must leave the dispatch monitor free to enforce timeouts"
+        );
+
+        release_tx.send(()).expect("release worker");
+        assert_eq!(
+            result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("worker reports completion"),
+            "completed"
+        );
+        worker
+            .join()
+            .expect("native worker completes without panic");
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_l3c75_worker_spawn_failure_is_actionable_and_fail_closed() {
+        let app_path = PathBuf::from("/fixture/deep-http.js");
+        let error = io::Error::other("synthetic thread resource exhaustion");
+        let dispatch_error = native_engine_worker_spawn_error(app_path.clone(), &error);
+
+        assert!(matches!(
+            dispatch_error,
+            EngineDispatchError::EngineExecutionError { .. }
+        ));
+        if let EngineDispatchError::EngineExecutionError {
+            app_path: mapped_path,
+            error_message,
+            phase,
+        } = &dispatch_error
+        {
+            assert_eq!(mapped_path, &app_path);
+            assert_eq!(phase, "worker startup");
+            assert!(error_message.contains(NATIVE_ENGINE_WORKER_NAME));
+            assert!(error_message.contains("8388608-byte stack"));
+            assert!(error_message.contains("system thread and memory limits"));
+        }
+
+        let actionable = dispatch_error.to_actionable();
+        let rendered = actionable.to_string();
+        assert!(rendered.contains("worker startup"));
+        assert!(rendered.contains("synthetic thread resource exhaustion"));
+        assert!(rendered.contains("deep-http.js"));
+    }
 
     #[cfg(feature = "engine")]
     #[test]
