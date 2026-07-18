@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "http",
   "description": "Genuine lockstep compatibility fixtures: HTTP client/server request-response semantics over loopback.",
-  "investigation_bead_id": "bd-j6i56",
+  "investigation_bead_id": "bd-l3c75",
   "lockstep": {
     "runtimes": [
       "bun",
