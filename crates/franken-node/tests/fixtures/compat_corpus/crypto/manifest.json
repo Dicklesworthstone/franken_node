@@ -2,7 +2,7 @@
   "schema_version": "compat-corpus-fixture-v1",
   "api_family": "crypto",
   "description": "Genuine lockstep compatibility fixtures: hashing, HMAC, ciphers, KDFs, and randomness predicates.",
-  "investigation_bead_id": "bd-c36e6",
+  "investigation_bead_id": "bd-y4t2i",
   "lockstep": {
     "runtimes": [
       "bun",

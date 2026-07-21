@@ -4,11 +4,11 @@
   "section": "13",
   "trace_id": "trace-bd-28sz-corpus-gate",
   "corpus": {
-    "corpus_version": "compat-corpus-v2-1cac0ed998e81fe622a8e5281aeb838d",
+    "corpus_version": "compat-corpus-v2-9c8cffef8f21e2a36bf46e057d4fa29e",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-18T21:36:32.197980096+00:00",
-    "result_digest": "sha256:02f9e9cca1b66cbb41eb5014187cafa7bd95c0a28f61a97363801960a5248c1c",
+    "generated_at_utc": "2026-07-21T23:48:43.640180029+00:00",
+    "result_digest": "sha256:0fbf670336ab96aa6a713c6aaba8e566bfdb2d32a5bcdce7af0560abbbf8981a",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
     "policy_mode": "legacy-risky",
@@ -26,38 +26,38 @@
   },
   "totals": {
     "total_test_cases": 560,
-    "passed_test_cases": 445,
-    "failed_test_cases": 115,
+    "passed_test_cases": 468,
+    "failed_test_cases": 92,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 79.46
+    "overall_pass_rate_pct": 83.57
   },
   "bands": [
     {
       "band": "core",
       "total": 254,
-      "passed": 203,
-      "pass_rate_pct": 79.92
+      "passed": 220,
+      "pass_rate_pct": 86.61
     },
     {
       "band": "edge",
       "total": 56,
-      "passed": 44,
-      "pass_rate_pct": 78.57
+      "passed": 40,
+      "pass_rate_pct": 71.43
     },
     {
       "band": "high-value",
       "total": 250,
-      "passed": 198,
-      "pass_rate_pct": 79.2
+      "passed": 208,
+      "pass_rate_pct": 83.2
     }
   ],
   "api_families": [
     {
       "family": "buffer",
       "total": 30,
-      "passed": 30,
-      "pass_rate_pct": 100.0
+      "passed": 28,
+      "pass_rate_pct": 93.33
     },
     {
       "family": "child_process",
@@ -74,20 +74,20 @@
     {
       "family": "crypto",
       "total": 45,
-      "passed": 0,
-      "pass_rate_pct": 0.0
+      "passed": 32,
+      "pass_rate_pct": 71.11
     },
     {
       "family": "events",
       "total": 30,
-      "passed": 26,
-      "pass_rate_pct": 86.67
+      "passed": 25,
+      "pass_rate_pct": 83.33
     },
     {
       "family": "fs",
       "total": 50,
-      "passed": 44,
-      "pass_rate_pct": 88.0
+      "passed": 39,
+      "pass_rate_pct": 78.0
     },
     {
       "family": "http",
@@ -122,8 +122,8 @@
     {
       "family": "stream",
       "total": 65,
-      "passed": 54,
-      "pass_rate_pct": 83.08
+      "passed": 53,
+      "pass_rate_pct": 81.54
     },
     {
       "family": "timers",
@@ -345,7 +345,7 @@
       "api_family": "buffer",
       "band": "edge",
       "risk_band": "medium",
-      "status": "pass"
+      "status": "fail"
     },
     {
       "test_id": "tc::buffer::0029",
@@ -359,7 +359,7 @@
       "api_family": "buffer",
       "band": "edge",
       "risk_band": "high",
-      "status": "pass"
+      "status": "fail"
     },
     {
       "test_id": "tc::child_process::0001",
@@ -716,98 +716,98 @@
       "api_family": "crypto",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0002",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0003",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0004",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0005",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0006",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0007",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0008",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0009",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0010",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0011",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0012",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0013",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0014",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0015",
@@ -821,42 +821,42 @@
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0017",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0018",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0019",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0020",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0021",
       "api_family": "crypto",
       "band": "edge",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0022",
@@ -870,7 +870,7 @@
       "api_family": "crypto",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0024",
@@ -919,14 +919,14 @@
       "api_family": "crypto",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0031",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0032",
@@ -940,7 +940,7 @@
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0034",
@@ -954,42 +954,42 @@
       "api_family": "crypto",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0036",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0037",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0038",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0039",
       "api_family": "crypto",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0040",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0041",
@@ -1017,14 +1017,14 @@
       "api_family": "crypto",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0045",
       "api_family": "crypto",
       "band": "edge",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::events::0001",
@@ -1143,7 +1143,7 @@
       "api_family": "events",
       "band": "edge",
       "risk_band": "critical",
-      "status": "pass"
+      "status": "fail"
     },
     {
       "test_id": "tc::events::0018",
@@ -1451,35 +1451,35 @@
       "api_family": "fs",
       "band": "edge",
       "risk_band": "high",
-      "status": "pass"
+      "status": "fail"
     },
     {
       "test_id": "tc::fs::0032",
       "api_family": "fs",
       "band": "edge",
       "risk_band": "medium",
-      "status": "pass"
+      "status": "fail"
     },
     {
       "test_id": "tc::fs::0033",
       "api_family": "fs",
       "band": "edge",
       "risk_band": "medium",
-      "status": "pass"
+      "status": "fail"
     },
     {
       "test_id": "tc::fs::0034",
       "api_family": "fs",
       "band": "edge",
       "risk_band": "medium",
-      "status": "pass"
+      "status": "fail"
     },
     {
       "test_id": "tc::fs::0035",
       "api_family": "fs",
       "band": "edge",
       "risk_band": "low",
-      "status": "pass"
+      "status": "fail"
     },
     {
       "test_id": "tc::fs::0036",
@@ -3236,7 +3236,7 @@
       "api_family": "stream",
       "band": "high-value",
       "risk_band": "high",
-      "status": "pass"
+      "status": "fail"
     },
     {
       "test_id": "tc::stream::0062",
@@ -4074,6 +4074,20 @@
   ],
   "failing_tests_tracking": [
     {
+      "test_id": "tc::buffer::0028",
+      "api_family": "buffer",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 18: TopSecret -> Internal (artifact_id=sha256:f4a490a7cd56895370192bd887fdf21643b7e",
+      "investigation_bead_id": "bd-8qvy6",
+      "investigation_status": "open"
+    },
+    {
+      "test_id": "tc::buffer::0030",
+      "api_family": "buffer",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 21: TopSecret -> Internal (artifact_id=sha256:324a0726c9525b0df463adb6d97f8ab0919f3",
+      "investigation_bead_id": "bd-8qvy6",
+      "investigation_status": "open"
+    },
+    {
       "test_id": "tc::child_process::0001",
       "api_family": "child_process",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
@@ -4305,324 +4319,107 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::crypto::0001",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0002",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0003",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0004",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0005",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0006",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0007",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0008",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0009",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0010",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0011",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0012",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0013",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0014",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::crypto::0015",
       "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0016",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0017",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0018",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0019",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0020",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0021",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 5: Secret -> Internal (artifact_id=sha256:6e17db537afa1eff61c3921979b9060209a24c451",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0022",
       "api_family": "crypto",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0023",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0024",
       "api_family": "crypto",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0025",
       "api_family": "crypto",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0026",
       "api_family": "crypto",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0027",
       "api_family": "crypto",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0028",
       "api_family": "crypto",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0029",
       "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0030",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0031",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 8: Secret -> Internal (artifact_id=sha256:7e157d60fb2591d4e4ddd1128a3e28ec2d2311b50",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0032",
       "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0033",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 6: Secret -> Internal (artifact_id=sha256:e07af1a27c2c70bdf5ace2d57a57dee320104db49",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0034",
       "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0035",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0036",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0037",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0038",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0039",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0040",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 26: Secret -> Internal (artifact_id=sha256:3330dd01404618f8458505fa456084ad76ae91d7",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0041",
       "api_family": "crypto",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0042",
       "api_family": "crypto",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0043",
       "api_family": "crypto",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0044",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0045",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-c36e6",
+      "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::events::0003",
       "api_family": "events",
       "reason": "lockstep divergence: output mismatch vs bun reference",
+      "investigation_bead_id": "bd-asw4m",
+      "investigation_status": "open"
+    },
+    {
+      "test_id": "tc::events::0017",
+      "api_family": "events",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 26: TopSecret -> Internal (artifact_id=sha256:80ee50e7a21501cb8b3495add1c6e724fdf2d",
       "investigation_bead_id": "bd-asw4m",
       "investigation_status": "open"
     },
@@ -4676,6 +4473,41 @@
       "investigation_status": "open"
     },
     {
+      "test_id": "tc::fs::0031",
+      "api_family": "fs",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 17: TopSecret -> Internal (artifact_id=sha256:fb98c7871de11895a3d8227ca3c0ef1e9f6e9",
+      "investigation_bead_id": "bd-zco6t",
+      "investigation_status": "open"
+    },
+    {
+      "test_id": "tc::fs::0032",
+      "api_family": "fs",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 21: TopSecret -> Internal (artifact_id=sha256:c99361a2313c864fb81a69fe033da81ac67a7",
+      "investigation_bead_id": "bd-zco6t",
+      "investigation_status": "open"
+    },
+    {
+      "test_id": "tc::fs::0033",
+      "api_family": "fs",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 21: TopSecret -> Internal (artifact_id=sha256:8ede5b42c5966dd97e03bba4ee2378a97ecdb",
+      "investigation_bead_id": "bd-zco6t",
+      "investigation_status": "open"
+    },
+    {
+      "test_id": "tc::fs::0034",
+      "api_family": "fs",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 20: TopSecret -> Internal (artifact_id=sha256:076f10c20ed68737c2922988d9621b0ea0817",
+      "investigation_bead_id": "bd-zco6t",
+      "investigation_status": "open"
+    },
+    {
+      "test_id": "tc::fs::0035",
+      "api_family": "fs",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 17: TopSecret -> Internal (artifact_id=sha256:e77f488ffad694c00af6c4040e8717fd24745",
+      "investigation_bead_id": "bd-zco6t",
+      "investigation_status": "open"
+    },
+    {
       "test_id": "tc::fs::0044",
       "api_family": "fs",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
@@ -4721,6 +4553,13 @@
       "test_id": "tc::stream::0053",
       "api_family": "stream",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected top-level await to settle before the event loop became idle, got pending module Promise with",
+      "investigation_bead_id": "bd-m8vaa.1",
+      "investigation_status": "open"
+    },
+    {
+      "test_id": "tc::stream::0061",
+      "api_family": "stream",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 67: TopSecret -> Internal (artifact_id=sha256:124a6b60e4252c6a02194f7b562eb4c4661ab",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
@@ -4881,7 +4720,7 @@
   ],
   "previous_release": {
     "release_version": "0.1.0",
-    "overall_pass_rate_pct": 79.29,
+    "overall_pass_rate_pct": 81.79,
     "corpus_version": "compat-corpus-v2-1cac0ed998e81fe622a8e5281aeb838d"
   },
   "ci_gate": {
@@ -4890,7 +4729,7 @@
     "threshold_met": false,
     "release_blocked": true,
     "regression_detected": false,
-    "release_blocked_reason": "genuine lockstep-oracle-run measured 79.46% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, crypto 0.00%]"
+    "release_blocked_reason": "genuine lockstep-oracle-run measured 83.57% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, crypto 71.11%, fs 78.00%]"
   },
   "reproducibility": {
     "deterministic_seed": "compat-corpus-generator-v1",
