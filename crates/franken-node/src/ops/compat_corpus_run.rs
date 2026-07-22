@@ -74,6 +74,8 @@ const DEFAULT_FAMILY_FLOOR_PCT: f64 = 80.0;
 const DEFAULT_BAND_FLOORS: [(&str, f64); 3] =
     [("core", 99.0), ("edge", 90.0), ("high-value", 95.0)];
 const TRACKING_REASON_MAX_CHARS: usize = 200;
+#[cfg(feature = "engine")]
+const NODE_NO_WARNINGS_ENV: &str = "NODE_NO_WARNINGS";
 
 /// One case entry in a family manifest.
 #[derive(Clone, Debug, Deserialize)]
@@ -86,6 +88,11 @@ pub struct CorpusCaseSpec {
     pub requirement: Option<String>,
     pub band: String,
     pub risk_band: String,
+    /// Suppress runtime-generated warnings for a fixture whose requirement is
+    /// intentionally limited to guest output/exit behavior. This is opt-in so
+    /// warning-bearing cases remain byte-compared by default.
+    #[serde(default)]
+    pub suppress_runtime_warnings: bool,
 }
 
 /// One per-family corpus fixture manifest (`compat-corpus-fixture-v1`).
@@ -105,6 +112,7 @@ pub struct ResolvedCase {
     pub api_family: String,
     pub band: String,
     pub risk_band: String,
+    pub suppress_runtime_warnings: bool,
     pub source_path: PathBuf,
     pub investigation_bead_id: Option<String>,
 }
@@ -428,6 +436,7 @@ fn capture_corpus_with_probe(
                     api_family: manifest.api_family.clone(),
                     band: case.band.clone(),
                     risk_band: case.risk_band.clone(),
+                    suppress_runtime_warnings: case.suppress_runtime_warnings,
                     source_path: corpus_root.join(&corpus_relative_path),
                     investigation_bead_id: manifest.investigation_bead_id.clone(),
                 },
@@ -1177,6 +1186,21 @@ fn drain_capped(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle
     })
 }
 
+/// Apply a fixture's explicit runtime-warning policy without weakening guest
+/// stderr comparison. Node and Bun warnings can embed each leg's distinct
+/// sandbox path, so a case whose contract excludes those warnings can opt out.
+/// Guest `console.error` and explicit stderr writes remain compared verbatim.
+#[cfg(feature = "engine")]
+fn configure_runtime_leg_environment(command: &mut Command, suppress_runtime_warnings: bool) {
+    if suppress_runtime_warnings {
+        command.env(NODE_NO_WARNINGS_ENV, "1");
+    } else {
+        // Do not let the operator's launch environment silently widen this
+        // fixture-scoped exception to the rest of the corpus.
+        command.env_remove(NODE_NO_WARNINGS_ENV);
+    }
+}
+
 #[cfg(feature = "engine")]
 fn run_leg(mut command: Command, timeout: Duration) -> Result<LegCapture> {
     let mut child = command
@@ -1336,6 +1360,7 @@ pub fn run_corpus(
         bun_cmd
             .arg(&snapshot_case.staged_relative_path)
             .current_dir(bun_dir.path());
+        configure_runtime_leg_environment(&mut bun_cmd, case.suppress_runtime_warnings);
         let bun_leg = run_leg(bun_cmd, case_timeout)
             .with_context(|| format!("bun leg failed to launch for case `{}`", case.test_id))?;
 
@@ -1357,6 +1382,7 @@ pub fn run_corpus(
             .arg("--engine-bin")
             .arg(&current_exe)
             .current_dir(franken_dir.path());
+        configure_runtime_leg_environment(&mut franken_cmd, case.suppress_runtime_warnings);
         let franken_leg = run_leg(franken_cmd, case_timeout)
             .with_context(|| format!("franken leg failed to launch for case `{}`", case.test_id))?;
 
@@ -1998,6 +2024,7 @@ mod snapshot_staging_tests {
         std::fs::write(&support_path, b"export const value = 'after';\n").expect("mutate support");
 
         let snapshot_case = snapshot.cases.first().expect("snapshot case");
+        assert!(!snapshot_case.case.suppress_runtime_warnings);
         let family = snapshot.families.get("stream").expect("snapshot family");
         let bun_leg = tempfile::TempDir::new().expect("bun leg tempdir");
         let franken_leg = tempfile::TempDir::new().expect("franken leg tempdir");
@@ -2015,6 +2042,65 @@ mod snapshot_staging_tests {
             assert_eq!(franken_bytes, expected);
             assert_eq!(bun_bytes, franken_bytes);
         }
+    }
+
+    #[test]
+    fn runtime_warning_suppression_is_fixture_scoped_and_opt_in() {
+        let mut default_command = Command::new("fixture-runtime");
+        configure_runtime_leg_environment(&mut default_command, false);
+        let default_warning_setting = default_command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(NODE_NO_WARNINGS_ENV));
+        assert_eq!(
+            default_warning_setting,
+            Some((std::ffi::OsStr::new(NODE_NO_WARNINGS_ENV), None))
+        );
+
+        let mut suppressed_command = Command::new("fixture-runtime");
+        configure_runtime_leg_environment(&mut suppressed_command, true);
+
+        let warning_setting = suppressed_command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(NODE_NO_WARNINGS_ENV))
+            .and_then(|(_, value)| value);
+        assert_eq!(warning_setting, Some(std::ffi::OsStr::new("1")));
+        assert!(
+            suppressed_command
+                .get_envs()
+                .all(|(key, _)| key == std::ffi::OsStr::new(NODE_NO_WARNINGS_ENV)),
+            "the fixture opt-out must not inject unrelated guest-visible environment"
+        );
+    }
+
+    #[test]
+    fn fixture_warning_policy_is_captured_from_the_manifest() {
+        let corpus = tempfile::TempDir::new().expect("corpus tempdir");
+        std::fs::create_dir_all(corpus.path().join("timers")).expect("create family");
+        std::fs::write(
+            corpus.path().join("timers/case.js"),
+            "setTimeout(() => console.log('fired'), -1);\n",
+        )
+        .expect("write warning fixture");
+        std::fs::write(
+            corpus.path().join("timers/manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema_version": CORPUS_FIXTURE_SCHEMA_VERSION,
+                "api_family": "timers",
+                "cases": [{
+                    "id": "tc::timers::warning-policy",
+                    "file": "case.js",
+                    "band": "edge",
+                    "risk_band": "low",
+                    "suppress_runtime_warnings": true
+                }]
+            }))
+            .expect("serialize warning manifest"),
+        )
+        .expect("write warning manifest");
+
+        let snapshot = capture_corpus(corpus.path()).expect("capture warning-policy corpus");
+        let case = snapshot.resolved_cases().next().expect("captured case");
+        assert!(case.suppress_runtime_warnings);
     }
 
     #[test]
@@ -2039,20 +2125,22 @@ mod snapshot_staging_tests {
         let displaced_path = corpus.path().join("stream/case.before-open.mjs");
         let triggered = Rc::new(Cell::new(false));
         let probe_triggered = Rc::clone(&triggered);
-        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
-            if !probe_triggered.get()
-                && phase == TestCapturePhase::AfterStatBeforeOpen
-                && kind == CaptureKind::Case
-                && relative_path == Path::new("stream/case.mjs")
-            {
-                std::fs::rename(&case_path, &displaced_path)
-                    .context("displace case after descriptor-relative stat")?;
-                std::fs::write(&case_path, b"console.log('replacement');\n")
-                    .context("replace case before descriptor-relative open")?;
-                probe_triggered.set(true);
-            }
-            Ok(())
-        });
+        let mut probe = TestCaptureProbe(
+            move |phase: TestCapturePhase, kind: CaptureKind, relative_path: &Path| {
+                if !probe_triggered.get()
+                    && phase == TestCapturePhase::AfterStatBeforeOpen
+                    && kind == CaptureKind::Case
+                    && relative_path == Path::new("stream/case.mjs")
+                {
+                    std::fs::rename(&case_path, &displaced_path)
+                        .context("displace case after descriptor-relative stat")?;
+                    std::fs::write(&case_path, b"console.log('replacement');\n")
+                        .context("replace case before descriptor-relative open")?;
+                    probe_triggered.set(true);
+                }
+                Ok(())
+            },
+        );
 
         let error = capture_corpus_with_probe(corpus.path(), &mut probe)
             .expect_err("inode replacement must fail closed");
@@ -2079,19 +2167,21 @@ mod snapshot_staging_tests {
         let displaced_path = corpus.path().join("stream/case.before-symlink.mjs");
         let reached_open = Rc::new(Cell::new(false));
         let probe_reached_open = Rc::clone(&reached_open);
-        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
-            if kind == CaptureKind::Case && relative_path == Path::new("stream/case.mjs") {
-                if phase == TestCapturePhase::AfterStatBeforeOpen {
-                    std::fs::rename(&case_path, &displaced_path)
-                        .context("displace case before symlink substitution")?;
-                    symlink(&outside_path, &case_path)
-                        .context("substitute outside symlink before open")?;
-                } else if phase == TestCapturePhase::AfterOpenBeforeRead {
-                    probe_reached_open.set(true);
+        let mut probe = TestCaptureProbe(
+            move |phase: TestCapturePhase, kind: CaptureKind, relative_path: &Path| {
+                if kind == CaptureKind::Case && relative_path == Path::new("stream/case.mjs") {
+                    if phase == TestCapturePhase::AfterStatBeforeOpen {
+                        std::fs::rename(&case_path, &displaced_path)
+                            .context("displace case before symlink substitution")?;
+                        symlink(&outside_path, &case_path)
+                            .context("substitute outside symlink before open")?;
+                    } else if phase == TestCapturePhase::AfterOpenBeforeRead {
+                        probe_reached_open.set(true);
+                    }
                 }
-            }
-            Ok(())
-        });
+                Ok(())
+            },
+        );
 
         let error = capture_corpus_with_probe(corpus.path(), &mut probe)
             .expect_err("symlink substitution must fail closed");
@@ -2123,24 +2213,26 @@ mod snapshot_staging_tests {
         let transient_link_path = corpus.path().join("stream/case.transient-link.mjs");
         let probe_state = Rc::new(Cell::new(0_u8));
         let observed_state = Rc::clone(&probe_state);
-        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
-            if kind == CaptureKind::Case && relative_path == Path::new("stream/case.mjs") {
-                if probe_state.get() == 0 && phase == TestCapturePhase::AfterOpenBeforeRead {
-                    std::fs::rename(&case_path, &displaced_path)
-                        .context("displace case after descriptor open")?;
-                    symlink(&outside_path, &case_path)
-                        .context("replace ambient case path after descriptor open")?;
-                    probe_state.set(1);
-                } else if probe_state.get() == 1 && phase == TestCapturePhase::AfterFirstRead {
-                    std::fs::rename(&case_path, &transient_link_path)
-                        .context("move transient symlink before restoring case path")?;
-                    std::fs::rename(&displaced_path, &case_path)
-                        .context("restore original case path after first descriptor read")?;
-                    probe_state.set(2);
+        let mut probe = TestCaptureProbe(
+            move |phase: TestCapturePhase, kind: CaptureKind, relative_path: &Path| {
+                if kind == CaptureKind::Case && relative_path == Path::new("stream/case.mjs") {
+                    if probe_state.get() == 0 && phase == TestCapturePhase::AfterOpenBeforeRead {
+                        std::fs::rename(&case_path, &displaced_path)
+                            .context("displace case after descriptor open")?;
+                        symlink(&outside_path, &case_path)
+                            .context("replace ambient case path after descriptor open")?;
+                        probe_state.set(1);
+                    } else if probe_state.get() == 1 && phase == TestCapturePhase::AfterFirstRead {
+                        std::fs::rename(&case_path, &transient_link_path)
+                            .context("move transient symlink before restoring case path")?;
+                        std::fs::rename(&displaced_path, &case_path)
+                            .context("restore original case path after first descriptor read")?;
+                        probe_state.set(2);
+                    }
                 }
-            }
-            Ok(())
-        });
+                Ok(())
+            },
+        );
 
         let snapshot = capture_corpus_with_probe(corpus.path(), &mut probe)
             .expect("the already-opened descriptor remains authoritative");
@@ -2168,20 +2260,22 @@ mod snapshot_staging_tests {
             .expect("write original support");
         let triggered = Rc::new(Cell::new(false));
         let probe_triggered = Rc::clone(&triggered);
-        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
-            if !probe_triggered.get()
-                && phase == TestCapturePhase::AfterStatBeforeOpen
-                && kind == CaptureKind::Support
-                && relative_path == Path::new("stream/_support.mjs")
-            {
-                std::fs::rename(&support_path, &displaced_path)
-                    .context("displace support after descriptor-relative stat")?;
-                std::fs::write(&support_path, b"export const value = 'replacement';\n")
-                    .context("replace support before descriptor-relative open")?;
-                probe_triggered.set(true);
-            }
-            Ok(())
-        });
+        let mut probe = TestCaptureProbe(
+            move |phase: TestCapturePhase, kind: CaptureKind, relative_path: &Path| {
+                if !probe_triggered.get()
+                    && phase == TestCapturePhase::AfterStatBeforeOpen
+                    && kind == CaptureKind::Support
+                    && relative_path == Path::new("stream/_support.mjs")
+                {
+                    std::fs::rename(&support_path, &displaced_path)
+                        .context("displace support after descriptor-relative stat")?;
+                    std::fs::write(&support_path, b"export const value = 'replacement';\n")
+                        .context("replace support before descriptor-relative open")?;
+                    probe_triggered.set(true);
+                }
+                Ok(())
+            },
+        );
 
         let error = capture_corpus_with_probe(corpus.path(), &mut probe)
             .expect_err("support inode replacement must fail closed");
@@ -2206,22 +2300,24 @@ mod snapshot_staging_tests {
         let root_for_probe = corpus_root.clone();
         let triggered = Rc::new(Cell::new(false));
         let probe_triggered = Rc::clone(&triggered);
-        let mut probe = TestCaptureProbe(move |phase, kind, observed_root| {
-            if !probe_triggered.get()
-                && phase == TestCapturePhase::AfterRootOpen
-                && kind == CaptureKind::Root
-                && observed_root == root_for_probe
-            {
-                std::fs::rename(&root_for_probe, &displaced_root)
-                    .context("displace corpus root after descriptor open")?;
-                std::fs::create_dir_all(&root_for_probe)
-                    .context("create ambient replacement corpus root")?;
-                std::fs::write(root_for_probe.join("decoy.txt"), b"ambient replacement\n")
-                    .context("write replacement-root marker")?;
-                probe_triggered.set(true);
-            }
-            Ok(())
-        });
+        let mut probe = TestCaptureProbe(
+            move |phase: TestCapturePhase, kind: CaptureKind, observed_root: &Path| {
+                if !probe_triggered.get()
+                    && phase == TestCapturePhase::AfterRootOpen
+                    && kind == CaptureKind::Root
+                    && observed_root == root_for_probe
+                {
+                    std::fs::rename(&root_for_probe, &displaced_root)
+                        .context("displace corpus root after descriptor open")?;
+                    std::fs::create_dir_all(&root_for_probe)
+                        .context("create ambient replacement corpus root")?;
+                    std::fs::write(root_for_probe.join("decoy.txt"), b"ambient replacement\n")
+                        .context("write replacement-root marker")?;
+                    probe_triggered.set(true);
+                }
+                Ok(())
+            },
+        );
 
         let snapshot = capture_corpus_with_probe(&corpus_root, &mut probe)
             .expect("the pinned root descriptor remains authoritative");
@@ -2243,18 +2339,20 @@ mod snapshot_staging_tests {
         let case_path = corpus.path().join("stream/case.mjs");
         let triggered = Rc::new(Cell::new(false));
         let probe_triggered = Rc::clone(&triggered);
-        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
-            if !probe_triggered.get()
-                && phase == TestCapturePhase::AfterFirstRead
-                && kind == CaptureKind::Case
-                && relative_path == Path::new("stream/case.mjs")
-            {
-                std::fs::write(&case_path, b"changed during descriptor read\n")
-                    .context("mutate case after first descriptor read")?;
-                probe_triggered.set(true);
-            }
-            Ok(())
-        });
+        let mut probe = TestCaptureProbe(
+            move |phase: TestCapturePhase, kind: CaptureKind, relative_path: &Path| {
+                if !probe_triggered.get()
+                    && phase == TestCapturePhase::AfterFirstRead
+                    && kind == CaptureKind::Case
+                    && relative_path == Path::new("stream/case.mjs")
+                {
+                    std::fs::write(&case_path, b"changed during descriptor read\n")
+                        .context("mutate case after first descriptor read")?;
+                    probe_triggered.set(true);
+                }
+                Ok(())
+            },
+        );
 
         let error = capture_corpus_with_probe(corpus.path(), &mut probe)
             .expect_err("in-place mutation must fail closed");
@@ -2277,20 +2375,22 @@ mod snapshot_staging_tests {
         let original_manifest = std::fs::read(&manifest_path).expect("read original manifest");
         let triggered = Rc::new(Cell::new(false));
         let probe_triggered = Rc::clone(&triggered);
-        let mut probe = TestCaptureProbe(move |phase, kind, relative_path| {
-            if !probe_triggered.get()
-                && phase == TestCapturePhase::AfterStatBeforeOpen
-                && kind == CaptureKind::Manifest
-                && relative_path == Path::new("stream/manifest.json")
-            {
-                std::fs::rename(&manifest_path, &displaced_path)
-                    .context("displace manifest after descriptor-relative stat")?;
-                std::fs::write(&manifest_path, &original_manifest)
-                    .context("replace manifest before descriptor-relative open")?;
-                probe_triggered.set(true);
-            }
-            Ok(())
-        });
+        let mut probe = TestCaptureProbe(
+            move |phase: TestCapturePhase, kind: CaptureKind, relative_path: &Path| {
+                if !probe_triggered.get()
+                    && phase == TestCapturePhase::AfterStatBeforeOpen
+                    && kind == CaptureKind::Manifest
+                    && relative_path == Path::new("stream/manifest.json")
+                {
+                    std::fs::rename(&manifest_path, &displaced_path)
+                        .context("displace manifest after descriptor-relative stat")?;
+                    std::fs::write(&manifest_path, &original_manifest)
+                        .context("replace manifest before descriptor-relative open")?;
+                    probe_triggered.set(true);
+                }
+                Ok(())
+            },
+        );
 
         let error = capture_corpus_with_probe(corpus.path(), &mut probe)
             .expect_err("manifest inode replacement must fail closed");

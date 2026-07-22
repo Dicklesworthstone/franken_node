@@ -238,6 +238,7 @@
       "file": "0019_timers_settimeout.js",
       "api": "timers.setTimeout",
       "requirement": "A negative delay is clamped and the callback still fires promptly.",
+      "suppress_runtime_warnings": true,
       "divergence_axes": [
         "output",
         "exit"
@@ -250,6 +251,7 @@
       "file": "0020_timers_settimeout.js",
       "api": "timers.setTimeout",
       "requirement": "A NaN delay is clamped and the callback still fires promptly.",
+      "suppress_runtime_warnings": true,
       "divergence_axes": [
         "output",
         "exit"

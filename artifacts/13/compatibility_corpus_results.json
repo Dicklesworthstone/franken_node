@@ -4,11 +4,11 @@
   "section": "13",
   "trace_id": "trace-bd-28sz-corpus-gate",
   "corpus": {
-    "corpus_version": "compat-corpus-v2-9c8cffef8f21e2a36bf46e057d4fa29e",
+    "corpus_version": "compat-corpus-v2-7b86e9d21758c6d06b8ae0cbc4d79c1b",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-21T23:48:43.640180029+00:00",
-    "result_digest": "sha256:0fbf670336ab96aa6a713c6aaba8e566bfdb2d32a5bcdce7af0560abbbf8981a",
+    "generated_at_utc": "2026-07-22T09:24:36.177520747+00:00",
+    "result_digest": "sha256:5980941c47e88945e15b4aeffde405e725b930f733b9738e8378878830aa7c03",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
     "policy_mode": "legacy-risky",
@@ -26,24 +26,24 @@
   },
   "totals": {
     "total_test_cases": 560,
-    "passed_test_cases": 468,
-    "failed_test_cases": 92,
+    "passed_test_cases": 472,
+    "failed_test_cases": 88,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 83.57
+    "overall_pass_rate_pct": 84.29
   },
   "bands": [
     {
       "band": "core",
       "total": 254,
-      "passed": 220,
-      "pass_rate_pct": 86.61
+      "passed": 221,
+      "pass_rate_pct": 87.01
     },
     {
       "band": "edge",
       "total": 56,
-      "passed": 40,
-      "pass_rate_pct": 71.43
+      "passed": 43,
+      "pass_rate_pct": 76.79
     },
     {
       "band": "high-value",
@@ -80,8 +80,8 @@
     {
       "family": "events",
       "total": 30,
-      "passed": 25,
-      "pass_rate_pct": 83.33
+      "passed": 27,
+      "pass_rate_pct": 90.0
     },
     {
       "family": "fs",
@@ -128,8 +128,8 @@
     {
       "family": "timers",
       "total": 30,
-      "passed": 28,
-      "pass_rate_pct": 93.33
+      "passed": 30,
+      "pass_rate_pct": 100.0
     },
     {
       "family": "tls",
@@ -1045,7 +1045,7 @@
       "api_family": "events",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::events::0004",
@@ -1199,7 +1199,7 @@
       "api_family": "events",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::events::0026",
@@ -3397,14 +3397,14 @@
       "api_family": "timers",
       "band": "edge",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0020",
       "api_family": "timers",
       "band": "edge",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::timers::0021",
@@ -4410,13 +4410,6 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::events::0003",
-      "api_family": "events",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-asw4m",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::events::0017",
       "api_family": "events",
       "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 26: TopSecret -> Internal (artifact_id=sha256:80ee50e7a21501cb8b3495add1c6e724fdf2d",
@@ -4433,35 +4426,28 @@
     {
       "test_id": "tc::events::0024",
       "api_family": "events",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined",
-      "investigation_bead_id": "bd-asw4m",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::events::0025",
-      "api_family": "events",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined. telemetry bridge stopped after native execution failure in 85ms",
       "investigation_bead_id": "bd-asw4m",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::fs::0021",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 90ms",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::fs::0022",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 86ms",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::fs::0023",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 90ms",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
@@ -4510,14 +4496,14 @@
     {
       "test_id": "tc::fs::0044",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 86ms",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::fs::0045",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 90ms",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
@@ -4545,7 +4531,7 @@
     {
       "test_id": "tc::stream::0048",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected iterable, got object",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected iterable, got object. telemetry bridge stopped after native execution failure in 79ms",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
@@ -4559,14 +4545,14 @@
     {
       "test_id": "tc::stream::0061",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 67: TopSecret -> Internal (artifact_id=sha256:124a6b60e4252c6a02194f7b562eb4c4661ab",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 67: TopSecret -> Internal (artifact_id=sha256:7a5d0f97536eb1fc5df0707f39e902776dfbd",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0003",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected array or string source for Readable.from, got object",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected array or string source for Readable.from, got object. telemetry bridge stopped after native ",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
@@ -4580,7 +4566,7 @@
     {
       "test_id": "tc::stream::0024",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected iterable, got object",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected iterable, got object. telemetry bridge stopped after native execution failure in 92ms",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
@@ -4615,7 +4601,7 @@
     {
       "test_id": "tc::stream::0040",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected live Writable that has not ended, got write after end",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected live Writable that has not ended, got write after end. telemetry bridge stopped after native",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
@@ -4624,20 +4610,6 @@
       "api_family": "stream",
       "reason": "lockstep divergence: output mismatch vs bun reference",
       "investigation_bead_id": "bd-m8vaa.1",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0019",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7hdlv",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::timers::0020",
-      "api_family": "timers",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
-      "investigation_bead_id": "bd-7hdlv",
       "investigation_status": "open"
     },
     {
@@ -4650,7 +4622,7 @@
     {
       "test_id": "tc::tls::0008",
       "api_family": "tls",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 70ms",
       "investigation_bead_id": "bd-387cw",
       "investigation_status": "open"
     },
@@ -4664,7 +4636,7 @@
     {
       "test_id": "tc::tls::0022",
       "api_family": "tls",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 65ms",
       "investigation_bead_id": "bd-387cw",
       "investigation_status": "open"
     },
@@ -4720,8 +4692,8 @@
   ],
   "previous_release": {
     "release_version": "0.1.0",
-    "overall_pass_rate_pct": 81.79,
-    "corpus_version": "compat-corpus-v2-1cac0ed998e81fe622a8e5281aeb838d"
+    "overall_pass_rate_pct": 83.57,
+    "corpus_version": "compat-corpus-v2-9c8cffef8f21e2a36bf46e057d4fa29e"
   },
   "ci_gate": {
     "workflow_name": "compatibility-corpus-pass-gate",
@@ -4729,7 +4701,7 @@
     "threshold_met": false,
     "release_blocked": true,
     "regression_detected": false,
-    "release_blocked_reason": "genuine lockstep-oracle-run measured 83.57% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, crypto 71.11%, fs 78.00%]"
+    "release_blocked_reason": "genuine lockstep-oracle-run measured 84.29% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, crypto 71.11%, fs 78.00%]"
   },
   "reproducibility": {
     "deterministic_seed": "compat-corpus-generator-v1",

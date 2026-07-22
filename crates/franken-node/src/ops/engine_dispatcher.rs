@@ -13,6 +13,8 @@ use chrono::Utc;
 #[cfg(feature = "engine")]
 use frankenengine_engine::ast::ParseGoal;
 #[cfg(feature = "engine")]
+use frankenengine_engine::checkpoint::CancellationToken;
+#[cfg(feature = "engine")]
 use frankenengine_engine::execution_orchestrator::{
     ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
 };
@@ -20,11 +22,17 @@ use frankenengine_engine::execution_orchestrator::{
 use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
 #[cfg(feature = "engine")]
 use frankenengine_engine::runtime_config::RuntimeConfig as EngineRuntimeConfig;
+#[cfg(feature = "engine")]
+use frankenengine_extension_host::host_io::{
+    HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest,
+};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+#[cfg(feature = "engine")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -57,11 +65,242 @@ fn spawn_native_engine_worker(
 }
 
 #[cfg(feature = "engine")]
-fn native_engine_worker_spawn_error(app_path: PathBuf, error: &io::Error) -> EngineDispatchError {
+enum NativeEngineWorkerOutcome<T> {
+    Completed(T),
+    Panicked {
+        panic_message: String,
+        cleanup_successful: bool,
+    },
+}
+
+#[cfg(feature = "engine")]
+fn native_engine_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else {
+        "native engine worker panicked with a non-string payload".to_string()
+    }
+}
+
+#[cfg(feature = "engine")]
+fn spawn_caught_native_engine_worker<T: Send + 'static>(
+    cleanup_successful: Arc<AtomicBool>,
+    worker: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<(
+    thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<NativeEngineWorkerOutcome<T>>,
+)> {
+    let (outcome_tx, outcome_rx) = std::sync::mpsc::channel();
+    let worker = spawn_native_engine_worker(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(worker));
+        let outcome = match outcome {
+            Ok(result) => NativeEngineWorkerOutcome::Completed(result),
+            Err(payload) => NativeEngineWorkerOutcome::Panicked {
+                panic_message: native_engine_panic_message(payload.as_ref()),
+                cleanup_successful: cleanup_successful.load(Ordering::Acquire),
+            },
+        };
+        let _ = outcome_tx.send(outcome);
+    })?;
+    Ok((worker, outcome_rx))
+}
+
+/// Owns the telemetry workers until the native engine reaches a terminal path.
+///
+/// `TelemetryRuntimeHandle` deliberately has no implicit drop behavior. Native
+/// execution, however, can fail or unwind before its success-path drain. This
+/// guard makes every such path stop and join the listener/persistence workers;
+/// the shared flag lets the worker-local panic envelope report real cleanup.
+#[cfg(feature = "engine")]
+struct NativeTelemetryGuard {
+    handle: Option<TelemetryRuntimeHandle>,
+    cleanup_successful: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "engine")]
+impl NativeTelemetryGuard {
+    fn new(handle: TelemetryRuntimeHandle) -> Self {
+        Self {
+            handle: Some(handle),
+            cleanup_successful: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn cleanup_probe(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cleanup_successful)
+    }
+
+    fn stop_and_join(
+        mut self,
+        reason: ShutdownReason,
+    ) -> std::result::Result<TelemetryRuntimeReport, String> {
+        let handle = self
+            .handle
+            .take()
+            .ok_or_else(|| "native telemetry handle was already consumed".to_string())?;
+        let result = handle
+            .stop_and_join(reason)
+            .map_err(|error| error.to_string());
+        self.cleanup_successful
+            .store(result.is_ok(), Ordering::Release);
+        result
+    }
+}
+
+#[cfg(feature = "engine")]
+impl Drop for NativeTelemetryGuard {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let cleanup_successful = match handle.stop_and_join(ShutdownReason::Requested) {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::error!(
+                    execution_mode = "native",
+                    telemetry_error = %error,
+                    "Native telemetry cleanup failed during guard drop"
+                );
+                false
+            }
+        };
+        self.cleanup_successful
+            .store(cleanup_successful, Ordering::Release);
+    }
+}
+
+#[cfg(feature = "engine")]
+fn native_engine_spawn_error_with_telemetry_cleanup(
+    message: String,
+    telemetry_guard: &mut Option<NativeTelemetryGuard>,
+) -> EngineProcessError {
+    let Some(telemetry_guard) = telemetry_guard.take() else {
+        return EngineProcessError::Spawn {
+            message: format!(
+                "{message}. additionally failed to stop telemetry bridge: native telemetry guard was already consumed"
+            ),
+            telemetry_report: None,
+        };
+    };
+
+    match telemetry_guard.stop_and_join(ShutdownReason::Requested) {
+        Ok(report) if report.drain_completed => EngineProcessError::Spawn {
+            message: format!(
+                "{message}. telemetry bridge stopped after native execution failure in {}ms",
+                report.drain_duration_ms
+            ),
+            telemetry_report: Some(Box::new(report)),
+        },
+        Ok(report) => EngineProcessError::Spawn {
+            message: format!(
+                "{message}. telemetry bridge drain timed out after native execution failure in {}ms",
+                report.drain_duration_ms
+            ),
+            telemetry_report: Some(Box::new(report)),
+        },
+        Err(cleanup_error) => EngineProcessError::Spawn {
+            message: format!(
+                "{message}. additionally failed to stop telemetry bridge: {cleanup_error}"
+            ),
+            telemetry_report: None,
+        },
+    }
+}
+
+/// One run's cooperative cancellation signal plus the host-effect admission
+/// barrier that turns timeout into a quiescent trust boundary.
+#[cfg(feature = "engine")]
+#[derive(Clone, Debug)]
+struct NativeEngineCancellation {
+    token: CancellationToken,
+    effect_gate: Arc<Mutex<()>>,
+}
+
+#[cfg(feature = "engine")]
+impl NativeEngineCancellation {
+    fn new() -> Self {
+        Self {
+            token: CancellationToken::new(),
+            effect_gate: Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+
+    fn cancel_and_wait_for_effects(&self) {
+        self.token.cancel();
+        let effect_guard = self
+            .effect_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(effect_guard);
+    }
+}
+
+/// Outermost Host-I/O gate for one native run. An admitted effect holds the
+/// shared mutex through its synchronous provider call. Timeout first cancels
+/// the token and then crosses this mutex, so no effect can still be running or
+/// start after the supervisor returns its timeout result.
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+struct CancellationGatedHostIo {
+    inner: Arc<dyn HostIoProvider>,
+    cancellation: NativeEngineCancellation,
+}
+
+#[cfg(feature = "engine")]
+impl CancellationGatedHostIo {
+    fn new(inner: Arc<dyn HostIoProvider>, cancellation: NativeEngineCancellation) -> Self {
+        Self {
+            inner,
+            cancellation,
+        }
+    }
+}
+
+#[cfg(feature = "engine")]
+impl HostIoProvider for CancellationGatedHostIo {
+    fn name(&self) -> &str {
+        "native-cancellation-gate"
+    }
+
+    fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+        let _effect_guard = match self.cancellation.effect_gate.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(HostIoError::Denied {
+                    reason: "native engine effect gate is poisoned".to_string(),
+                });
+            }
+        };
+        if self.cancellation.token.is_cancelled() {
+            return Err(HostIoError::Denied {
+                reason: "native engine execution was cancelled".to_string(),
+            });
+        }
+        self.inner.perform(request, granted)
+    }
+}
+
+#[cfg(feature = "engine")]
+fn native_engine_worker_spawn_error(
+    app_path: PathBuf,
+    error: &io::Error,
+    telemetry_cleanup_successful: bool,
+) -> EngineDispatchError {
     EngineDispatchError::EngineExecutionError {
         app_path,
         error_message: format!(
-            "failed to spawn native engine worker `{NATIVE_ENGINE_WORKER_NAME}` with a {NATIVE_ENGINE_WORKER_STACK_BYTES}-byte stack: {error}; check system thread and memory limits"
+            "failed to spawn native engine worker `{NATIVE_ENGINE_WORKER_NAME}` with a {NATIVE_ENGINE_WORKER_STACK_BYTES}-byte stack: {error}; telemetry cleanup: {}; check system thread and memory limits",
+            if telemetry_cleanup_successful {
+                "successful"
+            } else {
+                "failed"
+            }
         ),
         phase: "worker startup".to_string(),
     }
@@ -1725,10 +1964,7 @@ impl EngineDispatcher {
         policy_mode: &str,
         telemetry_handle: TelemetryRuntimeHandle,
     ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
-        use std::panic;
-        use std::sync::mpsc;
-        use std::thread;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         // Default to 5 minute timeout, but allow override via env var for testing
         let timeout_secs = std::env::var("FRANKEN_ENGINE_TIMEOUT_SECS")
@@ -1736,59 +1972,72 @@ impl EngineDispatcher {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(crate::config::timeouts::ENGINE_DISPATCH_DEFAULT_TIMEOUT_SECS);
         let timeout = Duration::from_secs(timeout_secs);
+
+        Self::run_engine_native_with_timeout(
+            app_path,
+            config,
+            policy_mode,
+            telemetry_handle,
+            timeout,
+        )
+    }
+
+    /// Supervise one native execution with an explicit deadline. Keeping the
+    /// duration as an argument makes timeout regressions deterministic without
+    /// mutating process-wide environment state.
+    #[cfg(feature = "engine")]
+    #[allow(clippy::type_complexity)]
+    fn run_engine_native_with_timeout(
+        app_path: &Path,
+        config: &Config,
+        policy_mode: &str,
+        telemetry_handle: TelemetryRuntimeHandle,
+        timeout: std::time::Duration,
+    ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
+        use std::sync::mpsc::RecvTimeoutError;
+
         let app_path_buf = app_path.to_path_buf();
-
-        // Set up panic hook to capture panic information
-        let (panic_tx, panic_rx) = mpsc::channel();
-        let original_hook = panic::take_hook();
-
-        panic::set_hook(Box::new(move |panic_info| {
-            let panic_message = format!("{}", panic_info);
-            let _ = panic_tx.send(panic_message);
-        }));
-
-        // Execute with timeout in separate thread to detect hangs
-        let (result_tx, result_rx) = mpsc::channel();
         let app_path_for_thread = app_path_buf.clone();
         let config_for_thread = config.clone();
         let policy_mode_for_thread = policy_mode.to_string();
+        let telemetry_guard = NativeTelemetryGuard::new(telemetry_handle);
+        let cleanup_probe = telemetry_guard.cleanup_probe();
+        let cleanup_probe_for_worker = Arc::clone(&cleanup_probe);
+        let cancellation = NativeEngineCancellation::new();
+        let cancellation_for_worker = cancellation.clone();
 
-        let execution_thread = match spawn_native_engine_worker(move || {
-            let result = Self::run_engine_native(
-                &app_path_for_thread,
-                &config_for_thread,
-                &policy_mode_for_thread,
-                telemetry_handle,
-            );
-            let _ = result_tx.send(result);
-        }) {
-            Ok(execution_thread) => execution_thread,
-            Err(error) => {
-                // A failed worker launch cannot produce a result or panic signal.
-                // Restore the process hook before returning through the same
-                // actionable, fail-closed dispatch channel as execution failures.
-                panic::set_hook(original_hook);
-                let dispatch_error = native_engine_worker_spawn_error(app_path_buf, &error);
-                return Err(dispatch_error.to_actionable().into());
-            }
-        };
+        let (execution_thread, outcome_rx) =
+            match spawn_caught_native_engine_worker(cleanup_probe_for_worker, move || {
+                Self::run_engine_native_guarded(
+                    &app_path_for_thread,
+                    &config_for_thread,
+                    &policy_mode_for_thread,
+                    telemetry_guard,
+                    cancellation_for_worker,
+                )
+            }) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    let dispatch_error = native_engine_worker_spawn_error(
+                        app_path_buf,
+                        &error,
+                        cleanup_probe.load(Ordering::Acquire),
+                    );
+                    return Err(dispatch_error.to_actionable().into());
+                }
+            };
 
-        let start_time = Instant::now();
-        let result = loop {
-            // Check for panic first
-            if let Ok(panic_message) = panic_rx.try_recv() {
-                let cleanup_successful = execution_thread.join().is_ok();
-                let dispatch_error = EngineDispatchError::EnginePanic {
-                    app_path: app_path_buf,
-                    panic_message,
-                    cleanup_successful,
-                };
-                break Err(dispatch_error.to_actionable().into());
-            }
-
-            // Check for completion
-            if let Ok(result) = result_rx.try_recv() {
-                break result.map_err(|err| match err {
+        match outcome_rx.recv_timeout(timeout) {
+            Ok(NativeEngineWorkerOutcome::Completed(result)) => {
+                if let Err(payload) = execution_thread.join() {
+                    let dispatch_error = EngineDispatchError::EnginePanic {
+                        app_path: app_path_buf,
+                        panic_message: native_engine_panic_message(payload.as_ref()),
+                        cleanup_successful: false,
+                    };
+                    return Err(dispatch_error.to_actionable().into());
+                }
+                result.map_err(|err| match err {
                     EngineProcessError::Spawn { message, .. } => {
                         let dispatch_error = EngineDispatchError::EngineExecutionError {
                             app_path: app_path_buf.clone(),
@@ -1804,27 +2053,61 @@ impl EngineDispatcher {
                         };
                         dispatch_error.to_actionable().into()
                     }
-                });
+                })
             }
-
-            // Check for timeout
-            if start_time.elapsed() >= timeout {
-                // Thread may still be running, but we'll return timeout error
+            Ok(NativeEngineWorkerOutcome::Panicked {
+                panic_message,
+                cleanup_successful,
+            }) => {
+                let worker_joined = execution_thread.join().is_ok();
+                let dispatch_error = EngineDispatchError::EnginePanic {
+                    app_path: app_path_buf,
+                    panic_message,
+                    cleanup_successful: cleanup_successful && worker_joined,
+                };
+                Err(dispatch_error.to_actionable().into())
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                // Timeout is a quiescence deadline, not merely a response
+                // deadline. First stop interpreter admission, then wait behind
+                // every already-admitted host effect, and finally join the
+                // worker. Returning earlier would let guest code or I/O outlive
+                // the run result and violate the product trust boundary.
+                cancellation.cancel_and_wait_for_effects();
+                let worker_joined = execution_thread.join().is_ok();
+                if !worker_joined || !cleanup_probe.load(Ordering::Acquire) {
+                    tracing::error!(
+                        execution_mode = "native",
+                        worker_joined,
+                        telemetry_cleanup_successful = cleanup_probe.load(Ordering::Acquire),
+                        "Native engine timeout cleanup was incomplete"
+                    );
+                }
                 let dispatch_error = EngineDispatchError::EngineTimeout {
                     app_path: app_path_buf,
                     timeout_duration: timeout,
                     phase: "execution".to_string(),
                 };
-                break Err(dispatch_error.to_actionable().into());
+                Err(dispatch_error.to_actionable().into())
             }
-
-            thread::sleep(crate::config::timeouts::ENGINE_DISPATCH_POLL_INTERVAL);
-        };
-
-        // Restore original panic hook
-        panic::set_hook(original_hook);
-
-        result
+            Err(RecvTimeoutError::Disconnected) => {
+                if let Err(payload) = execution_thread.join() {
+                    let dispatch_error = EngineDispatchError::EnginePanic {
+                        app_path: app_path_buf,
+                        panic_message: native_engine_panic_message(payload.as_ref()),
+                        cleanup_successful: cleanup_probe.load(Ordering::Acquire),
+                    };
+                    return Err(dispatch_error.to_actionable().into());
+                }
+                let dispatch_error = EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf,
+                    error_message: "native engine worker exited without a typed outcome"
+                        .to_string(),
+                    phase: "worker supervision".to_string(),
+                };
+                Err(dispatch_error.to_actionable().into())
+            }
+        }
     }
 
     /// Map franken-node Profile to franken-engine capability set.
@@ -2253,7 +2536,7 @@ impl EngineDispatcher {
 
     /// Execute code using native franken_engine API instead of external process.
     /// Returns the same interface as external execution for compatibility.
-    #[cfg(feature = "engine")]
+    #[cfg(all(feature = "engine", test))]
     #[allow(clippy::type_complexity)]
     fn run_engine_native(
         app_path: &Path,
@@ -2264,11 +2547,34 @@ impl EngineDispatcher {
         (Output, TelemetryRuntimeReport, Option<HostEffectLedger>),
         EngineProcessError,
     > {
+        Self::run_engine_native_guarded(
+            app_path,
+            config,
+            policy_mode,
+            NativeTelemetryGuard::new(telemetry_handle),
+            NativeEngineCancellation::new(),
+        )
+    }
+
+    #[cfg(feature = "engine")]
+    #[allow(clippy::type_complexity)]
+    fn run_engine_native_guarded(
+        app_path: &Path,
+        config: &Config,
+        policy_mode: &str,
+        telemetry_guard: NativeTelemetryGuard,
+        cancellation: NativeEngineCancellation,
+    ) -> std::result::Result<
+        (Output, TelemetryRuntimeReport, Option<HostEffectLedger>),
+        EngineProcessError,
+    > {
         use crate::ops::ssrf_gated_host_io::SsrfGatedHostIo;
         use frankenengine_extension_host::host_io::{
             HostIoRecorder, InMemoryHostIoTranscript, SandboxedHostIo,
         };
         use std::fs;
+
+        let mut telemetry_guard = Some(telemetry_guard);
 
         let _span = tracing::info_span!(
             "engine_execution",
@@ -2289,24 +2595,26 @@ impl EngineDispatcher {
         let execution_app_path = if app_path.is_absolute() {
             app_path.to_path_buf()
         } else {
-            let current_dir =
-                std::env::current_dir().map_err(|error| EngineProcessError::Spawn {
-                    message: format!("Failed to resolve current working directory: {error}"),
-                    telemetry_report: None,
-                })?;
+            let current_dir = std::env::current_dir().map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Failed to resolve current working directory: {error}"),
+                    &mut telemetry_guard,
+                )
+            })?;
             Self::lexical_execution_app_path(app_path, &current_dir)
         };
 
         // Read the application source code
-        let source_code =
-            fs::read_to_string(&execution_app_path).map_err(|e| EngineProcessError::Spawn {
-                message: format!(
+        let source_code = fs::read_to_string(&execution_app_path).map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                format!(
                     "Failed to read application source at {}: {}",
                     execution_app_path.display(),
-                    e
+                    error
                 ),
-                telemetry_report: None,
-            })?;
+                &mut telemetry_guard,
+            )
+        })?;
 
         // Create extension package from source
         let package = ExtensionPackage {
@@ -2321,9 +2629,11 @@ impl EngineDispatcher {
             source_file: Some(execution_app_path.to_string_lossy().to_string()),
             capabilities: {
                 let caps = Self::map_profile_to_capabilities(config.profile);
-                Self::validate_capabilities(&caps).map_err(|e| EngineProcessError::Spawn {
-                    message: e.to_string(),
-                    telemetry_report: None,
+                Self::validate_capabilities(&caps).map_err(|error| {
+                    native_engine_spawn_error_with_telemetry_cleanup(
+                        error.to_string(),
+                        &mut telemetry_guard,
+                    )
                 })?; // Validate against franken-engine's supported set
                 caps
             }, // Profile-based capability mapping
@@ -2348,6 +2658,7 @@ impl EngineDispatcher {
                 runtime_config,
                 ambient_authority_grant,
             );
+        orchestrator.set_cancellation_token(cancellation.token().clone());
 
         // bd-5r99w.12: install a sandboxed real-I/O host provider + recorder so the
         // run actually PERFORMS the program's authorized host effects (and records
@@ -2420,7 +2731,9 @@ impl EngineDispatcher {
                 // recorded as a flow block in the signed host-effect ledger.
                 let flow_gated =
                     crate::ops::flow_gated_host_io::FlowGatedHostIo::new(gated, run_egress_trace);
-                orchestrator.set_host_io(Arc::new(flow_gated), Some(recorder));
+                let cancellation_gated =
+                    CancellationGatedHostIo::new(Arc::new(flow_gated), cancellation.clone());
+                orchestrator.set_host_io(Arc::new(cancellation_gated), Some(recorder));
                 tracing::info!(
                     execution_mode = "native",
                     sandbox_root = %sandbox_root.display(),
@@ -2455,12 +2768,12 @@ impl EngineDispatcher {
             )
             .entered();
 
-            orchestrator
-                .execute(&package)
-                .map_err(|e| EngineProcessError::Spawn {
-                    message: format!("Native execution failed: {}", e),
-                    telemetry_report: None,
-                })
+            orchestrator.execute(&package).map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Native execution failed: {error}"),
+                    &mut telemetry_guard,
+                )
+            })
         }?;
 
         let exec_duration = exec_start.elapsed();
@@ -2515,11 +2828,17 @@ impl EngineDispatcher {
         };
 
         // Stop telemetry and return
-        let telemetry_report = telemetry_handle
+        let telemetry_guard = telemetry_guard.take().ok_or_else(|| {
+            EngineProcessError::TelemetryDrain(
+                "native telemetry guard was consumed before successful execution cleanup"
+                    .to_string(),
+            )
+        })?;
+        let telemetry_report = telemetry_guard
             .stop_and_join(ShutdownReason::EngineExit {
                 exit_code: Some(exit_code),
             })
-            .map_err(|err| EngineProcessError::TelemetryDrain(format!("{err}")))?;
+            .map_err(EngineProcessError::TelemetryDrain)?;
 
         Ok((output, telemetry_report, Some(host_effect_ledger)))
     }
@@ -2998,6 +3317,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[cfg(feature = "engine")]
+    const BD_45CK9_PANIC_HOOK_CHILD_ENV: &str = "FRANKEN_NODE_BD_45CK9_PANIC_HOOK_CHILD";
+
+    #[cfg(feature = "engine")]
     #[test]
     fn bd_l3c75_native_engine_worker_has_explicit_stack_and_name() {
         use std::sync::mpsc;
@@ -3071,7 +3393,7 @@ mod tests {
     fn bd_l3c75_worker_spawn_failure_is_actionable_and_fail_closed() {
         let app_path = PathBuf::from("/fixture/deep-http.js");
         let error = io::Error::other("synthetic thread resource exhaustion");
-        let dispatch_error = native_engine_worker_spawn_error(app_path.clone(), &error);
+        let dispatch_error = native_engine_worker_spawn_error(app_path.clone(), &error, true);
 
         assert!(matches!(
             dispatch_error,
@@ -3087,6 +3409,7 @@ mod tests {
             assert_eq!(phase, "worker startup");
             assert!(error_message.contains(NATIVE_ENGINE_WORKER_NAME));
             assert!(error_message.contains("8388608-byte stack"));
+            assert!(error_message.contains("telemetry cleanup: successful"));
             assert!(error_message.contains("system thread and memory limits"));
         }
 
@@ -3095,6 +3418,442 @@ mod tests {
         assert!(rendered.contains("worker startup"));
         assert!(rendered.contains("synthetic thread resource exhaustion"));
         assert!(rendered.contains("deep-http.js"));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_45ck9_worker_panic_is_typed_and_fully_joined() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        struct ActiveWorker(Arc<AtomicUsize>);
+
+        impl Drop for ActiveWorker {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+
+        struct CleanupProbe(Arc<AtomicBool>);
+
+        impl Drop for CleanupProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let active_workers = Arc::new(AtomicUsize::new(0));
+        let active_workers_for_thread = Arc::clone(&active_workers);
+        let cleanup_successful = Arc::new(AtomicBool::new(false));
+        let cleanup_probe_for_thread = Arc::clone(&cleanup_successful);
+        let (worker, outcome_rx) =
+            spawn_caught_native_engine_worker(cleanup_successful, move || -> &'static str {
+                active_workers_for_thread.fetch_add(1, Ordering::AcqRel);
+                let _active = ActiveWorker(active_workers_for_thread);
+                let _cleanup = CleanupProbe(cleanup_probe_for_thread);
+                std::panic::panic_any("bd-45ck9-owned-worker-panic");
+            })
+            .expect("caught worker should spawn");
+
+        let outcome = outcome_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker reports a typed panic outcome");
+        let (panic_message, cleanup_successful) = match outcome {
+            NativeEngineWorkerOutcome::Panicked {
+                panic_message,
+                cleanup_successful,
+            } => (panic_message, cleanup_successful),
+            NativeEngineWorkerOutcome::Completed(_) => {
+                ("worker unexpectedly completed".to_string(), false)
+            }
+        };
+        assert_eq!(panic_message, "bd-45ck9-owned-worker-panic");
+        assert!(cleanup_successful);
+        worker
+            .join()
+            .expect("catch_unwind keeps the worker joinable");
+        assert_eq!(active_workers.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_45ck9_foreign_panic_cannot_be_misclassified_as_engine_panic() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let cleanup_successful = Arc::new(AtomicBool::new(true));
+        let (worker, outcome_rx) =
+            spawn_caught_native_engine_worker(cleanup_successful, move || {
+                started_tx.send(()).expect("test receiver remains live");
+                release_rx.recv().expect("test releases engine worker");
+                "owned-engine-result"
+            })
+            .expect("caught worker should spawn");
+
+        started_rx.recv().expect("engine worker reports startup");
+        let foreign = thread::spawn(|| std::panic::panic_any("unrelated-process-panic"));
+        assert!(foreign.join().is_err(), "foreign thread really panicked");
+        assert!(
+            matches!(
+                outcome_rx.recv_timeout(Duration::from_millis(10)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a foreign panic must not produce an outcome for this engine worker"
+        );
+
+        release_tx.send(()).expect("release engine worker");
+        let outcome = outcome_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("engine worker reports its own result");
+        assert!(matches!(
+            outcome,
+            NativeEngineWorkerOutcome::Completed("owned-engine-result")
+        ));
+        worker.join().expect("engine worker remains joinable");
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_45ck9_panic_hook_child() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        if std::env::var_os(BD_45CK9_PANIC_HOOK_CHILD_ENV).is_none() {
+            return;
+        }
+
+        let hook_invocations = Arc::new(AtomicUsize::new(0));
+        let hook_invocations_for_hook = Arc::clone(&hook_invocations);
+        let original_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |_| {
+            hook_invocations_for_hook.fetch_add(1, Ordering::AcqRel);
+        }));
+
+        let check = (|| -> std::result::Result<(), String> {
+            let cleanup_successful = Arc::new(AtomicBool::new(true));
+            let (worker, outcome_rx) =
+                spawn_caught_native_engine_worker(cleanup_successful, || -> () {
+                    std::panic::panic_any("owned-child-worker-panic")
+                })
+                .map_err(|error| error.to_string())?;
+            let outcome = outcome_rx
+                .recv_timeout(Duration::from_secs(1))
+                .map_err(|error| error.to_string())?;
+            if !matches!(outcome, NativeEngineWorkerOutcome::Panicked { .. }) {
+                return Err("owned worker panic was not typed".to_string());
+            }
+            worker
+                .join()
+                .map_err(|_| "caught worker failed to join".to_string())?;
+
+            let post_dispatch_panic = std::panic::catch_unwind(|| {
+                std::panic::panic_any("post-dispatch-sentinel-panic");
+            });
+            if post_dispatch_panic.is_ok() {
+                return Err("post-dispatch sentinel did not panic".to_string());
+            }
+            Ok(())
+        })();
+
+        let _sentinel_hook = std::panic::take_hook();
+        std::panic::set_hook(original_hook);
+        assert!(check.is_ok(), "isolated hook check failed: {check:?}");
+        assert_eq!(
+            hook_invocations.load(Ordering::Acquire),
+            2,
+            "the same sentinel hook must observe the owned worker panic and a later panic"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_45ck9_native_supervision_preserves_the_process_panic_hook() {
+        let current_test_binary = std::env::current_exe().expect("resolve current test binary");
+        let output = Command::new(current_test_binary)
+            .arg("bd_45ck9_panic_hook_child")
+            .arg("--nocapture")
+            .env(BD_45CK9_PANIC_HOOK_CHILD_ENV, "1")
+            .output()
+            .expect("run isolated panic-hook child test");
+        assert!(
+            output.status.success(),
+            "isolated panic-hook child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_45ck9_panic_path_stops_and_joins_telemetry_workers() {
+        use std::time::Duration;
+
+        let temp_dir = tempfile::tempdir().expect("create telemetry tempdir");
+        let socket_path = temp_dir.path().join("panic-cleanup.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8 socket path"), adapter);
+        let telemetry_guard = NativeTelemetryGuard::new(
+            bridge
+                .start()
+                .expect("start telemetry bridge for panic test"),
+        );
+        let cleanup_probe = telemetry_guard.cleanup_probe();
+        let (worker, outcome_rx) =
+            spawn_caught_native_engine_worker(Arc::clone(&cleanup_probe), move || -> () {
+                let _telemetry_guard = telemetry_guard;
+                std::panic::panic_any("panic-after-telemetry-start");
+            })
+            .expect("caught worker should spawn");
+
+        let outcome = outcome_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker reports panic after telemetry cleanup");
+        assert!(matches!(
+            outcome,
+            NativeEngineWorkerOutcome::Panicked {
+                cleanup_successful: true,
+                ..
+            }
+        ));
+        worker.join().expect("caught worker joins successfully");
+        assert!(cleanup_probe.load(Ordering::Acquire));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_45ck9_ordinary_error_reports_completed_telemetry_cleanup() {
+        let temp_dir = tempfile::tempdir().expect("create telemetry error tempdir");
+        let app_path = temp_dir.path().join("missing-entrypoint.js");
+        let socket_path = temp_dir.path().join("error-cleanup.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let telemetry_handle =
+            TelemetryBridge::new(socket_path.to_str().expect("utf8 socket path"), adapter)
+                .start()
+                .expect("start telemetry bridge for ordinary error test");
+
+        let error = EngineDispatcher::run_engine_native(
+            &app_path,
+            &Config::for_profile(Profile::Balanced),
+            "balanced",
+            telemetry_handle,
+        )
+        .expect_err("a missing entrypoint must fail");
+
+        let mut verified_cleanup = false;
+        if let EngineProcessError::Spawn {
+            message,
+            telemetry_report: Some(report),
+        } = error
+        {
+            assert!(
+                message.contains("telemetry bridge stopped after native execution failure"),
+                "ordinary error must report telemetry cleanup: {message}"
+            );
+            assert!(report.drain_completed);
+            verified_cleanup = true;
+        }
+        assert!(
+            verified_cleanup,
+            "ordinary native error must carry its completed telemetry report"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_45ck9_cancellation_gate_denies_every_post_cancel_effect() {
+        use frankenengine_extension_host::host_io::HostIoResponse;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct CountingHostIo(Arc<AtomicUsize>);
+
+        impl HostIoProvider for CountingHostIo {
+            fn name(&self) -> &str {
+                "counting-host-io"
+            }
+
+            fn perform(
+                &self,
+                _request: &HostIoRequest,
+                _granted: &[HostIoCapability],
+            ) -> HostIoOutcome {
+                self.0.fetch_add(1, Ordering::AcqRel);
+                Ok(HostIoResponse::FsRead { bytes: Vec::new() })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cancellation = NativeEngineCancellation::new();
+        let gate = CancellationGatedHostIo::new(
+            Arc::new(CountingHostIo(Arc::clone(&calls))),
+            cancellation.clone(),
+        );
+        let request = HostIoRequest::FsRead {
+            path: "fixture.txt".to_string(),
+        };
+        let granted = [HostIoCapability::FsRead];
+
+        gate.perform(&request, &granted)
+            .expect("pre-cancel effect delegates");
+        cancellation.cancel_and_wait_for_effects();
+        let denied = gate
+            .perform(&request, &granted)
+            .expect_err("post-cancel effect must fail closed");
+
+        assert!(matches!(denied, HostIoError::Denied { .. }));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(cancellation.token().is_cancelled());
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_45ck9_cancellation_waits_for_an_admitted_effect_to_finish() {
+        use frankenengine_extension_host::host_io::HostIoResponse;
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::{Duration, Instant};
+
+        #[derive(Debug)]
+        struct BlockingHostIo {
+            entered: Arc<Barrier>,
+            release: Arc<Barrier>,
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl HostIoProvider for BlockingHostIo {
+            fn name(&self) -> &str {
+                "blocking-host-io"
+            }
+
+            fn perform(
+                &self,
+                _request: &HostIoRequest,
+                _granted: &[HostIoCapability],
+            ) -> HostIoOutcome {
+                self.calls.fetch_add(1, Ordering::AcqRel);
+                self.entered.wait();
+                self.release.wait();
+                Ok(HostIoResponse::FsRead { bytes: Vec::new() })
+            }
+        }
+
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cancellation = NativeEngineCancellation::new();
+        let gate = Arc::new(CancellationGatedHostIo::new(
+            Arc::new(BlockingHostIo {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                calls: Arc::clone(&calls),
+            }),
+            cancellation.clone(),
+        ));
+        let effect_gate = Arc::clone(&gate);
+        let effect_worker = thread::spawn(move || {
+            effect_gate.perform(
+                &HostIoRequest::FsRead {
+                    path: "in-flight.txt".to_string(),
+                },
+                &[HostIoCapability::FsRead],
+            )
+        });
+        entered.wait();
+
+        let cancellation_for_worker = cancellation.clone();
+        let (cancelled_tx, cancelled_rx) = mpsc::channel();
+        let cancellation_worker = thread::spawn(move || {
+            cancellation_for_worker.cancel_and_wait_for_effects();
+            cancelled_tx
+                .send(())
+                .expect("cancellation observer remains connected");
+        });
+        let cancellation_start = Instant::now();
+        while !cancellation.token().is_cancelled() {
+            assert!(
+                cancellation_start.elapsed() < Duration::from_secs(2),
+                "cancellation worker did not start"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(
+            cancelled_rx.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Timeout),
+            "cancellation must wait while the admitted effect holds the gate"
+        );
+
+        release.wait();
+        effect_worker
+            .join()
+            .expect("effect worker does not panic")
+            .expect("admitted effect completes");
+        cancelled_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancellation crosses the effect barrier");
+        cancellation_worker
+            .join()
+            .expect("cancellation worker does not panic");
+
+        let denied = gate
+            .perform(
+                &HostIoRequest::FsRead {
+                    path: "after-cancel.txt".to_string(),
+                },
+                &[HostIoCapability::FsRead],
+            )
+            .expect_err("a later effect must be denied");
+        assert!(matches!(denied, HostIoError::Denied { .. }));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_45ck9_poisoned_effect_gate_fails_closed_without_blocking_cancellation() {
+        #[derive(Debug)]
+        struct PanickingHostIo;
+
+        impl HostIoProvider for PanickingHostIo {
+            fn name(&self) -> &str {
+                "panicking-host-io"
+            }
+
+            fn perform(
+                &self,
+                _request: &HostIoRequest,
+                _granted: &[HostIoCapability],
+            ) -> HostIoOutcome {
+                std::panic::panic_any("poison-native-effect-gate");
+            }
+        }
+
+        let cancellation = NativeEngineCancellation::new();
+        let gate = CancellationGatedHostIo::new(Arc::new(PanickingHostIo), cancellation.clone());
+        let request = HostIoRequest::FsRead {
+            path: "poison.txt".to_string(),
+        };
+        let granted = [HostIoCapability::FsRead];
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = gate.perform(&request, &granted);
+        }));
+        assert!(
+            panic.is_err(),
+            "the provider panic reaches the worker envelope"
+        );
+
+        let denied = gate
+            .perform(&request, &granted)
+            .expect_err("a poisoned effect gate must fail closed");
+        assert!(matches!(
+            denied,
+            HostIoError::Denied { ref reason } if reason.contains("poisoned")
+        ));
+
+        cancellation.cancel_and_wait_for_effects();
+        assert!(cancellation.token().is_cancelled());
     }
 
     #[cfg(feature = "engine")]
@@ -7453,72 +8212,53 @@ mod tests {
         );
     }
 
-    /// Regression test for commit e5467b4b: engine timeout boundary condition
-    ///
-    /// Verifies that timeout check uses >= (fail-closed) rather than > (fail-open).
-    /// When elapsed time equals timeout exactly, execution should timeout immediately
-    /// rather than continuing for another poll cycle.
+    /// Regression for e5467b4b and bd-45ck9: the explicit supervisor deadline
+    /// cancels an infinite engine loop and does not return until the worker and
+    /// telemetry threads have reached their terminal paths.
     #[cfg(feature = "engine")]
-    // FIXME(bd-yom8c): seeds env via std::env::set_var/remove_var, which are `unsafe`
-    // under Rust 2024 and rejected by the crate-wide `#![forbid(unsafe_code)]`; gated
-    // until rewritten to drive the timeout without mutating process env.
-    #[cfg(any())]
     #[test]
-    fn engine_timeout_boundary_fail_closed_e5467b4b() {
-        use std::time::Instant;
-        use tempfile::NamedTempFile;
+    fn bd_45ck9_engine_timeout_is_fail_closed_and_quiescent() {
+        use std::time::{Duration, Instant};
 
-        // Create a hanging JavaScript program
-        let hanging_js = r#"
-            // Infinite loop to trigger timeout
-            while (true) {
-                // Keep the engine busy to test timeout boundary
-            }
-        "#;
-
-        let temp_file = NamedTempFile::new().expect("create temp file");
-        std::fs::write(temp_file.path(), hanging_js).expect("write hanging JS");
-
-        // Set a very short timeout (2 seconds) to ensure test completes quickly
-        std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "2");
-
-        let config = crate::config::Config::for_profile(crate::config::Profile::Balanced);
-        let dispatcher = EngineDispatcher::new(None, crate::ops::PreferredRuntime::Auto);
-
+        let temp_dir = tempfile::tempdir().expect("create timeout fixture directory");
+        let app_path = temp_dir.path().join("infinite-loop.js");
+        std::fs::write(&app_path, "while (true) {}\n").expect("write hanging JS");
+        let socket_path = temp_dir.path().join("timeout-telemetry.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let telemetry_handle =
+            TelemetryBridge::new(socket_path.to_str().expect("utf8 socket path"), adapter)
+                .start()
+                .expect("start timeout telemetry bridge");
+        let config = Config::for_profile(Profile::Balanced);
+        // The baseline interpreter also has an instruction budget, so the
+        // deadline must win deterministically even on a fast worker. Engine-
+        // level coverage separately proves both lanes observe the token while
+        // executing an unbounded jump loop.
+        let timeout = Duration::from_millis(1);
         let start = Instant::now();
-        let result = dispatcher.dispatch_run(temp_file.path(), &config, "balanced", &[], 0);
+        let result = EngineDispatcher::run_engine_native_with_timeout(
+            &app_path,
+            &config,
+            "balanced",
+            telemetry_handle,
+            timeout,
+        );
         let elapsed = start.elapsed();
 
-        // Clean up environment variable
-        std::env::remove_var("FRANKEN_ENGINE_TIMEOUT_SECS");
-
-        // Verify timeout occurred and error type is correct
-        assert!(
-            result.is_err(),
-            "Expected timeout error for hanging program"
-        );
-
-        let error = result.unwrap_err().to_string();
+        let error = result
+            .expect_err("the infinite loop must time out")
+            .to_string();
         assert!(
             error.contains("timeout") || error.contains("Timeout"),
-            "Error should mention timeout: {}",
-            error
-        );
-
-        // Verify timeout occurred close to the boundary (2 seconds ± 1 second tolerance)
-        assert!(
-            elapsed.as_secs() >= 2,
-            "Should timeout at >= 2 seconds (fail-closed)"
+            "error should identify the timeout: {error}"
         );
         assert!(
-            elapsed.as_secs() < 4,
-            "Should timeout reasonably close to boundary, got {}s",
-            elapsed.as_secs()
+            elapsed >= timeout,
+            "supervisor must not fail open before its deadline: {elapsed:?}"
         );
-
-        println!(
-            "✓ Timeout occurred at {}ms (boundary: 2000ms)",
-            elapsed.as_millis()
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "cooperative cancellation should reach quiescence promptly: {elapsed:?}"
         );
     }
 

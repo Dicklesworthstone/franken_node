@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use frankenengine_extension_host::host_io::{
-    HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
-    SandboxedHostIo,
+    FsMetaResult, HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest,
+    HostIoResponse, SandboxedHostIo,
 };
 use frankenengine_node::config::{NetworkAllowlistEntry, NetworkPolicyConfig, SsrfEnforcementMode};
 use frankenengine_node::ops::ssrf_gated_host_io::SsrfGatedHostIo;
@@ -43,6 +43,9 @@ impl HostIoProvider for RecordingInner {
         Ok(match request {
             HostIoRequest::FsRead { .. } => HostIoResponse::FsRead { bytes: Vec::new() },
             HostIoRequest::FsWrite { .. } => HostIoResponse::FsWrite { bytes_written: 0 },
+            HostIoRequest::FsMeta { .. } => HostIoResponse::FsMeta {
+                result: FsMetaResult::Unit,
+            },
             HostIoRequest::NetworkSend { payload, .. } => HostIoResponse::NetworkSend {
                 bytes_sent: payload.len() as u64,
             },
