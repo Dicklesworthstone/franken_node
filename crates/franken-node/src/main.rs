@@ -27934,6 +27934,13 @@ fn handle_debug_evidence(args: &DebugEvidenceArgs) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // bd-wwjxn: the private native-session worker must be selected before
+    // Clap parses public commands. It receives a bounded, versioned request on
+    // stdin and never recursively re-enters `run` dispatch.
+    if ops::engine_dispatcher::EngineDispatcher::maybe_run_internal_native_session_worker()? {
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -28171,8 +28178,18 @@ fn main() -> Result<()> {
                 _ => Vec::new(),
             };
 
+            // Linux resolves /proc/self/exe to the already-running executable
+            // inode at spawn time, avoiding a path-replacement race between
+            // worker selection and exec. Other platforms use the validated
+            // absolute current-executable path.
+            #[cfg(target_os = "linux")]
+            let native_session_worker_path = PathBuf::from("/proc/self/exe");
+            #[cfg(not(target_os = "linux"))]
+            let native_session_worker_path = std::env::current_exe()
+                .context("failed resolving current franken-node binary for native execution")?;
             let dispatcher =
-                ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime);
+                ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime)
+                    .with_native_session_worker_path(native_session_worker_path);
             let dispatch = match dispatcher.dispatch_run(
                 &app_path,
                 &resolved.config,

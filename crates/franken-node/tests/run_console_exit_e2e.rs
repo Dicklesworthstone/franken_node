@@ -33,7 +33,8 @@
 
 #![cfg(feature = "engine")]
 
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -100,6 +101,315 @@ fn run_app(app_src: &str, extra_args: &[&str]) -> (tempfile::TempDir, RunOutcome
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     };
     (dir, outcome)
+}
+
+/// bd-wwjxn: the actual product path must place source loading, parse/lower,
+/// HostIo and telemetry behind one killable session boundary. A loopback server
+/// confirms that an HTTP effect reached its real socket, then withholds the
+/// response; the parent deadline must still kill/reap the worker before returning.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::os::unix::process::CommandExt;
+    use std::sync::mpsc;
+
+    const ENGINE_TIMEOUT: Duration = Duration::from_secs(10);
+    const ADMISSION_DEADLINE: Duration = Duration::from_secs(15);
+    const OUTER_DEADLINE: Duration = Duration::from_secs(25);
+
+    fn fixed_binary(candidates: &[&'static str]) -> &'static str {
+        candidates
+            .iter()
+            .copied()
+            .find(|path| std::path::Path::new(path).is_file())
+            .expect("required fixed system binary is available")
+    }
+
+    fn process_start_time(pid: u32) -> Option<String> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields_after_command = stat.rsplit_once(") ")?.1;
+        fields_after_command
+            .split_whitespace()
+            .nth(19)
+            .map(str::to_string)
+    }
+
+    fn direct_worker_identity(parent_pid: u32) -> Option<(u32, String)> {
+        let children_path = format!("/proc/{parent_pid}/task/{parent_pid}/children");
+        let children = std::fs::read_to_string(children_path).ok()?;
+        children.split_whitespace().find_map(|pid| {
+            let pid = pid.parse::<u32>().ok()?;
+            process_start_time(pid).map(|start_time| (pid, start_time))
+        })
+    }
+
+    fn kill_test_process_tree(child: &mut std::process::Child) {
+        // The product worker deliberately creates a nested process group, so
+        // kill direct descendants first if the OUTER test deadline ever wins.
+        // This is test-harness cleanup only; the passing path never calls it.
+        let children_path = format!("/proc/{}/task/{}/children", child.id(), child.id());
+        if let Ok(children) = std::fs::read_to_string(children_path) {
+            let kill = fixed_binary(&["/bin/kill", "/usr/bin/kill"]);
+            for pid in children.split_whitespace() {
+                let _ = Command::new(kill)
+                    .args(["-KILL", "--", pid])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+        let kill = fixed_binary(&["/bin/kill", "/usr/bin/kill"]);
+        let _ = Command::new(kill)
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    let dir = tempfile::TempDir::new().expect("timeout fixture tempdir");
+    let app_path = dir.path().join("app.js");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind timeout sink");
+    listener
+        .set_nonblocking(true)
+        .expect("make timeout sink accept bounded");
+    let sink_addr = listener.local_addr().expect("timeout sink address");
+    let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    std::fs::write(
+        &app_path,
+        format!(
+            "require('fs').writeFileSync('entered.marker', 'entered');\n\
+             require('http').get('http://{sink_addr}/', (res) => {{\n\
+               require('fs').writeFileSync('after.marker', res.body);\n\
+             }});\n"
+        ),
+    )
+    .expect("write admitted-effect fixture");
+
+    let init = Command::new(franken_node_bin())
+        .args(["init", "--profile", "legacy-risky", "--out-dir", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("bootstrap timeout workspace");
+    assert!(
+        init.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let config_path = dir.path().join("franken_node.toml");
+    let mut config: frankenengine_node::config::Config =
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("read initialized config"))
+            .expect("parse initialized config");
+    config.security.network_policy.allowlist.push(
+        frankenengine_node::config::NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: Some(sink_addr.port()),
+            reason: "bd-wwjxn real admitted-effect timeout regression".to_string(),
+        },
+    );
+    std::fs::write(
+        &config_path,
+        config.to_toml().expect("serialize timeout config"),
+    )
+    .expect("write timeout config");
+
+    // Start the server deadline only after fixture initialization; otherwise a
+    // slow debug/CI init could consume the accept budget before the product is
+    // even spawned.
+    let server = std::thread::spawn(move || {
+        let accept_started = Instant::now();
+        let (mut stream, _peer) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && accept_started.elapsed() < ADMISSION_DEADLINE =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept admitted HTTP effect: {error}"),
+            }
+        };
+        stream
+            .set_nonblocking(false)
+            .expect("make accepted timeout connection blocking");
+        stream
+            .set_read_timeout(Some(ADMISSION_DEADLINE))
+            .expect("set timeout sink read deadline");
+        let mut request = Vec::new();
+        stream
+            .read_to_end(&mut request)
+            .expect("read half-closed guest HTTP request");
+        admitted_tx
+            .send(request)
+            .expect("publish admitted HTTP effect");
+        release_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("test releases the deliberately withheld response");
+        let write_result = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntoo-late",
+        );
+        let _ = stream.flush();
+        write_result
+    });
+
+    let mut command = Command::new(franken_node_bin());
+    command
+        .args([
+            "run",
+            "app.js",
+            "--policy",
+            "legacy-risky",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--console-only",
+        ])
+        .current_dir(dir.path())
+        .env(
+            "FRANKEN_ENGINE_TIMEOUT_SECS",
+            ENGINE_TIMEOUT.as_secs().to_string(),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let started = Instant::now();
+    let mut child = command.spawn().expect("spawn product timeout run");
+
+    let admitted_request = match admitted_rx.recv_timeout(ADMISSION_DEADLINE) {
+        Ok(request) => request,
+        Err(error) => {
+            kill_test_process_tree(&mut child);
+            let mut stderr = String::new();
+            if let Some(mut diagnostics) = child.stderr.take() {
+                let _ = diagnostics.read_to_string(&mut stderr);
+            }
+            let _ = release_tx.send(());
+            let _ = server.join();
+            panic!("product run never admitted the HTTP effect: {error}; stderr: {stderr}");
+        }
+    };
+    if !admitted_request.starts_with(b"GET / HTTP/1.1\r\n") {
+        kill_test_process_tree(&mut child);
+        let _ = release_tx.send(());
+        let _ = server.join();
+        panic!("the sink must observe the genuine lowered HTTP request");
+    }
+    let (worker_pid, worker_start_time) = match direct_worker_identity(child.id()) {
+        Some(identity) => identity,
+        None => {
+            kill_test_process_tree(&mut child);
+            let _ = release_tx.send(());
+            let _ = server.join();
+            panic!("the admitted effect must belong to the direct native-session worker");
+        }
+    };
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= OUTER_DEADLINE => {
+                kill_test_process_tree(&mut child);
+                let _ = release_tx.send(());
+                let _ = server.join();
+                panic!("product timeout exceeded the {OUTER_DEADLINE:?} outer test deadline");
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                kill_test_process_tree(&mut child);
+                let _ = release_tx.send(());
+                let _ = server.join();
+                panic!("failed polling product timeout run: {error}");
+            }
+        }
+    };
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("timeout stderr pipe")
+        .read_to_string(&mut stderr)
+        .expect("read timeout diagnostic");
+    let elapsed = started.elapsed();
+    let entered_before_timeout = dir.path().join("entered.marker").is_file();
+    let callback_absent_before_release = !dir.path().join("after.marker").exists();
+    let worker_identity_gone_before_release =
+        process_start_time(worker_pid).as_deref() != Some(worker_start_time.as_str());
+
+    // Only after the CLI has returned do we release a valid response. The
+    // write may succeed into the kernel buffer or fail because the peer was
+    // killed; either way, no guest callback can still consume it.
+    release_tx.send(()).expect("release withheld response");
+    let _late_response_result = server.join().expect("join timeout sink");
+    std::thread::sleep(Duration::from_millis(100));
+    let callback_absent_after_release = !dir.path().join("after.marker").exists();
+
+    assert!(!status.success(), "the stuck session must time out");
+    assert!(
+        stderr.to_ascii_lowercase().contains("timed out"),
+        "timeout must be typed and actionable: {stderr}"
+    );
+    assert!(
+        elapsed >= ENGINE_TIMEOUT && elapsed < OUTER_DEADLINE,
+        "whole-session deadline must be bounded: {elapsed:?}"
+    );
+    assert!(
+        entered_before_timeout,
+        "the pre-request marker proves guest execution reached the effect site"
+    );
+    assert!(
+        callback_absent_before_release,
+        "no response callback effect may survive timeout"
+    );
+    assert!(
+        worker_identity_gone_before_release,
+        "the timed-out native-session worker identity must be gone before the CLI returns"
+    );
+    assert!(
+        callback_absent_after_release,
+        "the released response must not revive a timed-out guest callback"
+    );
+
+    // A later product run must start a fresh healthy worker; timeout cleanup
+    // cannot poison global admission or telemetry state.
+    std::fs::write(
+        &app_path,
+        "require('fs').writeFileSync('healthy.marker', 'healthy');\n",
+    )
+    .expect("write post-timeout health fixture");
+    let healthy = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "app.js",
+            "--policy",
+            "legacy-risky",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--console-only",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn post-timeout health run");
+    assert!(
+        healthy.status.success(),
+        "subsequent native run failed: {}",
+        String::from_utf8_lossy(&healthy.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("healthy.marker")).expect("healthy marker"),
+        b"healthy"
+    );
 }
 
 const DEBUG_DUMP_MARKERS: &[&str] = &["Native execution completed", "OrchestratorResult"];

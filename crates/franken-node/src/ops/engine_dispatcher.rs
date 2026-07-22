@@ -28,6 +28,8 @@ use frankenengine_extension_host::host_io::{
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
+#[cfg(feature = "engine")]
+use std::io::Write;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -53,6 +55,209 @@ const CURRENT_SECURITY_EPOCH: u64 = 3; // Latest security epoch (Strict profile)
 const NATIVE_ENGINE_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
+
+/// Private argv marker for the one-shot native-session worker.  It is parsed
+/// before Clap so the worker can never recursively enter the public `run`
+/// command.
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v1";
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v1";
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V1\0";
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 1;
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2);
+
+#[cfg(feature = "engine")]
+#[derive(Debug, Serialize, Deserialize)]
+struct NativeSessionRequest {
+    schema_version: String,
+    nonce: String,
+    app_path: PathBuf,
+    working_dir: PathBuf,
+    policy_mode: String,
+    config: Config,
+    telemetry_socket_path: PathBuf,
+}
+
+#[cfg(feature = "engine")]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum NativeSessionResponse {
+    Completed {
+        schema_version: String,
+        nonce: String,
+        exit_code: i32,
+        stdout_base64: String,
+        stderr_base64: String,
+        telemetry_report: TelemetryRuntimeReport,
+        host_effect_ledger: Option<HostEffectLedger>,
+    },
+    ExecutionFailed {
+        schema_version: String,
+        nonce: String,
+        message: String,
+    },
+    TelemetryFailed {
+        schema_version: String,
+        nonce: String,
+        message: String,
+    },
+    Panicked {
+        schema_version: String,
+        nonce: String,
+        panic_message: String,
+        cleanup_successful: bool,
+    },
+}
+
+#[cfg(feature = "engine")]
+fn encode_native_session_frame<T: Serialize>(
+    value: &T,
+    payload_cap: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    use sha2::{Digest, Sha256};
+
+    let payload = serde_json::to_vec(value)
+        .map_err(|error| format!("failed serializing native-session frame: {error}"))?;
+    if payload.len() > payload_cap {
+        return Err(format!(
+            "native-session frame payload exceeded {payload_cap} bytes"
+        ));
+    }
+    let payload_len = u64::try_from(payload.len())
+        .map_err(|_| "native-session frame length does not fit u64".to_string())?;
+    let digest = Sha256::digest(&payload);
+    let mut frame =
+        Vec::with_capacity(NATIVE_SESSION_FRAME_MAGIC.len() + 4 + 8 + digest.len() + payload.len());
+    frame.extend_from_slice(NATIVE_SESSION_FRAME_MAGIC);
+    frame.extend_from_slice(&NATIVE_SESSION_PROTOCOL_VERSION.to_be_bytes());
+    frame.extend_from_slice(&payload_len.to_be_bytes());
+    frame.extend_from_slice(&digest);
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
+#[cfg(feature = "engine")]
+fn decode_native_session_frame<T: serde::de::DeserializeOwned>(
+    frame: &[u8],
+    payload_cap: usize,
+    allow_test_harness_noise: bool,
+) -> std::result::Result<T, String> {
+    use sha2::{Digest, Sha256};
+
+    const VERSION_BYTES: usize = 4;
+    const LENGTH_BYTES: usize = 8;
+    const DIGEST_BYTES: usize = 32;
+    let header_len = NATIVE_SESSION_FRAME_MAGIC.len() + VERSION_BYTES + LENGTH_BYTES + DIGEST_BYTES;
+    debug_assert_eq!(header_len, NATIVE_SESSION_FRAME_HEADER_BYTES);
+    let frame_start = if allow_test_harness_noise {
+        frame
+            .windows(NATIVE_SESSION_FRAME_MAGIC.len())
+            .position(|window| window == NATIVE_SESSION_FRAME_MAGIC)
+            .ok_or_else(|| "native-session frame magic was not found".to_string())?
+    } else {
+        0
+    };
+    let framed = frame
+        .get(frame_start..)
+        .ok_or_else(|| "native-session frame offset was invalid".to_string())?;
+    if framed.len() < header_len {
+        return Err("native-session frame header was truncated".to_string());
+    }
+    if &framed[..NATIVE_SESSION_FRAME_MAGIC.len()] != NATIVE_SESSION_FRAME_MAGIC {
+        return Err("native-session frame magic mismatch".to_string());
+    }
+    let version_start = NATIVE_SESSION_FRAME_MAGIC.len();
+    let version_end = version_start + VERSION_BYTES;
+    let version = u32::from_be_bytes(
+        framed[version_start..version_end]
+            .try_into()
+            .map_err(|_| "native-session frame version was truncated".to_string())?,
+    );
+    if version != NATIVE_SESSION_PROTOCOL_VERSION {
+        return Err(format!(
+            "unsupported native-session protocol version {version}"
+        ));
+    }
+    let length_end = version_end + LENGTH_BYTES;
+    let payload_len = u64::from_be_bytes(
+        framed[version_end..length_end]
+            .try_into()
+            .map_err(|_| "native-session frame length was truncated".to_string())?,
+    );
+    let payload_len = usize::try_from(payload_len)
+        .map_err(|_| "native-session frame length does not fit usize".to_string())?;
+    if payload_len > payload_cap {
+        return Err(format!(
+            "native-session frame payload exceeded {payload_cap} bytes"
+        ));
+    }
+    let digest_end = length_end + DIGEST_BYTES;
+    let frame_end = header_len
+        .checked_add(payload_len)
+        .ok_or_else(|| "native-session frame length overflowed".to_string())?;
+    if framed.len() < frame_end {
+        return Err("native-session frame payload was truncated".to_string());
+    }
+    if !allow_test_harness_noise && framed.len() != frame_end {
+        return Err("native-session frame had trailing bytes".to_string());
+    }
+    let payload = &framed[header_len..frame_end];
+    let expected_digest = &framed[length_end..digest_end];
+    let actual_digest = Sha256::digest(payload);
+    if expected_digest != &actual_digest[..] {
+        return Err("native-session frame digest mismatch".to_string());
+    }
+    serde_json::from_slice(payload)
+        .map_err(|error| format!("failed decoding native-session payload: {error}"))
+}
+
+#[cfg(feature = "engine")]
+fn read_native_session_frame(
+    reader: &mut impl Read,
+    payload_cap: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    const LENGTH_OFFSET: usize = 12 + 4;
+    const LENGTH_END: usize = LENGTH_OFFSET + 8;
+
+    let mut header = vec![0_u8; NATIVE_SESSION_FRAME_HEADER_BYTES];
+    reader
+        .read_exact(&mut header)
+        .map_err(|error| format!("native-session frame header was truncated: {error}"))?;
+    let payload_len = u64::from_be_bytes(
+        header[LENGTH_OFFSET..LENGTH_END]
+            .try_into()
+            .map_err(|_| "native-session frame length was truncated".to_string())?,
+    );
+    let payload_len = usize::try_from(payload_len)
+        .map_err(|_| "native-session frame length does not fit usize".to_string())?;
+    if payload_len > payload_cap {
+        return Err(format!(
+            "native-session frame payload exceeded {payload_cap} bytes"
+        ));
+    }
+    let frame_len = NATIVE_SESSION_FRAME_HEADER_BYTES
+        .checked_add(payload_len)
+        .ok_or_else(|| "native-session frame length overflowed".to_string())?;
+    header.resize(frame_len, 0);
+    reader
+        .read_exact(&mut header[NATIVE_SESSION_FRAME_HEADER_BYTES..])
+        .map_err(|error| format!("native-session frame payload was truncated: {error}"))?;
+    Ok(header)
+}
 
 #[cfg(feature = "engine")]
 fn spawn_native_engine_worker(
@@ -209,8 +414,9 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
     }
 }
 
-/// One run's cooperative cancellation signal plus the host-effect admission
-/// barrier that turns timeout into a quiescent trust boundary.
+/// One worker's cooperative cancellation signal plus its host-effect admission
+/// barrier. Process isolation is the hard timeout boundary; this remains
+/// defense-in-depth for engine-internal cancellation and focused regressions.
 #[cfg(feature = "engine")]
 #[derive(Clone, Debug)]
 struct NativeEngineCancellation {
@@ -231,6 +437,7 @@ impl NativeEngineCancellation {
         &self.token
     }
 
+    #[cfg(test)]
     fn cancel_and_wait_for_effects(&self) {
         self.token.cancel();
         let effect_guard = self
@@ -242,9 +449,9 @@ impl NativeEngineCancellation {
 }
 
 /// Outermost Host-I/O gate for one native run. An admitted effect holds the
-/// shared mutex through its synchronous provider call. Timeout first cancels
-/// the token and then crosses this mutex, so no effect can still be running or
-/// start after the supervisor returns its timeout result.
+/// shared mutex through its synchronous provider call. The parent kills the
+/// whole native worker at the deadline; the token/mutex pair additionally keeps
+/// cooperative cancellation fail-closed inside that worker.
 #[cfg(feature = "engine")]
 #[derive(Debug)]
 struct CancellationGatedHostIo {
@@ -286,7 +493,7 @@ impl HostIoProvider for CancellationGatedHostIo {
     }
 }
 
-#[cfg(feature = "engine")]
+#[cfg(all(feature = "engine", test))]
 fn native_engine_worker_spawn_error(
     app_path: PathBuf,
     error: &io::Error,
@@ -362,6 +569,10 @@ pub struct EngineDispatcher {
     engine_bin_path: String,
     configured_path: Option<PathBuf>,
     requested_runtime: PreferredRuntime,
+    /// Executable that implements the private one-shot native-session worker
+    /// protocol. The product CLI supplies its own absolute path explicitly;
+    /// direct library callers may do the same through the builder below.
+    native_session_worker_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1442,6 +1653,7 @@ impl Default for EngineDispatcher {
             engine_bin_path: default_hint,
             configured_path: None,
             requested_runtime: PreferredRuntime::Auto,
+            native_session_worker_path: None,
         }
     }
 }
@@ -1461,6 +1673,90 @@ impl EngineDispatcher {
         }
     }
 
+    #[cfg(feature = "engine")]
+    fn validate_native_session_worker_path(path: &Path) -> Result<PathBuf> {
+        if !path.is_absolute() {
+            anyhow::bail!(
+                "native-session worker path must be absolute: {}",
+                path.display()
+            );
+        }
+        let metadata = path.metadata().with_context(|| {
+            format!("native-session worker is unavailable at {}", path.display())
+        })?;
+        if !metadata.is_file() {
+            anyhow::bail!(
+                "native-session worker path is not a regular file: {}",
+                path.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                anyhow::bail!(
+                    "native-session worker is not executable: {}",
+                    path.display()
+                );
+            }
+        }
+        Ok(path.to_path_buf())
+    }
+
+    #[cfg(feature = "engine")]
+    fn resolve_native_session_worker_path(&self) -> Result<PathBuf> {
+        if let Some(path) = self.native_session_worker_path.as_deref() {
+            return Self::validate_native_session_worker_path(path);
+        }
+
+        // Cargo integration-test executables live under target/*/deps while
+        // the product binary built for CARGO_BIN_EXE lives one directory up.
+        // This fallback keeps direct dispatcher integration tests honest. A
+        // general library embedder must provide the explicit builder path;
+        // silently executing the embedding host as a worker would be a
+        // confused-deputy/protocol error.
+        let current = std::env::current_exe()
+            .context("failed resolving current executable for native-session worker")?;
+        #[cfg(test)]
+        {
+            // The lib-test harness contains the private worker-entry test below.
+            // Reusing it keeps unit tests self-contained; integration tests
+            // compile this library without cfg(test) and therefore take the
+            // real sibling-binary path.
+            Self::validate_native_session_worker_path(&current)
+        }
+        #[cfg(not(test))]
+        {
+            let parent = current
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("current executable has no parent directory"))?;
+            if parent.file_name().and_then(std::ffi::OsStr::to_str) == Some("deps") {
+                let mut sibling = parent
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("test executable has no target directory"))?
+                    .join("franken-node");
+                if !std::env::consts::EXE_SUFFIX.is_empty() {
+                    sibling.set_extension(std::env::consts::EXE_SUFFIX.trim_start_matches('.'));
+                }
+                return Self::validate_native_session_worker_path(&sibling).with_context(|| {
+                    "direct dispatcher tests require Cargo's franken-node binary; run an integration/all-targets build or set an explicit worker path"
+                });
+            }
+
+            if current
+                .file_stem()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name == "franken-node")
+            {
+                return Self::validate_native_session_worker_path(&current);
+            }
+
+            anyhow::bail!(
+                "native-session worker path is required for embedded dispatchers; configure the franken-node executable explicitly"
+            )
+        }
+    }
+
     /// Create a dispatcher with optional engine-binary and runtime overrides.
     pub fn new(path: Option<PathBuf>, requested_runtime: PreferredRuntime) -> Self {
         Self {
@@ -1470,17 +1766,29 @@ impl EngineDispatcher {
         }
     }
 
+    /// Set the trusted executable used for the private native-session worker.
+    ///
+    /// This is intentionally separate from `--engine-bin`: the latter is the
+    /// operator's engine-resolution hint and may name an unrelated external
+    /// engine, while this path must implement franken-node's private protocol.
+    pub fn with_native_session_worker_path(mut self, path: PathBuf) -> Self {
+        self.native_session_worker_path = Some(path);
+        self
+    }
+
     /// Dispatches execution to the external franken_engine binary.
     /// Serializes policy capabilities and limits into environment variables
     /// or command-line arguments to establish the trust boundary.
     ///
-    /// Telemetry lifecycle:
-    /// 1. Start telemetry bridge (returns owned handle)
-    /// 2. Launch engine process with socket path
-    /// 3. Wait for engine to exit
-    /// 4. Stop telemetry bridge with appropriate reason
-    /// 5. Join telemetry workers (drain remaining events)
-    /// 6. Clean up temp directory
+    /// Native lifecycle:
+    /// 1. Resolve and validate the private franken-node worker executable.
+    /// 2. Launch one process-group-isolated session worker.
+    /// 3. Let that worker own source loading, execution, HostIo, receipts, and telemetry.
+    /// 4. Validate its nonce-bound response only after a clean exit, or kill and reap it at the deadline.
+    /// 5. Clean up the parent-owned telemetry socket directory.
+    ///
+    /// The non-engine compatibility build retains its external-process,
+    /// parent-owned telemetry bridge lifecycle.
     pub fn dispatch_run(
         &self,
         app_path: &Path,
@@ -1762,12 +2070,17 @@ impl EngineDispatcher {
             .to_string_lossy()
             .into_owned();
 
-        // Start telemetry bridge and obtain explicit lifecycle handle
-        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-        let telemetry = TelemetryBridge::new(&socket_path, adapter);
-        let telemetry_handle = telemetry
-            .start()
-            .context("Failed to start telemetry bridge")?;
+        // The killable native-session worker owns telemetry too; otherwise a
+        // wedged telemetry join in the parent would recreate the very
+        // unbounded cleanup seam this supervisor closes. The external-engine
+        // compatibility path retains its parent-owned bridge.
+        #[cfg(not(feature = "engine"))]
+        let telemetry_handle = {
+            let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+            TelemetryBridge::new(&socket_path, adapter)
+                .start()
+                .context("Failed to start telemetry bridge")?
+        };
 
         let mut cmd = Command::new(&bin_path);
         cmd.arg("run")
@@ -1775,10 +2088,7 @@ impl EngineDispatcher {
             .arg("--policy")
             .arg(policy_mode)
             .env("FRANKEN_ENGINE_POLICY_PAYLOAD", &serialized_config)
-            .env(
-                "FRANKEN_ENGINE_TELEMETRY_SOCKET",
-                telemetry_handle.socket_path().to_string_lossy().as_ref(),
-            );
+            .env("FRANKEN_ENGINE_TELEMETRY_SOCKET", &socket_path);
 
         // Wire network policy enforcement to spawned engine process (bd-3pogm).
         // These env vars provide a fast path for the engine to read policy without
@@ -1836,11 +2146,13 @@ impl EngineDispatcher {
                     policy_mode,
                     "Using native franken_engine execution instead of external process"
                 );
+                let native_session_worker_path = self.resolve_native_session_worker_path()?;
                 Self::run_engine_native_with_error_handling(
                     app_path,
                     config,
                     policy_mode,
-                    telemetry_handle,
+                    Path::new(&socket_path),
+                    &native_session_worker_path,
                 )
             }
             #[cfg(not(feature = "engine"))]
@@ -1954,15 +2266,241 @@ impl EngineDispatcher {
         }
     }
 
+    /// Enter the private one-shot worker before the public CLI parser runs.
+    ///
+    /// The mode is deliberately absent from Clap help and accepts its complete
+    /// request only through bounded stdin. Returning `true` tells `main` that
+    /// the private worker completed and normal command dispatch must stop.
+    #[doc(hidden)]
+    #[cfg(feature = "engine")]
+    pub fn maybe_run_internal_native_session_worker() -> Result<bool> {
+        let args = std::env::args_os().collect::<Vec<_>>();
+        if args.get(1).and_then(|arg| arg.to_str()) != Some(NATIVE_SESSION_WORKER_ARG) {
+            return Ok(false);
+        }
+        if args.len() != 2 {
+            anyhow::bail!("private native-session worker accepts no additional arguments");
+        }
+        Self::run_internal_native_session_worker()?;
+        Ok(true)
+    }
+
+    #[doc(hidden)]
+    #[cfg(not(feature = "engine"))]
+    pub fn maybe_run_internal_native_session_worker() -> Result<bool> {
+        Ok(false)
+    }
+
+    #[cfg(feature = "engine")]
+    fn run_internal_native_session_worker() -> Result<()> {
+        use base64::Engine as _;
+
+        fn write_response(response: &NativeSessionResponse) -> Result<()> {
+            let frame = encode_native_session_frame(response, NATIVE_SESSION_MAX_RESPONSE_BYTES)
+                .map_err(anyhow::Error::msg)?;
+            let stdout = io::stdout();
+            let mut locked = stdout.lock();
+            locked
+                .write_all(&frame)
+                .context("failed writing native-session response")?;
+            locked
+                .flush()
+                .context("failed flushing native-session response")?;
+            Ok(())
+        }
+
+        // Read exactly one bounded frame without waiting for EOF. The parent
+        // deliberately keeps stdin open for the rest of the session; a
+        // watchdog below treats EOF as proof that the supervising process died
+        // (including SIGKILL) and aborts this worker before it can outlive the
+        // trust boundary.
+        let stdin = io::stdin();
+        let mut locked_stdin = stdin.lock();
+        let request_frame =
+            read_native_session_frame(&mut locked_stdin, NATIVE_SESSION_MAX_REQUEST_BYTES)
+                .map_err(anyhow::Error::msg)?;
+        drop(locked_stdin);
+        drop(stdin);
+        let _parent_liveness_watchdog = thread::Builder::new()
+            .name("franken-node-native-parent-watchdog".to_string())
+            .spawn(|| {
+                let stdin = io::stdin();
+                let mut control = stdin.lock();
+                let mut unexpected = [0_u8; 1];
+                loop {
+                    match control.read(&mut unexpected) {
+                        Ok(_) => std::process::abort(),
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => std::process::abort(),
+                    }
+                }
+            })
+            .context("failed spawning native-session parent-liveness watchdog")?;
+        let request: NativeSessionRequest =
+            decode_native_session_frame(&request_frame, NATIVE_SESSION_MAX_REQUEST_BYTES, false)
+                .map_err(anyhow::Error::msg)?;
+        if request.schema_version != NATIVE_SESSION_SCHEMA {
+            anyhow::bail!("native-session request schema mismatch");
+        }
+        if uuid::Uuid::parse_str(&request.nonce).is_err() {
+            anyhow::bail!("native-session request nonce was invalid");
+        }
+        if !matches!(
+            request.policy_mode.as_str(),
+            "strict" | "balanced" | "legacy-risky"
+        ) {
+            anyhow::bail!("native-session request policy mode was invalid");
+        }
+        let actual_working_dir =
+            std::env::current_dir().context("failed resolving native-session worker directory")?;
+        if actual_working_dir != request.working_dir {
+            anyhow::bail!(
+                "native-session worker directory mismatch: expected {}, got {}",
+                request.working_dir.display(),
+                actual_working_dir.display()
+            );
+        }
+
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let telemetry_handle = match TelemetryBridge::new(
+            request
+                .telemetry_socket_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("telemetry socket path was not UTF-8"))?,
+            adapter,
+        )
+        .start()
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                return write_response(&NativeSessionResponse::TelemetryFailed {
+                    schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                    nonce: request.nonce,
+                    message: format!("failed starting native telemetry bridge: {error}"),
+                });
+            }
+        };
+        let telemetry_guard = NativeTelemetryGuard::new(telemetry_handle);
+        let cleanup_probe = telemetry_guard.cleanup_probe();
+        let cleanup_for_worker = Arc::clone(&cleanup_probe);
+        let app_path = request.app_path;
+        let config = request.config;
+        let policy_mode = request.policy_mode;
+        let nonce = request.nonce;
+        let cancellation = NativeEngineCancellation::new();
+        let spawned = spawn_caught_native_engine_worker(cleanup_for_worker, move || {
+            Self::run_engine_native_guarded(
+                &app_path,
+                &config,
+                &policy_mode,
+                telemetry_guard,
+                cancellation,
+            )
+        });
+        let (worker, outcome_rx) = match spawned {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                return write_response(&NativeSessionResponse::ExecutionFailed {
+                    schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                    nonce,
+                    message: format!(
+                        "failed spawning native engine worker `{NATIVE_ENGINE_WORKER_NAME}` with a {NATIVE_ENGINE_WORKER_STACK_BYTES}-byte stack: {error}; telemetry cleanup: {}",
+                        if cleanup_probe.load(Ordering::Acquire) {
+                            "successful"
+                        } else {
+                            "failed"
+                        }
+                    ),
+                });
+            }
+        };
+
+        let response = match outcome_rx.recv() {
+            Ok(NativeEngineWorkerOutcome::Completed(result)) => {
+                if let Err(payload) = worker.join() {
+                    NativeSessionResponse::Panicked {
+                        schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                        nonce,
+                        panic_message: native_engine_panic_message(payload.as_ref()),
+                        cleanup_successful: cleanup_probe.load(Ordering::Acquire),
+                    }
+                } else {
+                    match result {
+                        Ok((output, telemetry_report, host_effect_ledger)) => {
+                            let Some(exit_code) = output.status.code() else {
+                                return write_response(&NativeSessionResponse::ExecutionFailed {
+                                    schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                                    nonce,
+                                    message: "native engine returned a signal-only status"
+                                        .to_string(),
+                                });
+                            };
+                            NativeSessionResponse::Completed {
+                                schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                                nonce,
+                                exit_code,
+                                stdout_base64: base64::engine::general_purpose::STANDARD
+                                    .encode(output.stdout),
+                                stderr_base64: base64::engine::general_purpose::STANDARD
+                                    .encode(output.stderr),
+                                telemetry_report,
+                                host_effect_ledger,
+                            }
+                        }
+                        Err(EngineProcessError::Spawn { message, .. }) => {
+                            NativeSessionResponse::ExecutionFailed {
+                                schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                                nonce,
+                                message,
+                            }
+                        }
+                        Err(EngineProcessError::TelemetryDrain(message)) => {
+                            NativeSessionResponse::TelemetryFailed {
+                                schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                                nonce,
+                                message,
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(NativeEngineWorkerOutcome::Panicked {
+                panic_message,
+                cleanup_successful,
+            }) => {
+                let worker_joined = worker.join().is_ok();
+                NativeSessionResponse::Panicked {
+                    schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                    nonce,
+                    panic_message,
+                    cleanup_successful: cleanup_successful && worker_joined,
+                }
+            }
+            Err(error) => {
+                let worker_joined = worker.join().is_ok();
+                NativeSessionResponse::ExecutionFailed {
+                    schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                    nonce,
+                    message: format!(
+                        "native engine worker stopped without a typed outcome: {error}; worker joined: {worker_joined}"
+                    ),
+                }
+            }
+        };
+        write_response(&response)
+    }
+
     /// Execute code using native franken_engine API with enhanced error handling.
-    /// Wraps run_engine_native with timeout, panic detection, and detailed error context.
+    /// Runs the entire native session in a killable process boundary with one
+    /// absolute deadline, panic detection, and detailed error context.
     #[cfg(feature = "engine")]
     #[allow(clippy::type_complexity)]
     fn run_engine_native_with_error_handling(
         app_path: &Path,
         config: &Config,
         policy_mode: &str,
-        telemetry_handle: TelemetryRuntimeHandle,
+        telemetry_socket_path: &Path,
+        native_session_worker_path: &Path,
     ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
         use std::time::Duration;
 
@@ -1977,7 +2515,8 @@ impl EngineDispatcher {
             app_path,
             config,
             policy_mode,
-            telemetry_handle,
+            telemetry_socket_path,
+            native_session_worker_path,
             timeout,
         )
     }
@@ -1991,119 +2530,753 @@ impl EngineDispatcher {
         app_path: &Path,
         config: &Config,
         policy_mode: &str,
-        telemetry_handle: TelemetryRuntimeHandle,
+        telemetry_socket_path: &Path,
+        native_session_worker_path: &Path,
         timeout: std::time::Duration,
     ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
-        use std::sync::mpsc::RecvTimeoutError;
+        use base64::Engine as _;
+        use std::sync::mpsc;
+
+        fn spawn_bounded_reader(
+            mut stream: impl Read + Send + 'static,
+            cap: usize,
+            label: &'static str,
+        ) -> io::Result<(
+            thread::JoinHandle<()>,
+            mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+        )> {
+            let (sender, receiver) = mpsc::channel();
+            let worker = thread::Builder::new()
+                .name(format!("franken-node-native-{label}-reader"))
+                .spawn(move || {
+                    let mut output = Vec::new();
+                    let mut chunk = [0u8; 8192];
+                    let mut exceeded = false;
+                    loop {
+                        match stream.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                let available = cap.saturating_sub(output.len());
+                                if available > 0 {
+                                    output.extend_from_slice(&chunk[..count.min(available)]);
+                                }
+                                exceeded |= count > available;
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(error) => {
+                                let _ = sender.send(Err(format!(
+                                    "failed reading native-session {label}: {error}"
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                    let result = if exceeded {
+                        Err(format!(
+                            "native-session {label} exceeded the {cap}-byte cap"
+                        ))
+                    } else {
+                        Ok(output)
+                    };
+                    let _ = sender.send(result);
+                })?;
+            Ok((worker, receiver))
+        }
+
+        fn receive_reader(
+            reader: (
+                thread::JoinHandle<()>,
+                mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+            ),
+            label: &'static str,
+        ) -> std::result::Result<Vec<u8>, String> {
+            let (worker, receiver) = reader;
+            match receiver
+                .recv_timeout(crate::config::timeouts::ENGINE_DISPATCH_PIPE_READER_TIMEOUT)
+            {
+                Ok(result) => {
+                    if worker.join().is_err() {
+                        return Err(format!("native-session {label} reader panicked"));
+                    }
+                    result
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+                    "native-session {label} pipe did not close after worker termination"
+                )),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if worker.join().is_err() {
+                        Err(format!("native-session {label} reader panicked"))
+                    } else {
+                        Err(format!(
+                            "native-session {label} reader ended without a result"
+                        ))
+                    }
+                }
+            }
+        }
+
+        fn spawn_request_writer(
+            mut stream: impl Write + Send + 'static,
+            request_frame: Vec<u8>,
+        ) -> io::Result<(
+            mpsc::Sender<()>,
+            thread::JoinHandle<()>,
+            mpsc::Receiver<std::result::Result<(), String>>,
+        )> {
+            let (sender, receiver) = mpsc::channel();
+            let (release_sender, release_receiver) = mpsc::channel();
+            let worker = thread::Builder::new()
+                .name("franken-node-native-request-writer".to_string())
+                .spawn(move || {
+                    let result = stream
+                        .write_all(&request_frame)
+                        .map_err(|error| format!("failed writing native-session request: {error}"));
+                    if result.is_ok() {
+                        let _ = release_receiver.recv();
+                    }
+                    drop(stream);
+                    let _ = sender.send(result);
+                })?;
+            Ok((release_sender, worker, receiver))
+        }
+
+        fn receive_request_writer(
+            writer: (
+                mpsc::Sender<()>,
+                thread::JoinHandle<()>,
+                mpsc::Receiver<std::result::Result<(), String>>,
+            ),
+            allow_write_error_after_termination: bool,
+        ) -> std::result::Result<(), String> {
+            let (release_sender, worker, receiver) = writer;
+            let _ = release_sender.send(());
+            match receiver
+                .recv_timeout(crate::config::timeouts::ENGINE_DISPATCH_PIPE_READER_TIMEOUT)
+            {
+                Ok(write_result) => {
+                    if worker.join().is_err() {
+                        return Err("native-session request writer panicked".to_string());
+                    }
+                    if allow_write_error_after_termination {
+                        Ok(())
+                    } else {
+                        write_result
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => Err(
+                    "native-session request writer did not stop after worker termination"
+                        .to_string(),
+                ),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if worker.join().is_err() {
+                        Err("native-session request writer panicked".to_string())
+                    } else {
+                        Err("native-session request writer ended without a result".to_string())
+                    }
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        fn isolate_process_group(command: &mut Command) {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+
+        #[cfg(not(unix))]
+        fn isolate_process_group(_command: &mut Command) {}
+
+        #[cfg(unix)]
+        fn kill_process_group(process_group_id: u32) -> io::Result<()> {
+            let kill_path = kill_command_path().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "neither /bin/kill nor /usr/bin/kill is available",
+                )
+            })?;
+            let process_group = format!("-{process_group_id}");
+            let status = Command::new(kill_path)
+                .arg("-KILL")
+                .arg("--")
+                .arg(process_group)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "kill command failed for native-session process group {process_group_id}: {status}"
+                )))
+            }
+        }
+
+        #[cfg(not(unix))]
+        fn kill_process_group(_process_group_id: u32) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn kill_and_reap_native_session(child: &mut std::process::Child) -> io::Result<()> {
+            let group_result = kill_process_group(child.id());
+            let direct_result = child.kill();
+            let wait_result = child.wait();
+            let mut failures = Vec::new();
+            if let Err(error) = group_result {
+                failures.push(format!("process-group kill failed: {error}"));
+            }
+            if let Err(error) = direct_result
+                && error.kind() != io::ErrorKind::InvalidInput
+            {
+                failures.push(format!("direct worker kill failed: {error}"));
+            }
+            if let Err(error) = wait_result {
+                failures.push(format!("worker reap failed: {error}"));
+            }
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(io::Error::other(failures.join("; ")))
+            }
+        }
+
+        fn native_session_cleanup_failure(
+            process_cleanup: io::Result<()>,
+            request_writer_cleanup: Option<std::result::Result<(), String>>,
+            response_drain: Option<std::result::Result<Vec<u8>, String>>,
+            diagnostic_drain: Option<std::result::Result<Vec<u8>, String>>,
+        ) -> Option<String> {
+            let mut failures = Vec::new();
+            if let Err(error) = process_cleanup {
+                failures.push(error.to_string());
+            }
+            if let Some(Err(error)) = request_writer_cleanup {
+                failures.push(error);
+            }
+            if let Some(Err(error)) = response_drain {
+                failures.push(error);
+            }
+            if let Some(Err(error)) = diagnostic_drain {
+                failures.push(error);
+            }
+            (!failures.is_empty()).then(|| failures.join("; "))
+        }
+
+        fn validate_ledger(ledger: &HostEffectLedger) -> std::result::Result<(), String> {
+            use crate::runtime::effect_receipt::EffectReceiptChain;
+
+            if ledger.schema_version != crate::schema_versions::HOST_EFFECT_LEDGER {
+                return Err(format!(
+                    "native-session ledger schema {} did not match {}",
+                    ledger.schema_version,
+                    crate::schema_versions::HOST_EFFECT_LEDGER
+                ));
+            }
+            if ledger.trace_id.trim().is_empty() {
+                return Err("native-session ledger trace_id was empty".to_string());
+            }
+            if ledger.effect_count != ledger.entries.len() {
+                return Err(format!(
+                    "native-session ledger effect_count {} did not match {} entries",
+                    ledger.effect_count,
+                    ledger.entries.len()
+                ));
+            }
+            if ledger.allowed_count.saturating_add(ledger.denied_count) != ledger.effect_count {
+                return Err("native-session ledger outcome counts were inconsistent".to_string());
+            }
+            EffectReceiptChain::verify_entries_integrity(&ledger.entries)
+                .map_err(|error| format!("native-session ledger integrity failed: {error}"))?;
+            let expected_head = ledger.entries.last().map_or_else(
+                || EffectReceiptChain::new().head_hash(),
+                |entry| entry.chain_hash.clone(),
+            );
+            if ledger.chain_head_hash != expected_head {
+                return Err("native-session ledger chain head was inconsistent".to_string());
+            }
+            Ok(())
+        }
 
         let app_path_buf = app_path.to_path_buf();
-        let app_path_for_thread = app_path_buf.clone();
-        let config_for_thread = config.clone();
-        let policy_mode_for_thread = policy_mode.to_string();
-        let telemetry_guard = NativeTelemetryGuard::new(telemetry_handle);
-        let cleanup_probe = telemetry_guard.cleanup_probe();
-        let cleanup_probe_for_worker = Arc::clone(&cleanup_probe);
-        let cancellation = NativeEngineCancellation::new();
-        let cancellation_for_worker = cancellation.clone();
-
-        let (execution_thread, outcome_rx) =
-            match spawn_caught_native_engine_worker(cleanup_probe_for_worker, move || {
-                Self::run_engine_native_guarded(
-                    &app_path_for_thread,
-                    &config_for_thread,
-                    &policy_mode_for_thread,
-                    telemetry_guard,
-                    cancellation_for_worker,
-                )
-            }) {
-                Ok(worker) => worker,
-                Err(error) => {
-                    let dispatch_error = native_engine_worker_spawn_error(
-                        app_path_buf,
-                        &error,
-                        cleanup_probe.load(Ordering::Acquire),
-                    );
-                    return Err(dispatch_error.to_actionable().into());
-                }
+        let working_dir = std::env::current_dir().map_err(|error| {
+            let dispatch_error = EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: format!(
+                    "failed resolving native-session working directory: {error}"
+                ),
+                phase: "worker startup".to_string(),
             };
+            anyhow::Error::new(dispatch_error.to_actionable())
+        })?;
+        let nonce = uuid::Uuid::now_v7().to_string();
+        let request = NativeSessionRequest {
+            schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+            nonce: nonce.clone(),
+            app_path: app_path_buf.clone(),
+            working_dir: working_dir.clone(),
+            policy_mode: policy_mode.to_string(),
+            config: config.clone(),
+            telemetry_socket_path: telemetry_socket_path.to_path_buf(),
+        };
+        let request_frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
+            .map_err(|message| {
+                EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf.clone(),
+                    error_message: message,
+                    phase: "worker protocol".to_string(),
+                }
+                .to_actionable()
+            })?;
 
-        match outcome_rx.recv_timeout(timeout) {
-            Ok(NativeEngineWorkerOutcome::Completed(result)) => {
-                if let Err(payload) = execution_thread.join() {
-                    let dispatch_error = EngineDispatchError::EnginePanic {
+        let started = Instant::now();
+        let mut command = Command::new(native_session_worker_path);
+        #[cfg(test)]
+        {
+            if std::env::current_exe().ok().as_deref() == Some(native_session_worker_path) {
+                command
+                    .args(["bd_wwjxn_native_session_worker_entrypoint", "--nocapture"])
+                    .env("FRANKEN_NODE_NATIVE_SESSION_TEST_WORKER", "1");
+            } else {
+                command.arg(NATIVE_SESSION_WORKER_ARG);
+            }
+        }
+        #[cfg(not(test))]
+        command.arg(NATIVE_SESSION_WORKER_ARG);
+        command
+            .current_dir(&working_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        isolate_process_group(&mut command);
+
+        let mut child = command.spawn().map_err(|error| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: format!(
+                    "failed spawning native-session worker {}: {error}",
+                    native_session_worker_path.display()
+                ),
+                phase: "worker startup".to_string(),
+            }
+            .to_actionable()
+        })?;
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                let cleanup_failure = native_session_cleanup_failure(
+                    kill_and_reap_native_session(&mut child),
+                    None,
+                    None,
+                    None,
+                );
+                let dispatch_error = EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf,
+                    error_message: cleanup_failure.map_or_else(
+                        || "native-session response pipe was unavailable".to_string(),
+                        |cleanup| {
+                            format!(
+                                "native-session response pipe was unavailable; cleanup could not prove quiescence: {cleanup}"
+                            )
+                        },
+                    ),
+                    phase: "worker startup".to_string(),
+                };
+                return Err(dispatch_error.to_actionable().into());
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                drop(stdout);
+                let cleanup_failure = native_session_cleanup_failure(
+                    kill_and_reap_native_session(&mut child),
+                    None,
+                    None,
+                    None,
+                );
+                let dispatch_error = EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf,
+                    error_message: cleanup_failure.map_or_else(
+                        || "native-session diagnostic pipe was unavailable".to_string(),
+                        |cleanup| {
+                            format!(
+                                "native-session diagnostic pipe was unavailable; cleanup could not prove quiescence: {cleanup}"
+                            )
+                        },
+                    ),
+                    phase: "worker startup".to_string(),
+                };
+                return Err(dispatch_error.to_actionable().into());
+            }
+        };
+        let stdout_reader = match spawn_bounded_reader(
+            stdout,
+            NATIVE_SESSION_MAX_RESPONSE_BYTES + NATIVE_SESSION_FRAME_HEADER_BYTES,
+            "response",
+        ) {
+            Ok(reader) => reader,
+            Err(error) => {
+                drop(stderr);
+                let cleanup_failure = native_session_cleanup_failure(
+                    kill_and_reap_native_session(&mut child),
+                    None,
+                    None,
+                    None,
+                );
+                let error_message = cleanup_failure.map_or_else(
+                    || format!("failed spawning native-session response reader: {error}"),
+                    |cleanup| {
+                        format!(
+                            "failed spawning native-session response reader: {error}; cleanup could not prove quiescence: {cleanup}"
+                        )
+                    },
+                );
+                let dispatch_error = EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf,
+                    error_message,
+                    phase: "worker startup".to_string(),
+                };
+                return Err(dispatch_error.to_actionable().into());
+            }
+        };
+        let stderr_reader = match spawn_bounded_reader(
+            stderr,
+            NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES,
+            "diagnostics",
+        ) {
+            Ok(reader) => reader,
+            Err(error) => {
+                let cleanup_failure = native_session_cleanup_failure(
+                    kill_and_reap_native_session(&mut child),
+                    None,
+                    Some(receive_reader(stdout_reader, "response")),
+                    None,
+                );
+                let error_message = cleanup_failure.map_or_else(
+                    || format!("failed spawning native-session diagnostic reader: {error}"),
+                    |cleanup| {
+                        format!(
+                            "failed spawning native-session diagnostic reader: {error}; cleanup could not prove quiescence: {cleanup}"
+                        )
+                    },
+                );
+                let dispatch_error = EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf,
+                    error_message,
+                    phase: "worker startup".to_string(),
+                };
+                return Err(dispatch_error.to_actionable().into());
+            }
+        };
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                let cleanup_failure = native_session_cleanup_failure(
+                    kill_and_reap_native_session(&mut child),
+                    None,
+                    Some(receive_reader(stdout_reader, "response")),
+                    Some(receive_reader(stderr_reader, "diagnostics")),
+                );
+                let dispatch_error = EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf,
+                    error_message: cleanup_failure.map_or_else(
+                        || "native-session request pipe was unavailable".to_string(),
+                        |cleanup| {
+                            format!(
+                                "native-session request pipe was unavailable; cleanup could not prove quiescence: {cleanup}"
+                            )
+                        },
+                    ),
+                    phase: "worker startup".to_string(),
+                };
+                return Err(dispatch_error.to_actionable().into());
+            }
+        };
+        let request_writer = match spawn_request_writer(stdin, request_frame) {
+            Ok(writer) => writer,
+            Err(error) => {
+                let cleanup_failure = native_session_cleanup_failure(
+                    kill_and_reap_native_session(&mut child),
+                    None,
+                    Some(receive_reader(stdout_reader, "response")),
+                    Some(receive_reader(stderr_reader, "diagnostics")),
+                );
+                let error_message = cleanup_failure.map_or_else(
+                    || format!("failed spawning native-session request writer: {error}"),
+                    |cleanup| {
+                        format!(
+                            "failed spawning native-session request writer: {error}; cleanup could not prove quiescence: {cleanup}"
+                        )
+                    },
+                );
+                let dispatch_error = EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf,
+                    error_message,
+                    phase: "worker protocol".to_string(),
+                };
+                return Err(dispatch_error.to_actionable().into());
+            }
+        };
+
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() >= timeout => {
+                    let cleanup_failure = native_session_cleanup_failure(
+                        kill_and_reap_native_session(&mut child),
+                        Some(receive_request_writer(request_writer, true)),
+                        Some(receive_reader(stdout_reader, "response")),
+                        Some(receive_reader(stderr_reader, "diagnostics")),
+                    );
+                    if let Some(error) = cleanup_failure {
+                        let dispatch_error = EngineDispatchError::EngineExecutionError {
+                            app_path: app_path_buf,
+                            error_message: format!(
+                                "native-session timeout cleanup could not prove quiescence: {error}"
+                            ),
+                            phase: "worker cleanup".to_string(),
+                        };
+                        return Err(dispatch_error.to_actionable().into());
+                    }
+                    let dispatch_error = EngineDispatchError::EngineTimeout {
                         app_path: app_path_buf,
-                        panic_message: native_engine_panic_message(payload.as_ref()),
-                        cleanup_successful: false,
+                        timeout_duration: timeout,
+                        phase: "whole native session".to_string(),
                     };
                     return Err(dispatch_error.to_actionable().into());
                 }
-                result.map_err(|err| match err {
-                    EngineProcessError::Spawn { message, .. } => {
-                        let dispatch_error = EngineDispatchError::EngineExecutionError {
+                Ok(None) => thread::sleep(NATIVE_SESSION_POLL_INTERVAL),
+                Err(error) => {
+                    let cleanup_failure = native_session_cleanup_failure(
+                        kill_and_reap_native_session(&mut child),
+                        Some(receive_request_writer(request_writer, true)),
+                        Some(receive_reader(stdout_reader, "response")),
+                        Some(receive_reader(stderr_reader, "diagnostics")),
+                    );
+                    let cleanup_detail = cleanup_failure.map_or_else(String::new, |cleanup| {
+                        format!("; cleanup could not prove quiescence: {cleanup}")
+                    });
+                    let dispatch_error = EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf,
+                        error_message: format!(
+                            "failed polling native-session worker: {error}{cleanup_detail}"
+                        ),
+                        phase: "worker supervision".to_string(),
+                    };
+                    return Err(dispatch_error.to_actionable().into());
+                }
+            }
+        };
+
+        let request_write_result = receive_request_writer(request_writer, false);
+        let response_result = receive_reader(stdout_reader, "response");
+        let diagnostic_result = receive_reader(stderr_reader, "diagnostics");
+        request_write_result.map_err(|message| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: message,
+                phase: "worker protocol".to_string(),
+            }
+            .to_actionable()
+        })?;
+        let response_bytes = response_result.map_err(|message| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: message,
+                phase: "worker protocol".to_string(),
+            }
+            .to_actionable()
+        })?;
+        let diagnostic_bytes = diagnostic_result.map_err(|message| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: message,
+                phase: "worker protocol".to_string(),
+            }
+            .to_actionable()
+        })?;
+        let diagnostics = String::from_utf8_lossy(&diagnostic_bytes)
+            .trim()
+            .to_string();
+        if !status.success() {
+            let dispatch_error = EngineDispatchError::EnginePanic {
+                app_path: app_path_buf,
+                panic_message: if diagnostics.is_empty() {
+                    format!("native-session worker exited unexpectedly: {status}")
+                } else {
+                    format!("native-session worker exited unexpectedly: {status}: {diagnostics}")
+                },
+                cleanup_successful: true,
+            };
+            return Err(dispatch_error.to_actionable().into());
+        }
+
+        let response: NativeSessionResponse = decode_native_session_frame(
+            &response_bytes,
+            NATIVE_SESSION_MAX_RESPONSE_BYTES,
+            cfg!(test),
+        )
+        .map_err(|message| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: if diagnostics.is_empty() {
+                    message
+                } else {
+                    format!("{message}; worker diagnostics: {diagnostics}")
+                },
+                phase: "worker protocol".to_string(),
+            }
+            .to_actionable()
+        })?;
+
+        let validate_envelope = |schema_version: &str, response_nonce: &str| {
+            if schema_version != NATIVE_SESSION_SCHEMA {
+                return Err("native-session response schema mismatch".to_string());
+            }
+            if response_nonce != nonce {
+                return Err("native-session response nonce mismatch".to_string());
+            }
+            Ok(())
+        };
+
+        match response {
+            NativeSessionResponse::Completed {
+                schema_version,
+                nonce: response_nonce,
+                exit_code,
+                stdout_base64,
+                stderr_base64,
+                telemetry_report,
+                host_effect_ledger,
+            } => {
+                validate_envelope(&schema_version, &response_nonce).map_err(|message| {
+                    EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf.clone(),
+                        error_message: message,
+                        phase: "worker protocol".to_string(),
+                    }
+                    .to_actionable()
+                })?;
+                if let Some(ledger) = host_effect_ledger.as_ref() {
+                    validate_ledger(ledger).map_err(|message| {
+                        EngineDispatchError::EngineExecutionError {
                             app_path: app_path_buf.clone(),
                             error_message: message,
-                            phase: "execution".to_string(),
-                        };
-                        dispatch_error.to_actionable().into()
-                    }
-                    EngineProcessError::TelemetryDrain(message) => {
-                        let dispatch_error = EngineDispatchError::TelemetryError {
-                            app_path: app_path_buf.clone(),
-                            telemetry_error: message,
-                        };
-                        dispatch_error.to_actionable().into()
-                    }
-                })
-            }
-            Ok(NativeEngineWorkerOutcome::Panicked {
-                panic_message,
-                cleanup_successful,
-            }) => {
-                let worker_joined = execution_thread.join().is_ok();
-                let dispatch_error = EngineDispatchError::EnginePanic {
-                    app_path: app_path_buf,
-                    panic_message,
-                    cleanup_successful: cleanup_successful && worker_joined,
-                };
-                Err(dispatch_error.to_actionable().into())
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                // Timeout is a quiescence deadline, not merely a response
-                // deadline. First stop interpreter admission, then wait behind
-                // every already-admitted host effect, and finally join the
-                // worker. Returning earlier would let guest code or I/O outlive
-                // the run result and violate the product trust boundary.
-                cancellation.cancel_and_wait_for_effects();
-                let worker_joined = execution_thread.join().is_ok();
-                if !worker_joined || !cleanup_probe.load(Ordering::Acquire) {
-                    tracing::error!(
-                        execution_mode = "native",
-                        worker_joined,
-                        telemetry_cleanup_successful = cleanup_probe.load(Ordering::Acquire),
-                        "Native engine timeout cleanup was incomplete"
-                    );
+                            phase: "worker protocol".to_string(),
+                        }
+                        .to_actionable()
+                    })?;
                 }
-                let dispatch_error = EngineDispatchError::EngineTimeout {
+                let stdout = base64::engine::general_purpose::STANDARD
+                    .decode(stdout_base64)
+                    .map_err(|error| {
+                        EngineDispatchError::EngineExecutionError {
+                            app_path: app_path_buf.clone(),
+                            error_message: format!(
+                                "native-session stdout base64 was invalid: {error}"
+                            ),
+                            phase: "worker protocol".to_string(),
+                        }
+                        .to_actionable()
+                    })?;
+                let stderr = base64::engine::general_purpose::STANDARD
+                    .decode(stderr_base64)
+                    .map_err(|error| {
+                        EngineDispatchError::EngineExecutionError {
+                            app_path: app_path_buf.clone(),
+                            error_message: format!(
+                                "native-session stderr base64 was invalid: {error}"
+                            ),
+                            phase: "worker protocol".to_string(),
+                        }
+                        .to_actionable()
+                    })?;
+                let guest_output_len = stdout.len().checked_add(stderr.len()).ok_or_else(|| {
+                    EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf.clone(),
+                        error_message: "native-session guest output length overflowed".to_string(),
+                        phase: "worker protocol".to_string(),
+                    }
+                    .to_actionable()
+                })?;
+                if guest_output_len > NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES {
+                    let dispatch_error = EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf,
+                        error_message: format!(
+                            "native-session guest output exceeded {} bytes",
+                            NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES
+                        ),
+                        phase: "worker protocol".to_string(),
+                    };
+                    return Err(dispatch_error.to_actionable().into());
+                }
+                Ok((
+                    Output {
+                        status: exit_status_from_code(exit_code),
+                        stdout,
+                        stderr,
+                    },
+                    telemetry_report,
+                    host_effect_ledger,
+                ))
+            }
+            NativeSessionResponse::ExecutionFailed {
+                schema_version,
+                nonce: response_nonce,
+                message,
+            } => {
+                validate_envelope(&schema_version, &response_nonce).map_err(|error| {
+                    EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf.clone(),
+                        error_message: error,
+                        phase: "worker protocol".to_string(),
+                    }
+                    .to_actionable()
+                })?;
+                let dispatch_error = EngineDispatchError::EngineExecutionError {
                     app_path: app_path_buf,
-                    timeout_duration: timeout,
+                    error_message: message,
                     phase: "execution".to_string(),
                 };
                 Err(dispatch_error.to_actionable().into())
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                if let Err(payload) = execution_thread.join() {
-                    let dispatch_error = EngineDispatchError::EnginePanic {
-                        app_path: app_path_buf,
-                        panic_message: native_engine_panic_message(payload.as_ref()),
-                        cleanup_successful: cleanup_probe.load(Ordering::Acquire),
-                    };
-                    return Err(dispatch_error.to_actionable().into());
-                }
-                let dispatch_error = EngineDispatchError::EngineExecutionError {
+            NativeSessionResponse::TelemetryFailed {
+                schema_version,
+                nonce: response_nonce,
+                message,
+            } => {
+                validate_envelope(&schema_version, &response_nonce).map_err(|error| {
+                    EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf.clone(),
+                        error_message: error,
+                        phase: "worker protocol".to_string(),
+                    }
+                    .to_actionable()
+                })?;
+                let dispatch_error = EngineDispatchError::TelemetryError {
                     app_path: app_path_buf,
-                    error_message: "native engine worker exited without a typed outcome"
-                        .to_string(),
-                    phase: "worker supervision".to_string(),
+                    telemetry_error: message,
+                };
+                Err(dispatch_error.to_actionable().into())
+            }
+            NativeSessionResponse::Panicked {
+                schema_version,
+                nonce: response_nonce,
+                panic_message,
+                cleanup_successful,
+            } => {
+                validate_envelope(&schema_version, &response_nonce).map_err(|error| {
+                    EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf.clone(),
+                        error_message: error,
+                        phase: "worker protocol".to_string(),
+                    }
+                    .to_actionable()
+                })?;
+                let dispatch_error = EngineDispatchError::EnginePanic {
+                    app_path: app_path_buf,
+                    panic_message,
+                    cleanup_successful,
                 };
                 Err(dispatch_error.to_actionable().into())
             }
@@ -8213,8 +9386,60 @@ mod tests {
     }
 
     /// Regression for e5467b4b and bd-45ck9: the explicit supervisor deadline
-    /// cancels an infinite engine loop and does not return until the worker and
-    /// telemetry threads have reached their terminal paths.
+    /// kills and reaps an infinite native session before returning.
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_wwjxn_native_session_frame_is_versioned_bounded_and_digest_checked() {
+        let request = NativeSessionRequest {
+            schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+            nonce: uuid::Uuid::now_v7().to_string(),
+            app_path: PathBuf::from("app.js"),
+            working_dir: PathBuf::from("/tmp/native-session-frame"),
+            policy_mode: "balanced".to_string(),
+            config: Config::for_profile(Profile::Balanced),
+            telemetry_socket_path: PathBuf::from("/tmp/native-session-frame.sock"),
+        };
+        let frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
+            .expect("encode request frame");
+        let decoded: NativeSessionRequest =
+            decode_native_session_frame(&frame, NATIVE_SESSION_MAX_REQUEST_BYTES, false)
+                .expect("decode request frame");
+        assert_eq!(decoded.schema_version, NATIVE_SESSION_SCHEMA);
+        assert_eq!(decoded.nonce, request.nonce);
+        assert_eq!(decoded.config, request.config);
+
+        let mut corrupted = frame.clone();
+        let last = corrupted.last_mut().expect("frame has payload");
+        *last ^= 1;
+        let digest_error = decode_native_session_frame::<NativeSessionRequest>(
+            &corrupted,
+            NATIVE_SESSION_MAX_REQUEST_BYTES,
+            false,
+        )
+        .expect_err("payload corruption must fail closed");
+        assert!(digest_error.contains("digest mismatch"));
+
+        let mut trailing = frame;
+        trailing.push(0);
+        let trailing_error = decode_native_session_frame::<NativeSessionRequest>(
+            &trailing,
+            NATIVE_SESSION_MAX_REQUEST_BYTES,
+            false,
+        )
+        .expect_err("trailing bytes must fail closed");
+        assert!(trailing_error.contains("trailing bytes"));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_wwjxn_native_session_worker_entrypoint() {
+        if std::env::var_os("FRANKEN_NODE_NATIVE_SESSION_TEST_WORKER").is_none() {
+            return;
+        }
+        EngineDispatcher::run_internal_native_session_worker()
+            .expect("private native-session test worker must produce a response");
+    }
+
     #[cfg(feature = "engine")]
     #[test]
     fn bd_45ck9_engine_timeout_is_fail_closed_and_quiescent() {
@@ -8224,11 +9449,6 @@ mod tests {
         let app_path = temp_dir.path().join("infinite-loop.js");
         std::fs::write(&app_path, "while (true) {}\n").expect("write hanging JS");
         let socket_path = temp_dir.path().join("timeout-telemetry.sock");
-        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-        let telemetry_handle =
-            TelemetryBridge::new(socket_path.to_str().expect("utf8 socket path"), adapter)
-                .start()
-                .expect("start timeout telemetry bridge");
         let config = Config::for_profile(Profile::Balanced);
         // The baseline interpreter also has an instruction budget, so the
         // deadline must win deterministically even on a fast worker. Engine-
@@ -8240,7 +9460,8 @@ mod tests {
             &app_path,
             &config,
             "balanced",
-            telemetry_handle,
+            &socket_path,
+            &std::env::current_exe().expect("resolve test worker executable"),
             timeout,
         );
         let elapsed = start.elapsed();
