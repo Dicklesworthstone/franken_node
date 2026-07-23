@@ -46,7 +46,8 @@ use std::path::Path;
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 use crate::config::{ChildProcessSpawnBackend, Config};
 use crate::security::isolation_backend::{
-    ProcessSpawnContainmentError, ProcessSpawnContainmentReadiness, probe_process_spawn_containment,
+    ProcessSpawnContainmentError, ProcessSpawnContainmentReadiness,
+    probe_process_spawn_containment, verify_active_process_spawn_containment,
 };
 
 // ---------------------------------------------------------------------------
@@ -268,6 +269,16 @@ impl ChildProcessSpawnAdmission {
     #[must_use]
     pub const fn containment(&self) -> &ProcessSpawnContainmentReadiness {
         &self.containment
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verified_for_test(expires_at_ms: u64, binary_path: std::path::PathBuf) -> Self {
+        Self {
+            token_id: "test-process-spawn-token".to_string(),
+            policy_subject: "test-policy-subject".to_string(),
+            expires_at_ms,
+            containment: ProcessSpawnContainmentReadiness::verified_for_test(binary_path),
+        }
     }
 }
 
@@ -520,6 +531,27 @@ pub fn configured_child_process_spawn_admission(
         &trusted_public_key_hex,
         system_time_ms,
         probe_process_spawn_containment,
+    )
+}
+
+/// Re-authenticate a configured process-spawn grant from inside the already
+/// running native worker. The signed token, policy subject, expiry, fixed
+/// trust root, and Bubblewrap executable identity are checked again, while the
+/// backend proof is reconstructed from the worker's active kernel namespace
+/// instead of attempting a forbidden nested Bubblewrap probe.
+pub fn configured_child_process_spawn_admission_in_active_containment(
+    config: &Config,
+) -> Result<Option<ChildProcessSpawnAdmission>, ChildProcessSpawnAdmissionError> {
+    if config.security.child_process_spawn.is_none() {
+        return Ok(None);
+    }
+    let trust_anchor_path = Path::new(PROCESS_SPAWN_TRUST_ANCHOR_PATH);
+    let trusted_public_key_hex = load_process_spawn_trust_anchor_at(trust_anchor_path)?;
+    configured_child_process_spawn_admission_with(
+        config,
+        &trusted_public_key_hex,
+        system_time_ms,
+        verify_active_process_spawn_containment,
     )
 }
 

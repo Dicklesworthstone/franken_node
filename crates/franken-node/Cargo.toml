@@ -174,7 +174,10 @@ lazy_static = "1.5.0"
 loom = { version = "0.7", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1.4", default-features = false, features = ["std", "fs"] }
+rustix = { version = "1.1.4", default-features = false, features = ["std", "event", "fs", "process"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31.2", default-features = false, features = ["socket"] }
 
 # Windows: AF_UNIX socket support for the telemetry bridge (Unix uses std's
 # os::unix::net). uds_windows mirrors std's UnixListener/UnixStream API.

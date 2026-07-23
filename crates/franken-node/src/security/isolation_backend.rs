@@ -84,6 +84,7 @@ pub enum ProcessSpawnContainmentError {
     InsecureBinary { path: PathBuf, reason: String },
     FunctionalProbeFailed { path: PathBuf, reason: String },
     FunctionalProbeTimedOut { path: PathBuf, timeout_ms: u64 },
+    ActiveContainmentFailed { path: PathBuf, reason: String },
 }
 
 impl fmt::Display for ProcessSpawnContainmentError {
@@ -114,6 +115,11 @@ impl fmt::Display for ProcessSpawnContainmentError {
             Self::FunctionalProbeTimedOut { path, timeout_ms } => write!(
                 f,
                 "PROCESS_SPAWN_BACKEND_PROBE_TIMEOUT: {} exceeded {timeout_ms}ms",
+                path.display()
+            ),
+            Self::ActiveContainmentFailed { path, reason } => write!(
+                f,
+                "PROCESS_SPAWN_ACTIVE_CONTAINMENT_INVALID: {}: {reason}",
                 path.display()
             ),
         }
@@ -391,6 +397,92 @@ pub fn probe_process_spawn_containment(
             validate_process_spawn_bubblewrap,
             run_process_spawn_bubblewrap_probe,
         )
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "external-commands")))]
+    {
+        let _ = configured_path;
+        Err(ProcessSpawnContainmentError::ExternalCommandsDisabled)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = configured_path;
+        Err(ProcessSpawnContainmentError::UnsupportedOs {
+            os: std::env::consts::OS.to_string(),
+        })
+    }
+}
+
+/// Reconstruct a readiness proof from the kernel state of the running native
+/// worker. Unlike [`probe_process_spawn_containment`], this never tries to
+/// create a nested user namespace: Bubblewrap deliberately disables that
+/// operation inside a process-spawn sandbox.
+///
+/// The worker must be Bubblewrap's initial command (PID 2, parented directly
+/// by Bubblewrap's PID-1 reaper) in the same PID namespace as that reaper. The
+/// reaper executable is revalidated with the same root-ownership, path, mode,
+/// and SHA-256 checks used by the parent-side readiness probe.
+pub fn verify_active_process_spawn_containment(
+    configured_path: Option<&Path>,
+) -> Result<ProcessSpawnContainmentReadiness, ProcessSpawnContainmentError> {
+    #[cfg(all(target_os = "linux", feature = "external-commands"))]
+    {
+        let binary_path = resolve_process_spawn_bubblewrap(configured_path)?;
+        let binary_sha256 = validate_process_spawn_bubblewrap(&binary_path)?;
+        let active_error = |reason: String| ProcessSpawnContainmentError::ActiveContainmentFailed {
+            path: binary_path.clone(),
+            reason,
+        };
+
+        if std::process::id() != 2 {
+            return Err(active_error(format!(
+                "native worker must be namespace PID 2, found {}",
+                std::process::id()
+            )));
+        }
+        let status = std::fs::read_to_string("/proc/self/status")
+            .map_err(|error| active_error(format!("failed reading /proc/self/status: {error}")))?;
+        let parent_pid = status
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:"))
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .ok_or_else(|| active_error("/proc/self/status had no valid PPid".to_string()))?;
+        if parent_pid != 1 {
+            return Err(active_error(format!(
+                "native worker must be parented by namespace PID 1, found {parent_pid}"
+            )));
+        }
+
+        let worker_namespace = std::fs::read_link("/proc/self/ns/pid").map_err(|error| {
+            active_error(format!("failed reading worker PID namespace: {error}"))
+        })?;
+        let init_namespace = std::fs::read_link("/proc/1/ns/pid")
+            .map_err(|error| active_error(format!("failed reading init PID namespace: {error}")))?;
+        if worker_namespace != init_namespace {
+            return Err(active_error(
+                "native worker and containment init are in different PID namespaces".to_string(),
+            ));
+        }
+
+        let init_executable = std::fs::read_link("/proc/1/exe").map_err(|error| {
+            active_error(format!(
+                "failed resolving containment init executable: {error}"
+            ))
+        })?;
+        if init_executable != binary_path {
+            return Err(active_error(format!(
+                "namespace PID 1 executable {} did not match the admitted Bubblewrap binary",
+                init_executable.display()
+            )));
+        }
+
+        Ok(ProcessSpawnContainmentReadiness {
+            backend: "bubblewrap".to_string(),
+            binary_path,
+            binary_sha256,
+            functional_probe_passed: true,
+        })
     }
 
     #[cfg(all(target_os = "linux", not(feature = "external-commands")))]
@@ -923,6 +1015,23 @@ mod tests {
             error,
             ProcessSpawnContainmentError::FunctionalProbeFailed { ref reason, .. }
                 if reason.contains("namespace sentinel mismatch")
+        ));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", feature = "external-commands"))]
+    fn bd_sfr61_active_containment_proof_rejects_an_ordinary_host_process() {
+        let bubblewrap_path = Path::new("/usr/bin/bwrap");
+        assert!(
+            bubblewrap_path.is_file(),
+            "Linux test image must provide /usr/bin/bwrap"
+        );
+        let error = verify_active_process_spawn_containment(Some(bubblewrap_path))
+            .expect_err("a host process must not forge an active namespace proof");
+        assert!(matches!(
+            error,
+            ProcessSpawnContainmentError::ActiveContainmentFailed { ref reason, .. }
+                if reason.contains("namespace PID 2")
         ));
     }
 

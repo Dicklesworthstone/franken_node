@@ -6,7 +6,10 @@ use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 use crate::{
     ActionableError,
     config::{Config, PreferredRuntime, Profile},
-    security::impossible_default::configured_child_process_spawn_admission,
+    security::impossible_default::{
+        ChildProcessSpawnAdmission, configured_child_process_spawn_admission,
+        configured_child_process_spawn_admission_in_active_containment,
+    },
     supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry},
 };
 use anyhow::{Context, Result};
@@ -61,13 +64,13 @@ const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
 /// before Clap so the worker can never recursively enter the public `run`
 /// command.
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v1";
+const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v2";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v1";
+const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v2";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V1\0";
+const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V2\0";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 1;
+const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 2;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
 #[cfg(feature = "engine")]
@@ -80,6 +83,40 @@ const NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 const NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2);
+#[cfg(all(feature = "engine", target_os = "linux"))]
+const NATIVE_SESSION_CONTAINMENT_STARTUP_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(2);
+#[cfg(all(feature = "engine", target_os = "linux"))]
+const NATIVE_SESSION_CONTAINMENT_CLEANUP_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeSessionPeerCredentials {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[derive(Debug, Deserialize)]
+struct BubblewrapInfo {
+    #[serde(rename = "child-pid")]
+    child_pid: u32,
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+struct BubblewrapContainmentUnit {
+    init_pid: u32,
+    init_pidfd: std::os::fd::OwnedFd,
+}
+
+#[cfg(feature = "engine")]
+enum NativeSessionContainment {
+    ProcessGroup,
+    #[cfg(target_os = "linux")]
+    Bubblewrap(BubblewrapContainmentUnit),
+}
 
 #[cfg(feature = "engine")]
 #[derive(Debug, Serialize, Deserialize)]
@@ -219,7 +256,7 @@ fn decode_native_session_frame<T: serde::de::DeserializeOwned>(
     let payload = &framed[header_len..frame_end];
     let expected_digest = &framed[length_end..digest_end];
     let actual_digest = Sha256::digest(payload);
-    if expected_digest != &actual_digest[..] {
+    if !crate::security::constant_time::ct_eq_bytes(expected_digest, &actual_digest) {
         return Err("native-session frame digest mismatch".to_string());
     }
     serde_json::from_slice(payload)
@@ -1814,11 +1851,18 @@ impl EngineDispatcher {
         // dispatcher side effect or guest execution instead.
         Self::require_embedded_engine_for_profile_governed_run()?;
 
-        // bd-ztr5v: no profile grants process spawning ambiently. A configured
-        // opt-in must authenticate and prove backend readiness, but it remains
-        // fail-closed until bd-sfr61 launches this execution path inside that
-        // backend and can pass a launch-time containment proof.
-        Self::reject_uncontained_process_spawn_opt_in(config)?;
+        // Authenticate the signed opt-in and establish backend readiness before
+        // any guest execution. The returned value is deliberately not enough
+        // to grant authority: the worker independently reconstructs the active
+        // namespace proof before `process_spawn` enters its capability set.
+        let process_spawn_admission = configured_child_process_spawn_admission(config).map_err(
+            |error| {
+                ActionableError::new(
+                    format!("Child-process-spawn admission failed: {error}"),
+                    "Remove security.child_process_spawn to keep spawning disabled, or replace it with a valid signed policy-bound token and a ready Linux Bubblewrap backend",
+                )
+            },
+        )?;
 
         // SECURITY: Re-validate trust state to close TOCTOU gap between preflight and execution (bd-zqz0q)
         let project_root = app_path
@@ -2174,6 +2218,7 @@ impl EngineDispatcher {
                     policy_mode,
                     Path::new(&socket_path),
                     &native_session_worker_path,
+                    process_spawn_admission.as_ref(),
                 )
             }
             #[cfg(not(feature = "engine"))]
@@ -2299,10 +2344,18 @@ impl EngineDispatcher {
         if args.get(1).and_then(|arg| arg.to_str()) != Some(NATIVE_SESSION_WORKER_ARG) {
             return Ok(false);
         }
-        if args.len() != 2 {
-            anyhow::bail!("private native-session worker accepts no additional arguments");
+        if args.len() != 3 {
+            anyhow::bail!(
+                "private native-session worker requires an authenticated parent channel and one launch nonce"
+            );
         }
-        Self::run_internal_native_session_worker()?;
+        let expected_nonce = args[2]
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("private native-session launch nonce was not UTF-8"))?;
+        if uuid::Uuid::parse_str(expected_nonce).is_err() {
+            anyhow::bail!("private native-session launch nonce was invalid");
+        }
+        Self::run_internal_native_session_worker(expected_nonce)?;
         Ok(true)
     }
 
@@ -2313,7 +2366,7 @@ impl EngineDispatcher {
     }
 
     #[cfg(feature = "engine")]
-    fn run_internal_native_session_worker() -> Result<()> {
+    fn run_internal_native_session_worker(expected_nonce: &str) -> Result<()> {
         use base64::Engine as _;
 
         fn write_response(response: &NativeSessionResponse) -> Result<()> {
@@ -2330,12 +2383,26 @@ impl EngineDispatcher {
             Ok(())
         }
 
+        let stdin = io::stdin();
+        #[cfg(target_os = "linux")]
+        let peer_credentials = {
+            use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+
+            let credentials = getsockopt(&stdin, PeerCredentials).context(
+                "private native-session stdin must be an authenticated Unix control socket",
+            )?;
+            NativeSessionPeerCredentials {
+                pid: credentials.pid(),
+                uid: credentials.uid(),
+                gid: credentials.gid(),
+            }
+        };
+
         // Read exactly one bounded frame without waiting for EOF. The parent
         // deliberately keeps stdin open for the rest of the session; a
         // watchdog below treats EOF as proof that the supervising process died
         // (including SIGKILL) and aborts this worker before it can outlive the
         // trust boundary.
-        let stdin = io::stdin();
         let mut locked_stdin = stdin.lock();
         let request_frame =
             read_native_session_frame(&mut locked_stdin, NATIVE_SESSION_MAX_REQUEST_BYTES)
@@ -2365,6 +2432,9 @@ impl EngineDispatcher {
         if uuid::Uuid::parse_str(&request.nonce).is_err() {
             anyhow::bail!("native-session request nonce was invalid");
         }
+        if !crate::security::constant_time::ct_eq(&request.nonce, expected_nonce) {
+            anyhow::bail!("native-session request nonce did not match the launch nonce");
+        }
         if !matches!(
             request.policy_mode.as_str(),
             "strict" | "balanced" | "legacy-risky"
@@ -2380,6 +2450,78 @@ impl EngineDispatcher {
                 actual_working_dir.display()
             );
         }
+
+        #[cfg(target_os = "linux")]
+        let process_spawn_admission = {
+            let status = std::fs::read_to_string("/proc/self/status")
+                .context("failed reading native-session worker process credentials")?;
+            let status_id = |key: &str| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .and_then(|value| value.split_whitespace().nth(1))
+                    .and_then(|value| value.parse::<u32>().ok())
+            };
+            let effective_uid = status_id("Uid:")
+                .ok_or_else(|| anyhow::anyhow!("worker status had no effective UID"))?;
+            let effective_gid = status_id("Gid:")
+                .ok_or_else(|| anyhow::anyhow!("worker status had no effective GID"))?;
+            if peer_credentials.uid != effective_uid || peer_credentials.gid != effective_gid {
+                anyhow::bail!(
+                    "private native-session control peer credentials did not match the worker identity"
+                );
+            }
+
+            if request.config.security.child_process_spawn.is_some() {
+                if peer_credentials.pid != 0 {
+                    anyhow::bail!(
+                        "process-spawn worker control peer must be outside the active PID namespace"
+                    );
+                }
+                configured_child_process_spawn_admission_in_active_containment(&request.config)
+                    .context("failed authenticating active process-spawn containment")?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("active process-spawn containment had no signed admission")
+                    })
+                    .map(Some)?
+            } else {
+                if peer_credentials.pid <= 0 {
+                    anyhow::bail!(
+                        "ordinary native-session control peer was not visible in the worker PID namespace"
+                    );
+                }
+                let parent_pid = status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("PPid:"))
+                    .and_then(|value| value.trim().parse::<i32>().ok())
+                    .ok_or_else(|| anyhow::anyhow!("worker status had no valid parent PID"))?;
+                if parent_pid != peer_credentials.pid {
+                    anyhow::bail!(
+                        "ordinary native-session control peer PID did not match the worker parent"
+                    );
+                }
+                let peer_executable =
+                    std::fs::read_link(format!("/proc/{}/exe", peer_credentials.pid))
+                        .context("failed resolving native-session supervisor executable")?;
+                let worker_executable = std::fs::read_link("/proc/self/exe")
+                    .context("failed resolving native-session worker executable")?;
+                if peer_executable != worker_executable {
+                    anyhow::bail!(
+                        "ordinary native-session control peer executable did not match this worker"
+                    );
+                }
+                None
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let process_spawn_admission: Option<ChildProcessSpawnAdmission> = {
+            if request.config.security.child_process_spawn.is_some() {
+                anyhow::bail!(
+                    "process-spawn native-session containment is supported only on Linux"
+                );
+            }
+            None
+        };
 
         let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
         let telemetry_handle = match TelemetryBridge::new(
@@ -2415,6 +2557,7 @@ impl EngineDispatcher {
                 &policy_mode,
                 telemetry_guard,
                 cancellation,
+                process_spawn_admission,
             )
         });
         let (worker, outcome_rx) = match spawned {
@@ -2521,6 +2664,7 @@ impl EngineDispatcher {
         policy_mode: &str,
         telemetry_socket_path: &Path,
         native_session_worker_path: &Path,
+        process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
     ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
         use std::time::Duration;
 
@@ -2537,6 +2681,7 @@ impl EngineDispatcher {
             policy_mode,
             telemetry_socket_path,
             native_session_worker_path,
+            process_spawn_admission,
             timeout,
         )
     }
@@ -2552,6 +2697,7 @@ impl EngineDispatcher {
         policy_mode: &str,
         telemetry_socket_path: &Path,
         native_session_worker_path: &Path,
+        process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
         timeout: std::time::Duration,
     ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
         use base64::Engine as _;
@@ -2737,7 +2883,185 @@ impl EngineDispatcher {
             Ok(())
         }
 
-        fn kill_and_reap_native_session(child: &mut std::process::Child) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        fn establish_bubblewrap_containment(
+            stderr: &mut std::process::ChildStderr,
+            outer_pid: u32,
+            bubblewrap_path: &Path,
+        ) -> io::Result<BubblewrapContainmentUnit> {
+            use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+            use rustix::process::{Pid, PidfdFlags, pidfd_open};
+
+            let original_flags = fcntl_getfl(&*stderr)?;
+            fcntl_setfl(&*stderr, original_flags | OFlags::NONBLOCK)?;
+            let started = Instant::now();
+            let mut payload = Vec::with_capacity(512);
+            let read_result = loop {
+                let mut byte = [0_u8; 1];
+                match stderr.read(&mut byte) {
+                    Ok(0) => {
+                        break Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "Bubblewrap closed its info stream before reporting namespace PID 1",
+                        ));
+                    }
+                    Ok(_) => {
+                        payload.push(byte[0]);
+                        if payload.len() > 4096 {
+                            break Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Bubblewrap info payload exceeded 4096 bytes",
+                            ));
+                        }
+                        if byte[0] == b'}' {
+                            match serde_json::from_slice::<BubblewrapInfo>(&payload) {
+                                Ok(info) => break Ok(info),
+                                Err(error) if error.is_eof() => {}
+                                Err(error) => {
+                                    break Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("invalid Bubblewrap info payload: {error}"),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if started.elapsed() >= NATIVE_SESSION_CONTAINMENT_STARTUP_TIMEOUT {
+                            break Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "Bubblewrap did not report namespace PID 1 before the startup deadline",
+                            ));
+                        }
+                        thread::sleep(NATIVE_SESSION_POLL_INTERVAL);
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
+            let restore_result = fcntl_setfl(&*stderr, original_flags);
+            let info = read_result?;
+            restore_result?;
+
+            // Pin the reported process before consulting any further /proc
+            // metadata so PID reuse cannot redirect later teardown to an
+            // unrelated process between identity validation and pidfd_open.
+            let init_pid = i32::try_from(info.child_pid)
+                .ok()
+                .and_then(Pid::from_raw)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Bubblewrap reported an invalid namespace init PID",
+                    )
+                })?;
+            let init_pidfd = pidfd_open(init_pid, PidfdFlags::empty()).map_err(io::Error::from)?;
+
+            let init_status = std::fs::read_to_string(format!("/proc/{}/status", info.child_pid))?;
+            let init_parent = init_status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:"))
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Bubblewrap namespace init had no valid parent PID",
+                    )
+                })?;
+            if init_parent != outer_pid {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Bubblewrap namespace init parent {init_parent} did not match supervisor {outer_pid}"
+                    ),
+                ));
+            }
+            let init_executable = std::fs::read_link(format!("/proc/{}/exe", info.child_pid))?;
+            if init_executable != bubblewrap_path {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Bubblewrap namespace init executable {} did not match {}",
+                        init_executable.display(),
+                        bubblewrap_path.display()
+                    ),
+                ));
+            }
+            Ok(BubblewrapContainmentUnit {
+                init_pid: info.child_pid,
+                init_pidfd,
+            })
+        }
+
+        #[cfg(target_os = "linux")]
+        fn wait_for_containment_unit_empty(unit: &BubblewrapContainmentUnit) -> io::Result<()> {
+            use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+            let timeout = Timespec::try_from(NATIVE_SESSION_CONTAINMENT_CLEANUP_TIMEOUT)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let mut descriptors = [PollFd::new(&unit.init_pidfd, PollFlags::IN)];
+            let ready = poll(&mut descriptors, Some(&timeout)).map_err(io::Error::from)?;
+            if ready == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "Bubblewrap namespace PID {} did not become empty before the cleanup deadline",
+                        unit.init_pid
+                    ),
+                ));
+            }
+            Ok(())
+        }
+
+        fn wait_for_outer_supervisor(child: &mut std::process::Child) -> io::Result<()> {
+            let started = Instant::now();
+            loop {
+                match child.try_wait()? {
+                    Some(_) => return Ok(()),
+                    None if started.elapsed() < NATIVE_SESSION_CONTAINMENT_CLEANUP_TIMEOUT => {
+                        thread::sleep(NATIVE_SESSION_POLL_INTERVAL);
+                    }
+                    None => {
+                        let _ = child.kill();
+                        child.wait()?;
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "native-session outer supervisor did not exit after containment became empty",
+                        ));
+                    }
+                }
+            }
+        }
+
+        fn kill_and_reap_native_session(
+            child: &mut std::process::Child,
+            containment: &NativeSessionContainment,
+        ) -> io::Result<()> {
+            #[cfg(target_os = "linux")]
+            if let NativeSessionContainment::Bubblewrap(unit) = containment {
+                use rustix::process::{Signal, pidfd_send_signal};
+
+                let signal_result =
+                    pidfd_send_signal(&unit.init_pidfd, Signal::KILL).map_err(io::Error::from);
+                let empty_result = wait_for_containment_unit_empty(unit);
+                let supervisor_result = wait_for_outer_supervisor(child);
+                let mut failures = Vec::new();
+                if let Err(error) = signal_result {
+                    failures.push(format!("namespace-init kill failed: {error}"));
+                }
+                if let Err(error) = empty_result {
+                    failures.push(format!("namespace-empty proof failed: {error}"));
+                }
+                if let Err(error) = supervisor_result {
+                    failures.push(format!("Bubblewrap reap failed: {error}"));
+                }
+                return if failures.is_empty() {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(failures.join("; ")))
+                };
+            }
+
             let group_result = kill_process_group(child.id());
             let direct_result = child.kill();
             let wait_result = child.wait();
@@ -2849,24 +3173,138 @@ impl EngineDispatcher {
             })?;
 
         let started = Instant::now();
-        let mut command = Command::new(native_session_worker_path);
+        let mut worker_args = Vec::<OsString>::new();
         #[cfg(test)]
         {
             if std::env::current_exe().ok().as_deref() == Some(native_session_worker_path) {
-                command
-                    .args(["bd_wwjxn_native_session_worker_entrypoint", "--nocapture"])
-                    .env("FRANKEN_NODE_NATIVE_SESSION_TEST_WORKER", "1");
+                worker_args.extend(
+                    ["bd_wwjxn_native_session_worker_entrypoint", "--nocapture"]
+                        .into_iter()
+                        .map(OsString::from),
+                );
             } else {
-                command.arg(NATIVE_SESSION_WORKER_ARG);
+                worker_args.extend(
+                    [NATIVE_SESSION_WORKER_ARG, nonce.as_str()]
+                        .into_iter()
+                        .map(OsString::from),
+                );
             }
         }
         #[cfg(not(test))]
-        command.arg(NATIVE_SESSION_WORKER_ARG);
+        worker_args.extend(
+            [NATIVE_SESSION_WORKER_ARG, nonce.as_str()]
+                .into_iter()
+                .map(OsString::from),
+        );
+
+        #[cfg(unix)]
+        let (request_control, worker_control) =
+            std::os::unix::net::UnixStream::pair().map_err(|error| {
+                EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf.clone(),
+                    error_message: format!(
+                        "failed creating authenticated native-session control socket: {error}"
+                    ),
+                    phase: "worker startup".to_string(),
+                }
+                .to_actionable()
+            })?;
+
+        let mut command = if let Some(admission) = process_spawn_admission {
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = admission;
+                return Err(ActionableError::new(
+                    "Child-process-spawn containment is supported only on Linux.",
+                    "Remove security.child_process_spawn on this platform",
+                )
+                .into());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let containment = admission.containment();
+                if containment.backend() != "bubblewrap" || !containment.functional_probe_passed() {
+                    return Err(ActionableError::new(
+                        "Child-process-spawn admission did not carry a valid Bubblewrap readiness proof.",
+                        "Re-run admission with a supported Linux Bubblewrap backend",
+                    )
+                    .into());
+                }
+                let mut command = Command::new(containment.binary_path());
+                command.args([
+                    "--info-fd",
+                    "2",
+                    "--die-with-parent",
+                    "--unshare-user",
+                    "--disable-userns",
+                    "--assert-userns-disabled",
+                    "--unshare-pid",
+                    "--unshare-cgroup",
+                    "--unshare-ipc",
+                    "--unshare-uts",
+                    "--new-session",
+                    "--cap-drop",
+                    "ALL",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                ]);
+                let execution_root = app_path_buf.parent();
+                if let Some(execution_root) = execution_root {
+                    command
+                        .arg("--bind")
+                        .arg(execution_root)
+                        .arg(execution_root);
+                }
+                if let Some(telemetry_root) = telemetry_socket_path.parent()
+                    && Some(telemetry_root) != execution_root
+                {
+                    command
+                        .arg("--bind")
+                        .arg(telemetry_root)
+                        .arg(telemetry_root);
+                }
+                command
+                    .args(["--proc", "/proc", "--dev", "/dev", "--chdir"])
+                    .arg(&working_dir)
+                    .arg("--")
+                    .arg(native_session_worker_path)
+                    .args(&worker_args);
+                command
+            }
+        } else {
+            let mut command = Command::new(native_session_worker_path);
+            command.args(&worker_args);
+            command
+        };
+
+        #[cfg(test)]
+        if std::env::current_exe().ok().as_deref() == Some(native_session_worker_path) {
+            command
+                .env("FRANKEN_NODE_NATIVE_SESSION_TEST_WORKER", "1")
+                .env("FRANKEN_NODE_NATIVE_SESSION_TEST_NONCE", &nonce);
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        if app_path_buf.file_name().and_then(|name| name.to_str())
+            == Some("bd-sfr61-containment-escape.js")
+        {
+            command
+                .env("FRANKEN_NODE_BD_SFR61_CONTAINMENT_ESCAPE", "1")
+                .env(
+                    "FRANKEN_NODE_BD_SFR61_CONTAINMENT_DIR",
+                    app_path_buf
+                        .parent()
+                        .expect("containment test app has a parent"),
+                );
+        }
         command
             .current_dir(&working_dir)
-            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.stdin(Stdio::from(std::os::fd::OwnedFd::from(worker_control)));
+        #[cfg(not(unix))]
+        command.stdin(Stdio::piped());
         isolate_process_group(&mut command);
 
         let mut child = command.spawn().map_err(|error| {
@@ -2880,11 +3318,12 @@ impl EngineDispatcher {
             }
             .to_actionable()
         })?;
+        let mut containment = NativeSessionContainment::ProcessGroup;
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child),
+                    kill_and_reap_native_session(&mut child, &containment),
                     None,
                     None,
                     None,
@@ -2904,12 +3343,12 @@ impl EngineDispatcher {
                 return Err(dispatch_error.to_actionable().into());
             }
         };
-        let stderr = match child.stderr.take() {
+        let mut stderr = match child.stderr.take() {
             Some(stderr) => stderr,
             None => {
                 drop(stdout);
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child),
+                    kill_and_reap_native_session(&mut child, &containment),
                     None,
                     None,
                     None,
@@ -2929,6 +3368,33 @@ impl EngineDispatcher {
                 return Err(dispatch_error.to_actionable().into());
             }
         };
+        #[cfg(target_os = "linux")]
+        if let Some(admission) = process_spawn_admission {
+            match establish_bubblewrap_containment(
+                &mut stderr,
+                child.id(),
+                admission.containment().binary_path(),
+            ) {
+                Ok(unit) => containment = NativeSessionContainment::Bubblewrap(unit),
+                Err(error) => {
+                    drop(stdout);
+                    drop(stderr);
+                    let cleanup = kill_and_reap_native_session(&mut child, &containment);
+                    let cleanup_detail = cleanup.err().map_or_else(String::new, |failure| {
+                        format!("; cleanup could not prove quiescence: {failure}")
+                    });
+                    return Err(EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf,
+                        error_message: format!(
+                            "failed establishing Bubblewrap containment unit: {error}{cleanup_detail}"
+                        ),
+                        phase: "worker startup".to_string(),
+                    }
+                    .to_actionable()
+                    .into());
+                }
+            }
+        }
         let stdout_reader = match spawn_bounded_reader(
             stdout,
             NATIVE_SESSION_MAX_RESPONSE_BYTES + NATIVE_SESSION_FRAME_HEADER_BYTES,
@@ -2938,7 +3404,7 @@ impl EngineDispatcher {
             Err(error) => {
                 drop(stderr);
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child),
+                    kill_and_reap_native_session(&mut child, &containment),
                     None,
                     None,
                     None,
@@ -2967,7 +3433,7 @@ impl EngineDispatcher {
             Ok(reader) => reader,
             Err(error) => {
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child),
+                    kill_and_reap_native_session(&mut child, &containment),
                     None,
                     Some(receive_reader(stdout_reader, "response")),
                     None,
@@ -2988,11 +3454,14 @@ impl EngineDispatcher {
                 return Err(dispatch_error.to_actionable().into());
             }
         };
+        #[cfg(unix)]
+        let stdin = request_control;
+        #[cfg(not(unix))]
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child),
+                    kill_and_reap_native_session(&mut child, &containment),
                     None,
                     Some(receive_reader(stdout_reader, "response")),
                     Some(receive_reader(stderr_reader, "diagnostics")),
@@ -3016,7 +3485,7 @@ impl EngineDispatcher {
             Ok(writer) => writer,
             Err(error) => {
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child),
+                    kill_and_reap_native_session(&mut child, &containment),
                     None,
                     Some(receive_reader(stdout_reader, "response")),
                     Some(receive_reader(stderr_reader, "diagnostics")),
@@ -3043,7 +3512,7 @@ impl EngineDispatcher {
                 Ok(Some(status)) => break status,
                 Ok(None) if started.elapsed() >= timeout => {
                     let cleanup_failure = native_session_cleanup_failure(
-                        kill_and_reap_native_session(&mut child),
+                        kill_and_reap_native_session(&mut child, &containment),
                         Some(receive_request_writer(request_writer, true)),
                         Some(receive_reader(stdout_reader, "response")),
                         Some(receive_reader(stderr_reader, "diagnostics")),
@@ -3068,7 +3537,7 @@ impl EngineDispatcher {
                 Ok(None) => thread::sleep(NATIVE_SESSION_POLL_INTERVAL),
                 Err(error) => {
                     let cleanup_failure = native_session_cleanup_failure(
-                        kill_and_reap_native_session(&mut child),
+                        kill_and_reap_native_session(&mut child, &containment),
                         Some(receive_request_writer(request_writer, true)),
                         Some(receive_reader(stdout_reader, "response")),
                         Some(receive_reader(stderr_reader, "diagnostics")),
@@ -3115,6 +3584,19 @@ impl EngineDispatcher {
             }
             .to_actionable()
         })?;
+        #[cfg(target_os = "linux")]
+        if let NativeSessionContainment::Bubblewrap(unit) = &containment {
+            wait_for_containment_unit_empty(unit).map_err(|error| {
+                EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf.clone(),
+                    error_message: format!(
+                        "Bubblewrap exited without proving the containment unit empty: {error}"
+                    ),
+                    phase: "worker cleanup".to_string(),
+                }
+                .to_actionable()
+            })?;
+        }
         let diagnostics = String::from_utf8_lossy(&diagnostic_bytes)
             .trim()
             .to_string();
@@ -3153,7 +3635,7 @@ impl EngineDispatcher {
             if schema_version != NATIVE_SESSION_SCHEMA {
                 return Err("native-session response schema mismatch".to_string());
             }
-            if response_nonce != nonce {
+            if !crate::security::constant_time::ct_eq(response_nonce, nonce) {
                 return Err("native-session response nonce mismatch".to_string());
             }
             Ok(())
@@ -3352,38 +3834,6 @@ impl EngineDispatcher {
         }
     }
 
-    fn reject_uncontained_process_spawn_opt_in(config: &Config) -> Result<(), ActionableError> {
-        Self::reject_uncontained_process_spawn_opt_in_with(config, |candidate| {
-            configured_child_process_spawn_admission(candidate).map(|admission| admission.is_some())
-        })
-    }
-
-    fn reject_uncontained_process_spawn_opt_in_with<Verify, Error>(
-        config: &Config,
-        verify: Verify,
-    ) -> Result<(), ActionableError>
-    where
-        Verify: FnOnce(&Config) -> Result<bool, Error>,
-        Error: std::fmt::Display,
-    {
-        let admission_present = verify(config).map_err(|error| {
-            ActionableError::new(
-                format!("Child-process-spawn admission failed: {error}"),
-                "Remove security.child_process_spawn to keep spawning disabled, or replace it with a valid signed policy-bound token and a ready Linux Bubblewrap backend",
-            )
-        })?;
-
-        if admission_present {
-            return Err(ActionableError::new(
-                "Child-process-spawn admission was authenticated, but this execution path has no active launch-time containment proof. The process_spawn capability remains withheld."
-                    .to_string(),
-                "Use a franken-node build whose bd-sfr61 authenticated native worker launches inside the validated Bubblewrap namespace; external Node/Bun runtimes cannot satisfy this contract",
-            ));
-        }
-
-        Ok(())
-    }
-
     fn require_embedded_engine_for_profile_governed_run() -> Result<(), ActionableError> {
         #[cfg(feature = "engine")]
         {
@@ -3416,9 +3866,36 @@ impl EngineDispatcher {
     }
 
     #[cfg(feature = "engine")]
-    fn resolve_capabilities_for_execution(config: &Config) -> Result<Vec<String>, ActionableError> {
-        Self::reject_uncontained_process_spawn_opt_in(config)?;
-        let capabilities = Self::map_profile_to_capabilities(config.profile);
+    fn resolve_capabilities_for_execution(
+        config: &Config,
+        process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
+    ) -> Result<Vec<String>, ActionableError> {
+        let configured = config.security.child_process_spawn.is_some();
+        if configured != process_spawn_admission.is_some() {
+            return Err(ActionableError::new(
+                "Child-process-spawn capability and active containment proof were inconsistent.",
+                "Run through the authenticated native-session supervisor; never invoke the private worker directly",
+            ));
+        }
+        let mut capabilities = Self::map_profile_to_capabilities(config.profile);
+        if let Some(admission) = process_spawn_admission {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| {
+                    ActionableError::new(
+                        format!("System clock cannot validate process-spawn admission: {error}"),
+                        "Correct the system clock before enabling child-process spawning",
+                    )
+                })?
+                .as_millis();
+            if now_ms >= u128::from(admission.expires_at_ms()) {
+                return Err(ActionableError::new(
+                    "Child-process-spawn admission expired before engine capability resolution.",
+                    "Issue a fresh signed process-spawn token and retry",
+                ));
+            }
+            capabilities.push("process_spawn".to_string());
+        }
 
         Self::validate_capabilities(&capabilities)?;
         Ok(capabilities)
@@ -3816,6 +4293,7 @@ impl EngineDispatcher {
             policy_mode,
             NativeTelemetryGuard::new(telemetry_handle),
             NativeEngineCancellation::new(),
+            None,
         )
     }
 
@@ -3827,6 +4305,7 @@ impl EngineDispatcher {
         policy_mode: &str,
         telemetry_guard: NativeTelemetryGuard,
         cancellation: NativeEngineCancellation,
+        process_spawn_admission: Option<ChildProcessSpawnAdmission>,
     ) -> std::result::Result<
         (Output, TelemetryRuntimeReport, Option<HostEffectLedger>),
         EngineProcessError,
@@ -3891,7 +4370,8 @@ impl EngineDispatcher {
             source: source_code,
             source_file: Some(execution_app_path.to_string_lossy().to_string()),
             capabilities: {
-                Self::resolve_capabilities_for_execution(config).map_err(|error| {
+                Self::resolve_capabilities_for_execution(config, process_spawn_admission.as_ref())
+                    .map_err(|error| {
                     native_engine_spawn_error_with_telemetry_cleanup(
                         error.to_string(),
                         &mut telemetry_guard,
@@ -4581,23 +5061,27 @@ mod tests {
     const BD_45CK9_PANIC_HOOK_CHILD_ENV: &str = "FRANKEN_NODE_BD_45CK9_PANIC_HOOK_CHILD";
 
     #[test]
-    fn bd_ztr5v_authenticated_opt_in_cannot_cross_uncontained_execution_gate() {
+    fn bd_ztr5v_profiles_never_grant_process_spawn_without_active_containment() {
         let config = Config::for_profile(Profile::LegacyRisky);
-        let error = EngineDispatcher::reject_uncontained_process_spawn_opt_in_with(&config, |_| {
-            Ok::<bool, &str>(true)
-        })
-        .expect_err("authenticated admission alone must not grant process spawning");
-        assert!(error.to_string().contains("capability remains withheld"));
+        let capabilities = EngineDispatcher::resolve_capabilities_for_execution(&config, None)
+            .expect("ordinary profile capabilities");
+        assert!(
+            !capabilities
+                .iter()
+                .any(|capability| capability == "process_spawn")
+        );
     }
 
     #[test]
-    fn bd_ztr5v_admission_failure_stays_actionable_at_execution_gate() {
+    fn bd_sfr61_active_proof_without_matching_signed_config_is_rejected() {
         let config = Config::for_profile(Profile::Balanced);
-        let error = EngineDispatcher::reject_uncontained_process_spawn_opt_in_with(&config, |_| {
-            Err::<bool, _>("invalid operator trust anchor")
-        })
-        .expect_err("admission failure must stop before execution");
-        assert!(error.to_string().contains("invalid operator trust anchor"));
+        let admission = ChildProcessSpawnAdmission::verified_for_test(
+            u64::MAX,
+            PathBuf::from("/usr/bin/bwrap"),
+        );
+        let error = EngineDispatcher::resolve_capabilities_for_execution(&config, Some(&admission))
+            .expect_err("a launch proof cannot create an unsigned config opt-in");
+        assert!(error.to_string().contains("inconsistent"));
     }
 
     #[test]
@@ -9577,8 +10061,99 @@ mod tests {
         if std::env::var_os("FRANKEN_NODE_NATIVE_SESSION_TEST_WORKER").is_none() {
             return;
         }
-        EngineDispatcher::run_internal_native_session_worker()
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("FRANKEN_NODE_BD_SFR61_CONTAINMENT_ESCAPE").is_some() {
+            use std::os::unix::process::CommandExt as _;
+
+            let containment_dir = PathBuf::from(
+                std::env::var_os("FRANKEN_NODE_BD_SFR61_CONTAINMENT_DIR")
+                    .expect("containment test directory"),
+            );
+            let escape_script = |kind: &str| {
+                format!(
+                    "printf started > \"$FRANKEN_NODE_BD_SFR61_CONTAINMENT_DIR/{kind}.started\"; \
+                     sleep 3; \
+                     printf survived > \"$FRANKEN_NODE_BD_SFR61_CONTAINMENT_DIR/{kind}.survived\"; \
+                     sleep 300"
+                )
+            };
+
+            Command::new("/usr/bin/setsid")
+                .args(["/bin/sh", "-c", &escape_script("setsid")])
+                .spawn()
+                .expect("spawn setsid escape attempt");
+            let mut setpgid = Command::new("/bin/sh");
+            setpgid
+                .args(["-c", &escape_script("setpgid")])
+                .process_group(0);
+            setpgid.spawn().expect("spawn setpgid escape attempt");
+            std::fs::write(containment_dir.join("worker.started"), b"started")
+                .expect("record containment worker startup");
+            thread::sleep(std::time::Duration::from_secs(300));
+            unreachable!("containment supervisor must terminate the escape worker");
+        }
+        let nonce = std::env::var("FRANKEN_NODE_NATIVE_SESSION_TEST_NONCE")
+            .expect("native-session test launch nonce");
+        EngineDispatcher::run_internal_native_session_worker(&nonce)
             .expect("private native-session test worker must produce a response");
+    }
+
+    /// bd-sfr61: session/process-group changes are not containment boundaries.
+    /// Both descendants inherit the control/output descriptors, so this call
+    /// can return only after Bubblewrap PID 1 has reaped the entire namespace
+    /// and every inherited IPC reference has closed.
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    #[test]
+    fn bd_sfr61_timeout_empties_namespace_after_setsid_and_setpgid_escape_attempts() {
+        use std::time::{Duration, Instant};
+
+        let temp_dir = tempfile::tempdir().expect("create containment fixture directory");
+        let app_path = temp_dir.path().join("bd-sfr61-containment-escape.js");
+        std::fs::write(&app_path, b"// test worker replaces guest execution\n")
+            .expect("write containment fixture");
+        let telemetry_path = temp_dir.path().join("containment.sock");
+        let config = Config::for_profile(Profile::Balanced);
+        let admission = ChildProcessSpawnAdmission::verified_for_test(
+            u64::MAX,
+            PathBuf::from("/usr/bin/bwrap"),
+        );
+        let timeout = Duration::from_secs(2);
+        let started = Instant::now();
+        let result = EngineDispatcher::run_engine_native_with_timeout(
+            &app_path,
+            &config,
+            "balanced",
+            &telemetry_path,
+            &std::env::current_exe().expect("resolve containment test executable"),
+            Some(&admission),
+            timeout,
+        );
+        let elapsed = started.elapsed();
+
+        let error = result
+            .expect_err("the containment escape worker must time out")
+            .to_string();
+        assert!(
+            error.contains("timeout") || error.contains("Timeout"),
+            "containment result should preserve the timeout verdict: {error}"
+        );
+        assert!(
+            temp_dir.path().join("worker.started").is_file()
+                && temp_dir.path().join("setsid.started").is_file()
+                && temp_dir.path().join("setpgid.started").is_file(),
+            "both escape attempts must actually start before containment teardown"
+        );
+        assert!(
+            elapsed >= timeout && elapsed < Duration::from_secs(9),
+            "timeout must wait for bounded namespace-empty and IPC-EOF proof: {elapsed:?}"
+        );
+
+        thread::sleep(Duration::from_millis(1_500));
+        assert!(
+            !temp_dir.path().join("setsid.survived").exists()
+                && !temp_dir.path().join("setpgid.survived").exists(),
+            "setsid/setpgid descendants must not survive the returned timeout"
+        );
     }
 
     #[cfg(feature = "engine")]
@@ -9603,6 +10178,7 @@ mod tests {
             "balanced",
             &socket_path,
             &std::env::current_exe().expect("resolve test worker executable"),
+            None,
             timeout,
         );
         let elapsed = start.elapsed();

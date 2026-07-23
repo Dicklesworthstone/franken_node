@@ -49,6 +49,50 @@ struct RunOutcome {
     stderr: String,
 }
 
+/// bd-sfr61: the private worker marker is not an alternate public CLI.  Even a
+/// caller that discovers the deliberately undocumented argv string must be
+/// refused before request decoding unless the authenticated supervisor also
+/// supplies the one-shot launch nonce and Unix control channel.
+#[test]
+fn private_native_session_worker_refuses_direct_cli_invocation() {
+    let missing_nonce = Command::new(franken_node_bin())
+        .arg("__franken-native-session-worker-v2")
+        .stdin(Stdio::null())
+        .output()
+        .expect("invoke private worker marker directly");
+
+    assert!(
+        !missing_nonce.status.success(),
+        "private entry must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&missing_nonce.stderr);
+    assert!(
+        stderr.contains("authenticated parent channel") && stderr.contains("launch nonce"),
+        "direct entry should explain the missing authenticated supervisor: {stderr}"
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        let forged_nonce = Command::new(franken_node_bin())
+            .args([
+                "__franken-native-session-worker-v2",
+                "00000000-0000-4000-8000-000000000001",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("invoke private worker with a forged nonce");
+        assert!(
+            !forged_nonce.status.success(),
+            "a forged argv nonce must not replace the supervisor channel"
+        );
+        let stderr = String::from_utf8_lossy(&forged_nonce.stderr);
+        assert!(
+            stderr.contains("authenticated Unix control socket"),
+            "forged direct entry should fail the kernel-authenticated channel check: {stderr}"
+        );
+    }
+}
+
 fn run_app(app_src: &str, extra_args: &[&str]) -> (tempfile::TempDir, RunOutcome) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     std::fs::write(dir.path().join("app.js"), app_src).expect("write fixture app");
