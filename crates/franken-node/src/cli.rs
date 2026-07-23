@@ -294,19 +294,14 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub config: Option<PathBuf>,
 
-    /// Runtime selection: auto, node, bun, or franken-engine.
+    /// Runtime selection. Profile-governed run accepts auto or franken-engine;
+    /// node and bun fail closed because they cannot enforce engine capabilities.
     #[arg(long)]
     pub runtime: Option<String>,
 
     /// Explicit franken_engine binary path or command name.
     #[arg(long, value_parser = parse_safe_binary_pathbuf)]
     pub engine_bin: Option<PathBuf>,
-
-    /// Run lockstep comparison across runtimes before execution.
-    /// When enabled, the app is run in both node and bun (if available)
-    /// and results are compared. Divergence blocks execution.
-    #[arg(long)]
-    pub lockstep_preflight: bool,
 
     /// Run the canonical first-tranche compat-op oracle before execution.
     #[arg(long)]
@@ -2033,6 +2028,10 @@ pub enum DoctorCommand {
     /// Analyze workspace pressure and resource usage.
     #[command(name = "workspace-pressure")]
     WorkspacePressure(DoctorWorkspacePressureArgs),
+
+    /// Validate the Linux Bubblewrap backend required for process spawning.
+    #[command(name = "process-spawn-readiness")]
+    ProcessSpawnReadiness(DoctorProcessSpawnReadinessArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -2078,6 +2077,17 @@ pub struct DoctorWorkspacePressureArgs {
     /// Use permissive pressure thresholds.
     #[arg(long)]
     pub permissive: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct DoctorProcessSpawnReadinessArgs {
+    /// Absolute Bubblewrap path. When omitted, resolve bwrap from the secure PATH.
+    #[arg(long)]
+    pub bubblewrap_path: Option<PathBuf>,
+
+    /// Emit the readiness report as machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -2436,7 +2446,7 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
-    fn run_parses_lockstep_and_runtime_options() -> Result<(), String> {
+    fn run_parses_runtime_options() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
             "run",
@@ -2445,7 +2455,6 @@ mod parser_contract_extra_tests {
             "node",
             "--policy",
             "strict",
-            "--lockstep-preflight",
             "--json",
         ])
         .map_err(|err| err.to_string())?;
@@ -2457,9 +2466,16 @@ mod parser_contract_extra_tests {
         assert_eq!(args.app_path, PathBuf::from("app.js"));
         assert_eq!(args.runtime.as_deref(), Some("node"));
         assert_eq!(args.policy, "strict");
-        assert!(args.lockstep_preflight);
         assert!(args.json);
         Ok(())
+    }
+
+    #[test]
+    fn bd_ztr5v_process_spawn_run_rejects_external_lockstep_preflight_flag() {
+        let error = parse(&["franken-node", "run", "app.js", "--lockstep-preflight"])
+            .expect_err("profile-governed run must not launch an external lockstep leg");
+
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]

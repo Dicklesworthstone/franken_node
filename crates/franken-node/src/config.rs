@@ -9,8 +9,10 @@ use std::{
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::push_bounded;
+use crate::security::impossible_default::CapabilityToken;
 
 pub mod timeouts;
 
@@ -161,6 +163,7 @@ impl Config {
                     decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
+                    child_process_spawn: None,
                 },
                 engine: EngineConfig::default(),
                 runtime: RuntimeConfig::strict_defaults(),
@@ -233,6 +236,7 @@ impl Config {
                     decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
+                    child_process_spawn: None,
                 },
                 engine: EngineConfig::default(),
                 runtime: RuntimeConfig::balanced_defaults(),
@@ -305,6 +309,7 @@ impl Config {
                     decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
+                    child_process_spawn: None,
                 },
                 engine: EngineConfig::default(),
                 runtime: RuntimeConfig::legacy_defaults(),
@@ -646,6 +651,29 @@ impl Config {
     /// ```
     pub fn to_toml(&self) -> Result<String, ConfigError> {
         toml::to_string_pretty(self).map_err(ConfigError::SerializeFailed)
+    }
+
+    /// Return the signed subject required for a child-process-spawn opt-in.
+    ///
+    /// The token subject and signature are blanked before serialization so the
+    /// subject does not recursively depend on itself. The rest of the opt-in
+    /// block remains in the digest, including the backend, binary path, token
+    /// identity, TTL, and justification. The verifier trust root lives outside
+    /// project configuration in the operator-owned keyring.
+    pub fn child_process_spawn_policy_subject(&self) -> Result<String, ConfigError> {
+        let mut policy = self.clone();
+        if let Some(opt_in) = policy.security.child_process_spawn.as_mut() {
+            opt_in.token.subject.clear();
+            opt_in.token.signature.clear();
+        }
+        let canonical_policy = policy.to_toml()?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"franken-node/process-spawn-policy/v1\0");
+        hasher.update(canonical_policy.as_bytes());
+        Ok(format!(
+            "franken-node/process-spawn/v1:{}",
+            hex::encode(hasher.finalize())
+        ))
     }
 
     /// Build an idempotency dedupe store from the resolved remote settings.
@@ -1145,6 +1173,25 @@ impl Config {
                         "ssrf_enforcement={:?} allowlist_len={}",
                         value.ssrf_enforcement,
                         value.allowlist.len()
+                    ),
+                ),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(section) = &overrides.security
+            && let Some(value) = &section.child_process_spawn
+        {
+            self.security.child_process_spawn = Some(value.clone());
+            push_bounded(
+                decisions,
+                MergeDecision::new(
+                    stage.clone(),
+                    "security.child_process_spawn",
+                    format!(
+                        "token_id={} backend={:?} binary_path={}",
+                        value.token.token_id,
+                        value.backend,
+                        value.binary_path.display()
                     ),
                 ),
                 MAX_MERGE_DECISIONS,
@@ -2011,6 +2058,13 @@ impl Config {
                 "engine.binary_path must be non-empty when configured".to_string(),
             ));
         }
+        if let Some(process_spawn) = &self.security.child_process_spawn
+            && !process_spawn.binary_path.is_absolute()
+        {
+            return Err(ConfigError::ValidationFailed(
+                "security.child_process_spawn.binary_path must be absolute".to_string(),
+            ));
+        }
         if self.runtime.remote_max_in_flight == 0 {
             return Err(ConfigError::ValidationFailed(
                 "runtime.remote_max_in_flight must be > 0".to_string(),
@@ -2622,6 +2676,7 @@ struct SecurityOverrides {
     /// cleanly through this loader. Without this field, every config file
     /// emitted by `init` fails to re-load with `unknown field network_policy`.
     pub network_policy: Option<NetworkPolicyConfig>,
+    pub child_process_spawn: Option<ChildProcessSpawnConfig>,
 }
 
 impl std::fmt::Debug for SecurityOverrides {
@@ -2638,6 +2693,7 @@ impl std::fmt::Debug for SecurityOverrides {
             )
             .field("authorized_api_keys", &"[REDACTED]")
             .field("network_policy", &self.network_policy)
+            .field("child_process_spawn", &self.child_process_spawn)
             .finish()
     }
 }
@@ -3019,6 +3075,45 @@ pub struct RemoteConfig {
 
 // -- Security --
 
+/// Containment backend accepted for explicit child-process spawning.
+///
+/// Bubblewrap is intentionally the only current variant. Unknown backend names
+/// fail TOML deserialization instead of silently falling back to an uncontained
+/// execution path.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChildProcessSpawnBackend {
+    #[default]
+    Bubblewrap,
+}
+
+/// Explicit, signed opt-in for the impossible-by-default process-spawn
+/// capability.
+///
+/// Merely configuring this block does not grant the capability. The runtime
+/// verifies the token against the resolved policy subject and the external
+/// operator trust anchor, then proves backend readiness before any execution
+/// path may consume the resulting admission proof.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChildProcessSpawnConfig {
+    pub token: CapabilityToken,
+    #[serde(default)]
+    pub backend: ChildProcessSpawnBackend,
+    /// Absolute path to the operator-managed Bubblewrap executable.
+    pub binary_path: PathBuf,
+}
+
+impl std::fmt::Debug for ChildProcessSpawnConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChildProcessSpawnConfig")
+            .field("token_id", &self.token.token_id)
+            .field("capability", &self.token.capability)
+            .field("backend", &self.backend)
+            .field("binary_path", &self.binary_path)
+            .finish()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecurityConfig {
     /// Maximum time the system may remain in degraded mode before suspension.
@@ -3039,6 +3134,11 @@ pub struct SecurityConfig {
     /// Network egress policy enforcement mode.
     #[serde(default)]
     pub network_policy: NetworkPolicyConfig,
+
+    /// Signed, policy-bound opt-in for child-process spawning. No runtime
+    /// profile supplies this value by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_process_spawn: Option<ChildProcessSpawnConfig>,
 }
 
 impl std::fmt::Debug for SecurityConfig {
@@ -3055,6 +3155,7 @@ impl std::fmt::Debug for SecurityConfig {
             )
             .field("authorized_api_keys", &"[REDACTED]")
             .field("network_policy", &self.network_policy)
+            .field("child_process_spawn", &self.child_process_spawn)
             .finish()
     }
 }
@@ -3813,6 +3914,112 @@ mod tests {
         config.trust.registry_signing_key = Some(test_registry_signing_key());
         config.security.authorized_api_keys = BTreeSet::from(["test-api-key".to_string()]);
         config
+    }
+
+    fn child_process_spawn_fixture() -> ChildProcessSpawnConfig {
+        ChildProcessSpawnConfig {
+            token: CapabilityToken {
+                token_id: "spawn-token".to_string(),
+                capability:
+                    crate::security::impossible_default::ImpossibleCapability::ChildProcessSpawn,
+                issuer: "operator".to_string(),
+                subject: "franken-node/process-spawn/v1:test".to_string(),
+                issued_at_ms: 1_000,
+                expires_at_ms: 2_000,
+                signature: "00".repeat(64),
+                justification: "config roundtrip".to_string(),
+            },
+            backend: ChildProcessSpawnBackend::Bubblewrap,
+            binary_path: PathBuf::from("/usr/bin/bwrap"),
+        }
+    }
+
+    #[test]
+    fn every_profile_keeps_child_process_spawn_disabled_by_default() {
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            assert!(
+                Config::for_profile(profile)
+                    .security
+                    .child_process_spawn
+                    .is_none(),
+                "{profile:?} must not synthesize a process-spawn opt-in"
+            );
+        }
+    }
+
+    #[test]
+    fn child_process_spawn_policy_subject_excludes_recursive_fields_but_binds_policy() {
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.security.child_process_spawn = Some(child_process_spawn_fixture());
+        let original = config
+            .child_process_spawn_policy_subject()
+            .expect("original subject");
+
+        let token = &mut config
+            .security
+            .child_process_spawn
+            .as_mut()
+            .expect("opt-in")
+            .token;
+        token.subject = "different recursive subject".to_string();
+        token.signature = "ff".repeat(64);
+        assert_eq!(
+            config.child_process_spawn_policy_subject().unwrap(),
+            original
+        );
+
+        config
+            .security
+            .child_process_spawn
+            .as_mut()
+            .expect("opt-in")
+            .binary_path = PathBuf::from("/opt/trusted/bin/bwrap");
+        assert_ne!(
+            config.child_process_spawn_policy_subject().unwrap(),
+            original
+        );
+
+        config
+            .security
+            .child_process_spawn
+            .as_mut()
+            .expect("opt-in")
+            .binary_path = PathBuf::from("/usr/bin/bwrap");
+        config.runtime.bulkhead_retry_after_ms =
+            config.runtime.bulkhead_retry_after_ms.saturating_add(1);
+        assert_ne!(
+            config
+                .child_process_spawn_policy_subject()
+                .expect("mutated subject"),
+            original,
+            "any resolved policy mutation must change the subject"
+        );
+    }
+
+    #[test]
+    fn child_process_spawn_config_roundtrips_through_full_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("franken_node.toml");
+        let mut config = valid_base_config(Profile::LegacyRisky);
+        config.security.child_process_spawn = Some(child_process_spawn_fixture());
+        std::fs::write(&path, config.to_toml().expect("serialize config")).expect("write config");
+
+        let loaded = Config::load(&path).expect("load config");
+        assert_eq!(
+            loaded.security.child_process_spawn,
+            config.security.child_process_spawn
+        );
+    }
+
+    #[test]
+    fn child_process_spawn_config_rejects_relative_backend_path() {
+        let mut config = valid_base_config(Profile::Balanced);
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.binary_path = PathBuf::from("bin/bwrap");
+        config.security.child_process_spawn = Some(process_spawn);
+
+        let error = config.validate().expect_err("relative backend must fail");
+        assert!(error.to_string().contains("binary_path must be absolute"));
     }
 
     /// Write a TOML file carrying only the two fail-closed security fields that

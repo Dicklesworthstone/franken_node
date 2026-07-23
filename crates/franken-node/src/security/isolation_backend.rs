@@ -5,8 +5,11 @@
 //! guarantees when microVM is unavailable.
 
 use serde::{Deserialize, Serialize};
+#[cfg(all(target_os = "linux", feature = "external-commands"))]
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use std::{process::Command, thread};
@@ -17,6 +20,393 @@ use which::which;
 use super::sandbox_policy_compiler::{
     AccessLevel, CAPABILITIES, CompiledPolicy, SandboxProfile, compile_policy,
 };
+
+#[cfg(all(target_os = "linux", feature = "external-commands"))]
+const PROCESS_SPAWN_BWRAP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(all(target_os = "linux", feature = "external-commands"))]
+const PROCESS_SPAWN_BWRAP_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(all(target_os = "linux", feature = "external-commands"))]
+const PROCESS_SPAWN_BWRAP_PROBE_MARKER: &str = "franken-node-bwrap-probe-v1";
+
+/// Successful readiness proof for the only currently supported process-spawn
+/// containment backend.
+///
+/// This proves that Bubblewrap is securely installed and can create the
+/// namespaces required by the process-spawn contract. It does not prove that a
+/// particular runtime worker was launched inside those namespaces; bd-sfr61
+/// owns that separate launch-time proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProcessSpawnContainmentReadiness {
+    backend: String,
+    binary_path: PathBuf,
+    binary_sha256: String,
+    functional_probe_passed: bool,
+}
+
+impl ProcessSpawnContainmentReadiness {
+    #[must_use]
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    #[must_use]
+    pub fn binary_path(&self) -> &Path {
+        &self.binary_path
+    }
+
+    #[must_use]
+    pub fn binary_sha256(&self) -> &str {
+        &self.binary_sha256
+    }
+
+    #[must_use]
+    pub const fn functional_probe_passed(&self) -> bool {
+        self.functional_probe_passed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verified_for_test(binary_path: PathBuf) -> Self {
+        Self {
+            backend: "bubblewrap".to_string(),
+            binary_path,
+            binary_sha256: "00".repeat(32),
+            functional_probe_passed: true,
+        }
+    }
+}
+
+/// Fail-closed reasons why process-spawn containment is not ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessSpawnContainmentError {
+    UnsupportedOs { os: String },
+    ExternalCommandsDisabled,
+    BinaryNotFound,
+    InsecureBinary { path: PathBuf, reason: String },
+    FunctionalProbeFailed { path: PathBuf, reason: String },
+    FunctionalProbeTimedOut { path: PathBuf, timeout_ms: u64 },
+}
+
+impl fmt::Display for ProcessSpawnContainmentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedOs { os } => write!(
+                f,
+                "PROCESS_SPAWN_BACKEND_UNSUPPORTED: Bubblewrap containment is supported only on Linux, not {os}"
+            ),
+            Self::ExternalCommandsDisabled => write!(
+                f,
+                "PROCESS_SPAWN_BACKEND_UNAVAILABLE: the external-commands feature is disabled"
+            ),
+            Self::BinaryNotFound => write!(
+                f,
+                "PROCESS_SPAWN_BACKEND_UNAVAILABLE: Bubblewrap was not found; configure an absolute binary_path or install bwrap"
+            ),
+            Self::InsecureBinary { path, reason } => write!(
+                f,
+                "PROCESS_SPAWN_BACKEND_INSECURE: {}: {reason}",
+                path.display()
+            ),
+            Self::FunctionalProbeFailed { path, reason } => write!(
+                f,
+                "PROCESS_SPAWN_BACKEND_PROBE_FAILED: {}: {reason}",
+                path.display()
+            ),
+            Self::FunctionalProbeTimedOut { path, timeout_ms } => write!(
+                f,
+                "PROCESS_SPAWN_BACKEND_PROBE_TIMEOUT: {} exceeded {timeout_ms}ms",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProcessSpawnContainmentError {}
+
+#[cfg(any(test, all(target_os = "linux", feature = "external-commands")))]
+fn probe_process_spawn_containment_with<Resolve, Validate, FunctionalProbe>(
+    os: &str,
+    resolve: Resolve,
+    validate: Validate,
+    functional_probe: FunctionalProbe,
+) -> Result<ProcessSpawnContainmentReadiness, ProcessSpawnContainmentError>
+where
+    Resolve: FnOnce() -> Result<PathBuf, ProcessSpawnContainmentError>,
+    Validate: FnOnce(&Path) -> Result<String, ProcessSpawnContainmentError>,
+    FunctionalProbe: FnOnce(&Path) -> Result<(), ProcessSpawnContainmentError>,
+{
+    if os != "linux" {
+        return Err(ProcessSpawnContainmentError::UnsupportedOs { os: os.to_string() });
+    }
+
+    let binary_path = resolve()?;
+    let binary_sha256 = validate(&binary_path)?;
+    functional_probe(&binary_path)?;
+    Ok(ProcessSpawnContainmentReadiness {
+        backend: "bubblewrap".to_string(),
+        binary_path,
+        binary_sha256,
+        functional_probe_passed: true,
+    })
+}
+
+#[cfg(all(target_os = "linux", feature = "external-commands"))]
+fn resolve_process_spawn_bubblewrap(
+    configured_path: Option<&Path>,
+) -> Result<PathBuf, ProcessSpawnContainmentError> {
+    if let Some(path) = configured_path {
+        if !path.is_absolute() {
+            return Err(ProcessSpawnContainmentError::InsecureBinary {
+                path: path.to_path_buf(),
+                reason: "configured path must be absolute".to_string(),
+            });
+        }
+        return Ok(path.to_path_buf());
+    }
+
+    which("bwrap").map_err(|_| ProcessSpawnContainmentError::BinaryNotFound)
+}
+
+#[cfg(all(target_os = "linux", feature = "external-commands"))]
+fn validate_process_spawn_bubblewrap(path: &Path) -> Result<String, ProcessSpawnContainmentError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if !path.is_absolute() {
+        return Err(ProcessSpawnContainmentError::InsecureBinary {
+            path: path.to_path_buf(),
+            reason: "resolved path must be absolute".to_string(),
+        });
+    }
+    let canonical =
+        path.canonicalize()
+            .map_err(|error| ProcessSpawnContainmentError::InsecureBinary {
+                path: path.to_path_buf(),
+                reason: format!("canonical path unavailable: {error}"),
+            })?;
+    if canonical != path {
+        return Err(ProcessSpawnContainmentError::InsecureBinary {
+            path: path.to_path_buf(),
+            reason: format!(
+                "path must be canonical with no symlinked components (resolved to {})",
+                canonical.display()
+            ),
+        });
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        ProcessSpawnContainmentError::InsecureBinary {
+            path: path.to_path_buf(),
+            reason: format!("metadata unavailable: {error}"),
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ProcessSpawnContainmentError::InsecureBinary {
+            path: path.to_path_buf(),
+            reason: "path must name a regular file, not a symlink".to_string(),
+        });
+    }
+    if metadata.uid() != 0 {
+        return Err(ProcessSpawnContainmentError::InsecureBinary {
+            path: path.to_path_buf(),
+            reason: format!(
+                "binary must be owned by root (uid 0), found uid {}",
+                metadata.uid()
+            ),
+        });
+    }
+    let mode = metadata.permissions().mode();
+    if mode & 0o111 == 0 {
+        return Err(ProcessSpawnContainmentError::InsecureBinary {
+            path: path.to_path_buf(),
+            reason: "binary is not executable".to_string(),
+        });
+    }
+    if mode & 0o022 != 0 {
+        return Err(ProcessSpawnContainmentError::InsecureBinary {
+            path: path.to_path_buf(),
+            reason: format!("binary is group/other writable (mode {:o})", mode & 0o7777),
+        });
+    }
+    if mode & 0o6000 != 0 {
+        return Err(ProcessSpawnContainmentError::InsecureBinary {
+            path: path.to_path_buf(),
+            reason: "setuid/setgid Bubblewrap binaries are not accepted".to_string(),
+        });
+    }
+    for ancestor in path.ancestors().skip(1) {
+        let ancestor_metadata = std::fs::symlink_metadata(ancestor).map_err(|error| {
+            ProcessSpawnContainmentError::InsecureBinary {
+                path: path.to_path_buf(),
+                reason: format!("ancestor {} is unavailable: {error}", ancestor.display()),
+            }
+        })?;
+        if !ancestor_metadata.is_dir()
+            || ancestor_metadata.file_type().is_symlink()
+            || ancestor_metadata.uid() != 0
+            || ancestor_metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(ProcessSpawnContainmentError::InsecureBinary {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "ancestor {} must be a root-owned, non-writable, non-symlink directory",
+                    ancestor.display()
+                ),
+            });
+        }
+    }
+
+    let mut binary = std::fs::File::open(path).map_err(|error| {
+        ProcessSpawnContainmentError::InsecureBinary {
+            path: path.to_path_buf(),
+            reason: format!("failed opening executable for identity hash: {error}"),
+        }
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        use std::io::Read as _;
+        let read = binary.read(&mut buffer).map_err(|error| {
+            ProcessSpawnContainmentError::InsecureBinary {
+                path: path.to_path_buf(),
+                reason: format!("failed hashing executable identity: {error}"),
+            }
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(all(target_os = "linux", feature = "external-commands"))]
+fn run_process_spawn_bubblewrap_probe(path: &Path) -> Result<(), ProcessSpawnContainmentError> {
+    let sentinel = format!(
+        "test \"$$\" -le 4 && test \"$(readlink /proc/self/ns/pid)\" = \"$(readlink /proc/1/ns/pid)\" && printf %s '{PROCESS_SPAWN_BWRAP_PROBE_MARKER}'"
+    );
+    let mut child = Command::new(path)
+        .args([
+            "--die-with-parent",
+            "--unshare-user",
+            "--disable-userns",
+            "--assert-userns-disabled",
+            "--unshare-pid",
+            "--unshare-cgroup",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--new-session",
+            "--cap-drop",
+            "ALL",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--",
+            "/bin/sh",
+            "-c",
+            &sentinel,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(
+            |error| ProcessSpawnContainmentError::FunctionalProbeFailed {
+                path: path.to_path_buf(),
+                reason: format!("failed to launch bounded functional probe: {error}"),
+            },
+        )?;
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut stdout = String::new();
+                if let Some(stream) = child.stdout.take() {
+                    use std::io::Read as _;
+                    let _ = stream.take(4096).read_to_string(&mut stdout);
+                }
+                if stdout == PROCESS_SPAWN_BWRAP_PROBE_MARKER {
+                    return Ok(());
+                }
+                return Err(ProcessSpawnContainmentError::FunctionalProbeFailed {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "namespace sentinel mismatch: expected {PROCESS_SPAWN_BWRAP_PROBE_MARKER:?}, received {stdout:?}"
+                    ),
+                });
+            }
+            Ok(Some(status)) => {
+                let mut stderr = String::new();
+                if let Some(stream) = child.stderr.take() {
+                    use std::io::Read as _;
+                    let _ = stream.take(4096).read_to_string(&mut stderr);
+                }
+                let detail = stderr.trim();
+                return Err(ProcessSpawnContainmentError::FunctionalProbeFailed {
+                    path: path.to_path_buf(),
+                    reason: if detail.is_empty() {
+                        format!("probe exited with {status}")
+                    } else {
+                        format!("probe exited with {status}: {detail}")
+                    },
+                });
+            }
+            Ok(None) if started.elapsed() < PROCESS_SPAWN_BWRAP_PROBE_TIMEOUT => {
+                thread::sleep(PROCESS_SPAWN_BWRAP_PROBE_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ProcessSpawnContainmentError::FunctionalProbeTimedOut {
+                    path: path.to_path_buf(),
+                    timeout_ms: u64::try_from(PROCESS_SPAWN_BWRAP_PROBE_TIMEOUT.as_millis())
+                        .unwrap_or(u64::MAX),
+                });
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ProcessSpawnContainmentError::FunctionalProbeFailed {
+                    path: path.to_path_buf(),
+                    reason: format!("failed waiting for functional probe: {error}"),
+                });
+            }
+        }
+    }
+}
+
+/// Resolve, validate, and functionally probe Bubblewrap for child-process
+/// containment. Callers must invoke this only after a signed opt-in has been
+/// authenticated, except for the explicit doctor readiness command.
+pub fn probe_process_spawn_containment(
+    configured_path: Option<&Path>,
+) -> Result<ProcessSpawnContainmentReadiness, ProcessSpawnContainmentError> {
+    #[cfg(all(target_os = "linux", feature = "external-commands"))]
+    {
+        probe_process_spawn_containment_with(
+            std::env::consts::OS,
+            || resolve_process_spawn_bubblewrap(configured_path),
+            validate_process_spawn_bubblewrap,
+            run_process_spawn_bubblewrap_probe,
+        )
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "external-commands")))]
+    {
+        let _ = configured_path;
+        Err(ProcessSpawnContainmentError::ExternalCommandsDisabled)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = configured_path;
+        Err(ProcessSpawnContainmentError::UnsupportedOs {
+            os: std::env::consts::OS.to_string(),
+        })
+    }
+}
 
 /// Available isolation backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -397,6 +787,7 @@ impl std::error::Error for IsolationError {}
 mod tests {
     use super::*;
     use crate::security::sandbox_policy_compiler::CapabilityGrant;
+    use std::cell::Cell;
 
     fn linux_kvm_caps() -> PlatformCapabilities {
         PlatformCapabilities::from_values("linux", "x86_64", true, true, true, true, false, true)
@@ -422,6 +813,117 @@ mod tests {
         PlatformCapabilities::from_values(
             "unknown", "unknown", false, false, false, false, false, false,
         )
+    }
+
+    #[test]
+    fn process_spawn_probe_rejects_unsupported_os_without_resolving_binary() {
+        let resolve_calls = Cell::new(0_u32);
+        let result = probe_process_spawn_containment_with(
+            "macos",
+            || {
+                resolve_calls.set(resolve_calls.get().saturating_add(1));
+                Ok(PathBuf::from("/usr/bin/bwrap"))
+            },
+            |_| Ok("00".repeat(32)),
+            |_| Ok(()),
+        );
+
+        assert!(matches!(
+            result,
+            Err(ProcessSpawnContainmentError::UnsupportedOs { ref os }) if os == "macos"
+        ));
+        assert_eq!(resolve_calls.get(), 0, "unsupported OS must not probe PATH");
+    }
+
+    #[test]
+    fn process_spawn_probe_returns_typed_readiness_after_both_checks() {
+        let validation_calls = Cell::new(0_u32);
+        let functional_calls = Cell::new(0_u32);
+        let result = probe_process_spawn_containment_with(
+            "linux",
+            || Ok(PathBuf::from("/usr/bin/bwrap")),
+            |path| {
+                assert_eq!(path, Path::new("/usr/bin/bwrap"));
+                validation_calls.set(validation_calls.get().saturating_add(1));
+                Ok("11".repeat(32))
+            },
+            |path| {
+                assert_eq!(path, Path::new("/usr/bin/bwrap"));
+                functional_calls.set(functional_calls.get().saturating_add(1));
+                Ok(())
+            },
+        )
+        .expect("valid backend should produce readiness proof");
+
+        assert_eq!(result.backend(), "bubblewrap");
+        assert_eq!(result.binary_path(), Path::new("/usr/bin/bwrap"));
+        assert_eq!(result.binary_sha256(), "11".repeat(32));
+        assert!(result.functional_probe_passed());
+        assert_eq!(validation_calls.get(), 1);
+        assert_eq!(functional_calls.get(), 1);
+    }
+
+    #[test]
+    fn process_spawn_probe_stops_before_functional_probe_on_insecure_binary() {
+        let functional_calls = Cell::new(0_u32);
+        let result = probe_process_spawn_containment_with(
+            "linux",
+            || Ok(PathBuf::from("/tmp/bwrap")),
+            |path| {
+                Err(ProcessSpawnContainmentError::InsecureBinary {
+                    path: path.to_path_buf(),
+                    reason: "not root-owned".to_string(),
+                })
+            },
+            |_| {
+                functional_calls.set(functional_calls.get().saturating_add(1));
+                Ok(())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ProcessSpawnContainmentError::InsecureBinary { .. })
+        ));
+        assert_eq!(functional_calls.get(), 0);
+    }
+
+    #[test]
+    fn process_spawn_probe_preserves_functional_failure() {
+        let result = probe_process_spawn_containment_with(
+            "linux",
+            || Ok(PathBuf::from("/usr/bin/bwrap")),
+            |_| Ok("22".repeat(32)),
+            |path| {
+                Err(ProcessSpawnContainmentError::FunctionalProbeFailed {
+                    path: path.to_path_buf(),
+                    reason: "user namespaces disabled".to_string(),
+                })
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ProcessSpawnContainmentError::FunctionalProbeFailed { ref reason, .. })
+                if reason == "user namespaces disabled"
+        ));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", feature = "external-commands"))]
+    fn process_spawn_probe_rejects_root_owned_non_bubblewrap_executable() {
+        let true_path = Path::new("/usr/bin/true");
+        assert!(
+            true_path.is_file(),
+            "Linux test image must provide /usr/bin/true"
+        );
+        let error = probe_process_spawn_containment(Some(true_path))
+            .expect_err("a zero-exit non-Bubblewrap executable must not forge readiness");
+        assert!(matches!(
+            error,
+            ProcessSpawnContainmentError::FunctionalProbeFailed { ref reason, .. }
+                if reason.contains("namespace sentinel mismatch")
+        ));
     }
 
     // === Backend selection ===

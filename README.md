@@ -164,7 +164,7 @@ franken-node verify lockstep ./my-app --runtimes bun,franken-node --emit-fixture
 franken-node trust scan ./my-app --deep --audit
 
 # 7) Run under policy-governed runtime controls
-franken-node run ./my-app --policy strict --lockstep-preflight
+franken-node run ./my-app --policy strict
 
 # 8) Diagnose environment and policy setup
 franken-node doctor --verbose --json
@@ -270,6 +270,26 @@ and **Windows x86_64**; on other platforms the bash installer falls back to a
 side-by-side source build. Pass `--help` (bash) / `-EasyMode` (PowerShell adds
 the dir to PATH) for options.
 
+Child-process spawning is not enabled by any runtime profile. Profile-governed
+`run` also rejects external Node/Bun runtimes because they cannot enforce the
+engine capability contract. Profile-governed execution requires a build with
+the embedded `engine` feature; an arbitrary external `--engine-bin` is never
+trusted by name alone. Use the explicit lockstep or compatibility-corpus tools
+for comparative execution. On Linux, an operator who intends to opt in may
+pass `--enable-process-spawn`; the installer
+then requires the installed binary's bounded Bubblewrap readiness probe to
+pass. The installer does not install or configure Bubblewrap. Install the
+distribution package first (for example, `sudo apt install bubblewrap`), then
+verify it explicitly:
+
+```bash
+franken-node doctor process-spawn-readiness --json
+```
+
+macOS and Windows fail closed for this opt-in because the current containment
+contract requires Linux PID and user namespaces. Normal installations do not
+probe Bubblewrap and are unaffected.
+
 > [!NOTE]
 > Homebrew is not currently published for `franken-node`; the public
 > `Dicklesworthstone/homebrew-tap` repository does not yet ship a
@@ -332,7 +352,7 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
    ```
 5. **Run in policy-governed mode:**
    ```bash
-   franken-node run ./my-app --policy strict --lockstep-preflight
+   franken-node run ./my-app --policy strict
    ```
 6. **Inspect trust and fleet state:**
    ```bash
@@ -422,12 +442,12 @@ re-run.
 ### Day 7 — Production rollout
 
 ```bash
-franken-node run ./app --policy balanced --lockstep-preflight
+franken-node run ./app --policy balanced
 ```
 
-The `--lockstep-preflight` flag runs one final lockstep comparison before
-the runtime boots the application. Divergence aborts the run with a
-signed receipt.
+Run `franken-node verify lockstep ./app --runtimes bun,franken-node` as a
+separate comparative verification step before profile-governed execution.
+The `run` command never launches an external reference runtime.
 
 ### Day 21 — Incident
 
@@ -511,6 +531,18 @@ profile**, not the packaging profile:
 | `strict` | High-assurance environments, regulated workloads, post-incident lockdowns | Maximum trust-card freshness requirements, revocation gates on all risky actions, all divergence emits receipts, lockstep validation required before rollout |
 | `balanced` | Default for most teams | Reasonable freshness windows, revocation gates on risky and dangerous classes, lockstep validation recommended |
 | `legacy-risky` | Constrained migration windows on legacy codebases | Permits insecure compatibility behaviors when explicitly enabled by policy. Not a long-term mode. |
+
+No profile—including `legacy-risky`—grants `process_spawn`. That capability is
+impossible by default and requires an expiring Ed25519-signed
+`ChildProcessSpawn` token bound to the complete resolved policy/config plus a
+validated Linux Bubblewrap backend. Missing, malformed, expired, or
+policy-mismatched grants fail before guest execution. Profile-governed `run`
+always rejects external Node/Bun paths because they cannot claim this
+containment contract. The signer is anchored outside project configuration at
+the fixed, root-owned `/etc/franken-node/process-spawn-trust-anchor.pub` as exactly 64
+lowercase hexadecimal Ed25519 public-key characters; the file and every path
+ancestor must be non-writable by group/other, so a project cannot declare its
+own trusted signer.
 
 Packaging profiles (`local`, `dev`, `enterprise`) live in
 [`packaging/profiles.toml`](packaging/profiles.toml) and govern installer
@@ -640,7 +672,7 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node init` | Bootstrap config, policy profile, and `.franken-node/state/` workspace metadata. Flags: `--profile`, `--config`, `--out-dir`, `--overwrite`, `--backup-existing`, `--scan`, `--state-dir`, `--no-state`, `--json`. |
-| `franken-node run <app_path>` | Run app under policy-governed runtime controls. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--lockstep-preflight`, `--json`. |
+| `franken-node run <app_path>` | Run app under policy-governed runtime controls. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json`. External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
 | `franken-node doctor` | Diagnose environment and policy setup. Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json`, `--structured-logs-jsonl`. |
 
 ### Migration
@@ -836,6 +868,15 @@ idempotency_ttl_secs = 604800
 [security]
 # Maximum degraded-mode duration before suspension
 max_degraded_duration_secs = 3600
+
+# Child-process spawning has no profile default. An operator-issued opt-in is
+# represented by [security.child_process_spawn] plus its nested .token table.
+# The token subject must equal the policy subject reported by trusted issuance
+# tooling after all non-recursive fields below are populated, and the signature
+# must cover the CapabilityToken content hash. The operator trust anchor is a
+# separate keyring file; it is never accepted from this project config.
+# backend = "bubblewrap"
+# binary_path = "/usr/bin/bwrap"
 
 [security.network_policy]
 # Network egress policy enforcement mode: enforced | report-only
@@ -2121,6 +2162,12 @@ franken-node doctor workspace-pressure --json --conservative > pressure.json
 - `franken-node doctor --policy-activation-input <fixture>` exercises
   the policy activation contract against a checked-in fixture, useful
   for catching drift between the policy code and the spec.
+- `franken-node doctor process-spawn-readiness --json` securely resolves (or
+  accepts `--bubblewrap-path` for) a root-owned, non-setuid, non-writable
+  Bubblewrap binary and runs a bounded functional user/PID/cgroup/IPC/UTS
+  namespace probe. It returns non-zero with `unavailable` or `unsupported`;
+  readiness by itself does not grant `process_spawn` or replace the signed
+  opt-in.
 
 `doctor` is the single best command to run before opening a support
 ticket: its output (or `--json` artifact) is everything an investigator
@@ -2639,7 +2686,7 @@ into the corresponding section above.
 | Validate behavior | `franken-node verify lockstep . --runtimes bun,franken-node` |
 | Seed trust cards | `franken-node trust scan . --deep --audit` |
 | Refresh trust | `franken-node trust sync --force` |
-| Run in strict mode | `franken-node run ./app --policy strict --lockstep-preflight` |
+| Run in strict mode | `franken-node run ./app --policy strict` |
 | Inspect a card | `franken-node trust card npm:@example/plugin --json` |
 | List high-risk | `franken-node trust list --risk high --json` |
 | Quarantine an artifact | `franken-node trust quarantine --artifact sha256:…` |
@@ -3013,7 +3060,15 @@ one pass.
 ## Limitations
 
 - **Legacy profile permits insecure behaviors.** `legacy-risky` exists for
-  constrained migration windows. It is not a long-term mode.
+  constrained migration windows. It is not a long-term mode, and it does not
+  ambiently permit child-process spawning.
+- **Child-process spawning is Linux/Bubblewrap-only and impossible by
+  default.** A signed, expiring, resolved-policy-bound `ChildProcessSpawn`
+  opt-in and a successful functional backend probe are both mandatory.
+  Unsupported operating systems and missing or insecure Bubblewrap binaries
+  fail closed. Current runtime-of-record work still withholds the capability
+  until the authenticated native worker can prove it was launched inside that
+  namespace.
 - **Strict profile blocks weak-provenance extensions.** This is intentional
   but can surprise teams whose registries are not yet provenance-clean.
 - **Migration rewrites target high-value patterns first.** Niche framework

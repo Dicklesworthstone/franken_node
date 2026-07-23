@@ -473,7 +473,6 @@ fn conformance_profile_capability_mappings() {
                 "network_egress",
                 "builtin",
                 "env_read",
-                "process_spawn",
                 "timer",
             ],
         ),
@@ -501,6 +500,10 @@ fn conformance_profile_capability_mappings() {
                 expected_cap
             );
         }
+        assert!(
+            !capabilities.contains(&"process_spawn".to_string()),
+            "{profile:?} must never grant process_spawn ambiently"
+        );
 
         println!(
             "✓ Profile {:?}: {} capabilities validated",

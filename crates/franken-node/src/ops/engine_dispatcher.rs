@@ -6,6 +6,7 @@ use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 use crate::{
     ActionableError,
     config::{Config, PreferredRuntime, Profile},
+    security::impossible_default::configured_child_process_spawn_admission,
     supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry},
 };
 use anyhow::{Context, Result};
@@ -102,7 +103,7 @@ enum NativeSessionResponse {
         exit_code: i32,
         stdout_base64: String,
         stderr_base64: String,
-        telemetry_report: TelemetryRuntimeReport,
+        telemetry_report: Box<TelemetryRuntimeReport>,
         host_effect_ledger: Option<HostEffectLedger>,
     },
     ExecutionFailed {
@@ -1776,9 +1777,9 @@ impl EngineDispatcher {
         self
     }
 
-    /// Dispatches execution to the external franken_engine binary.
-    /// Serializes policy capabilities and limits into environment variables
-    /// or command-line arguments to establish the trust boundary.
+    /// Dispatches profile-governed execution to the embedded franken-engine.
+    /// Builds without the embedded engine fail closed before plan resolution;
+    /// an external executable is never trusted as the policy boundary by name.
     ///
     /// Native lifecycle:
     /// 1. Resolve and validate the private franken-node worker executable.
@@ -1787,8 +1788,8 @@ impl EngineDispatcher {
     /// 4. Validate its nonce-bound response only after a clean exit, or kill and reap it at the deadline.
     /// 5. Clean up the parent-owned telemetry socket directory.
     ///
-    /// The non-engine compatibility build retains its external-process,
-    /// parent-owned telemetry bridge lifecycle.
+    /// Explicit Node/Bun comparison is handled by separate verification and
+    /// compatibility-corpus commands, never this product execution path.
     pub fn dispatch_run(
         &self,
         app_path: &Path,
@@ -1805,6 +1806,19 @@ impl EngineDispatcher {
                 "Use a valid policy mode: --policy strict, --policy balanced, or --policy legacy-risky"
             ).into());
         }
+
+        // An external executable named by --engine-bin, the environment, or
+        // project config has no authenticated identity. In builds without the
+        // embedded engine, treating that path as FrankenEngine would let Bun
+        // or Node masquerade as the policy-enforcing runtime. Fail before any
+        // dispatcher side effect or guest execution instead.
+        Self::require_embedded_engine_for_profile_governed_run()?;
+
+        // bd-ztr5v: no profile grants process spawning ambiently. A configured
+        // opt-in must authenticate and prove backend readiness, but it remains
+        // fail-closed until bd-sfr61 launches this execution path inside that
+        // backend and can pass a launch-time containment proof.
+        Self::reject_uncontained_process_spawn_opt_in(config)?;
 
         // SECURITY: Re-validate trust state to close TOCTOU gap between preflight and execution (bd-zqz0q)
         let project_root = app_path
@@ -1890,6 +1904,13 @@ impl EngineDispatcher {
             }
             Err(DispatchResolutionError::Resolution(err)) => return Err(err),
         };
+
+        // External Node/Bun processes expose ambient host process creation and
+        // cannot consume the engine's capability contract. Profile-governed
+        // `run` therefore rejects every runtime fallback before guest code can
+        // execute. Comparative execution remains available through the
+        // explicit lockstep and compatibility-corpus tooling.
+        Self::reject_profile_governed_external_runtime(&dispatch_plan)?;
 
         if let DispatchPlan::RuntimeFallback(plan) = dispatch_plan {
             if plan.mode == RuntimeExecutionMode::FallbackFrankenEngineUnavailable {
@@ -2320,7 +2341,6 @@ impl EngineDispatcher {
             read_native_session_frame(&mut locked_stdin, NATIVE_SESSION_MAX_REQUEST_BYTES)
                 .map_err(anyhow::Error::msg)?;
         drop(locked_stdin);
-        drop(stdin);
         let _parent_liveness_watchdog = thread::Builder::new()
             .name("franken-node-native-parent-watchdog".to_string())
             .spawn(|| {
@@ -2443,7 +2463,7 @@ impl EngineDispatcher {
                                     .encode(output.stdout),
                                 stderr_base64: base64::engine::general_purpose::STANDARD
                                     .encode(output.stderr),
-                                telemetry_report,
+                                telemetry_report: Box::new(telemetry_report),
                                 host_effect_ledger,
                             }
                         }
@@ -3216,7 +3236,7 @@ impl EngineDispatcher {
                         stdout,
                         stderr,
                     },
-                    telemetry_report,
+                    *telemetry_report,
                     host_effect_ledger,
                 ))
             }
@@ -3302,7 +3322,6 @@ impl EngineDispatcher {
     /// - `network_egress`: Outbound network access
     /// - `builtin`: JavaScript built-ins (includes crypto operations)
     /// - `env_read`: Environment variable access
-    /// - `process_spawn`: Process spawning capabilities
     /// - `timer`: Timeout/timer operations
     ///
     /// **Note**: All capability strings are validated against franken-engine's supported
@@ -3328,10 +3347,81 @@ impl EngineDispatcher {
                 "network_egress".to_string(), // Maps to RuntimeCapability::NetworkEgress
                 "builtin".to_string(), // Maps to RuntimeCapability::Builtin (includes crypto)
                 "env_read".to_string(), // Maps to RuntimeCapability::EnvRead
-                "process_spawn".to_string(), // Maps to RuntimeCapability::ProcessSpawn
                 "timer".to_string(),   // Maps to RuntimeCapability::Timer
             ],
         }
+    }
+
+    fn reject_uncontained_process_spawn_opt_in(config: &Config) -> Result<(), ActionableError> {
+        Self::reject_uncontained_process_spawn_opt_in_with(config, |candidate| {
+            configured_child_process_spawn_admission(candidate).map(|admission| admission.is_some())
+        })
+    }
+
+    fn reject_uncontained_process_spawn_opt_in_with<Verify, Error>(
+        config: &Config,
+        verify: Verify,
+    ) -> Result<(), ActionableError>
+    where
+        Verify: FnOnce(&Config) -> Result<bool, Error>,
+        Error: std::fmt::Display,
+    {
+        let admission_present = verify(config).map_err(|error| {
+            ActionableError::new(
+                format!("Child-process-spawn admission failed: {error}"),
+                "Remove security.child_process_spawn to keep spawning disabled, or replace it with a valid signed policy-bound token and a ready Linux Bubblewrap backend",
+            )
+        })?;
+
+        if admission_present {
+            return Err(ActionableError::new(
+                "Child-process-spawn admission was authenticated, but this execution path has no active launch-time containment proof. The process_spawn capability remains withheld."
+                    .to_string(),
+                "Use a franken-node build whose bd-sfr61 authenticated native worker launches inside the validated Bubblewrap namespace; external Node/Bun runtimes cannot satisfy this contract",
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn require_embedded_engine_for_profile_governed_run() -> Result<(), ActionableError> {
+        #[cfg(feature = "engine")]
+        {
+            Ok(())
+        }
+
+        #[cfg(not(feature = "engine"))]
+        {
+            Err(ActionableError::new(
+                "Native engine required for profile-governed `run`: this build cannot authenticate or enforce policy through an external engine executable.",
+                "rebuild with --features engine; use verify lockstep for explicit comparative Node/Bun execution",
+            ))
+        }
+    }
+
+    fn reject_profile_governed_external_runtime(
+        dispatch_plan: &DispatchPlan,
+    ) -> Result<(), ActionableError> {
+        let DispatchPlan::RuntimeFallback(plan) = dispatch_plan else {
+            return Ok(());
+        };
+
+        Err(ActionableError::new(
+            format!(
+                "Profile-governed `run` cannot launch external runtime `{}` because it cannot enforce franken-node's capability contract.",
+                plan.runtime
+            ),
+            "Use the native franken-engine runtime. Use verify lockstep or ops compat-corpus-run for explicit comparative Node/Bun execution",
+        ))
+    }
+
+    #[cfg(feature = "engine")]
+    fn resolve_capabilities_for_execution(config: &Config) -> Result<Vec<String>, ActionableError> {
+        Self::reject_uncontained_process_spawn_opt_in(config)?;
+        let capabilities = Self::map_profile_to_capabilities(config.profile);
+
+        Self::validate_capabilities(&capabilities)?;
+        Ok(capabilities)
     }
 
     /// Validates that all capability strings are recognized by franken-engine.
@@ -3801,14 +3891,12 @@ impl EngineDispatcher {
             source: source_code,
             source_file: Some(execution_app_path.to_string_lossy().to_string()),
             capabilities: {
-                let caps = Self::map_profile_to_capabilities(config.profile);
-                Self::validate_capabilities(&caps).map_err(|error| {
+                Self::resolve_capabilities_for_execution(config).map_err(|error| {
                     native_engine_spawn_error_with_telemetry_cleanup(
                         error.to_string(),
                         &mut telemetry_guard,
                     )
-                })?; // Validate against franken-engine's supported set
-                caps
+                })?
             }, // Profile-based capability mapping
             version: env!("CARGO_PKG_VERSION").to_string(), // Extract from package metadata
             metadata: std::collections::BTreeMap::new(),
@@ -4491,6 +4579,59 @@ mod tests {
 
     #[cfg(feature = "engine")]
     const BD_45CK9_PANIC_HOOK_CHILD_ENV: &str = "FRANKEN_NODE_BD_45CK9_PANIC_HOOK_CHILD";
+
+    #[test]
+    fn bd_ztr5v_authenticated_opt_in_cannot_cross_uncontained_execution_gate() {
+        let config = Config::for_profile(Profile::LegacyRisky);
+        let error = EngineDispatcher::reject_uncontained_process_spawn_opt_in_with(&config, |_| {
+            Ok::<bool, &str>(true)
+        })
+        .expect_err("authenticated admission alone must not grant process spawning");
+        assert!(error.to_string().contains("capability remains withheld"));
+    }
+
+    #[test]
+    fn bd_ztr5v_admission_failure_stays_actionable_at_execution_gate() {
+        let config = Config::for_profile(Profile::Balanced);
+        let error = EngineDispatcher::reject_uncontained_process_spawn_opt_in_with(&config, |_| {
+            Err::<bool, _>("invalid operator trust anchor")
+        })
+        .expect_err("admission failure must stop before execution");
+        assert!(error.to_string().contains("invalid operator trust anchor"));
+    }
+
+    #[test]
+    fn bd_ztr5v_process_spawn_profile_governed_run_rejects_external_runtime_plan() {
+        let plan = DispatchPlan::RuntimeFallback(RuntimeFallbackPlan {
+            runtime: "node".to_string(),
+            runtime_path: PathBuf::from("/usr/bin/node"),
+            target: PathBuf::from("/workspace/index.js"),
+            working_dir: PathBuf::from("/workspace"),
+            mode: RuntimeExecutionMode::Explicit,
+        });
+
+        let error = EngineDispatcher::reject_profile_governed_external_runtime(&plan)
+            .expect_err("profile-governed run must never launch external Node/Bun");
+
+        assert!(error.to_string().contains("external runtime `node`"));
+        assert!(error.to_string().contains("cannot enforce"));
+        assert!(error.to_string().contains("verify lockstep"));
+    }
+
+    #[test]
+    fn bd_ztr5v_process_spawn_profile_governed_run_requires_embedded_engine() {
+        let result = EngineDispatcher::require_embedded_engine_for_profile_governed_run();
+
+        #[cfg(feature = "engine")]
+        assert!(result.is_ok(), "default builds carry the embedded engine");
+
+        #[cfg(not(feature = "engine"))]
+        {
+            let error = result.expect_err("external engine identity must not be trusted by label");
+            assert!(error.to_string().contains("Native engine required"));
+            assert!(error.to_string().contains("cannot authenticate"));
+        }
+    }
 
     #[cfg(feature = "engine")]
     #[test]
@@ -5843,7 +5984,7 @@ mod tests {
         );
         let error = result.unwrap_err().to_string();
         assert!(
-            error.contains("Native engine required for strict profile"),
+            error.contains("Native engine required"),
             "Error should mention native engine requirement, got: {error}"
         );
         assert!(

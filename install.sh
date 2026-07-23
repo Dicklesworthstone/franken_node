@@ -19,6 +19,9 @@
 #   --offline TARBALL   Install from a local release tarball; skip all network access.
 #   --easy-mode         Auto-update PATH in shell rc files (~/.zshrc, ~/.bashrc).
 #   --verify            Run `franken-node --version` self-test after install.
+#   --enable-process-spawn
+#                       Require a ready Linux Bubblewrap containment backend.
+#                       The installer never installs or configures Bubblewrap.
 #   --force             Reinstall even if the target version is already present.
 #   --no-verify         Skip checksum + signature verification (testing only).
 #   --quiet             Suppress non-error output.
@@ -54,6 +57,7 @@ ENGINE_REF="${FRANKEN_ENGINE_REF:-main}"
 OFFLINE_TARBALL=""
 EASY=0
 VERIFY=0
+ENABLE_PROCESS_SPAWN=0
 FORCE_INSTALL=0
 NO_CHECKSUM=0
 QUIET=0
@@ -131,7 +135,10 @@ banner() {
   fi
 }
 
-usage() { sed -n '3,42p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() {
+  sed -n '3,/^# Release artifacts follow/p' "$0" 2>/dev/null \
+    | sed '$d; s/^# \{0,1\}//'
+}
 
 # ── Cleanup / locking ─────────────────────────────────────────────────────────
 cleanup() {
@@ -382,6 +389,16 @@ self_test() {
     && ok "Self-test passed" || warn "Self-test could not run $BINARY_NAME --version"
 }
 
+verify_process_spawn_backend() {
+  [ "$ENABLE_PROCESS_SPAWN" -eq 1 ] || return 0
+  info "Validating the optional process-spawn containment backend"
+  if "$DEST_DIR/$BINARY_NAME" doctor process-spawn-readiness --json >/dev/null; then
+    ok "Linux Bubblewrap process-spawn backend is ready"
+  else
+    die "process-spawn support requested, but Bubblewrap readiness failed; process spawning remains disabled"
+  fi
+}
+
 final_summary() {
   [ "$QUIET" -eq 1 ] && return 0
   local ver; ver="$("$DEST_DIR/$BINARY_NAME" --version 2>/dev/null | head -n1 || echo "$BINARY_NAME")"
@@ -409,6 +426,7 @@ parse_args() {
       --offline)    shift; [ $# -gt 0 ] || die "--offline requires a tarball path"; OFFLINE_TARBALL="$1"; METHOD="offline" ;;
       --easy-mode)  EASY=1 ;;
       --verify)     VERIFY=1 ;;
+      --enable-process-spawn) ENABLE_PROCESS_SPAWN=1 ;;
       --force)      FORCE_INSTALL=1 ;;
       --no-verify)  NO_CHECKSUM=1 ;;
       --quiet)      QUIET=1 ;;
@@ -436,11 +454,11 @@ main() {
 
   if check_already_installed; then
     ok "$BINARY_NAME $VERSION already installed (use --force to reinstall)"
-    install_completions; self_test; exit 0
+    install_completions; self_test; verify_process_spawn_backend; exit 0
   fi
 
   if [ "$METHOD" = "offline" ]; then
-    install_from_offline; install_completions; maybe_add_path; self_test; final_summary; return 0
+    install_from_offline; install_completions; maybe_add_path; self_test; verify_process_spawn_backend; final_summary; return 0
   fi
 
   if [ "$METHOD" = "auto" ] || [ "$METHOD" = "release" ]; then
@@ -448,7 +466,7 @@ main() {
     [ -z "$tag" ] && tag="$(discover_latest_release_tag || true)"
     if [ -n "$tag" ]; then
       if install_from_release "$tag"; then
-        install_completions; maybe_add_path; self_test; final_summary; return 0
+        install_completions; maybe_add_path; self_test; verify_process_spawn_backend; final_summary; return 0
       fi
       [ "$METHOD" = "release" ] && die "release install failed for tag $tag"
       warn "no usable release asset for ${TARGET}; falling back to source build"
@@ -459,7 +477,7 @@ main() {
   fi
 
   install_from_source
-  install_completions; maybe_add_path; self_test; final_summary
+  install_completions; maybe_add_path; self_test; verify_process_spawn_backend; final_summary
 }
 
 # Run main when executed or piped (curl | bash leaves BASH_SOURCE unset under set -u),

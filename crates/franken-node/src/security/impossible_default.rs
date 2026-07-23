@@ -41,8 +41,13 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
+use crate::config::{ChildProcessSpawnBackend, Config};
+use crate::security::isolation_backend::{
+    ProcessSpawnContainmentError, ProcessSpawnContainmentReadiness, probe_process_spawn_containment,
+};
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -225,6 +230,299 @@ impl CapabilityToken {
     }
 }
 
+/// Maximum lifetime of a signed child-process-spawn grant.
+pub const MAX_CHILD_PROCESS_SPAWN_TOKEN_TTL_MS: u64 = 15 * 60 * 1000;
+const PROCESS_SPAWN_TRUST_ANCHOR_PATH: &str = "/etc/franken-node/process-spawn-trust-anchor.pub";
+const MAX_PROCESS_SPAWN_TRUST_ANCHOR_BYTES: u64 = 256;
+
+/// A cryptographically authenticated opt-in paired with a live containment
+/// readiness proof.
+///
+/// This type is intentionally not itself sufficient to authorize execution:
+/// bd-sfr61 must additionally prove that the native worker was launched inside
+/// the named backend before it may add the engine `process_spawn` capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildProcessSpawnAdmission {
+    token_id: String,
+    policy_subject: String,
+    expires_at_ms: u64,
+    containment: ProcessSpawnContainmentReadiness,
+}
+
+impl ChildProcessSpawnAdmission {
+    #[must_use]
+    pub fn token_id(&self) -> &str {
+        &self.token_id
+    }
+
+    #[must_use]
+    pub fn policy_subject(&self) -> &str {
+        &self.policy_subject
+    }
+
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+
+    #[must_use]
+    pub const fn containment(&self) -> &ProcessSpawnContainmentReadiness {
+        &self.containment
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ChildProcessSpawnAdmissionError {
+    #[error("PROCESS_SPAWN_TOKEN_WRONG_CAPABILITY: token grants {actual}, not child_process_spawn")]
+    WrongCapability { actual: ImpossibleCapability },
+    #[error("PROCESS_SPAWN_TOKEN_INVALID: {reason}")]
+    InvalidToken { reason: String },
+    #[error("PROCESS_SPAWN_TRUST_ROOT_INVALID: {reason}")]
+    InvalidTrustRoot { reason: String },
+    #[error("PROCESS_SPAWN_POLICY_BINDING_FAILED: {reason}")]
+    PolicyBinding { reason: String },
+    #[error("PROCESS_SPAWN_CLOCK_INVALID: {reason}")]
+    Clock { reason: String },
+    #[error(transparent)]
+    Enforcement(#[from] EnforcementError),
+    #[error(transparent)]
+    Containment(#[from] ProcessSpawnContainmentError),
+}
+
+fn parse_child_process_spawn_verifying_key(
+    public_key_hex: &str,
+) -> Result<ed25519_dalek::VerifyingKey, ChildProcessSpawnAdmissionError> {
+    if public_key_hex.len() != 64
+        || !public_key_hex
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: "expected exactly 64 lowercase hexadecimal characters".to_string(),
+        });
+    }
+    let bytes = hex::decode(public_key_hex).map_err(|error| {
+        ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!("failed decoding Ed25519 public key: {error}"),
+        }
+    })?;
+    let key_bytes = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+        ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: "decoded Ed25519 public key was not 32 bytes".to_string(),
+        }
+    })?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).map_err(|error| {
+        ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!("invalid Ed25519 public key: {error}"),
+        }
+    })
+}
+
+fn system_time_ms() -> Result<u64, ChildProcessSpawnAdmissionError> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| ChildProcessSpawnAdmissionError::Clock {
+            reason: format!("system clock is before the Unix epoch: {error}"),
+        })?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| ChildProcessSpawnAdmissionError::Clock {
+        reason: "system time exceeds the supported millisecond range".to_string(),
+    })
+}
+
+fn load_process_spawn_trust_anchor_at(
+    path: &Path,
+) -> Result<String, ChildProcessSpawnAdmissionError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} is unavailable: {error}",
+                path.display()
+            ),
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} must be a regular non-symlink file",
+                path.display()
+            ),
+        });
+    }
+    let canonical =
+        path.canonicalize()
+            .map_err(|error| ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+                reason: format!(
+                    "operator trust anchor {} cannot be canonicalized: {error}",
+                    path.display()
+                ),
+            })?;
+    if canonical != path {
+        return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} must have no symlinked path components",
+                path.display()
+            ),
+        });
+    }
+    if metadata.len() > MAX_PROCESS_SPAWN_TRUST_ANCHOR_BYTES {
+        return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} exceeds {} bytes",
+                path.display(),
+                MAX_PROCESS_SPAWN_TRUST_ANCHOR_BYTES
+            ),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+            return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+                reason: format!(
+                    "operator trust anchor {} must be root-owned and not group/other writable",
+                    path.display()
+                ),
+            });
+        }
+        for ancestor in path.ancestors().skip(1) {
+            let ancestor_metadata = std::fs::symlink_metadata(ancestor).map_err(|error| {
+                ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+                    reason: format!(
+                        "operator trust-anchor ancestor {} is unavailable: {error}",
+                        ancestor.display()
+                    ),
+                }
+            })?;
+            if !ancestor_metadata.is_dir()
+                || ancestor_metadata.file_type().is_symlink()
+                || ancestor_metadata.uid() != 0
+                || ancestor_metadata.permissions().mode() & 0o022 != 0
+            {
+                return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+                    reason: format!(
+                        "operator trust-anchor ancestor {} must be a root-owned, non-writable, non-symlink directory",
+                        ancestor.display()
+                    ),
+                });
+            }
+        }
+    }
+    std::fs::read_to_string(path)
+        .map(|value| value.trim().to_string())
+        .map_err(|error| ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "failed reading operator trust anchor {}: {error}",
+                path.display()
+            ),
+        })
+}
+
+fn configured_child_process_spawn_admission_with<Clock, Probe>(
+    config: &Config,
+    trusted_public_key_hex: &str,
+    mut clock: Clock,
+    probe: Probe,
+) -> Result<Option<ChildProcessSpawnAdmission>, ChildProcessSpawnAdmissionError>
+where
+    Clock: FnMut() -> Result<u64, ChildProcessSpawnAdmissionError>,
+    Probe: FnOnce(
+        Option<&std::path::Path>,
+    ) -> Result<ProcessSpawnContainmentReadiness, ProcessSpawnContainmentError>,
+{
+    let Some(opt_in) = config.security.child_process_spawn.as_ref() else {
+        return Ok(None);
+    };
+    let current_time_ms = clock()?;
+
+    if opt_in.token.capability != ImpossibleCapability::ChildProcessSpawn {
+        return Err(ChildProcessSpawnAdmissionError::WrongCapability {
+            actual: opt_in.token.capability,
+        });
+    }
+    if opt_in.token.token_id.trim().is_empty() || opt_in.token.issuer.trim().is_empty() {
+        return Err(ChildProcessSpawnAdmissionError::InvalidToken {
+            reason: "token_id and issuer must be non-empty".to_string(),
+        });
+    }
+    if opt_in.token.justification.trim().is_empty() {
+        return Err(ChildProcessSpawnAdmissionError::InvalidToken {
+            reason: "operator justification must be non-empty".to_string(),
+        });
+    }
+    if opt_in.token.issued_at_ms > current_time_ms {
+        return Err(ChildProcessSpawnAdmissionError::InvalidToken {
+            reason: "issued_at_ms is in the future".to_string(),
+        });
+    }
+    if opt_in.token.expires_at_ms <= opt_in.token.issued_at_ms {
+        return Err(ChildProcessSpawnAdmissionError::InvalidToken {
+            reason: "expires_at_ms must be greater than issued_at_ms".to_string(),
+        });
+    }
+    let ttl_ms = opt_in
+        .token
+        .expires_at_ms
+        .saturating_sub(opt_in.token.issued_at_ms);
+    if ttl_ms > MAX_CHILD_PROCESS_SPAWN_TOKEN_TTL_MS {
+        return Err(ChildProcessSpawnAdmissionError::InvalidToken {
+            reason: format!(
+                "token TTL {ttl_ms}ms exceeds the maximum {}ms",
+                MAX_CHILD_PROCESS_SPAWN_TOKEN_TTL_MS
+            ),
+        });
+    }
+
+    let policy_subject = config
+        .child_process_spawn_policy_subject()
+        .map_err(|error| ChildProcessSpawnAdmissionError::PolicyBinding {
+            reason: error.to_string(),
+        })?;
+    let verifying_key = parse_child_process_spawn_verifying_key(trusted_public_key_hex)?;
+    let mut enforcer = CapabilityEnforcer::with_ed25519_verifier(verifying_key);
+    enforcer.opt_in(opt_in.token.clone(), &policy_subject, current_time_ms)?;
+    enforcer.enforce(
+        ImpossibleCapability::ChildProcessSpawn,
+        &policy_subject,
+        current_time_ms,
+    )?;
+
+    let containment = match opt_in.backend {
+        ChildProcessSpawnBackend::Bubblewrap => probe(Some(&opt_in.binary_path))?,
+    };
+    let post_probe_time_ms = clock()?;
+    if opt_in.token.is_expired(post_probe_time_ms) {
+        return Err(ChildProcessSpawnAdmissionError::InvalidToken {
+            reason: "token expired while containment readiness was being established".to_string(),
+        });
+    }
+    Ok(Some(ChildProcessSpawnAdmission {
+        token_id: opt_in.token.token_id.clone(),
+        policy_subject,
+        expires_at_ms: opt_in.token.expires_at_ms,
+        containment,
+    }))
+}
+
+/// Authenticate the configured process-spawn token and prove the selected
+/// backend is ready. When no opt-in block exists this returns immediately and
+/// never performs backend discovery or executes a probe.
+pub fn configured_child_process_spawn_admission(
+    config: &Config,
+) -> Result<Option<ChildProcessSpawnAdmission>, ChildProcessSpawnAdmissionError> {
+    if config.security.child_process_spawn.is_none() {
+        return Ok(None);
+    }
+    let trust_anchor_path = Path::new(PROCESS_SPAWN_TRUST_ANCHOR_PATH);
+    let trusted_public_key_hex = load_process_spawn_trust_anchor_at(trust_anchor_path)?;
+    configured_child_process_spawn_admission_with(
+        config,
+        &trusted_public_key_hex,
+        system_time_ms,
+        probe_process_spawn_containment,
+    )
+}
+
 /// Enforcement status for a single capability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnforcementStatus {
@@ -330,6 +628,8 @@ impl std::fmt::Display for EnforcementError {
         write!(f, "[{}] {}", self.code, self.message)
     }
 }
+
+impl std::error::Error for EnforcementError {}
 
 /// Audit log entry for enforcement actions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -947,6 +1247,8 @@ fn _assert_send_sync() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ChildProcessSpawnConfig, Profile};
+    use std::cell::Cell;
 
     // -- Helpers --
 
@@ -1013,6 +1315,219 @@ mod tests {
             signature: "invalid_signature_value".to_string(),
             justification: "test".to_string(),
         }
+    }
+
+    fn config_with_signed_process_spawn_token(issued_at_ms: u64, expires_at_ms: u64) -> Config {
+        let signing_key = test_signing_key();
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.security.child_process_spawn = Some(ChildProcessSpawnConfig {
+            token: CapabilityToken {
+                token_id: "process-spawn-test".to_string(),
+                capability: ImpossibleCapability::ChildProcessSpawn,
+                issuer: "operator-test".to_string(),
+                subject: String::new(),
+                issued_at_ms,
+                expires_at_ms,
+                signature: String::new(),
+                justification: "bounded compatibility test".to_string(),
+            },
+            backend: ChildProcessSpawnBackend::Bubblewrap,
+            binary_path: "/usr/bin/bwrap".into(),
+        });
+        let subject = config
+            .child_process_spawn_policy_subject()
+            .expect("policy subject");
+        let token = &mut config
+            .security
+            .child_process_spawn
+            .as_mut()
+            .expect("opt-in")
+            .token;
+        token.subject = subject;
+        sign_token(token, &signing_key);
+        config
+    }
+
+    fn process_spawn_test_trust_anchor() -> String {
+        hex::encode(test_signing_key().verifying_key().as_bytes())
+    }
+
+    fn ready_bubblewrap(
+        path: Option<&std::path::Path>,
+    ) -> Result<ProcessSpawnContainmentReadiness, ProcessSpawnContainmentError> {
+        Ok(ProcessSpawnContainmentReadiness::verified_for_test(
+            path.expect("configured path").to_path_buf(),
+        ))
+    }
+
+    #[test]
+    fn process_spawn_admission_absence_never_probes_backend() {
+        let config = Config::for_profile(Profile::LegacyRisky);
+        let probe_calls = Cell::new(0_u32);
+        let admission = configured_child_process_spawn_admission_with(
+            &config,
+            "",
+            || Ok(2_000),
+            |_| {
+                probe_calls.set(probe_calls.get().saturating_add(1));
+                Err(ProcessSpawnContainmentError::BinaryNotFound)
+            },
+        )
+        .expect("absent opt-in is valid");
+
+        assert!(admission.is_none());
+        assert_eq!(probe_calls.get(), 0, "ordinary runs must not probe bwrap");
+        assert!(
+            configured_child_process_spawn_admission(&config)
+                .expect("production path must not read the absent operator keyring")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn process_spawn_admission_binds_signed_token_to_resolved_config() {
+        let config = config_with_signed_process_spawn_token(1_000, 10_000);
+        let admission = configured_child_process_spawn_admission_with(
+            &config,
+            &process_spawn_test_trust_anchor(),
+            || Ok(2_000),
+            ready_bubblewrap,
+        )
+        .expect("valid signed opt-in")
+        .expect("configured admission");
+
+        assert_eq!(admission.token_id(), "process-spawn-test");
+        assert_eq!(
+            admission.policy_subject(),
+            config
+                .security
+                .child_process_spawn
+                .as_ref()
+                .unwrap()
+                .token
+                .subject
+        );
+        assert_eq!(admission.expires_at_ms(), 10_000);
+        assert!(admission.containment().functional_probe_passed());
+    }
+
+    #[test]
+    fn process_spawn_admission_rejects_policy_mutation_before_backend_probe() {
+        let mut config = config_with_signed_process_spawn_token(1_000, 10_000);
+        config.runtime.bulkhead_retry_after_ms =
+            config.runtime.bulkhead_retry_after_ms.saturating_add(1);
+        let probe_calls = Cell::new(0_u32);
+        let error = configured_child_process_spawn_admission_with(
+            &config,
+            &process_spawn_test_trust_anchor(),
+            || Ok(2_000),
+            |_| {
+                probe_calls.set(probe_calls.get().saturating_add(1));
+                Err(ProcessSpawnContainmentError::BinaryNotFound)
+            },
+        )
+        .expect_err("config mutation must invalidate the signed subject");
+
+        assert!(matches!(
+            error,
+            ChildProcessSpawnAdmissionError::Enforcement(EnforcementError {
+                ref code,
+                ..
+            }) if code == ERR_IBD_SUBJECT_MISMATCH
+        ));
+        assert_eq!(probe_calls.get(), 0);
+    }
+
+    #[test]
+    fn process_spawn_admission_rejects_future_and_overlong_tokens() {
+        let future = config_with_signed_process_spawn_token(3_000, 4_000);
+        assert!(matches!(
+            configured_child_process_spawn_admission_with(
+                &future,
+                &process_spawn_test_trust_anchor(),
+                || Ok(2_000),
+                ready_bubblewrap,
+            ),
+            Err(ChildProcessSpawnAdmissionError::InvalidToken { ref reason })
+                if reason.contains("future")
+        ));
+
+        let overlong = config_with_signed_process_spawn_token(
+            1_000,
+            1_000 + MAX_CHILD_PROCESS_SPAWN_TOKEN_TTL_MS + 1,
+        );
+        assert!(matches!(
+            configured_child_process_spawn_admission_with(
+                &overlong,
+                &process_spawn_test_trust_anchor(),
+                || Ok(2_000),
+                ready_bubblewrap,
+            ),
+            Err(ChildProcessSpawnAdmissionError::InvalidToken { ref reason })
+                if reason.contains("exceeds")
+        ));
+    }
+
+    #[test]
+    fn process_spawn_admission_preserves_missing_backend_failure() {
+        let config = config_with_signed_process_spawn_token(1_000, 10_000);
+        let error = configured_child_process_spawn_admission_with(
+            &config,
+            &process_spawn_test_trust_anchor(),
+            || Ok(2_000),
+            |_| Err(ProcessSpawnContainmentError::BinaryNotFound),
+        )
+        .expect_err("missing containment must fail closed");
+        assert!(matches!(
+            error,
+            ChildProcessSpawnAdmissionError::Containment(
+                ProcessSpawnContainmentError::BinaryNotFound
+            )
+        ));
+    }
+
+    #[test]
+    fn process_spawn_admission_rejects_project_self_selected_signer_before_probe() {
+        let config = config_with_signed_process_spawn_token(1_000, 10_000);
+        let untrusted_key = SigningKey::from_bytes(&[99_u8; 32]);
+        let probe_calls = Cell::new(0_u32);
+        let error = configured_child_process_spawn_admission_with(
+            &config,
+            &hex::encode(untrusted_key.verifying_key().as_bytes()),
+            || Ok(2_000),
+            |_| {
+                probe_calls.set(probe_calls.get().saturating_add(1));
+                ready_bubblewrap(Some(std::path::Path::new("/usr/bin/bwrap")))
+            },
+        )
+        .expect_err("project-selected signer must not replace the operator anchor");
+
+        assert!(matches!(
+            error,
+            ChildProcessSpawnAdmissionError::Enforcement(EnforcementError {
+                ref code,
+                ..
+            }) if code == ERR_IBD_INVALID_SIGNATURE
+        ));
+        assert_eq!(probe_calls.get(), 0);
+    }
+
+    #[test]
+    fn process_spawn_admission_rechecks_expiry_after_backend_probe() {
+        let config = config_with_signed_process_spawn_token(1_000, 10_000);
+        let mut times = [2_000_u64, 10_000_u64].into_iter();
+        let error = configured_child_process_spawn_admission_with(
+            &config,
+            &process_spawn_test_trust_anchor(),
+            || Ok(times.next().expect("clock call")),
+            ready_bubblewrap,
+        )
+        .expect_err("admission expiring during probe must fail closed");
+        assert!(matches!(
+            error,
+            ChildProcessSpawnAdmissionError::InvalidToken { ref reason }
+                if reason.contains("expired while containment")
+        ));
     }
 
     // -- AC1: Impossible-by-default capabilities are defined --

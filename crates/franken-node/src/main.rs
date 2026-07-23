@@ -108,17 +108,17 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugEvidenceArgs, DebugEvidenceKind,
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
-    DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorWorkspacePressureArgs,
-    FleetAgentArgs, FleetCommand, IncidentCommand, LtvCommand, MigrateCommand, MigrateReportArgs,
-    OpsCommand, OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsMetricsFormat,
-    OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
-    OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand,
-    ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
-    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
-    SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
-    TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
-    load_doctor_policy_activation_input,
+    DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorProcessSpawnReadinessArgs,
+    DoctorWorkspacePressureArgs, FleetAgentArgs, FleetCommand, IncidentCommand, LtvCommand,
+    MigrateCommand, MigrateReportArgs, OpsCommand, OpsCompatCorpusRunArgs, OpsConfigAuditArgs,
+    OpsMetricsFormat, OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs,
+    OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
+    ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
+    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
+    RuntimeLaneCommand, SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs,
+    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
+    VerifyMigrationArgs, VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs,
+    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -6499,6 +6499,97 @@ fn handle_doctor_evidence_readiness(
         )?;
     }
     Ok(())
+}
+
+const PROCESS_SPAWN_READINESS_SCHEMA_VERSION: &str = "franken-node/process-spawn-readiness/v1";
+
+#[derive(Debug, Serialize)]
+struct ProcessSpawnReadinessReport {
+    schema_version: &'static str,
+    status: &'static str,
+    supported_os: &'static str,
+    backend: &'static str,
+    resolved_path: Option<String>,
+    binary_sha256: Option<String>,
+    functional_probe_passed: bool,
+    reason: String,
+    remediation: String,
+}
+
+fn build_process_spawn_readiness_report(
+    configured_path: Option<&Path>,
+) -> ProcessSpawnReadinessReport {
+    match frankenengine_node::security::isolation_backend::probe_process_spawn_containment(
+        configured_path,
+    ) {
+        Ok(readiness) => ProcessSpawnReadinessReport {
+            schema_version: PROCESS_SPAWN_READINESS_SCHEMA_VERSION,
+            status: "ready",
+            supported_os: "linux",
+            backend: "bubblewrap",
+            resolved_path: Some(readiness.binary_path().display().to_string()),
+            binary_sha256: Some(readiness.binary_sha256().to_string()),
+            functional_probe_passed: readiness.functional_probe_passed(),
+            reason: "Bubblewrap passed secure metadata and functional namespace checks."
+                .to_string(),
+            remediation: "No backend remediation required. A signed ChildProcessSpawn token is still required, and process spawning remains disabled until launch-time containment is active."
+                .to_string(),
+        },
+        Err(error) => {
+            let unsupported = matches!(
+                error,
+                frankenengine_node::security::isolation_backend::ProcessSpawnContainmentError::UnsupportedOs {
+                    ..
+                }
+            );
+            ProcessSpawnReadinessReport {
+                schema_version: PROCESS_SPAWN_READINESS_SCHEMA_VERSION,
+                status: if unsupported {
+                    "unsupported"
+                } else {
+                    "unavailable"
+                },
+                supported_os: "linux",
+                backend: "bubblewrap",
+                resolved_path: configured_path.map(|path| path.display().to_string()),
+                binary_sha256: None,
+                functional_probe_passed: false,
+                reason: error.to_string(),
+                remediation: if unsupported {
+                    "Run process-spawn workloads on a Linux host with a validated Bubblewrap backend; unsupported operating systems fail closed."
+                        .to_string()
+                } else {
+                    "Install a root-owned, non-setuid, non-writable Bubblewrap binary, configure its absolute path, and rerun doctor process-spawn-readiness."
+                        .to_string()
+                },
+            }
+        }
+    }
+}
+
+fn handle_doctor_process_spawn_readiness(
+    args: &DoctorProcessSpawnReadinessArgs,
+    parent_json: bool,
+) -> Result<()> {
+    let report = build_process_spawn_readiness_report(args.bubblewrap_path.as_deref());
+    if args.json || parent_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "process-spawn readiness: {} backend={} path={}\nreason: {}\nremediation: {}",
+            report.status,
+            report.backend,
+            report.resolved_path.as_deref().unwrap_or("unresolved"),
+            report.reason,
+            report.remediation
+        );
+    }
+
+    if report.status == "ready" {
+        Ok(())
+    } else {
+        anyhow::bail!("process-spawn containment backend is not ready")
+    }
 }
 
 fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Result<()> {
@@ -28086,7 +28177,6 @@ fn main() -> Result<()> {
                 config,
                 runtime,
                 engine_bin,
-                lockstep_preflight,
                 compat_preflight,
             } = args;
 
@@ -28114,46 +28204,6 @@ fn main() -> Result<()> {
             if preflight.verdict.is_blocked() {
                 return Err(run_preflight_block_error(&preflight).into());
             }
-
-            // Optional lockstep pre-flight check (bd-3p0qh)
-            let lockstep_verdict = if lockstep_preflight {
-                eprintln!("Running lockstep pre-flight check across supported runtimes...");
-                let harness = runtime::lockstep_harness::LockstepHarness::new(vec![
-                    "bun".to_string(),
-                    "franken-node".to_string(),
-                ]);
-                match harness.verify_lockstep(&app_path, false) {
-                    Ok(()) => {
-                        eprintln!("Lockstep pre-flight: PASSED");
-                        Some(serde_json::json!({
-                            "status": "passed",
-                            "runtimes": ["bun", "franken-node"]
-                        }))
-                    }
-                    Err(e) => {
-                        let error_msg = e.to_string();
-                        eprintln!("Lockstep pre-flight: DIVERGENCE DETECTED - {}", error_msg);
-                        if resolved.config.migration.require_lockstep_validation {
-                            return Err(ActionableError::new(
-                                format!(
-                                    "run blocked by lockstep pre-flight divergence: {}",
-                                    error_msg
-                                ),
-                                "franken-node verify lockstep . --emit-fixtures",
-                            )
-                            .into());
-                        }
-                        Some(serde_json::json!({
-                            "status": "diverged",
-                            "error": error_msg,
-                            "runtimes": ["bun", "franken-node"],
-                            "blocked": false
-                        }))
-                    }
-                }
-            } else {
-                None
-            };
 
             let requested_runtime = parse_runtime_override(runtime.as_deref())?
                 .unwrap_or(resolved.config.runtime.preferred);
@@ -28244,7 +28294,7 @@ fn main() -> Result<()> {
                 ssrf_violations,
                 auto_quarantined_extensions,
                 sentinel_enforcement,
-                lockstep_verdict,
+                None,
                 compat_preflight_report,
             )?;
             let receipt_path = persist_run_execution_receipt(
@@ -28877,6 +28927,9 @@ fn main() -> Result<()> {
                     }
                     DoctorCommand::WorkspacePressure(pressure_args) => {
                         handle_doctor_workspace_pressure(pressure_args)?;
+                    }
+                    DoctorCommand::ProcessSpawnReadiness(readiness_args) => {
+                        handle_doctor_process_spawn_readiness(readiness_args, args.json)?;
                     }
                 }
                 return Ok(());

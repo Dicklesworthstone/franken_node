@@ -593,6 +593,42 @@ fn doctor_help_output() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn doctor_process_spawn_readiness_fails_closed_for_missing_backend() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "doctor",
+            "process-spawn-readiness",
+            "--bubblewrap-path",
+            "/definitely/missing/franken-node-bwrap",
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let report = parse_json_stdout(
+        "doctor process-spawn-readiness --json",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/process-spawn-readiness/v1"
+    );
+    assert_eq!(report["status"], "unavailable");
+    assert_eq!(report["supported_os"], "linux");
+    assert_eq!(report["backend"], "bubblewrap");
+    assert_eq!(report["binary_sha256"], serde_json::Value::Null);
+    assert_eq!(report["functional_probe_passed"], false);
+    assert!(
+        report["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("PROCESS_SPAWN_BACKEND_INSECURE"))
+    );
+    Ok(())
+}
+
+#[test]
 fn remotecap_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
     let assertion = cmd.args(["remotecap", "--help"]).assert().success();

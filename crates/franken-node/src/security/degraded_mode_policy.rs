@@ -724,6 +724,7 @@ mod tests {
             authorized_api_keys,
             decision_receipt_signing_key_path: None,
             network_policy: crate::config::NetworkPolicyConfig::default(),
+            child_process_spawn: None,
         };
         let policy = DegradedModePolicy::with_security_defaults("trust-input-stale", &config);
         assert_eq!(policy.max_degraded_duration_secs, 42);
