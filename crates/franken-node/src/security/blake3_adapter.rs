@@ -245,7 +245,8 @@ mod tests {
 
         let hash = provider.hash(data);
         assert_eq!(hash.len(), 32);
-        assert_ne!(hash, blake3::hash(data).into());
+        let raw_hash = *blake3::hash(data).as_bytes();
+        assert_ne!(hash, raw_hash);
 
         let keyed = provider.keyed_hash(key, data);
         assert_eq!(keyed.len(), 32);
