@@ -706,6 +706,24 @@ impl EffectReceiptChain {
         let mut expected_prev = CHAIN_GENESIS.to_string();
         for (idx, entry) in entries.iter().enumerate() {
             let index = u64::try_from(idx).unwrap_or(u64::MAX);
+            // `append` refuses a semantically impossible receipt before it is
+            // ever chained, so a chain built in-process cannot contain one.
+            // Entries arriving from a bundle, a replay capsule, or a worker
+            // frame never passed that gate, and hash linkage alone does not
+            // recover it: the hashes commit to whatever the producer wrote.
+            // Without this, a receipt could claim `Allowed` with a
+            // `result_hash` (proof the effect executed) while also claiming a
+            // `Blocked` flow verdict, and downstream consumers that branch on
+            // the flow verdict first would report the effect as stopped before
+            // its sink. Re-run the same admission contract here so the
+            // verifier-facing path is exactly as strict as the producing one.
+            entry
+                .receipt
+                .validate()
+                .map_err(|error| EffectReceiptError::ChainIntegrity {
+                    index,
+                    detail: format!("receipt failed its own validity contract: {error}"),
+                })?;
             if entry.index != index {
                 return Err(EffectReceiptError::ChainIntegrity {
                     index,
