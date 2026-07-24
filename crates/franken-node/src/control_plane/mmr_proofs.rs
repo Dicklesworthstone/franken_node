@@ -691,7 +691,17 @@ pub fn verify_root_reattestation_chain(
     let mut current_root = chain.origin_root.clone();
     let mut previous_issued_at = 0;
     for reattestation in &chain.attestations {
-        if reattestation.previous_root != current_root {
+        // Same eager-predicate discipline as the checkpoint-root comparison
+        // above. The derived `PartialEq` on `MmrRoot` compares `root_hash` with
+        // a short-circuiting string compare, which leaks the matching prefix
+        // length of the chain's linkage hash; computing both predicates first
+        // also keeps `||` from revealing whether the size or the hash diverged.
+        let size_matches = reattestation.previous_root.tree_size == current_root.tree_size;
+        let root_hash_matches = constant_time::ct_eq(
+            &reattestation.previous_root.root_hash,
+            &current_root.root_hash,
+        );
+        if !size_matches || !root_hash_matches {
             return Err(ProofError::InvalidProof {
                 reason: "reattestation chain root continuity mismatch".to_string(),
             });
