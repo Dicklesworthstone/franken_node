@@ -308,6 +308,35 @@ fn canonical_lock_key_normalizes_symlinked_parent_before_lock_file_exists() {
     );
 }
 
+/// A bare relative lock name has `Some("")` as its parent, not `None`, so the
+/// no-parent fallback never fired: the empty path was canonicalized instead and
+/// the call failed with `NotFound`. Such a name must resolve against the working
+/// directory and agree with the equivalent absolute form.
+///
+/// The ambient working directory is read, never changed: mutating it would race
+/// every other test sharing this binary's process.
+#[test]
+fn canonical_lock_key_resolves_a_bare_relative_name_against_the_working_directory() {
+    let working_dir = std::env::current_dir()
+        .and_then(|dir| dir.canonicalize())
+        .expect("canonical working directory");
+    let bare_name = "franken-node-canonical-lock-key-probe.json.lock";
+
+    let bare_key =
+        canonical_lock_key(std::path::Path::new(bare_name)).expect("bare relative lock key");
+
+    assert_eq!(
+        bare_key,
+        working_dir.join(bare_name),
+        "a bare relative lock name must resolve against the working directory"
+    );
+    assert_eq!(
+        bare_key,
+        canonical_lock_key(&working_dir.join(bare_name)).expect("absolute lock key"),
+        "the bare relative and absolute forms must converge on one lock key"
+    );
+}
+
 #[test]
 fn canonical_lock_key_fails_closed_when_parent_is_missing() {
     let dir = TempDir::new().unwrap();
