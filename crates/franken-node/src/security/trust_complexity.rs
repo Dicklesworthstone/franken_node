@@ -255,6 +255,14 @@ pub struct TrustComplexityGate {
     degraded_state: DegradedModeState,
     budget: ComplexityBudget,
     budget_exceeded_count: u64,
+    /// Monotonic count of replay divergences ever observed.
+    ///
+    /// `replay_results` is a bounded ring buffer, so scanning it for a
+    /// divergence lets ordinary later traffic evict the failure and flip
+    /// INV-RTC-REPLAY back to satisfied. The invariant is evaluated on this
+    /// counter instead, for the same reason `budget_exceeded_count` exists
+    /// rather than a scan over an evictable event list.
+    replay_diverged_count: u64,
     events: Vec<TrustAuditEvent>,
 }
 
@@ -266,6 +274,7 @@ impl TrustComplexityGate {
             degraded_state: DegradedModeState::new(max_degraded_duration_seconds),
             budget,
             budget_exceeded_count: 0,
+            replay_diverged_count: 0,
             events: Vec::new(),
         }
     }
@@ -355,6 +364,9 @@ impl TrustComplexityGate {
             deterministic,
         };
 
+        if !deterministic {
+            self.replay_diverged_count = self.replay_diverged_count.saturating_add(1);
+        }
         push_bounded(&mut self.replay_results, result.clone(), MAX_REPLAY_RESULTS);
         result
     }
@@ -386,8 +398,11 @@ impl TrustComplexityGate {
 
     /// Gate pass: all invariants satisfied.
     pub fn gate_pass(&self) -> bool {
-        // INV-RTC-REPLAY: no replay divergences
-        let no_divergence = !self.replay_results.iter().any(|r| !r.deterministic);
+        // INV-RTC-REPLAY: no replay divergence has ever been observed. Scanning
+        // the bounded `replay_results` window instead would let 4096 subsequent
+        // agreeing replays evict a recorded divergence and turn this gate back
+        // to PASS.
+        let no_divergence = self.replay_diverged_count == 0;
 
         // INV-RTC-DEGRADED: degraded mode not expired
         let degraded_ok = !self.degraded_state.is_expired();
@@ -496,7 +511,7 @@ impl TrustComplexityGate {
             "gate_verdict": verdict,
             "summary": summary,
             "invariants": {
-                INV_RTC_REPLAY: !self.replay_results.iter().any(|r| !r.deterministic),
+                INV_RTC_REPLAY: self.replay_diverged_count == 0,
                 INV_RTC_DEGRADED: !self.degraded_state.is_expired(),
                 INV_RTC_BUDGET: self.budget_exceeded_count == 0,
                 INV_RTC_AUDIT: !self.decisions.is_empty() || !self.events.is_empty(),
