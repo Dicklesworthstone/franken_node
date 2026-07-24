@@ -102,9 +102,14 @@ pub fn canonical_lock_key(lock_path: &std::path::Path) -> std::io::Result<std::p
         return Ok(canonical_path);
     }
 
-    let parent = lock_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    // `Path::new("state.json").parent()` is `Some("")`, not `None`, so a bare
+    // relative lock name never reached the no-parent fallback: it canonicalized
+    // the empty path instead and failed with ENOENT. Treat an empty parent as
+    // the working directory, which is what the fallback always meant.
+    let parent = match lock_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
     let file_name = lock_path.file_name().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
