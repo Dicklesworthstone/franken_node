@@ -606,7 +606,15 @@ impl AttestationLedger {
         // generate_proof() by looking it up in the internal store.  Without
         // this check, a caller could construct a fabricated ZkAttestation
         // struct that passes all structural checks but was never generated.
-        if !self.attestations.contains_key(&aid) {
+        //
+        // Existence alone is not enough: revocation and expiry are recorded by
+        // mutating the LEDGER's record, so every lifecycle decision below must
+        // read that record rather than the caller's copy. Checking the argument
+        // let a holder of a pre-revocation copy keep verifying indefinitely,
+        // because `revoke_attestation` never touches the caller's struct.
+        // `is_valid()` already resolves through the ledger; this path now
+        // matches it.
+        let Some(ledger_record) = self.attestations.get(&aid).cloned() else {
             self.record_audit(
                 format!("audit-{}-unknown", aid),
                 event_codes::FN_ZK_004.to_string(),
@@ -623,7 +631,7 @@ impl AttestationLedger {
                 reason: "Attestation not found in ledger — may be forged".to_string(),
                 error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
             };
-        }
+        };
 
         // INV-ZKA-POLICY-BOUND: check policy match
         if !invariants::check_policy_bound(attestation, policy) {
@@ -645,8 +653,8 @@ impl AttestationLedger {
             };
         }
 
-        // Check revocation
-        if attestation.status == AttestationStatus::Revoked {
+        // Check revocation (against the ledger record, not the caller's copy)
+        if ledger_record.status == AttestationStatus::Revoked {
             self.record_audit(
                 format!("audit-{}-rev", aid),
                 event_codes::FN_ZK_004.to_string(),
@@ -665,8 +673,8 @@ impl AttestationLedger {
             };
         }
 
-        // Check expiry
-        if now_ms >= attestation.expires_at_ms {
+        // Check expiry (against the ledger record, not the caller's copy)
+        if now_ms >= ledger_record.expires_at_ms {
             self.record_audit(
                 format!("audit-{}-exp", aid),
                 event_codes::FN_ZK_004.to_string(),
@@ -685,7 +693,7 @@ impl AttestationLedger {
             };
         }
 
-        if now_ms < attestation.generated_at_ms {
+        if now_ms < ledger_record.generated_at_ms {
             self.record_audit(
                 format!("audit-{}-future", aid),
                 event_codes::FN_ZK_004.to_string(),
