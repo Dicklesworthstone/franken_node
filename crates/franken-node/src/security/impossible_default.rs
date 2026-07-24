@@ -534,6 +534,26 @@ pub fn configured_child_process_spawn_admission(
     )
 }
 
+/// Authenticate a process-spawn grant with a public key received through the
+/// private, kernel-authenticated compatibility-corpus parent channel.
+///
+/// This is crate-private so neither project configuration nor the public CLI
+/// can select a trust root. The caller must authenticate the channel peer,
+/// executable identity, exact child PID, and nonce before passing the key
+/// here. Ordinary product runs continue to use
+/// [`configured_child_process_spawn_admission`] and the fixed operator root.
+pub(crate) fn configured_child_process_spawn_admission_from_authenticated_run_key(
+    config: &Config,
+    trusted_public_key_hex: &str,
+) -> Result<Option<ChildProcessSpawnAdmission>, ChildProcessSpawnAdmissionError> {
+    configured_child_process_spawn_admission_with(
+        config,
+        trusted_public_key_hex,
+        system_time_ms,
+        probe_process_spawn_containment,
+    )
+}
+
 /// Re-authenticate a configured process-spawn grant from inside the already
 /// running native worker. The signed token, policy subject, expiry, fixed
 /// trust root, and Bubblewrap executable identity are checked again, while the
@@ -550,6 +570,25 @@ pub fn configured_child_process_spawn_admission_in_active_containment(
     configured_child_process_spawn_admission_with(
         config,
         &trusted_public_key_hex,
+        system_time_ms,
+        verify_active_process_spawn_containment,
+    )
+}
+
+/// Re-authenticate a run-scoped corpus grant from inside the active
+/// containment unit.
+///
+/// The key has already crossed two authenticated private channels: the exact
+/// corpus parent to its exact `run` child, then the native-session supervisor
+/// to its PID-namespace worker. Keeping this entry point crate-private prevents
+/// any public config or environment selector from bypassing those checks.
+pub(crate) fn configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key(
+    config: &Config,
+    trusted_public_key_hex: &str,
+) -> Result<Option<ChildProcessSpawnAdmission>, ChildProcessSpawnAdmissionError> {
+    configured_child_process_spawn_admission_with(
+        config,
+        trusted_public_key_hex,
         system_time_ms,
         verify_active_process_spawn_containment,
     )
@@ -1279,8 +1318,12 @@ fn _assert_send_sync() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ChildProcessSpawnConfig, Profile};
+    use crate::config::{
+        ChildProcessExecutablePolicy, ChildProcessExecutionPolicy, ChildProcessResourceLimits,
+        ChildProcessSpawnConfig, Profile,
+    };
     use std::cell::Cell;
+    use std::collections::{BTreeMap, BTreeSet};
 
     // -- Helpers --
 
@@ -1365,6 +1408,21 @@ mod tests {
             },
             backend: ChildProcessSpawnBackend::Bubblewrap,
             binary_path: "/usr/bin/bwrap".into(),
+            execution_policy: ChildProcessExecutionPolicy {
+                allowed_executables: BTreeMap::from([(
+                    "true".to_string(),
+                    ChildProcessExecutablePolicy {
+                        path: "/usr/bin/true".into(),
+                        sha256: "11".repeat(32),
+                    },
+                )]),
+                jailed_cwd_root: "/".into(),
+                allow_shell: false,
+                shell_executable_alias: None,
+                allowed_env_keys: BTreeSet::new(),
+                fixed_env: BTreeMap::new(),
+                limits: ChildProcessResourceLimits::default(),
+            },
         });
         let subject = config
             .child_process_spawn_policy_subject()

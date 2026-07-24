@@ -23,7 +23,7 @@ use frankenengine_node::ops::compat_corpus_run::{
 use serde_json::Value;
 use serde_json::json;
 #[cfg(unix)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 fn write_family(
@@ -968,6 +968,112 @@ fn compat_corpus_run_preflights_template_collisions_before_bun() {
         !marker.exists(),
         "Bun must not be invoked before all staging targets pass preflight"
     );
+}
+
+/// Mock-free process-authority e2e: the corpus runner signs an exact
+/// run-scoped policy, authenticates its same-executable child over the private
+/// channel, and the native Bubblewrap worker re-verifies that authority before
+/// executing the fixture.
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[test]
+fn compat_corpus_run_authenticates_run_scoped_child_process_authority() {
+    let configured_bun = std::env::var_os("FRANKEN_NODE_TEST_BUN_BIN");
+    let bun_executable = configured_bun
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("bun"));
+    let bun_available = std::process::Command::new(&bun_executable)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !bun_available {
+        eprintln!(
+            "SKIP compat_corpus_run_authenticates_run_scoped_child_process_authority: \
+             bun is not on PATH; the corpus reference leg requires it"
+        );
+        return;
+    }
+    if !Path::new("/usr/bin/bwrap").is_file() {
+        eprintln!(
+            "SKIP compat_corpus_run_authenticates_run_scoped_child_process_authority: \
+             canonical /usr/bin/bwrap is unavailable"
+        );
+        return;
+    }
+
+    let work = tempfile::TempDir::new().expect("tempdir");
+    let corpus_root = work.path().join("corpus");
+    write_family(
+        &corpus_root,
+        "child_process",
+        "child_process",
+        "bd-91tpy",
+        &[(
+            "tc::child_process::authority-e2e",
+            "spawn_sync_echo.js",
+            "const cp=require('child_process');\
+             const r=cp.spawnSync('echo',['authority-ok'],{encoding:'utf8'});\
+             console.log(r.stdout.trim()+':'+r.status);\n",
+            "core",
+            "critical",
+        )],
+    );
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"));
+    command
+        .args([
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--out",
+            "artifacts/corpus_results.json",
+            "--case-timeout-secs",
+            "30",
+            "--json",
+        ])
+        .current_dir(work.path());
+    if let Some(configured_bun) = configured_bun {
+        let bun_directory = Path::new(&configured_bun)
+            .parent()
+            .expect("configured Bun binary has a parent directory");
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut launch_path = vec![bun_directory.to_path_buf()];
+        launch_path.extend(std::env::split_paths(&inherited_path));
+        command.env(
+            "PATH",
+            std::env::join_paths(launch_path).expect("compose product launch PATH"),
+        );
+    }
+    let output = command
+        .output()
+        .expect("spawn authenticated child-process corpus run");
+    assert!(
+        output.status.success(),
+        "authenticated child-process corpus run failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact: Value = serde_json::from_str(
+        &std::fs::read_to_string(work.path().join("artifacts/corpus_results.json"))
+            .expect("read child-process artifact"),
+    )
+    .expect("parse child-process artifact");
+    assert_eq!(artifact["totals"]["total_test_cases"], 1);
+    assert_eq!(
+        artifact["totals"]["passed_test_cases"],
+        1,
+        "child-process case did not pass: artifact={} stdout={} stderr={}",
+        artifact,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        artifact["per_test_results"][0]["test_id"],
+        "tc::child_process::authority-e2e"
+    );
+    assert_eq!(artifact["per_test_results"][0]["status"], "pass");
 }
 
 /// Mock-free e2e: the real binary runs a tiny corpus across bun and the

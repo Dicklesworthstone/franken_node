@@ -8,7 +8,9 @@ use crate::{
     config::{Config, PreferredRuntime, Profile},
     security::impossible_default::{
         ChildProcessSpawnAdmission, configured_child_process_spawn_admission,
+        configured_child_process_spawn_admission_from_authenticated_run_key,
         configured_child_process_spawn_admission_in_active_containment,
+        configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key,
     },
     supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry},
 };
@@ -27,8 +29,18 @@ use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
 #[cfg(feature = "engine")]
 use frankenengine_engine::runtime_config::RuntimeConfig as EngineRuntimeConfig;
 #[cfg(feature = "engine")]
+use frankenengine_extension_host::host_effect_journal::{
+    HostEffectJournalEntry, InMemoryHostEffectJournal,
+};
+#[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
     HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest,
+};
+#[cfg(feature = "engine")]
+use frankenengine_extension_host::process_spawn::{
+    NativeProcessSpawn, ProcessSignal, ProcessSpawnCapability, ProcessSpawnError,
+    ProcessSpawnLimits, ProcessSpawnOutcome, ProcessSpawnPolicy, ProcessSpawnProvider,
+    ProcessSpawnRequest, ProcessStdioMode,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -64,13 +76,13 @@ const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
 /// before Clap so the worker can never recursively enter the public `run`
 /// command.
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v2";
+const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v3";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v2";
+const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v3";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V2\0";
+const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V3\0";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 2;
+const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 3;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
 #[cfg(feature = "engine")]
@@ -89,6 +101,17 @@ const NATIVE_SESSION_CONTAINMENT_STARTUP_TIMEOUT: std::time::Duration =
 #[cfg(all(feature = "engine", target_os = "linux"))]
 const NATIVE_SESSION_CONTAINMENT_CLEANUP_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+const CORPUS_PROCESS_AUTHORITY_SCHEMA: &str = "franken-node/corpus-process-authority/v1";
+#[cfg(all(feature = "engine", target_os = "linux"))]
+const CORPUS_PROCESS_AUTHORITY_SOCKET_ENV: &str = "FRANKEN_NODE_INTERNAL_CORPUS_AUTH_SOCKET";
+#[cfg(all(feature = "engine", target_os = "linux"))]
+const CORPUS_PROCESS_AUTHORITY_NONCE_ENV: &str = "FRANKEN_NODE_INTERNAL_CORPUS_AUTH_NONCE";
+#[cfg(all(feature = "engine", target_os = "linux"))]
+const CORPUS_PROCESS_AUTHORITY_MAX_FRAME_BYTES: usize = 1024;
+#[cfg(all(feature = "engine", target_os = "linux"))]
+const CORPUS_PROCESS_AUTHORITY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +143,7 @@ enum NativeSessionContainment {
 
 #[cfg(feature = "engine")]
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NativeSessionRequest {
     schema_version: String,
     nonce: String,
@@ -128,6 +152,111 @@ struct NativeSessionRequest {
     policy_mode: String,
     config: Config,
     telemetry_socket_path: PathBuf,
+    process_spawn_trust_key_hex: Option<String>,
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorpusProcessAuthorityRequest {
+    schema_version: String,
+    nonce: String,
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorpusProcessAuthorityResponse {
+    schema_version: String,
+    nonce: String,
+    ed25519_public_key_hex: String,
+}
+
+/// One-shot server for the compatibility runner's run-scoped process trust
+/// key. The socket path and nonce are untrusted rendezvous hints; authority is
+/// released only after Linux authenticates the peer as the exact spawned child
+/// PID, same effective identity, and same executable image.
+#[doc(hidden)]
+#[cfg(all(feature = "engine", target_os = "linux"))]
+pub struct InternalCorpusProcessAuthorityServer {
+    listener: std::os::unix::net::UnixListener,
+    socket_path: PathBuf,
+    nonce: String,
+    ed25519_public_key_hex: String,
+}
+
+#[cfg(feature = "engine")]
+struct AdmissionBoundProcessSpawn {
+    inner: NativeProcessSpawn,
+    expires_at_ms: u64,
+}
+
+#[cfg(feature = "engine")]
+impl std::fmt::Debug for AdmissionBoundProcessSpawn {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdmissionBoundProcessSpawn")
+            .field("provider", &"native-process-spawn")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "engine")]
+impl AdmissionBoundProcessSpawn {
+    fn ensure_current(&self) -> std::result::Result<(), ProcessSpawnError> {
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| ProcessSpawnError::Denied {
+                reason: format!(
+                    "PROCESS_SPAWN_CLOCK_INVALID: system clock is before the Unix epoch: {error}"
+                ),
+            })?;
+        let current_time_ms =
+            u64::try_from(elapsed.as_millis()).map_err(|_| ProcessSpawnError::Denied {
+                reason:
+                    "PROCESS_SPAWN_CLOCK_INVALID: system time exceeds the supported millisecond range"
+                        .to_string(),
+            })?;
+        if current_time_ms >= self.expires_at_ms {
+            return Err(ProcessSpawnError::Denied {
+                reason: "PROCESS_SPAWN_TOKEN_EXPIRED: signed authority expired before this effect"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "engine")]
+impl ProcessSpawnProvider for AdmissionBoundProcessSpawn {
+    fn name(&self) -> &str {
+        "admission-bound-native-process-spawn"
+    }
+
+    fn prepare_request(
+        &self,
+        request: &ProcessSpawnRequest,
+    ) -> std::result::Result<ProcessSpawnRequest, ProcessSpawnError> {
+        self.ensure_current()?;
+        self.inner.prepare_request(request)
+    }
+
+    fn perform(
+        &self,
+        request: &ProcessSpawnRequest,
+        granted: &[ProcessSpawnCapability],
+    ) -> ProcessSpawnOutcome {
+        self.ensure_current()?;
+        self.inner.perform(request, granted)
+    }
+
+    fn cleanup_handle(&self, handle: &str) {
+        // Cleanup is compensating containment, not a new guest effect. It must
+        // remain available after expiry so an already-created child cannot
+        // outlive its authority window.
+        self.inner.cleanup_handle(handle);
+    }
 }
 
 #[cfg(feature = "engine")]
@@ -295,6 +424,302 @@ fn read_native_session_frame(
         .read_exact(&mut header[NATIVE_SESSION_FRAME_HEADER_BYTES..])
         .map_err(|error| format!("native-session frame payload was truncated: {error}"))?;
     Ok(header)
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[derive(Debug, Clone, Copy)]
+struct LinuxProcessIdentity {
+    parent_pid: u32,
+    effective_uid: u32,
+    effective_gid: u32,
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn linux_process_identity() -> Result<LinuxProcessIdentity> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .context("failed reading Linux process credentials")?;
+    let status_id = |key: &str, field_index: usize| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .and_then(|value| value.split_whitespace().nth(field_index))
+            .and_then(|value| value.parse::<u32>().ok())
+    };
+    Ok(LinuxProcessIdentity {
+        parent_pid: status_id("PPid:", 0)
+            .ok_or_else(|| anyhow::anyhow!("process status had no valid parent PID"))?,
+        effective_uid: status_id("Uid:", 1)
+            .ok_or_else(|| anyhow::anyhow!("process status had no effective UID"))?,
+        effective_gid: status_id("Gid:", 1)
+            .ok_or_else(|| anyhow::anyhow!("process status had no effective GID"))?,
+    })
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn validate_lowercase_hex_32(value: &str, label: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        anyhow::bail!("{label} must contain exactly 64 lowercase hexadecimal characters");
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+impl InternalCorpusProcessAuthorityServer {
+    /// Bind one private authority socket inside a caller-owned mode-0700
+    /// directory. The public key is validated before a socket is made visible.
+    pub fn bind(
+        socket_directory: &Path,
+        ed25519_public_key_hex: impl Into<String>,
+    ) -> Result<Self> {
+        use rand::RngCore as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let ed25519_public_key_hex = ed25519_public_key_hex.into();
+        validate_lowercase_hex_32(
+            &ed25519_public_key_hex,
+            "corpus process-authority Ed25519 public key",
+        )?;
+        if !socket_directory.is_absolute() {
+            anyhow::bail!("corpus process-authority socket directory must be absolute");
+        }
+        let metadata = std::fs::symlink_metadata(socket_directory).with_context(|| {
+            format!(
+                "inspect corpus process-authority directory {}",
+                socket_directory.display()
+            )
+        })?;
+        let identity = linux_process_identity()?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != identity.effective_uid
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            anyhow::bail!(
+                "corpus process-authority directory {} must be a mode-0700, caller-owned, non-symlink directory",
+                socket_directory.display()
+            );
+        }
+
+        let mut nonce_bytes = [0_u8; 32];
+        let mut random = rand::rngs::OsRng;
+        random.fill_bytes(&mut nonce_bytes);
+        let nonce = hex::encode(nonce_bytes);
+        let socket_path = socket_directory.join(format!(
+            "process-authority-{}.sock",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).with_context(|| {
+            format!(
+                "bind corpus process-authority socket {}",
+                socket_path.display()
+            )
+        })?;
+        listener
+            .set_nonblocking(true)
+            .context("set corpus process-authority listener nonblocking")?;
+        Ok(Self {
+            listener,
+            socket_path,
+            nonce,
+            ed25519_public_key_hex,
+        })
+    }
+
+    /// Add only the untrusted rendezvous hints to the exact child command.
+    /// Neither value is a signer or trust root.
+    pub fn configure_child_command(&self, command: &mut Command) {
+        command
+            .env(
+                CORPUS_PROCESS_AUTHORITY_SOCKET_ENV,
+                self.socket_path.as_os_str(),
+            )
+            .env(CORPUS_PROCESS_AUTHORITY_NONCE_ENV, &self.nonce);
+    }
+
+    /// Authenticate and answer exactly one connection from `expected_child_pid`.
+    pub fn serve_once(self, expected_child_pid: u32) -> Result<()> {
+        use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+
+        if expected_child_pid == 0 {
+            anyhow::bail!("corpus process-authority child PID was zero");
+        }
+        let started = Instant::now();
+        let (mut stream, _) = loop {
+            match self.listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if started.elapsed() >= CORPUS_PROCESS_AUTHORITY_DEADLINE {
+                        anyhow::bail!(
+                            "corpus process-authority child did not connect before the deadline"
+                        );
+                    }
+                    thread::sleep(NATIVE_SESSION_POLL_INTERVAL);
+                }
+                Err(error) => {
+                    return Err(error).context("accept corpus process-authority child");
+                }
+            }
+        };
+        stream
+            .set_read_timeout(Some(CORPUS_PROCESS_AUTHORITY_DEADLINE))
+            .context("set corpus process-authority read deadline")?;
+        stream
+            .set_write_timeout(Some(CORPUS_PROCESS_AUTHORITY_DEADLINE))
+            .context("set corpus process-authority write deadline")?;
+
+        let credentials = getsockopt(&stream, PeerCredentials)
+            .context("authenticate corpus process-authority child socket")?;
+        let identity = linux_process_identity()?;
+        let peer_pid = u32::try_from(credentials.pid())
+            .context("corpus process-authority peer PID was invalid")?;
+        if peer_pid != expected_child_pid
+            || credentials.uid() != identity.effective_uid
+            || credentials.gid() != identity.effective_gid
+        {
+            anyhow::bail!(
+                "corpus process-authority peer credentials did not match the exact spawned child"
+            );
+        }
+        let peer_executable = std::fs::read_link(format!("/proc/{peer_pid}/exe"))
+            .context("resolve corpus process-authority child executable")?;
+        let server_executable =
+            std::fs::read_link("/proc/self/exe").context("resolve corpus runner executable")?;
+        if peer_executable != server_executable {
+            anyhow::bail!(
+                "corpus process-authority child executable did not match the runner executable"
+            );
+        }
+
+        let request_frame =
+            read_native_session_frame(&mut stream, CORPUS_PROCESS_AUTHORITY_MAX_FRAME_BYTES)
+                .map_err(anyhow::Error::msg)?;
+        let request: CorpusProcessAuthorityRequest = decode_native_session_frame(
+            &request_frame,
+            CORPUS_PROCESS_AUTHORITY_MAX_FRAME_BYTES,
+            false,
+        )
+        .map_err(anyhow::Error::msg)?;
+        if request.schema_version != CORPUS_PROCESS_AUTHORITY_SCHEMA
+            || !crate::security::constant_time::ct_eq(&request.nonce, &self.nonce)
+        {
+            anyhow::bail!("corpus process-authority request envelope was invalid");
+        }
+
+        let response = CorpusProcessAuthorityResponse {
+            schema_version: CORPUS_PROCESS_AUTHORITY_SCHEMA.to_string(),
+            nonce: self.nonce,
+            ed25519_public_key_hex: self.ed25519_public_key_hex,
+        };
+        let response_frame =
+            encode_native_session_frame(&response, CORPUS_PROCESS_AUTHORITY_MAX_FRAME_BYTES)
+                .map_err(anyhow::Error::msg)?;
+        stream
+            .write_all(&response_frame)
+            .context("write corpus process-authority response")?;
+        stream
+            .flush()
+            .context("flush corpus process-authority response")?;
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn receive_authenticated_corpus_process_authority() -> Result<Option<String>> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+
+    let socket_path = std::env::var_os(CORPUS_PROCESS_AUTHORITY_SOCKET_ENV);
+    let nonce = std::env::var_os(CORPUS_PROCESS_AUTHORITY_NONCE_ENV);
+    let (socket_path, nonce) = match (socket_path, nonce) {
+        (None, None) => return Ok(None),
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!(
+                "corpus process-authority rendezvous was incomplete; both internal hints are required"
+            );
+        }
+        (Some(socket_path), Some(nonce)) => (PathBuf::from(socket_path), nonce),
+    };
+    if !socket_path.is_absolute() {
+        anyhow::bail!("corpus process-authority socket hint was not absolute");
+    }
+    let nonce = nonce
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("corpus process-authority nonce was not UTF-8"))?;
+    validate_lowercase_hex_32(nonce, "corpus process-authority nonce")?;
+
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket_path).with_context(|| {
+        format!(
+            "connect authenticated corpus process-authority parent at {}",
+            socket_path.display()
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(CORPUS_PROCESS_AUTHORITY_DEADLINE))
+        .context("set corpus process-authority parent read deadline")?;
+    stream
+        .set_write_timeout(Some(CORPUS_PROCESS_AUTHORITY_DEADLINE))
+        .context("set corpus process-authority parent write deadline")?;
+
+    let credentials = getsockopt(&stream, PeerCredentials)
+        .context("authenticate corpus process-authority parent socket")?;
+    let identity = linux_process_identity()?;
+    let peer_pid = u32::try_from(credentials.pid())
+        .context("corpus process-authority parent PID was invalid")?;
+    if peer_pid != identity.parent_pid
+        || credentials.uid() != identity.effective_uid
+        || credentials.gid() != identity.effective_gid
+    {
+        anyhow::bail!(
+            "corpus process-authority peer was not this run process's same-identity parent"
+        );
+    }
+    let peer_executable = std::fs::read_link(format!("/proc/{peer_pid}/exe"))
+        .context("resolve corpus process-authority parent executable")?;
+    let child_executable =
+        std::fs::read_link("/proc/self/exe").context("resolve corpus run executable")?;
+    if peer_executable != child_executable {
+        anyhow::bail!(
+            "corpus process-authority parent executable did not match this run executable"
+        );
+    }
+
+    let request = CorpusProcessAuthorityRequest {
+        schema_version: CORPUS_PROCESS_AUTHORITY_SCHEMA.to_string(),
+        nonce: nonce.to_string(),
+    };
+    let request_frame =
+        encode_native_session_frame(&request, CORPUS_PROCESS_AUTHORITY_MAX_FRAME_BYTES)
+            .map_err(anyhow::Error::msg)?;
+    stream
+        .write_all(&request_frame)
+        .context("write corpus process-authority request")?;
+    stream
+        .flush()
+        .context("flush corpus process-authority request")?;
+    let response_frame =
+        read_native_session_frame(&mut stream, CORPUS_PROCESS_AUTHORITY_MAX_FRAME_BYTES)
+            .map_err(anyhow::Error::msg)?;
+    let response: CorpusProcessAuthorityResponse = decode_native_session_frame(
+        &response_frame,
+        CORPUS_PROCESS_AUTHORITY_MAX_FRAME_BYTES,
+        false,
+    )
+    .map_err(anyhow::Error::msg)?;
+    if response.schema_version != CORPUS_PROCESS_AUTHORITY_SCHEMA
+        || !crate::security::constant_time::ct_eq(&response.nonce, nonce)
+    {
+        anyhow::bail!("corpus process-authority response envelope was invalid");
+    }
+    validate_lowercase_hex_32(
+        &response.ed25519_public_key_hex,
+        "corpus process-authority Ed25519 public key",
+    )?;
+    Ok(Some(response.ed25519_public_key_hex))
 }
 
 #[cfg(feature = "engine")]
@@ -1851,18 +2276,49 @@ impl EngineDispatcher {
         // dispatcher side effect or guest execution instead.
         Self::require_embedded_engine_for_profile_governed_run()?;
 
+        // The compatibility runner may supply a public key through its
+        // kernel-authenticated exact-parent channel. These environment values
+        // are only rendezvous hints; a value is accepted only after peer PID,
+        // uid/gid, executable identity, and nonce validation. Ordinary runs
+        // never take a key from config or environment and retain the fixed
+        // operator trust anchor.
+        #[cfg(all(feature = "engine", target_os = "linux"))]
+        let process_spawn_trust_key_hex =
+            receive_authenticated_corpus_process_authority().map_err(|error| {
+                ActionableError::new(
+                    format!("Authenticated corpus process authority failed: {error}"),
+                    "Run through `franken-node ops compat-corpus-run`, or remove the internal corpus authority rendezvous variables",
+                )
+            })?;
+        #[cfg(not(all(feature = "engine", target_os = "linux")))]
+        let process_spawn_trust_key_hex: Option<String> = None;
+        if process_spawn_trust_key_hex.is_some() && config.security.child_process_spawn.is_none() {
+            return Err(ActionableError::new(
+                "Authenticated corpus process authority was presented without a signed child-process policy.",
+                "Use the corpus runner's complete per-case signed policy, or remove the internal authority channel",
+            )
+            .into());
+        }
+
         // Authenticate the signed opt-in and establish backend readiness before
         // any guest execution. The returned value is deliberately not enough
         // to grant authority: the worker independently reconstructs the active
         // namespace proof before `process_spawn` enters its capability set.
-        let process_spawn_admission = configured_child_process_spawn_admission(config).map_err(
-            |error| {
-                ActionableError::new(
-                    format!("Child-process-spawn admission failed: {error}"),
-                    "Remove security.child_process_spawn to keep spawning disabled, or replace it with a valid signed policy-bound token and a ready Linux Bubblewrap backend",
+        let process_spawn_admission = match process_spawn_trust_key_hex.as_deref() {
+            Some(trusted_key) => {
+                configured_child_process_spawn_admission_from_authenticated_run_key(
+                    config,
+                    trusted_key,
                 )
-            },
-        )?;
+            }
+            None => configured_child_process_spawn_admission(config),
+        }
+        .map_err(|error| {
+            ActionableError::new(
+                format!("Child-process-spawn admission failed: {error}"),
+                "Remove security.child_process_spawn to keep spawning disabled, or replace it with a valid signed policy-bound token and a ready Linux Bubblewrap backend",
+            )
+        })?;
 
         // SECURITY: Re-validate trust state to close TOCTOU gap between preflight and execution (bd-zqz0q)
         let project_root = app_path
@@ -2219,6 +2675,7 @@ impl EngineDispatcher {
                     Path::new(&socket_path),
                     &native_session_worker_path,
                     process_spawn_admission.as_ref(),
+                    process_spawn_trust_key_hex.as_deref(),
                 )
             }
             #[cfg(not(feature = "engine"))]
@@ -2478,13 +2935,28 @@ impl EngineDispatcher {
                         "process-spawn worker control peer must be outside the active PID namespace"
                     );
                 }
-                configured_child_process_spawn_admission_in_active_containment(&request.config)
-                    .context("failed authenticating active process-spawn containment")?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("active process-spawn containment had no signed admission")
-                    })
-                    .map(Some)?
+                match request.process_spawn_trust_key_hex.as_deref() {
+                    Some(trusted_key) => {
+                        configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key(
+                            &request.config,
+                            trusted_key,
+                        )
+                    }
+                    None => configured_child_process_spawn_admission_in_active_containment(
+                        &request.config,
+                    ),
+                }
+                .context("failed authenticating active process-spawn containment")?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("active process-spawn containment had no signed admission")
+                })
+                .map(Some)?
             } else {
+                if request.process_spawn_trust_key_hex.is_some() {
+                    anyhow::bail!(
+                        "native-session request carried a process trust key without a signed process policy"
+                    );
+                }
                 if peer_credentials.pid <= 0 {
                     anyhow::bail!(
                         "ordinary native-session control peer was not visible in the worker PID namespace"
@@ -2515,7 +2987,9 @@ impl EngineDispatcher {
         };
         #[cfg(not(target_os = "linux"))]
         let process_spawn_admission: Option<ChildProcessSpawnAdmission> = {
-            if request.config.security.child_process_spawn.is_some() {
+            if request.config.security.child_process_spawn.is_some()
+                || request.process_spawn_trust_key_hex.is_some()
+            {
                 anyhow::bail!(
                     "process-spawn native-session containment is supported only on Linux"
                 );
@@ -2665,6 +3139,7 @@ impl EngineDispatcher {
         telemetry_socket_path: &Path,
         native_session_worker_path: &Path,
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
+        process_spawn_trust_key_hex: Option<&str>,
     ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
         use std::time::Duration;
 
@@ -2682,6 +3157,7 @@ impl EngineDispatcher {
             telemetry_socket_path,
             native_session_worker_path,
             process_spawn_admission,
+            process_spawn_trust_key_hex,
             timeout,
         )
     }
@@ -2698,6 +3174,7 @@ impl EngineDispatcher {
         telemetry_socket_path: &Path,
         native_session_worker_path: &Path,
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
+        process_spawn_trust_key_hex: Option<&str>,
         timeout: std::time::Duration,
     ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
         use base64::Engine as _;
@@ -3161,6 +3638,7 @@ impl EngineDispatcher {
             policy_mode: policy_mode.to_string(),
             config: config.clone(),
             telemetry_socket_path: telemetry_socket_path.to_path_buf(),
+            process_spawn_trust_key_hex: process_spawn_trust_key_hex.map(str::to_string),
         };
         let request_frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
             .map_err(|message| {
@@ -3296,6 +3774,16 @@ impl EngineDispatcher {
                         .parent()
                         .expect("containment test app has a parent"),
                 );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // The outer `run` process already consumed and authenticated these
+            // untrusted rendezvous hints. They must not ambiently propagate
+            // into the native worker; the verified public key travels only in
+            // the nonce-bound private request above.
+            command
+                .env_remove(CORPUS_PROCESS_AUTHORITY_SOCKET_ENV)
+                .env_remove(CORPUS_PROCESS_AUTHORITY_NONCE_ENV);
         }
         command
             .current_dir(&working_dir)
@@ -3635,7 +4123,7 @@ impl EngineDispatcher {
             if schema_version != NATIVE_SESSION_SCHEMA {
                 return Err("native-session response schema mismatch".to_string());
             }
-            if !crate::security::constant_time::ct_eq(response_nonce, nonce) {
+            if !crate::security::constant_time::ct_eq(response_nonce, &nonce) {
                 return Err("native-session response nonce mismatch".to_string());
             }
             Ok(())
@@ -3899,6 +4387,86 @@ impl EngineDispatcher {
 
         Self::validate_capabilities(&capabilities)?;
         Ok(capabilities)
+    }
+
+    /// Translate the already-authenticated product policy into the extension
+    /// host's narrow process boundary. This is deliberately a lossless mapping:
+    /// aliases, exact paths/digests, environment authority, cwd jail, shell
+    /// selection, and every resource ceiling were all committed into the token
+    /// subject before the active-containment admission was issued.
+    #[cfg(feature = "engine")]
+    fn process_spawn_policy_for_execution(
+        config: &Config,
+    ) -> Result<ProcessSpawnPolicy, ActionableError> {
+        let configured = config
+            .security
+            .child_process_spawn
+            .as_ref()
+            .ok_or_else(|| {
+                ActionableError::new(
+                    "Process-spawn provider requested without a configured signed policy.",
+                    "Configure [security.child_process_spawn] and obtain an operator-signed admission token",
+                )
+            })?;
+        let source = &configured.execution_policy;
+        let mut allowed_executables = std::collections::BTreeMap::new();
+        let mut executable_aliases = std::collections::BTreeMap::new();
+
+        for (alias, executable) in &source.allowed_executables {
+            let path = executable.path.to_str().ok_or_else(|| {
+                ActionableError::new(
+                    format!("Process executable for alias `{alias}` is not valid UTF-8."),
+                    "Use an absolute UTF-8 executable path in the signed process policy",
+                )
+            })?;
+            let decoded = hex::decode(&executable.sha256).map_err(|error| {
+                ActionableError::new(
+                    format!("Process executable digest for alias `{alias}` is invalid: {error}"),
+                    "Use the exact lowercase 64-character SHA-256 digest committed by the operator",
+                )
+            })?;
+            let digest: [u8; 32] = decoded.try_into().map_err(|bytes: Vec<u8>| {
+                ActionableError::new(
+                    format!(
+                        "Process executable digest for alias `{alias}` decoded to {} bytes, expected 32.",
+                        bytes.len()
+                    ),
+                    "Use the exact lowercase 64-character SHA-256 digest committed by the operator",
+                )
+            })?;
+            allowed_executables.insert(path.to_string(), digest);
+            executable_aliases.insert(alias.clone(), path.to_string());
+        }
+
+        let jailed_cwd_root = source.jailed_cwd_root.to_str().ok_or_else(|| {
+            ActionableError::new(
+                "Process working-directory jail is not valid UTF-8.",
+                "Use an absolute UTF-8 jail path in the signed process policy",
+            )
+        })?;
+
+        Ok(ProcessSpawnPolicy {
+            allowed_executables,
+            executable_aliases,
+            allow_shell: source.allow_shell,
+            shell_executable_alias: source.shell_executable_alias.clone(),
+            allowed_env_keys: source.allowed_env_keys.clone(),
+            fixed_env: source.fixed_env.clone(),
+            jailed_cwd_root: jailed_cwd_root.to_string(),
+            limits: ProcessSpawnLimits {
+                max_children: source.limits.max_children,
+                max_argv_count: source.limits.max_argv_count,
+                max_argv_bytes: source.limits.max_argv_bytes,
+                max_stdin_bytes: source.limits.max_stdin_bytes,
+                max_output_bytes: source.limits.max_output_bytes,
+                max_runtime_millis: source.limits.max_runtime_millis,
+            },
+            allowed_signals: std::collections::BTreeSet::from([ProcessSignal::Kill]),
+            allowed_stdio: std::collections::BTreeSet::from([
+                ProcessStdioMode::Pipe,
+                ProcessStdioMode::Null,
+            ]),
+        })
     }
 
     /// Validates that all capability strings are recognized by franken-engine.
@@ -4401,6 +4969,37 @@ impl EngineDispatcher {
             );
         orchestrator.set_cancellation_token(cancellation.token().clone());
 
+        // Process authority is orthogonal to the ordinary runtime profile. The
+        // provider exists only inside a worker that has reauthenticated the
+        // operator-signed token and proven its active containment unit. Its
+        // policy is the exact token-subject policy, not ambient PATH/env state.
+        // The shared journal is installed at the same time so interleaved
+        // filesystem/network/process crossings retain their real global order.
+        if let Some(admission) = process_spawn_admission.as_ref() {
+            let policy = Self::process_spawn_policy_for_execution(config).map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    error.to_string(),
+                    &mut telemetry_guard,
+                )
+            })?;
+            let provider = NativeProcessSpawn::new(policy).map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Process-spawn provider policy was invalid: {error}"),
+                    &mut telemetry_guard,
+                )
+            })?;
+            let provider = AdmissionBoundProcessSpawn {
+                inner: provider,
+                expires_at_ms: admission.expires_at_ms(),
+            };
+            let journal = Arc::new(InMemoryHostEffectJournal::recording());
+            orchestrator.set_process_spawn(Arc::new(provider), journal);
+            tracing::info!(
+                execution_mode = "native",
+                "Installed signed, containment-bound process-spawn provider"
+            );
+        }
+
         // bd-5r99w.12: install a sandboxed real-I/O host provider + recorder so the
         // run actually PERFORMS the program's authorized host effects (and records
         // the denied ones), confined to the application directory. The recorder's
@@ -4529,10 +5128,23 @@ impl EngineDispatcher {
         // hash-chained, SDK-verifiable effect ledger. This is the native effect-
         // producing path, so the ledger is always present (empty when the program
         // performed no host effects) — never omitted, never fabricated.
-        let host_effect_ledger = Self::build_host_effect_ledger(
-            &execution_result.trace_id,
-            &execution_result.host_effect_transcript,
-        );
+        let host_effect_ledger = if process_spawn_admission.is_some() {
+            Self::build_host_effect_journal_ledger(
+                &execution_result.trace_id,
+                &execution_result.host_effect_journal,
+                process_spawn_admission.as_ref(),
+                config
+                    .security
+                    .child_process_spawn
+                    .as_ref()
+                    .map(|configured| &configured.execution_policy),
+            )
+        } else {
+            Self::build_host_effect_ledger(
+                &execution_result.trace_id,
+                &execution_result.host_effect_transcript,
+            )
+        };
         tracing::info!(
             execution_mode = "native",
             phase = "execution",
@@ -4599,6 +5211,27 @@ impl EngineDispatcher {
             frankenengine_extension_host::host_io::HostIoOutcome,
         )],
     ) -> HostEffectLedger {
+        let journal = transcript
+            .iter()
+            .map(|(request, outcome)| HostEffectJournalEntry::HostIo {
+                request: request.clone(),
+                outcome: outcome.clone(),
+            })
+            .collect::<Vec<_>>();
+        Self::build_host_effect_journal_ledger(trace_id, &journal, None, None)
+    }
+
+    /// Harvest the globally ordered journal used when extraordinary process
+    /// authority is installed. Host-I/O entries keep their established receipt
+    /// mapping; process entries become `EffectKind::Spawn` receipts bound to the
+    /// authenticated token id and policy subject that authorized the provider.
+    #[cfg(feature = "engine")]
+    fn build_host_effect_journal_ledger(
+        trace_id: &str,
+        journal: &[HostEffectJournalEntry],
+        process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
+        process_execution_policy: Option<&crate::config::ChildProcessExecutionPolicy>,
+    ) -> HostEffectLedger {
         use crate::runtime::effect_receipt::{
             EFFECT_RECEIPT_EMPTY_LINEAGE_HASH, EffectKind, EffectLineageFields, EffectReceipt,
             EffectReceiptChain, FlowPolicyVerdict,
@@ -4644,6 +5277,85 @@ impl EngineDispatcher {
                     .any(|window| window == needle)
         }
 
+        fn process_request_carries_secret(
+            request: &frankenengine_extension_host::process_spawn::ProcessSpawnRequest,
+            samples: &[Vec<u8>],
+            fixed_env: Option<&std::collections::BTreeMap<String, String>>,
+        ) -> bool {
+            use frankenengine_extension_host::process_spawn::{ProcessLaunch, ProcessSpawnRequest};
+
+            fn field_carries_secret(field: &[u8], samples: &[Vec<u8>]) -> bool {
+                !field.is_empty() && samples.iter().any(|sample| slice_contains(field, sample))
+            }
+
+            fn launch_carries_secret(
+                launch: &ProcessLaunch,
+                samples: &[Vec<u8>],
+                fixed_env: Option<&std::collections::BTreeMap<String, String>>,
+            ) -> bool {
+                field_carries_secret(launch.executable.as_bytes(), samples)
+                    || launch
+                        .argv
+                        .iter()
+                        .any(|argument| field_carries_secret(argument.as_bytes(), samples))
+                    || launch.env.iter().any(|(key, value)| {
+                        field_carries_secret(key.as_bytes(), samples)
+                            || field_carries_secret(value.as_bytes(), samples)
+                    })
+                    || launch
+                        .cwd
+                        .as_deref()
+                        .is_some_and(|cwd| field_carries_secret(cwd.as_bytes(), samples))
+                    || fixed_env.is_some_and(|environment| {
+                        environment.iter().any(|(key, value)| {
+                            field_carries_secret(key.as_bytes(), samples)
+                                || field_carries_secret(value.as_bytes(), samples)
+                        })
+                    })
+            }
+
+            match request {
+                ProcessSpawnRequest::Run { launch, stdin, .. } => {
+                    launch_carries_secret(launch, samples, fixed_env)
+                        || field_carries_secret(stdin, samples)
+                }
+                ProcessSpawnRequest::Spawn { launch } => {
+                    launch_carries_secret(launch, samples, fixed_env)
+                }
+                ProcessSpawnRequest::WriteStdin { handle, data } => {
+                    field_carries_secret(handle.as_bytes(), samples)
+                        || field_carries_secret(data, samples)
+                }
+                ProcessSpawnRequest::CloseStdin { handle }
+                | ProcessSpawnRequest::Wait { handle, .. }
+                | ProcessSpawnRequest::Kill { handle, .. } => {
+                    field_carries_secret(handle.as_bytes(), samples)
+                }
+            }
+        }
+
+        fn process_response_carries_secret(
+            response: &frankenengine_extension_host::process_spawn::ProcessSpawnResponse,
+            samples: &[Vec<u8>],
+        ) -> bool {
+            use frankenengine_extension_host::process_spawn::ProcessSpawnResponse;
+
+            let field_carries_secret = |field: &[u8]| {
+                !field.is_empty() && samples.iter().any(|sample| slice_contains(field, sample))
+            };
+            match response {
+                ProcessSpawnResponse::Run { stdout, stderr, .. }
+                | ProcessSpawnResponse::Waited { stdout, stderr, .. }
+                | ProcessSpawnResponse::Killed { stdout, stderr, .. } => {
+                    field_carries_secret(stdout) || field_carries_secret(stderr)
+                }
+                ProcessSpawnResponse::Spawned { handle } => field_carries_secret(handle.as_bytes()),
+                ProcessSpawnResponse::StdinWritten { .. } | ProcessSpawnResponse::StdinClosed => {
+                    false
+                }
+            }
+        }
+
         // Single monotonic recording timestamp for the whole run; this module
         // owns the clock read (the receipt layer never reads the wall clock).
         let recorded_at_millis = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
@@ -4669,9 +5381,129 @@ impl EngineDispatcher {
         const MAX_SECRET_SAMPLES: usize = 16;
         let mut secret_samples: Vec<Vec<u8>> = Vec::new();
 
-        for (index, (request, outcome)) in transcript.iter().enumerate() {
+        for (index, entry) in journal.iter().enumerate() {
             let seq = u64::try_from(index).unwrap_or(u64::MAX);
-            let capability_ref = format!("host-io:{}", request.required_capability().as_str());
+            let (capability_ref, request, outcome) = match entry {
+                HostEffectJournalEntry::HostIo { request, outcome } => (
+                    format!("host-io:{}", request.required_capability().as_str()),
+                    request,
+                    outcome,
+                ),
+                HostEffectJournalEntry::ProcessSpawn { .. } => {
+                    let HostEffectJournalEntry::ProcessSpawn { request, outcome } = entry else {
+                        unreachable!("process family checked")
+                    };
+                    let request_bytes = serde_json::to_vec(request)
+                        .unwrap_or_else(|_| b"process-request-serialization-error".to_vec());
+                    let args_hash = content_hash(&request_bytes);
+                    let Some(admission) = process_spawn_admission else {
+                        denied_count = denied_count.saturating_add(1);
+                        let receipt = EffectReceipt::denied_with_lineage(
+                            seq,
+                            trace_id,
+                            EffectKind::Spawn,
+                            "PROCESS_SPAWN_ADMISSION_MISSING: journal contained a process effect without an authenticated admission"
+                                .to_string(),
+                            content_hash(&request_bytes),
+                            args_hash,
+                            recorded_at_millis,
+                            EffectLineageFields::label_clean_denied(),
+                        );
+                        if let Err(append_err) = chain.append(receipt) {
+                            tracing::warn!(
+                                execution_mode = "native",
+                                seq,
+                                error = %append_err,
+                                "Stopped harvesting host-effect ledger after append failure"
+                            );
+                            break;
+                        }
+                        continue;
+                    };
+                    let capability_ref = format!(
+                        "process-spawn:{}@{}",
+                        admission.token_id(),
+                        admission.policy_subject()
+                    );
+                    let carries_secret = process_request_carries_secret(
+                        request,
+                        &secret_samples,
+                        process_execution_policy.map(|policy| &policy.fixed_env),
+                    );
+                    let lineage = match outcome {
+                        Ok(response) => {
+                            allowed_count = allowed_count.saturating_add(1);
+                            let produced = serde_json::to_vec(response).unwrap_or_else(|_| {
+                                b"process-response-serialization-error".to_vec()
+                            });
+                            let lineage = if carries_secret
+                                || process_response_carries_secret(response, &secret_samples)
+                            {
+                                EffectLineageFields {
+                                    input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH
+                                        .to_string(),
+                                    output_lineage_hash: Some(
+                                        EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                                    ),
+                                    label_set_commitment: secret_file_label_set_commitment(),
+                                    declassification_ref: None,
+                                    flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+                                }
+                            } else {
+                                EffectLineageFields::label_clean_allowed()
+                            };
+                            EffectReceipt::allowed_with_lineage(
+                                seq,
+                                trace_id,
+                                EffectKind::Spawn,
+                                capability_ref,
+                                content_hash(&request_bytes),
+                                args_hash,
+                                content_hash(&produced),
+                                content_hash(&produced),
+                                recorded_at_millis,
+                                lineage,
+                            )
+                        }
+                        Err(error) => {
+                            denied_count = denied_count.saturating_add(1);
+                            let lineage = if carries_secret
+                                || matches!(
+                                    error,
+                                    frankenengine_extension_host::process_spawn::ProcessSpawnError::FlowPolicyBlocked
+                                )
+                            {
+                                EffectLineageFields::blocked(
+                                    EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                                    secret_file_label_set_commitment(),
+                                )
+                            } else {
+                                EffectLineageFields::label_clean_denied()
+                            };
+                            EffectReceipt::denied_with_lineage(
+                                seq,
+                                trace_id,
+                                EffectKind::Spawn,
+                                error.to_string(),
+                                content_hash(&request_bytes),
+                                args_hash,
+                                recorded_at_millis,
+                                lineage,
+                            )
+                        }
+                    };
+                    if let Err(append_err) = chain.append(lineage) {
+                        tracing::warn!(
+                            execution_mode = "native",
+                            seq,
+                            error = %append_err,
+                            "Stopped harvesting host-effect ledger after append failure"
+                        );
+                        break;
+                    }
+                    continue;
+                }
+            };
 
             // A read of a recognized secret file is a sensitive information-flow
             // source; its bytes' content hash is registered (below) so later
@@ -5082,6 +5914,72 @@ mod tests {
         let error = EngineDispatcher::resolve_capabilities_for_execution(&config, Some(&admission))
             .expect_err("a launch proof cannot create an unsigned config opt-in");
         assert!(error.to_string().contains("inconsistent"));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_91tpy_process_provider_rechecks_expiry_and_redacts_inner_policy() {
+        use frankenengine_extension_host::process_spawn::{
+            ProcessLaunch, ProcessSpawnCapability, ProcessSpawnRequest, ProcessStdio,
+        };
+
+        let jail = TempDir::new().expect("create process-policy jail");
+        let mut policy =
+            ProcessSpawnPolicy::jailed(jail.path()).expect("construct jailed process policy");
+        policy.fixed_env.insert(
+            "SECRET_TOKEN".to_string(),
+            "must-not-appear-in-debug".to_string(),
+        );
+        let provider = NativeProcessSpawn::new(policy).expect("construct native process provider");
+        let provider = AdmissionBoundProcessSpawn {
+            inner: provider,
+            expires_at_ms: 0,
+        };
+        let request = ProcessSpawnRequest::Spawn {
+            launch: ProcessLaunch {
+                executable: "not-reached".to_string(),
+                argv: Vec::new(),
+                env: std::collections::BTreeMap::new(),
+                cwd: None,
+                shell: false,
+                stdio: ProcessStdio::default(),
+            },
+        };
+
+        assert!(matches!(
+            provider.perform(&request, &[ProcessSpawnCapability::Spawn]),
+            Err(ProcessSpawnError::Denied { reason })
+                if reason.starts_with("PROCESS_SPAWN_TOKEN_EXPIRED")
+        ));
+        let debug = format!("{provider:?}");
+        assert!(debug.contains("AdmissionBoundProcessSpawn"));
+        assert!(!debug.contains("must-not-appear-in-debug"));
+        assert!(!debug.contains("SECRET_TOKEN"));
+    }
+
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    #[test]
+    fn bd_91tpy_corpus_authority_server_rejects_public_or_invalid_roots() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let private_directory = TempDir::new().expect("create private authority directory");
+        let invalid_key =
+            InternalCorpusProcessAuthorityServer::bind(private_directory.path(), "not-a-key")
+                .err()
+                .expect("invalid key must fail before binding");
+        assert!(invalid_key.to_string().contains("64 lowercase hexadecimal"));
+
+        let public_directory = TempDir::new().expect("create public authority directory");
+        std::fs::set_permissions(
+            public_directory.path(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("make authority directory public");
+        let insecure_root =
+            InternalCorpusProcessAuthorityServer::bind(public_directory.path(), "11".repeat(32))
+                .err()
+                .expect("public socket directory must fail closed");
+        assert!(insecure_root.to_string().contains("mode-0700"));
     }
 
     #[test]
@@ -9771,6 +10669,206 @@ mod tests {
         assert_ledger_sdk_verifiable(&ledger);
     }
 
+    /// bd-x85a7/bd-at11s: process effects share the same journal and signed
+    /// receipt chain as filesystem/network effects. The process receipt is
+    /// bound to the reauthenticated token and policy subject, never to a broad
+    /// runtime profile or an ambient executable lookup.
+    #[test]
+    #[cfg(feature = "engine")]
+    fn process_spawn_receipts_preserve_global_order_and_admission_bd_at11s() {
+        use crate::runtime::effect_receipt::{FlowPolicyVerdict, PolicyOutcome};
+        use frankenengine_extension_host::host_io::{HostIoRequest, HostIoResponse};
+        use frankenengine_extension_host::process_spawn::{
+            ProcessExit, ProcessLaunch, ProcessSpawnError, ProcessSpawnRequest,
+            ProcessSpawnResponse,
+        };
+
+        let request = ProcessSpawnRequest::Run {
+            launch: ProcessLaunch {
+                executable: "/usr/bin/printf".to_string(),
+                argv: vec!["hello".to_string()],
+                env: std::collections::BTreeMap::new(),
+                cwd: Some("/work".to_string()),
+                shell: false,
+                stdio: Default::default(),
+            },
+            stdin: b"super-secret-token".to_vec(),
+            timeout_millis: Some(1_000),
+        };
+        let journal = vec![
+            HostEffectJournalEntry::HostIo {
+                request: HostIoRequest::FsRead {
+                    path: ".env".to_string(),
+                },
+                outcome: Ok(HostIoResponse::FsRead {
+                    bytes: b"super-secret-token".to_vec(),
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
+                request: request.clone(),
+                outcome: Ok(ProcessSpawnResponse::Run {
+                    exit: ProcessExit {
+                        success: true,
+                        code: Some(0),
+                        signal: None,
+                    },
+                    stdout: b"hello".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
+                request,
+                outcome: Err(ProcessSpawnError::PolicyViolation {
+                    code: "executable_denied".to_string(),
+                    detail: "not signed into the policy".to_string(),
+                }),
+            },
+        ];
+        let admission = ChildProcessSpawnAdmission::verified_for_test(
+            u64::MAX,
+            PathBuf::from("/usr/bin/bwrap"),
+        );
+
+        let ledger = EngineDispatcher::build_host_effect_journal_ledger(
+            "trace-process-ledger",
+            &journal,
+            Some(&admission),
+            None,
+        );
+
+        assert_eq!(ledger.effect_count, 3);
+        assert_eq!(ledger.allowed_count, 2);
+        assert_eq!(ledger.denied_count, 1);
+        assert_eq!(
+            ledger
+                .entries
+                .iter()
+                .map(|entry| entry.receipt.effect_kind.label())
+                .collect::<Vec<_>>(),
+            vec!["fs_read", "spawn", "spawn"]
+        );
+        assert!(matches!(
+            &ledger.entries[1].receipt.policy_outcome,
+            PolicyOutcome::Allowed { capability_ref }
+                if capability_ref == "process-spawn:test-process-spawn-token@test-policy-subject"
+        ));
+        assert_eq!(
+            ledger.entries[1].receipt.flow_policy_verdict,
+            FlowPolicyVerdict::LabelClean,
+            "an allowed secret-bearing spawn is detected, not rewritten as prevention"
+        );
+        assert_eq!(
+            ledger.entries[1].receipt.label_set_commitment,
+            crate::security::lineage_tracker::secret_file_label_set_commitment()
+        );
+        assert!(matches!(
+            &ledger.entries[2].receipt.policy_outcome,
+            PolicyOutcome::Denied { reason }
+                if reason.contains("executable_denied")
+        ));
+        assert_eq!(
+            ledger.entries[2].receipt.flow_policy_verdict,
+            FlowPolicyVerdict::Blocked,
+            "a denied secret-bearing spawn is a pre-sink flow block"
+        );
+        crate::runtime::effect_receipt::EffectReceiptChain::verify_entries_integrity(
+            &ledger.entries,
+        )
+        .expect("global process receipt chain integrity");
+        assert_ledger_sdk_verifiable(&ledger);
+
+        let missing_admission = EngineDispatcher::build_host_effect_journal_ledger(
+            "trace-process-ledger-missing-admission",
+            &journal[1..2],
+            None,
+            None,
+        );
+        assert_eq!(missing_admission.allowed_count, 0);
+        assert_eq!(missing_admission.denied_count, 1);
+        assert!(matches!(
+            &missing_admission.entries[0].receipt.policy_outcome,
+            PolicyOutcome::Denied { reason }
+                if reason.starts_with("PROCESS_SPAWN_ADMISSION_MISSING")
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn bd_91tpy_process_receipts_track_response_taint_and_structured_flow_blocks() {
+        use crate::runtime::effect_receipt::FlowPolicyVerdict;
+        use frankenengine_extension_host::host_io::{HostIoRequest, HostIoResponse};
+        use frankenengine_extension_host::process_spawn::{
+            ProcessExit, ProcessLaunch, ProcessSpawnError, ProcessSpawnRequest,
+            ProcessSpawnResponse, ProcessStdio,
+        };
+
+        let clean_request = ProcessSpawnRequest::Run {
+            launch: ProcessLaunch {
+                executable: "true".to_string(),
+                argv: Vec::new(),
+                env: std::collections::BTreeMap::new(),
+                cwd: None,
+                shell: false,
+                stdio: ProcessStdio::default(),
+            },
+            stdin: Vec::new(),
+            timeout_millis: Some(1_000),
+        };
+        let journal = vec![
+            HostEffectJournalEntry::HostIo {
+                request: HostIoRequest::FsRead {
+                    path: ".env".to_string(),
+                },
+                outcome: Ok(HostIoResponse::FsRead {
+                    bytes: b"response-only-secret".to_vec(),
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
+                request: clean_request.clone(),
+                outcome: Ok(ProcessSpawnResponse::Run {
+                    exit: ProcessExit {
+                        success: true,
+                        code: Some(0),
+                        signal: None,
+                    },
+                    stdout: b"response-only-secret".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
+                request: clean_request,
+                outcome: Err(ProcessSpawnError::FlowPolicyBlocked),
+            },
+        ];
+        let admission = ChildProcessSpawnAdmission::verified_for_test(
+            u64::MAX,
+            PathBuf::from("/usr/bin/bwrap"),
+        );
+        let ledger = EngineDispatcher::build_host_effect_journal_ledger(
+            "trace-process-response-lineage",
+            &journal,
+            Some(&admission),
+            None,
+        );
+
+        assert_eq!(
+            ledger.entries[1].receipt.label_set_commitment,
+            crate::security::lineage_tracker::secret_file_label_set_commitment()
+        );
+        assert_eq!(
+            ledger.entries[1].receipt.flow_policy_verdict,
+            FlowPolicyVerdict::LabelClean
+        );
+        assert_eq!(
+            ledger.entries[2].receipt.flow_policy_verdict,
+            FlowPolicyVerdict::Blocked
+        );
+        crate::runtime::effect_receipt::EffectReceiptChain::verify_entries_integrity(
+            &ledger.entries,
+        )
+        .expect("process response-lineage receipt integrity");
+    }
+
     /// bd-b0hm6: widened filesystem operations keep the existing read/write
     /// receipt schema while committing to their concrete operation, arguments,
     /// byte input, typed result, and typed filesystem denial.
@@ -10023,6 +11121,7 @@ mod tests {
             policy_mode: "balanced".to_string(),
             config: Config::for_profile(Profile::Balanced),
             telemetry_socket_path: PathBuf::from("/tmp/native-session-frame.sock"),
+            process_spawn_trust_key_hex: Some("11".repeat(32)),
         };
         let frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
             .expect("encode request frame");
@@ -10032,6 +11131,10 @@ mod tests {
         assert_eq!(decoded.schema_version, NATIVE_SESSION_SCHEMA);
         assert_eq!(decoded.nonce, request.nonce);
         assert_eq!(decoded.config, request.config);
+        assert_eq!(
+            decoded.process_spawn_trust_key_hex,
+            request.process_spawn_trust_key_hex
+        );
 
         let mut corrupted = frame.clone();
         let last = corrupted.last_mut().expect("frame has payload");
@@ -10126,6 +11229,7 @@ mod tests {
             &telemetry_path,
             &std::env::current_exe().expect("resolve containment test executable"),
             Some(&admission),
+            None,
             timeout,
         );
         let elapsed = started.elapsed();
@@ -10178,6 +11282,7 @@ mod tests {
             "balanced",
             &socket_path,
             &std::env::current_exe().expect("resolve test worker executable"),
+            None,
             None,
             timeout,
         );

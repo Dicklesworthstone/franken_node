@@ -10,6 +10,7 @@ use std::{
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq as _;
 
 use crate::push_bounded;
 use crate::security::impossible_default::CapabilityToken;
@@ -2058,12 +2059,13 @@ impl Config {
                 "engine.binary_path must be non-empty when configured".to_string(),
             ));
         }
-        if let Some(process_spawn) = &self.security.child_process_spawn
-            && !process_spawn.binary_path.is_absolute()
-        {
-            return Err(ConfigError::ValidationFailed(
-                "security.child_process_spawn.binary_path must be absolute".to_string(),
-            ));
+        if let Some(process_spawn) = &self.security.child_process_spawn {
+            validate_absolute_process_path(
+                "security.child_process_spawn.binary_path",
+                &process_spawn.binary_path,
+                true,
+            )?;
+            validate_child_process_execution_policy(&process_spawn.execution_policy)?;
         }
         if self.runtime.remote_max_in_flight == 0 {
             return Err(ConfigError::ValidationFailed(
@@ -2297,7 +2299,246 @@ fn apply_env_field_opt_f64(
     Ok(())
 }
 
-/// Validate an optional score is finite and within [0.0, 1.0].
+fn validate_absolute_process_path(
+    field: &str,
+    path: &Path,
+    require_file_name: bool,
+) -> Result<(), ConfigError> {
+    if !path.is_absolute() {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field} must be absolute"
+        )));
+    }
+    let path_text = path
+        .to_str()
+        .ok_or_else(|| ConfigError::ValidationFailed(format!("{field} must be valid UTF-8")))?;
+    if path_text.contains('\0') {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field} must not contain NUL bytes"
+        )));
+    }
+    let contains_lexical_dot_component = path_text
+        .split(std::path::is_separator)
+        .any(|component| matches!(component, "." | ".."));
+    if contains_lexical_dot_component
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field} must not contain `.` or `..` components"
+        )));
+    }
+    if require_file_name && path.file_name().is_none() {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field} must identify an executable file"
+        )));
+    }
+    Ok(())
+}
+
+fn is_forbidden_process_env_key(key: &str) -> bool {
+    key.starts_with("LD_")
+        || key.starts_with("DYLD_")
+        || matches!(
+            key,
+            "BASH_ENV"
+                | "ENV"
+                | "SHELLOPTS"
+                | "IFS"
+                | "CDPATH"
+                | "GLOBIGNORE"
+                | "PS4"
+                | "GCONV_PATH"
+                | "LOCPATH"
+                | "NLSPATH"
+                | "NODE_OPTIONS"
+                | "NODE_PATH"
+                | "PYTHONHOME"
+                | "PYTHONPATH"
+                | "PYTHONSTARTUP"
+                | "RUBYLIB"
+                | "RUBYOPT"
+                | "PERL5LIB"
+                | "PERL5OPT"
+                | "CLASSPATH"
+                | "JAVA_TOOL_OPTIONS"
+                | "_JAVA_OPTIONS"
+                | "JDK_JAVA_OPTIONS"
+        )
+}
+
+fn validate_child_process_resource_limits(
+    field: &str,
+    limits: &ChildProcessResourceLimits,
+) -> Result<(), ConfigError> {
+    let named_limits = [
+        ("max_children", limits.max_children),
+        ("max_argv_count", limits.max_argv_count),
+        ("max_argv_bytes", limits.max_argv_bytes),
+        ("max_stdin_bytes", limits.max_stdin_bytes),
+        ("max_output_bytes", limits.max_output_bytes),
+        ("max_runtime_millis", limits.max_runtime_millis),
+    ];
+    for (name, value) in named_limits {
+        if value == 0 {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field}.limits.{name} must be greater than zero"
+            )));
+        }
+        if u128::from(value) > usize::MAX as u128 {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field}.limits.{name} exceeds this host's addressable range"
+            )));
+        }
+    }
+
+    if limits.max_argv_count > limits.max_argv_bytes {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field}.limits.max_argv_count must not exceed max_argv_bytes"
+        )));
+    }
+
+    let argv_metadata_bytes = u128::from(limits.max_argv_count)
+        * u128::from(u64::try_from(std::mem::size_of::<String>()).unwrap_or(u64::MAX));
+    let per_child_bytes = u128::from(limits.max_argv_bytes)
+        + argv_metadata_bytes
+        + u128::from(limits.max_stdin_bytes)
+        + u128::from(limits.max_output_bytes) * 2;
+    if per_child_bytes > usize::MAX as u128 {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field}.limits per-child aggregate byte ceiling exceeds this host's addressable range"
+        )));
+    }
+    let aggregate_bytes = per_child_bytes
+        .checked_mul(u128::from(limits.max_children))
+        .ok_or_else(|| {
+            ConfigError::ValidationFailed(format!(
+                "{field}.limits aggregate child-process byte ceiling overflows"
+            ))
+        })?;
+    if aggregate_bytes > usize::MAX as u128 {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field}.limits aggregate child-process byte ceiling exceeds this host's addressable range"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_child_process_execution_policy(
+    policy: &ChildProcessExecutionPolicy,
+) -> Result<(), ConfigError> {
+    let field = "security.child_process_spawn.execution_policy";
+    validate_absolute_process_path(
+        &format!("{field}.jailed_cwd_root"),
+        &policy.jailed_cwd_root,
+        false,
+    )?;
+    if policy.allowed_executables.is_empty() {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field}.allowed_executables must contain at least one signed executable"
+        )));
+    }
+    let mut executable_identities = BTreeMap::<&Path, (&str, &str)>::new();
+    for (alias, executable) in &policy.allowed_executables {
+        let alias_is_valid = !alias.is_empty()
+            && alias != "."
+            && alias != ".."
+            && !alias.contains('/')
+            && !alias.contains('\\')
+            && !alias.contains('\0')
+            && alias
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+        if !alias_is_valid {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field}.allowed_executables contains invalid alias {alias:?}"
+            )));
+        }
+        validate_absolute_process_path(
+            &format!("{field}.allowed_executables.{alias}.path"),
+            &executable.path,
+            true,
+        )?;
+        if executable.sha256.len() != 64
+            || !executable
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field}.allowed_executables.{alias}.sha256 must be 64 lowercase hexadecimal characters"
+            )));
+        }
+        if let Some((previous_alias, previous_digest)) =
+            executable_identities.insert(&executable.path, (alias, &executable.sha256))
+            && !bool::from(
+                previous_digest
+                    .as_bytes()
+                    .ct_eq(executable.sha256.as_bytes()),
+            )
+        {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field}.allowed_executables aliases {previous_alias:?} and {alias:?} map to the same path with different SHA-256 digests"
+            )));
+        }
+    }
+    match (policy.allow_shell, policy.shell_executable_alias.as_deref()) {
+        (true, Some(alias)) if policy.allowed_executables.contains_key(alias) => {}
+        (true, Some(alias)) => {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field}.shell_executable_alias {alias:?} is not an allowed executable alias"
+            )));
+        }
+        (true, None) => {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field}.allow_shell requires shell_executable_alias"
+            )));
+        }
+        (false, Some(_)) => {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field}.shell_executable_alias requires allow_shell=true"
+            )));
+        }
+        (false, None) => {}
+    }
+    for key in policy
+        .allowed_env_keys
+        .iter()
+        .chain(policy.fixed_env.keys())
+    {
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field} contains invalid environment key {key:?}"
+            )));
+        }
+        if is_forbidden_process_env_key(key) {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field} contains forbidden environment injection key {key:?}"
+            )));
+        }
+    }
+    if let Some(overlap) = policy
+        .allowed_env_keys
+        .iter()
+        .find(|key| policy.fixed_env.contains_key(*key))
+    {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field} environment key {overlap:?} cannot be both caller-supplied and fixed"
+        )));
+    }
+    if policy.fixed_env.values().any(|value| value.contains('\0')) {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field}.fixed_env values must not contain NUL bytes"
+        )));
+    }
+    validate_child_process_resource_limits(field, &policy.limits)?;
+    Ok(())
+}
+
 fn validate_opt_score(field: &str, value: Option<f64>) -> Result<(), ConfigError> {
     if let Some(v) = value
         && (!v.is_finite() || !(0.0..=1.0).contains(&v))
@@ -3087,6 +3328,77 @@ pub enum ChildProcessSpawnBackend {
     Bubblewrap,
 }
 
+/// One exact executable identity authorized by the signed process policy.
+/// The alias is the key in `allowed_executables`; ambient `PATH` lookup is
+/// never part of process dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChildProcessExecutablePolicy {
+    pub path: PathBuf,
+    /// Lowercase SHA-256 of the executable bytes.
+    pub sha256: String,
+}
+
+/// Signed resource ceilings for every provider instance and child operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChildProcessResourceLimits {
+    pub max_children: u64,
+    pub max_argv_count: u64,
+    pub max_argv_bytes: u64,
+    pub max_stdin_bytes: u64,
+    pub max_output_bytes: u64,
+    pub max_runtime_millis: u64,
+}
+
+impl Default for ChildProcessResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_children: 4,
+            max_argv_count: 128,
+            max_argv_bytes: 64 * 1024,
+            max_stdin_bytes: 1024 * 1024,
+            max_output_bytes: 4 * 1024 * 1024,
+            max_runtime_millis: 30_000,
+        }
+    }
+}
+
+/// Operator-owned process policy committed into the capability-token subject.
+/// Every bare command resolves through this map to one exact absolute path and
+/// digest; environment, cwd, shell, and resource authority are explicit too.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChildProcessExecutionPolicy {
+    #[serde(default)]
+    pub allowed_executables: BTreeMap<String, ChildProcessExecutablePolicy>,
+    pub jailed_cwd_root: PathBuf,
+    #[serde(default)]
+    pub allow_shell: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_executable_alias: Option<String>,
+    #[serde(default)]
+    pub allowed_env_keys: BTreeSet<String>,
+    #[serde(default)]
+    pub fixed_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub limits: ChildProcessResourceLimits,
+}
+
+impl std::fmt::Debug for ChildProcessExecutionPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChildProcessExecutionPolicy")
+            .field("allowed_executables", &self.allowed_executables)
+            .field("jailed_cwd_root", &self.jailed_cwd_root)
+            .field("allow_shell", &self.allow_shell)
+            .field("shell_executable_alias", &self.shell_executable_alias)
+            .field("allowed_env_keys", &self.allowed_env_keys)
+            .field("fixed_env_keys", &self.fixed_env.keys().collect::<Vec<_>>())
+            .field("limits", &self.limits)
+            .finish()
+    }
+}
+
 /// Explicit, signed opt-in for the impossible-by-default process-spawn
 /// capability.
 ///
@@ -3095,12 +3407,15 @@ pub enum ChildProcessSpawnBackend {
 /// operator trust anchor, then proves backend readiness before any execution
 /// path may consume the resulting admission proof.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ChildProcessSpawnConfig {
     pub token: CapabilityToken,
     #[serde(default)]
     pub backend: ChildProcessSpawnBackend,
     /// Absolute path to the operator-managed Bubblewrap executable.
     pub binary_path: PathBuf,
+    /// Exact command/environment/cwd/resource policy covered by the token.
+    pub execution_policy: ChildProcessExecutionPolicy,
 }
 
 impl std::fmt::Debug for ChildProcessSpawnConfig {
@@ -3110,6 +3425,7 @@ impl std::fmt::Debug for ChildProcessSpawnConfig {
             .field("capability", &self.token.capability)
             .field("backend", &self.backend)
             .field("binary_path", &self.binary_path)
+            .field("execution_policy", &self.execution_policy)
             .finish()
     }
 }
@@ -3931,7 +4247,42 @@ mod tests {
             },
             backend: ChildProcessSpawnBackend::Bubblewrap,
             binary_path: PathBuf::from("/usr/bin/bwrap"),
+            execution_policy: ChildProcessExecutionPolicy {
+                allowed_executables: BTreeMap::from([(
+                    "true".to_string(),
+                    ChildProcessExecutablePolicy {
+                        path: PathBuf::from("/usr/bin/true"),
+                        sha256: "11".repeat(32),
+                    },
+                )]),
+                jailed_cwd_root: PathBuf::from("/"),
+                allow_shell: false,
+                shell_executable_alias: None,
+                allowed_env_keys: BTreeSet::new(),
+                fixed_env: BTreeMap::new(),
+                limits: ChildProcessResourceLimits::default(),
+            },
         }
+    }
+
+    fn assert_child_process_policy_error(process_spawn: ChildProcessSpawnConfig, expected: &str) {
+        let mut config = valid_base_config(Profile::LegacyRisky);
+        config.security.child_process_spawn = Some(process_spawn);
+        let error = config
+            .validate()
+            .expect_err("invalid child-process policy must fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?} in validation error, got {error}"
+        );
+    }
+
+    fn child_process_policy_subject(process_spawn: ChildProcessSpawnConfig) -> String {
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.security.child_process_spawn = Some(process_spawn);
+        config
+            .child_process_spawn_policy_subject()
+            .expect("child-process policy subject")
     }
 
     #[test]
@@ -3985,6 +4336,32 @@ mod tests {
             .as_mut()
             .expect("opt-in")
             .binary_path = PathBuf::from("/usr/bin/bwrap");
+        config
+            .security
+            .child_process_spawn
+            .as_mut()
+            .expect("opt-in")
+            .execution_policy
+            .allowed_executables
+            .get_mut("true")
+            .expect("fixture executable")
+            .sha256 = "22".repeat(32);
+        assert_ne!(
+            config.child_process_spawn_policy_subject().unwrap(),
+            original,
+            "the executable identity must be committed into the token subject"
+        );
+
+        config
+            .security
+            .child_process_spawn
+            .as_mut()
+            .expect("opt-in")
+            .execution_policy
+            .allowed_executables
+            .get_mut("true")
+            .expect("fixture executable")
+            .sha256 = "11".repeat(32);
         config.runtime.bulkhead_retry_after_ms =
             config.runtime.bulkhead_retry_after_ms.saturating_add(1);
         assert_ne!(
@@ -4020,6 +4397,276 @@ mod tests {
 
         let error = config.validate().expect_err("relative backend must fail");
         assert!(error.to_string().contains("binary_path must be absolute"));
+    }
+
+    #[test]
+    fn child_process_spawn_config_rejects_unsigned_or_ambiguous_execution_policy() {
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn
+            .execution_policy
+            .allowed_executables
+            .get_mut("true")
+            .expect("fixture executable")
+            .sha256 = "not-a-digest".to_string();
+        assert_child_process_policy_error(
+            process_spawn,
+            "sha256 must be 64 lowercase hexadecimal characters",
+        );
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.allow_shell = true;
+        assert_child_process_policy_error(process_spawn, "allow_shell requires");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.jailed_cwd_root = PathBuf::from("relative-root");
+        assert_child_process_policy_error(process_spawn, "jailed_cwd_root must be absolute");
+    }
+
+    #[test]
+    fn child_process_spawn_rejects_conflicting_identities_for_one_executable_path() {
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.allowed_executables.insert(
+            "same-path-different-identity".to_string(),
+            ChildProcessExecutablePolicy {
+                path: PathBuf::from("/usr/bin/true"),
+                sha256: "22".repeat(32),
+            },
+        );
+        assert_child_process_policy_error(process_spawn, "same path with different SHA-256");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.allowed_executables.insert(
+            "same-path-same-identity".to_string(),
+            ChildProcessExecutablePolicy {
+                path: PathBuf::from("/usr/bin/true"),
+                sha256: "11".repeat(32),
+            },
+        );
+        let mut config = valid_base_config(Profile::LegacyRisky);
+        config.security.child_process_spawn = Some(process_spawn);
+        config
+            .validate()
+            .expect("multiple aliases for the same exact identity are unambiguous");
+    }
+
+    #[test]
+    fn child_process_spawn_validates_environment_authority_without_secret_exposure() {
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn
+            .execution_policy
+            .allowed_env_keys
+            .insert("MODE".to_string());
+        process_spawn
+            .execution_policy
+            .fixed_env
+            .insert("MODE".to_string(), "production".to_string());
+        assert_child_process_policy_error(
+            process_spawn,
+            "cannot be both caller-supplied and fixed",
+        );
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn
+            .execution_policy
+            .allowed_env_keys
+            .insert("LD_AUDIT".to_string());
+        assert_child_process_policy_error(process_spawn, "environment injection key");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn
+            .execution_policy
+            .allowed_env_keys
+            .insert("BAD=KEY".to_string());
+        assert_child_process_policy_error(process_spawn, "invalid environment key");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn
+            .execution_policy
+            .fixed_env
+            .insert("MODE".to_string(), "prod\0hidden".to_string());
+        assert_child_process_policy_error(process_spawn, "values must not contain NUL");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn
+            .execution_policy
+            .allowed_env_keys
+            .insert("ld_preload".to_string());
+        let mut config = valid_base_config(Profile::LegacyRisky);
+        config.security.child_process_spawn = Some(process_spawn);
+        config
+            .validate()
+            .expect("Unix environment names are case-sensitive");
+    }
+
+    #[test]
+    fn child_process_spawn_rejects_ambiguous_or_unrepresentable_paths() {
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn
+            .execution_policy
+            .allowed_executables
+            .get_mut("true")
+            .expect("fixture executable")
+            .path = PathBuf::from("/usr/bin/../bin/true");
+        assert_child_process_policy_error(process_spawn, "must not contain `.` or `..`");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.jailed_cwd_root = PathBuf::from("/srv/./sandbox");
+        assert_child_process_policy_error(process_spawn, "must not contain `.` or `..`");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn
+            .execution_policy
+            .allowed_executables
+            .get_mut("true")
+            .expect("fixture executable")
+            .path = PathBuf::from("/usr/bin/tru\0hidden");
+        assert_child_process_policy_error(process_spawn, "must not contain NUL bytes");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.binary_path = PathBuf::from("/");
+        assert_child_process_policy_error(process_spawn, "must identify an executable file");
+    }
+
+    #[test]
+    fn child_process_spawn_validates_shell_alias_as_an_exact_signed_mapping() {
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.allow_shell = true;
+        process_spawn.execution_policy.shell_executable_alias = Some("not-authorized".to_string());
+        assert_child_process_policy_error(process_spawn, "is not an allowed executable alias");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.shell_executable_alias = Some("true".to_string());
+        assert_child_process_policy_error(process_spawn, "requires allow_shell=true");
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.allow_shell = true;
+        process_spawn.execution_policy.shell_executable_alias = Some("true".to_string());
+        let mut config = valid_base_config(Profile::LegacyRisky);
+        config.security.child_process_spawn = Some(process_spawn);
+        config
+            .validate()
+            .expect("shell alias resolves to one exact signed executable identity");
+    }
+
+    #[test]
+    fn child_process_spawn_rejects_zero_or_incoherent_resource_ceilings() {
+        let zero_mutations: &[(&str, fn(&mut ChildProcessResourceLimits))] = &[
+            ("max_children", |limits| limits.max_children = 0),
+            ("max_argv_count", |limits| limits.max_argv_count = 0),
+            ("max_argv_bytes", |limits| limits.max_argv_bytes = 0),
+            ("max_stdin_bytes", |limits| limits.max_stdin_bytes = 0),
+            ("max_output_bytes", |limits| limits.max_output_bytes = 0),
+            ("max_runtime_millis", |limits| {
+                limits.max_runtime_millis = 0;
+            }),
+        ];
+        for (field, mutate) in zero_mutations {
+            let mut process_spawn = child_process_spawn_fixture();
+            mutate(&mut process_spawn.execution_policy.limits);
+            assert_child_process_policy_error(
+                process_spawn,
+                &format!("limits.{field} must be greater than zero"),
+            );
+        }
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.limits.max_argv_count = 65;
+        process_spawn.execution_policy.limits.max_argv_bytes = 64;
+        assert_child_process_policy_error(
+            process_spawn,
+            "max_argv_count must not exceed max_argv_bytes",
+        );
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.limits.max_output_bytes =
+            u64::try_from(usize::MAX).unwrap_or(u64::MAX);
+        assert_child_process_policy_error(
+            process_spawn,
+            "per-child aggregate byte ceiling exceeds",
+        );
+    }
+
+    #[test]
+    fn child_process_spawn_subject_binds_every_execution_policy_field() {
+        let fixture = child_process_spawn_fixture();
+        let original = child_process_policy_subject(fixture.clone());
+        let mutations: &[(&str, fn(&mut ChildProcessExecutionPolicy))] = &[
+            ("executable alias", |policy| {
+                let executable = policy
+                    .allowed_executables
+                    .remove("true")
+                    .expect("fixture executable");
+                policy
+                    .allowed_executables
+                    .insert("renamed".to_string(), executable);
+            }),
+            ("executable path", |policy| {
+                policy
+                    .allowed_executables
+                    .get_mut("true")
+                    .expect("fixture executable")
+                    .path = PathBuf::from("/opt/bin/true");
+            }),
+            ("executable digest", |policy| {
+                policy
+                    .allowed_executables
+                    .get_mut("true")
+                    .expect("fixture executable")
+                    .sha256 = "22".repeat(32);
+            }),
+            ("jailed cwd root", |policy| {
+                policy.jailed_cwd_root = PathBuf::from("/srv/sandbox");
+            }),
+            ("allow shell", |policy| policy.allow_shell = true),
+            ("shell executable alias", |policy| {
+                policy.shell_executable_alias = Some("true".to_string());
+            }),
+            ("allowed environment", |policy| {
+                policy.allowed_env_keys.insert("MODE".to_string());
+            }),
+            ("fixed environment", |policy| {
+                policy
+                    .fixed_env
+                    .insert("MODE".to_string(), "production".to_string());
+            }),
+            ("max children", |policy| policy.limits.max_children += 1),
+            ("max argv count", |policy| {
+                policy.limits.max_argv_count += 1;
+            }),
+            ("max argv bytes", |policy| {
+                policy.limits.max_argv_bytes += 1;
+            }),
+            ("max stdin bytes", |policy| {
+                policy.limits.max_stdin_bytes += 1;
+            }),
+            ("max output bytes", |policy| {
+                policy.limits.max_output_bytes += 1;
+            }),
+            ("max runtime", |policy| {
+                policy.limits.max_runtime_millis += 1;
+            }),
+        ];
+        for (field, mutate) in mutations {
+            let mut mutated = fixture.clone();
+            mutate(&mut mutated.execution_policy);
+            assert_ne!(
+                child_process_policy_subject(mutated),
+                original,
+                "{field} must be committed into the signed policy subject"
+            );
+        }
+    }
+
+    #[test]
+    fn child_process_spawn_debug_redacts_fixed_environment_values() {
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.fixed_env.insert(
+            "API_TOKEN".to_string(),
+            "never-print-this-secret".to_string(),
+        );
+        let debug = format!("{process_spawn:?}");
+        assert!(debug.contains("API_TOKEN"));
+        assert!(!debug.contains("never-print-this-secret"));
     }
 
     /// Write a TOML file carrying only the two fail-closed security fields that

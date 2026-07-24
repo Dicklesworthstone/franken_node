@@ -23,13 +23,19 @@
 //! and never appears in an emitted artifact.
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "engine")]
+use ed25519_dalek::{Signer as _, SigningKey};
+#[cfg(feature = "engine")]
+use rand::rngs::OsRng;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 #[cfg(feature = "engine")]
-use std::io::Write;
+use std::io::Write as _;
+#[cfg(all(feature = "engine", target_os = "linux"))]
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -43,6 +49,18 @@ use rustix::fs::{
 
 use crate::ops::close_condition::{
     COMPATIBILITY_CORPUS_ONLINE_PROVENANCE, compute_compatibility_corpus_result_digest,
+};
+#[cfg(all(feature = "engine", target_os = "linux"))]
+use crate::ops::engine_dispatcher::InternalCorpusProcessAuthorityServer;
+#[cfg(feature = "engine")]
+use crate::{
+    config::{
+        ChildProcessExecutablePolicy, ChildProcessExecutionPolicy, ChildProcessResourceLimits,
+        ChildProcessSpawnBackend, ChildProcessSpawnConfig, CliOverrides, Config, Profile,
+    },
+    security::impossible_default::{
+        CapabilityToken, ImpossibleCapability, MAX_CHILD_PROCESS_SPAWN_TOKEN_TTL_MS,
+    },
 };
 
 /// Manifest schema accepted for per-family corpus fixture directories.
@@ -76,6 +94,14 @@ const DEFAULT_BAND_FLOORS: [(&str, f64); 3] =
 const TRACKING_REASON_MAX_CHARS: usize = 200;
 #[cfg(feature = "engine")]
 const NODE_NO_WARNINGS_ENV: &str = "NODE_NO_WARNINGS";
+#[cfg(feature = "engine")]
+const CHILD_PROCESS_FAMILY: &str = "child_process";
+#[cfg(feature = "engine")]
+const CORPUS_PROCESS_ALLOWED_ENV_KEY: &str = "BATCH_E_VAR";
+#[cfg(feature = "engine")]
+const CORPUS_PROCESS_FIXED_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+#[cfg(feature = "engine")]
+const CORPUS_PROCESS_ALIASES: [&str; 6] = ["cat", "echo", "false", "printf", "sh", "true"];
 
 /// One case entry in a family manifest.
 #[derive(Clone, Debug, Deserialize)]
@@ -1201,8 +1227,292 @@ fn configure_runtime_leg_environment(command: &mut Command, suppress_runtime_war
     }
 }
 
+/// Run-scoped authority material for exactly one `child_process` corpus case.
+///
+/// The signing key never leaves the constructor. Only the public key is kept
+/// for the authenticated same-executable parent channel; the signed policy is
+/// carried in the byte-identical project configuration staged into both legs.
+#[cfg(feature = "engine")]
+struct CorpusProcessAuthority {
+    public_key_hex: String,
+    config_toml: String,
+}
+
+#[cfg(feature = "engine")]
+fn corpus_process_authority(
+    template_config_path: &Path,
+    canonical_run_root: &Path,
+    case_timeout: Duration,
+) -> Result<CorpusProcessAuthority> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (template_config_path, canonical_run_root, case_timeout);
+        bail!("corpus child-process authority is supported only on Linux");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if !canonical_run_root.is_absolute()
+            || canonical_run_root.canonicalize().with_context(|| {
+                format!(
+                    "canonicalize corpus process run root {}",
+                    canonical_run_root.display()
+                )
+            })? != canonical_run_root
+        {
+            bail!(
+                "corpus process run root {} must be an existing canonical absolute directory",
+                canonical_run_root.display()
+            );
+        }
+
+        let mut allowed_executables = BTreeMap::new();
+        for alias in CORPUS_PROCESS_ALIASES {
+            allowed_executables
+                .insert(alias.to_string(), resolve_corpus_process_executable(alias)?);
+        }
+
+        let bubblewrap = resolve_fixed_path_executable("bwrap")?;
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let now_ms = unix_time_millis()?;
+        let timeout_ms = u64::try_from(case_timeout.as_millis()).unwrap_or(u64::MAX);
+        let ttl_ms = timeout_ms
+            .saturating_add(60_000)
+            .clamp(60_000, MAX_CHILD_PROCESS_SPAWN_TOKEN_TTL_MS);
+        // Sign the exact configuration shape the `run --policy
+        // legacy-risky` child will authenticate. Directly deserializing the
+        // balanced init template would bind the token to pre-resolution
+        // defaults and admission would correctly reject it after CLI profile
+        // resolution.
+        let mut config = Config::resolve(
+            Some(template_config_path),
+            CliOverrides {
+                profile: Some(Profile::LegacyRisky),
+            },
+        )
+        .with_context(|| {
+            format!(
+                "resolve corpus workspace template config {} for legacy-risky run",
+                template_config_path.display()
+            )
+        })?
+        .config;
+        config.security.child_process_spawn = Some(ChildProcessSpawnConfig {
+            token: CapabilityToken {
+                token_id: format!("compat-corpus-{}", uuid::Uuid::now_v7()),
+                capability: ImpossibleCapability::ChildProcessSpawn,
+                issuer: "franken-node-compat-corpus-run".to_string(),
+                subject: String::new(),
+                issued_at_ms: now_ms,
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+                signature: String::new(),
+                justification:
+                    "Run-scoped child_process authority for one measured compatibility case"
+                        .to_string(),
+            },
+            backend: ChildProcessSpawnBackend::Bubblewrap,
+            binary_path: bubblewrap.path,
+            execution_policy: ChildProcessExecutionPolicy {
+                allowed_executables,
+                jailed_cwd_root: canonical_run_root.to_path_buf(),
+                allow_shell: true,
+                shell_executable_alias: Some("sh".to_string()),
+                allowed_env_keys: BTreeSet::from([CORPUS_PROCESS_ALLOWED_ENV_KEY.to_string()]),
+                fixed_env: BTreeMap::from([(
+                    "PATH".to_string(),
+                    CORPUS_PROCESS_FIXED_PATH.to_string(),
+                )]),
+                limits: ChildProcessResourceLimits {
+                    max_children: 4,
+                    max_argv_count: 64,
+                    max_argv_bytes: 16 * 1024,
+                    max_stdin_bytes: u64::try_from(MAX_CASE_FILE_BYTES).unwrap_or(u64::MAX),
+                    max_output_bytes: u64::try_from(MAX_LEG_OUTPUT_BYTES).unwrap_or(u64::MAX),
+                    max_runtime_millis: timeout_ms.clamp(1_000, 600_000),
+                },
+            },
+        });
+
+        let policy_subject = config
+            .child_process_spawn_policy_subject()
+            .context("bind corpus child-process policy subject")?;
+        let opt_in = config
+            .security
+            .child_process_spawn
+            .as_mut()
+            .context("corpus child-process opt-in disappeared while signing")?;
+        opt_in.token.subject = policy_subject;
+        let signature = signing_key.sign(opt_in.token.content_hash().as_bytes());
+        opt_in.token.signature = hex::encode(signature.to_bytes());
+
+        Ok(CorpusProcessAuthority {
+            public_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
+            config_toml: config
+                .to_toml()
+                .context("serialize signed corpus child-process policy")?,
+        })
+    }
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn resolve_corpus_process_executable(alias: &str) -> Result<ChildProcessExecutablePolicy> {
+    let executable = resolve_fixed_path_executable(alias)?;
+    Ok(ChildProcessExecutablePolicy {
+        path: executable.path,
+        sha256: executable.sha256,
+    })
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+struct ResolvedExecutable {
+    path: PathBuf,
+    sha256: String,
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn resolve_fixed_path_executable(alias: &str) -> Result<ResolvedExecutable> {
+    for directory in std::env::split_paths(CORPUS_PROCESS_FIXED_PATH) {
+        let candidate = directory.join(alias);
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            continue;
+        }
+        let canonical = candidate
+            .canonicalize()
+            .with_context(|| format!("canonicalize corpus executable {}", candidate.display()))?;
+        let canonical_metadata = std::fs::symlink_metadata(&canonical)
+            .with_context(|| format!("inspect corpus executable {}", canonical.display()))?;
+        if !canonical_metadata.is_file()
+            || canonical_metadata.file_type().is_symlink()
+            || canonical_metadata.permissions().mode() & 0o111 == 0
+            || canonical_metadata.uid() != 0
+            || canonical_metadata.permissions().mode() & 0o022 != 0
+        {
+            bail!(
+                "corpus executable alias `{alias}` resolved to insecure path {}",
+                canonical.display()
+            );
+        }
+        for ancestor in canonical.ancestors().skip(1) {
+            let metadata = std::fs::symlink_metadata(ancestor).with_context(|| {
+                format!(
+                    "inspect corpus executable ancestor {} for alias `{alias}`",
+                    ancestor.display()
+                )
+            })?;
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != 0
+                || metadata.permissions().mode() & 0o022 != 0
+            {
+                bail!(
+                    "corpus executable alias `{alias}` has insecure ancestor {}",
+                    ancestor.display()
+                );
+            }
+        }
+        return Ok(ResolvedExecutable {
+            sha256: sha256_file(&canonical)?,
+            path: canonical,
+        });
+    }
+    bail!(
+        "required corpus executable alias `{alias}` was not found in fixed PATH {CORPUS_PROCESS_FIXED_PATH}"
+    )
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("open corpus executable {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .with_context(|| format!("hash corpus executable {}", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(feature = "engine")]
+fn unix_time_millis() -> Result<u64> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?;
+    u64::try_from(elapsed.as_millis()).context("system time exceeds supported milliseconds")
+}
+
+#[cfg(feature = "engine")]
+fn stage_identical_corpus_config(
+    authority: &CorpusProcessAuthority,
+    bun_dir: &Path,
+    franken_dir: &Path,
+) -> Result<()> {
+    for directory in [bun_dir, franken_dir] {
+        let path = directory.join("franken_node.toml");
+        std::fs::write(&path, authority.config_toml.as_bytes())
+            .with_context(|| format!("stage signed corpus config {}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn configure_child_process_leg_environment(command: &mut Command) {
+    command
+        .env("PATH", CORPUS_PROCESS_FIXED_PATH)
+        .env_remove(CORPUS_PROCESS_ALLOWED_ENV_KEY);
+}
+
+#[cfg(all(feature = "engine", unix))]
+fn resolve_bun_executable() -> Result<PathBuf> {
+    let path = std::env::var_os("PATH").context("PATH is unavailable while resolving bun")?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join("bun");
+        if !candidate.is_file() {
+            continue;
+        }
+        return candidate
+            .canonicalize()
+            .with_context(|| format!("canonicalize bun executable {}", candidate.display()));
+    }
+    bail!("bun is required for the corpus reference leg but was not found on PATH")
+}
+
+#[cfg(all(feature = "engine", not(unix)))]
+fn resolve_bun_executable() -> Result<PathBuf> {
+    Ok(PathBuf::from("bun"))
+}
+
 #[cfg(feature = "engine")]
 fn run_leg(mut command: Command, timeout: Duration) -> Result<LegCapture> {
+    run_leg_after_spawn(&mut command, timeout, |_| Ok(()))
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn run_leg_with_process_authority(
+    mut command: Command,
+    timeout: Duration,
+    authority_server: InternalCorpusProcessAuthorityServer,
+) -> Result<LegCapture> {
+    authority_server.configure_child_command(&mut command);
+    run_leg_after_spawn(&mut command, timeout, move |child_pid| {
+        authority_server.serve_once(child_pid)
+    })
+}
+
+#[cfg(feature = "engine")]
+fn run_leg_after_spawn(
+    command: &mut Command,
+    timeout: Duration,
+    after_spawn: impl FnOnce(u32) -> Result<()>,
+) -> Result<LegCapture> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1219,6 +1529,19 @@ fn run_leg(mut command: Command, timeout: Duration) -> Result<LegCapture> {
         .context("runtime leg stderr pipe unavailable")?;
     let stdout_thread = drain_capped(stdout);
     let stderr_thread = drain_capped(stderr);
+    if let Err(error) = after_spawn(child.id()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let stdout = stdout_thread.join().unwrap_or_default();
+        let stderr = stderr_thread.join().unwrap_or_default();
+        let diagnostic = sanitize_reason_excerpt(if stderr.is_empty() { &stdout } else { &stderr });
+        let context = if diagnostic.is_empty() {
+            "authenticate corpus process-authority child".to_string()
+        } else {
+            format!("authenticate corpus process-authority child: {diagnostic}")
+        };
+        return Err(error).context(context);
+    }
 
     let started = Instant::now();
     let mut timed_out = false;
@@ -1328,7 +1651,11 @@ pub fn run_corpus(
     // Reference-leg availability and version pin are checked only after every
     // staged destination has passed collision preflight, so an invalid later
     // case cannot cause an earlier external runtime invocation.
-    let bun_version_output = Command::new("bun")
+    // Resolve Bun before any child-process case replaces the guest's PATH with
+    // the signed fixed value. Command lookup otherwise consults that guest
+    // environment at spawn time and can lose a valid Bun installed elsewhere.
+    let bun_executable = resolve_bun_executable()?;
+    let bun_version_output = Command::new(&bun_executable)
         .arg("--version")
         .output()
         .context("bun is required for the corpus reference leg (bun --version failed)")?;
@@ -1349,27 +1676,59 @@ pub fn run_corpus(
                 format!("snapshot family `{}` is missing", snapshot_case.family_key)
             })?;
 
+        // Both isolated legs live under one canonical per-case root. Process
+        // authority can therefore commit one honest cwd jail into the exact
+        // same TOML bytes without letting Bun's filesystem mutations reach the
+        // Franken leg.
+        let case_run_root = tempfile::TempDir::new().context("create per-case corpus run root")?;
+        let canonical_run_root = case_run_root
+            .path()
+            .canonicalize()
+            .context("canonicalize per-case corpus run root")?;
+        let bun_dir = canonical_run_root.join("bun");
+        let franken_dir = canonical_run_root.join("franken");
+        std::fs::create_dir(&bun_dir).context("create bun leg sandbox")?;
+        std::fs::create_dir(&franken_dir).context("create franken leg sandbox")?;
+
+        copy_dir_recursive(template.path(), &bun_dir, 0)
+            .context("clone workspace template into bun leg sandbox")?;
+        stage_snapshot_case(snapshot_case, family, &bun_dir)
+            .context("stage bun leg executable inputs")?;
+        copy_dir_recursive(template.path(), &franken_dir, 0)
+            .context("clone workspace template into franken leg sandbox")?;
+        stage_snapshot_case(snapshot_case, family, &franken_dir)
+            .context("stage franken leg executable inputs")?;
+
+        let process_authority = if case.api_family == CHILD_PROCESS_FAMILY {
+            let authority = corpus_process_authority(
+                &template.path().join("franken_node.toml"),
+                &canonical_run_root,
+                case_timeout,
+            )
+            .with_context(|| {
+                format!(
+                    "provision run-scoped child-process authority for case `{}`",
+                    case.test_id
+                )
+            })?;
+            stage_identical_corpus_config(&authority, &bun_dir, &franken_dir)?;
+            Some(authority)
+        } else {
+            None
+        };
+
         // Reference leg sandbox: same workspace scaffold as the franken leg so
         // filesystem-observing fixtures receive identical ambient inputs.
-        let bun_dir = tempfile::TempDir::new().context("create bun leg sandbox")?;
-        copy_dir_recursive(template.path(), bun_dir.path(), 0)
-            .context("clone workspace template into bun leg sandbox")?;
-        stage_snapshot_case(snapshot_case, family, bun_dir.path())
-            .context("stage bun leg executable inputs")?;
-        let mut bun_cmd = Command::new("bun");
+        let mut bun_cmd = Command::new(&bun_executable);
         bun_cmd
             .arg(&snapshot_case.staged_relative_path)
-            .current_dir(bun_dir.path());
+            .current_dir(&bun_dir);
         configure_runtime_leg_environment(&mut bun_cmd, case.suppress_runtime_warnings);
-        let bun_leg = run_leg(bun_cmd, case_timeout)
-            .with_context(|| format!("bun leg failed to launch for case `{}`", case.test_id))?;
+        if process_authority.is_some() {
+            configure_child_process_leg_environment(&mut bun_cmd);
+        }
 
         // Franken leg sandbox: cloned workspace template + case file.
-        let franken_dir = tempfile::TempDir::new().context("create franken leg sandbox")?;
-        copy_dir_recursive(template.path(), franken_dir.path(), 0)
-            .context("clone workspace template into franken leg sandbox")?;
-        stage_snapshot_case(snapshot_case, family, franken_dir.path())
-            .context("stage franken leg executable inputs")?;
         let mut franken_cmd = Command::new(&current_exe);
         franken_cmd
             .arg("run")
@@ -1381,10 +1740,62 @@ pub fn run_corpus(
             .arg("franken-engine")
             .arg("--engine-bin")
             .arg(&current_exe)
-            .current_dir(franken_dir.path());
+            .current_dir(&franken_dir);
         configure_runtime_leg_environment(&mut franken_cmd, case.suppress_runtime_warnings);
-        let franken_leg = run_leg(franken_cmd, case_timeout)
-            .with_context(|| format!("franken leg failed to launch for case `{}`", case.test_id))?;
+        if process_authority.is_some() {
+            configure_child_process_leg_environment(&mut franken_cmd);
+        }
+
+        let (bun_leg, franken_leg) = match process_authority {
+            Some(authority) => {
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = (authority, bun_cmd, franken_cmd);
+                    bail!("corpus child-process authority is supported only on Linux");
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    // Run the authenticated leg first so even the CLI's
+                    // operator-selected 600-second case bound cannot consume
+                    // most of the deliberately capped 15-minute token TTL in
+                    // the independent Bun leg.
+                    let socket_directory = tempfile::TempDir::new()
+                        .context("create corpus authority socket directory")?;
+                    std::fs::set_permissions(
+                        socket_directory.path(),
+                        std::fs::Permissions::from_mode(0o700),
+                    )
+                    .context("secure corpus authority socket directory")?;
+                    let canonical_socket_directory = socket_directory
+                        .path()
+                        .canonicalize()
+                        .context("canonicalize corpus authority socket directory")?;
+                    let server = InternalCorpusProcessAuthorityServer::bind(
+                        &canonical_socket_directory,
+                        authority.public_key_hex,
+                    )
+                    .context("bind corpus process-authority server")?;
+                    let franken_leg =
+                        run_leg_with_process_authority(franken_cmd, case_timeout, server)
+                            .with_context(|| {
+                                format!("franken leg failed to launch for case `{}`", case.test_id)
+                            })?;
+                    let bun_leg = run_leg(bun_cmd, case_timeout).with_context(|| {
+                        format!("bun leg failed to launch for case `{}`", case.test_id)
+                    })?;
+                    (bun_leg, franken_leg)
+                }
+            }
+            None => {
+                let bun_leg = run_leg(bun_cmd, case_timeout).with_context(|| {
+                    format!("bun leg failed to launch for case `{}`", case.test_id)
+                })?;
+                let franken_leg = run_leg(franken_cmd, case_timeout).with_context(|| {
+                    format!("franken leg failed to launch for case `{}`", case.test_id)
+                })?;
+                (bun_leg, franken_leg)
+            }
+        };
 
         // Adjudicate through the real N-version oracle: bun is the reference
         // executor, the native engine is the runtime under test.
@@ -2069,6 +2480,130 @@ mod snapshot_staging_tests {
                 .get_envs()
                 .all(|(key, _)| key == std::ffi::OsStr::new(NODE_NO_WARNINGS_ENV)),
             "the fixture opt-out must not inject unrelated guest-visible environment"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_process_authority_is_exact_signed_bounded_and_staged_identically() {
+        use crate::config::Profile;
+        use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+
+        let template = tempfile::TempDir::new().expect("template tempdir");
+        let mut base = Config::for_profile(Profile::Balanced);
+        let synthesis = base.synthesize_init_security_defaults();
+        assert!(synthesis.registry_signing_key_generated);
+        std::fs::write(
+            template.path().join("franken_node.toml"),
+            base.to_toml().expect("serialize base config"),
+        )
+        .expect("write template config");
+
+        let run_root = tempfile::TempDir::new().expect("run root");
+        let canonical_run_root = run_root.path().canonicalize().expect("canonical run root");
+        let bun_dir = canonical_run_root.join("bun");
+        let franken_dir = canonical_run_root.join("franken");
+        std::fs::create_dir(&bun_dir).expect("create bun dir");
+        std::fs::create_dir(&franken_dir).expect("create franken dir");
+
+        let authority = corpus_process_authority(
+            &template.path().join("franken_node.toml"),
+            &canonical_run_root,
+            Duration::from_secs(30),
+        )
+        .expect("provision authority");
+        stage_identical_corpus_config(&authority, &bun_dir, &franken_dir)
+            .expect("stage identical configs");
+        let bun_toml = std::fs::read(bun_dir.join("franken_node.toml")).expect("read bun config");
+        let franken_toml =
+            std::fs::read(franken_dir.join("franken_node.toml")).expect("read franken config");
+        assert_eq!(bun_toml, franken_toml);
+        assert_eq!(bun_toml, authority.config_toml.as_bytes());
+
+        let parsed =
+            Config::load(&bun_dir.join("franken_node.toml")).expect("load signed corpus config");
+        let opt_in = parsed
+            .security
+            .child_process_spawn
+            .as_ref()
+            .expect("child-process opt-in");
+        assert_eq!(opt_in.execution_policy.jailed_cwd_root, canonical_run_root);
+        assert!(opt_in.execution_policy.allow_shell);
+        assert_eq!(
+            opt_in.execution_policy.shell_executable_alias.as_deref(),
+            Some("sh")
+        );
+        assert_eq!(
+            opt_in.execution_policy.allowed_env_keys,
+            BTreeSet::from([CORPUS_PROCESS_ALLOWED_ENV_KEY.to_string()])
+        );
+        assert_eq!(
+            opt_in.execution_policy.fixed_env.get("PATH"),
+            Some(&CORPUS_PROCESS_FIXED_PATH.to_string())
+        );
+        assert_eq!(
+            opt_in
+                .execution_policy
+                .allowed_executables
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            CORPUS_PROCESS_ALIASES
+        );
+        for executable in opt_in.execution_policy.allowed_executables.values() {
+            assert!(executable.path.is_absolute());
+            assert_eq!(
+                sha256_file(&executable.path).expect("rehash authorized executable"),
+                executable.sha256
+            );
+        }
+        assert_eq!(opt_in.execution_policy.limits.max_children, 4);
+        assert_eq!(
+            opt_in.execution_policy.limits.max_output_bytes,
+            u64::try_from(MAX_LEG_OUTPUT_BYTES).expect("output bound fits u64")
+        );
+        assert!(
+            opt_in
+                .token
+                .expires_at_ms
+                .saturating_sub(opt_in.token.issued_at_ms)
+                <= MAX_CHILD_PROCESS_SPAWN_TOKEN_TTL_MS
+        );
+        assert_eq!(
+            opt_in.token.subject,
+            parsed
+                .child_process_spawn_policy_subject()
+                .expect("recompute signed policy subject")
+        );
+
+        let public_key_bytes = hex::decode(&authority.public_key_hex).expect("decode public key");
+        let verifying_key = VerifyingKey::from_bytes(
+            &public_key_bytes
+                .try_into()
+                .expect("public key has exact Ed25519 length"),
+        )
+        .expect("parse public key");
+        let signature_bytes = hex::decode(&opt_in.token.signature).expect("decode signature");
+        let signature = Signature::from_slice(&signature_bytes).expect("parse signature");
+        verifying_key
+            .verify(opt_in.token.content_hash().as_bytes(), &signature)
+            .expect("verify exact policy-bound token");
+    }
+
+    #[test]
+    fn child_process_leg_environment_fixes_path_and_removes_ambient_fixture_key() {
+        let mut command = Command::new("fixture-runtime");
+        configure_child_process_leg_environment(&mut command);
+        let environment = command.get_envs().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("PATH")).copied(),
+            Some(Some(std::ffi::OsStr::new(CORPUS_PROCESS_FIXED_PATH)))
+        );
+        assert_eq!(
+            environment
+                .get(std::ffi::OsStr::new(CORPUS_PROCESS_ALLOWED_ENV_KEY))
+                .copied(),
+            Some(None)
         );
     }
 

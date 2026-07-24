@@ -877,6 +877,29 @@ max_degraded_duration_secs = 3600
 # separate keyring file; it is never accepted from this project config.
 # backend = "bubblewrap"
 # binary_path = "/usr/bin/bwrap"
+#
+# Process execution authority is also explicit and token-bound: each command
+# alias resolves without PATH lookup to one exact canonical executable and
+# SHA-256 digest. The cwd jail, environment vocabulary, shell choice, and
+# resource ceilings below are all part of the signed policy subject.
+#
+# [security.child_process_spawn.execution_policy]
+# jailed_cwd_root = "/srv/franken-node/apps/example"
+# allow_shell = false
+# allowed_env_keys = ["LANG"]
+# fixed_env = { LANG = "C.UTF-8" }
+#
+# [security.child_process_spawn.execution_policy.allowed_executables.true]
+# path = "/usr/bin/true"
+# sha256 = "<64 lowercase hexadecimal characters>"
+#
+# [security.child_process_spawn.execution_policy.limits]
+# max_children = 4
+# max_argv_count = 128
+# max_argv_bytes = 65536
+# max_stdin_bytes = 1048576
+# max_output_bytes = 4194304
+# max_runtime_millis = 30000
 
 [security.network_policy]
 # Network egress policy enforcement mode: enforced | report-only
