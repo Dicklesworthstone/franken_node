@@ -1,0 +1,125 @@
+{
+  "schema_version": "oracle-close-condition-receipt/v1",
+  "receipt_path": "artifacts/oracle/close_condition_receipt.json",
+  "generated_at_utc": "2026-07-12T03:00:10.299537012+00:00",
+  "L1_product_oracle": {
+    "verdict": "RED",
+    "source_path": "artifacts/13/compatibility_corpus_results.json",
+    "corpus_version": "compat-corpus-v1-af34cb312425",
+    "corpus_provenance": "lockstep-oracle-run",
+    "total_test_cases": 560,
+    "passed_test_cases": 14,
+    "failed_test_cases": 546,
+    "errored_test_cases": 0,
+    "skipped_test_cases": 0,
+    "pass_rate_pct": 2.5,
+    "required_pass_rate_pct": 95.0,
+    "blocking_findings": [
+      "compatibility corpus pass rate 2.50% is below required 95.00%"
+    ]
+  },
+  "L2_engine_boundary_oracle": {
+    "verdict": "GREEN",
+    "source": "engine_split_contract_check",
+    "contract_ref": "docs/ENGINE_SPLIT_CONTRACT.md",
+    "checks": [
+      {
+        "id": "SPLIT-NO-LOCAL",
+        "status": "GREEN",
+        "details": {
+          "checked": [
+            "crates/franken-engine",
+            "crates/franken-extension-host"
+          ],
+          "violations": []
+        }
+      },
+      {
+        "id": "SPLIT-PATH-DEPS",
+        "status": "GREEN",
+        "details": {
+          "cargo_files": [
+            {
+              "path": "crates/franken-node/Cargo.toml",
+              "engine_deps": [
+                {
+                  "crate": "frankenengine-engine",
+                  "path": "../../../franken_engine/crates/franken-engine",
+                  "valid": true
+                },
+                {
+                  "crate": "frankenengine-extension-host",
+                  "path": "../../../franken_engine/crates/franken-extension-host",
+                  "valid": true
+                }
+              ]
+            }
+          ],
+          "violations": []
+        }
+      },
+      {
+        "id": "SPLIT-NO-INTERNALS",
+        "status": "GREEN",
+        "details": {
+          "files_scanned": 791,
+          "violations": []
+        }
+      },
+      {
+        "id": "SPLIT-GOVERNANCE",
+        "status": "GREEN",
+        "details": {
+          "docs": [
+            {
+              "path": "docs/ENGINE_SPLIT_CONTRACT.md",
+              "exists": true
+            },
+            {
+              "path": "docs/PRODUCT_CHARTER.md",
+              "exists": true
+            }
+          ],
+          "violations": []
+        }
+      }
+    ],
+    "summary": {
+      "total_checks": 4,
+      "passing_checks": 4,
+      "failing_checks": 0
+    },
+    "blocking_findings": []
+  },
+  "release_policy_linkage": {
+    "verdict": "GREEN",
+    "source": "ci_gate_output",
+    "ci_outputs_accessible": true,
+    "ci_output_ref": "artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json",
+    "consumed_oracles": [
+      "L1_product_oracle",
+      "L2_engine_boundary_oracle"
+    ],
+    "blocking_findings": []
+  },
+  "composite_verdict": "RED",
+  "failing_dimensions": [
+    "L1_product_oracle"
+  ],
+  "tamper_evidence": {
+    "algorithm": "SHA-256",
+    "canonicalization": "lexicographically-sorted-json-keys/no-whitespace",
+    "hash_scope": "close_condition_receipt_v1_len_prefixed_core",
+    "sha256": "sha256:aea886b48ba80936d74aa455b76ee007fc565d543a8252ebca828651748a27be",
+    "signature": {
+      "algorithm": "ed25519",
+      "public_key_hex": "6ee62ae3642137517d14f3437e3bb94c7dedb661aad53de8d5cfc46d406a1ce0",
+      "key_id": "40c56529b7788c31",
+      "key_source": "cli",
+      "signing_identity": "oracle-close-condition",
+      "trust_scope": "oracle_close_condition",
+      "signed_payload_sha256": "aea886b48ba80936d74aa455b76ee007fc565d543a8252ebca828651748a27be",
+      "signature_hex": "2aff3edefd125d2efa290f272465af387fb766c1d9c9678429a2f09ba6f55423ac73a93365179722b4e1efcaf34eae09338874990e59ed68321fb3af5ce8dc01"
+    }
+  }
+}
