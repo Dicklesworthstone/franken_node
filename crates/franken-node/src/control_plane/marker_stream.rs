@@ -638,7 +638,16 @@ impl MarkerStream {
         );
 
         if !crate::security::constant_time::ct_eq(&last.marker_hash, &recomputed) {
-            self.markers.pop()
+            let discarded = self.markers.pop()?;
+            // `total_appended` is the next sequence to hand out, so discarding
+            // a marker has to give its number back. Leaving the counter
+            // advanced made the following append skip a sequence, which
+            // permanently breaks the dense-sequence invariant this recovery
+            // exists to preserve — `verify_integrity` then fails forever — and
+            // pushes every later marker past the inclusion window its proofs
+            // are checked against.
+            self.total_appended = discarded.sequence;
+            Some(discarded)
         } else {
             None
         }
