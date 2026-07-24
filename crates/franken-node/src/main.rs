@@ -9831,6 +9831,47 @@ fn render_run_execution_receipt_summary(
     )
 }
 
+// bd-muy9u: a native run that aborts after the engine has already performed or
+// been denied host effects produces no completion report, so the ledger that
+// `run --json` normally carries inside that report has nowhere to go. This
+// self-describing envelope is that home: it exists only on the failure path and
+// carries the identical, SDK-verifiable `HostEffectLedger` shape, so a denial
+// stays visible instead of vanishing because the program aborted afterwards.
+const RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA: &str = "franken-node/run-failure-effect-evidence/v1";
+
+/// Surface the host-effect ledger recovered from a failed native run.
+///
+/// The run stays failed; this only stops its receipts from being discarded.
+/// Console-only mode emits nothing, for the same reason it suppresses the
+/// preflight banner: anything beyond the guest's own streams registers as
+/// behavioral divergence when a reference runtime is compared in lockstep.
+fn emit_failed_run_effect_evidence(
+    ledger: &ops::engine_dispatcher::HostEffectLedger,
+    json: bool,
+    console_only: bool,
+) -> Result<()> {
+    if console_only {
+        return Ok(());
+    }
+    if json {
+        let evidence = serde_json::json!({
+            "schema_version": RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA,
+            "host_effect_ledger": ledger,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&evidence)
+                .context("failed serializing failed-run host-effect evidence")?
+        );
+        return Ok(());
+    }
+    println!(
+        "run failed after host effects were already recorded; the signed ledger below is complete for the attempt"
+    );
+    println!("{}", render_host_effect_ledger_human(ledger));
+    Ok(())
+}
+
 fn emit_run_completion_output(
     preflight: &RunPreFlightReport,
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
@@ -28249,6 +28290,21 @@ fn main() -> Result<()> {
             ) {
                 Ok(dispatch) => dispatch,
                 Err(err) => {
+                    // bd-muy9u: when the attempt aborted after the engine had
+                    // already performed or been denied host effects, those
+                    // receipts are recovered on the error. Emit them before
+                    // propagating: a denial must not become invisible merely
+                    // because the guest aborted afterwards. The run still
+                    // fails — only the evidence is preserved.
+                    if let Some(failure) =
+                        err.downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
+                    {
+                        emit_failed_run_effect_evidence(
+                            failure.host_effect_ledger(),
+                            json,
+                            console_only,
+                        )?;
+                    }
                     // bd-rpo4f: `dispatch_run` surfaces requested-runtime
                     // unavailability as a typed error instead of exiting the
                     // process from library code. The CLI boundary owns the

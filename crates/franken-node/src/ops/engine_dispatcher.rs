@@ -276,6 +276,13 @@ enum NativeSessionResponse {
         schema_version: String,
         nonce: String,
         message: String,
+        /// bd-muy9u: effects the aborted attempt already performed or was
+        /// denied. Carried across the worker boundary so a failed native run
+        /// surfaces the same SDK-verifiable receipts a successful one does.
+        /// Validated by the parent exactly like the success-path ledger before
+        /// it is trusted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_effect_ledger: Option<HostEffectLedger>,
     },
     TelemetryFailed {
         schema_version: String,
@@ -850,6 +857,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
                 "{message}. additionally failed to stop telemetry bridge: native telemetry guard was already consumed"
             ),
             telemetry_report: None,
+            host_effect_ledger: None,
         };
     };
 
@@ -860,6 +868,7 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
                 report.drain_duration_ms
             ),
             telemetry_report: Some(Box::new(report)),
+            host_effect_ledger: None,
         },
         Ok(report) => EngineProcessError::Spawn {
             message: format!(
@@ -867,12 +876,14 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
                 report.drain_duration_ms
             ),
             telemetry_report: Some(Box::new(report)),
+            host_effect_ledger: None,
         },
         Err(cleanup_error) => EngineProcessError::Spawn {
             message: format!(
                 "{message}. additionally failed to stop telemetry bridge: {cleanup_error}"
             ),
             telemetry_report: None,
+            host_effect_ledger: None,
         },
     }
 }
@@ -1111,6 +1122,39 @@ pub struct HostEffectLedger {
     pub entries: Vec<crate::runtime::effect_receipt::EffectReceiptChainEntry>,
 }
 
+/// A native run that aborted after the engine had already performed or been
+/// denied host effects (bd-muy9u).
+///
+/// The run stays failed and the operator-visible text is byte-identical to the
+/// [`ActionableError`] the same failure produced before: this type exists only
+/// to keep the attempt's signed, hash-chained host-effect ledger attached, so
+/// the CLI can surface the very evidence a denial produced instead of dropping
+/// it because the program happened to abort afterwards. Recover it with
+/// `anyhow::Error::downcast_ref::<NativeRunFailure>()`.
+#[derive(Debug)]
+pub struct NativeRunFailure {
+    actionable: ActionableError,
+    host_effect_ledger: Box<HostEffectLedger>,
+}
+
+impl NativeRunFailure {
+    /// The signed, hash-chained ledger of effects this failed run performed or
+    /// was denied. Verified against the same integrity rules as a successful
+    /// run's ledger before the failure was constructed.
+    #[must_use]
+    pub fn host_effect_ledger(&self) -> &HostEffectLedger {
+        &self.host_effect_ledger
+    }
+}
+
+impl std::fmt::Display for NativeRunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.actionable, f)
+    }
+}
+
+impl std::error::Error for NativeRunFailure {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DispatchPlan {
     FrankenEngine { binary: String },
@@ -1159,8 +1203,31 @@ enum EngineProcessError {
         message: String,
         #[cfg_attr(not(test), allow(dead_code))]
         telemetry_report: Option<Box<TelemetryRuntimeReport>>,
+        /// bd-muy9u: the signed, globally ordered ledger of host effects the
+        /// aborted attempt had already performed or been denied, when the
+        /// engine reached execution and could certify the attempt's exact
+        /// effect boundary. `None` for failures raised before execution began
+        /// (or whose boundary is indeterminate); never an empty stand-in,
+        /// because "no effects" and "unknown effects" are different claims.
+        host_effect_ledger: Option<Box<HostEffectLedger>>,
     },
     TelemetryDrain(String),
+}
+
+#[cfg(feature = "engine")]
+impl EngineProcessError {
+    /// Attach recovered host-effect evidence to a failure without changing the
+    /// failure itself. The operator-visible message is untouched: this only
+    /// stops already-performed or denied effects from disappearing.
+    fn with_host_effect_ledger(mut self, ledger: Option<HostEffectLedger>) -> Self {
+        if let Self::Spawn {
+            host_effect_ledger, ..
+        } = &mut self
+        {
+            *host_effect_ledger = ledger.map(Box::new);
+        }
+        self
+    }
 }
 
 /// Specific error types for native engine execution with detailed context
@@ -3048,6 +3115,8 @@ impl EngineDispatcher {
                             "failed"
                         }
                     ),
+                    // The worker never started, so no effect could have run.
+                    host_effect_ledger: None,
                 });
             }
         };
@@ -3070,6 +3139,11 @@ impl EngineDispatcher {
                                     nonce,
                                     message: "native engine returned a signal-only status"
                                         .to_string(),
+                                    // bd-muy9u: execution reached completion and
+                                    // produced a ledger; only the exit status was
+                                    // unusable. Losing the effects here would be
+                                    // the same evidence gap on a rarer path.
+                                    host_effect_ledger,
                                 });
                             };
                             NativeSessionResponse::Completed {
@@ -3084,13 +3158,16 @@ impl EngineDispatcher {
                                 host_effect_ledger,
                             }
                         }
-                        Err(EngineProcessError::Spawn { message, .. }) => {
-                            NativeSessionResponse::ExecutionFailed {
-                                schema_version: NATIVE_SESSION_SCHEMA.to_string(),
-                                nonce,
-                                message,
-                            }
-                        }
+                        Err(EngineProcessError::Spawn {
+                            message,
+                            host_effect_ledger,
+                            ..
+                        }) => NativeSessionResponse::ExecutionFailed {
+                            schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                            nonce,
+                            message,
+                            host_effect_ledger: host_effect_ledger.map(|ledger| *ledger),
+                        },
                         Err(EngineProcessError::TelemetryDrain(message)) => {
                             NativeSessionResponse::TelemetryFailed {
                                 schema_version: NATIVE_SESSION_SCHEMA.to_string(),
@@ -3121,6 +3198,10 @@ impl EngineDispatcher {
                     message: format!(
                         "native engine worker stopped without a typed outcome: {error}; worker joined: {worker_joined}"
                     ),
+                    // No typed outcome crossed the channel, so the attempt's
+                    // effect boundary is unknown. Emitting an empty ledger here
+                    // would assert "no effects occurred" without evidence.
+                    host_effect_ledger: None,
                 }
             }
         };
@@ -4214,6 +4295,7 @@ impl EngineDispatcher {
                 schema_version,
                 nonce: response_nonce,
                 message,
+                host_effect_ledger,
             } => {
                 validate_envelope(&schema_version, &response_nonce).map_err(|error| {
                     EngineDispatchError::EngineExecutionError {
@@ -4223,12 +4305,38 @@ impl EngineDispatcher {
                     }
                     .to_actionable()
                 })?;
+                // bd-muy9u: evidence recovered from a failed run is held to the
+                // same integrity bar as a successful run's ledger. A ledger the
+                // parent cannot verify is discarded rather than surfaced, and
+                // the rejection is appended to the operator's message: an
+                // unverifiable receipt must never look like a verified one, and
+                // an evidence-protocol fault must never hide the execution
+                // failure that is the operator's actual problem.
+                let (host_effect_ledger, evidence_note) = match host_effect_ledger {
+                    Some(ledger) => match validate_ledger(&ledger) {
+                        Ok(()) => (Some(ledger), String::new()),
+                        Err(rejection) => (
+                            None,
+                            format!(
+                                "; recovered host-effect ledger was rejected and withheld: {rejection}"
+                            ),
+                        ),
+                    },
+                    None => (None, String::new()),
+                };
                 let dispatch_error = EngineDispatchError::EngineExecutionError {
                     app_path: app_path_buf,
-                    error_message: message,
+                    error_message: format!("{message}{evidence_note}"),
                     phase: "execution".to_string(),
                 };
-                Err(dispatch_error.to_actionable().into())
+                let actionable = dispatch_error.to_actionable();
+                Err(match host_effect_ledger {
+                    Some(ledger) => anyhow::Error::new(NativeRunFailure {
+                        actionable,
+                        host_effect_ledger: Box::new(ledger),
+                    }),
+                    None => actionable.into(),
+                })
             }
             NativeSessionResponse::TelemetryFailed {
                 schema_version,
@@ -5108,13 +5216,49 @@ impl EngineDispatcher {
             )
             .entered();
 
-            orchestrator.execute(&package).map_err(|error| {
-                native_engine_spawn_error_with_telemetry_cleanup(
-                    format!("Native execution failed: {error}"),
-                    &mut telemetry_guard,
-                )
-            })
-        }?;
+            match orchestrator.execute(&package) {
+                Ok(result) => result,
+                Err(error) => {
+                    // bd-muy9u: an attempt that aborts still owes the operator
+                    // the effects it already performed or was denied. Harvest
+                    // the engine's retained failure journal into exactly the
+                    // signed, hash-chained ledger the success path emits,
+                    // bound to the engine's own trace. The run stays failed —
+                    // only its evidence is recovered, never fabricated: the
+                    // ledger is omitted entirely when the engine could not
+                    // certify the attempt's effect boundary.
+                    let host_effect_ledger =
+                        orchestrator.last_failed_trace_id().map(|failed_trace_id| {
+                            Self::build_host_effect_journal_ledger(
+                                failed_trace_id,
+                                orchestrator.last_failed_host_effect_journal(),
+                                process_spawn_admission.as_ref(),
+                                config
+                                    .security
+                                    .child_process_spawn
+                                    .as_ref()
+                                    .map(|configured| &configured.execution_policy),
+                            )
+                        });
+                    if let Some(ledger) = host_effect_ledger.as_ref() {
+                        tracing::info!(
+                            execution_mode = "native",
+                            phase = "execution",
+                            effect_count = ledger.effect_count,
+                            allowed_count = ledger.allowed_count,
+                            denied_count = ledger.denied_count,
+                            chain_head_hash = %ledger.chain_head_hash,
+                            "Harvested host-effect ledger from a failed run"
+                        );
+                    }
+                    return Err(native_engine_spawn_error_with_telemetry_cleanup(
+                        format!("Native execution failed: {error}"),
+                        &mut telemetry_guard,
+                    )
+                    .with_host_effect_ledger(host_effect_ledger));
+                }
+            }
+        };
 
         let exec_duration = exec_start.elapsed();
         tracing::info!(
@@ -5775,6 +5919,7 @@ impl EngineDispatcher {
                             report.drain_duration_ms
                         ),
                         telemetry_report: Some(Box::new(report)),
+                        host_effect_ledger: None,
                     }),
                     Ok(report) => Err(EngineProcessError::Spawn {
                         message: format!(
@@ -5782,12 +5927,14 @@ impl EngineDispatcher {
                             report.drain_duration_ms
                         ),
                         telemetry_report: Some(Box::new(report)),
+                        host_effect_ledger: None,
                     }),
                     Err(cleanup_err) => Err(EngineProcessError::Spawn {
                         message: format!(
                             "Failed to spawn franken_engine process: {spawn_err}. additionally failed to stop telemetry bridge: {cleanup_err}"
                         ),
                         telemetry_report: None,
+                        host_effect_ledger: None,
                     }),
                 }
             }
@@ -6341,6 +6488,7 @@ mod tests {
         if let EngineProcessError::Spawn {
             message,
             telemetry_report: Some(report),
+            ..
         } = error
         {
             assert!(
@@ -7946,6 +8094,7 @@ mod tests {
             EngineProcessError::Spawn {
                 message,
                 telemetry_report: Some(report),
+                ..
             } => {
                 assert!(message.contains("Failed to spawn franken_engine process"));
                 assert!(message.contains("telemetry bridge stopped after launch failure"));
