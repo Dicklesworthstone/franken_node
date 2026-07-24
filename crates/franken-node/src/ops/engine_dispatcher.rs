@@ -1209,6 +1209,10 @@ enum EngineProcessError {
         /// effect boundary. `None` for failures raised before execution began
         /// (or whose boundary is indeterminate); never an empty stand-in,
         /// because "no effects" and "unknown effects" are different claims.
+        ///
+        /// Only the native path produces and consumes it, so a build without
+        /// the `engine` feature never reads the field.
+        #[cfg_attr(not(feature = "engine"), allow(dead_code))]
         host_effect_ledger: Option<Box<HostEffectLedger>>,
     },
     TelemetryDrain(String),
