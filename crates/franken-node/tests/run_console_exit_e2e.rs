@@ -56,7 +56,7 @@ struct RunOutcome {
 #[test]
 fn private_native_session_worker_refuses_direct_cli_invocation() {
     let missing_nonce = Command::new(franken_node_bin())
-        .arg("__franken-native-session-worker-v2")
+        .arg("__franken-native-session-worker-v3")
         .stdin(Stdio::null())
         .output()
         .expect("invoke private worker marker directly");
@@ -75,7 +75,7 @@ fn private_native_session_worker_refuses_direct_cli_invocation() {
     {
         let forged_nonce = Command::new(franken_node_bin())
             .args([
-                "__franken-native-session-worker-v2",
+                "__franken-native-session-worker-v3",
                 "00000000-0000-4000-8000-000000000001",
             ])
             .stdin(Stdio::null())
@@ -470,9 +470,19 @@ const THROW_APP: &str = "throw new Error(\"boom\");\n";
 /// the capability/SSRF gates refuse under every default profile. The denial
 /// is deterministic and happens BEFORE any socket opens, so this fixture
 /// needs no network and cannot flake on connectivity.
+// The `error` listener is load-bearing, not decoration: this fixture exists to
+// prove a denied effect is RECORDED while the run still completes, and the
+// assertions below read `dispatch.host_effect_ledger`, which only exists on a
+// completed run. Without the listener the refused egress raises an uncaught
+// ERR_NETWORK, the run aborts before any dispatch report, and the test fails
+// for a reason it was never written to detect. A guest that handles the refusal
+// is exactly the "clean guest" this test's contract describes.
 const DENIED_EGRESS_APP: &str = "const http = require(\"http\");\n\
-    http.get(\"http://169.254.169.254/latest/meta-data/\", (res) => {\n\
+    const req = http.get(\"http://169.254.169.254/latest/meta-data/\", (res) => {\n\
     console.log(\"unexpected\", res.statusCode);\n\
+    });\n\
+    req.on(\"error\", () => {\n\
+    console.log(\"egress refused as expected\");\n\
     });\n";
 
 fn assert_no_debug_dump(stream: &str, label: &str) {
@@ -570,6 +580,89 @@ fn denied_host_effect_is_surfaced_in_signed_ledger_not_masked() {
         outcome.stderr
     );
     assert_no_debug_dump(&outcome.stdout, "process stdout");
+}
+
+/// Same refused egress as above, but the guest does NOT handle it, so the
+/// uncaught `ERR_NETWORK` aborts the run before any completion report exists.
+///
+/// bd-muy9u: the abort must not take the evidence with it. Previously the
+/// engine dropped the recorder's finalized transcript on the failure path and
+/// the dispatcher mapped the error straight to `EngineProcessError`, so the
+/// refusal that had already been decided and recorded simply vanished — a
+/// denial was indistinguishable from an egress that never happened. The run is
+/// still a failure; only its receipts are recovered.
+#[test]
+fn a_failed_run_still_surfaces_the_denied_effect_receipt_bd_muy9u() {
+    const UNHANDLED_DENIED_EGRESS_APP: &str = "const http = require(\"http\");\n\
+        http.get(\"http://169.254.169.254/latest/meta-data/\", (res) => {\n\
+        console.log(\"unexpected\", res.statusCode);\n\
+        });\n";
+
+    let (_dir, outcome) = run_app(UNHANDLED_DENIED_EGRESS_APP, &["--json"]);
+
+    assert_ne!(
+        outcome.exit_code,
+        Some(0),
+        "an uncaught denial must still fail the run, never be laundered into a success; stdout=\n{}\nstderr=\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+
+    let evidence: Value = serde_json::from_str(&outcome.stdout).unwrap_or_else(|e| {
+        panic!(
+            "a failed run that already performed host effects must still emit their evidence: {e}\nexit={:?}\nstdout=\n{}\nstderr=\n{}",
+            outcome.exit_code, outcome.stdout, outcome.stderr
+        )
+    });
+    assert_eq!(
+        evidence["schema_version"].as_str(),
+        Some("franken-node/run-failure-effect-evidence/v1"),
+        "failure evidence must be self-describing; got=\n{}",
+        serde_json::to_string_pretty(&evidence).unwrap_or_default()
+    );
+
+    let ledger = &evidence["host_effect_ledger"];
+    assert_eq!(
+        ledger["denied_count"].as_u64(),
+        Some(1),
+        "the refusal decided before the abort must survive it; got ledger=\n{}",
+        serde_json::to_string_pretty(ledger).unwrap_or_default()
+    );
+    assert_eq!(
+        ledger["allowed_count"].as_u64(),
+        Some(0),
+        "nothing was permitted to execute; got ledger=\n{}",
+        serde_json::to_string_pretty(ledger).unwrap_or_default()
+    );
+
+    let receipt = &ledger["entries"][0]["receipt"];
+    assert_eq!(
+        receipt["policy_outcome"]["outcome"].as_str(),
+        Some("denied"),
+        "the receipt must record the exact refusal, not a bare count; got=\n{}",
+        serde_json::to_string_pretty(receipt).unwrap_or_default()
+    );
+    assert!(
+        receipt["result_hash"].is_null() && receipt["post_state_hash"].is_null(),
+        "a denied effect is fail-closed: no result and no post-state; got=\n{}",
+        serde_json::to_string_pretty(receipt).unwrap_or_default()
+    );
+    // The engine's own attempt trace, not a label the product invented for
+    // evidence it did not produce.
+    assert!(
+        ledger["trace_id"]
+            .as_str()
+            .is_some_and(|trace| !trace.trim().is_empty()),
+        "failure evidence must carry the engine's real attempt trace; got ledger=\n{}",
+        serde_json::to_string_pretty(ledger).unwrap_or_default()
+    );
+    assert!(
+        ledger["chain_head_hash"]
+            .as_str()
+            .is_some_and(|head| head.starts_with("sha256:")),
+        "recovered evidence is still chain-committed; got ledger=\n{}",
+        serde_json::to_string_pretty(ledger).unwrap_or_default()
+    );
 }
 
 #[test]
