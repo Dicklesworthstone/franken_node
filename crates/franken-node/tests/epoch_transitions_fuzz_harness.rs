@@ -10,12 +10,9 @@
 //! epoch state generation and invariant validation.
 
 use frankenengine_node::control_plane::control_epoch::{
-    ControlEpoch, EpochArtifactEvent, EpochError, EpochRejection, EpochRejectionReason,
-    EpochSigningKey, EpochStore, EpochTransition, ValidityWindowPolicy, check_artifact_epoch,
-    event_codes,
+    ControlEpoch, EpochError, EpochSigningKey, EpochStore, EpochTransition, ValidityWindowPolicy,
+    check_artifact_epoch,
 };
-use serde_json::Value;
-use std::collections::BTreeMap;
 
 /// bd-kpjrz: `EpochStore` now signs transition events with an HMAC key, so the
 /// event MAC is an authenticity check rather than a hash anyone can recompute.
@@ -46,6 +43,10 @@ const MAX_TRACE_ID_LEN: usize = 4096;
 const MAX_ARTIFACT_ID_LEN: usize = 4096;
 const MAX_LOOKBACK_WINDOW: u64 = 1000;
 
+// bd-6r7c4: `Serialization` and `ArtifactValidation` are part of this harness's
+// error vocabulary but are not reachable from the currently-seeded corpus. They
+// are kept so a future seed does not have to reintroduce them.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HarnessEpochError {
     EpochOperation(String),
@@ -130,7 +131,12 @@ fn seed_artifact_ids() -> Vec<String> {
     ]
 }
 
-/// Generate seed timestamp values
+/// Generate seed timestamp values.
+///
+/// bd-6r7c4: retained for the same reason as the unused error variants — this is
+/// a seed-corpus harness and the timestamp corpus is part of it, even though no
+/// currently-registered test draws from it yet.
+#[allow(dead_code)]
 fn seed_timestamps() -> Vec<u64> {
     vec![
         0,            // Unix epoch start
@@ -168,7 +174,7 @@ fn seed_transition_vectors() -> Vec<(u64, String, u64, String)> {
 /// Validate epoch transition MAC consistency
 fn validate_transition_mac_consistency(
     old_epoch: ControlEpoch,
-    new_epoch: ControlEpoch,
+    _new_epoch: ControlEpoch,
     timestamp: u64,
     manifest_hash: &str,
     trace_id: &str,
@@ -424,7 +430,7 @@ fn fuzz_epoch_store_recovery_determinism() {
 fn fuzz_transition_serialization_round_trip() {
     let mut store = epoch_test_store();
 
-    for (i, (epoch_val, manifest_hash, timestamp, trace_id)) in
+    for (i, (_epoch_val, manifest_hash, timestamp, trace_id)) in
         seed_transition_vectors().iter().enumerate().take(5)
     {
         if !manifest_hash.trim().is_empty() && !trace_id.trim().is_empty() {
