@@ -19,6 +19,10 @@ pub fn pretty_json_stdout(command_name: &str, stdout: &[u8]) -> String {
     serde_json::to_string_pretty(&value).expect("pretty json")
 }
 
+// bd-6r7c4: shared helper module, `#[path]`-included by several golden test
+// targets. Not every including target calls every helper, so `dead_code` fires
+// per-target even though the function is live overall.
+#[allow(dead_code)]
 pub fn with_scrubbed_snapshot_settings<R>(snapshot_dir: &str, assertion: impl FnOnce() -> R) -> R {
     let mut settings = Settings::clone_current();
     settings.set_snapshot_path(

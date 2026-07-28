@@ -114,7 +114,7 @@ impl ConformanceReport {
 
         // Detailed results
         md.push_str("\n## Test Results\n\n");
-        for (_, record) in &self.results {
+        for record in self.results.values() {
             let status = match &record.result {
                 TestResult::Pass => "✅ PASS",
                 TestResult::Fail { .. } => "❌ FAIL",
@@ -229,7 +229,7 @@ fn test_case_3a3q_inv_1() -> ConformanceRecord {
 
         // Test that monitor produces valid verdict at any point
         // API-DRIFT REDESIGN (bd-rjc2m.4): check(value, level) -> check(&state_with_value(value, level)); Minimal -> Baseline, Maximal -> Maximum. Boundary semantics preserved (50<80 allow, 85>80 warn, 150>100 block, 0 allow).
-        let verdicts = vec![
+        let verdicts = [
             monitor.check(&state_with_value(50.0, HardeningLevel::Baseline)),
             monitor.check(&state_with_value(85.0, HardeningLevel::Standard)), // Should warn
             monitor.check(&state_with_value(150.0, HardeningLevel::Maximum)), // Should block

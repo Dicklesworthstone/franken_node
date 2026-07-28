@@ -89,8 +89,7 @@ fn create_test_trust_card() -> TrustCard {
 
 /// Create a registry with multiple test cards for listing tests
 fn create_test_registry() -> TrustCardRegistry {
-    let registry = fixture_registry(1000).expect("create fixture registry");
-    registry
+    fixture_registry(1000).expect("create fixture registry")
 }
 
 #[test]

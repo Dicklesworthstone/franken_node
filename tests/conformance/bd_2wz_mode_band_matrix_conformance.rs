@@ -7,7 +7,6 @@
 //! - INV-BAND-ORDERING: Core most protected, Unsafe least protected
 //! - INV-DETERMINISTIC: same inputs always produce same outputs
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use frankenengine_node::policy::compat_gates::{
@@ -367,7 +366,7 @@ fn test_band_priority_ordering() -> TestResult {
     let core_action = divergence_action(CompatibilityBand::Core, mode);
     let high_value_action = divergence_action(CompatibilityBand::HighValue, mode);
     let edge_action = divergence_action(CompatibilityBand::Edge, mode);
-    let unsafe_action = divergence_action(CompatibilityBand::Unsafe, mode);
+    let _unsafe_action = divergence_action(CompatibilityBand::Unsafe, mode);
 
     // Core should be most restrictive
     if !is_more_restrictive_or_equal(core_action, high_value_action) {

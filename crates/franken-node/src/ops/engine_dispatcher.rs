@@ -3252,6 +3252,19 @@ impl EngineDispatcher {
     /// mutating process-wide environment state.
     #[cfg(feature = "engine")]
     #[allow(clippy::type_complexity)]
+    // Eight arguments, one over the lint's threshold. Every one is a distinct,
+    // independently-sourced input to a single subprocess supervision call — the
+    // app, the resolved config, the policy mode, two socket/worker paths, the
+    // optional signed spawn admission, its trust key, and the deadline. Bundling
+    // them into a struct would only move the argument list one call frame up, so
+    // the lint is allowed here rather than worked around. The `timeout` argument
+    // in particular is deliberate (see the doc comment above): passing it
+    // explicitly is what makes timeout regressions deterministic instead of
+    // depending on process-wide environment state.
+    //
+    // Surfaced 2026-07-28: this was introduced by a51b429fd (bd-muy9u) and could
+    // not be seen until bd-3mj98 made the workspace compile again.
+    #[allow(clippy::too_many_arguments)]
     fn run_engine_native_with_timeout(
         app_path: &Path,
         config: &Config,

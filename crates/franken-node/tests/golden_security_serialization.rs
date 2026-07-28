@@ -12,7 +12,6 @@ use frankenengine_node::supply_chain::trust_card::{
     ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard,
 };
 use insta::{assert_json_snapshot, assert_snapshot};
-use serde_json;
 use std::collections::BTreeMap;
 
 /// Test golden snapshot for trust card JSON serialization.

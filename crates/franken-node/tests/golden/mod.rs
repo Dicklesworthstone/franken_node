@@ -42,7 +42,12 @@ pub fn assert_golden(test_name: &str, actual: &str) {
     }
 }
 
-/// Assert golden for JSON with automatic pretty-printing
+/// Assert golden for JSON with automatic pretty-printing.
+///
+/// bd-6r7c4: shared helper module, `#[path]`-included by several golden test
+/// targets. Not every including target calls every helper, so `dead_code` fires
+/// per-target even though the function is live overall.
+#[allow(dead_code)]
 pub fn assert_json_golden(test_name: &str, value: &Value) {
     let actual = serde_json::to_string_pretty(value).unwrap();
     assert_golden(test_name, &actual);

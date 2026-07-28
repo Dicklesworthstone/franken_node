@@ -17,12 +17,11 @@
 //! - **EVD-SEED-002**: SEED_VERSION_BUMP event emission
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 // Import the module under test
 use frankenengine_node::encoding::deterministic_seed::{
-    ContentHash, DeterministicSeed, DeterministicSeedDeriver, DomainTag, EVENT_SEED_DERIVED,
-    EVENT_SEED_VERSION_BUMP, ScheduleConfig, derive_seed,
+    ContentHash, DeterministicSeedDeriver, DomainTag, EVENT_SEED_DERIVED, EVENT_SEED_VERSION_BUMP,
+    ScheduleConfig, derive_seed,
 };
 // API-DRIFT REMEDIATION (bd-rjc2m.7): seed bytes are [u8; 32]; constant_time::ct_eq is the
 // &str variant, ct_eq_bytes is the [u8] variant (project hardening pattern). Use ct_eq_bytes.
