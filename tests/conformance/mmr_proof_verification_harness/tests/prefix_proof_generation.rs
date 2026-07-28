@@ -69,12 +69,8 @@ fn witness_threshold_config(threshold: u32, total: u32) -> (Vec<SigningKey>, Thr
 /// from the same witness group/policy and quorum the fixtures sign with.
 fn root_witness_anchor() -> MmrRootWitnessTrustAnchor {
     let (_, threshold_config) = witness_threshold_config(2, 3);
-    MmrRootWitnessTrustAnchor::new(
-        WITNESS_GROUP_ID,
-        WITNESS_POLICY_ID,
-        threshold_config,
-    )
-    .expect("valid root witness trust anchor")
+    MmrRootWitnessTrustAnchor::new(WITNESS_GROUP_ID, WITNESS_POLICY_ID, threshold_config)
+        .expect("valid root witness trust anchor")
 }
 
 fn root_witness_receipt(
@@ -499,13 +495,16 @@ impl ConformanceTest for RootWitnessEvidenceLedgerRecordingTest {
         };
         let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 64 * 1024));
 
-        let (entry_id, verification) =
-            match ledger.append_mmr_root_witness_receipt(&receipt, &root_witness_anchor(), 1_700_000_200) {
-                Ok(result) => result,
-                Err(err) => {
-                    return TestResult::fail(format!("root witness evidence append failed: {err}"));
-                }
-            };
+        let (entry_id, verification) = match ledger.append_mmr_root_witness_receipt(
+            &receipt,
+            &root_witness_anchor(),
+            1_700_000_200,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                return TestResult::fail(format!("root witness evidence append failed: {err}"));
+            }
+        };
         if verification.valid_signatures != 2 || verification.threshold != 2 {
             return TestResult::fail(format!(
                 "unexpected witness quorum valid={} threshold={}",

@@ -194,8 +194,31 @@ uds_windows = "1"
 [dev-dependencies]
 assert_cmd = "2.0.16"
 assert2 = "0.4.0"
-fsqlite = { path = "../../../frankensqlite/crates/fsqlite", default-features = false, features = ["native"] }
-fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false }
+# bd-6n2xv: the PUBLISHED crate, not `path = "../../../frankensqlite/..."`.
+#
+# Same lesson as the `[patch.crates-io]` removal in the workspace manifest
+# (bd-3mj98): a path dependency on a sibling *development checkout* silently
+# adopts whatever unreleased breaking change that checkout is mid-way through.
+# `/dp/frankensqlite` is currently migrating `Connection` from sync to async
+# under an unchanged 0.1.19 version, which broke every franken_node test written
+# against the sync API (`Connection::open(..).expect(..)` became `.expect()` on
+# an `impl Future`) — while the published 0.1.19 keeps the sync surface and puts
+# the async one in `async_api`.
+#
+# Binding to the published crate also makes our fsqlite the SAME one the engine
+# resolves through `sqlmodel-frankensqlite`, so the graph no longer carries two
+# different 0.1.19s. Re-point at the path only once frankensqlite's async
+# migration (their bd-2jpu6) has landed and been released.
+fsqlite = { version = "0.1.19", default-features = false, features = ["native"] }
+# bd-6n2xv: `features = ["testing"]` is required by
+# tests/fastapi_rust_control_plane_integration.rs — `TestClient`,
+# `RequestBuilder` and `TestResponse` are all behind `#[cfg(feature = "testing")]`
+# in fastapi-rust, so with `default-features = false` alone that target failed to
+# compile with E0432/E0425. This is a dev-dependency and the workspace uses
+# resolver = "2", so the feature does not leak into non-test builds.
+fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false, features = [
+    "testing",
+] }
 tokio = { workspace = true, features = ["sync", "time"] }
 regex = "1.11.1"
 sqlmodel = { path = "/dp/sqlmodel_rust/crates/sqlmodel", default-features = false }
@@ -350,6 +373,15 @@ path = "tests/remote_cap_revocation_durability.rs"
 [[test]]
 name = "trust_zone_cross_zone_isolation"
 path = "tests/trust_zone_cross_zone_isolation.rs"
+
+# bd-kpjrz: this harness carries 9 `#[test]` fns over the public
+# `control_plane::control_epoch` surface — including MAC verification of a
+# round-tripped `EpochTransition`, which is exactly the authenticity property
+# that bead fixed — but it had no Cargo registration, so none of them ran. The
+# .G2 census had it in the allowlisted `[fuzz]` bucket rather than flagged.
+[[test]]
+name = "epoch_transitions_fuzz_harness"
+path = "tests/epoch_transitions_fuzz_harness.rs"
 
 # bd-4sh1w: tests/conformance/sandbox_profile_conformance.rs had NO Cargo
 # registration and no crate-local `#[path]` shim, so nothing ever ran it — it sat

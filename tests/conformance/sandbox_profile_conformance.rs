@@ -11,7 +11,10 @@ use frankenengine_node::security::sandbox_policy_compiler::*;
 fn profiles_form_strict_total_order() {
     let levels: Vec<u8> = SandboxProfile::ALL.iter().map(|p| p.level()).collect();
     for i in 1..levels.len() {
-        assert!(levels[i] > levels[i - 1], "profiles must be strictly ordered");
+        assert!(
+            levels[i] > levels[i - 1],
+            "profiles must be strictly ordered"
+        );
     }
 }
 
@@ -55,13 +58,23 @@ fn downgrade_blocked_without_override() {
 fn relaxation_is_refused_by_change_profile() {
     let mut t = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
     let err = t
-        .change_profile(SandboxProfile::Permissive, "upgrade".into(), "t".into(), false)
+        .change_profile(
+            SandboxProfile::Permissive,
+            "upgrade".into(),
+            "t".into(),
+            false,
+        )
         .unwrap_err();
     assert!(matches!(err, SandboxError::RelaxationBlocked { .. }));
 
     // The tightening override does not authorize relaxation either.
     let err = t
-        .change_profile(SandboxProfile::Permissive, "upgrade".into(), "t".into(), true)
+        .change_profile(
+            SandboxProfile::Permissive,
+            "upgrade".into(),
+            "t".into(),
+            true,
+        )
         .unwrap_err();
     assert!(matches!(err, SandboxError::RelaxationBlocked { .. }));
     assert_eq!(t.current_profile, SandboxProfile::Strict);
@@ -70,14 +83,25 @@ fn relaxation_is_refused_by_change_profile() {
 #[test]
 fn relaxation_succeeds_through_its_own_entry_point() {
     let mut t = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
-    t.relax_profile(SandboxProfile::Moderate, "connector needs net".into(), "t".into())
-        .unwrap();
-    t.relax_profile(SandboxProfile::Permissive, "operator sign-off #42".into(), "t".into())
-        .unwrap();
+    t.relax_profile(
+        SandboxProfile::Moderate,
+        "connector needs net".into(),
+        "t".into(),
+    )
+    .unwrap();
+    t.relax_profile(
+        SandboxProfile::Permissive,
+        "operator sign-off #42".into(),
+        "t".into(),
+    )
+    .unwrap();
     assert_eq!(t.current_profile, SandboxProfile::Permissive);
 
     // The justification is auditable.
-    assert_eq!(t.audit_log.last().map(|r| r.reason.as_str()), Some("operator sign-off #42"));
+    assert_eq!(
+        t.audit_log.last().map(|r| r.reason.as_str()),
+        Some("operator sign-off #42")
+    );
 }
 
 #[test]
@@ -124,7 +148,8 @@ fn profile_change_audited() {
     // bd-4sh1w: Strict -> Moderate is a relaxation, so it routes through
     // `relax_profile`. The audit record it produces is identical in shape.
     let mut t = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
-    t.relax_profile(SandboxProfile::Moderate, "needs net".into(), "t".into()).unwrap();
+    t.relax_profile(SandboxProfile::Moderate, "needs net".into(), "t".into())
+        .unwrap();
     assert_eq!(t.audit_log.len(), 2);
     let last = &t.audit_log[1];
     assert_eq!(last.old_profile, Some(SandboxProfile::Strict));

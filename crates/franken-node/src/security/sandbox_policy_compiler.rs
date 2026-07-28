@@ -618,14 +618,14 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, SandboxError::RelaxationBlocked { .. }));
         assert_eq!(t.current_profile, SandboxProfile::Strict);
-        assert_eq!(t.audit_log.len(), 1, "a refused change records no audit entry");
+        assert_eq!(
+            t.audit_log.len(),
+            1,
+            "a refused change records no audit entry"
+        );
 
         let audit = t
-            .relax_profile(
-                SandboxProfile::Moderate,
-                "needs network".into(),
-                "t".into(),
-            )
+            .relax_profile(SandboxProfile::Moderate, "needs network".into(), "t".into())
             .unwrap();
         assert_eq!(audit.new_profile, SandboxProfile::Moderate);
         assert_eq!(t.current_profile, SandboxProfile::Moderate);

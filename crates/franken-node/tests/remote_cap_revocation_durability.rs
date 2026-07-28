@@ -91,7 +91,11 @@ fn revocation_survives_a_flood_of_later_revocations() {
 
     // Flood the gate with further live revocations, past the old FIFO bound.
     for index in 0..FLOOD_SIZE {
-        let filler = issue(&provider, &format!("trace-filler-{index:05}"), LONG_TTL_SECS);
+        let filler = issue(
+            &provider,
+            &format!("trace-filler-{index:05}"),
+            LONG_TTL_SECS,
+        );
         gate.revoke(&filler, BASE_TIME + 30, &format!("trace-revoke-{index:05}"));
     }
 
@@ -124,7 +128,11 @@ fn overflowing_the_revocation_store_refuses_loudly_instead_of_evicting() {
     let mut refusals = 0usize;
     for index in 0..FLOOD_SIZE {
         let filler = issue(&provider, &format!("trace-fill-{index:05}"), LONG_TTL_SECS);
-        let event = gate.revoke(&filler, BASE_TIME + 30, &format!("trace-fill-rev-{index:05}"));
+        let event = gate.revoke(
+            &filler,
+            BASE_TIME + 30,
+            &format!("trace-fill-rev-{index:05}"),
+        );
         if event.event_code == "REMOTECAP_REVOKE_REFUSED" {
             refusals = refusals.saturating_add(1);
             assert!(!event.allowed);

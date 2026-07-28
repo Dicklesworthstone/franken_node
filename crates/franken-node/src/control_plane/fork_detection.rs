@@ -1812,7 +1812,14 @@ mod tests {
     }
 
     #[test]
-    fn rollback_detector_gap_error_does_not_create_rollback_proof() {
+    fn rollback_detector_gap_records_the_re_anchor_as_a_typed_proof() {
+        // bd-zfg3w: was `rollback_detector_gap_error_does_not_create_rollback_proof`,
+        // which pinned the gap path as the one error branch that mutated state
+        // (promoting an unvalidated peer vector to `last_known`) while recording
+        // NOTHING. Forward progress is unchanged — the operator kept it so a
+        // replica can resume after a legitimate gap — but the re-anchor is now
+        // evidence-producing, so a two-epoch jump can no longer silently re-root
+        // the parent-hash chain onto attacker state.
         let mut detector = RollbackDetector::new();
         let first = make_sv(10, "state-10", "state-9", "node");
         detector.feed(first).unwrap();
@@ -1822,7 +1829,11 @@ mod tests {
             .expect_err("gap must be reported");
 
         assert_eq!(err.code(), "RFD_GAP_DETECTED");
-        assert_eq!(detector.proof_count(), 0);
+        assert_eq!(detector.proof_count(), 1);
+        let proof = detector.proofs().last().expect("gap re-anchor proof");
+        assert_eq!(proof.detection_result, DetectionResult::GapDetected);
+        assert_eq!(proof.local_state.epoch, 10);
+        assert_eq!(proof.remote_state.epoch, 15);
         assert_eq!(detector.last_known().expect("last known").epoch, 15);
     }
 
@@ -1842,7 +1853,19 @@ mod tests {
             .expect_err("post-gap replay below last known must be rollback");
 
         assert_eq!(err.code(), "RFD_ROLLBACK_DETECTED");
-        assert_eq!(detector.proof_count(), 1);
+        // bd-zfg3w: two proofs now — the gap re-anchor, then this rollback.
+        assert_eq!(detector.proof_count(), 2);
+        assert_eq!(
+            detector
+                .proofs()
+                .iter()
+                .map(|proof| proof.detection_result.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                DetectionResult::GapDetected,
+                DetectionResult::RollbackDetected,
+            ]
+        );
         assert_eq!(detector.last_known().expect("last known").epoch, 15);
     }
 
@@ -1975,7 +1998,9 @@ mod tests {
     }
 
     #[test]
-    fn rollback_detector_gap_to_u64_max_advances_without_proof() {
+    fn rollback_detector_gap_to_u64_max_advances_and_records_the_re_anchor() {
+        // bd-zfg3w: the boundary case of the same rule — a gap at the epoch
+        // ceiling still advances, and still leaves a proof.
         let mut detector = RollbackDetector::new();
         detector
             .feed(make_sv(u64::MAX - 2, "near-max", "near-parent", "node"))
@@ -1986,7 +2011,15 @@ mod tests {
             .expect_err("two-epoch jump to u64::MAX must be a gap");
 
         assert_eq!(err.code(), "RFD_GAP_DETECTED");
-        assert_eq!(detector.proof_count(), 0);
+        assert_eq!(detector.proof_count(), 1);
+        assert_eq!(
+            detector
+                .proofs()
+                .last()
+                .expect("gap re-anchor proof")
+                .detection_result,
+            DetectionResult::GapDetected
+        );
         assert_eq!(detector.last_known().expect("last known").epoch, u64::MAX);
     }
 

@@ -449,9 +449,7 @@ fn tnr_ltv_reattestation_verification(c: &mut Criterion) {
             witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
             threshold_config: evidence.witness_receipt.threshold_config.clone(),
         };
-        b.iter(|| {
-            black_box(sdk.verify_as_of_ltv(black_box(&evidence), black_box(&witness_anchor)))
-        })
+        b.iter(|| black_box(sdk.verify_as_of_ltv(black_box(&evidence), black_box(&witness_anchor))))
     });
 }
 

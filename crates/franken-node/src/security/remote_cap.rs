@@ -479,12 +479,7 @@ impl HybridRevocationChecker {
             self.revocations.remove(&token_id);
             self.cuckoo.remove(&token_id);
         }
-        self.earliest_expiry = self
-            .revocations
-            .values()
-            .copied()
-            .min()
-            .unwrap_or(u64::MAX);
+        self.earliest_expiry = self.revocations.values().copied().min().unwrap_or(u64::MAX);
     }
 
     fn len(&self) -> usize {

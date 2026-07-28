@@ -2822,13 +2822,18 @@ mod tests {
     fn negative_memory_exhaustion_with_massive_proof_lists_and_audit_logs() {
         let mut ctrl = make_controller();
 
-        // Test with massive number of required proofs
+        // bd-uwcal: a 10,000-entry required_proofs list is now REFUSED at
+        // issuance, which is the strongest possible answer to this test's own
+        // question — the list is never stored at all, so there is nothing to
+        // exhaust. (The flow accepts exactly one proof, so any multi-proof
+        // challenge could only ever be denied or time out; expressing one is now
+        // an immediate error rather than a silent dead end.)
         let massive_proofs: Vec<RequiredProofType> = (0..10_000)
             .map(|i| RequiredProofType::Custom(format!("massive_proof_type_{}", i)))
             .collect();
 
         let mass_artifact = ArtifactId::new("massive_proof_artifact");
-        let cid = ctrl
+        let refused = ctrl
             .issue_challenge(
                 mass_artifact.clone(),
                 SuspicionReason::PolicyRule("massive_policy".to_string()),
@@ -2836,19 +2841,35 @@ mod tests {
                 "mass_operator",
                 1000,
             )
+            .expect_err("a 10,000-proof challenge must be refused as unsatisfiable");
+        assert_eq!(refused.code, ERR_UNSATISFIABLE_CHALLENGE);
+
+        // The submission-pressure half of this test still needs a live challenge,
+        // so issue the satisfiable single-proof form and stress that.
+        let required_type = RequiredProofType::Custom("massive_proof_type_0".to_string());
+        let cid = ctrl
+            .issue_challenge(
+                mass_artifact.clone(),
+                SuspicionReason::PolicyRule("massive_policy".to_string()),
+                vec![required_type.clone()],
+                "mass_operator",
+                1000,
+            )
             .unwrap();
 
-        // Verify challenge handles massive proof requirements
         let challenge = ctrl.get_challenge(&cid).unwrap();
-        assert_eq!(challenge.required_proofs.len(), 10_000);
+        assert_eq!(challenge.required_proofs.len(), 1);
 
         // Submit massive number of proof artifacts
         for i in 0..1000 {
             let proof = ProofSubmission {
-                // proof_type must be one of the challenge's required_proofs: prod now
+                // proof_type must be one of the challenge's required_proofs: prod
                 // rejects unrequired types ("not required for this challenge").
-                // massive_proof_type_{i} matches required_proofs[i] for i < 10_000.
-                proof_type: RequiredProofType::Custom(format!("massive_proof_type_{}", i)),
+                // bd-uwcal: the challenge now declares exactly one required type,
+                // so every submission uses it — which keeps the assertion below
+                // about ERR_INVALID_TRANSITION (rather than a not-required error)
+                // measuring what it was written to measure.
+                proof_type: required_type.clone(),
                 // data_hash must be valid hex, 32..=128 chars (prod format validation).
                 // 128 hex chars preserves the "large hash" stress intent within bounds.
                 data_hash: "a".repeat(128),

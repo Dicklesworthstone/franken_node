@@ -747,7 +747,8 @@ pub fn mmr_root_witness_evidence_entry(
     anchor: &MmrRootWitnessTrustAnchor,
     as_of_unix_seconds: u64,
 ) -> Result<EvidenceEntry, LedgerError> {
-    build_mmr_root_witness_evidence_entry(receipt, anchor, as_of_unix_seconds).map(|(entry, _)| entry)
+    build_mmr_root_witness_evidence_entry(receipt, anchor, as_of_unix_seconds)
+        .map(|(entry, _)| entry)
 }
 
 fn build_mmr_root_witness_evidence_entry(

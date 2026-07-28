@@ -142,8 +142,11 @@ fn conformance_must_rg_002_deterministic_process_classification() {
     ];
 
     for (command, expected_kind) in test_commands {
+        // bd-6n2xv: `ObservedValidationProcess::new` returns `Option<Self>`, not
+        // `Result` — the closure takes no argument. This target had drifted out
+        // of compilation and the total workspace build failure hid it.
         let process = ObservedValidationProcess::new(Some(1234), command)
-            .unwrap_or_else(|_| panic!("Failed to classify command: {}", command));
+            .unwrap_or_else(|| panic!("Failed to classify command: {}", command));
 
         assert_eq!(
             process.kind, expected_kind,

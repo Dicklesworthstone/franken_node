@@ -34,7 +34,9 @@ fn zone(id: &str, isolation: IsolationLevel) -> ZonePolicy {
 fn zone_with_targets(id: &str, isolation: IsolationLevel, targets: &[&str]) -> ZonePolicy {
     let mut policy = zone(id, isolation);
     for target in targets {
-        policy.allowed_cross_zone_targets.push((*target).to_string());
+        policy
+            .allowed_cross_zone_targets
+            .push((*target).to_string());
     }
     policy
 }
@@ -50,7 +52,8 @@ fn permissive_zone_cannot_push_an_unbridged_write_into_a_strict_zone() {
         .register_zone(zone("victim", IsolationLevel::Strict))
         .expect("register victim zone");
 
-    let request = CrossZoneRequest::new("attacker", "victim", "write:delete_all", "attacker", PROOF);
+    let request =
+        CrossZoneRequest::new("attacker", "victim", "write:delete_all", "attacker", PROOF);
 
     assert_eq!(
         engine.authorize_cross_zone(&request),
@@ -113,7 +116,14 @@ fn unrecognized_action_verbs_are_treated_as_writes() {
         .register_zone(zone("target", IsolationLevel::Strict))
         .expect("register target zone");
 
-    for action in ["update", "put", "truncate", "insert", "migrate", "frobnicate"] {
+    for action in [
+        "update",
+        "put",
+        "truncate",
+        "insert",
+        "migrate",
+        "frobnicate",
+    ] {
         let request = CrossZoneRequest::new("source", "target", action, "actor", PROOF);
         assert_eq!(
             engine.authorize_cross_zone(&request),
@@ -127,7 +137,14 @@ fn unrecognized_action_verbs_are_treated_as_writes() {
 
 #[test]
 fn read_classification_matches_the_documented_verb_set() {
-    for action in ["read", "GET", "list/zones", "query.plan", "describe", "stat"] {
+    for action in [
+        "read",
+        "GET",
+        "list/zones",
+        "query.plan",
+        "describe",
+        "stat",
+    ] {
         assert!(is_read_only_action(action), "'{action}' should be a read");
     }
     for action in [

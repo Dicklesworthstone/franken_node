@@ -72,18 +72,8 @@ pub enum IsolationLevel {
 /// lets cross a zone boundary without a bridge, so a verb belongs here only if it
 /// cannot mutate the target zone under any reading.
 const READ_ONLY_ACTION_VERBS: &[&str] = &[
-    "count",
-    "describe",
-    "exists",
-    "get",
-    "head",
-    "inspect",
-    "list",
-    "query",
-    "read",
-    "select",
-    "stat",
-    "watch",
+    "count", "describe", "exists", "get", "head", "inspect", "list", "query", "read", "select",
+    "stat", "watch",
 ];
 
 /// Classify a cross-zone action descriptor as read-only.
@@ -1480,7 +1470,14 @@ mod tests {
     #[test]
     fn read_only_action_classification_fails_closed() {
         // Positively recognized reads, in the shapes the descriptor allows.
-        for action in ["read", "READ", "get:blob", "list/zones", "query.plan", "stat"] {
+        for action in [
+            "read",
+            "READ",
+            "get:blob",
+            "list/zones",
+            "query.plan",
+            "stat",
+        ] {
             assert!(
                 is_read_only_action(action),
                 "'{action}' should classify as a read"
@@ -2592,17 +2589,24 @@ mod tests {
         let auth_scenarios = vec![
             ("zone-a", "zone-b", "valid-proof-ab", true), // Should succeed
             ("zone-b", "zone-c", "valid-proof-bc", true), // Should succeed
-            ("zone-c", "zone-a", "valid-proof-ca", true), // Permissive allows any with proof
+            ("zone-c", "zone-a", "valid-proof-ca", true), // Permissive allows reads without a bridge
             ("zone-a", "zone-c", "invalid-proof-ac", false), // A doesn't allow C directly
             ("zone-b", "zone-a", "invalid-proof-ba", false), // B doesn't allow A
         ];
 
         // Rapidly execute authorization attempts
         for (i, (source, target, proof, should_succeed)) in auth_scenarios.iter().enumerate() {
+            // bd-djpur: read actions. This test's subject is authorization
+            // SEQUENCE consistency under rapid requests, not the read/write rule,
+            // and the previous `action-{i}` descriptor is (correctly) classified
+            // as mutating now that `IsolationLevel::Permissive` enforces the
+            // bridge on writes. Using reads keeps all five expectations — Strict
+            // and Custom enforce their allowlists for reads too, so only the
+            // Permissive row depends on the distinction.
             let req = CrossZoneRequest::new(
                 *source,
                 *target,
-                format!("action-{}", i),
+                format!("read:probe-{}", i),
                 format!("user-{}", i),
                 *proof,
             );

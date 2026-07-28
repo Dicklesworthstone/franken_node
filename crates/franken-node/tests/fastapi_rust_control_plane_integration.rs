@@ -3,9 +3,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use fastapi_rust::{App, Method, Request, RequestContext, Response, StatusCode, TestClient};
 use frankenengine_node::api::error::ApiError;
 use frankenengine_node::api::fleet_quarantine::{
-    FLEET_NOT_ACTIVATED, FLEET_RECONCILE_COMPLETED,
+    FLEET_NOT_ACTIVATED, FLEET_RECONCILE_COMPLETED, FleetControlManager,
     activate_shared_fleet_control_manager_for_tests, handle_reconcile,
-    reset_shared_fleet_control_manager_for_tests,
+    replace_shared_fleet_control_manager_for_tests, reset_shared_fleet_control_manager_for_tests,
 };
 use frankenengine_node::api::middleware::{
     AuthIdentity, AuthMethod, RequestLog, TraceContext, span_id_from_unix_nanos_for_tests,
@@ -33,6 +33,14 @@ const TRUSTED_FLEET_ADMIN: &str = "fastapi-rust-fleet-admin";
 const NON_ADMIN_IDENTITY: &str = "fastapi-rust-readonly-operator";
 const MAX_RECONCILE_PAYLOAD_BYTES: usize = 1024;
 const RECONCILE_TRACEPARENT: &str = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01";
+/// The trace id a request carrying `RECONCILE_TRACEPARENT` actually gets.
+///
+/// bd-6n2xv: distinct from `RECONCILE_TRACE_ID`, which is only the fallback used
+/// in error responses when the traceparent header is missing or malformed. A
+/// successful request is traced by the header, so asserting `RECONCILE_TRACE_ID`
+/// on a 200 body compared the fallback against the real value. Nobody noticed
+/// because this target never compiled, so the assertion never ran.
+const RECONCILE_TRACEPARENT_TRACE_ID: &str = "0123456789abcdef0123456789abcdef";
 
 #[derive(Debug, Deserialize)]
 struct ReconcileRouteRequest {
@@ -420,7 +428,14 @@ mod traceparent_parser_hardening {
         // 55-byte header where extra dashes inside fields create a 5th segment.
         // Exactly 55 bytes total, but split into 5+ segments so the
         // post-split is_some check trips and parser rejects.
-        let weird: String = "00-0af7651916cd43dd8448eb211c80319-b7ad6b71-9203331-01".to_string();
+        //
+        // bd-6n2xv: the previous literal was 54 bytes, not 55 — its trace-id
+        // field was 31 hex characters — so the length assertion below failed
+        // before the parser was ever exercised, and the test proved nothing
+        // about extra segments. This target had never compiled, so nobody saw it.
+        // Layout: "00" + trace-id(32) + "b7ad6b71"(8) + "9203331"(7) + "01",
+        // four dashes => 2+1+32+1+8+1+7+1+2 = 55 across five segments.
+        let weird: String = "00-0af7651916cd43dd8448eb211c803190-b7ad6b71-9203331-01".to_string();
         assert_eq!(weird.len(), TRACEPARENT_HEADER_LEN);
         assert!(parse_traceparent(&weird).is_none());
     }
@@ -658,6 +673,22 @@ fn reconcile_body(request_id: &str) -> Vec<u8> {
 #[test]
 fn fleet_quarantine_reconcile_serves_through_fastapi_rust_route_handler() {
     let _guard = lock_shared_fleet_state();
+    // bd-6n2xv: install a manager that HAS decision signing material.
+    //
+    // `FleetControlManager::new()` only provisions default signing material under
+    // the lib crate's own `#[cfg(test)]`. This is an external integration-test
+    // binary, so the lib is compiled without `cfg(test)` and `new()` yields a
+    // manager with none — every write then fails
+    // `FLEET_RECEIPT_SIGNING_MATERIAL_MISSING`, which is exactly what this test
+    // hit (as a bare 400) the first time it was ever able to run. Production
+    // exposes `with_decision_signing_key` for precisely this, and
+    // tests/conformance/bd_tg2_fleet_quarantine_conformance.rs documents the same
+    // trap under bd-rjc2m.7.
+    replace_shared_fleet_control_manager_for_tests(FleetControlManager::with_decision_signing_key(
+        ed25519_dalek::SigningKey::from_bytes(&[42_u8; 32]),
+        "fastapi-rust-control-plane-integration",
+        "fleet-control-plane",
+    ));
     activate_shared_fleet_control_manager_for_tests();
 
     let client = TestClient::new(control_plane_app());
@@ -665,14 +696,23 @@ fn fleet_quarantine_reconcile_serves_through_fastapi_rust_route_handler() {
     let response =
         authorized_reconcile_request(&client, reconcile_body("reconcile-happy-path")).send();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    // bd-6n2xv: surface the problem detail on failure. This target did not
+    // compile for months, so when it finally ran, a bare status mismatch gave
+    // nothing to diagnose from.
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "reconcile happy path rejected; content_type={:?} body={:?}",
+        response.content_type(),
+        response.text()
+    );
     assert_eq!(response.content_type(), Some("application/json"));
 
     let body: Value = response.json().expect("json reconcile response");
     assert_eq!(body["ok"], true);
     assert_eq!(body["data"]["action_type"], "reconcile");
     assert_eq!(body["data"]["event_code"], FLEET_RECONCILE_COMPLETED);
-    assert_eq!(body["data"]["trace_id"], RECONCILE_TRACE_ID);
+    assert_eq!(body["data"]["trace_id"], RECONCILE_TRACEPARENT_TRACE_ID);
     assert_eq!(body["data"]["success"], true);
     assert_eq!(body["data"]["convergence"]["progress_pct"], 100);
 }
