@@ -519,6 +519,25 @@ pub struct LongTermMmrRootWitnessStatement {
     pub content_hash: String,
 }
 
+/// Operator-pinned trust anchor for LTV witness receipts.
+///
+/// bd-7fubt: verification must not read the witness signer set out of the
+/// artifact being verified. This anchor names the witness group and policy the
+/// verifier trusts and pins the quorum — and therefore the keys — that a receipt
+/// must satisfy. It is supplied out of band, exactly like the Ed25519 trust
+/// anchor `incident replay` and `verify release` already require; the SDK ships
+/// no built-in witness roots.
+///
+/// Pinning the group/policy alone would not be enough: `ThresholdConfig` carries
+/// `signer_keys`, so an attacker could keep the advertised group name and swap
+/// the key set. Both are bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermWitnessTrustAnchor {
+    pub witness_group_id: String,
+    pub witness_policy_id: String,
+    pub threshold_config: LongTermThresholdConfig,
+}
+
 /// Threshold-cosigned receipt proving a root was observed by independent witnesses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LongTermMmrRootWitnessReceipt {
@@ -1018,13 +1037,20 @@ impl VerifierSdk {
     /// the claimed time, verifies MMR inclusion under the origin root, verifies
     /// the re-attestation prefix chain to the witnessed root, and verifies the
     /// independent threshold witness receipt before accepting anteriority.
+    /// Re-verify long-term verification evidence offline.
+    ///
+    /// `witness_anchor` is the operator-supplied witness trust anchor and is
+    /// REQUIRED (bd-7fubt): without it the witness receipt would be checked
+    /// against the signer set it carries itself, which any forger can choose.
+    /// There is no built-in witness root, by design.
     pub fn verify_as_of_ltv(
         &self,
         evidence: &LongTermVerificationEvidence,
+        witness_anchor: &LongTermWitnessTrustAnchor,
     ) -> VerifierSdkResult<VerificationResult> {
         check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
         self.validate_current_verifier_identity()?;
-        let verification = verify_long_term_evidence(evidence);
+        let verification = verify_long_term_evidence(evidence, witness_anchor);
         let verdict = if verification.all_passed() {
             VerificationVerdict::Pass
         } else {
@@ -2383,6 +2409,7 @@ struct LongTermWitnessVerification {
 
 fn verify_long_term_evidence(
     evidence: &LongTermVerificationEvidence,
+    witness_anchor: &LongTermWitnessTrustAnchor,
 ) -> LongTermEvidenceVerification {
     let mut assertions = Vec::new();
     let artifact_binding_hash = long_term_artifact_marker_hash(&evidence.artifact);
@@ -2466,7 +2493,8 @@ fn verify_long_term_evidence(
         },
     );
 
-    let witness_check = verify_long_term_witness_receipt(&evidence.witness_receipt);
+    let witness_check =
+        verify_long_term_witness_receipt(&evidence.witness_receipt, witness_anchor);
     let witness_root_matches = match (&chain_check, &witness_check) {
         (Ok(reattested_root), Ok(witness)) => witness.root == *reattested_root,
         _ => false,
@@ -2854,7 +2882,33 @@ fn verify_long_term_prefix(
 
 fn verify_long_term_witness_receipt(
     receipt: &LongTermMmrRootWitnessReceipt,
+    anchor: &LongTermWitnessTrustAnchor,
 ) -> Result<LongTermWitnessVerification, String> {
+    // bd-7fubt: the receipt carries its own `threshold_config`, and that config
+    // carries the verifying KEYS. Handing it to `verify_long_term_threshold`
+    // meant a receipt supplied both the signatures and the key set they were
+    // checked against, so an attacker with one keypair could mint a witness
+    // receipt for any root at any claimed observation time and this SDK — the
+    // component whose entire purpose is verifying without trusting the producer —
+    // would return Pass. The anchor is the authority; the embedded config is an
+    // assertion to check against it.
+    if !constant_time_eq(
+        &receipt.statement.witness_group_id,
+        &anchor.witness_group_id,
+    ) {
+        return Err("root witness group does not match the pinned trust anchor".to_string());
+    }
+    if !constant_time_eq(
+        &receipt.statement.witness_policy_id,
+        &anchor.witness_policy_id,
+    ) {
+        return Err("root witness policy does not match the pinned trust anchor".to_string());
+    }
+    if receipt.threshold_config != anchor.threshold_config {
+        return Err(
+            "root witness threshold_config does not match the pinned trust anchor".to_string(),
+        );
+    }
     validate_long_term_witness_statement(&receipt.statement)?;
     validate_long_term_text("trace_id", &receipt.trace_id)?;
     validate_long_term_text("timestamp", &receipt.timestamp)?;
@@ -2883,7 +2937,8 @@ fn verify_long_term_witness_receipt(
         ));
     }
     let (valid_signatures, threshold) =
-        verify_long_term_threshold(&receipt.threshold_config, &receipt.witness_artifact)?;
+        // The ANCHOR's config, never the receipt's (bd-7fubt).
+        verify_long_term_threshold(&anchor.threshold_config, &receipt.witness_artifact)?;
     Ok(LongTermWitnessVerification {
         root: receipt.statement.root.clone(),
         observed_at_unix_seconds: receipt.statement.observed_at_unix_seconds,
@@ -3437,7 +3492,15 @@ pub fn build_long_term_verification_evidence(
         },
     };
 
-    let verification = verify_long_term_evidence(&evidence);
+    // The builder is the PRODUCER: it just constructed the witness set, so it can
+    // legitimately state the anchor for its own self-check. A verifier must
+    // supply one out of band instead (bd-7fubt).
+    let self_check_anchor = LongTermWitnessTrustAnchor {
+        witness_group_id: evidence.witness_receipt.statement.witness_group_id.clone(),
+        witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
+        threshold_config: evidence.witness_receipt.threshold_config.clone(),
+    };
+    let verification = verify_long_term_evidence(&evidence, &self_check_anchor);
     if let Some(failed) = verification
         .checked_assertions
         .iter()
@@ -4404,12 +4467,23 @@ mod tests {
         }
     }
 
+    /// Build the anchor a verifier would hold for this evidence's witness set.
+    fn witness_anchor_for(
+        evidence: &LongTermVerificationEvidence,
+    ) -> LongTermWitnessTrustAnchor {
+        LongTermWitnessTrustAnchor {
+            witness_group_id: evidence.witness_receipt.statement.witness_group_id.clone(),
+            witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
+            threshold_config: evidence.witness_receipt.threshold_config.clone(),
+        }
+    }
+
     fn verify_as_of_ltv_for_test(
         sdk: &VerifierSdk,
         evidence: &LongTermVerificationEvidence,
         context: &str,
     ) -> VerificationResult {
-        let result = sdk.verify_as_of_ltv(evidence);
+        let result = sdk.verify_as_of_ltv(evidence, &witness_anchor_for(evidence));
         assert!(result.is_ok(), "{context}: {result:?}");
         result.unwrap_or_else(|_| VerificationResult {
             operation: VerificationOperation::LongTermValidation,
@@ -5405,6 +5479,53 @@ mod tests {
     }
 
     #[test]
+    fn verify_as_of_ltv_rejects_a_witness_receipt_that_supplies_its_own_signer_set() {
+        // bd-7fubt: this SDK exists to verify claims WITHOUT trusting the party
+        // that produced them, and the witness receipt used to be checked against
+        // the `threshold_config` — i.e. the verifying keys — it carries itself.
+        // Anyone could therefore mint a receipt for any root at any claimed
+        // observation time and have an offline verifier return Pass.
+        //
+        // Here the evidence is genuine but the verifier holds an anchor naming a
+        // DIFFERENT witness group, which is the realistic shape of the attack:
+        // the receipt's own quorum says it is fine, the operator's anchor does
+        // not, and the anchor must win.
+        let request = builder_reference_request();
+        let signers = builder_witness_signers(3);
+        let evidence = build_long_term_verification_evidence(&request, &signers)
+            .expect("builder should assemble self-verifying evidence");
+
+        let mut foreign_anchor = witness_anchor_for(&evidence);
+        foreign_anchor.witness_group_id = "some-other-witness-group".to_string();
+
+        let sdk = create_verifier_sdk("verifier://builder");
+        let result = sdk
+            .verify_as_of_ltv(&evidence, &foreign_anchor)
+            .expect("a refused anchor still yields a signed result");
+        assert_eq!(
+            result.verdict,
+            VerificationVerdict::Fail,
+            "a receipt that does not match the operator's anchor must not verify"
+        );
+        assert!(
+            result.checked_assertions.iter().any(|assertion| {
+                assertion.assertion == "ltv_witness_threshold_verified" && !assertion.passed
+            }),
+            "the witness threshold assertion must be the one that fails"
+        );
+
+        // Swapping only the signer keys while keeping the advertised group name
+        // must fail too, otherwise pinning the name alone would be theatre.
+        let mut swapped_keys_anchor = witness_anchor_for(&evidence);
+        swapped_keys_anchor.threshold_config.signer_keys.clear();
+        swapped_keys_anchor.threshold_config.total_signers = 0;
+        let result = sdk
+            .verify_as_of_ltv(&evidence, &swapped_keys_anchor)
+            .expect("a refused anchor still yields a signed result");
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+    }
+
+    #[test]
     fn public_builder_evidence_fails_closed_after_tamper() {
         let request = builder_reference_request();
         let signers = builder_witness_signers(3);
@@ -5414,7 +5535,7 @@ mod tests {
 
         let sdk = create_verifier_sdk("verifier://builder");
         let result = sdk
-            .verify_as_of_ltv(&evidence)
+            .verify_as_of_ltv(&evidence, &witness_anchor_for(&evidence))
             .expect("tampered evidence still yields a signed fail result");
         assert_eq!(result.verdict, VerificationVerdict::Fail);
         assert!(result.checked_assertions.iter().any(|assertion| {

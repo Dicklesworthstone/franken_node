@@ -72,7 +72,9 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::Duration;
 
-use frankenengine_node::control_plane::mmr_proofs::MmrRootWitnessReceipt;
+use frankenengine_node::control_plane::mmr_proofs::{
+    MmrRootWitnessReceipt, MmrRootWitnessTrustAnchor,
+};
 use frankenengine_node::observability::evidence_ledger::{EvidenceLedger, LedgerCapacity};
 use frankenengine_node::tools::replay_bundle::{
     EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
@@ -655,8 +657,22 @@ fn ltv_leg(
             .expect("CLI witness receipt must deserialize as the product receipt type");
     let as_of = evidence_json["as_of_unix_seconds"].as_u64().expect("as_of");
     let mut evidence_ledger = EvidenceLedger::new(LedgerCapacity::new(16, 1 << 20));
+    // bd-7fubt: the ledger no longer trusts a receipt's own embedded signer set,
+    // so an anchor is required. This leg asserts WIRE COMPATIBILITY — that the
+    // CLI's witness receipt deserializes as the product type and appends — so the
+    // anchor is derived from the receipt on purpose. That derivation is circular
+    // and proves nothing about forgery resistance; the enforcement itself is
+    // pinned by `mmr_root_witness_receipt_rejects_a_self_anchored_forgery` in
+    // `observability::evidence_ledger`, where the anchor is independent of the
+    // receipt under test.
+    let witness_anchor = MmrRootWitnessTrustAnchor::new(
+        &receipt.statement.witness_group_id,
+        &receipt.statement.witness_policy_id,
+        receipt.threshold_config.clone(),
+    )
+    .expect("operator witness trust anchor");
     let (_, verification) = evidence_ledger
-        .append_mmr_root_witness_receipt(&receipt, as_of + 1)
+        .append_mmr_root_witness_receipt(&receipt, &witness_anchor, as_of + 1)
         .expect("witness receipt appends as proof-of-anteriority evidence");
     assert!(verification.valid_signatures >= 2);
     layer_pass(
@@ -667,6 +683,20 @@ fn ltv_leg(
         ),
     );
 
+    // bd-7fubt: `verify-as-of` is fail-closed without an operator-supplied
+    // witness trust anchor. Write the one this operator holds for the witness
+    // group `ltv attest` just cosigned with.
+    std::fs::write(
+        workspace.join("witness-anchor.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "witness_group_id": receipt.statement.witness_group_id,
+            "witness_policy_id": receipt.statement.witness_policy_id,
+            "threshold_config": receipt.threshold_config,
+        }))
+        .expect("witness anchor serializes"),
+    )
+    .expect("write witness anchor");
+
     let verify_output = run_cli(
         workspace,
         &[
@@ -674,6 +704,8 @@ fn ltv_leg(
             "verify-as-of",
             "--evidence",
             "ltv-evidence.json",
+            "--witness-anchor",
+            "witness-anchor.json",
             "--json",
             "--structured-logs-jsonl",
             "--trace-id",
@@ -719,6 +751,8 @@ fn ltv_leg(
             "verify-as-of",
             "--evidence",
             "ltv-evidence.json",
+            "--witness-anchor",
+            "witness-anchor.json",
             "--as-of",
             "1000",
             "--json",

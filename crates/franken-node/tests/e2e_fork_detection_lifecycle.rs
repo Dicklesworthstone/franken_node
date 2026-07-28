@@ -542,6 +542,21 @@ fn e2e_rollback_detector_feed_chain_lifecycle() {
     // Even on gap, RollbackDetector promotes the new SV to last_known so
     // forward progress can resume (gap was returned for operator visibility).
     assert_eq!(rd.last_known().map(|k| k.epoch), Some(5));
+
+    // bd-zfg3w: that promotion re-roots the parent-hash chain onto a peer vector
+    // that was never validated against the local one, and it used to leave no
+    // trace at all — `proof_count()` stayed put, so a two-epoch jump could
+    // re-anchor the chain invisibly. Forward progress is unchanged; the
+    // re-anchor is now recorded as evidence an operator can audit.
+    assert_eq!(
+        rd.proof_count(),
+        2,
+        "the gap re-anchor must record a proof alongside the earlier rollback"
+    );
+    let gap_proof = rd.proofs().last().expect("gap re-anchor proof");
+    assert_eq!(gap_proof.detection_result, DetectionResult::GapDetected);
+    assert_eq!(gap_proof.local_state.epoch, 3);
+    assert_eq!(gap_proof.remote_state.epoch, 5);
     h.log_phase("gap_detected", true, json!({"new_epoch": 5}));
 
     // ── ASSERT: parent-hash chain break detected ────────────────────
@@ -572,12 +587,22 @@ fn e2e_rollback_detector_feed_chain_lifecycle() {
         assert_eq!(actual_parent, wrong_parent.parent_state_hash);
         h.log_phase("chain_break_rejected", true, json!({"epoch": 6}));
     }
-    // The proofs vec accumulates: first same-epoch + this chain break.
-    assert_eq!(rd.proof_count(), 2);
-    assert!(
-        rd.proofs()
-            .iter()
-            .all(|p| matches!(p.detection_result, DetectionResult::RollbackDetected))
+    // The proofs vec accumulates: same-epoch rollback, the bd-zfg3w gap
+    // re-anchor, then this chain break.
+    assert_eq!(rd.proof_count(), 3);
+    let kinds: Vec<DetectionResult> = rd
+        .proofs()
+        .iter()
+        .map(|p| p.detection_result.clone())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            DetectionResult::RollbackDetected,
+            DetectionResult::GapDetected,
+            DetectionResult::RollbackDetected,
+        ],
+        "every state-mutating or refused transition must leave a typed proof"
     );
     h.log_phase(
         "proofs_serializable",

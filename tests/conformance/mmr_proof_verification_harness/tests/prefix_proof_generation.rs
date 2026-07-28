@@ -2,7 +2,13 @@
 
 use super::super::*;
 use ed25519_dalek::SigningKey;
+use frankenengine_node::control_plane::mmr_proofs::MmrRootWitnessTrustAnchor;
 use sha2::{Digest, Sha256};
+
+/// Witness group / policy the R4.* fixtures speak for. Shared between the
+/// statement builder and the trust anchor so the two cannot drift apart.
+const WITNESS_GROUP_ID: &str = "cross-zone-witnesses";
+const WITNESS_POLICY_ID: &str = "ltv-policy-v1";
 
 fn prefix_pair(
     ctx: &TestContext,
@@ -59,6 +65,18 @@ fn witness_threshold_config(threshold: u32, total: u32) -> (Vec<SigningKey>, Thr
     )
 }
 
+/// bd-7fubt: the operator-pinned anchor a verifier holds out of band, built
+/// from the same witness group/policy and quorum the fixtures sign with.
+fn root_witness_anchor() -> MmrRootWitnessTrustAnchor {
+    let (_, threshold_config) = witness_threshold_config(2, 3);
+    MmrRootWitnessTrustAnchor::new(
+        WITNESS_GROUP_ID,
+        WITNESS_POLICY_ID,
+        threshold_config,
+    )
+    .expect("valid root witness trust anchor")
+}
+
 fn root_witness_receipt(
     ctx: &TestContext,
     observed_at_unix_seconds: u64,
@@ -70,8 +88,8 @@ fn root_witness_receipt(
     let statement = mmr_root_witness_statement(
         &root,
         observed_at_unix_seconds,
-        "cross-zone-witnesses",
-        "ltv-policy-v1",
+        WITNESS_GROUP_ID,
+        WITNESS_POLICY_ID,
     )
     .map_err(|err| format!("root witness statement failed: {err}"))?;
 
@@ -390,7 +408,7 @@ impl ConformanceTest for RootWitnessCosigningValidTest {
             Err(err) => return TestResult::fail(err),
         };
 
-        let verification = match verify_root_witness_receipt(&receipt) {
+        let verification = match verify_root_witness_receipt(&receipt, &root_witness_anchor()) {
             Ok(verification) => verification,
             Err(err) => return TestResult::fail(format!("root witness did not verify: {err}")),
         };
@@ -401,7 +419,7 @@ impl ConformanceTest for RootWitnessCosigningValidTest {
             ));
         }
 
-        match verify_root_witness_anteriority(&receipt, 1_700_000_200) {
+        match verify_root_witness_anteriority(&receipt, &root_witness_anchor(), 1_700_000_200) {
             Ok(anteriority)
                 if anteriority
                     .event_codes
@@ -444,7 +462,7 @@ impl ConformanceTest for RootWitnessBackdatedForgeryRejectionTest {
             Err(err) => return TestResult::fail(err),
         };
 
-        match verify_root_witness_anteriority(&receipt, 1_700_000_200) {
+        match verify_root_witness_anteriority(&receipt, &root_witness_anchor(), 1_700_000_200) {
             Err(err) if err.code() == "MMR_INVALID_PROOF" => TestResult::pass(),
             Err(err) => TestResult::fail(format!("unexpected error: {err}")),
             Ok(_) => TestResult::fail("too-late root witness was accepted as anterior"),
@@ -482,7 +500,7 @@ impl ConformanceTest for RootWitnessEvidenceLedgerRecordingTest {
         let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 64 * 1024));
 
         let (entry_id, verification) =
-            match ledger.append_mmr_root_witness_receipt(&receipt, 1_700_000_200) {
+            match ledger.append_mmr_root_witness_receipt(&receipt, &root_witness_anchor(), 1_700_000_200) {
                 Ok(result) => result,
                 Err(err) => {
                     return TestResult::fail(format!("root witness evidence append failed: {err}"));

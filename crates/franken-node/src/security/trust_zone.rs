@@ -66,6 +66,60 @@ pub enum IsolationLevel {
     Custom,
 }
 
+/// Leading verbs that mark a cross-zone action descriptor as read-only.
+///
+/// Kept deliberately short: every entry widens what `IsolationLevel::Permissive`
+/// lets cross a zone boundary without a bridge, so a verb belongs here only if it
+/// cannot mutate the target zone under any reading.
+const READ_ONLY_ACTION_VERBS: &[&str] = &[
+    "count",
+    "describe",
+    "exists",
+    "get",
+    "head",
+    "inspect",
+    "list",
+    "query",
+    "read",
+    "select",
+    "stat",
+    "watch",
+];
+
+/// Classify a cross-zone action descriptor as read-only.
+///
+/// **Fail-closed by construction (bd-djpur).** An action counts as a read only
+/// when its leading verb is one this module positively recognizes; everything
+/// else — unknown verbs, misspellings, empty strings, non-ASCII lookalikes — is
+/// treated as mutating and therefore subject to the bridge requirement. A new
+/// action verb thus tightens the gate by default instead of opening it.
+///
+/// The descriptor may be a bare verb (`"read"`) or a verb with a qualifier
+/// separated by `:`, `/`, `.` or whitespace (`"read:config"`, `"write/blob"`);
+/// only the leading verb is considered, so `"write:delete_all"` classifies as
+/// mutating rather than matching on an embedded substring.
+///
+/// `connector::trust_zone` previously inlined a weaker form of this check
+/// (`action == "write" || action == "delete"`), which classified every other
+/// verb — `update`, `put`, `truncate`, `write:delete_all` — as a read. Both
+/// modules route through this function so the two cannot drift apart again.
+#[must_use]
+pub fn is_read_only_action(action: &str) -> bool {
+    let verb = action
+        .trim()
+        .split(|c: char| matches!(c, ':' | '/' | '.') || c.is_whitespace())
+        .next()
+        .unwrap_or_default();
+
+    if verb.is_empty() {
+        return false;
+    }
+
+    READ_ONLY_ACTION_VERBS
+        .iter()
+        .any(|candidate| verb.eq_ignore_ascii_case(candidate))
+}
+
 impl IsolationLevel {
     pub fn label(&self) -> &'static str {
         match self {
@@ -535,8 +589,36 @@ impl ZoneSegmentationEngine {
                 }
             }
             IsolationLevel::Permissive => {
-                // Permissive: reads are allowed, writes need bridge.
-                // Since we have a proof, we allow it.
+                // bd-djpur: this arm used to be empty, with a comment that
+                // described the rule but then waived it ("Since we have a proof,
+                // we allow it"). `req.action` was never inspected and
+                // `allowed_cross_zone_targets` was never consulted, so a zone
+                // registered Permissive with an EMPTY allowed-target list would
+                // authorize `write:delete_all` into any other zone — including a
+                // Strict one — and still report `INV_ZTS_ISOLATE: true`. Both
+                // Strict and Custom enforce the allowlist; Permissive was the
+                // outlier, and the presence check on `authorization_proof` above
+                // is not a substitute because it runs for every level.
+                //
+                // `IsolationLevel::Permissive`'s own doc comment ("Cross-zone
+                // reads allowed, writes require bridge authorization") and the
+                // sibling `connector::trust_zone` implementation both specify the
+                // rule below, so this restores the documented contract rather
+                // than inventing one: reads cross without an allowlist entry,
+                // writes need the bridge exactly as Strict does.
+                if !is_read_only_action(&req.action)
+                    && !source.allowed_cross_zone_targets.contains(&req.target_zone)
+                {
+                    self.emit_event(
+                        ZTS_004_ISOLATION_VIOLATION,
+                        &req.source_zone,
+                        &format!(
+                            "permissive isolation: mutating action '{}' from '{}' requires '{}' in allowed targets",
+                            req.action, req.source_zone, req.target_zone
+                        ),
+                    );
+                    return Err(SegmentationError::IsolationViolation);
+                }
             }
             IsolationLevel::Custom => {
                 // Custom: check allowed targets.
@@ -1333,7 +1415,9 @@ mod tests {
     }
 
     #[test]
-    fn cross_zone_permissive_allows_with_proof() {
+    fn cross_zone_permissive_allows_reads_without_a_bridge() {
+        // The read half of `IsolationLevel::Permissive`: a read crosses without
+        // the target appearing in `allowed_cross_zone_targets`.
         let mut engine = ZoneSegmentationEngine::new();
         engine
             .register_zone(make_zone("prod", 90, 5, IsolationLevel::Permissive))
@@ -1342,8 +1426,89 @@ mod tests {
             .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
             .unwrap();
 
+        let req = CrossZoneRequest::new("prod", "staging", "read:config", "requester-1", "proof");
+        assert!(engine.authorize_cross_zone(&req).is_ok());
+    }
+
+    #[test]
+    fn cross_zone_permissive_allows_writes_to_a_bridged_target() {
+        // The write half: with the bridge in place, a mutating action crosses.
+        let mut engine = ZoneSegmentationEngine::new();
+        let mut prod = make_zone("prod", 90, 5, IsolationLevel::Permissive);
+        prod.allowed_cross_zone_targets.push("staging".to_string());
+        engine.register_zone(prod).unwrap();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
+            .unwrap();
+
+        // `make_cross_zone_req` uses the mutating action "migrate".
         let req = make_cross_zone_req("prod", "staging", "proof");
         assert!(engine.authorize_cross_zone(&req).is_ok());
+    }
+
+    #[test]
+    fn cross_zone_permissive_rejects_unbridged_writes() {
+        // bd-djpur: this is the case the empty Permissive arm used to authorize.
+        // A zone registered Permissive with NO allowed targets could push a
+        // mutating action into any other zone — including a Strict one — while
+        // `to_report()` still claimed `INV_ZTS_ISOLATE: true`.
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("attacker", 90, 5, IsolationLevel::Permissive))
+            .unwrap();
+        engine
+            .register_zone(make_zone("victim", 70, 3, IsolationLevel::Strict))
+            .unwrap();
+
+        let req = CrossZoneRequest::new(
+            "attacker",
+            "victim",
+            "write:delete_all",
+            "attacker",
+            "non-empty-proof",
+        );
+
+        assert_eq!(
+            engine.authorize_cross_zone(&req),
+            Err(SegmentationError::IsolationViolation),
+            "a non-empty proof is not a bridge; Permissive writes still need an allowed target"
+        );
+        assert_eq!(engine.event_count(ZTS_003_CROSS_ZONE_AUTHORIZED), 0);
+        assert_eq!(engine.event_count(ZTS_004_ISOLATION_VIOLATION), 1);
+    }
+
+    #[test]
+    fn read_only_action_classification_fails_closed() {
+        // Positively recognized reads, in the shapes the descriptor allows.
+        for action in ["read", "READ", "get:blob", "list/zones", "query.plan", "stat"] {
+            assert!(
+                is_read_only_action(action),
+                "'{action}' should classify as a read"
+            );
+        }
+
+        // Everything else is mutating — including the substring trap that the
+        // connector module's old `action == \"write\"` check let through, the
+        // empty/blank descriptor, and a non-ASCII lookalike.
+        for action in [
+            "write",
+            "delete",
+            "write:delete_all",
+            "update",
+            "put",
+            "truncate",
+            "migrate",
+            "readable-nonsense",
+            "",
+            "   ",
+            ":read",
+            "rea\u{0501}",
+        ] {
+            assert!(
+                !is_read_only_action(action),
+                "'{action}' must classify as mutating"
+            );
+        }
     }
 
     #[test]

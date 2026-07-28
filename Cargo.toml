@@ -32,11 +32,43 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 frankentui = { package = "ftui", path = "../frankentui/crates/ftui", default-features = false }
 
-[patch.crates-io]
-fsqlite = { path = "../frankensqlite/crates/fsqlite" }
-fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
-fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
-fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }
+# NO `[patch.crates-io]` BLOCK. Removed 2026-07-27 (bd-3mj98); do not reintroduce
+# one without reading that bead and the matching franken_engine note (bd-h5cl7).
+#
+# This workspace used to substitute `/dp/frankensqlite`'s local `fsqlite*` crates
+# for the published ones. franken_node's own use of fsqlite is a direct **path**
+# dev-dependency (`crates/franken-node/Cargo.toml`, the frankensqlite adapter and
+# persistence integration tests), which `[patch]` does not affect at all. So the
+# block's only reachable effect was to rewire which fsqlite a *sibling* crate
+# binds to: `frankenengine-node -> frankenengine-engine -> sqlmodel-frankensqlite
+# -> fsqlite`.
+#
+# The failure mode is one semver cannot see, so state it precisely. The
+# PUBLISHED `fsqlite 0.1.19` on crates.io keeps `Connection`'s methods sync and
+# puts the async surface in a separate `async_api` module — which is exactly what
+# `sqlmodel-frankensqlite` 0.3.1 is written against. The LOCAL
+# `/dp/frankensqlite` checkout is ALSO version 0.1.19, but there `Connection`'s
+# own methods have been made `async` by an in-flight migration. Identical version
+# number, incompatible content: a version-consistency check cannot catch this,
+# because nothing about the version is inconsistent. Only "don't point a patch at
+# a development checkout" catches it.
+#
+# With the patch in place `sqlmodel-frankensqlite` bound to the local copy, and
+# its 33 sync call sites in `connection.rs` met Futures (E0599 `map_err` on
+# `impl Future`, E0308 expected future / found Result). That took out EVERY
+# default-feature `cargo check`, `clippy`, and `test` in this workspace, because
+# the engine feature is on by default and fsqlite arrives through it as a NORMAL
+# dependency — `--lib --bin` does not avoid it.
+#
+# franken_engine removed its identical block on 2026-07-25 for exactly this
+# reason; this workspace's copy silently re-created the breakage for anything
+# built from here. Without the patch, `sqlmodel-frankensqlite` resolves to the
+# published fsqlite and the pairing is coherent.
+#
+# The graph therefore contains two fsqlite 0.1.19s — the local path copy for our
+# own adapter/persistence tests, and the published one under the engine. That is
+# intentional and safe: no franken_node surface exchanges fsqlite types with the
+# engine.
 
 # Profiling-only build profile. DO NOT REMOVE this section without first
 # reading docs/dev/profiling.md (canonical reference) and

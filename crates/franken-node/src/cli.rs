@@ -1834,6 +1834,18 @@ pub struct LtvVerifyAsOfArgs {
     #[arg(long)]
     pub evidence: PathBuf,
 
+    /// Path to the operator's witness trust anchor JSON.
+    ///
+    /// REQUIRED and fail-closed (bd-7fubt). The file pins
+    /// `{witness_group_id, witness_policy_id, threshold_config}` — including the
+    /// witness signer keys — that a receipt must satisfy. Without it the witness
+    /// receipt would be verified against the signer set it carries itself, which
+    /// any forger can choose, so proof-of-anteriority would be unforgeable in
+    /// name only. There are no built-in witness roots, exactly as `verify
+    /// release` and `incident replay` have no built-in trust roots.
+    #[arg(long)]
+    pub witness_anchor: PathBuf,
+
     /// Override the evidence's verification target time (unix seconds).
     #[arg(long)]
     pub as_of: Option<u64>,

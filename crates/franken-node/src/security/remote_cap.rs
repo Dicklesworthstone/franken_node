@@ -6,7 +6,7 @@
 //! - `CapabilityGate` as the single validation/enforcement point
 //! - structured audit events for issuance/consumption/denials
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,6 +27,16 @@ use crate::push_bounded;
 use crate::security::cuckoo_filter::CuckooFilter;
 
 const MAX_REPLAY_ENTRIES: usize = 4_096;
+/// Upper bound on *simultaneously live* revocations held by a `CapabilityGate`.
+///
+/// bd-z5k66: deliberately a separate constant from `MAX_REPLAY_ENTRIES`. The
+/// replay set bounds how many consumed single-use tokens we remember, and FIFO
+/// eviction there is harmless — an evicted entry only permits replaying a token
+/// that has long since expired. A revocation is the opposite: evicting one turns
+/// a revoked capability back into a valid one. These two bounds must be free to
+/// move independently, and nobody tuning the replay window should silently
+/// change how many revocations the gate can enforce.
+const MAX_LIVE_REVOCATIONS: usize = 4_096;
 const MIN_SECRET_MATERIAL_LEN: usize = 16;
 const MIN_SECRET_ENTROPY_BITS: usize = 56;
 const REMOTE_CAP_REPLAY_STORE_ENV: &str = "FRANKEN_NODE_REMOTECAP_REPLAY_STORE";
@@ -274,25 +284,85 @@ pub fn replay_token_set_duplicate_insert_is_atomic_loom_model() {
 /// Operating mode for hybrid revocation checker
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckMode {
-    /// Use cuckoo filter only (fastest, false positives possible)
+    /// Use cuckoo filter only (fastest, false positives possible).
+    ///
+    /// Never constructed today: `HybridRevocationChecker::new` forces `Fallback`
+    /// (bd-98xo5.3.3). Retained because the mode arms below are the rollback
+    /// path, and because a filter-only mode can produce false positives — for a
+    /// revocation set that means denying a valid capability, so it must stay an
+    /// explicit opt-in rather than something a refactor reintroduces silently.
+    #[allow(dead_code)]
     FastPath,
-    /// Use cuckoo filter with BTreeSet verification (fast + accurate)
+    /// Use cuckoo filter with exact-map verification (fast + accurate)
     #[allow(dead_code)]
     Hybrid,
-    /// Use BTreeSet only (fallback, always accurate)
+    /// Use the exact map only (fallback, always accurate)
     Fallback,
 }
 
-/// High-performance hybrid revocation checker.
+/// Outcome of recording one revocation.
 ///
-/// Combines cuckoo filter's O(1) performance with BTreeSet's 100% accuracy.
-/// Automatically falls back to safe mode if false positive rate exceeds threshold.
-/// Maintains FIFO behavior compatible with ReplayTokenSet.
+/// bd-z5k66: a plain `bool` conflated "already revoked" (benign) with "could not
+/// record" (a capability that the operator believes is revoked but the gate will
+/// still authorize). Those must be distinguishable so `revoke` can report the
+/// second one instead of silently returning a success-shaped value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevocationOutcome {
+    /// Newly recorded and now enforced.
+    Recorded,
+    /// Already revoked; coverage extended if the new expiry is later.
+    AlreadyRevoked,
+    /// NOT recorded: the store is at capacity and every entry in it is still
+    /// live, so nothing could be dropped without laundering a revocation.
+    Refused,
+}
+
+impl RevocationOutcome {
+    /// True when the token is enforced as revoked after this call.
+    const fn is_enforced(self) -> bool {
+        matches!(self, Self::Recorded | Self::AlreadyRevoked)
+    }
+}
+
+/// Revocation store for `CapabilityGate`.
+///
+/// Combines the cuckoo filter's O(1) membership test with an exact map for
+/// accuracy, and falls back to the exact map alone if the observed false
+/// positive rate exceeds the threshold.
+///
+/// # Revocations are never evicted while live (bd-z5k66)
+///
+/// This type used to mirror `ReplayTokenSet`: a `BTreeSet` plus an
+/// `insertion_order` `Vec` that FIFO-evicted at `MAX_REPLAY_ENTRIES`. For a
+/// replay set that is correct — dropping the oldest consumed token only permits
+/// replaying something that has long since expired. For a *revocation* set it is
+/// a bypass: revoke capability `C` while it is still inside its TTL, perform
+/// `MAX_REPLAY_ENTRIES` further revocations, and `C` is drained out the front,
+/// after which `authorize_network(Some(&C))` returns `Ok`. `network_guard`
+/// already refuses to evict deny rules for exactly this reason.
+///
+/// So entries are keyed by token id and carry the capability's own
+/// `expires_at_epoch_secs`. An entry is dropped only once `now >=
+/// expires_at_epoch_secs`, which is safe because `authorize_network` rejects the
+/// same capability with `RemoteCapError::Expired` from that instant on — the
+/// revocation record has nothing left to protect. If the store is full of
+/// entries that are all still live, a new revocation is *refused* rather than
+/// evicting an existing one: the failure is loud and confined to the newest
+/// request, instead of silently un-revoking something already being enforced.
 #[derive(Debug, Clone)]
 struct HybridRevocationChecker {
     cuckoo: CuckooFilter,
-    btree_backup: BTreeSet<String>,
-    insertion_order: Vec<String>, // For FIFO behavior in BTreeSet
+    /// token id -> the revoked capability's own `expires_at_epoch_secs`.
+    revocations: BTreeMap<String, u64>,
+    /// Lower bound on every expiry in `revocations`, so `retire_expired` can
+    /// return in O(1) when nothing can possibly have expired. `revocations` is
+    /// keyed by token id, so the minimum expiry is not otherwise cheap to find,
+    /// and `retire_expired` sits on the authorize hot path.
+    ///
+    /// Only ever required to be a *lower* bound: extending an existing entry's
+    /// expiry may leave this pessimistically low, which costs at most one
+    /// unnecessary sweep and can never skip a due one.
+    earliest_expiry: u64,
     mode: CheckMode,
     false_positive_count: usize,
     total_positive_checks: usize,
@@ -301,17 +371,17 @@ struct HybridRevocationChecker {
 
 impl HybridRevocationChecker {
     fn new() -> Self {
-        // bd-98xo5.3.3: Switch to BTree-only mode based on production N distribution analysis.
-        // Production data shows 4 instances crossing 30K entries (p99=37.2K, max=37.2K),
-        // exceeding cuckoo filter cliff thresholds. BTree provides 45% better insertion
-        // performance at 50K+ entries vs cuckoo's cliff degradation.
-        let capacity = MAX_REPLAY_ENTRIES; // Minimal capacity for potential future rollback
-        let mode = CheckMode::Fallback; // Force BTree-only mode regardless of environment
+        // bd-98xo5.3.3: Switch to exact-map-only mode based on production N distribution
+        // analysis. Production data shows 4 instances crossing 30K entries (p99=37.2K,
+        // max=37.2K), exceeding cuckoo filter cliff thresholds. The ordered map provides
+        // 45% better insertion performance at 50K+ entries vs cuckoo's cliff degradation.
+        let capacity = MAX_LIVE_REVOCATIONS; // Minimal capacity for potential future rollback
+        let mode = CheckMode::Fallback; // Force exact-map-only mode regardless of environment
 
         Self {
             cuckoo: CuckooFilter::new(capacity.max(1024)),
-            btree_backup: BTreeSet::new(),
-            insertion_order: Vec::new(),
+            revocations: BTreeMap::new(),
+            earliest_expiry: u64::MAX,
             mode,
             false_positive_count: 0,
             total_positive_checks: 0,
@@ -322,8 +392,8 @@ impl HybridRevocationChecker {
     fn contains(&mut self, token_id: &str) -> bool {
         match self.mode {
             CheckMode::Fallback => {
-                // BTreeSet only - always accurate
-                self.btree_backup.contains(token_id)
+                // Exact map only - always accurate
+                self.revocations.contains_key(token_id)
             }
             CheckMode::FastPath => {
                 // Cuckoo filter only - fastest but may have false positives
@@ -335,9 +405,9 @@ impl HybridRevocationChecker {
                     // Definitely not present (no false negatives in cuckoo)
                     false
                 } else {
-                    // Potential positive - verify with BTreeSet
+                    // Potential positive - verify against the exact map
                     self.total_positive_checks = self.total_positive_checks.saturating_add(1);
-                    let actually_present = self.btree_backup.contains(token_id);
+                    let actually_present = self.revocations.contains_key(token_id);
 
                     if !actually_present {
                         // False positive detected
@@ -351,53 +421,76 @@ impl HybridRevocationChecker {
         }
     }
 
-    fn insert(&mut self, token_id: String) -> bool {
-        // Check if already exists
-        if self.mode != CheckMode::FastPath && self.btree_backup.contains(&token_id) {
-            return false; // Already present
+    /// Record that `token_id` is revoked until its capability would have expired.
+    ///
+    /// `now_epoch_secs` is used only to retire entries whose capability has
+    /// already expired; it never shortens live coverage.
+    fn insert(
+        &mut self,
+        token_id: String,
+        expires_at_epoch_secs: u64,
+        now_epoch_secs: u64,
+    ) -> RevocationOutcome {
+        self.retire_expired(now_epoch_secs);
+
+        if let Some(recorded_expiry) = self.revocations.get_mut(&token_id) {
+            // Re-revoking may only ever *extend* coverage, never shorten it: a
+            // caller passing a nearer expiry must not be able to retire an
+            // existing record early.
+            *recorded_expiry = (*recorded_expiry).max(expires_at_epoch_secs);
+            return RevocationOutcome::AlreadyRevoked;
         }
 
-        let inserted_cuckoo = match self.mode {
-            CheckMode::Fallback => true,
-            _ => self.cuckoo.insert(&token_id),
-        };
-
-        // Handle BTreeSet with FIFO behavior
-        if self.mode != CheckMode::FastPath {
-            // Insert new token
-            self.btree_backup.insert(token_id.clone());
-
-            // Handle FIFO eviction if needed
-            if self.insertion_order.len() >= MAX_REPLAY_ENTRIES {
-                let overflow = self
-                    .insertion_order
-                    .len()
-                    .saturating_sub(MAX_REPLAY_ENTRIES)
-                    .saturating_add(1);
-                let drain_len = overflow.min(self.insertion_order.len());
-                for removed_token in self.insertion_order.drain(0..drain_len) {
-                    self.btree_backup.remove(&removed_token);
-                }
-            }
-
-            // Add to insertion order tracking
-            if self.insertion_order.len() < MAX_REPLAY_ENTRIES {
-                self.insertion_order.push(token_id);
-            }
+        if self.revocations.len() >= MAX_LIVE_REVOCATIONS {
+            // Every resident entry is still live (anything expired was just
+            // retired above). Refuse rather than evict one of them.
+            return RevocationOutcome::Refused;
         }
 
-        // Return true if successfully inserted
-        match self.mode {
-            CheckMode::Fallback => true, // We already handled duplicates above
-            CheckMode::FastPath => inserted_cuckoo,
-            CheckMode::Hybrid => inserted_cuckoo, // Both structures updated
+        if self.mode != CheckMode::Fallback && !self.cuckoo.insert(&token_id) {
+            // The cuckoo filter is full. It can no longer answer "definitely not
+            // revoked" for this token, so the Hybrid fast path would produce a
+            // false negative. Drop to the exact map, which is always accurate.
+            self.mode = CheckMode::Fallback;
         }
+
+        self.earliest_expiry = self.earliest_expiry.min(expires_at_epoch_secs);
+        self.revocations.insert(token_id, expires_at_epoch_secs);
+        RevocationOutcome::Recorded
+    }
+
+    /// Drop revocations whose capability has expired on its own terms.
+    ///
+    /// Safe because `authorize_network` checks `now >= cap.expires_at_epoch_secs`
+    /// and returns `RemoteCapError::Expired` independently of revocation state,
+    /// so a retired record cannot resurrect anything.
+    fn retire_expired(&mut self, now_epoch_secs: u64) {
+        // O(1) fast path: nothing in the store can be due yet.
+        if now_epoch_secs < self.earliest_expiry {
+            return;
+        }
+        let expired: Vec<String> = self
+            .revocations
+            .iter()
+            .filter(|(_, expires_at)| now_epoch_secs >= **expires_at)
+            .map(|(token_id, _)| token_id.clone())
+            .collect();
+        for token_id in expired {
+            self.revocations.remove(&token_id);
+            self.cuckoo.remove(&token_id);
+        }
+        self.earliest_expiry = self
+            .revocations
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(u64::MAX);
     }
 
     fn len(&self) -> usize {
         match self.mode {
             CheckMode::FastPath => self.cuckoo.len(),
-            _ => self.btree_backup.len(),
+            _ => self.revocations.len(),
         }
     }
 
@@ -1922,19 +2015,45 @@ impl CapabilityGate {
         now_epoch_secs: u64,
         trace_id: &str,
     ) -> RemoteCapAuditEvent {
-        self.revoked_tokens.insert(cap.token_id.clone());
-        let event = build_audit_event(
-            "REMOTECAP_REVOKED",
-            "RC_CAP_REVOKED",
-            Some(cap.token_id.clone()),
-            Some(cap.issuer_identity.clone()),
-            None,
-            None,
-            trace_id.to_string(),
+        // bd-z5k66: bind the record to the capability's own expiry so it can be
+        // retired when — and only when — `authorize_network` would reject the
+        // same token as `Expired` anyway. Until then it is never evicted.
+        let outcome = self.revoked_tokens.insert(
+            cap.token_id.clone(),
+            cap.expires_at_epoch_secs,
             now_epoch_secs,
-            true,
-            None,
         );
+        let event = if outcome.is_enforced() {
+            build_audit_event(
+                "REMOTECAP_REVOKED",
+                "RC_CAP_REVOKED",
+                Some(cap.token_id.clone()),
+                Some(cap.issuer_identity.clone()),
+                None,
+                None,
+                trace_id.to_string(),
+                now_epoch_secs,
+                true,
+                None,
+            )
+        } else {
+            // The store is full of revocations that are all still live. Evicting
+            // one to make room would un-revoke a capability the gate is actively
+            // enforcing, so this request is refused instead — loudly, and scoped
+            // to the newest revocation rather than an arbitrary older one.
+            build_audit_event(
+                "REMOTECAP_REVOKE_REFUSED",
+                "RC_CAP_REVOKE_REFUSED",
+                Some(cap.token_id.clone()),
+                Some(cap.issuer_identity.clone()),
+                None,
+                None,
+                trace_id.to_string(),
+                now_epoch_secs,
+                false,
+                Some("REMOTECAP_REVOCATION_CAPACITY".to_string()),
+            )
+        };
         self.push_audit(event.clone());
         event
     }
@@ -2072,6 +2191,13 @@ impl CapabilityGate {
             return Err(err);
         };
 
+        // bd-z5k66: retire revocations whose capability has expired on its own
+        // terms before consulting the store. Without this the store only pruned
+        // when a NEW revocation arrived, so a gate that stops receiving them
+        // never reclaims a slot, and a long-dead capability kept reporting
+        // `Revoked` instead of the `Expired` the expiry check below would give.
+        // Guarded by an O(1) watermark, so the common case costs one compare.
+        self.revoked_tokens.retire_expired(now_epoch_secs);
         if self.revoked_tokens.contains(&cap.token_id) {
             let err = RemoteCapError::Revoked {
                 token_id: cap.token_id.clone(),
@@ -4654,20 +4780,130 @@ mod tests {
     }
 
     #[test]
-    fn capability_gate_replay_sets_are_bounded_fifo() {
+    fn capability_gate_consumed_token_set_is_bounded_fifo() {
+        // The *replay* set is FIFO-bounded, and that is correct: evicting the
+        // oldest consumed single-use token only ever permits replaying one that
+        // expired long ago. The revocation set deliberately does NOT behave this
+        // way — see `live_revocations_are_never_evicted_by_later_revocations`.
         let mut gate = CapabilityGate::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("valid gate");
 
         for index in 0..(MAX_REPLAY_ENTRIES + 32) {
             gate.consumed_tokens.insert(format!("consumed-{index:05}"));
-            gate.revoked_tokens.insert(format!("revoked-{index:05}"));
         }
 
         assert_eq!(gate.consumed_tokens.len(), MAX_REPLAY_ENTRIES);
-        assert_eq!(gate.revoked_tokens.len(), MAX_REPLAY_ENTRIES);
         assert!(!gate.consumed_tokens.contains("consumed-00000"));
-        assert!(!gate.revoked_tokens.contains("revoked-00000"));
         assert!(gate.consumed_tokens.contains("consumed-00032"));
-        assert!(gate.revoked_tokens.contains("revoked-00032"));
+    }
+
+    #[test]
+    fn live_revocations_are_never_evicted_by_later_revocations() {
+        // bd-z5k66 path (2): the revocation set used to share ReplayTokenSet's
+        // FIFO eviction, so revoking MAX_REPLAY_ENTRIES further capabilities
+        // drained an earlier — still live — revocation out the front and the gate
+        // authorized it again.
+        let mut gate = CapabilityGate::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("valid gate");
+        let now = 1_700_000_000u64;
+        let far_future = now + 86_400;
+
+        assert_eq!(
+            gate.revoked_tokens
+                .insert("victim".to_string(), far_future, now),
+            RevocationOutcome::Recorded
+        );
+
+        // Flood with further live revocations, well past the old FIFO bound.
+        for index in 0..(MAX_LIVE_REVOCATIONS + 32) {
+            gate.revoked_tokens
+                .insert(format!("filler-{index:05}"), far_future, now);
+        }
+
+        assert!(
+            gate.revoked_tokens.contains("victim"),
+            "a live revocation must survive any number of later revocations"
+        );
+        assert!(
+            gate.revoked_tokens.len() <= MAX_LIVE_REVOCATIONS,
+            "the store must still be bounded"
+        );
+    }
+
+    #[test]
+    fn revocation_store_refuses_rather_than_evicting_when_full() {
+        // Being bounded and never laundering a live revocation together imply a
+        // full store must refuse. The refusal is confined to the newest request.
+        let mut checker = HybridRevocationChecker::new();
+        let now = 1_700_000_000u64;
+        let far_future = now + 86_400;
+
+        for index in 0..MAX_LIVE_REVOCATIONS {
+            assert_eq!(
+                checker.insert(format!("live-{index:05}"), far_future, now),
+                RevocationOutcome::Recorded
+            );
+        }
+
+        assert_eq!(
+            checker.insert("overflow".to_string(), far_future, now),
+            RevocationOutcome::Refused
+        );
+        assert!(!checker.contains("overflow"));
+        assert!(
+            checker.contains("live-00000"),
+            "refusing must not disturb the entries already being enforced"
+        );
+    }
+
+    #[test]
+    fn revocations_retire_only_once_their_capability_has_expired() {
+        // The record exists to stop a capability that is otherwise still valid.
+        // Once `now >= expires_at`, `authorize_network` rejects the same token as
+        // `Expired` regardless, so the record can be retired — and only then.
+        let mut checker = HybridRevocationChecker::new();
+        let issued = 1_700_000_000u64;
+        let expires = issued + 60;
+
+        assert_eq!(
+            checker.insert("short-lived".to_string(), expires, issued),
+            RevocationOutcome::Recorded
+        );
+
+        // One second before expiry the revocation is still enforced.
+        checker.retire_expired(expires - 1);
+        assert!(checker.contains("short-lived"));
+
+        // At expiry it may be retired.
+        checker.retire_expired(expires);
+        assert!(!checker.contains("short-lived"));
+    }
+
+    #[test]
+    fn re_revoking_can_extend_coverage_but_never_shorten_it() {
+        let mut checker = HybridRevocationChecker::new();
+        let now = 1_700_000_000u64;
+
+        assert_eq!(
+            checker.insert("token".to_string(), now + 3_600, now),
+            RevocationOutcome::Recorded
+        );
+        // A nearer expiry must not shrink the window.
+        assert_eq!(
+            checker.insert("token".to_string(), now + 10, now),
+            RevocationOutcome::AlreadyRevoked
+        );
+        checker.retire_expired(now + 11);
+        assert!(
+            checker.contains("token"),
+            "a shorter re-revocation must not retire the record early"
+        );
+
+        // A later expiry extends it.
+        assert_eq!(
+            checker.insert("token".to_string(), now + 7_200, now),
+            RevocationOutcome::AlreadyRevoked
+        );
+        checker.retire_expired(now + 3_601);
+        assert!(checker.contains("token"));
     }
 
     proptest! {

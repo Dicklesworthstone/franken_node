@@ -58,7 +58,8 @@ use sha2::{Digest, Sha256};
 use std::convert::TryInto;
 
 use crate::control_plane::mmr_proofs::{
-    MmrRootWitnessReceipt, MmrRootWitnessVerification, verify_root_witness_anteriority,
+    MmrRootWitnessReceipt, MmrRootWitnessTrustAnchor, MmrRootWitnessVerification,
+    verify_root_witness_anteriority,
 };
 
 // ── Profiling instrumentation (bd-98xo5.12.4) ───────────────────────────
@@ -743,20 +744,24 @@ pub fn verify_evidence_entry(
 /// no later than the supplied cutoff.
 pub fn mmr_root_witness_evidence_entry(
     receipt: &MmrRootWitnessReceipt,
+    anchor: &MmrRootWitnessTrustAnchor,
     as_of_unix_seconds: u64,
 ) -> Result<EvidenceEntry, LedgerError> {
-    build_mmr_root_witness_evidence_entry(receipt, as_of_unix_seconds).map(|(entry, _)| entry)
+    build_mmr_root_witness_evidence_entry(receipt, anchor, as_of_unix_seconds).map(|(entry, _)| entry)
 }
 
 fn build_mmr_root_witness_evidence_entry(
     receipt: &MmrRootWitnessReceipt,
+    anchor: &MmrRootWitnessTrustAnchor,
     as_of_unix_seconds: u64,
 ) -> Result<(EvidenceEntry, MmrRootWitnessVerification), LedgerError> {
-    let verification =
-        verify_root_witness_anteriority(receipt, as_of_unix_seconds).map_err(|source| {
-            LedgerError::InvalidEvidence {
-                reason: format!("root witness proof invalid: {source}"),
-            }
+    // bd-7fubt: the anchor must come from the caller. Appending this entry
+    // records a claim that the root was observed no later than the cutoff, so
+    // verifying against the receipt's own embedded signer set would let a forged
+    // receipt write its own proof-of-anteriority into the ledger.
+    let verification = verify_root_witness_anteriority(receipt, anchor, as_of_unix_seconds)
+        .map_err(|source| LedgerError::InvalidEvidence {
+            reason: format!("root witness proof invalid: {source}"),
         })?;
     let timestamp_ms = receipt
         .statement
@@ -1696,10 +1701,11 @@ impl EvidenceLedger {
     pub fn append_mmr_root_witness_receipt(
         &mut self,
         receipt: &MmrRootWitnessReceipt,
+        anchor: &MmrRootWitnessTrustAnchor,
         as_of_unix_seconds: u64,
     ) -> Result<(EntryId, MmrRootWitnessVerification), LedgerError> {
         let (entry, verification) =
-            build_mmr_root_witness_evidence_entry(receipt, as_of_unix_seconds)?;
+            build_mmr_root_witness_evidence_entry(receipt, anchor, as_of_unix_seconds)?;
         let entry_id = self.append(entry)?;
         Ok((entry_id, verification))
     }
@@ -2655,6 +2661,22 @@ mod tests {
         entry
     }
 
+    /// The witness group/policy the ledger fixtures speak for.
+    const LEDGER_WITNESS_GROUP: &str = "ledger-witnesses";
+    const LEDGER_WITNESS_POLICY: &str = "policy-a";
+
+    /// bd-7fubt: the trust anchor a verifier holds out of band. Built from the
+    /// same signer set the fixture signs with, so a well-formed receipt verifies
+    /// and a receipt carrying its own signer set does not.
+    fn make_mmr_root_witness_anchor() -> MmrRootWitnessTrustAnchor {
+        MmrRootWitnessTrustAnchor::new(
+            LEDGER_WITNESS_GROUP,
+            LEDGER_WITNESS_POLICY,
+            make_mmr_root_witness_receipt(1_700_000_000).threshold_config,
+        )
+        .expect("valid witness trust anchor")
+    }
+
     fn make_mmr_root_witness_receipt(observed_at_unix_seconds: u64) -> MmrRootWitnessReceipt {
         use crate::control_plane::mmr_proofs::{
             MMR_ROOT_WITNESS_ARTIFACT_ID, MMR_ROOT_WITNESS_CONNECTOR_ID, MmrRoot, marker_leaf_hash,
@@ -2687,8 +2709,8 @@ mod tests {
         let statement = mmr_root_witness_statement(
             &root,
             observed_at_unix_seconds,
-            "ledger-witnesses",
-            "policy-a",
+            LEDGER_WITNESS_GROUP,
+            LEDGER_WITNESS_POLICY,
         )
         .expect("witness statement");
         let signatures = signing_keys
@@ -2723,7 +2745,11 @@ mod tests {
         let receipt = make_mmr_root_witness_receipt(1_700_000_000);
 
         let (entry_id, verification) = ledger
-            .append_mmr_root_witness_receipt(&receipt, 1_700_000_100)
+            .append_mmr_root_witness_receipt(
+                &receipt,
+                &make_mmr_root_witness_anchor(),
+                1_700_000_100,
+            )
             .expect("root witness receipt should append");
 
         assert_eq!(entry_id, EntryId(1));
@@ -2768,11 +2794,80 @@ mod tests {
         let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 100_000));
         let receipt = make_mmr_root_witness_receipt(1_700_000_100);
 
-        let result = ledger.append_mmr_root_witness_receipt(&receipt, 1_700_000_000);
+        let result = ledger.append_mmr_root_witness_receipt(
+            &receipt,
+            &make_mmr_root_witness_anchor(),
+            1_700_000_000,
+        );
 
         assert!(
             matches!(result, Err(LedgerError::InvalidEvidence { .. })),
             "expected invalid evidence, got {result:?}"
+        );
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn mmr_root_witness_receipt_rejects_a_self_anchored_forgery() {
+        // bd-7fubt: the forgery this anchor exists to stop. An attacker with ONE
+        // keypair of their own can mint a statement for any root at any claimed
+        // observation time, sign the artifact, and set
+        // `threshold_config = 1-of-1 over their own key`. Verification used to
+        // read the signer set off the receipt, so this returned Ok and the ledger
+        // recorded it as proof the root had been observed by the cutoff.
+        use crate::control_plane::mmr_proofs::{
+            MMR_ROOT_WITNESS_ARTIFACT_ID, MMR_ROOT_WITNESS_CONNECTOR_ID, MmrRoot, marker_leaf_hash,
+            mmr_root_witness_artifact, mmr_root_witness_statement,
+        };
+        use crate::security::threshold_sig::{SignerKey, ThresholdConfig, sign};
+
+        let attacker = SigningKey::from_bytes(&[99_u8; 32]);
+        let attacker_config = ThresholdConfig {
+            threshold: 1,
+            total_signers: 1,
+            signer_keys: vec![SignerKey {
+                key_id: "attacker-witness".to_string(),
+                public_key_hex: hex::encode(attacker.verifying_key().to_bytes()),
+            }],
+        };
+        let root = MmrRoot {
+            tree_size: 1,
+            root_hash: marker_leaf_hash("attacker-invented-root"),
+        };
+        let statement = mmr_root_witness_statement(
+            &root,
+            1_700_000_000,
+            LEDGER_WITNESS_GROUP,
+            LEDGER_WITNESS_POLICY,
+        )
+        .expect("witness statement");
+        let signatures = vec![sign(
+            &attacker,
+            "attacker-witness",
+            MMR_ROOT_WITNESS_ARTIFACT_ID,
+            MMR_ROOT_WITNESS_CONNECTOR_ID,
+            &statement.content_hash,
+        )];
+        let witness_artifact =
+            mmr_root_witness_artifact(&statement, signatures).expect("witness artifact");
+        let forged = MmrRootWitnessReceipt {
+            statement,
+            threshold_config: attacker_config,
+            witness_artifact,
+            trace_id: "trace-attacker".to_string(),
+            timestamp: "2026-02-20T12:00:00Z".to_string(),
+        };
+
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(4, 100_000));
+        let result = ledger.append_mmr_root_witness_receipt(
+            &forged,
+            &make_mmr_root_witness_anchor(),
+            1_700_000_100,
+        );
+
+        assert!(
+            matches!(result, Err(LedgerError::InvalidEvidence { .. })),
+            "a receipt carrying its own signer set must not verify, got {result:?}"
         );
         assert!(ledger.is_empty());
     }

@@ -444,7 +444,14 @@ fn tnr_ltv_reattestation_verification(c: &mut Criterion) {
     let sdk = VerifierSdk::new("verifier://perf-wins");
 
     c.bench_function("tnr_ltv_reattestation_verification", |b| {
-        b.iter(|| black_box(sdk.verify_as_of_ltv(black_box(&evidence))))
+        let witness_anchor = frankenengine_verifier_sdk::LongTermWitnessTrustAnchor {
+            witness_group_id: evidence.witness_receipt.statement.witness_group_id.clone(),
+            witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
+            threshold_config: evidence.witness_receipt.threshold_config.clone(),
+        };
+        b.iter(|| {
+            black_box(sdk.verify_as_of_ltv(black_box(&evidence), black_box(&witness_anchor)))
+        })
     });
 }
 

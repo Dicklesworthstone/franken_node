@@ -98,6 +98,8 @@ pub const ERR_CHALLENGE_TIMED_OUT: &str = "ERR_CHALLENGE_TIMED_OUT";
 pub const ERR_INVALID_ARTIFACT_ID: &str = "ERR_INVALID_ARTIFACT_ID";
 pub const ERR_PROOF_INVALID: &str = "ERR_PROOF_INVALID";
 pub const ERR_LENGTH_OVERFLOW: &str = "ERR_LENGTH_OVERFLOW";
+/// A challenge was issued that the state machine could never satisfy (bd-uwcal).
+pub const ERR_UNSATISFIABLE_CHALLENGE: &str = "ERR_UNSATISFIABLE_CHALLENGE";
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
@@ -499,6 +501,33 @@ impl ChallengeFlowController {
     ) -> Result<ChallengeId, ChallengeError> {
         if let Some(reason) = invalid_artifact_id_reason(&artifact_id) {
             return Err(ChallengeError::new(ERR_INVALID_ARTIFACT_ID, reason));
+        }
+
+        // bd-uwcal: refuse a challenge the state machine cannot satisfy.
+        //
+        // `verify_proof` requires EVERY entry of `required_proofs` to have been
+        // received, but `submit_proof` gates on `can_transition_to(ProofReceived)`
+        // and `ProofReceived`'s successor set does not include itself — so the
+        // second submission always fails `ERR_INVALID_TRANSITION`. A challenge
+        // listing two or more proof types could therefore only ever be denied or
+        // time out, and the duplicate-type guard plus
+        // `MAX_RECEIVED_PROOFS_PER_CHALLENGE` below were unreachable.
+        //
+        // Rather than let the API express something the machine cannot honor,
+        // the ask is refused at issuance. Fail-closed either way — this converts
+        // a silent, delayed dead end into an immediate, diagnosable error. If
+        // multi-proof challenges become a product requirement, the fix is to
+        // allow the `ProofReceived` self-transition (the duplicate-type guard
+        // already rejects genuine replays), not to relax this check.
+        if required_proofs.len() > 1 {
+            return Err(ChallengeError::new(
+                ERR_UNSATISFIABLE_CHALLENGE,
+                format!(
+                    "challenge requires {} proof types but the flow accepts exactly one; \
+                     a multi-proof challenge can only be denied or time out",
+                    required_proofs.len()
+                ),
+            ));
         }
 
         // Check for existing active challenge on same artifact.
@@ -2483,10 +2512,14 @@ mod tests {
             .issue_challenge(
                 malicious_artifact.clone(),
                 SuspicionReason::PolicyRule("rule\u{200B}\u{200C}hidden\u{FEFF}name".to_string()),
-                vec![
-                    RequiredProofType::Custom("\u{202E}ggats\u{202D}legitimate_proof".to_string()),
-                    RequiredProofType::ProvenanceAttestation,
-                ],
+                // bd-uwcal: a second required type used to be listed here, but
+                // only the first was ever submitted and a multi-proof challenge
+                // is now refused at issuance as unsatisfiable. This test's
+                // subject is Unicode preservation, which the RTL-injected first
+                // type still exercises end to end.
+                vec![RequiredProofType::Custom(
+                    "\u{202E}ggats\u{202D}legitimate_proof".to_string(),
+                )],
                 "operator\u{0000}\ninjection\r\tmalicious",
                 1000,
             )

@@ -590,7 +590,38 @@ impl RollbackDetector {
                 });
             }
             if sv.epoch > last.epoch.saturating_add(1) {
+                // bd-zfg3w: this is the only error path that MUTATES state — it
+                // promotes the peer's vector to `last_known` before any
+                // parent-hash validation, so the chain is re-rooted onto whatever
+                // the peer sent. That promotion is deliberate (a replica must be
+                // able to resume forward progress after a legitimate gap; see
+                // tests/e2e_fork_detection_lifecycle.rs), but it used to record
+                // NOTHING.
+                //
+                // That silence was the exploitable part. `DivergenceDetector::compare`
+                // treats a gap as non-halting, so feeding {epoch+2, parent:"junk"}
+                // re-anchored the chain and left `proof_count() == 0`; the next
+                // vector chaining off the attacker's hash then verified cleanly,
+                // and no artifact anywhere showed the chain had been re-rooted.
+                //
+                // The promotion still happens, but it is now evidence-producing:
+                // the re-anchor is recorded with `DetectionResult::GapDetected`,
+                // capturing both the local state it abandoned and the unvalidated
+                // remote state it adopted.
                 let local_epoch = last.epoch;
+                let proof = RollbackProof {
+                    local_state: last.clone(),
+                    remote_state: sv.clone(),
+                    expected_parent_hash: last.state_hash.clone(),
+                    actual_parent_hash: sv.parent_state_hash.clone(),
+                    detection_timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    trace_id: format!("rbd-gap-{}-{}", last.epoch, sv.epoch),
+                    detection_result: DetectionResult::GapDetected,
+                };
+                push_bounded(&mut self.proofs, proof, MAX_PROOFS);
                 self.last_known = Some(sv.clone());
                 return Err(ForkDetectionError::RfdGapDetected {
                     local_epoch,

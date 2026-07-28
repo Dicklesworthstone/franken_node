@@ -70,10 +70,17 @@ name = "collect-production-metrics"
 path = "src/bin/collect_production_metrics.rs"
 test = false
 
-[[bin]]
-name = "vef-degraded-mode-metamorphic"
-path = "tests/vef_degraded_mode_metamorphic.rs"
-test = false
+# bd-8m3oc: the `[[bin]] vef-degraded-mode-metamorphic` registration over
+# tests/vef_degraded_mode_metamorphic.rs was removed here. It duplicated the
+# `[[test]] vef_degraded_mode_metamorphic` entry below over the same path, which
+# made cargo warn on every build of this workspace, and it compiled the file in
+# default feature configs where the test form is deliberately gated behind
+# `advanced-features`. The file now carries `#[test]` attributes instead of a
+# hand-rolled `fn main()`, so the `[[test]]` entry is the single authoritative
+# registration and the file's own two metamorphic checks actually execute
+# (65 -> 67 tests; the other 65 come from the `#[path]`-included
+# `vef_degraded_mode` module and were already running, which is what made the
+# missing two easy to overlook).
 
 [lib]
 path = "src/lib.rs"
@@ -335,6 +342,23 @@ path = "tests/remotecap_cli_wire_conformance.rs"
 [[test]]
 name = "remote_cap_enforcement"
 path = "tests/remote_cap_enforcement.rs"
+
+[[test]]
+name = "remote_cap_revocation_durability"
+path = "tests/remote_cap_revocation_durability.rs"
+
+[[test]]
+name = "trust_zone_cross_zone_isolation"
+path = "tests/trust_zone_cross_zone_isolation.rs"
+
+# bd-4sh1w: tests/conformance/sandbox_profile_conformance.rs had NO Cargo
+# registration and no crate-local `#[path]` shim, so nothing ever ran it — it sat
+# outside both the .G1 and .G2 orphan censuses because those scan
+# crates/franken-node/tests/, not the workspace-root tree. Registering it here so
+# the sandbox profile direction gates are actually enforced by `cargo test`.
+[[test]]
+name = "sandbox_profile_conformance"
+path = "../../tests/conformance/sandbox_profile_conformance.rs"
 
 [[test]]
 name = "remote_capability_gate_fuzz_regression"

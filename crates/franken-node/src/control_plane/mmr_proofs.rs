@@ -129,6 +129,113 @@ pub struct MmrRootWitnessReceipt {
     pub timestamp: String,
 }
 
+/// Operator-pinned trust anchor for MMR root-witness receipts.
+///
+/// # Why verification cannot use the receipt's own `threshold_config` (bd-7fubt)
+///
+/// `MmrRootWitnessReceipt` carries a `threshold_config`, and `ThresholdConfig`
+/// carries the *verifying keys*. Verification used to hand that embedded config
+/// straight to `verify_threshold`, so a receipt supplied both the signatures and
+/// the key set they were checked against. Nothing else pinned the signers:
+/// `witness_group_id` and `witness_policy_id` were only charset-validated.
+///
+/// The forgery was a one-liner. Generate a single Ed25519 keypair; pick any
+/// `MmrRoot` and any `observed_at_unix_seconds`; build the statement; sign the
+/// artifact content hash with your key; set
+/// `threshold_config = { threshold: 1, total_signers: 1, signer_keys: [your key] }`.
+/// `verify_root_witness_receipt` returned `Ok`, `verify_root_witness_anteriority`
+/// returned `Ok` for any later cutoff, and `EvidenceLedger` recorded it as proof
+/// that the root had been observed by that time. Proof-of-anteriority was
+/// unforgeable in name only.
+///
+/// So verification now requires an anchor the *caller* supplies out of band. The
+/// anchor names the witness group and policy it speaks for and pins the quorum
+/// those witnesses must meet; the receipt's embedded `threshold_config` is
+/// treated as an assertion to check against the anchor, never as an authority.
+/// This mirrors the repository's standing rule that there are no built-in trust
+/// roots — the same reason `incident replay` and `verify release` refuse to run
+/// without an operator-supplied key.
+///
+/// The anchor does not, by itself, establish that the witnesses are mutually
+/// independent; choosing a quorum large enough to make collusion meaningful is
+/// an operator responsibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MmrRootWitnessTrustAnchor {
+    witness_group_id: String,
+    witness_policy_id: String,
+    threshold_config: ThresholdConfig,
+}
+
+impl MmrRootWitnessTrustAnchor {
+    /// Build a trust anchor, validating the identifiers and quorum shape up front
+    /// so a malformed anchor fails at configuration time rather than mid-verify.
+    pub fn new(
+        witness_group_id: &str,
+        witness_policy_id: &str,
+        threshold_config: ThresholdConfig,
+    ) -> Result<Self, ProofError> {
+        validate_root_witness_identifier("anchor witness_group_id", witness_group_id)?;
+        validate_root_witness_identifier("anchor witness_policy_id", witness_policy_id)?;
+
+        if threshold_config.threshold == 0 {
+            return Err(ProofError::InvalidProof {
+                reason: "anchor threshold must be greater than zero".to_string(),
+            });
+        }
+        if threshold_config.threshold > threshold_config.total_signers {
+            return Err(ProofError::InvalidProof {
+                reason: format!(
+                    "anchor threshold={} exceeds total_signers={}",
+                    threshold_config.threshold, threshold_config.total_signers
+                ),
+            });
+        }
+        if u32::try_from(threshold_config.signer_keys.len()).unwrap_or(u32::MAX)
+            != threshold_config.total_signers
+        {
+            return Err(ProofError::InvalidProof {
+                reason: format!(
+                    "anchor signer_keys len={} does not match total_signers={}",
+                    threshold_config.signer_keys.len(),
+                    threshold_config.total_signers
+                ),
+            });
+        }
+        if threshold_config.signer_keys.len() > MAX_ROOT_WITNESS_SIGNATURES {
+            return Err(ProofError::InvalidProof {
+                reason: format!(
+                    "anchor signer_keys len={} exceeds limit={MAX_ROOT_WITNESS_SIGNATURES}",
+                    threshold_config.signer_keys.len()
+                ),
+            });
+        }
+
+        Ok(Self {
+            witness_group_id: witness_group_id.to_string(),
+            witness_policy_id: witness_policy_id.to_string(),
+            threshold_config,
+        })
+    }
+
+    /// Witness group this anchor speaks for.
+    #[must_use]
+    pub fn witness_group_id(&self) -> &str {
+        &self.witness_group_id
+    }
+
+    /// Witness policy this anchor speaks for.
+    #[must_use]
+    pub fn witness_policy_id(&self) -> &str {
+        &self.witness_policy_id
+    }
+
+    /// The pinned quorum receipts must satisfy.
+    #[must_use]
+    pub fn threshold_config(&self) -> &ThresholdConfig {
+        &self.threshold_config
+    }
+}
+
 /// Verified proof-of-anteriority summary for one witnessed MMR root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MmrRootWitnessVerification {
@@ -771,13 +878,55 @@ pub fn mmr_root_witness_artifact(
     })
 }
 
-/// Verify the witness threshold receipt for an MMR root.
+/// Verify the witness threshold receipt for an MMR root against a pinned anchor.
+///
+/// The `anchor` is the authority: it names the witness group/policy the receipt
+/// must claim and supplies the `ThresholdConfig` — and therefore the verifying
+/// keys — the signatures are checked against. See [`MmrRootWitnessTrustAnchor`]
+/// for why the receipt's own embedded config can never play that role.
 pub fn verify_root_witness_receipt(
     receipt: &MmrRootWitnessReceipt,
+    anchor: &MmrRootWitnessTrustAnchor,
 ) -> Result<MmrRootWitnessVerification, ProofError> {
     validate_root_witness_statement(&receipt.statement)?;
     validate_root_witness_text("trace_id", &receipt.trace_id)?;
     validate_root_witness_text("timestamp", &receipt.timestamp)?;
+
+    // bd-7fubt: bind the receipt to the anchor before any signature work. A
+    // receipt that names a different witness group or policy is not evidence
+    // about the group this caller trusts, whatever it is signed with.
+    if !constant_time::ct_eq(
+        &receipt.statement.witness_group_id,
+        &anchor.witness_group_id,
+    ) {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness group mismatch: anchor={} receipt={}",
+                anchor.witness_group_id, receipt.statement.witness_group_id
+            ),
+        });
+    }
+    if !constant_time::ct_eq(
+        &receipt.statement.witness_policy_id,
+        &anchor.witness_policy_id,
+    ) {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness policy mismatch: anchor={} receipt={}",
+                anchor.witness_policy_id, receipt.statement.witness_policy_id
+            ),
+        });
+    }
+    // The embedded config is an assertion about the quorum, not an authority for
+    // it. Requiring it to equal the anchor's rejects a receipt that advertises a
+    // weaker quorum or a different signer set outright, rather than quietly
+    // verifying it under the anchor's terms.
+    if receipt.threshold_config != anchor.threshold_config {
+        return Err(ProofError::InvalidProof {
+            reason: "root witness threshold_config does not match the pinned trust anchor"
+                .to_string(),
+        });
+    }
 
     if !constant_time::ct_eq(
         &receipt.witness_artifact.artifact_id,
@@ -819,7 +968,8 @@ pub fn verify_root_witness_receipt(
     }
 
     let threshold_result = verify_threshold(
-        &receipt.threshold_config,
+        // The ANCHOR's config, never the receipt's (bd-7fubt).
+        &anchor.threshold_config,
         &receipt.witness_artifact,
         &receipt.trace_id,
         &receipt.timestamp,
@@ -849,8 +999,12 @@ pub fn verify_root_witness_receipt(
 }
 
 /// Verify a root witness and require it to have been observed no later than `as_of`.
+///
+/// Anteriority is only as strong as the witness set behind it, so this takes the
+/// same operator-pinned `anchor` as [`verify_root_witness_receipt`].
 pub fn verify_root_witness_anteriority(
     receipt: &MmrRootWitnessReceipt,
+    anchor: &MmrRootWitnessTrustAnchor,
     as_of_unix_seconds: u64,
 ) -> Result<MmrRootWitnessVerification, ProofError> {
     if as_of_unix_seconds == 0 {
@@ -859,7 +1013,7 @@ pub fn verify_root_witness_anteriority(
         });
     }
 
-    let mut verification = verify_root_witness_receipt(receipt)?;
+    let mut verification = verify_root_witness_receipt(receipt, anchor)?;
     if verification.observed_at_unix_seconds > as_of_unix_seconds {
         return Err(ProofError::InvalidProof {
             reason: format!(

@@ -18028,9 +18028,26 @@ fn handle_ltv_verify_as_of_command(args: &cli::LtvVerifyAsOfArgs) -> Result<()> 
         evidence.as_of_unix_seconds = as_of;
     }
 
+    // bd-7fubt: the witness trust anchor is operator-supplied and mandatory.
+    let anchor_raw = crate::bounded_read(&args.witness_anchor, MAX_LTV_EVIDENCE_BYTES)
+        .with_context(|| {
+            format!(
+                "failed reading witness trust anchor {}",
+                args.witness_anchor.display()
+            )
+        })?;
+    let witness_anchor: frankenengine_verifier_sdk::LongTermWitnessTrustAnchor =
+        serde_json::from_slice(&anchor_raw).with_context(|| {
+            format!(
+                "witness trust anchor {} does not parse as \
+                 {{witness_group_id, witness_policy_id, threshold_config}}",
+                args.witness_anchor.display()
+            )
+        })?;
+
     let sdk = frankenengine_verifier_sdk::VerifierSdk::new(args.verifier_identity.as_str());
     let result = sdk
-        .verify_as_of_ltv(&evidence)
+        .verify_as_of_ltv(&evidence, &witness_anchor)
         .map_err(|err| anyhow::anyhow!("verifier SDK refused the LTV evidence: {err}"))?;
     let passed = matches!(
         result.verdict,
