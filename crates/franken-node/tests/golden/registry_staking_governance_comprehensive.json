@@ -1,0 +1,394 @@
+{
+  "schema_version": "staking-v1.0",
+  "test_name": "comprehensive_staking_governance_registry",
+  "test_description": "Complete staking governance scenario with deposits, slashes, appeals, resolutions, expiry, and withdrawal",
+  "accounts": [
+    {
+      "publisher_id": "alice-publisher",
+      "balance": 900,
+      "deposited": 1000,
+      "slashed_total": 100,
+      "slash_history_len": 1,
+      "cooldown_until": 45201
+    },
+    {
+      "publisher_id": "bob-corp",
+      "balance": 3750,
+      "deposited": 5000,
+      "slashed_total": 1250,
+      "slash_history_len": 1,
+      "cooldown_until": 88501
+    },
+    {
+      "publisher_id": "bulk-publisher-000",
+      "balance": 1000,
+      "deposited": 1000,
+      "slashed_total": 0,
+      "slash_history_len": 0,
+      "cooldown_until": null
+    },
+    {
+      "publisher_id": "bulk-publisher-001",
+      "balance": 1100,
+      "deposited": 1100,
+      "slashed_total": 0,
+      "slash_history_len": 0,
+      "cooldown_until": null
+    },
+    {
+      "publisher_id": "bulk-publisher-002",
+      "balance": 1200,
+      "deposited": 1200,
+      "slashed_total": 0,
+      "slash_history_len": 0,
+      "cooldown_until": null
+    },
+    {
+      "publisher_id": "bulk-publisher-003",
+      "balance": 1300,
+      "deposited": 1300,
+      "slashed_total": 0,
+      "slash_history_len": 0,
+      "cooldown_until": null
+    },
+    {
+      "publisher_id": "bulk-publisher-004",
+      "balance": 1400,
+      "deposited": 1400,
+      "slashed_total": 0,
+      "slash_history_len": 0,
+      "cooldown_until": null
+    },
+    {
+      "publisher_id": "charlie-enterprise",
+      "balance": 50000,
+      "deposited": 50000,
+      "slashed_total": 0,
+      "slash_history_len": 0,
+      "cooldown_until": null
+    },
+    {
+      "publisher_id": "charlie-expiring",
+      "balance": 0,
+      "deposited": 10000,
+      "slashed_total": 0,
+      "slash_history_len": 0,
+      "cooldown_until": null
+    },
+    {
+      "publisher_id": "diana-validator",
+      "balance": 0,
+      "deposited": 2500,
+      "slashed_total": 0,
+      "slash_history_len": 0,
+      "cooldown_until": null
+    }
+  ],
+  "stakes": [
+    {
+      "stake_id": 1,
+      "publisher_id": "alice-publisher",
+      "amount": 900,
+      "deposited_at": 1000,
+      "expires_at": null,
+      "state": "Slashed",
+      "risk_tier": "Low"
+    },
+    {
+      "stake_id": 2,
+      "publisher_id": "bob-corp",
+      "amount": 3750,
+      "deposited_at": 1001,
+      "expires_at": null,
+      "state": "Slashed",
+      "risk_tier": "Medium"
+    },
+    {
+      "stake_id": 3,
+      "publisher_id": "charlie-enterprise",
+      "amount": 50000,
+      "deposited_at": 1002,
+      "expires_at": null,
+      "state": "Active",
+      "risk_tier": "Critical"
+    },
+    {
+      "stake_id": 4,
+      "publisher_id": "diana-validator",
+      "amount": 0,
+      "deposited_at": 1003,
+      "expires_at": null,
+      "state": "Withdrawn",
+      "risk_tier": "High"
+    },
+    {
+      "stake_id": 5,
+      "publisher_id": "charlie-expiring",
+      "amount": 0,
+      "deposited_at": 3100,
+      "expires_at": 4000,
+      "state": "Expired",
+      "risk_tier": "Medium"
+    },
+    {
+      "stake_id": 6,
+      "publisher_id": "bulk-publisher-000",
+      "amount": 1000,
+      "deposited_at": 5000,
+      "expires_at": null,
+      "state": "Active",
+      "risk_tier": "Low"
+    },
+    {
+      "stake_id": 7,
+      "publisher_id": "bulk-publisher-001",
+      "amount": 1100,
+      "deposited_at": 5001,
+      "expires_at": null,
+      "state": "Active",
+      "risk_tier": "Low"
+    },
+    {
+      "stake_id": 8,
+      "publisher_id": "bulk-publisher-002",
+      "amount": 1200,
+      "deposited_at": 5002,
+      "expires_at": null,
+      "state": "Active",
+      "risk_tier": "Low"
+    },
+    {
+      "stake_id": 9,
+      "publisher_id": "bulk-publisher-003",
+      "amount": 1300,
+      "deposited_at": 5003,
+      "expires_at": null,
+      "state": "Active",
+      "risk_tier": "Low"
+    },
+    {
+      "stake_id": 10,
+      "publisher_id": "bulk-publisher-004",
+      "amount": 1400,
+      "deposited_at": 5004,
+      "expires_at": null,
+      "state": "Active",
+      "risk_tier": "Low"
+    }
+  ],
+  "slash_events": [
+    {
+      "slash_id": 1,
+      "stake_id": 1,
+      "slash_amount": 100,
+      "slashed_at": 2001,
+      "evidence": {
+        "violation_type": "PolicyViolation",
+        "description": "Failed to maintain required uptime SLA",
+        "evidence_payload": "uptime_metrics: {failures: 12, threshold: 5}",
+        "collector_identity": "monitoring-system",
+        "reported_at": 2000
+      }
+    },
+    {
+      "slash_id": 2,
+      "stake_id": 2,
+      "slash_amount": 1250,
+      "slashed_at": 2101,
+      "evidence": {
+        "violation_type": "FalseAttestation",
+        "description": "Suspected signature falsification",
+        "evidence_payload": "signature_verification: {invalid_count: 3, threshold: 1}",
+        "collector_identity": "security-auditor",
+        "reported_at": 2100
+      }
+    }
+  ],
+  "appeals": [
+    {
+      "appeal_id": 1,
+      "slash_id": 2,
+      "stake_id": 2,
+      "reason": "False positive - signatures were valid but used new key rotation scheme",
+      "filed_at": 2200,
+      "resolved_at": 3000,
+      "outcome": "Upheld"
+    }
+  ],
+  "audit_log": [
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "alice-publisher",
+      "stake_id": 1,
+      "timestamp": 1000,
+      "outcome": "deposited 1000 for tier low"
+    },
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "bob-corp",
+      "stake_id": 2,
+      "timestamp": 1001,
+      "outcome": "deposited 5000 for tier medium"
+    },
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "charlie-enterprise",
+      "stake_id": 3,
+      "timestamp": 1002,
+      "outcome": "deposited 50000 for tier critical"
+    },
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "diana-validator",
+      "stake_id": 4,
+      "timestamp": 1003,
+      "outcome": "deposited 2500 for tier high"
+    },
+    {
+      "event_code": "STAKE-002",
+      "operation": "slash",
+      "publisher_id": "alice-publisher",
+      "stake_id": 1,
+      "timestamp": 2001,
+      "outcome": "slashed 100 from 1000 (post=900, tier=low)"
+    },
+    {
+      "event_code": "STAKE-002",
+      "operation": "slash",
+      "publisher_id": "bob-corp",
+      "stake_id": 2,
+      "timestamp": 2101,
+      "outcome": "slashed 1250 from 5000 (post=3750, tier=medium)"
+    },
+    {
+      "event_code": "STAKE-003",
+      "operation": "appeal_filed",
+      "publisher_id": "bob-corp",
+      "stake_id": 2,
+      "timestamp": 2200,
+      "outcome": "appeal filed for slash 2: False positive - signatures were valid but used new key rotation scheme"
+    },
+    {
+      "event_code": "STAKE-004",
+      "operation": "appeal_resolved",
+      "publisher_id": "bob-corp",
+      "stake_id": 2,
+      "timestamp": 3000,
+      "outcome": "appeal 1 resolved: upheld"
+    },
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "charlie-expiring",
+      "stake_id": 5,
+      "timestamp": 3100,
+      "outcome": "deposited 10000 for tier medium"
+    },
+    {
+      "event_code": "STAKE-006",
+      "operation": "expire",
+      "publisher_id": "charlie-expiring",
+      "stake_id": 5,
+      "timestamp": 4000,
+      "outcome": "expired and released 10000"
+    },
+    {
+      "event_code": "STAKE-005",
+      "operation": "withdraw",
+      "publisher_id": "diana-validator",
+      "stake_id": 4,
+      "timestamp": 4100,
+      "outcome": "withdrew 2500"
+    },
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "bulk-publisher-000",
+      "stake_id": 6,
+      "timestamp": 5000,
+      "outcome": "deposited 1000 for tier low"
+    },
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "bulk-publisher-001",
+      "stake_id": 7,
+      "timestamp": 5001,
+      "outcome": "deposited 1100 for tier low"
+    },
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "bulk-publisher-002",
+      "stake_id": 8,
+      "timestamp": 5002,
+      "outcome": "deposited 1200 for tier low"
+    },
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "bulk-publisher-003",
+      "stake_id": 9,
+      "timestamp": 5003,
+      "outcome": "deposited 1300 for tier low"
+    },
+    {
+      "event_code": "STAKE-001",
+      "operation": "deposit",
+      "publisher_id": "bulk-publisher-004",
+      "stake_id": 10,
+      "timestamp": 5004,
+      "outcome": "deposited 1400 for tier low"
+    }
+  ],
+  "policy": {
+    "tiers": [
+      {
+        "tier_name": "critical",
+        "minimum_stake": 1000,
+        "slash_fraction_bps": 10000,
+        "appeal_window_secs": 172800,
+        "cooldown_secs": 259200
+      },
+      {
+        "tier_name": "high",
+        "minimum_stake": 500,
+        "slash_fraction_bps": 5000,
+        "appeal_window_secs": 129600,
+        "cooldown_secs": 172800
+      },
+      {
+        "tier_name": "low",
+        "minimum_stake": 10,
+        "slash_fraction_bps": 1000,
+        "appeal_window_secs": 43200,
+        "cooldown_secs": 43200
+      },
+      {
+        "tier_name": "medium",
+        "minimum_stake": 100,
+        "slash_fraction_bps": 2500,
+        "appeal_window_secs": 86400,
+        "cooldown_secs": 86400
+      }
+    ]
+  },
+  "collection_capacities": {
+    "max_slash_events": 4096,
+    "max_appeal_records": 4096,
+    "max_slash_history_per_account": 1024,
+    "max_stake_records": 8192,
+    "max_audit_log_entries": 4096
+  },
+  "stats": {
+    "total_accounts": 10,
+    "total_stakes": 10,
+    "total_slash_events": 2,
+    "total_appeals": 1,
+    "total_audit_entries": 16
+  }
+}
