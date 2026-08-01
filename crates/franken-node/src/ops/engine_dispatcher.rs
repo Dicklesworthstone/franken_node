@@ -664,7 +664,7 @@ fn validate_runtime_evidence_state_outside_guest(
 fn runtime_evidence_user_state_home() -> Result<PathBuf> {
     let state_home = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
+        .or({
             #[cfg(target_os = "windows")]
             {
                 std::env::var_os("LOCALAPPDATA").map(PathBuf::from)

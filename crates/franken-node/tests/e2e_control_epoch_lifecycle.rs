@@ -7,9 +7,9 @@
 //!   - INV-EPOCH-MONOTONIC      `epoch_advance` only ever increases the epoch
 //!   - INV-EPOCH-NO-GAP         `epoch_advance` advances by exactly +1
 //!   - INV-EPOCH-SIGNED-EVENT   every `EpochTransition::verify(key)` returns true
-//!                              (bd-kpjrz: the MAC is HMAC-keyed, so this is a
-//!                              real authenticity check rather than a hash
-//!                              anyone could recompute)
+//!     (bd-kpjrz: the MAC is HMAC-keyed, so this is a
+//!     real authenticity check rather than a hash
+//!     anyone could recompute)
 //!   - INV-EPOCH-DURABLE        `recover(committed)` round-trips state across
 //!     a simulated restart
 //!   - epoch_set: regression to `<= current` is rejected with
