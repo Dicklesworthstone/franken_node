@@ -1815,6 +1815,22 @@ validation broker receipts, cleanup audit) as those subsystems are
 exercised; the bootstrap above is the minimum layout that `franken-node
 init` creates up-front.
 
+Native-runtime evidence authority is deliberately outside this project tree,
+because the project directory is also the guest filesystem sandbox root.
+`<user-state>` is `XDG_STATE_HOME` when set, otherwise
+`$HOME/.local/state` (`LOCALAPPDATA` is also recognized on Windows):
+
+| Path | Purpose |
+|---|---|
+| `<user-state>/franken-node/runtime-evidence/keys/product-root.key` | Owner-only persistent product root; never serialized into the execution child |
+| `<user-state>/franken-node/runtime-evidence/identity-captures/<verification-key>.json` | Product-root-signed public identity capture for one short-lived native-engine evidence key |
+
+These directories are created lazily with owner-only permissions. Native
+startup fails closed if the resolved user-state directory is inside the guest
+project root. A process-spawn-enabled Bubblewrap worker additionally masks the
+complete runtime-evidence directory with an empty `tmpfs`, so an allowed child
+utility cannot read the parent-owned root through the read-only host-root bind.
+
 Every durable write goes through an atomic-rename + directory-fsync
 TempFileGuard; readers take an `fs2` advisory lock when consistency
 across multiple writers is required (see `lib.rs::lock_utils`).
@@ -2406,6 +2422,7 @@ implementation CI gate.
 |---|---|
 | Native runtime internals (VM, parser, AST, interpreter, GC) | Compatibility capture from Node/Bun ecosystems |
 | Policy semantics and trust primitives at the VM level | Migration and operator experience (audit, rewrite, validate, rollout) |
+| Typed runtime-evidence authority and verification-identity contracts | Persistent product-root custody, per-session authority provisioning, signed identity capture, and worker-response reconciliation |
 | Bayesian sentinel inference and containment actions | Extension ecosystem and trust distribution (registry, trust cards, reputation) |
 | Native Rust execution (no V8/QuickJS bindings) | Packaging, rollout, and enterprise control planes |
 | | Product-layer policy controls and verification surfaces |
@@ -2417,6 +2434,15 @@ product-layer claims (trust, migration, replay, fleet) without having to
 audit the engine internals, and vice versa. Engine revisions are pinned
 by `Cargo.toml` path dependency; bumping the engine revision is an
 explicit, reviewed change.
+
+For native runs, the product parent retains a persistent evidence root outside
+the execution child, provisions a fresh short-lived engine signing authority
+per session, and persists a root-signed public identity capture. The child
+receives only the session authority; the parent rejects any returned evidence
+identity that does not match its signed capture. Verifiers must obtain the
+product root independently—the root embedded in a capture is not a trust
+anchor. See the
+[runtime-evidence authority handoff](docs/ENGINE_SPLIT_CONTRACT.md#runtime-evidence-authority-handoff-bd-fzpkz).
 
 ---
 

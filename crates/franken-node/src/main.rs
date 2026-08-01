@@ -29481,6 +29481,10 @@ mod run_trust_gate_tests {
                 stderr: String::new(),
             },
             host_effect_ledger: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture_path: None,
             sentinel: None,
         }
     }

@@ -8,7 +8,9 @@ use frankenengine_node::connector::lifecycle::ConnectorState;
 use frankenengine_node::connector::rollout_state::{
     EpochPersistError, RolloutPhase, RolloutState, persist_epoch_scoped,
 };
-use frankenengine_node::control_plane::control_epoch::{ControlEpoch, ValidityWindowPolicy};
+use frankenengine_node::control_plane::control_epoch::{
+    ControlEpoch, EpochSigningKey, ValidityWindowPolicy,
+};
 use frankenengine_node::control_plane::epoch_transition_barrier::BarrierConfig;
 use frankenengine_node::runtime::epoch_transition::{
     EPOCH_ADVANCED, EPOCH_DRAIN_CONFIRMED, EPOCH_DRAIN_REQUESTED, EPOCH_TRANSITION_ABORTED,
@@ -17,8 +19,13 @@ use frankenengine_node::runtime::epoch_transition::{
 use serde_json::json;
 use tempfile::TempDir;
 
+fn epoch_test_key() -> EpochSigningKey {
+    EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+}
+
 fn coordinator_at(epoch: u64) -> ProductEpochCoordinator {
-    let mut coordinator = ProductEpochCoordinator::new(epoch, 2, BarrierConfig::new(10_000, 500));
+    let mut coordinator =
+        ProductEpochCoordinator::new(epoch, 2, BarrierConfig::new(10_000, 500), epoch_test_key());
     for service_id in [
         "connector_fencing",
         "connector_lifecycle",
@@ -183,7 +190,8 @@ fn barrier_commit_state_is_metamorphic_under_registration_order_permutation() ->
     }
 
     fn run_registration_order(order: &[&str]) -> Result<RegistrationOrderRun, String> {
-        let mut coordinator = ProductEpochCoordinator::new(55, 2, BarrierConfig::new(10_000, 500));
+        let mut coordinator =
+            ProductEpochCoordinator::new(55, 2, BarrierConfig::new(10_000, 500), epoch_test_key());
         for service_id in order {
             coordinator.register_service(service_id);
         }

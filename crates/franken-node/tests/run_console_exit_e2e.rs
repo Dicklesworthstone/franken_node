@@ -56,7 +56,7 @@ struct RunOutcome {
 #[test]
 fn private_native_session_worker_refuses_direct_cli_invocation() {
     let missing_nonce = Command::new(franken_node_bin())
-        .arg("__franken-native-session-worker-v3")
+        .arg("__franken-native-session-worker-v4")
         .stdin(Stdio::null())
         .output()
         .expect("invoke private worker marker directly");
@@ -75,7 +75,7 @@ fn private_native_session_worker_refuses_direct_cli_invocation() {
     {
         let forged_nonce = Command::new(franken_node_bin())
             .args([
-                "__franken-native-session-worker-v3",
+                "__franken-native-session-worker-v4",
                 "00000000-0000-4000-8000-000000000001",
             ])
             .stdin(Stdio::null())

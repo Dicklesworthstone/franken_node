@@ -19,6 +19,42 @@ This repo MUST consume engine crates from `/dp/franken_engine` and MUST NOT main
 - `franken_node` may ship on a different cadence but must pin and validate an explicit engine revision.
 - No local reintroduction of `crates/franken-engine` or `crates/franken-extension-host` in this repo.
 
+## Runtime-Evidence Authority Handoff (`bd-fzpkz`)
+
+Runtime evidence crosses the repository boundary through the typed
+`franken_engine::RuntimeEvidenceAuthority` API. The product does not call an
+engine constructor that invents a signing seed, and the execution child does
+not receive a long-lived product key.
+
+The ownership and lifecycle are:
+
+| Surface | Owner | Contract |
+|---|---|---|
+| Product evidence root | `franken_node` parent | Generate from OS entropy on first use and persist at `<user-state>/franken-node/runtime-evidence/keys/product-root.key` as an owner-only file outside the guest project root. Never serialize its private seed into the execution child. |
+| Session evidence authority | `franken_node` parent, consumed by `franken_engine` | Generate a fresh nonzero seed for each native session, derive the public `EvidenceVerificationIdentity`, and pass the resulting typed authority through `ExecutionOrchestrator::try_new_with_runtime_config_and_authority`. |
+| Public identity capture | `franken_node` parent | Sign the session nonce and complete engine verification identity with the persistent product root, then persist the capture under `<user-state>/franken-node/runtime-evidence/identity-captures/<verification-key>.json`, also outside the guest project root. |
+| Child admission | supervised native-session worker | Verify the signed capture, reconstruct the authority from the short-lived seed, and reject any seed/public-identity mismatch before engine construction. When process spawning activates Bubblewrap's read-only host-root bind, mask the complete parent-owned runtime-evidence state directory with an empty `tmpfs` before launching the worker. |
+| Completion reconciliation | `franken_node` parent | Reject a worker response whose evidence identity differs from the product-signed capture and surface the capture plus its durable path in `RunDispatchReport`. |
+| Independent verification | operator/verifier | Pin the product root through a channel independent of the capture. The public key embedded in a capture is useful for integrity checks but is not, by itself, a trust anchor. |
+
+The session seed may exist only for the bounded native-session handoff and
+engine authority lifetime. Request buffers and the handoff grant zeroize their
+seed storage when consumed or dropped. Production code must not substitute a
+hard-coded seed, a process-global seed, a producer-known deterministic seed,
+or a child-generated self-asserted identity. Fixed seeds are permitted only in
+`cfg(test)` fixtures.
+
+This handoff preserves the execution-cell rule below: the persistent product
+root and durable captures stay outside the guest filesystem root, while each
+child receives only one short-lived session authority. The user-state root is
+`XDG_STATE_HOME`, then `LOCALAPPDATA` on Windows, then `$HOME/.local/state`;
+startup fails closed if that location resolves inside the guest project. The
+capture is independently durable even if the child crashes, and it binds the
+exact engine key provenance needed to verify the session's signed evidence.
+The Bubblewrap mask prevents an otherwise allowed child utility from receiving
+the absolute product-root path as an argument and returning its bytes through
+captured output.
+
 ## Native-Code Capsule Handoff (`NCC-NODE-SPLIT-0010-V1`)
 
 The engine ADR

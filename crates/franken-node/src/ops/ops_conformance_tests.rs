@@ -88,6 +88,10 @@ fn run_dispatch_report_json_keeps_receipt_fields_stable() {
             stderr: String::new(),
         },
         host_effect_ledger: None,
+        #[cfg(feature = "engine")]
+        runtime_evidence_identity_capture: None,
+        #[cfg(feature = "engine")]
+        runtime_evidence_identity_capture_path: None,
         sentinel: None,
     };
 
@@ -123,6 +127,10 @@ fn run_dispatch_report_json_round_trips_without_format_drift() {
             stderr: "terminated".to_string(),
         },
         host_effect_ledger: None,
+        #[cfg(feature = "engine")]
+        runtime_evidence_identity_capture: None,
+        #[cfg(feature = "engine")]
+        runtime_evidence_identity_capture_path: None,
         sentinel: None,
     };
 

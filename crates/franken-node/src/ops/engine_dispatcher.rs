@@ -29,6 +29,14 @@ use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
 #[cfg(feature = "engine")]
 use frankenengine_engine::runtime_config::RuntimeConfig as EngineRuntimeConfig;
 #[cfg(feature = "engine")]
+use frankenengine_engine::{
+    evidence_ledger::{
+        EvidenceTrustSnapshot, EvidenceVerificationIdentity, RuntimeEvidenceAuthority,
+    },
+    security_epoch::SecurityEpoch,
+    signature_preimage::SigningKey as EngineEvidenceSigningKey,
+};
+#[cfg(feature = "engine")]
 use frankenengine_extension_host::host_effect_journal::{
     HostEffectJournalEntry, InMemoryHostEffectJournal,
 };
@@ -54,6 +62,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
+#[cfg(feature = "engine")]
+use zeroize::{Zeroize, Zeroizing};
 
 // Security epoch constants to prevent hardcoded value drift across the module
 // These values must stay synchronized with franken-engine SecurityEpoch evolution
@@ -63,6 +73,15 @@ const LEGACY_SECURITY_EPOCH: u64 = 1; // Legacy security epoch for compatibility
 const STANDARD_SECURITY_EPOCH: u64 = 2; // Standard security epoch (Balanced profile)
 #[cfg(feature = "engine")]
 const CURRENT_SECURITY_EPOCH: u64 = 3; // Latest security epoch (Strict profile)
+
+#[cfg(feature = "engine")]
+fn security_epoch_for_profile(profile: Profile) -> SecurityEpoch {
+    match profile {
+        Profile::Strict => SecurityEpoch::from_raw(CURRENT_SECURITY_EPOCH),
+        Profile::Balanced => SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        Profile::LegacyRisky => SecurityEpoch::from_raw(LEGACY_SECURITY_EPOCH),
+    }
+}
 
 /// Native engine execution can traverse deeply nested parser/lowering/interpreter
 /// frames. Give that one bounded worker an explicit stack so its correctness does
@@ -76,13 +95,13 @@ const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
 /// before Clap so the worker can never recursively enter the public `run`
 /// command.
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v3";
+const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v4";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v3";
+const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v4";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V3\0";
+const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V4\0";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 3;
+const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 4;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
 #[cfg(feature = "engine")]
@@ -101,6 +120,20 @@ const NATIVE_SESSION_CONTAINMENT_STARTUP_TIMEOUT: std::time::Duration =
 #[cfg(all(feature = "engine", target_os = "linux"))]
 const NATIVE_SESSION_CONTAINMENT_CLEANUP_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5);
+
+#[cfg(feature = "engine")]
+const RUNTIME_EVIDENCE_CAPTURE_SCHEMA: &str = "franken-node/runtime-evidence-identity-capture/v1";
+#[cfg(feature = "engine")]
+const RUNTIME_EVIDENCE_CAPTURE_SIGNATURE_DOMAIN: &[u8] =
+    b"franken-node.runtime-evidence-identity-capture.v1";
+#[cfg(feature = "engine")]
+const RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY: &str = "franken-node";
+#[cfg(feature = "engine")]
+const RUNTIME_EVIDENCE_STATE_DIRECTORY: &str = "runtime-evidence";
+#[cfg(feature = "engine")]
+const RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH: &str = "keys/product-root.key";
+#[cfg(feature = "engine")]
+const RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH: &str = "identity-captures";
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
 const CORPUS_PROCESS_AUTHORITY_SCHEMA: &str = "franken-node/corpus-process-authority/v1";
@@ -141,6 +174,57 @@ enum NativeSessionContainment {
     Bubblewrap(BubblewrapContainmentUnit),
 }
 
+/// Product-root-signed public binding for one short-lived engine evidence key.
+///
+/// The persistent product root is stored outside the guest project filesystem
+/// and is never serialized into the execution child. The child receives only
+/// the per-session signing seed, while verifiers can pin the product root and
+/// authenticate this independently persisted public record.
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeEvidenceIdentityCapture {
+    pub schema_version: String,
+    pub session_nonce: String,
+    pub product_root_key_id: String,
+    pub product_root_verification_key_hex: String,
+    pub evidence_verification_identity: EvidenceVerificationIdentity,
+    pub signature_hex: String,
+}
+
+#[cfg(feature = "engine")]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeEvidenceSessionGrant {
+    signing_seed: [u8; 32],
+    capture: RuntimeEvidenceIdentityCapture,
+}
+
+#[cfg(feature = "engine")]
+impl std::fmt::Debug for RuntimeEvidenceSessionGrant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeEvidenceSessionGrant")
+            .field("signing_seed", &"[REDACTED]")
+            .field("capture", &self.capture)
+            .finish()
+    }
+}
+
+#[cfg(feature = "engine")]
+impl Drop for RuntimeEvidenceSessionGrant {
+    fn drop(&mut self) {
+        self.signing_seed.zeroize();
+    }
+}
+
+#[cfg(feature = "engine")]
+struct ProvisionedRuntimeEvidenceSession {
+    grant: RuntimeEvidenceSessionGrant,
+    capture_path: PathBuf,
+    protected_state_root: PathBuf,
+}
+
 #[cfg(feature = "engine")]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -153,6 +237,7 @@ struct NativeSessionRequest {
     config: Config,
     telemetry_socket_path: PathBuf,
     process_spawn_trust_key_hex: Option<String>,
+    runtime_evidence_grant: RuntimeEvidenceSessionGrant,
 }
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
@@ -271,6 +356,7 @@ enum NativeSessionResponse {
         stderr_base64: String,
         telemetry_report: Box<TelemetryRuntimeReport>,
         host_effect_ledger: Option<HostEffectLedger>,
+        evidence_verification_identity: EvidenceVerificationIdentity,
     },
     ExecutionFailed {
         schema_version: String,
@@ -298,14 +384,621 @@ enum NativeSessionResponse {
 }
 
 #[cfg(feature = "engine")]
+#[derive(Serialize)]
+struct RuntimeEvidenceIdentityCapturePayload<'a> {
+    schema_version: &'a str,
+    session_nonce: &'a str,
+    product_root_key_id: &'a str,
+    product_root_verification_key_hex: &'a str,
+    evidence_verification_identity: &'a EvidenceVerificationIdentity,
+}
+
+#[cfg(feature = "engine")]
+fn product_root_key_id(verifying_key: &ed25519_dalek::VerifyingKey) -> String {
+    format!("ed25519:{}", hex::encode(verifying_key.as_bytes()))
+}
+
+#[cfg(feature = "engine")]
+fn runtime_evidence_capture_preimage(capture: &RuntimeEvidenceIdentityCapture) -> Result<Vec<u8>> {
+    let payload = serde_json::to_vec(&RuntimeEvidenceIdentityCapturePayload {
+        schema_version: &capture.schema_version,
+        session_nonce: &capture.session_nonce,
+        product_root_key_id: &capture.product_root_key_id,
+        product_root_verification_key_hex: &capture.product_root_verification_key_hex,
+        evidence_verification_identity: &capture.evidence_verification_identity,
+    })
+    .context("serialize runtime evidence identity capture payload")?;
+    let payload_len =
+        u64::try_from(payload.len()).context("runtime evidence capture payload is too large")?;
+    let mut preimage = Vec::with_capacity(
+        RUNTIME_EVIDENCE_CAPTURE_SIGNATURE_DOMAIN
+            .len()
+            .saturating_add(8)
+            .saturating_add(payload.len()),
+    );
+    preimage.extend_from_slice(RUNTIME_EVIDENCE_CAPTURE_SIGNATURE_DOMAIN);
+    preimage.extend_from_slice(&payload_len.to_be_bytes());
+    preimage.extend_from_slice(&payload);
+    Ok(preimage)
+}
+
+#[cfg(feature = "engine")]
+impl RuntimeEvidenceIdentityCapture {
+    fn issue(
+        session_nonce: &str,
+        identity: EvidenceVerificationIdentity,
+        product_root: &ed25519_dalek::SigningKey,
+    ) -> Result<Self> {
+        use ed25519_dalek::Signer as _;
+
+        let product_root_verification_key = product_root.verifying_key();
+        let product_root_verification_key_hex =
+            hex::encode(product_root_verification_key.as_bytes());
+        let mut capture = Self {
+            schema_version: RUNTIME_EVIDENCE_CAPTURE_SCHEMA.to_string(),
+            session_nonce: session_nonce.to_string(),
+            product_root_key_id: product_root_key_id(&product_root_verification_key),
+            product_root_verification_key_hex,
+            evidence_verification_identity: identity,
+            signature_hex: String::new(),
+        };
+        let preimage = runtime_evidence_capture_preimage(&capture)?;
+        capture.signature_hex = hex::encode(product_root.sign(&preimage).to_bytes());
+        capture.verify_with_product_root(&product_root_verification_key)?;
+        Ok(capture)
+    }
+
+    pub fn product_root_verifying_key(&self) -> Result<ed25519_dalek::VerifyingKey> {
+        let decoded = hex::decode(&self.product_root_verification_key_hex)
+            .context("runtime evidence product root key is not hexadecimal")?;
+        let key_bytes: [u8; 32] = decoded.try_into().map_err(|decoded: Vec<u8>| {
+            anyhow::anyhow!(
+                "runtime evidence product root key must be 32 bytes, got {}",
+                decoded.len()
+            )
+        })?;
+        ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
+            .context("runtime evidence product root key is not valid Ed25519")
+    }
+
+    /// Verify this capture against a product root obtained through a separate,
+    /// trusted channel. The root embedded in the capture is never sufficient
+    /// by itself to establish trust.
+    pub fn verify_with_product_root(
+        &self,
+        trusted_product_root: &ed25519_dalek::VerifyingKey,
+    ) -> Result<()> {
+        if self.schema_version != RUNTIME_EVIDENCE_CAPTURE_SCHEMA {
+            anyhow::bail!("runtime evidence identity capture schema mismatch");
+        }
+        uuid::Uuid::parse_str(&self.session_nonce)
+            .context("runtime evidence identity capture nonce is invalid")?;
+
+        let expected_root_hex = hex::encode(trusted_product_root.as_bytes());
+        if !crate::security::constant_time::ct_eq(
+            &self.product_root_verification_key_hex,
+            &expected_root_hex,
+        ) {
+            anyhow::bail!("runtime evidence identity capture root key is not trusted");
+        }
+        let expected_root_key_id = product_root_key_id(trusted_product_root);
+        if !crate::security::constant_time::ct_eq(&self.product_root_key_id, &expected_root_key_id)
+        {
+            anyhow::bail!("runtime evidence identity capture root key id is inconsistent");
+        }
+
+        EvidenceTrustSnapshot::from_runtime_identities(
+            self.evidence_verification_identity
+                .key_provenance
+                .activation_epoch,
+            [self.evidence_verification_identity.clone()],
+        )
+        .context("runtime evidence identity capture contains invalid engine provenance")?;
+
+        let decoded_signature = hex::decode(&self.signature_hex)
+            .context("runtime evidence identity capture signature is not hexadecimal")?;
+        let signature_bytes: [u8; 64] =
+            decoded_signature
+                .try_into()
+                .map_err(|decoded_signature: Vec<u8>| {
+                    anyhow::anyhow!(
+                        "runtime evidence identity capture signature must be 64 bytes, got {}",
+                        decoded_signature.len()
+                    )
+                })?;
+        let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+        trusted_product_root
+            .verify_strict(&runtime_evidence_capture_preimage(self)?, &signature)
+            .context("runtime evidence identity capture signature verification failed")
+    }
+}
+
+#[cfg(feature = "engine")]
+impl RuntimeEvidenceSessionGrant {
+    fn into_authority(mut self) -> Result<RuntimeEvidenceAuthority> {
+        let embedded_product_root = self.capture.product_root_verifying_key()?;
+        self.capture
+            .verify_with_product_root(&embedded_product_root)
+            .context("runtime evidence session grant capture is invalid")?;
+
+        let signing_key = EngineEvidenceSigningKey::from_bytes(self.signing_seed)
+            .context("runtime evidence session grant contains an invalid signing seed")?;
+        self.signing_seed.zeroize();
+        let provenance = &self.capture.evidence_verification_identity.key_provenance;
+        let authority = RuntimeEvidenceAuthority::from_signing_key(
+            self.capture
+                .evidence_verification_identity
+                .producer_id
+                .clone(),
+            signing_key,
+            provenance.activation_epoch,
+            provenance.rotation_sequence,
+            provenance.previous_key_id.clone(),
+        )
+        .context("runtime evidence session grant cannot construct engine authority")?;
+        if authority.verification_identity() != self.capture.evidence_verification_identity {
+            anyhow::bail!(
+                "runtime evidence session grant seed does not match its signed public identity"
+            );
+        }
+        Ok(authority)
+    }
+}
+
+#[cfg(feature = "engine")]
+fn ensure_runtime_evidence_directory(path: &Path, require_private_mode: bool) -> Result<()> {
+    let created = match std::fs::create_dir(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("create runtime evidence directory {}", path.display()));
+        }
+    };
+
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect runtime evidence directory {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "runtime evidence directory {} must be a non-symlink directory",
+            path.display()
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.uid() != linux_process_identity()?.effective_uid {
+            anyhow::bail!(
+                "runtime evidence directory {} is not owned by the current effective user",
+                path.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    if created || require_private_mode {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restrict runtime evidence directory {}", path.display()))?;
+    }
+
+    // Re-open the path metadata after the permission transition so a raced
+    // replacement cannot inherit trust from the pre-chmod observation.
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect runtime evidence directory {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "runtime evidence directory {} must be a non-symlink directory",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    if require_private_mode {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            anyhow::bail!(
+                "runtime evidence directory {} must not grant group or other access",
+                path.display()
+            );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.uid() != linux_process_identity()?.effective_uid {
+            anyhow::bail!(
+                "runtime evidence directory {} is not owned by the current effective user",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn validate_runtime_evidence_state_home_path(state_home: &Path) -> Result<()> {
+    if !state_home.is_absolute() {
+        anyhow::bail!(
+            "runtime evidence user state home must be absolute: {}",
+            state_home.display()
+        );
+    }
+    if state_home.parent().is_none() {
+        anyhow::bail!("runtime evidence user state home must not be a filesystem root");
+    }
+    if state_home
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "runtime evidence user state home must not contain parent traversal: {}",
+            state_home.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn validate_runtime_evidence_state_outside_guest(
+    state_home: &Path,
+    guest_project_root: &Path,
+) -> Result<()> {
+    validate_runtime_evidence_state_home_path(state_home)?;
+    if !guest_project_root.is_absolute() {
+        anyhow::bail!(
+            "runtime evidence guest project root must be absolute: {}",
+            guest_project_root.display()
+        );
+    }
+    if state_home.starts_with(guest_project_root) {
+        anyhow::bail!(
+            "runtime evidence user state home {} must remain outside guest filesystem root {}",
+            state_home.display(),
+            guest_project_root.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn runtime_evidence_user_state_home() -> Result<PathBuf> {
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            #[cfg(target_os = "windows")]
+            {
+                std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                None
+            }
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".local").join("state"))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime evidence state requires XDG_STATE_HOME, LOCALAPPDATA, or HOME")
+        })?;
+    validate_runtime_evidence_state_home_path(&state_home)?;
+    Ok(state_home)
+}
+
+#[cfg(feature = "engine")]
+fn prepare_runtime_evidence_directories(
+    guest_project_root: &Path,
+) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let state_home = runtime_evidence_user_state_home()?;
+    validate_runtime_evidence_state_outside_guest(&state_home, guest_project_root)?;
+    std::fs::create_dir_all(&state_home).with_context(|| {
+        format!(
+            "create runtime evidence user state home {}",
+            state_home.display()
+        )
+    })?;
+    ensure_runtime_evidence_directory(&state_home, false)?;
+    let state_home = state_home.canonicalize().with_context(|| {
+        format!(
+            "resolve runtime evidence user state home {}",
+            state_home.display()
+        )
+    })?;
+    validate_runtime_evidence_state_outside_guest(&state_home, guest_project_root)
+        .context("resolved runtime evidence user state home is unsafe")?;
+
+    let product_state_root = state_home.join(RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY);
+    let state_root = product_state_root.join(RUNTIME_EVIDENCE_STATE_DIRECTORY);
+    let key_directory = state_root.join("keys");
+    let capture_directory = state_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+    ensure_runtime_evidence_directory(&product_state_root, true)?;
+    ensure_runtime_evidence_directory(&state_root, true)?;
+    ensure_runtime_evidence_directory(&key_directory, true)?;
+    ensure_runtime_evidence_directory(&capture_directory, true)?;
+    Ok((
+        state_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+        capture_directory,
+        state_root,
+    ))
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn append_runtime_evidence_containment_mask(
+    command: &mut Command,
+    protected_state_root: &Path,
+) -> Result<()> {
+    if !protected_state_root.is_absolute() {
+        anyhow::bail!(
+            "runtime evidence containment mask must be absolute: {}",
+            protected_state_root.display()
+        );
+    }
+    command.arg("--tmpfs").arg(protected_state_root);
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn validate_runtime_evidence_private_file_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<()> {
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "runtime evidence key material {} must be a regular file",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            anyhow::bail!(
+                "runtime evidence key material {} must not grant group or other access",
+                path.display()
+            );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.uid() != linux_process_identity()?.effective_uid {
+            anyhow::bail!(
+                "runtime evidence key material {} is not owned by the current effective user",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engine")]
+fn read_runtime_evidence_private_file(path: &Path, max_bytes: usize) -> Result<Zeroizing<Vec<u8>>> {
+    let observed = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect runtime evidence file {}", path.display()))?;
+    if observed.file_type().is_symlink() {
+        anyhow::bail!(
+            "runtime evidence file {} must not be a symlink",
+            path.display()
+        );
+    }
+    validate_runtime_evidence_private_file_metadata(path, &observed)?;
+
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        let descriptor = open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .with_context(|| format!("open runtime evidence file {}", path.display()))?;
+        std::fs::File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open runtime evidence file {}", path.display()))?;
+
+    let opened = file
+        .metadata()
+        .with_context(|| format!("inspect opened runtime evidence file {}", path.display()))?;
+    validate_runtime_evidence_private_file_metadata(path, &opened)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if observed.dev() != opened.dev() || observed.ino() != opened.ino() {
+            anyhow::bail!(
+                "runtime evidence file {} changed while it was opened",
+                path.display()
+            );
+        }
+    }
+
+    let mut bytes = Zeroizing::new(Vec::with_capacity(max_bytes.min(4096)));
+    file.take(u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read runtime evidence file {}", path.display()))?;
+    if bytes.len() > max_bytes {
+        anyhow::bail!(
+            "runtime evidence file {} exceeds the {}-byte bound",
+            path.display(),
+            max_bytes
+        );
+    }
+    Ok(bytes)
+}
+
+#[cfg(feature = "engine")]
+fn create_new_runtime_evidence_private_file(path: &Path, bytes: &[u8]) -> Result<bool> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("create runtime evidence file {}", path.display()));
+        }
+    };
+    validate_runtime_evidence_private_file_metadata(
+        path,
+        &file
+            .metadata()
+            .with_context(|| format!("inspect new runtime evidence file {}", path.display()))?,
+    )?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("persist runtime evidence file {}", path.display()))?;
+    #[cfg(unix)]
+    std::fs::File::open(
+        path.parent()
+            .ok_or_else(|| anyhow::anyhow!("runtime evidence file has no parent directory"))?,
+    )
+    .and_then(|directory| directory.sync_all())
+    .with_context(|| {
+        format!(
+            "sync runtime evidence directory for newly persisted {}",
+            path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+#[cfg(feature = "engine")]
+fn load_runtime_evidence_product_root(path: &Path) -> Result<ed25519_dalek::SigningKey> {
+    let bytes = read_runtime_evidence_private_file(path, 32)?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "runtime evidence product root {} must contain exactly 32 bytes",
+            path.display()
+        );
+    }
+    let mut seed = Zeroizing::new([0_u8; 32]);
+    seed.copy_from_slice(&bytes);
+    if crate::security::constant_time::ct_eq_bytes(seed.as_ref(), &[0_u8; 32]) {
+        anyhow::bail!("runtime evidence product root must not use the all-zero seed");
+    }
+    Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+}
+
+#[cfg(feature = "engine")]
+fn load_or_create_runtime_evidence_product_root(path: &Path) -> Result<ed25519_dalek::SigningKey> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return load_runtime_evidence_product_root(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect runtime evidence root {}", path.display()));
+        }
+    }
+
+    use rand::RngCore as _;
+    let mut seed = Zeroizing::new([0_u8; 32]);
+    loop {
+        rand::rngs::OsRng.fill_bytes(seed.as_mut());
+        if !crate::security::constant_time::ct_eq_bytes(seed.as_ref(), &[0_u8; 32]) {
+            break;
+        }
+    }
+    if create_new_runtime_evidence_private_file(path, seed.as_ref())? {
+        Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
+    } else {
+        load_runtime_evidence_product_root(path)
+    }
+}
+
+#[cfg(feature = "engine")]
+fn persist_runtime_evidence_capture(
+    capture_directory: &Path,
+    capture: &RuntimeEvidenceIdentityCapture,
+) -> Result<PathBuf> {
+    let file_name = format!(
+        "{}.json",
+        capture
+            .evidence_verification_identity
+            .verification_key
+            .to_hex()
+    );
+    let capture_path = capture_directory.join(file_name);
+    let mut serialized = serde_json::to_vec_pretty(capture)
+        .context("serialize runtime evidence identity capture")?;
+    serialized.push(b'\n');
+    if !create_new_runtime_evidence_private_file(&capture_path, &serialized)? {
+        let existing = read_runtime_evidence_private_file(&capture_path, 64 * 1024)?;
+        if !crate::security::constant_time::ct_eq_bytes(&existing, &serialized) {
+            anyhow::bail!(
+                "runtime evidence identity capture {} already exists with different contents",
+                capture_path.display()
+            );
+        }
+    }
+    Ok(capture_path)
+}
+
+#[cfg(feature = "engine")]
+fn provision_runtime_evidence_session(
+    project_root: &Path,
+    session_nonce: &str,
+    activation_epoch: SecurityEpoch,
+) -> Result<ProvisionedRuntimeEvidenceSession> {
+    uuid::Uuid::parse_str(session_nonce).context("runtime evidence session nonce is invalid")?;
+    let (product_root_path, capture_directory, protected_state_root) =
+        prepare_runtime_evidence_directories(project_root)?;
+    let product_root = load_or_create_runtime_evidence_product_root(&product_root_path)?;
+    let root_key_id = product_root_key_id(&product_root.verifying_key());
+
+    use rand::RngCore as _;
+    let mut signing_seed = Zeroizing::new([0_u8; 32]);
+    loop {
+        rand::rngs::OsRng.fill_bytes(signing_seed.as_mut());
+        if !crate::security::constant_time::ct_eq_bytes(signing_seed.as_ref(), &[0_u8; 32]) {
+            break;
+        }
+    }
+    let engine_signing_key = EngineEvidenceSigningKey::from_bytes(*signing_seed)
+        .context("operating system generated an invalid runtime evidence signing seed")?;
+    let producer_id = format!("franken-node.native-session:{root_key_id}:{session_nonce}");
+    let authority = RuntimeEvidenceAuthority::from_signing_key(
+        producer_id,
+        engine_signing_key,
+        activation_epoch,
+        1,
+        None,
+    )
+    .context("construct product-provisioned runtime evidence authority")?;
+    let capture = RuntimeEvidenceIdentityCapture::issue(
+        session_nonce,
+        authority.verification_identity(),
+        &product_root,
+    )?;
+    let capture_path = persist_runtime_evidence_capture(&capture_directory, &capture)?;
+    let grant = RuntimeEvidenceSessionGrant {
+        signing_seed: *signing_seed,
+        capture,
+    };
+    Ok(ProvisionedRuntimeEvidenceSession {
+        grant,
+        capture_path,
+        protected_state_root,
+    })
+}
+
+#[cfg(feature = "engine")]
 fn encode_native_session_frame<T: Serialize>(
     value: &T,
     payload_cap: usize,
 ) -> std::result::Result<Vec<u8>, String> {
     use sha2::{Digest, Sha256};
 
-    let payload = serde_json::to_vec(value)
-        .map_err(|error| format!("failed serializing native-session frame: {error}"))?;
+    let payload = Zeroizing::new(
+        serde_json::to_vec(value)
+            .map_err(|error| format!("failed serializing native-session frame: {error}"))?,
+    );
     if payload.len() > payload_cap {
         return Err(format!(
             "native-session frame payload exceeded {payload_cap} bytes"
@@ -1075,6 +1768,15 @@ pub struct RunDispatchReport {
     /// external-runtime fallbacks). Auto-surfaced in `run --json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_effect_ledger: Option<HostEffectLedger>,
+    /// Product-root-signed public identity for the short-lived authority that
+    /// signed the engine evidence emitted by this native session.
+    #[cfg(feature = "engine")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_evidence_identity_capture: Option<RuntimeEvidenceIdentityCapture>,
+    /// Durable product-state path where the same signed capture was persisted.
+    #[cfg(feature = "engine")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_evidence_identity_capture_path: Option<String>,
     /// bd-bg2hy: the Bayesian Runtime Sentinel's per-run report — observation
     /// ingest (FN-SENTINEL-001), fixed-point e-process updates
     /// (FN-SENTINEL-002), the expected-loss containment decision
@@ -1189,7 +1891,28 @@ struct DispatchReportInputs<'a> {
     output: Output,
     telemetry: Option<TelemetryRuntimeReport>,
     host_effect_ledger: Option<HostEffectLedger>,
+    #[cfg(feature = "engine")]
+    runtime_evidence_identity_capture: Option<RuntimeEvidenceIdentityCapture>,
+    #[cfg(feature = "engine")]
+    runtime_evidence_identity_capture_path: Option<PathBuf>,
 }
+
+#[cfg(feature = "engine")]
+type NativeEngineSuccess = (
+    Output,
+    TelemetryRuntimeReport,
+    Option<HostEffectLedger>,
+    EvidenceVerificationIdentity,
+);
+
+#[cfg(feature = "engine")]
+type NativeEngineDispatchSuccess = (
+    Output,
+    TelemetryRuntimeReport,
+    Option<HostEffectLedger>,
+    RuntimeEvidenceIdentityCapture,
+    PathBuf,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeExecutionMode {
@@ -1733,6 +2456,29 @@ fn project_root_for_path(app_path: &Path) -> &Path {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
     }
+}
+
+#[cfg(feature = "engine")]
+fn runtime_evidence_project_root(app_path: &Path, working_dir: &Path) -> Result<PathBuf> {
+    let absolute_app_path = if app_path.is_absolute() {
+        app_path.to_path_buf()
+    } else {
+        working_dir.join(app_path)
+    };
+    let root = project_root_for_path(&absolute_app_path);
+    let canonical = root.canonicalize().with_context(|| {
+        format!(
+            "resolve runtime evidence project root for {}",
+            absolute_app_path.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        anyhow::bail!(
+            "runtime evidence project root is not a directory: {}",
+            canonical.display()
+        );
+    }
+    Ok(canonical)
 }
 
 fn project_prefers_bun(app_path: &Path) -> bool {
@@ -2631,6 +3377,10 @@ impl EngineDispatcher {
                 telemetry: None,
                 // External-runtime fallback path does not produce host effects.
                 host_effect_ledger: None,
+                #[cfg(feature = "engine")]
+                runtime_evidence_identity_capture: None,
+                #[cfg(feature = "engine")]
+                runtime_evidence_identity_capture_path: None,
             }));
         }
 
@@ -2727,46 +3477,45 @@ impl EngineDispatcher {
             cmd.env("FRANKEN_ENGINE_NETWORK_ALLOWLIST", allowlist_json);
         }
 
+        #[cfg(feature = "engine")]
+        let (
+            output,
+            report,
+            host_effect_ledger,
+            runtime_evidence_identity_capture,
+            runtime_evidence_identity_capture_path,
+        ) = {
+            tracing::info!(
+                execution_mode = "native",
+                engine = "franken_engine",
+                app_path = %app_path.display(),
+                policy_mode,
+                "Using native franken_engine execution instead of external process"
+            );
+            let native_session_worker_path = self.resolve_native_session_worker_path()?;
+            Self::run_engine_native_with_error_handling(
+                app_path,
+                config,
+                policy_mode,
+                Path::new(&socket_path),
+                &native_session_worker_path,
+                process_spawn_admission.as_ref(),
+                process_spawn_trust_key_hex.as_deref(),
+            )
+        }?;
+        #[cfg(not(feature = "engine"))]
         let (output, report, host_effect_ledger) = {
-            #[cfg(feature = "engine")]
-            {
-                // Use native execution when engine feature is enabled
-                tracing::info!(
-                    execution_mode = "native",
-                    engine = "franken_engine",
-                    app_path = %app_path.display(),
-                    policy_mode,
-                    "Using native franken_engine execution instead of external process"
-                );
-                let native_session_worker_path = self.resolve_native_session_worker_path()?;
-                Self::run_engine_native_with_error_handling(
-                    app_path,
-                    config,
-                    policy_mode,
-                    Path::new(&socket_path),
-                    &native_session_worker_path,
-                    process_spawn_admission.as_ref(),
-                    process_spawn_trust_key_hex.as_deref(),
-                )
+            if config.profile == Profile::Strict {
+                let dispatch_error = EngineDispatchError::EngineNotBuilt {
+                    app_path: app_path.to_path_buf(),
+                    profile: config.profile,
+                };
+                return Err(dispatch_error.to_actionable().into());
             }
-            #[cfg(not(feature = "engine"))]
-            {
-                // Check profile policy for engine feature requirement
-                if config.profile == Profile::Strict {
-                    let dispatch_error = EngineDispatchError::EngineNotBuilt {
-                        app_path: app_path.to_path_buf(),
-                        profile: config.profile,
-                    };
-                    return Err(dispatch_error.to_actionable().into());
-                }
-                // Fall back to external process when engine feature is disabled
-                tracing::warn!(
-                    "Engine feature disabled; falling back to external process execution"
-                );
-                Self::run_engine_process(&mut cmd, telemetry_handle)
-                    .map_err(|err| anyhow::anyhow!("{err}"))
-                    .map(|(output, report)| (output, report, None::<HostEffectLedger>))
-            }
+            tracing::warn!("Engine feature disabled; falling back to external process execution");
+            Self::run_engine_process(&mut cmd, telemetry_handle)
+                .map_err(|err| anyhow::anyhow!("{err}"))
+                .map(|(output, report)| (output, report, None::<HostEffectLedger>))
         }?;
         if !report.drain_completed {
             eprintln!(
@@ -2792,6 +3541,10 @@ impl EngineDispatcher {
             output,
             telemetry: Some(report),
             host_effect_ledger,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture: Some(runtime_evidence_identity_capture),
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture_path: Some(runtime_evidence_identity_capture_path),
         }))
     }
 
@@ -2856,6 +3609,12 @@ impl EngineDispatcher {
             telemetry: inputs.telemetry,
             captured_output: captured_output_from(inputs.output),
             host_effect_ledger: inputs.host_effect_ledger,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture: inputs.runtime_evidence_identity_capture,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture_path: inputs
+                .runtime_evidence_identity_capture_path
+                .map(|path| path.display().to_string()),
             sentinel,
         }
     }
@@ -2932,9 +3691,10 @@ impl EngineDispatcher {
         // (including SIGKILL) and aborts this worker before it can outlive the
         // trust boundary.
         let mut locked_stdin = stdin.lock();
-        let request_frame =
+        let request_frame = Zeroizing::new(
             read_native_session_frame(&mut locked_stdin, NATIVE_SESSION_MAX_REQUEST_BYTES)
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::msg)?,
+        );
         drop(locked_stdin);
         let _parent_liveness_watchdog = thread::Builder::new()
             .name("franken-node-native-parent-watchdog".to_string())
@@ -2954,6 +3714,7 @@ impl EngineDispatcher {
         let request: NativeSessionRequest =
             decode_native_session_frame(&request_frame, NATIVE_SESSION_MAX_REQUEST_BYTES, false)
                 .map_err(anyhow::Error::msg)?;
+        drop(request_frame);
         if request.schema_version != NATIVE_SESSION_SCHEMA {
             anyhow::bail!("native-session request schema mismatch");
         }
@@ -2968,6 +3729,12 @@ impl EngineDispatcher {
             "strict" | "balanced" | "legacy-risky"
         ) {
             anyhow::bail!("native-session request policy mode was invalid");
+        }
+        if !crate::security::constant_time::ct_eq(
+            &request.runtime_evidence_grant.capture.session_nonce,
+            &request.nonce,
+        ) {
+            anyhow::bail!("runtime evidence session grant nonce did not match the request");
         }
         let actual_working_dir =
             std::env::current_dir().context("failed resolving native-session worker directory")?;
@@ -3068,6 +3835,10 @@ impl EngineDispatcher {
             None
         };
 
+        let evidence_authority = request
+            .runtime_evidence_grant
+            .into_authority()
+            .context("failed authenticating runtime evidence session grant")?;
         let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
         let telemetry_handle = match TelemetryBridge::new(
             request
@@ -3103,6 +3874,7 @@ impl EngineDispatcher {
                 telemetry_guard,
                 cancellation,
                 process_spawn_admission,
+                evidence_authority,
             )
         });
         let (worker, outcome_rx) = match spawned {
@@ -3136,7 +3908,12 @@ impl EngineDispatcher {
                     }
                 } else {
                     match result {
-                        Ok((output, telemetry_report, host_effect_ledger)) => {
+                        Ok((
+                            output,
+                            telemetry_report,
+                            host_effect_ledger,
+                            evidence_verification_identity,
+                        )) => {
                             let Some(exit_code) = output.status.code() else {
                                 return write_response(&NativeSessionResponse::ExecutionFailed {
                                     schema_version: NATIVE_SESSION_SCHEMA.to_string(),
@@ -3160,6 +3937,7 @@ impl EngineDispatcher {
                                     .encode(output.stderr),
                                 telemetry_report: Box::new(telemetry_report),
                                 host_effect_ledger,
+                                evidence_verification_identity,
                             }
                         }
                         Err(EngineProcessError::Spawn {
@@ -3225,7 +4003,7 @@ impl EngineDispatcher {
         native_session_worker_path: &Path,
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
         process_spawn_trust_key_hex: Option<&str>,
-    ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
+    ) -> Result<NativeEngineDispatchSuccess> {
         use std::time::Duration;
 
         // Default to 5 minute timeout, but allow override via env var for testing
@@ -3274,7 +4052,7 @@ impl EngineDispatcher {
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
         process_spawn_trust_key_hex: Option<&str>,
         timeout: std::time::Duration,
-    ) -> Result<(Output, TelemetryRuntimeReport, Option<HostEffectLedger>)> {
+    ) -> Result<NativeEngineDispatchSuccess> {
         use base64::Engine as _;
         use std::sync::mpsc;
 
@@ -3358,7 +4136,7 @@ impl EngineDispatcher {
 
         fn spawn_request_writer(
             mut stream: impl Write + Send + 'static,
-            request_frame: Vec<u8>,
+            mut request_frame: Zeroizing<Vec<u8>>,
         ) -> io::Result<(
             mpsc::Sender<()>,
             thread::JoinHandle<()>,
@@ -3372,6 +4150,12 @@ impl EngineDispatcher {
                     let result = stream
                         .write_all(&request_frame)
                         .map_err(|error| format!("failed writing native-session request: {error}"));
+                    // The control stream deliberately remains open until the
+                    // worker exits so Linux peer-credential checks retain a
+                    // live parent endpoint. The serialized session seed does
+                    // not need the same lifetime: erase the parent-side frame
+                    // immediately after the write completes.
+                    request_frame.zeroize();
                     if result.is_ok() {
                         let _ = release_receiver.recv();
                     }
@@ -3728,6 +4512,37 @@ impl EngineDispatcher {
             anyhow::Error::new(dispatch_error.to_actionable())
         })?;
         let nonce = uuid::Uuid::now_v7().to_string();
+        let evidence_project_root = runtime_evidence_project_root(&app_path_buf, &working_dir)
+            .map_err(|error| {
+                EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf.clone(),
+                    error_message: format!(
+                        "failed resolving product evidence authority root: {error}"
+                    ),
+                    phase: "worker startup".to_string(),
+                }
+                .to_actionable()
+            })?;
+        let ProvisionedRuntimeEvidenceSession {
+            grant: runtime_evidence_grant,
+            capture_path: evidence_capture_path,
+            protected_state_root: runtime_evidence_state_root,
+        } = provision_runtime_evidence_session(
+            &evidence_project_root,
+            &nonce,
+            security_epoch_for_profile(config.profile),
+        )
+        .map_err(|error| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: format!(
+                    "failed provisioning product-owned runtime evidence authority: {error}"
+                ),
+                phase: "worker startup".to_string(),
+            }
+            .to_actionable()
+        })?;
+        let expected_evidence_capture = runtime_evidence_grant.capture.clone();
         let request = NativeSessionRequest {
             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
             nonce: nonce.clone(),
@@ -3737,16 +4552,21 @@ impl EngineDispatcher {
             config: config.clone(),
             telemetry_socket_path: telemetry_socket_path.to_path_buf(),
             process_spawn_trust_key_hex: process_spawn_trust_key_hex.map(str::to_string),
+            runtime_evidence_grant,
         };
-        let request_frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
-            .map_err(|message| {
-                EngineDispatchError::EngineExecutionError {
-                    app_path: app_path_buf.clone(),
-                    error_message: message,
-                    phase: "worker protocol".to_string(),
-                }
-                .to_actionable()
-            })?;
+        let request_frame = Zeroizing::new(
+            encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES).map_err(
+                |message| {
+                    EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf.clone(),
+                        error_message: message,
+                        phase: "worker protocol".to_string(),
+                    }
+                    .to_actionable()
+                },
+            )?,
+        );
+        drop(request);
 
         let started = Instant::now();
         let mut worker_args = Vec::<OsString>::new();
@@ -3825,6 +4645,16 @@ impl EngineDispatcher {
                     "/",
                     "/",
                 ]);
+                // The outer root is intentionally read-only so process-spawn
+                // children see the operator-approved host toolchain. Mask the
+                // parent-owned evidence state before any writable guest bind:
+                // otherwise an allowed utility could receive the absolute key
+                // path as argv and return the long-lived root through stdout.
+                append_runtime_evidence_containment_mask(
+                    &mut command,
+                    &runtime_evidence_state_root,
+                )
+                .context("mask runtime evidence state inside Bubblewrap")?;
                 let execution_root = app_path_buf.parent();
                 if let Some(execution_root) = execution_root {
                     command
@@ -4236,6 +5066,7 @@ impl EngineDispatcher {
                 stderr_base64,
                 telemetry_report,
                 host_effect_ledger,
+                evidence_verification_identity,
             } => {
                 validate_envelope(&schema_version, &response_nonce).map_err(|message| {
                     EngineDispatchError::EngineExecutionError {
@@ -4254,6 +5085,18 @@ impl EngineDispatcher {
                         }
                         .to_actionable()
                     })?;
+                }
+                if evidence_verification_identity
+                    != expected_evidence_capture.evidence_verification_identity
+                {
+                    let dispatch_error = EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf.clone(),
+                        error_message:
+                            "native-session response evidence identity did not match the product-signed capture"
+                                .to_string(),
+                        phase: "worker protocol".to_string(),
+                    };
+                    return Err(dispatch_error.to_actionable().into());
                 }
                 let stdout = base64::engine::general_purpose::STANDARD
                     .decode(stdout_base64)
@@ -4306,6 +5149,8 @@ impl EngineDispatcher {
                     },
                     *telemetry_report,
                     host_effect_ledger,
+                    expected_evidence_capture,
+                    evidence_capture_path,
                 ))
             }
             NativeSessionResponse::ExecutionFailed {
@@ -4890,7 +5735,6 @@ impl EngineDispatcher {
     fn map_config_to_orchestrator_config(config: &Config) -> OrchestratorConfig {
         use frankenengine_engine::execution_orchestrator::{LossMatrixPreset, OrchestratorConfig};
         use frankenengine_engine::parser::ParserOptions;
-        use frankenengine_engine::security_epoch::SecurityEpoch;
 
         // Map profile to loss matrix preset (risk management strategy)
         let loss_matrix_preset = match config.profile {
@@ -4901,11 +5745,7 @@ impl EngineDispatcher {
 
         // Map profile to security epoch (versioning for security policies)
         // NOTE: Higher epoch numbers = newer/more secure policies (monotonic counter)
-        let epoch = match config.profile {
-            Profile::Strict => SecurityEpoch::from_raw(CURRENT_SECURITY_EPOCH), // Latest security epoch
-            Profile::Balanced => SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH), // Standard security epoch
-            Profile::LegacyRisky => SecurityEpoch::from_raw(LEGACY_SECURITY_EPOCH), // Legacy security epoch for compatibility
-        };
+        let epoch = security_epoch_for_profile(config.profile);
 
         // Profile-based timeouts and limits (independent of runtime config for orchestrator)
 
@@ -4976,10 +5816,16 @@ impl EngineDispatcher {
         config: &Config,
         policy_mode: &str,
         telemetry_handle: TelemetryRuntimeHandle,
-    ) -> std::result::Result<
-        (Output, TelemetryRuntimeReport, Option<HostEffectLedger>),
-        EngineProcessError,
-    > {
+    ) -> std::result::Result<NativeEngineSuccess, EngineProcessError> {
+        let evidence_authority = RuntimeEvidenceAuthority::from_signing_key(
+            "franken-node.test-native-session",
+            EngineEvidenceSigningKey::from_bytes([0xA5; 32])
+                .expect("test-only runtime evidence signing key"),
+            SecurityEpoch::GENESIS,
+            1,
+            None,
+        )
+        .expect("test-only runtime evidence authority");
         Self::run_engine_native_guarded(
             app_path,
             config,
@@ -4987,6 +5833,7 @@ impl EngineDispatcher {
             NativeTelemetryGuard::new(telemetry_handle),
             NativeEngineCancellation::new(),
             None,
+            evidence_authority,
         )
     }
 
@@ -4999,10 +5846,8 @@ impl EngineDispatcher {
         telemetry_guard: NativeTelemetryGuard,
         cancellation: NativeEngineCancellation,
         process_spawn_admission: Option<ChildProcessSpawnAdmission>,
-    ) -> std::result::Result<
-        (Output, TelemetryRuntimeReport, Option<HostEffectLedger>),
-        EngineProcessError,
-    > {
+        evidence_authority: RuntimeEvidenceAuthority,
+    ) -> std::result::Result<NativeEngineSuccess, EngineProcessError> {
         use crate::ops::ssrf_gated_host_io::SsrfGatedHostIo;
         use frankenengine_extension_host::host_io::{
             HostIoRecorder, InMemoryHostIoTranscript, SandboxedHostIo,
@@ -5086,12 +5931,19 @@ impl EngineDispatcher {
         let runtime_config = Self::map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
 
         let ambient_authority_grant = Self::map_profile_to_ambient_authority_grant(config.profile);
-        let mut orchestrator =
-            ExecutionOrchestrator::new_with_runtime_config_and_ambient_authority_grant(
-                orchestrator_config,
-                runtime_config,
-                ambient_authority_grant,
-            );
+        let expected_evidence_identity = evidence_authority.verification_identity();
+        let mut orchestrator = ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
+            orchestrator_config,
+            runtime_config,
+            ambient_authority_grant,
+            evidence_authority,
+        )
+        .map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                format!("Failed to construct native engine evidence authority: {error}"),
+                &mut telemetry_guard,
+            )
+        })?;
         orchestrator.set_cancellation_token(cancellation.token().clone());
 
         // Process authority is orthogonal to the ordinary runtime profile. The
@@ -5276,6 +6128,13 @@ impl EngineDispatcher {
                 }
             }
         };
+        if execution_result.evidence_verification_identity != expected_evidence_identity {
+            return Err(native_engine_spawn_error_with_telemetry_cleanup(
+                "Native execution returned evidence under an unexpected verification identity"
+                    .to_string(),
+                &mut telemetry_guard,
+            ));
+        }
 
         let exec_duration = exec_start.elapsed();
         tracing::info!(
@@ -5354,7 +6213,12 @@ impl EngineDispatcher {
             })
             .map_err(EngineProcessError::TelemetryDrain)?;
 
-        Ok((output, telemetry_report, Some(host_effect_ledger)))
+        Ok((
+            output,
+            telemetry_report,
+            Some(host_effect_ledger),
+            expected_evidence_identity,
+        ))
     }
 
     /// bd-5r99w.12: build a hash-chained, content-addressed effect ledger from the
@@ -6055,6 +6919,197 @@ mod tests {
 
     #[cfg(feature = "engine")]
     const BD_45CK9_PANIC_HOOK_CHILD_ENV: &str = "FRANKEN_NODE_BD_45CK9_PANIC_HOOK_CHILD";
+
+    #[cfg(feature = "engine")]
+    fn runtime_evidence_grant_for_test(
+        session_nonce: &str,
+        signing_seed: [u8; 32],
+        product_root_seed: [u8; 32],
+    ) -> RuntimeEvidenceSessionGrant {
+        let engine_signing_key =
+            EngineEvidenceSigningKey::from_bytes(signing_seed).expect("valid test engine seed");
+        let authority = RuntimeEvidenceAuthority::from_signing_key(
+            format!("franken-node.test-native-session:{session_nonce}"),
+            engine_signing_key,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+            1,
+            None,
+        )
+        .expect("construct test runtime evidence authority");
+        let product_root = ed25519_dalek::SigningKey::from_bytes(&product_root_seed);
+        let capture = RuntimeEvidenceIdentityCapture::issue(
+            session_nonce,
+            authority.verification_identity(),
+            &product_root,
+        )
+        .expect("issue test runtime evidence capture");
+        RuntimeEvidenceSessionGrant {
+            signing_seed,
+            capture,
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_fzpkz_runtime_evidence_capture_requires_pinned_root_and_binds_identity() {
+        let session_nonce = uuid::Uuid::now_v7().to_string();
+        let grant = runtime_evidence_grant_for_test(&session_nonce, [0x31; 32], [0x52; 32]);
+        let capture = grant.capture.clone();
+        let trusted_root = ed25519_dalek::SigningKey::from_bytes(&[0x52; 32]).verifying_key();
+        capture
+            .verify_with_product_root(&trusted_root)
+            .expect("product-root-signed capture verifies");
+
+        let untrusted_root = ed25519_dalek::SigningKey::from_bytes(&[0x53; 32]).verifying_key();
+        let root_error = capture
+            .verify_with_product_root(&untrusted_root)
+            .expect_err("an embedded root must not replace an independently pinned root");
+        assert!(root_error.to_string().contains("root key is not trusted"));
+
+        let mut tampered = capture;
+        tampered
+            .evidence_verification_identity
+            .producer_id
+            .push_str(":tampered");
+        let tamper_error = tampered
+            .verify_with_product_root(&trusted_root)
+            .expect_err("identity mutation must invalidate the product signature");
+        assert!(
+            tamper_error
+                .to_string()
+                .contains("signature verification failed")
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_fzpkz_runtime_evidence_grant_rejects_seed_identity_drift() {
+        let session_nonce = uuid::Uuid::now_v7().to_string();
+        let grant = runtime_evidence_grant_for_test(&session_nonce, [0x61; 32], [0x72; 32]);
+        let expected_identity = grant.capture.evidence_verification_identity.clone();
+        let authority = grant
+            .into_authority()
+            .expect("matching session seed becomes a typed engine authority");
+        assert_eq!(authority.verification_identity(), expected_identity);
+
+        let capture = runtime_evidence_grant_for_test(
+            &uuid::Uuid::now_v7().to_string(),
+            [0x63; 32],
+            [0x74; 32],
+        )
+        .capture
+        .clone();
+        let mismatched = RuntimeEvidenceSessionGrant {
+            signing_seed: [0x64; 32],
+            capture,
+        };
+        let mismatch_error = mismatched
+            .into_authority()
+            .expect_err("a different private seed must not impersonate the signed identity");
+        assert!(
+            mismatch_error
+                .to_string()
+                .contains("seed does not match its signed public identity")
+        );
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn bd_fzpkz_runtime_evidence_state_must_be_outside_guest_root() {
+        validate_runtime_evidence_state_outside_guest(
+            Path::new("/var/lib/franken-node-state"),
+            Path::new("/srv/guest-project"),
+        )
+        .expect("separate product state is outside the guest filesystem root");
+
+        let inside_error = validate_runtime_evidence_state_outside_guest(
+            Path::new("/srv/guest-project/.franken-node"),
+            Path::new("/srv/guest-project"),
+        )
+        .expect_err("guest-readable product state must fail closed");
+        assert!(inside_error.to_string().contains("must remain outside"));
+
+        let traversal_error =
+            validate_runtime_evidence_state_home_path(Path::new("/var/lib/../guest-project-state"))
+                .expect_err("state paths with parent traversal must fail closed");
+        assert!(traversal_error.to_string().contains("parent traversal"));
+
+        let root_error = validate_runtime_evidence_state_home_path(Path::new("/"))
+            .expect_err("the filesystem root must not become product state");
+        assert!(root_error.to_string().contains("filesystem root"));
+    }
+
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    #[test]
+    fn bd_fzpkz_bubblewrap_masks_parent_owned_evidence_state() {
+        let protected_state_root = Path::new("/var/lib/franken-node/runtime-evidence");
+        let mut command = Command::new("/usr/bin/bwrap");
+        append_runtime_evidence_containment_mask(&mut command, protected_state_root)
+            .expect("absolute product state can be masked");
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            [
+                "--tmpfs".to_string(),
+                protected_state_root.display().to_string()
+            ]
+        );
+
+        let relative_error =
+            append_runtime_evidence_containment_mask(&mut command, Path::new("relative/state"))
+                .expect_err("a relative mask target must fail closed");
+        assert!(relative_error.to_string().contains("must be absolute"));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_fzpkz_run_report_surfaces_signed_capture_and_durable_path() {
+        let session_nonce = uuid::Uuid::now_v7().to_string();
+        let capture = runtime_evidence_grant_for_test(&session_nonce, [0x81; 32], [0x92; 32])
+            .capture
+            .clone();
+        let capture_path = PathBuf::from("/var/lib/franken-node-state/identity-capture.json");
+        let report = EngineDispatcher::build_dispatch_report(DispatchReportInputs {
+            runtime: "franken_engine",
+            runtime_path: Path::new("/usr/bin/franken-node"),
+            target: Path::new("/srv/guest-project/app.js"),
+            working_dir: Path::new("/srv/guest-project"),
+            used_fallback_runtime: false,
+            started_at: Utc::now(),
+            duration: std::time::Duration::from_millis(1),
+            output: Output {
+                status: exit_status_from_code(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+            telemetry: None,
+            host_effect_ledger: None,
+            runtime_evidence_identity_capture: Some(capture.clone()),
+            runtime_evidence_identity_capture_path: Some(capture_path.clone()),
+        });
+
+        assert_eq!(
+            report.runtime_evidence_identity_capture,
+            Some(capture.clone())
+        );
+        let capture_path_string = capture_path.display().to_string();
+        assert_eq!(
+            report.runtime_evidence_identity_capture_path.as_deref(),
+            Some(capture_path_string.as_str())
+        );
+        let serialized = serde_json::to_value(&report).expect("serialize run dispatch report");
+        assert_eq!(
+            serialized["runtime_evidence_identity_capture"]["signature_hex"],
+            capture.signature_hex
+        );
+        assert_eq!(
+            serialized["runtime_evidence_identity_capture_path"],
+            capture_path_string
+        );
+    }
 
     #[test]
     fn bd_ztr5v_profiles_never_grant_process_spawn_without_active_containment() {
@@ -7967,6 +9022,10 @@ mod tests {
             output: captured_output(0, b"ok\n", b""),
             telemetry: None,
             host_effect_ledger: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture_path: None,
         });
 
         assert_eq!(report.runtime, "node");
@@ -7999,6 +9058,10 @@ mod tests {
             output: captured_output(9, b"", b"signal"),
             telemetry: None,
             host_effect_ledger: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture_path: None,
         });
 
         assert_eq!(report.duration_ms, u64::MAX);
@@ -8024,6 +9087,10 @@ mod tests {
             output: captured_output(0, &[0xff, b'o', b'k'], &[b'e', 0xfe]),
             telemetry: None,
             host_effect_ledger: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture_path: None,
         });
 
         assert_eq!(report.captured_output.stdout, "\u{fffd}ok");
@@ -8557,6 +9624,10 @@ mod tests {
                         },
                         telemetry: None,
                         host_effect_ledger: None,
+                        #[cfg(feature = "engine")]
+                        runtime_evidence_identity_capture: None,
+                        #[cfg(feature = "engine")]
+                        runtime_evidence_identity_capture_path: None,
                     };
 
                     // Verify report field sanitization
@@ -8857,6 +9928,10 @@ mod tests {
                     output: mock_output,
                     telemetry: None,
                     host_effect_ledger: None,
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture: None,
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture_path: None,
                 };
 
                 // Build report with malicious output
@@ -8878,6 +9953,15 @@ mod tests {
                     telemetry: report_inputs.telemetry.clone(),
                     captured_output: captured,
                     host_effect_ledger: report_inputs.host_effect_ledger.clone(),
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture: report_inputs
+                        .runtime_evidence_identity_capture
+                        .clone(),
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture_path: report_inputs
+                        .runtime_evidence_identity_capture_path
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
                     sentinel: None,
                 };
 
@@ -9485,6 +10569,10 @@ mod tests {
                         stderr: "test stderr".to_string(),
                     },
                     host_effect_ledger: None,
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture: None,
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture_path: None,
                     sentinel: None,
                 };
 
@@ -10578,7 +11666,7 @@ mod tests {
         let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
         let handle = bridge.start().expect("start telemetry bridge");
 
-        let (output, _telemetry, _ledger) =
+        let (output, _telemetry, _ledger, _evidence_identity) =
             EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
                 .expect("legacy-risky native run accepts static process shape");
         assert!(output.status.success());
@@ -10714,7 +11802,7 @@ mod tests {
         let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
         let handle = bridge.start().expect("start telemetry bridge");
 
-        let (_output, _telemetry, ledger) =
+        let (_output, _telemetry, ledger, _evidence_identity) =
             EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
                 .expect("native run succeeds");
         let ledger = ledger.expect("native path always surfaces a host-effect ledger");
@@ -10761,6 +11849,10 @@ mod tests {
             },
             telemetry: None,
             host_effect_ledger: Some(ledger.clone()),
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture_path: None,
         });
         let json = serde_json::to_string(&report).expect("serialize run report");
         assert!(
@@ -11279,15 +12371,17 @@ mod tests {
     #[cfg(feature = "engine")]
     #[test]
     fn bd_wwjxn_native_session_frame_is_versioned_bounded_and_digest_checked() {
+        let nonce = uuid::Uuid::now_v7().to_string();
         let request = NativeSessionRequest {
             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
-            nonce: uuid::Uuid::now_v7().to_string(),
+            nonce: nonce.clone(),
             app_path: PathBuf::from("app.js"),
             working_dir: PathBuf::from("/tmp/native-session-frame"),
             policy_mode: "balanced".to_string(),
             config: Config::for_profile(Profile::Balanced),
             telemetry_socket_path: PathBuf::from("/tmp/native-session-frame.sock"),
             process_spawn_trust_key_hex: Some("11".repeat(32)),
+            runtime_evidence_grant: runtime_evidence_grant_for_test(&nonce, [0x21; 32], [0x42; 32]),
         };
         let frame = encode_native_session_frame(&request, NATIVE_SESSION_MAX_REQUEST_BYTES)
             .expect("encode request frame");
@@ -11300,6 +12394,18 @@ mod tests {
         assert_eq!(
             decoded.process_spawn_trust_key_hex,
             request.process_spawn_trust_key_hex
+        );
+        assert_eq!(
+            decoded.runtime_evidence_grant.capture,
+            request.runtime_evidence_grant.capture
+        );
+        assert!(crate::security::constant_time::ct_eq_bytes(
+            &decoded.runtime_evidence_grant.signing_seed,
+            &request.runtime_evidence_grant.signing_seed,
+        ));
+        assert!(
+            format!("{request:?}").contains("[REDACTED]"),
+            "native-session request debug output must redact its signing seed"
         );
 
         let mut corrupted = frame.clone();
