@@ -1484,15 +1484,7 @@ fn parse_audit_timestamp(raw: &str) -> Result<QuarantineAuditTimestamp, Quaranti
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ERR_AUDIT_CHAIN_BROKEN, ERR_LIFT_REQUIRES_CLEARANCE, ERR_QUARANTINE_ALREADY_ACTIVE,
-        ERR_QUARANTINE_INVALID_ID, ERR_QUARANTINE_NOT_FOUND, MAX_AUDIT_TRAIL,
-        MAX_PROPAGATION_STATUS, MAX_STATE_HISTORY, QuarantineAuditEntry, QuarantineAuditId,
-        QuarantineAuditTimestamp, QuarantineClearance, QuarantineError, QuarantineImpactReport,
-        QuarantineMode, QuarantineOrder, QuarantineReason, QuarantineRecord, QuarantineRegistry,
-        QuarantineScope, QuarantineSeverity, QuarantineState, RecallOrder, RecallReceipt,
-        constant_time,
-    };
+    use super::*;
 
     const QUARANTINE_ORDER_FIXTURE_SIGNATURE: &str =
         "sha256:4516c63acce5f11fe6b750c98e1ea51c8fe384e5c211c829ea9894962ba928cb";
@@ -2517,9 +2509,10 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     mod quarantine_comprehensive_negative_tests {
+        use super::super::*;
         use super::{
-            QuarantineMode, QuarantineOrder, QuarantineReason, QuarantineRegistry, QuarantineScope,
-            QuarantineSeverity,
+            make_clearance, make_order, make_order_for_extension, make_recall,
+            setup_recall_registry,
         };
 
         #[test]
@@ -2622,11 +2615,17 @@ mod tests {
 
             // Test sequence counter overflow protection
             for i in 0..10 {
-                let order = make_order(
+                let mut order = make_order(
                     &format!("overflow_test_{i}"),
                     QuarantineSeverity::High,
                     QuarantineMode::Soft,
                 );
+                // Prod rejects a second active quarantine on the same extension, so each
+                // iteration targets a distinct extension to actually exercise the
+                // sequence counter across all 10 increments.
+                order.scope = QuarantineScope::AllVersions {
+                    extension_id: format!("ext_overflow_seq_{i}"),
+                };
 
                 let record_result = reg.initiate_quarantine(order);
                 assert!(
@@ -2806,23 +2805,39 @@ mod tests {
             .expect("should succeed");
 
             // Attempt invalid state transitions and verify rejections
-            let invalid_transitions = [
+            #[allow(clippy::type_complexity)]
+            let invalid_transitions: [(
+                &str,
+                Box<dyn Fn(&mut QuarantineRegistry) -> Result<(), QuarantineError> + '_>,
+            ); 4] = [
                 // Try to start drain without enforcement
-                ("start_drain", |reg: &mut QuarantineRegistry| {
-                    reg.start_drain(order_id, "2026-01-15T00:03:00Z")
-                }),
+                (
+                    "start_drain",
+                    Box::new(|reg: &mut QuarantineRegistry| {
+                        reg.start_drain(order_id, "2026-01-15T00:03:00Z")
+                    }),
+                ),
                 // Try to complete drain without starting
-                ("complete_drain", |reg: &mut QuarantineRegistry| {
-                    reg.complete_drain(order_id, "2026-01-15T00:04:00Z")
-                }),
+                (
+                    "complete_drain",
+                    Box::new(|reg: &mut QuarantineRegistry| {
+                        reg.complete_drain(order_id, "2026-01-15T00:04:00Z")
+                    }),
+                ),
                 // Try to trigger recall without isolation
-                ("trigger_recall", |reg: &mut QuarantineRegistry| {
-                    reg.trigger_recall(make_recall(order_id))
-                }),
+                (
+                    "trigger_recall",
+                    Box::new(|reg: &mut QuarantineRegistry| {
+                        reg.trigger_recall(make_recall(order_id))
+                    }),
+                ),
                 // Try to lift quarantine without isolation
-                ("lift_quarantine", |reg: &mut QuarantineRegistry| {
-                    reg.lift_quarantine(make_clearance(order_id))
-                }),
+                (
+                    "lift_quarantine",
+                    Box::new(|reg: &mut QuarantineRegistry| {
+                        reg.lift_quarantine(make_clearance(order_id))
+                    }),
+                ),
             ];
 
             for (transition_name, transition_fn) in invalid_transitions {
@@ -3167,6 +3182,7 @@ mod tests {
 
         #[test]
         fn serialization_format_injection_resistance_in_structured_data() {
+            let long_content = "very long content that could cause buffer issues".repeat(1000);
             let injection_payloads = [
                 "normal content",
                 "content\nwith\nnewlines",
@@ -3179,7 +3195,7 @@ mod tests {
                 "content with xml </tag><script>alert(1)</script><tag>",
                 "content with sql '; DROP TABLE quarantine; --",
                 "content with shell && rm -rf /",
-                "very long content that could cause buffer issues".repeat(1000),
+                long_content.as_str(),
                 "\\/\\/comment injection attempt",
                 "\\x41\\x42\\x43 hex escape attempt",
             ];
@@ -3218,14 +3234,15 @@ mod tests {
                 );
 
                 if let Ok(json_str) = json_result {
-                    // Verify no script tags or dangerous content in JSON
+                    // serde_json does not HTML-escape `<`/`>` (inert inside a JSON
+                    // string), so a literal `<script>` legitimately appears in the
+                    // output. The security property is structural: the payload cannot
+                    // break OUT of its JSON string — breakout characters (`"`, `\`) are
+                    // escaped — so the document stays valid JSON and round-trips to the
+                    // exact injected value (asserted below).
                     assert!(
-                        !json_str.contains("<script>"),
-                        "Serialized JSON should not contain script tags"
-                    );
-                    assert!(
-                        !json_str.contains("</script>"),
-                        "Serialized JSON should not contain closing script tags"
+                        serde_json::from_str::<serde_json::Value>(&json_str).is_ok(),
+                        "Serialized injection {i} must remain structurally valid JSON"
                     );
 
                     // Test deserialization safety
@@ -3319,19 +3336,14 @@ mod tests {
                 "Registry should serialize safely with all injected content"
             );
 
-            // Verify no dangerous content in final serialized form
+            // Verify the injected content stays inert (structurally contained) in the
+            // final serialized form: serde_json keeps `<script>`/`DROP TABLE`/`&& rm`
+            // as raw string bytes but escapes the JSON breakout characters, so the
+            // registry still parses as valid JSON (injection cannot corrupt structure).
             if let Ok(json_str) = registry_json {
                 assert!(
-                    !json_str.contains("<script>"),
-                    "Registry JSON should not contain script tags"
-                );
-                assert!(
-                    !json_str.contains("DROP TABLE"),
-                    "Registry JSON should not contain SQL injection"
-                );
-                assert!(
-                    !json_str.contains("&& rm"),
-                    "Registry JSON should not contain shell injection"
+                    serde_json::from_str::<serde_json::Value>(&json_str).is_ok(),
+                    "Registry JSON must remain structurally valid despite injected content"
                 );
             }
         }
@@ -3411,16 +3423,16 @@ mod tests {
 
                 // Test various hash tampering attempts
                 let tampered_hashes = [
-                    "",                                                 // Empty hash
-                    "a",                                                // Short hash
-                    "wrong_hash",                                       // Wrong content
+                    String::new(),                                      // Empty hash
+                    "a".to_string(),                                    // Short hash
+                    "wrong_hash".to_string(),                           // Wrong content
                     entry.entry_hash.chars().rev().collect::<String>(), // Reversed
                     format!("{}x", entry.entry_hash),                   // Extended
                     entry.entry_hash.to_uppercase(),                    // Case change
                 ];
 
                 for tampered_hash in tampered_hashes {
-                    tampered_entry.entry_hash = tampered_hash;
+                    tampered_entry.entry_hash = tampered_hash.clone();
 
                     let start_time = std::time::Instant::now();
                     let computed_hash = compute_entry_hash(&tampered_entry);
@@ -3433,7 +3445,10 @@ mod tests {
                     );
 
                     // Should not match the tampered hash (except by coincidence)
-                    if crate::security::constant_time::ct_eq_bytes(&computed_hash, &tampered_hash) {
+                    if crate::security::constant_time::ct_eq_bytes(
+                        computed_hash.as_bytes(),
+                        tampered_hash.as_bytes(),
+                    ) {
                         // This would be an extremely unlikely hash collision
                         tracing::warn!(
                             computed_hash = %hex::encode(&computed_hash),
@@ -3538,6 +3553,13 @@ mod tests {
             reg.initiate_quarantine(order).unwrap();
 
             let order_id = "test-recall-f64";
+            // Prod's state machine now requires the entry to reach Isolated before a
+            // recall can be triggered (Initiated -> Enforced -> Draining -> Isolated).
+            reg.enforce_quarantine(order_id, "2026-01-15T00:02:00Z")
+                .unwrap();
+            reg.start_drain(order_id, "2026-01-15T00:03:00Z").unwrap();
+            reg.complete_drain(order_id, "2026-01-15T00:04:00Z")
+                .unwrap();
             let recall = make_recall(order_id);
             reg.trigger_recall(recall).unwrap();
 
@@ -3610,11 +3632,27 @@ mod tests {
 
             let mut reg = QuarantineRegistry::new();
 
+            // Reserve the state-history fixture's record slot up front: prod bounds the
+            // record store, so the audit-fill loop below would otherwise saturate it and
+            // leave no slot for this order (its state-history is exercised further down).
+            let test_order = make_order(
+                "state-test",
+                QuarantineSeverity::Medium,
+                QuarantineMode::Hard,
+            );
+            reg.initiate_quarantine(test_order).unwrap();
+
             // Test unbounded audit trail growth (line 1214)
             // Fill audit trail beyond its intended capacity
             for i in 0..MAX_AUDIT_TRAIL + 100 {
                 let order_id = format!("overflow-order-{}", i);
-                let order = make_order(&order_id, QuarantineSeverity::Low, QuarantineMode::Soft);
+                let mut order =
+                    make_order(&order_id, QuarantineSeverity::Low, QuarantineMode::Soft);
+                // Distinct extension per iteration so prod's "already active" guard does
+                // not reject duplicates and the audit trail genuinely fills.
+                order.scope = QuarantineScope::AllVersions {
+                    extension_id: format!("ext-overflow-{i}"),
+                };
 
                 // Each quarantine operation appends to audit_trail via push()
                 let _ = reg.initiate_quarantine(order);
@@ -3629,13 +3667,6 @@ mod tests {
             );
 
             // Test state_history growth within records (line 433 area)
-            let test_order = make_order(
-                "state-test",
-                QuarantineSeverity::Medium,
-                QuarantineMode::Hard,
-            );
-            reg.initiate_quarantine(test_order).unwrap();
-
             // Simulate many state transitions that could grow state_history unbounded
             let order_id = "state-test";
 
@@ -3691,7 +3722,14 @@ mod tests {
             // Test quarantine counter saturation
             for i in 0..10 {
                 let order_id = format!("overflow-test-{}", i);
-                let order = make_order(&order_id, QuarantineSeverity::Low, QuarantineMode::Soft);
+                let mut order =
+                    make_order(&order_id, QuarantineSeverity::Low, QuarantineMode::Soft);
+                // Each iteration targets a distinct extension so prod's "already active"
+                // guard does not reject it; this lets all 10 increments run and the
+                // saturating counter genuinely reaches u64::MAX.
+                order.scope = QuarantineScope::AllVersions {
+                    extension_id: format!("ext-overflow-{i}"),
+                };
 
                 let _ = reg.initiate_quarantine(order);
             }
@@ -3750,10 +3788,13 @@ mod tests {
 
             let order = QuarantineOrder {
                 order_id: "test-order-123".to_string(),
-                scope: QuarantineScope::SingleNode("test-node".to_string()),
+                scope: QuarantineScope::Version {
+                    extension_id: "test-node".to_string(),
+                    version: "1.0.0".to_string(),
+                },
                 mode: QuarantineMode::Soft,
                 severity: QuarantineSeverity::Medium,
-                reason: QuarantineReason::VulnerabilityDisclosed,
+                reason: QuarantineReason::VulnerabilityDisclosure,
                 justification: "Test quarantine justification".to_string(),
                 issued_by: "test-operator".to_string(),
                 issued_at: "2024-01-01T00:00:00Z".to_string(),

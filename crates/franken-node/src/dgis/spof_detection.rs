@@ -768,7 +768,7 @@ mod tests {
     use super::*;
     use crate::dgis::graph_ingestion::{EdgeKind, GraphEdge, GraphNode, NodeKind};
 
-    type TestResult = Result<(), String>;
+    type TestResult = std::result::Result<(), String>;
 
     fn mk_maintainer(
         id: &str,

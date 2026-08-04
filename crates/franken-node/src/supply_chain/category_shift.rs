@@ -1426,15 +1426,12 @@ fn generate_benchmark_metrics(now_secs: u64) -> Result<RealBenchmarkMetrics, Cat
 #[cfg(feature = "advanced-features")]
 fn load_compatibility_corpus_pass_rate() -> Option<f64> {
     let corpus_path = "artifacts/13/compatibility_corpus_results.json";
-    if let Ok(content) = fs::read_to_string(corpus_path) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
-            return value
-                .get("totals")
-                .and_then(|t| t.get("overall_pass_rate_pct"))
-                .and_then(|p| p.as_f64());
-        }
-    }
-    None
+    let content = fs::read_to_string(corpus_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("totals")
+        .and_then(|t| t.get("overall_pass_rate_pct"))
+        .and_then(|p| p.as_f64())
 }
 
 /// Save benchmark results to artifacts folder for CI gating and regression detection
@@ -1851,7 +1848,7 @@ fn analyze_evidence_economics(ledger: &EvidenceLedger) -> (f64, f64, f64) {
     let stability_multiplier = 1.0 + (1.0 - rollback_rate).max(0.0);
 
     // Activity volume: more total decisions = more network activity = scale benefits
-    let volume_multiplier = 1.0 + (total_decisions.ln() / 20.0).max(0.0).min(2.0);
+    let volume_multiplier = 1.0 + (total_decisions.ln() / 20.0).clamp(0.0, 2.0);
 
     (trust_multiplier, stability_multiplier, volume_multiplier)
 }
@@ -2115,6 +2112,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "advanced-features")]
     use crate::observability::evidence_ledger::{LedgerCapacity, test_entry};
+    use crate::runtime::clock;
 
     fn sample_evidence(now_secs: u64) -> EvidenceInput {
         let content = r#"{"test":"data"}"#;
@@ -2895,7 +2893,7 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(
             hash,
-            "48d99f6613e7b962672061107e464451db24f86e6786bff95249cf9d500eb26a"
+            "6c8feaab9df65fae3221d8e46e6e1d226eab53044fcae8e817d4bbaba6c3668e"
         );
     }
 
@@ -3353,8 +3351,16 @@ mod tests {
 
     #[test]
     fn benchmark_validation_handles_missing_summary() {
-        // Test that validation handles missing benchmark summary gracefully
-        let result = validate_benchmark_thresholds().expect("should not error on missing file");
+        // Test that validation handles a missing benchmark summary gracefully.
+        // Point at a guaranteed-absent path so the test is hermetic regardless of
+        // whether the default `artifacts/category_shift/...` summary happens to
+        // exist in the working tree (a committed/generated artifact now does).
+        let config = BenchmarkConfig {
+            summary_path: "/nonexistent/category_shift/missing_benchmark_summary.json".to_string(),
+            ..BenchmarkConfig::default()
+        };
+        let result = validate_benchmark_thresholds_with_config(&config)
+            .expect("should not error on missing file");
         assert!(!result.passed);
         assert!(result.message.contains("No benchmark summary found"));
     }

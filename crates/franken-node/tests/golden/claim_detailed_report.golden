@@ -1,0 +1,151 @@
+{
+  "gate_report": {
+    "bead_id": "bd-2ji2",
+    "section": "10.16",
+    "gate_verdict": "FAIL",
+    "summary": {
+      "total_claims": 4,
+      "linked": 2,
+      "unlinked": 1,
+      "broken_links": 1
+    },
+    "claims": [
+      {
+        "file": "docs/api.md",
+        "line": 42,
+        "claim_text": "The API supports batch operations for improved performance",
+        "category": "Api",
+        "linked_artifact": "artifacts/10.16/api_batch_conformance.json",
+        "artifact_exists": true,
+        "status": "Linked"
+      },
+      {
+        "file": "docs/storage.md",
+        "line": 128,
+        "claim_text": "Storage layer provides ACID guarantees for all transactions",
+        "category": "Storage",
+        "linked_artifact": "artifacts/10.16/storage_acid_test.json",
+        "artifact_exists": true,
+        "status": "Linked"
+      },
+      {
+        "file": "docs/tui.md",
+        "line": 67,
+        "claim_text": "TUI responds to resize events within [DURATION]",
+        "category": "Tui",
+        "linked_artifact": null,
+        "artifact_exists": false,
+        "status": "Unlinked"
+      },
+      {
+        "file": "docs/model.md",
+        "line": 203,
+        "claim_text": "Model validation ensures data integrity constraints",
+        "category": "Model",
+        "linked_artifact": "artifacts/10.16/missing_file.json",
+        "artifact_exists": false,
+        "status": "BrokenLink"
+      }
+    ]
+  },
+  "summary": {
+    "total_claims": 4,
+    "linked": 2,
+    "unlinked": 1,
+    "broken_links": 1
+  },
+  "events": [
+    {
+      "code": "CLAIM_GATE_SCAN_START",
+      "file": "docs/api.md",
+      "claim_hash": "docs/api.md:42",
+      "detail": "Scanning claim at docs/api.md:42"
+    },
+    {
+      "code": "CLAIM_LINKED",
+      "file": "docs/api.md",
+      "claim_hash": "docs/api.md:42",
+      "detail": "Claim linked to artifacts/10.16/api_batch_conformance.json"
+    },
+    {
+      "code": "CLAIM_GATE_SCAN_START",
+      "file": "docs/storage.md",
+      "claim_hash": "docs/storage.md:128",
+      "detail": "Scanning claim at docs/storage.md:128"
+    },
+    {
+      "code": "CLAIM_LINKED",
+      "file": "docs/storage.md",
+      "claim_hash": "docs/storage.md:128",
+      "detail": "Claim linked to artifacts/10.16/storage_acid_test.json"
+    },
+    {
+      "code": "CLAIM_GATE_SCAN_START",
+      "file": "docs/tui.md",
+      "claim_hash": "docs/tui.md:67",
+      "detail": "Scanning claim at docs/tui.md:67"
+    },
+    {
+      "code": "CLAIM_UNLINKED",
+      "file": "docs/tui.md",
+      "claim_hash": "docs/tui.md:67",
+      "detail": "UNLINKED: TUI responds to resize events within [DURATION]"
+    },
+    {
+      "code": "CLAIM_GATE_SCAN_START",
+      "file": "docs/model.md",
+      "claim_hash": "docs/model.md:203",
+      "detail": "Scanning claim at docs/model.md:203"
+    },
+    {
+      "code": "CLAIM_LINK_BROKEN",
+      "file": "docs/model.md",
+      "claim_hash": "docs/model.md:203",
+      "detail": "BROKEN LINK: artifacts/10.16/missing_file.json"
+    }
+  ],
+  "claims": [
+    {
+      "file": "docs/api.md",
+      "line": 42,
+      "claim_text": "The API supports batch operations for improved performance",
+      "category": "Api",
+      "linked_artifact": "artifacts/10.16/api_batch_conformance.json",
+      "artifact_exists": true,
+      "status": "Linked"
+    },
+    {
+      "file": "docs/storage.md",
+      "line": 128,
+      "claim_text": "Storage layer provides ACID guarantees for all transactions",
+      "category": "Storage",
+      "linked_artifact": "artifacts/10.16/storage_acid_test.json",
+      "artifact_exists": true,
+      "status": "Linked"
+    },
+    {
+      "file": "docs/tui.md",
+      "line": 67,
+      "claim_text": "TUI responds to resize events within [DURATION]",
+      "category": "Tui",
+      "linked_artifact": null,
+      "artifact_exists": false,
+      "status": "Unlinked"
+    },
+    {
+      "file": "docs/model.md",
+      "line": 203,
+      "claim_text": "Model validation ensures data integrity constraints",
+      "category": "Model",
+      "linked_artifact": "artifacts/10.16/missing_file.json",
+      "artifact_exists": false,
+      "status": "BrokenLink"
+    }
+  ],
+  "gate_pass": false,
+  "metadata": {
+    "total_categories": 4,
+    "scan_timestamp": "[TIMESTAMP]",
+    "validator_version": "1.0.0"
+  }
+}

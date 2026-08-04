@@ -38,9 +38,8 @@ use sha2::{Digest, Sha256};
 
 use crate::security::constant_time::ct_eq;
 
-/// Schema/format version for the on-disk CAS layout. Local copy per the
-/// `schema_versions` convention (existing modules keep local copies).
-pub const CONTENT_ADDRESSED_STORE_SCHEMA: &str = "cas-v1.0";
+/// Schema/format version for the on-disk CAS layout.
+pub const CONTENT_ADDRESSED_STORE_SCHEMA: &str = crate::schema_versions::CONTENT_ADDRESSED_STORE;
 
 /// Domain separator prefixing every content-hash preimage so a CAS hash can
 /// never collide with a hash computed for another protocol context.

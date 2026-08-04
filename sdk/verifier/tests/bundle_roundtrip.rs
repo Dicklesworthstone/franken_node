@@ -1,16 +1,28 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use frankenengine_verifier_sdk::SDK_VERSION;
-use frankenengine_verifier_sdk::VerifierSdk;
 use frankenengine_verifier_sdk::bundle::{
     BundleArtifact, BundleChunk, BundleError, BundleHeader, BundleSignature,
-    EFFECT_RECEIPT_EVENT_TYPE, EFFECT_RECEIPT_SCHEMA_VERSION, EffectKind, EffectPolicyOutcome,
-    EffectReceipt, EffectReceiptChainEntry, FN_VSDK_EFFECT_CHAIN_PASS, FN_VSDK_EFFECT_CHAIN_START,
-    FN_VSDK_EFFECT_VERIFIED, REPLAY_BUNDLE_HASH_ALGORITHM, REPLAY_BUNDLE_SCHEMA_VERSION,
-    ReplayBundle, TimelineEvent, hash, render_effect_chain_transcript, seal, serialize, verify,
-    verify_effect_chain,
+    CAPABILITY_PROOF_SCHEMA_VERSION, CAPABILITY_RECEIPT_SCHEMA_VERSION, CapabilityPolicyProfile,
+    CapabilityPostcondition, CapabilityProof, CapabilityReceipt, CapabilityRevocationFreshness,
+    CapabilityScope, EFFECT_RECEIPT_EVENT_TYPE, EFFECT_RECEIPT_SCHEMA_VERSION, EffectKind,
+    EffectPolicyOutcome, EffectReceipt, EffectReceiptChainEntry, FN_VSDK_CAPABILITY_PROOF_VERIFIED,
+    FN_VSDK_CAPABILITY_RECEIPT_VERIFIED, FN_VSDK_CAPABILITY_SCHEMA_PASS,
+    FN_VSDK_CAPABILITY_SCHEMA_START, FN_VSDK_EFFECT_CHAIN_PASS, FN_VSDK_EFFECT_CHAIN_START,
+    FN_VSDK_EFFECT_VERIFIED, FN_VSDK_NON_EXFILTRATION_EFFECT, FN_VSDK_NON_EXFILTRATION_PASS,
+    FN_VSDK_NON_EXFILTRATION_START, FlowPolicyVerdict, NonExfiltrationClaim,
+    REPLAY_BUNDLE_HASH_ALGORITHM, REPLAY_BUNDLE_SCHEMA_VERSION, ReplayBundle, TimelineEvent,
+    capability_proof_canonical_bytes, capability_proof_hash, capability_receipt_canonical_bytes,
+    capability_receipt_hash, hash, render_capability_verification_transcript,
+    render_effect_chain_transcript, seal, seal_capability_proof, seal_capability_receipt,
+    serialize, verify, verify_capability_receipt_schema, verify_effect_chain,
+    verify_non_exfiltration_claim,
 };
+use frankenengine_verifier_sdk::counterfactual::{
+    CounterfactualCapabilityDecision, CounterfactualCapabilityError,
+    CounterfactualCapabilityRequest, validate_counterfactual_capability_decision,
+};
+use frankenengine_verifier_sdk::{SDK_VERSION, VerifierSdk, VerifierSdkError};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -24,6 +36,39 @@ const DENIED_PRE_BYTES: &[u8] = b"connect 169.254.169.254:80";
 const DENIED_ARGS_BYTES: &[u8] = br#"{"host":"metadata.internal","port":80}"#;
 const EFFECT_CHAIN_TRANSCRIPT_GOLDEN: &str =
     include_str!("fixtures/effect_chain_transcript.golden");
+const CAPABILITY_VERIFICATION_TRANSCRIPT_GOLDEN: &str =
+    include_str!("fixtures/capability_verification_transcript.golden");
+const CAPABILITY_PROOF_CANONICAL_GOLDEN: &str = concat!(
+    "{\"actor\":\"agent://builder\",\"audience\":\"verifier://capability-test\",\"epoch\":42,",
+    "\"evidence_refs\":[\"effect-chain:head:001\",\"revocation:fresh:001\"],",
+    "\"expected_postconditions\":[",
+    "{\"expected_hash\":\"sha256:8e1992fd9b4c6464f3a1cd4d40f6150c8f1566e404ec70a16b2dd1529bb3ca99\",\"field\":\"http_status\"},",
+    "{\"expected_hash\":\"sha256:c082bb9237a57be2c405295f5f3e984e6e28f3a4ca84d2becabe1c331a31fba1\",\"field\":\"response_body\"}],",
+    "\"expires_at_millis\":1775003600000,\"issued_at_millis\":1775000000000,",
+    "\"policy_profile\":\"strict\",\"proof_id\":\"cap-proof-001\",",
+    "\"revocation_freshness\":{\"checked_at_millis\":1775000000000,\"evidence_ref\":\"revocation:fresh:001\",\"status\":\"fresh\"},",
+    "\"schema_version\":\"capability-proof-v1\",\"scopes\":[",
+    "{\"access\":\"read\",\"capability\":\"fs_read\",\"resource\":\"cas://workspace/app/index.js\"},",
+    "{\"access\":\"egress\",\"capability\":\"http_request\",\"resource\":\"https://api.example.test/v1/data\"}],",
+    "\"side_effect_kind\":\"http_request\"}"
+);
+const CAPABILITY_RECEIPT_CANONICAL_GOLDEN: &str = concat!(
+    "{\"actor\":\"agent://builder\",\"audience\":\"verifier://capability-test\",",
+    "\"effect_receipt_chain_hash\":\"sha256:21c645997bfda31f5752ca59026f067d63d575a0909807393f9329e447f1053a\",",
+    "\"epoch\":42,\"exercised_scope\":{\"access\":\"egress\",\"capability\":\"http_request\",",
+    "\"resource\":\"https://api.example.test/v1/data\"},\"observed_postconditions\":[",
+    "{\"expected_hash\":\"sha256:8e1992fd9b4c6464f3a1cd4d40f6150c8f1566e404ec70a16b2dd1529bb3ca99\",\"field\":\"http_status\"},",
+    "{\"expected_hash\":\"sha256:c082bb9237a57be2c405295f5f3e984e6e28f3a4ca84d2becabe1c331a31fba1\",\"field\":\"response_body\"}],",
+    "\"policy_profile\":\"strict\",",
+    "\"proof_hash\":\"sha256:d0563896cedd3f6593a94d0e564b564dfe6d0c8df28de2f1cde0ca0597d7e6ed\",",
+    "\"proof_id\":\"cap-proof-001\",\"receipt_id\":\"cap-receipt-001\",",
+    "\"recorded_at_millis\":1775000001000,\"schema_version\":\"capability-receipt-v1\",",
+    "\"side_effect_kind\":\"http_request\"}"
+);
+const CAPABILITY_PROOF_HASH_GOLDEN: &str =
+    "sha256:d0563896cedd3f6593a94d0e564b564dfe6d0c8df28de2f1cde0ca0597d7e6ed";
+const CAPABILITY_RECEIPT_HASH_GOLDEN: &str =
+    "sha256:c1fbabac7f4542e057a8299e0b5a1309e1cec466aa1e665fd39d95506824445e";
 
 #[test]
 fn replay_bundle_serialization_and_hash_are_byte_stable() {
@@ -89,6 +134,15 @@ fn effect_chain_bundle_verifies_cas_backed_receipts_and_transcript() {
         first.result_hash.as_deref(),
         Some(cas_hash(EFFECT_RESULT_BYTES).as_str())
     );
+    assert_eq!(first.flow_policy_verdict, "declassified");
+    assert_eq!(
+        first.declassification_ref.as_deref(),
+        Some("ifl-declass:network-egress-allow-001")
+    );
+    assert_eq!(
+        first.label_set_commitment,
+        lineage_hash("labels:operator_secret")
+    );
     assert!(
         first
             .cas_bindings
@@ -103,6 +157,9 @@ fn effect_chain_bundle_verifies_cas_backed_receipts_and_transcript() {
     assert_eq!(second.effect_kind, "http_request");
     assert_eq!(second.outcome, "denied");
     assert_eq!(second.result_hash, None);
+    assert_eq!(second.flow_policy_verdict, "blocked");
+    assert!(second.output_lineage_hash.is_none());
+    assert!(second.declassification_ref.is_none());
     assert_eq!(
         second.cas_bindings.len(),
         2,
@@ -111,6 +168,350 @@ fn effect_chain_bundle_verifies_cas_backed_receipts_and_transcript() {
 
     let transcript = render_effect_chain_transcript(&report);
     assert_eq!(transcript, EFFECT_CHAIN_TRANSCRIPT_GOLDEN);
+}
+
+#[test]
+fn effect_chain_sdk_proves_selective_disclosure_non_exfiltration_claims() {
+    let bundle = effect_chain_replay_bundle();
+    let bundle_bytes = serialize(&bundle).expect("effect-chain fixture should serialize");
+    let claim = operator_secret_external_sink_claim(Vec::new());
+
+    let proof = verify_non_exfiltration_claim(&bundle_bytes, &claim)
+        .expect("blocked external sink should prove non-exfiltration");
+
+    assert_eq!(proof.bundle_id, "effect-chain-bundle-001");
+    assert_eq!(proof.verifier_identity, "verifier://effect-chain-test");
+    assert_eq!(proof.effect_count, 2);
+    assert!(proof.claim_hash.starts_with("sha256:"));
+    assert_eq!(
+        proof.event_codes,
+        vec![
+            FN_VSDK_NON_EXFILTRATION_START.to_string(),
+            FN_VSDK_NON_EXFILTRATION_EFFECT.to_string(),
+            FN_VSDK_NON_EXFILTRATION_PASS.to_string(),
+        ]
+    );
+    assert_eq!(proof.claim.forbidden_label_set_commitments.len(), 1);
+    assert_eq!(proof.examined_effects.len(), 2);
+    let first_effect = proof
+        .examined_effects
+        .first()
+        .expect("first proof effect should be present");
+    let second_effect = proof
+        .examined_effects
+        .get(1)
+        .expect("second proof effect should be present");
+    assert_eq!(
+        first_effect.disclosed_label_set_commitment.as_deref(),
+        Some(lineage_hash("labels:operator_secret").as_str())
+    );
+    assert_eq!(first_effect.proof_outcome, "not_external_sink");
+    assert_eq!(second_effect.effect_kind, "http_request");
+    assert_eq!(
+        second_effect.disclosed_label_set_commitment.as_deref(),
+        Some(lineage_hash("labels:operator_secret").as_str())
+    );
+    assert_eq!(second_effect.proof_outcome, "blocked_before_sink");
+    assert!(second_effect.declassification_ref.is_none());
+
+    let sdk = VerifierSdk::new("verifier://effect-chain-test");
+    let facade_proof = sdk
+        .verify_non_exfiltration_claim_bundle(&bundle_bytes, &claim)
+        .expect("facade should verify the same non-exfiltration claim");
+    assert_eq!(proof, facade_proof);
+}
+
+#[test]
+fn non_exfiltration_claim_rejects_unauthorized_external_declassification() -> Result<(), String> {
+    let mut bundle = effect_chain_replay_bundle();
+    let mut egress_receipt = timeline_effect_entry(&bundle, 1).receipt;
+    egress_receipt.policy_outcome = EffectPolicyOutcome::Allowed {
+        capability_ref: "cap-http-egress-01".to_string(),
+    };
+    egress_receipt.result_hash = Some(cas_hash(EFFECT_RESULT_BYTES));
+    egress_receipt.post_state_hash = Some(cas_hash(EFFECT_POST_BYTES));
+    egress_receipt.output_lineage_hash = Some(lineage_hash("operator_secret:egress"));
+    egress_receipt.declassification_ref =
+        Some("ifl-declass:http-egress-operator-secret".to_string());
+    egress_receipt.flow_policy_verdict = FlowPolicyVerdict::Declassified;
+    replace_effect_receipt_and_reseal_chain(&mut bundle, 1, egress_receipt);
+    let bundle_bytes = serialize(&bundle).expect("effect-chain fixture should serialize");
+
+    let err = verify_non_exfiltration_claim(
+        &bundle_bytes,
+        &operator_secret_external_sink_claim(Vec::new()),
+    )
+    .expect_err("undisclosed external declassification must fail closed");
+    match err {
+        BundleError::NonExfiltrationViolation {
+            index: 1,
+            effect_kind,
+            label_set_commitment,
+            ..
+        } => {
+            assert_eq!(effect_kind, "http_request");
+            assert_eq!(label_set_commitment, lineage_hash("labels:operator_secret"));
+        }
+        other => return Err(format!("unexpected non-exfiltration error: {other:?}")),
+    }
+
+    let proof = verify_non_exfiltration_claim(
+        &bundle_bytes,
+        &operator_secret_external_sink_claim(vec![
+            "ifl-declass:http-egress-operator-secret".to_string(),
+        ]),
+    )
+    .expect("disclosed scoped declassification should satisfy the claim");
+    let egress_proof = proof
+        .examined_effects
+        .get(1)
+        .expect("egress proof effect should be present");
+    assert_eq!(
+        egress_proof.declassification_ref.as_deref(),
+        Some("ifl-declass:http-egress-operator-secret")
+    );
+    assert_eq!(egress_proof.proof_outcome, "authorized_declassification");
+    Ok(())
+}
+
+#[test]
+fn capability_proof_and_receipt_schemas_are_canonical_and_bound() {
+    let proof = capability_proof_fixture();
+    let receipt = capability_receipt_fixture(&proof);
+
+    assert_eq!(
+        capability_proof_canonical_bytes(&proof).expect("proof payload should encode canonically"),
+        CAPABILITY_PROOF_CANONICAL_GOLDEN.as_bytes()
+    );
+    assert_eq!(
+        capability_receipt_canonical_bytes(&receipt)
+            .expect("receipt payload should encode canonically"),
+        CAPABILITY_RECEIPT_CANONICAL_GOLDEN.as_bytes()
+    );
+    assert_eq!(
+        capability_proof_hash(&proof).expect("proof hash should recompute"),
+        CAPABILITY_PROOF_HASH_GOLDEN
+    );
+    assert_eq!(proof.proof_hash, CAPABILITY_PROOF_HASH_GOLDEN);
+    assert_eq!(
+        capability_receipt_hash(&receipt).expect("receipt hash should recompute"),
+        CAPABILITY_RECEIPT_HASH_GOLDEN
+    );
+    assert_eq!(receipt.receipt_hash, CAPABILITY_RECEIPT_HASH_GOLDEN);
+
+    let verification = verify_capability_receipt_schema(&proof, &receipt)
+        .expect("receipt should be bound to the proof");
+    assert_eq!(verification.proof_id, "cap-proof-001");
+    assert_eq!(verification.receipt_id, "cap-receipt-001");
+    assert_eq!(verification.actor, "agent://builder");
+    assert_eq!(verification.audience, "verifier://capability-test");
+    assert_eq!(verification.policy_profile, "strict");
+    assert_eq!(verification.epoch, 42);
+    assert_eq!(verification.side_effect_kind, "http_request");
+    assert_eq!(verification.postcondition_count, 2);
+    assert_eq!(verification.evidence_ref_count, 2);
+    assert_eq!(
+        verification.event_codes,
+        vec![
+            FN_VSDK_CAPABILITY_SCHEMA_START.to_string(),
+            FN_VSDK_CAPABILITY_PROOF_VERIFIED.to_string(),
+            FN_VSDK_CAPABILITY_RECEIPT_VERIFIED.to_string(),
+            FN_VSDK_CAPABILITY_SCHEMA_PASS.to_string(),
+        ]
+    );
+    let transcript = render_capability_verification_transcript(&verification);
+    assert_eq!(transcript, CAPABILITY_VERIFICATION_TRANSCRIPT_GOLDEN);
+}
+
+#[test]
+fn capability_receipt_schema_fails_closed_on_stale_or_tampered_bindings() {
+    let proof = capability_proof_fixture();
+    let receipt = capability_receipt_fixture(&proof);
+
+    let mut stale_proof = proof.clone();
+    stale_proof.revocation_freshness = CapabilityRevocationFreshness::Stale {
+        last_checked_at_millis: 1_774_999_000_000,
+        evidence_ref: "revocation:stale:001".to_string(),
+    };
+    seal_capability_proof(&mut stale_proof).expect("stale proof should still self-hash");
+    let err = verify_capability_receipt_schema(&stale_proof, &receipt)
+        .expect_err("stale revocation evidence must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::InvalidCapabilityField {
+            field: "revocation_freshness",
+            ..
+        }
+    ));
+
+    let mut wrong_actor = receipt.clone();
+    wrong_actor.actor = "agent://other".to_string();
+    seal_capability_receipt(&mut wrong_actor).expect("tampered receipt should self-hash");
+    let err = verify_capability_receipt_schema(&proof, &wrong_actor)
+        .expect_err("actor mismatch must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::CapabilityReceiptMismatch { field: "actor", .. }
+    ));
+
+    let mut wrong_scope = receipt.clone();
+    wrong_scope.exercised_scope.resource = "https://api.example.test/v1/private".to_string();
+    seal_capability_receipt(&mut wrong_scope).expect("tampered scope receipt should self-hash");
+    let err = verify_capability_receipt_schema(&proof, &wrong_scope)
+        .expect_err("out-of-proof exercised scope must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::CapabilityReceiptMismatch {
+            field: "exercised_scope",
+            ..
+        }
+    ));
+
+    let mut wrong_postcondition = receipt;
+    wrong_postcondition
+        .observed_postconditions
+        .get_mut(1)
+        .expect("fixture should include response_body postcondition")
+        .expected_hash = lineage_hash("post:response_body:tampered");
+    seal_capability_receipt(&mut wrong_postcondition)
+        .expect("tampered postcondition receipt should self-hash");
+    let err = verify_capability_receipt_schema(&proof, &wrong_postcondition)
+        .expect_err("postcondition mismatch must fail closed");
+    assert!(matches!(
+        err,
+        BundleError::CapabilityReceiptMismatch {
+            field: "observed_postconditions",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn verifier_sdk_checks_capability_proofs_and_counterfactual_decisions_offline() -> Result<(), String>
+{
+    let proof = capability_proof_fixture();
+    let receipt = capability_receipt_fixture(&proof);
+    let sdk = VerifierSdk::new("verifier://capability-test");
+
+    let proof_hash = sdk
+        .verify_capability_proof(&proof)
+        .expect("facade should verify capability proof schema and audience");
+    assert_eq!(proof_hash, CAPABILITY_PROOF_HASH_GOLDEN);
+
+    let receipt_verification = sdk
+        .verify_capability_receipt(&proof, &receipt)
+        .expect("facade should verify capability receipt binding");
+    assert_eq!(receipt_verification.receipt_id, "cap-receipt-001");
+    assert_eq!(
+        receipt_verification.scope, receipt.exercised_scope,
+        "receipt verification must disclose the exercised capability scope"
+    );
+
+    let mut stale_proof = proof.clone();
+    stale_proof.revocation_freshness = CapabilityRevocationFreshness::Stale {
+        last_checked_at_millis: 1_774_999_000_000,
+        evidence_ref: "revocation:stale:001".to_string(),
+    };
+    seal_capability_proof(&mut stale_proof).expect("stale proof should still self-hash");
+    let err = sdk
+        .verify_capability_receipt(&stale_proof, &receipt)
+        .expect_err("SDK receipt verification must fail closed on stale revocation evidence");
+    assert!(matches!(
+        err,
+        VerifierSdkError::Bundle(BundleError::InvalidCapabilityField {
+            field: "revocation_freshness",
+            ..
+        })
+    ));
+
+    let mut wrong_postcondition = receipt.clone();
+    wrong_postcondition
+        .observed_postconditions
+        .get_mut(1)
+        .expect("fixture should include response_body postcondition")
+        .expected_hash = lineage_hash("post:response_body:sdk-tampered");
+    seal_capability_receipt(&mut wrong_postcondition)
+        .expect("tampered postcondition receipt should self-hash");
+    let err = sdk
+        .verify_capability_receipt(&proof, &wrong_postcondition)
+        .expect_err("SDK receipt verification must fail closed on postcondition drift");
+    assert!(matches!(
+        err,
+        VerifierSdkError::Bundle(BundleError::CapabilityReceiptMismatch {
+            field: "observed_postconditions",
+            ..
+        })
+    ));
+
+    let request = capability_counterfactual_request(&proof);
+    let allowed = sdk
+        .validate_counterfactual_capability_decision(
+            &proof,
+            &request,
+            CounterfactualCapabilityDecision::Allow,
+        )
+        .expect("matching counterfactual allow decision should verify offline");
+    assert!(allowed.allowed);
+    assert_eq!(allowed.decision, "allow");
+    assert_eq!(allowed.expected_decision, "allow");
+    assert_eq!(
+        allowed.reason,
+        "proof and request bindings permit capability"
+    );
+    assert_eq!(allowed.scope, receipt.exercised_scope);
+
+    let mut out_of_scope_request = request.clone();
+    out_of_scope_request.requested_scope.resource =
+        "https://api.example.test/v1/private".to_string();
+    let denied = validate_counterfactual_capability_decision(
+        &proof,
+        &out_of_scope_request,
+        CounterfactualCapabilityDecision::Deny,
+    )
+    .expect("counterfactual deny should verify when the requested scope is not in the proof");
+    assert!(!denied.allowed);
+    assert_eq!(denied.decision, "deny");
+    assert_eq!(denied.expected_decision, "deny");
+    assert_eq!(denied.reason, "requested scope is outside capability proof");
+
+    let err = sdk
+        .validate_counterfactual_capability_decision(
+            &proof,
+            &out_of_scope_request,
+            CounterfactualCapabilityDecision::Allow,
+        )
+        .expect_err("counterfactual allow must fail closed for an out-of-scope request");
+    match err {
+        VerifierSdkError::CounterfactualCapability(
+            CounterfactualCapabilityError::DecisionMismatch {
+                expected,
+                actual,
+                reason,
+            },
+        ) => {
+            assert_eq!(expected, "deny");
+            assert_eq!(actual, "allow");
+            assert_eq!(reason, "requested scope is outside capability proof");
+        }
+        other => {
+            return Err(format!(
+                "unexpected counterfactual capability error: {other:?}"
+            ));
+        }
+    }
+
+    let foreign_sdk = VerifierSdk::new("verifier://other");
+    let err = foreign_sdk
+        .verify_capability_proof(&proof)
+        .expect_err("foreign verifier audience must be rejected");
+    match err {
+        VerifierSdkError::SessionVerifierMismatch { expected, actual } => {
+            assert_eq!(expected, "verifier://other");
+            assert_eq!(actual, "verifier://capability-test");
+        }
+        other => return Err(format!("unexpected verifier mismatch error: {other:?}")),
+    }
+    Ok(())
 }
 
 #[test]
@@ -136,7 +537,8 @@ fn third_party_style_fnbundle_reader_uses_facade_and_prints_verified_effects() {
 }
 
 #[test]
-fn effect_chain_verification_rejects_tampered_receipts_bytes_order_and_versions() {
+fn effect_chain_verification_rejects_tampered_receipts_bytes_order_and_versions()
+-> Result<(), String> {
     let mut receipt_tampered = effect_chain_replay_bundle();
     let mut first_entry = timeline_effect_entry(&receipt_tampered, 0);
     first_entry.receipt.trace_id = "forged-trace".to_string();
@@ -192,14 +594,28 @@ fn effect_chain_verification_rejects_tampered_receipts_bytes_order_and_versions(
     set_timeline_effect_entry(&mut unsupported_receipt_schema, 0, first_entry);
     let err = verify_effect_chain_bytes(&unsupported_receipt_schema)
         .expect_err("unknown effect receipt schema must fail closed");
+    match err {
+        BundleError::UnsupportedEffectReceiptSchema {
+            index: 0, actual, ..
+        } => assert_eq!(actual, "effect-receipt-v9.0"),
+        other => return Err(format!("unexpected effect receipt schema error: {other:?}")),
+    }
+
+    let mut malformed_lineage = effect_chain_replay_bundle();
+    let mut first_entry = timeline_effect_entry(&malformed_lineage, 0);
+    first_entry.receipt.label_set_commitment = "sha256:ABC".to_string();
+    set_timeline_effect_entry(&mut malformed_lineage, 0, first_entry);
+    let err = verify_effect_chain_bytes(&malformed_lineage)
+        .expect_err("malformed lineage commitments must fail closed");
     assert!(matches!(
         err,
-        BundleError::UnsupportedEffectReceiptSchema {
+        BundleError::MalformedEffectLineageHash {
             index: 0,
-            ref actual,
+            field: "label_set_commitment",
             ..
-        } if actual == "effect-receipt-v9.0"
+        }
     ));
+    Ok(())
 }
 
 fn canonical_replay_bundle() -> ReplayBundle {
@@ -359,6 +775,11 @@ fn effect_chain_replay_bundle() -> ReplayBundle {
             args_hash,
             result_hash: Some(result_hash),
             post_state_hash: Some(post_hash),
+            input_lineage_hash: lineage_hash("operator_secret:input"),
+            output_lineage_hash: Some(lineage_hash("operator_secret:output")),
+            label_set_commitment: lineage_hash("labels:operator_secret"),
+            declassification_ref: Some("ifl-declass:network-egress-allow-001".to_string()),
+            flow_policy_verdict: FlowPolicyVerdict::Declassified,
             recorded_at_millis: 1_775_000_000_000,
         },
         EffectReceipt {
@@ -373,6 +794,11 @@ fn effect_chain_replay_bundle() -> ReplayBundle {
             args_hash: denied_args_hash,
             result_hash: None,
             post_state_hash: None,
+            input_lineage_hash: lineage_hash("operator_secret:input"),
+            output_lineage_hash: None,
+            label_set_commitment: lineage_hash("labels:operator_secret"),
+            declassification_ref: None,
+            flow_policy_verdict: FlowPolicyVerdict::Blocked,
             recorded_at_millis: 1_775_000_000_001,
         },
     ];
@@ -492,6 +918,35 @@ fn set_timeline_effect_entry(
     reseal_bundle(bundle);
 }
 
+fn replace_effect_receipt_and_reseal_chain(
+    bundle: &mut ReplayBundle,
+    index: usize,
+    receipt: EffectReceipt,
+) {
+    let mut receipts = bundle
+        .timeline
+        .iter()
+        .cloned()
+        .map(|event| {
+            serde_json::from_value::<EffectReceiptChainEntry>(event.payload)
+                .expect("timeline payload should be an effect entry")
+                .receipt
+        })
+        .collect::<Vec<_>>();
+    let target_receipt = receipts
+        .get_mut(index)
+        .expect("effect receipt index should exist");
+    *target_receipt = receipt;
+    for (event, entry) in bundle
+        .timeline
+        .iter_mut()
+        .zip(seal_effect_entries(receipts))
+    {
+        event.payload = serde_json::to_value(entry).expect("entry should encode as JSON");
+    }
+    reseal_bundle(bundle);
+}
+
 fn replace_artifact_bytes(bundle: &mut ReplayBundle, path: &str, bytes: &[u8]) {
     let media_type = bundle
         .artifacts
@@ -543,6 +998,114 @@ fn cas_hash(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+fn lineage_hash(label: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn operator_secret_external_sink_claim(
+    allowed_declassification_refs: Vec<String>,
+) -> NonExfiltrationClaim {
+    NonExfiltrationClaim {
+        forbidden_label_set_commitments: vec![lineage_hash("labels:operator_secret")],
+        external_sink_effect_kinds: vec![
+            "http_request".to_string(),
+            "net_connect".to_string(),
+            "spawn".to_string(),
+        ],
+        allowed_declassification_refs,
+    }
+}
+
+fn capability_proof_fixture() -> CapabilityProof {
+    let mut proof = CapabilityProof {
+        schema_version: CAPABILITY_PROOF_SCHEMA_VERSION.to_string(),
+        proof_id: "cap-proof-001".to_string(),
+        actor: "agent://builder".to_string(),
+        audience: "verifier://capability-test".to_string(),
+        scopes: vec![
+            CapabilityScope {
+                capability: "fs_read".to_string(),
+                resource: "cas://workspace/app/index.js".to_string(),
+                access: "read".to_string(),
+            },
+            CapabilityScope {
+                capability: "http_request".to_string(),
+                resource: "https://api.example.test/v1/data".to_string(),
+                access: "egress".to_string(),
+            },
+        ],
+        policy_profile: CapabilityPolicyProfile::Strict,
+        revocation_freshness: CapabilityRevocationFreshness::Fresh {
+            checked_at_millis: 1_775_000_000_000,
+            evidence_ref: "revocation:fresh:001".to_string(),
+        },
+        epoch: 42,
+        side_effect_kind: EffectKind::HttpRequest,
+        evidence_refs: vec![
+            "effect-chain:head:001".to_string(),
+            "revocation:fresh:001".to_string(),
+        ],
+        expected_postconditions: vec![
+            CapabilityPostcondition {
+                field: "http_status".to_string(),
+                expected_hash: lineage_hash("post:http_status:200"),
+            },
+            CapabilityPostcondition {
+                field: "response_body".to_string(),
+                expected_hash: cas_hash(EFFECT_RESULT_BYTES),
+            },
+        ],
+        issued_at_millis: 1_775_000_000_000,
+        expires_at_millis: 1_775_003_600_000,
+        proof_hash: String::new(),
+    };
+    seal_capability_proof(&mut proof).expect("capability proof fixture should seal");
+    proof
+}
+
+fn capability_receipt_fixture(proof: &CapabilityProof) -> CapabilityReceipt {
+    let mut receipt = CapabilityReceipt {
+        schema_version: CAPABILITY_RECEIPT_SCHEMA_VERSION.to_string(),
+        receipt_id: "cap-receipt-001".to_string(),
+        proof_id: proof.proof_id.clone(),
+        proof_hash: proof.proof_hash.clone(),
+        actor: proof.actor.clone(),
+        audience: proof.audience.clone(),
+        exercised_scope: proof
+            .scopes
+            .get(1)
+            .expect("fixture should include http_request scope")
+            .clone(),
+        policy_profile: proof.policy_profile,
+        epoch: proof.epoch,
+        side_effect_kind: proof.side_effect_kind,
+        effect_receipt_chain_hash: lineage_hash("effect-chain:head:001"),
+        observed_postconditions: proof.expected_postconditions.clone(),
+        recorded_at_millis: 1_775_000_001_000,
+        receipt_hash: String::new(),
+    };
+    seal_capability_receipt(&mut receipt).expect("capability receipt fixture should seal");
+    receipt
+}
+
+fn capability_counterfactual_request(proof: &CapabilityProof) -> CounterfactualCapabilityRequest {
+    CounterfactualCapabilityRequest {
+        actor: proof.actor.clone(),
+        audience: proof.audience.clone(),
+        requested_scope: proof
+            .scopes
+            .get(1)
+            .expect("fixture should include http_request scope")
+            .clone(),
+        policy_profile: proof.policy_profile,
+        epoch: proof.epoch,
+        side_effect_kind: proof.side_effect_kind,
+        observed_postconditions: proof.expected_postconditions.clone(),
+    }
+}
+
 fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"runtime_effect_receipt_canonical_v1:");
@@ -563,6 +1126,11 @@ fn effect_receipt_hash(receipt: &EffectReceipt) -> String {
     update_hash_str(&mut hasher, &receipt.args_hash);
     update_optional_hash_str(&mut hasher, receipt.result_hash.as_deref());
     update_optional_hash_str(&mut hasher, receipt.post_state_hash.as_deref());
+    update_hash_str(&mut hasher, &receipt.input_lineage_hash);
+    update_optional_hash_str(&mut hasher, receipt.output_lineage_hash.as_deref());
+    update_hash_str(&mut hasher, &receipt.label_set_commitment);
+    update_optional_hash_str(&mut hasher, receipt.declassification_ref.as_deref());
+    hasher.update([flow_policy_verdict_tag(receipt.flow_policy_verdict)]);
     hasher.update(receipt.recorded_at_millis.to_le_bytes());
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
@@ -607,6 +1175,14 @@ fn policy_outcome_tag(outcome: &EffectPolicyOutcome) -> u8 {
     match outcome {
         EffectPolicyOutcome::Allowed { .. } => 1,
         EffectPolicyOutcome::Denied { .. } => 2,
+    }
+}
+
+fn flow_policy_verdict_tag(verdict: FlowPolicyVerdict) -> u8 {
+    match verdict {
+        FlowPolicyVerdict::LabelClean => 1,
+        FlowPolicyVerdict::Declassified => 2,
+        FlowPolicyVerdict::Blocked => 3,
     }
 }
 

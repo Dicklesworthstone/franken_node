@@ -30,7 +30,7 @@
     <text y="190" fill="#9ad0a4">divergence receipt written: receipts/lockstep-2026-05-17-canary.fnreceipt</text>
 
     <text y="216" fill="#6ec1ff">$</text>
-    <text x="14" y="216" fill="#e6e8ee">franken-node run . --policy strict --lockstep-preflight</text>
+    <text x="14" y="216" fill="#e6e8ee">franken-node run . --policy strict</text>
 
     <text y="238" fill="#ff7e7e">refused: revocation frontier stale (max age 6h, actual 38h)</text>
     <text y="256" fill="#6e7691">  hint: run `franken-node trust sync --force`, then retry</text>

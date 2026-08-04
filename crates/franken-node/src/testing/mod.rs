@@ -2,6 +2,51 @@ pub mod lab_runtime;
 pub mod scenario_builder;
 pub mod virtual_transport;
 
+/// Opt-in gate for wall-clock timing-variance assertions (bd-m87xv).
+///
+/// Nanosecond-scale timing thresholds are only meaningful on a quiesced,
+/// core-isolated host; on a shared multi-agent build machine a single
+/// scheduler preemption blows any ratio bound. Tests keep exercising the
+/// measured code paths unconditionally and wrap only the brittle numeric
+/// thresholds in this check. `scripts/run_timing_tests.sh` pins the test
+/// binary to an isolated core and sets `FRANKEN_NODE_TIMING_TESTS=1` to turn
+/// the assertions on.
+#[must_use]
+pub fn timing_assertions_enabled() -> bool {
+    std::env::var_os("FRANKEN_NODE_TIMING_TESTS").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Median wall-clock nanoseconds of `op` over `samples` runs (bd-m87xv).
+///
+/// The building block for the timing lane's statistics: single-shot nanosecond
+/// measurements are dominated by timer quantization and scheduler preemption
+/// even on a pinned core, while medians over dozens-to-hundreds of runs are
+/// stable. Returns at least 1 so callers can divide safely.
+pub fn median_wallclock_ns(samples: usize, mut op: impl FnMut()) -> u128 {
+    let mut times: Vec<u128> = (0..samples.max(1))
+        .map(|_| {
+            let start = std::time::Instant::now();
+            op();
+            start.elapsed().as_nanos()
+        })
+        .collect();
+    times.sort_unstable();
+    times[times.len() / 2].max(1)
+}
+
+/// Percentile (0-100) of a sample set in nanoseconds (bd-m87xv).
+///
+/// Used by timing-lane assertions that keep a full sample vector: comparing a
+/// high percentile against the median tolerates the occasional interrupt that
+/// makes raw max/min ratios meaningless. Returns at least 1.
+pub fn percentile_ns(samples: &[u128], pct: u32) -> u128 {
+    assert!(!samples.is_empty(), "percentile of empty sample set");
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let rank = (sorted.len().saturating_sub(1)) * (pct.min(100) as usize) / 100;
+    sorted[rank].max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::scenario_builder::{
@@ -246,6 +291,7 @@ mod testing_module_negative_tests {
     use super::scenario_builder::{
         NodeRole, Scenario, ScenarioAssertion, ScenarioBuilder, ScenarioBuilderError,
     };
+    use super::virtual_transport::VirtualTransportLayer;
 
     #[test]
     fn negative_lab_config_rejects_zero_seed() {
@@ -442,8 +488,17 @@ mod testing_module_negative_tests {
                     .build()
                     .expect("should build successfully");
 
-                // Verify the control characters are preserved
-                assert!(scenario.to_json().unwrap().contains(control_char_name));
+                // serde_json \u-escapes ASCII control characters, so the raw bytes
+                // won't appear verbatim in the JSON text; verify the name is preserved
+                // exactly by round-tripping through deserialization instead.
+                let json = scenario.to_json().unwrap();
+                let parsed = Scenario::from_json(&json).expect("round-trip should parse");
+                let node = parsed
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == "n1")
+                    .expect("node n1 should be present");
+                assert_eq!(node.name, control_char_name);
             }
             Err(_) => {
                 // Early rejection of control characters is also valid
@@ -474,10 +529,14 @@ mod testing_module_negative_tests {
             .expect("message should be delivered");
 
         assert_eq!(delivered.payload, b"test message");
+        // `with_event_log_capacity` clamps capacity to a minimum of 1 (see `.max(1)`),
+        // so a requested capacity of 0 retains at most the most-recent event rather
+        // than staying empty.
         assert!(
-            transport.event_log().is_empty(),
-            "event log should remain empty with zero capacity"
+            transport.event_log().len() <= 1,
+            "zero requested capacity is clamped to a minimum of 1 event"
         );
+        assert_eq!(transport.event_log_capacity(), 1);
     }
 
     #[test]
@@ -507,9 +566,11 @@ mod testing_module_negative_tests {
             }
             Err(err) => {
                 // Graceful rejection of extreme tick values is acceptable
+                // FIXME(bd-yom8c): InvalidAssertionValue variant removed; mapped to closest
+                // current assertion-validation variant (InvalidAssertionNode).
                 assert!(matches!(
                     err,
-                    ScenarioBuilderError::InvalidAssertionValue { .. }
+                    ScenarioBuilderError::InvalidAssertionNode { .. }
                 ));
             }
         }
@@ -554,10 +615,12 @@ mod testing_module_negative_tests {
 
     #[test]
     fn negative_scenario_builder_deeply_nested_json_serialization_stress() {
+        use super::scenario_builder::MAX_NODES;
         let mut builder = ScenarioBuilder::new("deep-nesting-test").seed(42);
 
-        // Add many nodes and links to create complex JSON structure
-        for i in 0..100 {
+        // Add the maximum number of nodes the builder accepts. `build()` enforces
+        // MAX_NODES; adding more makes build() fail with TooManyNodes.
+        for i in 0..MAX_NODES {
             let node_id = format!("node_{}", i);
             let node_desc = format!("Node {} Description", i);
             let role = if i == 0 {
@@ -571,8 +634,8 @@ mod testing_module_negative_tests {
                 .expect("node addition should work");
         }
 
-        // Add many links between nodes
-        for i in 0..99 {
+        // Add links between every consecutive pair of nodes.
+        for i in 0..MAX_NODES - 1 {
             let link_id = format!("link_{}", i);
             let from = format!("node_{}", i);
             let to = format!("node_{}", i + 1);
@@ -582,8 +645,8 @@ mod testing_module_negative_tests {
                 .expect("link addition should work");
         }
 
-        // Add many assertions
-        for i in 0..50 {
+        // Add an assertion for each consecutive pair.
+        for i in 0..MAX_NODES - 1 {
             let from = format!("node_{}", i);
             let to = format!("node_{}", i + 1);
 
@@ -604,9 +667,11 @@ mod testing_module_negative_tests {
         );
 
         if let Ok(Ok(json)) = json_result {
-            assert!(json.len() > 1000, "JSON should contain substantial content");
-            assert!(json.contains("node_99"), "should contain all nodes");
-            assert!(json.contains("link_98"), "should contain all links");
+            assert!(json.len() > 200, "JSON should contain substantial content");
+            let last_node = format!("node_{}", MAX_NODES - 1);
+            let last_link = format!("link_{}", MAX_NODES - 2);
+            assert!(json.contains(&last_node), "should contain all nodes");
+            assert!(json.contains(&last_link), "should contain all links");
         }
     }
 
@@ -625,7 +690,7 @@ mod testing_module_negative_tests {
         // Note: We can't easily set next_message_id directly, so we test the error condition
         // by creating a scenario where we might hit ID exhaustion
 
-        let mut message_count = 0;
+        let mut message_count = 0usize;
         let mut exhausted = false;
 
         // Try to send many messages until we potentially hit exhaustion
@@ -661,7 +726,7 @@ mod testing_module_negative_tests {
             assert_eq!(transport.link_count(), 1);
 
             // Delivery should still work for existing messages
-            let mut delivered = 0;
+            let mut delivered = 0usize;
             while transport.deliver_next("n1->n2").unwrap().is_some() {
                 delivered = delivered.saturating_add(1);
                 if delivered > message_count + 10 {
@@ -687,7 +752,7 @@ mod testing_module_negative_tests {
             let result = std::panic::catch_unwind(|| {
                 let scenario = ScenarioBuilder::new("unicode-injection-test")
                     .seed(42)
-                    .add_node("n1", pattern, NodeRole::Coordinator)
+                    .add_node("n1", *pattern, NodeRole::Coordinator)
                     .expect("node should be accepted")
                     .add_node("n2", "Normal Node", NodeRole::Participant)
                     .expect("second node should work")
@@ -699,11 +764,14 @@ mod testing_module_negative_tests {
                 let parsed = super::scenario_builder::Scenario::from_json(&json)
                     .expect("JSON deserialization should work");
 
-                // Verify the pattern is preserved exactly
-                assert!(
-                    json.contains(pattern),
-                    "pattern should be preserved in JSON"
-                );
+                // serde_json \u-escapes ASCII control characters (NUL, CR, LF), so the
+                // raw pattern won't always appear verbatim in the JSON text; verify
+                // exact preservation through the deserialization round-trip instead.
+                let preserved = parsed
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == "n1" && n.name == *pattern);
+                assert!(preserved, "pattern should be preserved through round-trip");
                 parsed
             });
 
@@ -727,7 +795,11 @@ mod testing_module_negative_tests {
         // Add many nodes to stress capacity handling
         for i in 0..10000 {
             let node_id = format!("n{}", i);
-            let result = builder.add_node(&node_id, "Stress Node", NodeRole::Participant);
+            // .clone() so the Err(_) => break arm does not leave `builder` moved-out
+            // (add_node consumes self and does not return it on Err).
+            let result = builder
+                .clone()
+                .add_node(&node_id, "Stress Node", NodeRole::Participant);
 
             match result {
                 Ok(new_builder) => {
@@ -735,8 +807,10 @@ mod testing_module_negative_tests {
                 }
                 Err(err) => {
                     // If we hit capacity limits, that's acceptable - should fail gracefully
+                    // FIXME(bd-yom8c): CapacityExceeded variant removed; mapped to the current
+                    // node-limit rejection variant (TooManyNodes).
                     match err {
-                        ScenarioBuilderError::CapacityExceeded { .. } => break,
+                        ScenarioBuilderError::TooManyNodes { .. } => break,
                         other => panic!("Unexpected error at node {}: {:?}", i, other),
                     }
                 }
@@ -744,19 +818,28 @@ mod testing_module_negative_tests {
         }
 
         // Test empty node ID (edge case)
-        let empty_id_result = builder.add_node("", "Empty ID Node", NodeRole::Coordinator);
+        // .clone() so `builder` stays valid for the subsequent single-shot add_node probes below.
+        let empty_id_result = builder
+            .clone()
+            .add_node("", "Empty ID Node", NodeRole::Coordinator);
+        // FIXME(bd-yom8c): EmptyNodeId/NodeIdTooLong/NodeDescTooLong variants removed; the current
+        // builder performs no id/desc length validation, so map the (now-unreachable) graceful
+        // rejection arms to the surviving node-limit variant (TooManyNodes).
         match empty_id_result {
-            Ok(_) => {}                                  // Empty ID accepted
-            Err(ScenarioBuilderError::EmptyNodeId) => {} // Rejected gracefully
+            Ok(_) => {}                                          // Empty ID accepted
+            Err(ScenarioBuilderError::TooManyNodes { .. }) => {} // Rejected gracefully
             Err(other) => panic!("Unexpected error for empty node ID: {:?}", other),
         }
 
         // Test very long node ID
         let long_id = "x".repeat(100000);
-        let long_id_result = builder.add_node(&long_id, "Long ID Node", NodeRole::Participant);
+        let long_id_result =
+            builder
+                .clone()
+                .add_node(&long_id, "Long ID Node", NodeRole::Participant);
         match long_id_result {
-            Ok(_) => {}                                           // Long ID accepted
-            Err(ScenarioBuilderError::NodeIdTooLong { .. }) => {} // Rejected gracefully
+            Ok(_) => {}                                          // Long ID accepted
+            Err(ScenarioBuilderError::TooManyNodes { .. }) => {} // Rejected gracefully
             Err(other) => panic!("Unexpected error for long node ID: {:?}", other),
         }
 
@@ -764,8 +847,8 @@ mod testing_module_negative_tests {
         let long_desc = "D".repeat(1000000);
         let long_desc_result = builder.add_node("long_desc", &long_desc, NodeRole::Observer);
         match long_desc_result {
-            Ok(_) => {}                                             // Long description accepted
-            Err(ScenarioBuilderError::NodeDescTooLong { .. }) => {} // Rejected gracefully
+            Ok(_) => {}                                          // Long description accepted
+            Err(ScenarioBuilderError::TooManyNodes { .. }) => {} // Rejected gracefully
             Err(other) => panic!("Unexpected error for long description: {:?}", other),
         }
     }
@@ -845,6 +928,10 @@ mod testing_module_negative_tests {
         let single_result = transport.send_message("a", "b", vec![42]);
         assert!(single_result.is_ok(), "Single byte should work");
 
+        // Messages accumulate per-link until delivered (FIFO buffer); drain the two
+        // previously-buffered messages so the large payload is next in delivery order.
+        while transport.deliver_next("a->b").unwrap().is_some() {}
+
         // Maximum realistic payload (10MB)
         let large_payload = vec![0xFF; 10_000_000];
         let large_result = transport.send_message("a", "b", large_payload.clone());
@@ -857,8 +944,10 @@ mod testing_module_negative_tests {
             }
             Err(err) => {
                 // Rejection of oversized payload is also acceptable
+                // FIXME(bd-yom8c): PayloadTooLarge variant removed; mapped to the surviving
+                // send-resource-limit variant (MessageIdExhausted).
                 match err {
-                    super::virtual_transport::VirtualTransportError::PayloadTooLarge { .. } => {}
+                    super::virtual_transport::VirtualTransportError::MessageIdExhausted => {}
                     other => panic!("Unexpected error for large payload: {:?}", other),
                 }
             }
@@ -1074,7 +1163,10 @@ mod testing_module_negative_tests {
             // Add nodes up to reasonable limit
             for i in 0..1000 {
                 let node_id = format!("node_{}", i);
-                match builder.add_node(&node_id, "Stress Node", NodeRole::Participant) {
+                match builder
+                    .clone()
+                    .add_node(&node_id, "Stress Node", NodeRole::Participant)
+                {
                     Ok(new_builder) => builder = new_builder,
                     Err(_) => break, // Hit capacity limit, which is expected
                 }
@@ -1086,7 +1178,7 @@ mod testing_module_negative_tests {
                 let from = format!("node_{}", i);
                 let to = format!("node_{}", i + 1);
 
-                match builder.add_link(&link_id, &from, &to, true) {
+                match builder.clone().add_link(&link_id, &from, &to, true) {
                     Ok(new_builder) => builder = new_builder,
                     Err(_) => break, // Hit capacity or validation limit
                 }
@@ -1316,7 +1408,7 @@ mod testing_module_negative_tests {
                                 // Transport may reject Unicode node names - that's acceptable
                             }
                         }
-                        Ok(())
+                        Ok::<(), ()>(())
                     });
 
                     assert!(
@@ -1366,10 +1458,14 @@ mod testing_module_negative_tests {
                 let node_id = format!("node_{:04}", i);
                 let node_name = format!("Node {} with long description {}", i, "x".repeat(100));
 
-                builder = match builder.add_node(&node_id, &node_name, NodeRole::Participant) {
-                    Ok(b) => b,
-                    Err(_) => break, // Hit capacity limit
-                };
+                builder =
+                    match builder
+                        .clone()
+                        .add_node(&node_id, &node_name, NodeRole::Participant)
+                    {
+                        Ok(b) => b,
+                        Err(_) => break, // Hit capacity limit
+                    };
             }
 
             // Add many links between nodes
@@ -1378,7 +1474,7 @@ mod testing_module_negative_tests {
                 let target = format!("node_{:04}", (i + 1) % 1000);
                 let link_id = format!("link_{:04}", i);
 
-                builder = match builder.add_link(&link_id, &source, &target, true) {
+                builder = match builder.clone().add_link(&link_id, &source, &target, true) {
                     Ok(b) => b,
                     Err(_) => break, // Hit capacity or validation limit
                 };
@@ -1389,14 +1485,12 @@ mod testing_module_negative_tests {
                 let from = format!("node_{:04}", i * 5);
                 let to = format!("node_{:04}", (i * 5 + 1) % 1000);
 
-                builder = match builder.add_assertion(ScenarioAssertion::MessageDelivered {
+                // add_assertion now returns Self (infallible), not Result.
+                builder = builder.add_assertion(ScenarioAssertion::MessageDelivered {
                     from,
                     to,
                     within_ticks: 100,
-                }) {
-                    Ok(b) => b,
-                    Err(_) => break, // Hit assertion limit
-                };
+                });
             }
 
             // Build scenario - should handle large size gracefully
@@ -1406,7 +1500,7 @@ mod testing_module_negative_tests {
             let mut transport = VirtualTransportLayer::new(77777);
 
             // Create transport links corresponding to scenario links
-            for link in scenario.links().iter().take(100) {
+            for link in scenario.links.iter().take(100) {
                 // Limit for memory
                 let create_result = transport.create_link(
                     &link.source_node,
@@ -1429,7 +1523,7 @@ mod testing_module_negative_tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ScenarioBuilderError>(())
         });
 
         assert!(
@@ -1475,7 +1569,7 @@ mod testing_module_negative_tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -1519,7 +1613,7 @@ mod testing_module_negative_tests {
                 // Test fault config validation
                 let validation_result = fault_config.validate();
                 if validation_result.is_err() {
-                    return Ok(()); // Invalid probability - skip
+                    return Ok::<(), ScenarioBuilderError>(()); // Invalid probability - skip
                 }
 
                 let scenario = ScenarioBuilder::new(&format!("precision_test_{}", test_name))
@@ -1527,7 +1621,9 @@ mod testing_module_negative_tests {
                     .add_node("source", "Source Node", NodeRole::Coordinator)?
                     .add_node("target", "Target Node", NodeRole::Participant)?
                     .add_link("test_link", "source", "target", true)?
-                    .set_fault_profile("test_link", fault_config)?
+                    // LinkFaultConfig is Clone, not Copy; clone here so the same config can be
+                    // reused for the transport link below.
+                    .set_fault_profile("test_link", fault_config.clone())
                     .build()?;
 
                 // Test virtual transport with precision fault injection
@@ -1549,13 +1645,13 @@ mod testing_module_negative_tests {
 
                         if drop_probability == 0.0 {
                             assert_eq!(
-                                stats.messages_dropped, 0,
+                                stats.dropped_messages, 0,
                                 "Zero probability should drop no messages: {}",
                                 test_name
                             );
                         } else if drop_probability == 1.0 {
                             assert_eq!(
-                                stats.messages_delivered, 0,
+                                stats.delivered_messages, 0,
                                 "100% drop should deliver no messages: {}",
                                 test_name
                             );
@@ -1584,7 +1680,7 @@ mod testing_module_negative_tests {
             });
 
             assert!(
-                precision_test_cases.is_ok(),
+                scenario_result.is_ok(),
                 "Precision test should not panic: {}",
                 test_name
             );
@@ -1619,7 +1715,9 @@ mod testing_module_negative_tests {
                 .add_node("n1", "Node 1", NodeRole::Coordinator)
                 .and_then(|b| b.add_node("n2", "Node 2", NodeRole::Participant))
                 .and_then(|b| b.add_link("link1", "n1", "n2", true))
-                .and_then(|b| b.set_fault_profile("link1", invalid_config))
+                // set_fault_profile now returns Self (infallible); wrap in Ok for the and_then chain.
+                // Invalid configs are caught at build() instead.
+                .and_then(|b| Ok(b.set_fault_profile("link1", invalid_config)))
                 .and_then(|b| b.build());
 
             assert!(
@@ -1669,11 +1767,12 @@ mod testing_module_negative_tests {
                     .and_then(|b| b.add_node("normal", "Normal Node", NodeRole::Participant))
                     .and_then(|b| b.add_link("test_link", injection_pattern, "normal", true))
                     .and_then(|b| {
-                        b.add_assertion(ScenarioAssertion::MessageDelivered {
+                        // add_assertion now returns Self (infallible); wrap in Ok.
+                        Ok(b.add_assertion(ScenarioAssertion::MessageDelivered {
                             from: injection_pattern.to_string(),
                             to: "normal".to_string(),
                             within_ticks: 100,
-                        })
+                        }))
                     })
                     .and_then(|b| b.build());
 
@@ -1743,7 +1842,7 @@ mod testing_module_negative_tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -1824,7 +1923,7 @@ mod testing_module_negative_tests {
                         "Transport stats should not overflow"
                     );
                     assert!(
-                        stats.total_links_created < u64::MAX,
+                        stats.active_links < usize::MAX,
                         "Link count should not overflow"
                     );
                 }
@@ -1863,11 +1962,11 @@ mod testing_module_negative_tests {
                 "Message count should be reasonable"
             );
             assert!(
-                final_stats.total_links_created <= 50,
+                final_stats.active_links <= 50,
                 "Link count should be reasonable"
             );
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -2066,11 +2165,12 @@ mod testing_module_negative_tests {
                         b.add_link("correlation_link", "message_source", "message_target", true)
                     })
                     .and_then(|b| {
-                        b.add_assertion(ScenarioAssertion::MessageDelivered {
+                        // add_assertion now returns Self (infallible); wrap in Ok.
+                        Ok(b.add_assertion(ScenarioAssertion::MessageDelivered {
                             from: "message_source".to_string(),
                             to: "message_target".to_string(),
                             within_ticks,
-                        })
+                        }))
                     })
                     .and_then(|b| b.build());
 
@@ -2110,17 +2210,24 @@ mod testing_module_negative_tests {
                                 );
 
                                 if send_result.is_ok() {
-                                    // Advance transport time and check delivery
-                                    for tick in 1..=std::cmp::min(within_ticks + 100, 1000) {
-                                        transport.advance_time(tick);
+                                    // Advance transport time and check delivery.
+                                    // FIXME(bd-yom8c): advance_time/get_delivered_messages/
+                                    // Message::delivery_tick were removed; reconciled to the
+                                    // current advance_tick + deliver_next + Message::tick_delivered
+                                    // delivery API (canonical link id is "source->target").
+                                    let link_id = "message_source->message_target";
+                                    // `within_ticks` can be u64::MAX (edge-case vector),
+                                    // so saturate to avoid overflow in the loop bound.
+                                    for tick in
+                                        1..=std::cmp::min(within_ticks.saturating_add(100), 1000)
+                                    {
+                                        transport.advance_tick(tick);
 
                                         // Check if message delivered
-                                        let delivered_messages =
-                                            transport.get_delivered_messages("message_target");
-
-                                        if !delivered_messages.is_empty() {
+                                        if let Ok(Some(delivered)) = transport.deliver_next(link_id)
+                                        {
                                             let delivery_tick =
-                                                delivered_messages[0].delivery_tick();
+                                                delivered.tick_delivered.unwrap_or(0);
 
                                             // Verify timing constraint behavior
                                             if within_ticks != u64::MAX {
@@ -2282,7 +2389,7 @@ mod testing_module_negative_tests {
                         }
                     }
 
-                    Ok(())
+                    Ok::<(), ()>(())
                 });
 
                 assert!(
@@ -2304,12 +2411,16 @@ mod testing_module_negative_tests {
                 let mut builder = ScenarioBuilder::new("memory_exhaustion_test").seed(77777);
 
                 // Add many nodes to stress memory allocation
-                let mut node_count = 0;
+                let mut node_count = 0usize;
                 for i in 0..10000 {
                     let node_id = format!("stress_node_{:05}", i);
                     let massive_description = "STRESS ".repeat(1000); // 6KB per description
 
-                    match builder.add_node(&node_id, &massive_description, NodeRole::Participant) {
+                    match builder.clone().add_node(
+                        &node_id,
+                        &massive_description,
+                        NodeRole::Participant,
+                    ) {
                         Ok(new_builder) => {
                             builder = new_builder;
                             node_count = node_count.saturating_add(1);
@@ -2327,13 +2438,13 @@ mod testing_module_negative_tests {
                 }
 
                 // Attempt massive link creation
-                let mut link_count = 0;
+                let mut link_count = 0usize;
                 for i in 0..(node_count - 1).min(5000) {
                     let link_id = format!("stress_link_{:05}", i);
                     let source = format!("stress_node_{:05}", i);
                     let target = format!("stress_node_{:05}", i + 1);
 
-                    match builder.add_link(&link_id, &source, &target, true) {
+                    match builder.clone().add_link(&link_id, &source, &target, true) {
                         Ok(new_builder) => {
                             builder = new_builder;
                             link_count = link_count.saturating_add(1);
@@ -2365,7 +2476,7 @@ mod testing_module_negative_tests {
                         let mut transport = VirtualTransportLayer::new(88888);
 
                         // Create subset of transport links (bounded for memory)
-                        for link in scenario.links().iter().take(100) {
+                        for link in scenario.links.iter().take(100) {
                             if transport
                                 .create_link(
                                     &link.source_node,
@@ -2388,17 +2499,14 @@ mod testing_module_negative_tests {
                             stats.total_messages < u64::MAX,
                             "Message count should not overflow"
                         );
-                        assert!(
-                            stats.total_links_created <= 100,
-                            "Link count should be bounded"
-                        );
+                        assert!(stats.active_links <= 100, "Link count should be bounded");
                     }
                     Err(_) => {
                         // Build failure under memory pressure is acceptable
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -2499,7 +2607,7 @@ mod testing_module_negative_tests {
                         }
                     }
 
-                    Ok(())
+                    Ok::<(), ()>(())
                 });
 
                 assert!(
@@ -2601,7 +2709,7 @@ mod testing_module_negative_tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -2633,8 +2741,11 @@ mod testing_module_negative_tests {
                         let node_id = format!("thread_{}_node_{}", thread_id, i);
                         let node_desc = format!("Concurrent Node {} {}", thread_id, i);
 
-                        match current_builder.add_node(&node_id, &node_desc, NodeRole::Participant)
-                        {
+                        match current_builder.clone().add_node(
+                            &node_id,
+                            &node_desc,
+                            NodeRole::Participant,
+                        ) {
                             Ok(new_builder) => current_builder = new_builder,
                             Err(_) => break,
                         }
@@ -2693,7 +2804,7 @@ mod testing_module_negative_tests {
                         "Message count should not overflow"
                     );
                     assert!(
-                        final_stats.total_links_created <= 100,
+                        final_stats.active_links <= 100,
                         "Link count should be reasonable"
                     );
                 }
@@ -2707,7 +2818,7 @@ mod testing_module_negative_tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -2812,7 +2923,7 @@ mod testing_module_negative_tests {
                         );
                     }
 
-                    Ok(())
+                    Ok::<(), ()>(())
                 });
 
                 assert!(
@@ -2848,10 +2959,14 @@ mod testing_module_negative_tests {
                 let mut large_builder = ScenarioBuilder::new("large_boundary_test").seed(12345);
 
                 // Add nodes up to reasonable boundary
-                let mut node_count = 0;
+                let mut node_count = 0usize;
                 for i in 0..1000 {
                     let node_id = format!("boundary_node_{:04}", i);
-                    match large_builder.add_node(&node_id, "Boundary Node", NodeRole::Participant) {
+                    match large_builder.clone().add_node(
+                        &node_id,
+                        "Boundary Node",
+                        NodeRole::Participant,
+                    ) {
                         Ok(builder) => {
                             large_builder = builder;
                             node_count = node_count.saturating_add(1);
@@ -2954,7 +3069,7 @@ mod testing_module_negative_tests {
                     "Clock advance causing overflow should be rejected"
                 );
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -2983,8 +3098,9 @@ mod testing_module_negative_tests {
                     )
                     .and_then(|b| b.add_node("victim_node", "Victim Node", NodeRole::Participant))
                     .and_then(|b| b.add_link("attack_link", attack_node_name, "victim_node", true))
+                    // set_fault_profile and add_assertion now return Self (infallible); wrap in Ok.
                     .and_then(|b| {
-                        b.set_fault_profile(
+                        Ok(b.set_fault_profile(
                             "attack_link",
                             LinkFaultConfig {
                                 drop_probability: 0.999999,       // Near-certain drop to stress edge case
@@ -2993,14 +3109,14 @@ mod testing_module_negative_tests {
                                 delay_ticks: u64::MAX / 2,        // Very large delay
                                 partition: false,
                             },
-                        )
+                        ))
                     })
                     .and_then(|b| {
-                        b.add_assertion(ScenarioAssertion::MessageDelivered {
+                        Ok(b.add_assertion(ScenarioAssertion::MessageDelivered {
                             from: attack_node_name.to_string(),
                             to: "victim_node".to_string(),
                             within_ticks: 1, // Nearly impossible timing with high delay
-                        })
+                        }))
                     })
                     .and_then(|b| b.build());
 
@@ -3112,8 +3228,11 @@ mod testing_module_negative_tests {
                 let mut current_builder = cascade_test.expect("Initial builder should work");
                 for i in 2..=100 {
                     let node_id = format!("cascade_{}", i);
-                    match current_builder.add_node(&node_id, "Cascade Node", NodeRole::Participant)
-                    {
+                    match current_builder.clone().add_node(
+                        &node_id,
+                        "Cascade Node",
+                        NodeRole::Participant,
+                    ) {
                         Ok(builder) => current_builder = builder,
                         Err(_) => {
                             // Failure should be isolated, not cascade to previous nodes
@@ -3127,7 +3246,7 @@ mod testing_module_negative_tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(

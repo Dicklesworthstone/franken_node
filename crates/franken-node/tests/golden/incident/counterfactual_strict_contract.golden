@@ -154,7 +154,7 @@
     }
   ],
   "metadata": {
-    "bundle_hash": "b43fce2b6dd9ccef0ec2fca309e79ec8b8b12cfd22b94e2fcbc52228092aaf0a",
+    "bundle_hash": "a62426b20c9031e2ecfbc84af480438b6a945e088cc07c8d4b47d82cdbe948e0",
     "engine_version": "counterfactual-v1",
     "invocation_event_codes": [
       "COUNTERFACTUAL_REPLAY_STARTED",

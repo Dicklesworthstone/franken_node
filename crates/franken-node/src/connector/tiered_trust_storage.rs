@@ -1888,10 +1888,14 @@ mod tests {
         ];
 
         for (code, tier_str, artifact_id, detail) in malicious_events {
+            let _ = tier_str;
+            // `emit` takes `Option<&ArtifactId>`; bind the owned value first so the
+            // borrow outlives the call instead of referencing a temporary (E0515).
+            let artifact_id = artifact_id.map(|s| ArtifactId(s.to_string()));
             storage.emit(
                 code,
                 Tier::L1Local, // Will be converted to "L1_local"
-                artifact_id.map(|s| &ArtifactId(s.to_string())),
+                artifact_id.as_ref(),
                 detail.to_string(),
             );
         }
@@ -2058,7 +2062,7 @@ mod tests {
             "\"L4_nonexistent\"",
             "\"l1_local\"", // Wrong case
             "\"L1-local\"", // Wrong separator
-            "\"L1Local\"",  // No separator
+            "\"L0Local\"", // Nonexistent variant (Tier has no serde rename; valid names are L1Local/L2Warm/L3Archive)
             "null",
             "0",
             "false",
@@ -2265,7 +2269,7 @@ mod tests {
             "artifact_\u{FF11}",  // Fullwidth Digit One
         ];
 
-        for id in collision_ids {
+        for &id in &collision_ids {
             let artifact = TrustArtifact {
                 id: ArtifactId(id.to_string()),
                 object_class: ObjectClass::CriticalMarker,
@@ -2394,7 +2398,10 @@ mod tests {
             }
         }
 
-        // Half should remain
-        assert_eq!(storage.tier_count(Tier::L3Archive), 500);
+        // 500 odd-indexed stress artifacts remain (even indices were evicted),
+        // plus the `partial_test` artifact stored in L3 earlier and never evicted
+        // from L3 (only its L1 copy was evicted). TierStore is an unbounded
+        // BTreeMap, so nothing auto-evicts.
+        assert_eq!(storage.tier_count(Tier::L3Archive), 501);
     }
 }

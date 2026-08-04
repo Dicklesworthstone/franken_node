@@ -373,7 +373,11 @@ fn stream_family_report_matches_per_test_rows() -> TestResult {
 }
 
 #[test]
-fn stream_fixture_cases_are_reported_as_passing_results() -> TestResult {
+fn stream_fixture_cases_are_reported_with_measured_statuses() -> TestResult {
+    // bd-kfseq: the report carries GENUINE lockstep-oracle statuses, so the
+    // honest contract is not "every fixture passes" (an authored fantasy the
+    // pre-bd-ihusm artifact asserted) but "every fixture is measured, tagged,
+    // and — when failing — tracked against an investigation bead".
     let manifest = load_stream_manifest()?;
     let report = load_compatibility_report()?;
     let mut rows_by_id = BTreeMap::new();
@@ -382,16 +386,35 @@ fn stream_fixture_cases_are_reported_as_passing_results() -> TestResult {
             rows_by_id.insert(test_id, row);
         }
     }
+    let tracked_ids: BTreeSet<&str> = report
+        .get("failing_tests_tracking")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("test_id").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
 
     for case in stream_cases(&manifest)? {
         let case_id = required_str(case, "id", "stream fixture id")?;
         let row = rows_by_id
             .get(case_id)
             .ok_or_else(|| format!("compatibility report missing stream fixture case {case_id}"))?;
+        let status = row.get("status").and_then(Value::as_str).unwrap_or("");
         require(
-            row.get("status").and_then(Value::as_str) == Some("pass"),
-            format!("stream fixture case {case_id} must be reported as passing"),
+            REQUIRED_STATUS_VALUES.contains(&status),
+            format!("stream fixture case {case_id} must carry a measured status, got `{status}`"),
         )?;
+        if status == "fail" || status == "error" {
+            require(
+                tracked_ids.contains(case_id),
+                format!(
+                    "stream fixture case {case_id} fails but has no failing_tests_tracking entry"
+                ),
+            )?;
+        }
         require(
             row.get("api_family").and_then(Value::as_str) == Some("stream")
                 && row.get("band").and_then(Value::as_str) == Some("high-value")
@@ -404,7 +427,11 @@ fn stream_fixture_cases_are_reported_as_passing_results() -> TestResult {
 }
 
 #[test]
-fn compatibility_gate_ratchet_ci_and_event_codes_are_release_safe() -> TestResult {
+fn compatibility_gate_ratchet_ci_and_event_codes_are_self_consistent() -> TestResult {
+    // bd-kfseq: the committed report is a MEASUREMENT, not a ship claim, so
+    // the contract is internal consistency — the ci_gate booleans must be the
+    // ones the recorded rates imply (a 2.5% run recorded as release-safe
+    // would be the fabrication bd-ihusm forbids), never hardcoded GREEN.
     let report = load_compatibility_report()?;
     let totals = report
         .get("totals")
@@ -416,27 +443,54 @@ fn compatibility_gate_ratchet_ci_and_event_codes_are_release_safe() -> TestResul
         .and_then(|previous| previous.get("overall_pass_rate_pct"))
         .and_then(Value::as_f64)
         .ok_or("previous release pass rate must be numeric")?;
-    require(
-        current_rate >= previous_rate,
-        "compatibility corpus ratchet must reject pass-rate regression",
-    )?;
+    let overall_min = report
+        .get("thresholds")
+        .and_then(|thresholds| thresholds.get("overall_pass_rate_min_pct"))
+        .and_then(Value::as_f64)
+        .ok_or("thresholds.overall_pass_rate_min_pct must be numeric")?;
 
     let ci_gate = report
         .get("ci_gate")
         .and_then(Value::as_object)
         .ok_or("compatibility report ci_gate must be an object")?;
+    let threshold_met = ci_gate
+        .get("threshold_met")
+        .and_then(Value::as_bool)
+        .ok_or("ci_gate.threshold_met must be a boolean")?;
+    let release_blocked = ci_gate
+        .get("release_blocked")
+        .and_then(Value::as_bool)
+        .ok_or("ci_gate.release_blocked must be a boolean")?;
+    let regression_detected = ci_gate
+        .get("regression_detected")
+        .and_then(Value::as_bool)
+        .ok_or("ci_gate.regression_detected must be a boolean")?;
+
     require(
-        ci_gate.get("threshold_met").and_then(Value::as_bool) == Some(true),
-        "compatibility CI gate must record threshold_met=true",
+        regression_detected == (current_rate < previous_rate),
+        "ci_gate.regression_detected must equal the recorded rate comparison",
     )?;
     require(
-        ci_gate.get("release_blocked").and_then(Value::as_bool) == Some(false),
-        "compatibility CI gate must not block release when thresholds pass",
+        !threshold_met || current_rate >= overall_min,
+        "ci_gate.threshold_met=true requires the recorded rate to clear the threshold",
     )?;
     require(
-        ci_gate.get("regression_detected").and_then(Value::as_bool) == Some(false),
-        "compatibility CI gate must not record a regression",
+        current_rate >= overall_min || !threshold_met,
+        "a recorded rate below the threshold must not claim threshold_met",
     )?;
+    require(
+        release_blocked == (!threshold_met || regression_detected),
+        "ci_gate.release_blocked must re-derive from threshold_met and regression_detected",
+    )?;
+    if release_blocked {
+        require(
+            ci_gate
+                .get("release_blocked_reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| !reason.trim().is_empty()),
+            "a blocked release must record a non-empty release_blocked_reason",
+        )?;
+    }
 
     let event_codes: BTreeSet<&str> = report
         .get("event_codes")

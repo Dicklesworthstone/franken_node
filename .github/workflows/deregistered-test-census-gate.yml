@@ -1,0 +1,50 @@
+# Recurrence-prevention gate (bd-rjc2m.G2 / bd-romfp): flag orphaned test files.
+#
+# Root cause this prevents (complements the .G1 compile-census): with
+# `autotests = false`, a tests/*.rs file runs ONLY if it is a registered
+# [[test]] target OR transitively #[path]/include!/mod-reached from one. A
+# conformance/golden file dropped from [[test]] (or never registered) silently
+# loses coverage — and the .G1 compile-census CANNOT see it, because cargo never
+# even tries to compile an unregistered file. The initial census found 40
+# flagged coverage holes (22 conformance / 9 golden / 6 metamorphic / 2 e2e / 1
+# contract), tracked for re-registration under bd-rjc2m .C*/.E2E1.
+#
+# This gate is PURE STATIC (no cargo/toolchain) and therefore cheap.
+#
+# MODE: starts WARN-ONLY so the in-flight re-registration backlog is not wedged.
+# FLIP to blocking by setting BLOCKING=1 once bd-rjc2m.E2E1 (full e2e) is green.
+name: deregistered-test-census-gate
+
+on:
+  pull_request:
+    paths:
+      - 'crates/franken-node/tests/**'
+      - 'crates/franken-node/Cargo.toml'
+      - 'scripts/check_deregistered_test_targets.py'
+  workflow_dispatch: {}
+
+env:
+  BLOCKING: "0"   # set to "1" after bd-rjc2m.E2E1 is green to make this gate blocking
+
+jobs:
+  orphan-census:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gate unit tests (parser + reachability must be correct first)
+        run: python3 scripts/test_check_deregistered_test_targets.py
+      - name: Evaluate gate (warn-only unless BLOCKING=1)
+        run: |
+          export GATE_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ARGS="--out artifacts/verification --ts $GATE_TS"
+          if [ "${BLOCKING}" = "1" ]; then
+            python3 scripts/check_deregistered_test_targets.py $ARGS
+          else
+            python3 scripts/check_deregistered_test_targets.py $ARGS --warn-only
+          fi
+      - name: Upload orphan census report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deregistered-test-census
+          path: artifacts/verification/*.jsonl

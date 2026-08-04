@@ -36,8 +36,11 @@ from scripts.lib.test_logger import configure_test_logging
 REGISTRY_PATH = ROOT / "docs" / "capability_ownership_registry.json"
 CONTRACT_PATH = ROOT / "docs" / "architecture" / "tri_kernel_ownership_contract.md"
 CONTRACT_REL_PATH = "docs/architecture/tri_kernel_ownership_contract.md"
+ENGINE_SPLIT_CONTRACT_PATH = ROOT / "docs" / "ENGINE_SPLIT_CONTRACT.md"
+ENGINE_SPLIT_CONTRACT_REL_PATH = "docs/ENGINE_SPLIT_CONTRACT.md"
 POLICY_MATRIX_HEADING = "## Semantic Twin Inventory And Classification Matrix"
 RULE_CATALOG_HEADING = "### Anti-Drift Rule Catalog"
+ENGINE_EFFECT_PRODUCER_HEADING = "## Proof-Carrying Host-Effect Producer Handoff (bd-f5b04.2.6)"
 
 RULE_CATALOG = [
     {
@@ -55,7 +58,45 @@ RULE_CATALOG = [
         "reason_code": "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING",
         "summary": "franken_node imported another kernel's internal module directly",
     },
+    {
+        "rule_id": "OWN-SEMB-004",
+        "reason_code": "ENGINE_EFFECT_PRODUCER_BOUNDARY_VIOLATION",
+        "summary": "first-tranche effect producer ownership or handoff contract drifted",
+    },
 ]
+
+ENGINE_EFFECT_PRODUCER_REQUIRED_TERMS = [
+    "bd-f5b04.2.6",
+    "crates/franken-engine/src/hostcall_effects_migration.rs",
+    "FullCapsHandler::dispatches_real_hostcalls()",
+    "fs.read",
+    "fs.write",
+    "http.request",
+    "EffectReceipt",
+    "ContentAddressedStore",
+    "compat:fs:readFile",
+    "compat:fs:writeFile",
+    "compat:http:request",
+]
+
+ENGINE_EFFECT_PRODUCER_FORBIDDEN_MARKERS = [
+    "pub struct FsHostcallEffect",
+    "pub struct NetworkHostcallEffect",
+    "pub struct FullCapsHandler",
+    "dispatches_real_hostcalls",
+    '"hostcall:fs:read"',
+    '"hostcall:fs:write"',
+    '"hostcall:network"',
+]
+
+ENGINE_EFFECT_PRODUCER_ALLOWED_NODE_PATHS = {
+    "crates/franken-node/src/runtime/effect_receipt.rs",
+    "crates/franken-node/src/storage/cas.rs",
+    "crates/franken-node/src/replay/time_travel_engine.rs",
+    "crates/franken-node/src/api/compat_conformance.rs",
+    "crates/franken-node/src/api/compat_gate.rs",
+    "crates/franken-node/src/main.rs",
+}
 
 SEMANTIC_BOUNDARY_FAMILIES = [
     {
@@ -266,6 +307,14 @@ def load_policy_contract_text(contract_path: Path = CONTRACT_PATH) -> str:
     return contract_path.read_text()
 
 
+def load_engine_split_contract_text(contract_path: Path = ENGINE_SPLIT_CONTRACT_PATH) -> str:
+    """Load the franken_engine/franken_node split contract text."""
+    if not contract_path.exists():
+        print(f"ERROR: Engine split contract not found: {contract_path}", file=sys.stderr)
+        sys.exit(2)
+    return contract_path.read_text()
+
+
 def load_waivers(waiver_path: str | None) -> list[dict[str, Any]]:
     """Load waiver file if provided."""
     if not waiver_path:
@@ -372,6 +421,96 @@ def check_contract_alignment(contract_text: str) -> list[dict[str, Any]]:
                 )
 
     return violations
+
+
+def check_engine_effect_producer_contract_alignment(
+    split_contract_text: str,
+    ownership_contract_text: str,
+) -> list[dict[str, Any]]:
+    """Ensure bd-f5b04.2.6's engine producer handoff stays documented."""
+    violations = []
+
+    if ENGINE_EFFECT_PRODUCER_HEADING not in split_contract_text:
+        violations.append(
+            _make_violation(
+                rule_id="OWN-SEMB-004",
+                reason_code="ENGINE_EFFECT_PRODUCER_BOUNDARY_VIOLATION",
+                file=ENGINE_SPLIT_CONTRACT_REL_PATH,
+                detail=f"missing contract heading: {ENGINE_EFFECT_PRODUCER_HEADING}",
+                remediation=(
+                    "Restore the proof-carrying host-effect producer handoff "
+                    "section in the engine split contract."
+                ),
+            )
+        )
+
+    for term in ENGINE_EFFECT_PRODUCER_REQUIRED_TERMS:
+        if term not in split_contract_text:
+            violations.append(
+                _make_violation(
+                    rule_id="OWN-SEMB-004",
+                    reason_code="ENGINE_EFFECT_PRODUCER_BOUNDARY_VIOLATION",
+                    file=ENGINE_SPLIT_CONTRACT_REL_PATH,
+                    detail=f"engine split contract missing required handoff term: {term}",
+                    remediation=(
+                        "Document the first-tranche producer requirement, including "
+                        "the exact engine path, franken_node receipt/CAS surfaces, "
+                        "and compatibility operation ids."
+                    ),
+                    required_term=term,
+                )
+            )
+
+    for term in ("bd-f5b04.2.6", "EffectReceipt", "hostcall_effects_migration.rs"):
+        if term not in ownership_contract_text:
+            violations.append(
+                _make_violation(
+                    rule_id="OWN-SEMB-004",
+                    reason_code="ENGINE_EFFECT_PRODUCER_BOUNDARY_VIOLATION",
+                    file=CONTRACT_REL_PATH,
+                    detail=f"tri-kernel ownership contract missing handoff term: {term}",
+                    remediation=(
+                        "Document the bd-f5b04.2.6 engine-producer ownership row "
+                        "and keep it aligned with docs/ENGINE_SPLIT_CONTRACT.md."
+                    ),
+                    required_term=term,
+                )
+            )
+
+    return violations
+
+
+def check_engine_effect_producer_duplicate(
+    filepath: Path,
+    project_root: Path = ROOT,
+) -> list[dict[str, Any]]:
+    """Reject local reimplementation of the engine-owned effect producer."""
+    relpath = _relative_to_root(filepath, project_root)
+    if relpath in ENGINE_EFFECT_PRODUCER_ALLOWED_NODE_PATHS:
+        return []
+
+    text = filepath.read_text(errors="ignore")
+    markers = [marker for marker in ENGINE_EFFECT_PRODUCER_FORBIDDEN_MARKERS if marker in text]
+    if not markers:
+        return []
+
+    return [
+        _make_violation(
+            rule_id="OWN-SEMB-004",
+            reason_code="ENGINE_EFFECT_PRODUCER_BOUNDARY_VIOLATION",
+            file=relpath,
+            detail=(
+                f"{relpath} contains engine-owned first-tranche effect producer "
+                f"marker(s): {', '.join(markers)}"
+            ),
+            remediation=(
+                "Move real fs.read/fs.write/http.request execution to the "
+                "franken_engine producer boundary and keep franken_node limited "
+                "to EffectReceipt, CAS, replay, compat-oracle, and release gates."
+            ),
+            markers=markers,
+        )
+    ]
 
 
 def check_file_ownership(filepath: Path, registry: dict[str, Any]) -> list[dict[str, Any]]:
@@ -520,6 +659,7 @@ def main() -> None:
 
     registry = load_registry()
     contract_text = load_policy_contract_text()
+    engine_split_contract_text = load_engine_split_contract_text()
     waivers = load_waivers(waiver_path)
     waiver_rules = {(w["file"], w["rule_id"]) for w in waivers}
 
@@ -530,6 +670,10 @@ def main() -> None:
     registry_violations: list[dict[str, Any]] = []
     semantic_violations: list[dict[str, Any]] = []
     boundary_violations: list[dict[str, Any]] = []
+    engine_effect_violations = _waive(
+        check_engine_effect_producer_contract_alignment(engine_split_contract_text, contract_text),
+        waiver_rules,
+    )
 
     for rs_file in rust_files:
         registry_violations.extend(
@@ -541,8 +685,17 @@ def main() -> None:
         boundary_violations.extend(
             _waive(check_forbidden_internal_imports(rs_file), waiver_rules)
         )
+        engine_effect_violations.extend(
+            _waive(check_engine_effect_producer_duplicate(rs_file), waiver_rules)
+        )
 
-    all_violations = contract_violations + registry_violations + semantic_violations + boundary_violations
+    all_violations = (
+        contract_violations
+        + registry_violations
+        + semantic_violations
+        + boundary_violations
+        + engine_effect_violations
+    )
     active_violations = [v for v in all_violations if not v["waived"]]
     waived_violations = [v for v in all_violations if v["waived"]]
 
@@ -565,6 +718,9 @@ def main() -> None:
             "cross_track_redefinition": len([v for v in registry_violations if not v["waived"]]),
             "semantic_family_drift": len([v for v in semantic_violations if not v["waived"]]),
             "internal_boundary_crossing": len([v for v in boundary_violations if not v["waived"]]),
+            "engine_effect_producer_boundary": len(
+                [v for v in engine_effect_violations if not v["waived"]]
+            ),
         },
         "active_violations": len(active_violations),
         "waived_violations": len(waived_violations),

@@ -319,7 +319,7 @@ fn conformance_must_maintain_complete_audit_trail_for_all_proof_attempts() {
         .filter(|e| e.code == RG_PROOF_PASSED)
         .collect();
     assert!(
-        success_events.len() >= 1,
+        !success_events.is_empty(),
         "Proof success must be event-logged"
     );
 
@@ -345,7 +345,7 @@ fn conformance_must_maintain_complete_audit_trail_for_all_proof_attempts() {
     // Verify failure audit trail
     let all_receipts = gate.receipts();
     let failure_receipts: Vec<_> = all_receipts.iter().filter(|r| !r.passed).collect();
-    assert!(failure_receipts.len() >= 1, "Failure must be receipted");
+    assert!(!failure_receipts.is_empty(), "Failure must be receipted");
 
     let failure_receipt = &failure_receipts[0];
     assert_eq!(failure_receipt.artifact_id, "audit-test");
@@ -372,7 +372,7 @@ fn conformance_must_maintain_complete_audit_trail_for_all_proof_attempts() {
         .filter(|e| e.code == RG_PROOF_FAILED)
         .collect();
     assert!(
-        failure_events.len() >= 1,
+        !failure_events.is_empty(),
         "Proof failure must be event-logged"
     );
 

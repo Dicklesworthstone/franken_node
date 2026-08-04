@@ -1,0 +1,9 @@
+{
+  "valid": true,
+  "config": {
+    "max_frame_bytes": 18446744073709551615,
+    "max_nesting_depth": [UNIX_TIMESTAMP],
+    "max_decode_cpu_ms": 18446744073709551615
+  },
+  "test_case": "max_values"
+}

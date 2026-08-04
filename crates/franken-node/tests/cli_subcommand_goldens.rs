@@ -8,6 +8,8 @@
 //! Run with UPDATE_GOLDENS=1 or `cargo insta review` to accept initial outputs.
 
 use assert_cmd::Command;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use frankenengine_node::supply_chain::artifact_signing::{build_and_sign_manifest, sign_artifact};
 use insta::{Settings, assert_json_snapshot, assert_snapshot};
 use serde_json::{Value, json};
@@ -20,7 +22,7 @@ mod cli_golden_helpers;
 #[path = "operator_json_contract_registry.rs"]
 mod operator_json_contract_registry;
 
-use cli_golden_helpers::{pretty_json_stdout, with_scrubbed_snapshot_settings};
+use cli_golden_helpers::with_scrubbed_snapshot_settings;
 
 fn with_json_snapshot_settings<R>(snapshot_dir: &str, assertion: impl FnOnce() -> R) -> R {
     let mut settings = Settings::clone_current();
@@ -81,7 +83,56 @@ fn write_proof_pipeline_readiness_fixture(root: &Path) -> io::Result<String> {
     Ok("proof-readiness.json".to_string())
 }
 
+/// Doctor check scopes whose pass/fail reflects live host load (concurrent
+/// builds, disk headroom, RCH reachability, stray benchmark artifacts) rather
+/// than the CLI contract under test. Mirrors `ENV_SENSITIVE_SCOPES` in
+/// `doctor_policy_activation_e2e.rs`; the golden must exclude them to stay
+/// deterministic across hosts.
+const ENV_SENSITIVE_DOCTOR_SCOPES: [&str; 3] = [
+    "workspace.pressure",
+    "benchmark.validation",
+    "resource_governor.monitoring",
+];
+
+fn is_env_sensitive_doctor_entry(value: &Value) -> bool {
+    value["scope"]
+        .as_str()
+        .is_some_and(|scope| ENV_SENSITIVE_DOCTOR_SCOPES.contains(&scope))
+}
+
 fn canonicalize_doctor_json(value: &mut Value, cwd: &Path) {
+    scrub_doctor_json(value, cwd);
+
+    // Drop environment-sensitive checks and their structured-log twins, then
+    // recompute the aggregate fields from the surviving deterministic checks
+    // so live workspace/benchmark pressure cannot perturb the snapshot.
+    for key in ["checks", "structured_logs"] {
+        if let Some(entries) = value[key].as_array_mut() {
+            entries.retain(|entry| !is_env_sensitive_doctor_entry(entry));
+        }
+    }
+    let (mut pass, mut warn, mut fail) = (0_u64, 0_u64, 0_u64);
+    if let Some(checks) = value["checks"].as_array() {
+        for check in checks {
+            match check["status"].as_str() {
+                Some("pass") => pass += 1,
+                Some("warn") => warn += 1,
+                Some("fail") => fail += 1,
+                _ => {}
+            }
+        }
+    }
+    value["status_counts"] = json!({ "pass": pass, "warn": warn, "fail": fail });
+    value["overall_status"] = json!(if fail > 0 {
+        "fail"
+    } else if warn > 0 {
+        "warn"
+    } else {
+        "pass"
+    });
+}
+
+fn scrub_doctor_json(value: &mut Value, cwd: &Path) {
     match value {
         Value::Object(map) => {
             for (key, nested) in map.iter_mut() {
@@ -89,13 +140,13 @@ fn canonicalize_doctor_json(value: &mut Value, cwd: &Path) {
                     "generated_at_utc" | "timestamp" => *nested = json!("[TIMESTAMP]"),
                     "duration_ms" => *nested = json!("[DURATION_MS]"),
                     "source_path" if !nested.is_null() => *nested = json!("[PATH]"),
-                    _ => canonicalize_doctor_json(nested, cwd),
+                    _ => scrub_doctor_json(nested, cwd),
                 }
             }
         }
         Value::Array(items) => {
             for item in items {
-                canonicalize_doctor_json(item, cwd);
+                scrub_doctor_json(item, cwd);
             }
         }
         Value::String(text) => {
@@ -283,6 +334,93 @@ fn canonicalize_fleet_reconcile_json(mut value: Value, fleet_state_dir: &Path) -
     value
 }
 
+/// bd-qr5i2.4: a genuine, re-derivable v2 proof-carrying evidence block for
+/// the close-condition GREEN fixture (v1 declared-summary acceptance is
+/// retired; the gate re-derives the embedded chain).
+fn l1_v2_proof_block() -> Value {
+    use frankenengine_node::runtime::effect_receipt::{
+        EffectKind, EffectReceipt, EffectReceiptChain,
+    };
+    use frankenengine_node::storage::cas::content_hash;
+
+    let mut chain = EffectReceiptChain::new();
+    for (seq, kind) in [
+        (0_u64, EffectKind::FsRead),
+        (1, EffectKind::FsWrite),
+        (2, EffectKind::HttpRequest),
+    ] {
+        let receipt = EffectReceipt::allowed(
+            seq,
+            "close-condition-golden",
+            kind,
+            "cap-l1-acceptance",
+            content_hash(b"pre-state"),
+            content_hash(b"args"),
+            content_hash(b"result"),
+            content_hash(b"post-state"),
+            1_774_000_000_000,
+        );
+        chain.append(receipt).expect("append acceptance receipt");
+    }
+    json!({
+        "schema_version": "franken-node/l1-proof-carrying-effects/v2",
+        "required_subjects": ["fs.read", "fs.write", "http.request"],
+        "verified_subjects": ["fs.read", "fs.write", "http.request"],
+        "effect_receipts_verified": 3,
+        "invalid_receipts": 0,
+        "receipt_chain_verified": true,
+        "receipt_chain_entries": chain.entries()
+    })
+}
+
+/// bd-ry7d1: a deterministic lockstep verdict block built through the real
+/// nversion-oracle API for the close-condition GREEN golden fixture.
+fn l1_lockstep_verdict_block() -> Value {
+    use frankenengine_node::runtime::nversion_oracle::{
+        BoundaryScope, RuntimeEntry, RuntimeOracle,
+    };
+
+    let mut oracle = RuntimeOracle::new("l1-lockstep:close-condition-golden", 100);
+    for (id, is_reference) in [("bun", true), ("franken-engine-native", false)] {
+        oracle
+            .register_runtime(RuntimeEntry {
+                runtime_id: id.to_string(),
+                runtime_name: id.to_string(),
+                version: "golden".to_string(),
+                is_reference,
+            })
+            .expect("register runtime");
+    }
+    let mut outputs = std::collections::BTreeMap::new();
+    outputs.insert("bun".to_string(), b"l1-lockstep:ok\n".to_vec());
+    outputs.insert(
+        "franken-engine-native".to_string(),
+        b"l1-lockstep:ok\n".to_vec(),
+    );
+    oracle
+        .run_cross_check(
+            "l1-lockstep:close-condition-golden:check-0",
+            BoundaryScope::IO,
+            b"guest-src",
+            &outputs,
+        )
+        .expect("cross check");
+    let report = oracle.generate_report(1_774_000_000);
+    json!({
+        "schema_version": "franken-node/l1-lockstep-verdict/v1",
+        "trace_id": report.trace_id,
+        "produced_at": "2026-02-21T00:00:00Z",
+        "producer": "close-condition-golden",
+        "guest_program_content_hash":
+            frankenengine_node::storage::cas::content_hash(b"guest-src").as_str(),
+        "runtimes": report.runtimes.keys().cloned().collect::<Vec<_>>(),
+        "oracle_verdict": report.verdict.label(),
+        "checks_total": report.checks.len(),
+        "divergence_count": report.divergences.len(),
+        "report": report,
+    })
+}
+
 fn write_close_condition_fixture(root: &Path) -> io::Result<()> {
     fn write_fixture(path: &Path, contents: &str) -> io::Result<()> {
         ensure_parent_dir(path)?;
@@ -313,6 +451,13 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
         &root.join("crates/franken-node/src/lib.rs"),
         "pub fn fixture() -> bool { true }\n",
     )?;
+    let engine_crates_root = root
+        .parent()
+        .unwrap_or(root)
+        .join("franken_engine")
+        .join("crates");
+    fs::create_dir_all(engine_crates_root.join("franken-engine"))?;
+    fs::create_dir_all(engine_crates_root.join("franken-extension-host"))?;
     write_fixture(
         &root.join("docs/ENGINE_SPLIT_CONTRACT.md"),
         "franken_engine path dependencies MUST NOT be replaced by local engine crates.\n",
@@ -321,24 +466,61 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
         &root.join("docs/PRODUCT_CHARTER.md"),
         "Dual-oracle close condition requires all dimensions to be green.\n",
     )?;
+    // bd-qr5i2.4: v1 declared-summary acceptance is retired; the GREEN
+    // close-condition golden fixture carries v2 evidence with a genuine
+    // re-derivable receipt chain built through the production API.
+    // bd-ihusm: L1 also requires a genuine-oracle-run provenance and a
+    // digest-bound per-test result set for the GREEN golden.
+    let per_test_results: Vec<Value> = (0..100)
+        .map(|index| {
+            json!({
+                "test_id": format!("tc::fs::{index:04}"),
+                "api_family": "fs",
+                "band": "core",
+                "risk_band": "critical",
+                "status": if index < 98 { "pass" } else { "fail" },
+            })
+        })
+        .collect();
+    let corpus = json!({
+        "corpus": {
+            "corpus_version": "compat-corpus-golden",
+            "provenance": frankenengine_node::ops::close_condition::COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
+            "result_digest": frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(&per_test_results),
+        },
+        "thresholds": { "overall_pass_rate_min_pct": 95.0 },
+        "totals": {
+            "total_test_cases": 100,
+            "passed_test_cases": 98,
+            "failed_test_cases": 2,
+            "errored_test_cases": 0,
+            "skipped_test_cases": 0,
+            "overall_pass_rate_pct": 98.0
+        },
+        "per_test_results": per_test_results,
+        "proof_carrying_effects": l1_v2_proof_block()
+    });
     write_fixture(
         &root.join("artifacts/13/compatibility_corpus_results.json"),
-        r#"{
-  "corpus": {
-    "corpus_version": "compat-corpus-golden"
-  },
-  "thresholds": {
-    "overall_pass_rate_min_pct": 95.0
-  },
-  "totals": {
-    "total_test_cases": 100,
-    "passed_test_cases": 98,
-    "failed_test_cases": 2,
-    "errored_test_cases": 0,
-    "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 98.0
-  }
-}"#,
+        &serde_json::to_string_pretty(&corpus).expect("corpus fixture render"),
+    )?;
+    // bd-ry7d1: the gate also consumes the L1 verdict artifact and binds its
+    // proof-carrying copy to the corpus copy; the lockstep block below is
+    // deterministic (fixed trace id, outputs, and epoch), so the golden
+    // output stays stable.
+    write_fixture(
+        &root.join("artifacts/oracle/l1_product_verdict.json"),
+        &serde_json::to_string_pretty(&json!({
+            "dimension": "l1_product",
+            "verdict": "GREEN",
+            "owner_track": "10.2",
+            "timestamp": "2026-02-21T00:00:00Z",
+            "evidence": {
+                "proof_carrying_effects": corpus["proof_carrying_effects"].clone(),
+                "lockstep_verdict": l1_lockstep_verdict_block(),
+            },
+        }))
+        .expect("verdict artifact render"),
     )?;
     write_fixture(
         &root.join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),
@@ -354,27 +536,6 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
 }"#,
     )?;
     Ok(())
-}
-
-/// Helper to run CLI commands that may fail gracefully.
-fn run_cli_command_with_fallback(
-    args: &[&str],
-    expect_json: bool,
-    command_name: &str,
-) -> Result<String, String> {
-    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
-    let output = cmd.args(args).output().expect("command execution");
-
-    if output.status.success() {
-        if expect_json {
-            Ok(pretty_json_stdout(command_name, &output.stdout))
-        } else {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        }
-    } else {
-        // Return stderr for failed commands
-        Err(String::from_utf8_lossy(&output.stderr).into_owned())
-    }
 }
 
 // === help commands (guaranteed to work) ===
@@ -418,6 +579,9 @@ fn doctor_help_output() {
     let assertion = cmd
         .env("NO_COLOR", "1")
         .env("CLICOLOR", "0")
+        // clap renders `[env: NAME=value]` with the live value when the
+        // fallback variable is set (bd-lmbt0); strip it for hermeticity.
+        .env_remove("FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT")
         .args(["doctor", "--help"])
         .assert()
         .success();
@@ -426,6 +590,42 @@ fn doctor_help_output() {
     with_scrubbed_snapshot_settings("doctor_cli", || {
         assert_snapshot!("doctor_help", stdout);
     });
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn doctor_process_spawn_readiness_fails_closed_for_missing_backend() -> Result<(), Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("franken-node")?;
+    let assertion = cmd
+        .args([
+            "doctor",
+            "process-spawn-readiness",
+            "--bubblewrap-path",
+            "/definitely/missing/franken-node-bwrap",
+            "--json",
+        ])
+        .assert()
+        .failure();
+
+    let report = parse_json_stdout(
+        "doctor process-spawn-readiness --json",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/process-spawn-readiness/v1"
+    );
+    assert_eq!(report["status"], "unavailable");
+    assert_eq!(report["supported_os"], "linux");
+    assert_eq!(report["backend"], "bubblewrap");
+    assert_eq!(report["binary_sha256"], serde_json::Value::Null);
+    assert_eq!(report["functional_probe_passed"], false);
+    assert!(
+        report["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("PROCESS_SPAWN_BACKEND_INSECURE"))
+    );
+    Ok(())
 }
 
 #[test]
@@ -473,6 +673,17 @@ fn incident_help_output() {
 }
 
 #[test]
+fn ltv_help_output() {
+    let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let assertion = cmd.args(["ltv", "--help"]).assert().success();
+
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
+    with_scrubbed_snapshot_settings("ltv_cli", || {
+        assert_snapshot!("ltv_help", stdout);
+    });
+}
+
+#[test]
 fn bench_run_secure_extension_heavy_json_output() -> Result<(), Box<dyn Error>> {
     let mut cmd = Command::cargo_bin("franken-node")?;
     let assertion = cmd
@@ -503,6 +714,9 @@ fn doctor_json_output() -> Result<(), Box<dyn Error>> {
     let assertion = cmd
         .current_dir(temp.path())
         .env_remove("FRANKEN_NODE_PROFILE")
+        // bd-lmbt0 env fallback would inject host-specific policy-activation
+        // checks into the report; strip it for hermeticity.
+        .env_remove("FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT")
         .args([
             "doctor",
             "--json",
@@ -812,6 +1026,18 @@ fn cli_json_golden_fleet_reconcile_output() -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
     let fleet_state_dir = temp.path().join("fleet-state");
     let signing_key_path = write_seed_signing_key(temp.path(), "keys/fleet.key", 31)?;
+    // f6916d153 removed the embedded registry signing key from the default
+    // profiles, so config validation fails closed in a bare directory. Supply
+    // the fixture trust/security keys explicitly (same shape as
+    // trust_cli_e2e::explicit_fixture_registry_config).
+    fs::write(
+        temp.path().join("franken_node.toml"),
+        format!(
+            "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"{}\"\n\n\
+             [security]\nauthorized_api_keys = [\"fnode-fixture-cli-goldens\"]\n",
+            BASE64_STANDARD.encode(b"franken-node-trust-card-registry-key-v1"),
+        ),
+    )?;
 
     let mut cmd = Command::cargo_bin("franken-node")?;
     let assertion = cmd
@@ -839,13 +1065,14 @@ fn cli_json_golden_fleet_reconcile_output() -> Result<(), Box<dyn Error>> {
 #[test]
 fn cli_json_golden_doctor_close_condition_output() -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
-    write_close_condition_fixture(temp.path())?;
+    let fixture_root = temp.path().join("workspace/franken_node");
+    write_close_condition_fixture(&fixture_root)?;
     let signing_key_path =
-        write_seed_signing_key(temp.path(), ".franken-node/keys/oracle-close.key", 41)?;
+        write_seed_signing_key(&fixture_root, ".franken-node/keys/oracle-close.key", 41)?;
 
     let mut cmd = Command::cargo_bin("franken-node")?;
     let assertion = cmd
-        .current_dir(temp.path())
+        .current_dir(&fixture_root)
         .env(
             "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
             "2026-02-21T00:00:00Z",

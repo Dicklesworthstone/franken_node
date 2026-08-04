@@ -1,0 +1,23 @@
+---
+source: crates/franken-node/src/registry/staking_governance.rs
+expression: scrubbed
+---
+{
+  "slash_id": 9876,
+  "stake_id": 54321,
+  "publisher_id": "rogue-publisher",
+  "evidence": {
+    "violation_type": "policy_violation",
+    "description": "Critical security policy violation detected",
+    "evidence_payload": "unauthorized file system access outside sandbox",
+    "evidence_hash": "6bb0e3aa70ad95c6681d8458574bb1e5e0d75fdd2a4b6ad35256aa62ae20b59b",
+    "collector_identity": "security-monitor-alpha",
+    "collected_at": [EPOCH]
+  },
+  "slash_amount": 500,
+  "pre_balance": 1000,
+  "post_balance": 500,
+  "risk_tier": "high",
+  "timestamp": [EPOCH],
+  "penalty_hash": "sha256:abcdef123456789"
+}

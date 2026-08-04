@@ -1,0 +1,57 @@
+---
+source: crates/franken-node/src/registry/staking_governance.rs
+expression: scrubbed
+---
+{
+  "stakes": {
+    "1": {
+      "id": 1,
+      "publisher_id": "pub-alpha",
+      "amount": 1000,
+      "state": "active",
+      "risk_tier": "medium",
+      "deposited_at": [EPOCH],
+      "expires_at": null,
+      "withdrawn_at": null,
+      "slashed_at": null
+    },
+    "2": {
+      "id": 2,
+      "publisher_id": "pub-beta",
+      "amount": 2000,
+      "state": "slashed",
+      "risk_tier": "high",
+      "deposited_at": [EPOCH],
+      "expires_at": null,
+      "withdrawn_at": null,
+      "slashed_at": [EPOCH]
+    }
+  },
+  "slash_events": [
+    {
+      "slash_id": 100,
+      "stake_id": 2,
+      "publisher_id": "pub-beta",
+      "evidence": {
+        "violation_type": "malicious_code",
+        "description": "Code injection found",
+        "evidence_payload": "eval() call with user input",
+        "evidence_hash": "15d0a0f24961dffdf9a2dd6422bd6a1ebcfd524613e6444042080b648bf21fa3",
+        "collector_identity": "static-analyzer",
+        "collected_at": [EPOCH]
+      },
+      "slash_amount": 750,
+      "pre_balance": 2000,
+      "post_balance": 1250,
+      "risk_tier": "high",
+      "timestamp": [EPOCH],
+      "penalty_hash": "sha256:evidence123"
+    }
+  ],
+  "appeals": [],
+  "audit_log": [],
+  "next_stake_id": 1,
+  "next_slash_id": 1,
+  "next_appeal_id": 1,
+  "next_audit_id": 1
+}

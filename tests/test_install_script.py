@@ -36,7 +36,9 @@ class TestInstallScript(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("--prefix PATH", result.stdout)
-        self.assertIn("--method auto|release|source", result.stdout)
+        self.assertIn("--method MODE", result.stdout)
+        self.assertIn("Values: auto|release|source", result.stdout)
+        self.assertIn("--enable-process-spawn", result.stdout)
 
     def test_bash_syntax_is_valid(self) -> None:
         result = subprocess.run(
@@ -112,6 +114,68 @@ class TestInstallScript(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), expected)
+
+    def test_default_install_never_probes_process_spawn_backend(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="franken-node-install-test-") as tmp:
+            temp = Path(tmp)
+            marker = temp / "probed"
+            binary = temp / "franken-node"
+            binary.write_text(
+                f"#!/usr/bin/env bash\ntouch {marker}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            result = run_bash(
+                f"source ./install.sh; DEST_DIR={temp}; ENABLE_PROCESS_SPAWN=0; "
+                "verify_process_spawn_backend"
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertFalse(marker.exists(), "default install must not probe Bubblewrap")
+
+    def test_requested_process_spawn_backend_failure_aborts_install(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="franken-node-install-test-") as tmp:
+            temp = Path(tmp)
+            binary = temp / "franken-node"
+            binary.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+            binary.chmod(0o755)
+            result = run_bash(
+                f"source ./install.sh; DEST_DIR={temp}; ENABLE_PROCESS_SPAWN=1; "
+                "verify_process_spawn_backend"
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("process-spawn support requested", result.stderr)
+
+    def test_requested_process_spawn_backend_success_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="franken-node-install-test-") as tmp:
+            temp = Path(tmp)
+            args_file = temp / "doctor-args"
+            binary = temp / "franken-node"
+            binary.write_text(
+                f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" > {args_file}\n',
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            result = run_bash(
+                f"source ./install.sh; DEST_DIR={temp}; ENABLE_PROCESS_SPAWN=1; "
+                "verify_process_spawn_backend"
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertEqual(
+                args_file.read_text(encoding="utf-8").strip(),
+                "doctor process-spawn-readiness --json",
+            )
+
+    def test_enable_process_spawn_flag_sets_explicit_opt_in(self) -> None:
+        result = run_bash(
+            "source ./install.sh; ENABLE_PROCESS_SPAWN=0; "
+            "parse_args --enable-process-spawn; printf '%s\\n' \"$ENABLE_PROCESS_SPAWN\""
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "1")
 
 
 if __name__ == "__main__":

@@ -99,16 +99,20 @@ impl CuckooFilter {
     fn hash_and_fingerprint(&self, key: &str) -> (u64, u16) {
         let hash = self.hash_builder.hash_one(key);
 
-        // Truncate to FINGERPRINT_BITS, then remap 0 → 1 so the empty-bucket
-        // marker is never produced. The previous implementation used
-        // `| 1`, which forced the LSB to 1 unconditionally and collapsed
-        // the 4096-value fingerprint space into 2048 odd values — halving
-        // the entropy and **doubling the false-positive rate** reported by
-        // `false_positive_rate()` (which assumes the full
-        // `1 << FINGERPRINT_BITS` space). Preserving 4095 distinct
-        // non-zero fingerprints restores the documented
-        // `2 * BUCKET_SIZE / 2^FINGERPRINT_BITS` base FPR.
-        let raw = (hash & FINGERPRINT_MASK as u64) as u16;
+        // bd-9f5cm: derive the fingerprint from the HIGH bits of the hash, disjoint from the LOW
+        // bits the primary bucket index uses (`i1 = hash % bucket_count`, and `bucket_count` is
+        // always a power of two, so that is exactly the low `log2(bucket_count)` bits). When the
+        // fingerprint was taken from the low bits too, it was correlated with the bucket: two
+        // keys colliding in a bucket also shared the overlapping low fingerprint bits, leaving
+        // only a few high bits to distinguish them. That inflated the observed false-positive
+        // rate ~130x over the modeled `2 * BUCKET_SIZE / 2^FINGERPRINT_BITS`. SipHash's high and
+        // low output bits are independent, so the top `FINGERPRINT_BITS` decouple cleanly.
+        //
+        // Then remap 0 → 1 so the empty-bucket marker is never produced. (Using `| 1` here would
+        // force the LSB and collapse the 4096-value fingerprint space into 2048 odd values,
+        // halving entropy and doubling the modeled FPR; the conditional preserves 4095 distinct
+        // non-zero fingerprints.)
+        let raw = ((hash >> (u64::BITS - FINGERPRINT_BITS)) as u16) & FINGERPRINT_MASK;
         let fingerprint = if raw == 0 { 1 } else { raw };
         (hash, fingerprint)
     }
@@ -175,15 +179,40 @@ impl CuckooFilter {
 
     /// Perform cuckoo eviction to make space for new fingerprint.
     ///
-    /// Randomly evicts existing fingerprint and tries to relocate it.
-    /// Limited to MAX_CUCKOO_EVICTIONS attempts to prevent infinite loops.
+    /// Evicts a resident fingerprint and tries to relocate it, walking the
+    /// eviction chain up to `MAX_CUCKOO_EVICTIONS` times.
+    ///
+    /// # Failure is atomic (bd-z5k66)
+    ///
+    /// Every step of the walk `swap`s the carried fingerprint into an *occupied*
+    /// slot and carries out the live fingerprint that was there. If the walk runs
+    /// out of attempts, the carried value is therefore a fingerprint that was
+    /// resident in the table when the call began. Dropping it on the floor — as
+    /// this function used to — silently destroys a revocation record while
+    /// leaving `num_items` unchanged, so nothing anywhere signals the loss. For
+    /// the revocation filter that is a **false negative**: a revoked token
+    /// reports not-revoked, violating this type's "No false negatives (critical
+    /// for security)" contract.
+    ///
+    /// So the chain records the `(bucket, slot)` it touched at each step and,
+    /// on failure, replays those swaps in reverse. `swap` is its own inverse, so
+    /// undoing the sequence backwards restores the table byte-for-byte to its
+    /// pre-call state (this holds even when the walk revisits a slot, i.e. when
+    /// the chain cycles). The caller then sees a plain `false` — "filter full" —
+    /// against an intact table, instead of `false` against a lossy one.
     fn cuckoo_insert(&mut self, mut fingerprint: u16, mut bucket_idx: usize) -> bool {
-        for _ in 0..MAX_CUCKOO_EVICTIONS {
-            // Randomly select slot to evict in current bucket
-            let slot_idx = self.random_slot();
+        // Fixed-size, allocation-free: the walk is bounded by MAX_CUCKOO_EVICTIONS.
+        let mut path = [(0usize, 0usize); MAX_CUCKOO_EVICTIONS];
+        let mut path_len = 0usize;
+
+        for iteration in 0..MAX_CUCKOO_EVICTIONS {
+            // Select slot to evict in current bucket
+            let slot_idx = self.eviction_slot(iteration, fingerprint, bucket_idx);
 
             // Swap fingerprints
             std::mem::swap(&mut fingerprint, &mut self.buckets[bucket_idx][slot_idx]);
+            path[path_len] = (bucket_idx, slot_idx);
+            path_len = path_len.saturating_add(1);
 
             // Find alternate bucket for evicted fingerprint
             let fp_hash = self.hash_builder.hash_one(fingerprint);
@@ -198,21 +227,40 @@ impl CuckooFilter {
             }
         }
 
-        // Could not find space after MAX_CUCKOO_EVICTIONS attempts
+        // Could not find space after MAX_CUCKOO_EVICTIONS attempts. Roll the
+        // whole chain back so no resident fingerprint is lost.
+        for &(bucket, slot) in path[..path_len].iter().rev() {
+            std::mem::swap(&mut fingerprint, &mut self.buckets[bucket][slot]);
+        }
+        debug_assert_ne!(
+            fingerprint, 0,
+            "rollback must hand back the caller's fingerprint, never the empty marker"
+        );
         false
     }
 
-    /// Generate pseudo-random slot index for cuckoo eviction.
+    /// Select the slot to evict for one step of a cuckoo eviction chain.
     ///
-    /// Uses simple hash-based selection for speed - cryptographic quality not required.
-    fn random_slot(&self) -> usize {
-        use std::ptr;
-
-        // Use memory address as entropy source (changes per allocation)
-        let addr = ptr::addr_of!(self.buckets) as usize;
-        // Mix with current item count for variation over time
-        let entropy = addr.wrapping_add(self.num_items).wrapping_mul(0x9e3779b9);
-        entropy % BUCKET_SIZE
+    /// Cryptographic quality is not required, but *variation across the steps of
+    /// a single chain* is: a cuckoo walk escapes a cycle only by kicking a
+    /// different victim when it revisits a bucket. The previous implementation
+    /// mixed `addr_of!(self.buckets)` (the address of the Vec header — fixed for
+    /// the filter's lifetime, not the heap buffer) with `self.num_items`, which
+    /// is not mutated inside the walk. Both inputs were therefore constant for
+    /// the whole chain, so it kicked the *same* slot index of every bucket it
+    /// visited and reduced to `num_items % BUCKET_SIZE` (`0x9e3779b9 % 4 == 1`
+    /// and addresses are 8-byte aligned). That collapsed the walk's reach and
+    /// made the exhaustion path above far more likely than the design assumes.
+    ///
+    /// Mixing the iteration index, the carried fingerprint, and the current
+    /// bucket through the filter's per-instance `RandomState` restores the
+    /// intended randomization while keeping the walk deterministic for a given
+    /// filter (so behavior is reproducible under a fixed hash seed).
+    fn eviction_slot(&self, iteration: usize, fingerprint: u16, bucket_idx: usize) -> usize {
+        let mixed = self
+            .hash_builder
+            .hash_one((iteration as u64, fingerprint, bucket_idx as u64));
+        (mixed as usize) % BUCKET_SIZE
     }
 
     /// Remove a token ID from the filter.
@@ -277,9 +325,7 @@ impl CuckooFilter {
     /// Clear all items from the filter, resetting to empty state.
     pub fn clear(&mut self) {
         let cleared_count = self.num_items;
-        for bucket in &mut self.buckets {
-            *bucket = [0u16; BUCKET_SIZE];
-        }
+        self.buckets.fill([0u16; BUCKET_SIZE]);
         self.num_items = 0;
         if cleared_count > 0 {
             self.emit_gauge_delta(-(cleared_count as isize));
@@ -300,7 +346,10 @@ impl Default for CuckooFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::{CuckooFilter, REVOCATION_FILTER_ENTRIES, revocation_filter_entries_gauge};
+    use super::{
+        BUCKET_SIZE, CuckooFilter, MAX_CUCKOO_EVICTIONS, REVOCATION_FILTER_ENTRIES,
+        revocation_filter_entries_gauge,
+    };
     use std::collections::BTreeSet;
     use std::sync::atomic::Ordering;
 
@@ -435,8 +484,11 @@ mod tests {
     fn test_rebuild_on_full_detection() {
         let mut filter = CuckooFilter::new(100);
 
-        // Fill filter close to capacity
-        for i in 0..90 {
+        // Fill filter close to capacity.
+        // capacity 100 -> bucket_count = (100/4).next_power_of_two() = 32
+        // -> max_items = (32 * 4 * 95) / 100 = 121; insert 110 so
+        // load_factor = 110/121 = 0.909 > 0.90 (the should_rebuild threshold).
+        for i in 0..110 {
             assert!(filter.insert(&format!("token_{}", i)));
         }
 
@@ -483,9 +535,11 @@ mod tests {
             }
         }
 
-        // Should accept most items but eventually fail when full
+        // Should accept most items but eventually fail when full.
+        // capacity 10 -> bucket_count = (10/4).next_power_of_two() = 2
+        // -> max_items = (2 * 4 * 95) / 100 = 7, so 7 is the real capacity.
         assert!(
-            inserted >= 8,
+            inserted >= 7,
             "Filter should accept most items within capacity"
         );
         assert!(inserted < 20, "Filter should reject some items when full");
@@ -528,5 +582,100 @@ mod tests {
         filter.clear();
         assert_eq!(revocation_filter_entries_gauge(), 0);
         assert_eq!(filter.len(), 0);
+    }
+
+    #[test]
+    fn exhausted_cuckoo_chain_restores_the_table_exactly() {
+        // bd-z5k66 path (3): every step of an eviction chain swaps the carried
+        // fingerprint into an occupied slot and carries out the live one that was
+        // there. When the walk gave up, that carried live fingerprint was simply
+        // dropped and `num_items` was left alone, so the filter silently acquired
+        // a false negative — a revoked token reporting not-revoked, which is
+        // exactly what this type's header forbids.
+        //
+        // Saturate every slot so no chain can possibly terminate, then assert the
+        // refusal is atomic. Driving `cuckoo_insert` directly is deliberate: the
+        // public `insert` would bail at the `num_items >= max_items` guard and
+        // never reach the eviction walk.
+        let mut filter = CuckooFilter::new(64);
+        for bucket in &mut filter.buckets {
+            for (slot, cell) in bucket.iter_mut().enumerate() {
+                *cell = (slot as u16) + 1; // any non-zero value; 0 is the empty marker
+            }
+        }
+        filter.num_items = filter.bucket_count * BUCKET_SIZE;
+
+        let buckets_before = filter.buckets.clone();
+        let items_before = filter.num_items;
+
+        assert!(
+            !filter.cuckoo_insert(0x0ABC, 0),
+            "a fully saturated filter cannot accept an insert"
+        );
+
+        assert_eq!(
+            filter.buckets, buckets_before,
+            "a failed eviction chain must leave the table byte-identical"
+        );
+        assert_eq!(
+            filter.num_items, items_before,
+            "a failed eviction chain must not disturb the item count"
+        );
+    }
+
+    #[test]
+    fn eviction_slot_varies_within_a_single_chain() {
+        // bd-z5k66: the old `random_slot` mixed the *address of the Vec header*
+        // with `num_items`, neither of which changes during a walk, so it returned
+        // one constant slot for the whole chain. A cuckoo walk escapes a cycle
+        // only by kicking a different victim when it revisits a bucket, so that
+        // collapsed the walk's reach and drove it into the exhaustion path above.
+        let filter = CuckooFilter::new(1024);
+        let observed: BTreeSet<usize> = (0..MAX_CUCKOO_EVICTIONS)
+            .map(|iteration| filter.eviction_slot(iteration, 0x0123, 7))
+            .collect();
+
+        assert!(
+            observed.len() > 1,
+            "eviction slot must vary across chain steps, saw only {observed:?}"
+        );
+        assert!(
+            observed.iter().all(|&slot| slot < BUCKET_SIZE),
+            "eviction slot must stay in range, saw {observed:?}"
+        );
+    }
+
+    #[test]
+    fn refused_inserts_never_create_false_negatives() {
+        // End-to-end form of the same contract, through the public API: drive the
+        // filter past its load factor and prove every accepted token is still
+        // reported present after the refusals begin.
+        let mut filter = CuckooFilter::new(64);
+        let mut accepted: Vec<String> = Vec::new();
+        let mut refused = 0usize;
+
+        for index in 0..512 {
+            let token = format!("tok_{index:04}");
+            if filter.insert(&token) {
+                accepted.push(token);
+            } else {
+                refused = refused.saturating_add(1);
+            }
+        }
+
+        assert!(refused > 0, "test must actually reach the refusal path");
+        assert!(!accepted.is_empty());
+
+        for token in &accepted {
+            assert!(
+                filter.contains(token),
+                "false negative for accepted token {token} after {refused} refusals"
+            );
+        }
+        assert_eq!(
+            filter.len(),
+            accepted.len(),
+            "num_items must equal the number of accepted distinct inserts"
+        );
     }
 }

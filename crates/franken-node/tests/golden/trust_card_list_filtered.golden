@@ -1,0 +1,87 @@
+[
+  {
+    "schema_version": "1.0.0",
+    "trust_card_version": 1,
+    "previous_version_hash": null,
+    "extension": {
+      "extension_id": "npm:@acme/auth-guard",
+      "version": "1.4.2"
+    },
+    "publisher": {
+      "publisher_id": "pub-acme",
+      "display_name": "Acme Security"
+    },
+    "certification_level": "gold",
+    "capability_declarations": [
+      {
+        "name": "auth.revoke-session",
+        "description": "Invalidate compromised sessions",
+        "risk": "high"
+      },
+      {
+        "name": "auth.validate-token",
+        "description": "Validate JWT and attach identity context",
+        "risk": "medium"
+      }
+    ],
+    "behavioral_profile": {
+      "network_access": true,
+      "filesystem_access": false,
+      "subprocess_access": false,
+      "profile_summary": "Network-only auth checks with bounded side effects"
+    },
+    "revocation_status": {
+      "status": "active"
+    },
+    "provenance_summary": {
+      "attestation_level": "slsa-l3",
+      "source_uri": "fixture://trust-card/acme/auth-guard",
+      "artifact_hashes": [
+        "sha256:[HASH]"
+      ],
+      "verified_at": "[TIMESTAMP]"
+    },
+    "reputation_score_basis_points": 920,
+    "reputation_trend": "improving",
+    "active_quarantine": false,
+    "dependency_trust_summary": [
+      {
+        "dependency_id": "npm:jsonwebtoken@9",
+        "trust_level": "verified"
+      }
+    ],
+    "last_verified_timestamp": "[TIMESTAMP]",
+    "user_facing_risk_assessment": {
+      "level": "low",
+      "summary": "Token validation extension with strong provenance and no local disk access"
+    },
+    "audit_history": [
+      {
+        "timestamp": "[TIMESTAMP]",
+        "event_code": "TRUST_CARD_CREATED",
+        "detail": "trust card created",
+        "trace_id": "trace-fixture-registry"
+      }
+    ],
+    "derivation_evidence": {
+      "evidence_refs": [
+        {
+          "evidence_id": "ev-fixture-prov-001",
+          "evidence_type": "provenance_chain",
+          "verified_at_epoch": 1000,
+          "verification_receipt_hash": "[HASH]"
+        },
+        {
+          "evidence_id": "ev-fixture-rep-001",
+          "evidence_type": "reputation_signal",
+          "verified_at_epoch": 1000,
+          "verification_receipt_hash": "[HASH]"
+        }
+      ],
+      "derived_at_epoch": 1000,
+      "derivation_chain_hash": "sha256:[HASH]"
+    },
+    "card_hash": "[HASH]",
+    "registry_signature": "[HASH]"
+  }
+]

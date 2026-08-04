@@ -233,7 +233,7 @@ def check_rust_integration() -> dict[str, Any]:
     required_markers = [
         "pub struct SignedExtensionManifest",
         "pub fn validate_signed_manifest",
-        "validate_engine_manifest",
+        "validate_manifest_with_config",
         "to_engine_manifest",
         "ManifestSchemaError",
     ]

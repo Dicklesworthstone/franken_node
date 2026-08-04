@@ -1,0 +1,7 @@
+plugin-test-golden-[KEY_ID]
+.franken-node/state/registry/artifacts/plugin-test-golden-[KEY_ID]/artifact.fnext
+verified
+
+plugin-older-archived-[KEY_ID]
+.franken-node/state/registry/archive/plugin-older-archived-[KEY_ID]/artifact.fnext
+hash-mismatch

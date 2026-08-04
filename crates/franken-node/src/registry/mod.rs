@@ -595,19 +595,20 @@ mod tests {
         let (mut ledger, stake_id) = low_stake_ledger();
 
         // Test various potentially malicious payloads
+        let long_payload = "A".repeat(10_000); // Very long payload (hoisted to keep vec homogeneous)
         let malicious_payloads = vec![
-            "\x00\x01\x02\x03\x04",            // Null bytes and control characters
-            "javascript:alert('xss')",         // Potential XSS
-            "<script>eval(payload)</script>",  // Script injection
-            "../../etc/passwd",                // Path traversal
-            "\u{FFFD}\u{FFFD}",                // Replacement characters
-            "\u{202E}spoofed\u{202D}",         // BiDi override
-            format!("{}", "A".repeat(10_000)), // Very long payload
+            "\x00\x01\x02\x03\x04",           // Null bytes and control characters
+            "javascript:alert('xss')",        // Potential XSS
+            "<script>eval(payload)</script>", // Script injection
+            "../../etc/passwd",               // Path traversal
+            "\u{FFFD}\u{FFFD}",               // Replacement characters
+            "\u{202E}spoofed\u{202D}",        // BiDi override
+            long_payload.as_str(),            // Very long payload
         ];
 
         for (idx, payload) in malicious_payloads.iter().enumerate() {
             let malicious_evidence = SlashEvidence::new(
-                ViolationType::SecurityViolation,
+                ViolationType::MaliciousCode,
                 "malicious evidence test",
                 payload,
                 &format!("collector-{}", idx),
@@ -884,7 +885,7 @@ mod tests {
             (u64::MAX - 1, "near-max timestamp"),
         ];
 
-        for (timestamp, description) in timestamp_tests {
+        for &(timestamp, description) in &timestamp_tests {
             // Only the first resolution should succeed
             let result = ledger.resolve_appeal(appeal.appeal_id, true, timestamp);
 
@@ -946,7 +947,8 @@ mod tests {
             // Periodic verification that earlier accounts still exist
             if i % 100 == 0 && i > 0 {
                 let check_idx = i / 2;
-                if let Some((ref check_publisher, check_stake)) = created_stakes.get(check_idx) {
+                if let Some((check_publisher, check_stake)) = created_stakes.get(check_idx as usize)
+                {
                     let account = ledger.get_account(check_publisher);
                     assert!(account.is_some(), "Earlier account should still exist");
                     let stake = ledger.get_stake(*check_stake);
@@ -962,7 +964,7 @@ mod tests {
         );
 
         // Test that operations still work on existing accounts
-        if let Some((ref publisher, stake_id)) = created_stakes.first() {
+        if let Some((publisher, stake_id)) = created_stakes.first() {
             let gate = CapabilityStakeGate::new(StakePolicy::default_policy());
             let (allowed, _, _) =
                 gate.check_stake(&ledger, publisher, &RiskTier::Low, account_count + 1000);
@@ -986,14 +988,14 @@ mod tests {
         // Test that ViolationType can handle unknown variants gracefully during deserialization
         let violation_types = vec![
             ViolationType::PolicyViolation,
-            ViolationType::SecurityViolation,
-            ViolationType::PerformanceViolation,
+            ViolationType::MaliciousCode,
+            ViolationType::SupplyChainCompromise,
         ];
 
         for vtype in violation_types {
             // Test serialization round-trip
             let evidence = SlashEvidence::new(
-                vtype,
+                vtype.clone(),
                 "serialization test",
                 "test payload",
                 "test-collector",
@@ -1014,11 +1016,11 @@ mod tests {
         let (mut ledger, stake_id) = low_stake_ledger();
 
         for vtype in [
-            ViolationType::SecurityViolation,
-            ViolationType::PerformanceViolation,
+            ViolationType::MaliciousCode,
+            ViolationType::SupplyChainCompromise,
         ] {
             let evidence = SlashEvidence::new(
-                vtype,
+                vtype.clone(),
                 "variant test",
                 "test payload",
                 "variant-collector",
@@ -1113,8 +1115,13 @@ mod tests {
         let mut successful_deposits = 0;
 
         for (publisher_id, description) in unicode_publisher_ids {
+            // Medium tier minimum_stake is 100; the original amount (50) is below
+            // it and prod rejects every deposit with InsufficientStake, leaving
+            // `successful_deposits == 0`. This test probes Unicode publisher-id
+            // handling, not the minimum gate, so seed at/above the tier minimum
+            // (reconciled for bd-o776s).
             let result =
-                ledger.deposit(publisher_id, 50, RiskTier::Medium, successful_deposits + 1);
+                ledger.deposit(publisher_id, 100, RiskTier::Medium, successful_deposits + 1);
 
             match result {
                 Ok(stake_id) => {
@@ -1135,7 +1142,7 @@ mod tests {
                     if description.contains("NFC") {
                         let nfd_result = ledger.deposit(
                             "cafe\u{0301}",
-                            50,
+                            100,
                             RiskTier::Medium,
                             successful_deposits + 100,
                         );
@@ -1144,8 +1151,8 @@ mod tests {
                             Ok(_) => {
                                 // If accepted, should be separate account
                                 assert_ne!(
-                                    ledger.get_account("café").unwrap().stakes.len(),
-                                    ledger.get_account("cafe\u{0301}").unwrap().stakes.len()
+                                    ledger.get_account("café").unwrap().publisher_id,
+                                    ledger.get_account("cafe\u{0301}").unwrap().publisher_id
                                 );
                             }
                             Err(_) => {
@@ -1222,7 +1229,7 @@ mod tests {
         }
 
         // Verify all created stakes are still accessible and unique
-        assert_eq!(created_stakes.len(), test_iterations);
+        assert_eq!(created_stakes.len(), test_iterations as usize);
 
         // Test operations on stakes created throughout the process
         for (idx, &stake_id) in created_stakes.iter().enumerate() {
@@ -1296,6 +1303,8 @@ mod tests {
         let (mut ledger, stake_id) = low_stake_ledger();
 
         // Test various collector ID bypass attempts
+        let long_collector = "x".repeat(1000); // Very long collector ID (hoisted)
+        let emoji_collector = "\u{1F4A9}".repeat(10); // Unicode emoji spam (hoisted)
         let malicious_collector_ids = vec![
             "",                                // Empty collector
             " ",                               // Whitespace only
@@ -1305,15 +1314,15 @@ mod tests {
             "collector;rm -rf /",              // Command injection attempt
             "../../system",                    // Path traversal
             "collector\u{202E}system\u{202D}", // BiDi override
-            "x".repeat(1000),                  // Very long collector ID
-            "\u{1F4A9}".repeat(10),            // Unicode emoji spam
+            long_collector.as_str(),           // Very long collector ID
+            emoji_collector.as_str(),          // Unicode emoji spam
         ];
 
         let mut slash_attempts = 0;
 
         for collector_id in malicious_collector_ids {
             let malicious_evidence = SlashEvidence::new(
-                ViolationType::SecurityViolation,
+                ViolationType::MaliciousCode,
                 "collector bypass test",
                 &format!("payload_{}", slash_attempts),
                 collector_id,
@@ -1364,16 +1373,17 @@ mod tests {
             .unwrap();
 
         // Test various injection attack vectors in appeal justification
+        let long_justification = format!("justified {}", "A".repeat(10000)); // Buffer overflow attempt (hoisted)
         let injection_justifications = vec![
             "<script>alert('xss')</script>",
             "'; DROP TABLE stakes; --",
             "$(rm -rf /)",
             "javascript:alert(document.cookie)",
-            "\x00\x01\x02\x03",                         // Binary data
-            "\u{202E}justified\u{202D}",                // BiDi override
-            "justified\nSELECT * FROM passwords",       // SQL injection with newline
-            "justified\"; system(\"rm -rf /\")",        // Command injection
-            format!("justified {}", "A".repeat(10000)), // Buffer overflow attempt
+            "\x00\x01\x02\x03",                   // Binary data
+            "\u{202E}justified\u{202D}",          // BiDi override
+            "justified\nSELECT * FROM passwords", // SQL injection with newline
+            "justified\"; system(\"rm -rf /\")",  // Command injection
+            long_justification.as_str(),          // Buffer overflow attempt
         ];
 
         let mut successful_appeals = 0;
@@ -1682,7 +1692,12 @@ mod tests {
             .expect("account2 should exist");
 
         assert_eq!(account1.balance, account2.balance);
-        assert_eq!(account1.deposited, account2.deposited);
+        // `deposited` is a CUMULATIVE lifetime counter — deposit() adds to it and
+        // withdraw() never subtracts. The admission/eviction cycle therefore
+        // deposits twice, so `deposited` is NOT idempotent the way `balance` is.
+        // Assert the cumulative relationship (path 2 deposited twice) rather than
+        // equality (reconciled for bd-o776s).
+        assert_eq!(account2.deposited, account1.deposited.saturating_mul(2));
         // Note: account2 may have different total_withdrawn due to the cycle, which is expected
 
         // Registry integrity should be maintained
@@ -1708,6 +1723,11 @@ mod tests {
     fn mr_registry_publisher_operation_commutativity() {
         let publisher_a = "publisher-A";
         let publisher_b = "publisher-B";
+        // publisher_b stakes at the High tier, whose minimum_stake is 500; the
+        // original 200 is below it and prod rejects with InsufficientStake. The
+        // amount is incidental to the commutativity property, so seed above the
+        // tier minimum (reconciled for bd-o776s). publisher_a (Low, min 10) is
+        // already above its minimum at 100.
 
         // Path 1: A then B
         let mut ledger1 = StakingLedger::new();
@@ -1715,13 +1735,13 @@ mod tests {
             .deposit(publisher_a, 100, RiskTier::Low, 1000)
             .expect("deposit A first");
         let stake_b1 = ledger1
-            .deposit(publisher_b, 200, RiskTier::High, 2000)
+            .deposit(publisher_b, 500, RiskTier::High, 2000)
             .expect("deposit B second");
 
         // Path 2: B then A
         let mut ledger2 = StakingLedger::new();
         let stake_b2 = ledger2
-            .deposit(publisher_b, 200, RiskTier::High, 2000)
+            .deposit(publisher_b, 500, RiskTier::High, 2000)
             .expect("deposit B first");
         let stake_a2 = ledger2
             .deposit(publisher_a, 100, RiskTier::Low, 1000)
@@ -1787,8 +1807,13 @@ mod tests {
             .file_appeal(stake_id2, slash_event.slash_id, "false positive", 3000)
             .expect("appeal should succeed");
 
+        // `resolve_appeal(appeal_id, upheld, ...)`: `upheld = true` UPHOLDS the
+        // slash (appeal denied, stake stays Slashed at amount 0). The test wants
+        // a SUCCESSFUL restoration, which is `upheld = false` (appeal granted →
+        // slash reversed, stake + balance restored). Reconciled for bd-o776s — the
+        // original `true` left the stake slashed, contradicting the test's intent.
         ledger2
-            .resolve_appeal(appeal_event.appeal_id, true, 4000)
+            .resolve_appeal(appeal_event.appeal_id, false, 4000)
             .expect("appeal resolution should succeed");
 
         // Metamorphic relation: After successful appeal resolution, stake should be equivalent to clean stake

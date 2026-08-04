@@ -101,6 +101,28 @@ All security implementations in franken_node must address these five adversary c
 - Autonomous containment with explicit, auditable rationale
 - Standardized incident response procedures with formal verification
 
+### TNR Cross-Feature Release-Gating Addendum
+
+The five base adversary classes remain the product doctrine baseline. The TNR
+program adds cross-feature attack surfaces that must be reviewed before each TNR
+release because the risks appear at the boundary between evidence, policy,
+fleet, verifier, and agent-control subsystems.
+
+| TNR threat | Attack surface | Required defense primitive | Regression / evidence anchor |
+|------------|----------------|----------------------------|------------------------------|
+| CAS poisoning and EffectReceipt forgery | Tampered CAS bytes, receipt back-dating, or chain-splice across host effects | Read-time CAS hash verification plus canonical, domain-separated `EffectReceipt` hashes and chain-link recomputation | `crates/franken-node/tests/cas_effect_receipt_conformance.rs`; `crates/franken-node/src/runtime/effect_receipt.rs` |
+| Declassification authority abuse | Forged, over-scoped, expired, wrong-sink, or wrong-epoch declassification receipt | Receipt id recomputation over exact sink policy, forbidden label set, actor, purpose, epoch, and revocation freshness | `crates/franken-node/src/security/lineage_tracker.rs`; `tests/security/exfiltration_sentinel_scenarios.rs` |
+| MCP mutation abuse | Scope escalation, parent-delegation expansion, missing rollback command, or replayed mutation session | Audience-bound capability token chains, attenuated delegation, rollback evidence, signed mutation receipts, and session digest checks | `crates/franken-node/src/api/mcp.rs`; `crates/franken-node/tests/mcp_control_surface_contract.rs` |
+| LTV witness collusion and crypto-suite downgrade | Collusive re-attestation, stale witness reuse, or downgrade to a weaker `crypto_suite` discriminator | Release gate must require witness independence evidence, suite-discriminator binding, and fail-closed re-attestation verification before LTV claims ship | `crates/franken-node/tests/threshold_sig_quorum_metamorphic.rs`; `docs/specs/crypto_trait_abstraction.md` |
+| Conformal calibration and Sentinel signal poisoning | Poisoned Phase-0 corpus, shifted calibration signals, or Sybil-amplified Sentinel inputs | Signed calibration artifacts, canonical corpus exchange, verifier recomputation, and signal-poisoning/Sybil thresholds | `tests/security/bpet_calibration_benchmark.rs`; `docs/policy/signal_poisoning_sybil_defense.md`; `docs/policy/risk_signal_poisoning_sybil.md` |
+| Fleet-log equivocation and quorum replay | Partition/catch-up races, conflicting validator attestations, duplicate partial signatures, or quorum-certificate replay | Canonical action hashing, distinct-validator quorum accounting, equivocation fault receipts, and threshold-signature replay rejection | `crates/franken-node/src/api/fleet_quarantine.rs`; `tests/security/threshold_signature_verification.rs`; `crates/franken-node/tests/threshold_sig_quorum_metamorphic.rs` |
+
+The signed review artifact for this addendum is
+`artifacts/adversarial/bd-f5b04.9.1_tnr_adversarial_review.json`. A TNR release
+must treat any row with `release_gate_obligation` as incomplete until a concrete
+implementation bead replaces it with an executed regression and verifier-visible
+evidence.
+
 ## 6.4 Trust-Native Product Surfaces
 
 ### TNS-01: Extension Trust Cards and Provenance Scoring

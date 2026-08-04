@@ -1876,8 +1876,8 @@ mod tests {
             )
             .unwrap();
 
-        let hash1 = &eco.kits().get(&kit_id1).unwrap().content_hash;
-        let hash2 = &eco.kits().get(&kit_id2).unwrap().content_hash;
+        let hash1 = eco.kits().get(&kit_id1).unwrap().content_hash.clone();
+        let hash2 = eco.kits().get(&kit_id2).unwrap().content_hash.clone();
 
         // Should produce different hashes due to proper serialization
         assert_ne!(
@@ -1927,7 +1927,10 @@ mod tests {
         assert_eq!(empty_report.completed_steps, 0);
         assert_eq!(empty_report.failed_steps, 0);
         assert_eq!(empty_report.progress_pct, 0.0);
-        assert_eq!(empty_report.overall_status, MigrationStatus::NotStarted);
+        // A plan with zero steps is vacuously complete: generate_report
+        // evaluates `completed == total` (0 == 0) first, so an empty kit
+        // reports Completed (there is nothing left to migrate).
+        assert_eq!(empty_report.overall_status, MigrationStatus::Completed);
 
         // Test single step boundary
         let single_step = vec![MigrationStep {

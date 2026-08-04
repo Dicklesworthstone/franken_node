@@ -98,6 +98,8 @@ pub const ERR_CHALLENGE_TIMED_OUT: &str = "ERR_CHALLENGE_TIMED_OUT";
 pub const ERR_INVALID_ARTIFACT_ID: &str = "ERR_INVALID_ARTIFACT_ID";
 pub const ERR_PROOF_INVALID: &str = "ERR_PROOF_INVALID";
 pub const ERR_LENGTH_OVERFLOW: &str = "ERR_LENGTH_OVERFLOW";
+/// A challenge was issued that the state machine could never satisfy (bd-uwcal).
+pub const ERR_UNSATISFIABLE_CHALLENGE: &str = "ERR_UNSATISFIABLE_CHALLENGE";
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
@@ -499,6 +501,33 @@ impl ChallengeFlowController {
     ) -> Result<ChallengeId, ChallengeError> {
         if let Some(reason) = invalid_artifact_id_reason(&artifact_id) {
             return Err(ChallengeError::new(ERR_INVALID_ARTIFACT_ID, reason));
+        }
+
+        // bd-uwcal: refuse a challenge the state machine cannot satisfy.
+        //
+        // `verify_proof` requires EVERY entry of `required_proofs` to have been
+        // received, but `submit_proof` gates on `can_transition_to(ProofReceived)`
+        // and `ProofReceived`'s successor set does not include itself — so the
+        // second submission always fails `ERR_INVALID_TRANSITION`. A challenge
+        // listing two or more proof types could therefore only ever be denied or
+        // time out, and the duplicate-type guard plus
+        // `MAX_RECEIVED_PROOFS_PER_CHALLENGE` below were unreachable.
+        //
+        // Rather than let the API express something the machine cannot honor,
+        // the ask is refused at issuance. Fail-closed either way — this converts
+        // a silent, delayed dead end into an immediate, diagnosable error. If
+        // multi-proof challenges become a product requirement, the fix is to
+        // allow the `ProofReceived` self-transition (the duplicate-type guard
+        // already rejects genuine replays), not to relax this check.
+        if required_proofs.len() > 1 {
+            return Err(ChallengeError::new(
+                ERR_UNSATISFIABLE_CHALLENGE,
+                format!(
+                    "challenge requires {} proof types but the flow accepts exactly one; \
+                     a multi-proof challenge can only be denied or time out",
+                    required_proofs.len()
+                ),
+            ));
         }
 
         // Check for existing active challenge on same artifact.
@@ -2352,7 +2381,11 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
-        assert!(err.message.contains("whitespace"));
+        // Prod trims before the reserved-alias check (invalid_artifact_id_reason),
+        // so " <unknown> " trims to the reserved "<unknown>" and is rejected as
+        // reserved -- which takes precedence over the whitespace reason. Either way
+        // it is rejected fail-closed with ERR_INVALID_ARTIFACT_ID and no metric drift.
+        assert!(err.message.contains("reserved"));
         assert_eq!(ctrl.metrics().challenges_issued_total, 0);
         assert!(ctrl.audit_log().is_empty());
     }
@@ -2479,10 +2512,14 @@ mod tests {
             .issue_challenge(
                 malicious_artifact.clone(),
                 SuspicionReason::PolicyRule("rule\u{200B}\u{200C}hidden\u{FEFF}name".to_string()),
-                vec![
-                    RequiredProofType::Custom("\u{202E}ggats\u{202D}legitimate_proof".to_string()),
-                    RequiredProofType::ProvenanceAttestation,
-                ],
+                // bd-uwcal: a second required type used to be listed here, but
+                // only the first was ever submitted and a multi-proof challenge
+                // is now refused at issuance as unsatisfiable. This test's
+                // subject is Unicode preservation, which the RTL-injected first
+                // type still exercises end to end.
+                vec![RequiredProofType::Custom(
+                    "\u{202E}ggats\u{202D}legitimate_proof".to_string(),
+                )],
                 "operator\u{0000}\ninjection\r\tmalicious",
                 1000,
             )
@@ -2497,10 +2534,20 @@ mod tests {
 
         // Unicode injection in proof submission
         let malicious_proof = ProofSubmission {
-            proof_type: RequiredProofType::Custom("proof\u{202E}kcatta\u{202D}normal".to_string()),
-            data_hash: "hash\u{2028}injection\u{2029}line\u{0085}separator".to_string(),
+            // Must match one of the challenge's required_proofs (prod rejects unrequired
+            // types). The first required type already carries RTL/Unicode injection, so
+            // unicode in the proof type is still exercised end-to-end.
+            proof_type: RequiredProofType::Custom(
+                "\u{202E}ggats\u{202D}legitimate_proof".to_string(),
+            ),
+            // data_hash must be valid hex 32..=128 chars (prod format validation now
+            // rejects unicode hashes); injection coverage is preserved via submitter_id
+            // and actor_id below, which prod stores verbatim into the audit log.
+            data_hash: "a".repeat(64),
             submitter_id: "submitter\u{000C}\u{000B}control\u{0007}chars".to_string(),
-            submitted_at_ms: u64::MAX, // Also test timestamp overflow
+            // Must be within [created_at, now]; timestamp overflow is covered by
+            // negative_timestamp_manipulation_and_overflow_attacks.
+            submitted_at_ms: 2000,
         };
 
         ctrl.submit_proof(
@@ -2755,16 +2802,17 @@ mod tests {
             ChallengeState::Promoted
         );
 
-        // Test invalid operations on terminal state
-        let terminal_operations = vec![
-            || ctrl.submit_proof(&cid2, make_proof(7000), "late_prover", 7000),
-            || ctrl.verify_proof(&cid2, "late_verifier", 8000),
-            || ctrl.promote(&cid2, "late_promoter", 9000),
-            || ctrl.deny(&cid2, "late_denier", 10000, "too late"),
+        // Test invalid operations on terminal state. Each call borrows `ctrl`
+        // mutably, so they are evaluated sequentially into an array of results
+        // (a Vec of distinct closures cannot hold four `&mut ctrl` borrows at once).
+        let terminal_results = [
+            ctrl.submit_proof(&cid2, make_proof(7000), "late_prover", 7000),
+            ctrl.verify_proof(&cid2, "late_verifier", 8000),
+            ctrl.promote(&cid2, "late_promoter", 9000),
+            ctrl.deny(&cid2, "late_denier", 10000, "too late"),
         ];
 
-        for operation in terminal_operations {
-            let result = operation();
+        for result in terminal_results {
             assert!(result.is_err(), "Operation on terminal state should fail");
             assert_eq!(result.unwrap_err().code, ERR_INVALID_TRANSITION);
         }
@@ -2774,13 +2822,18 @@ mod tests {
     fn negative_memory_exhaustion_with_massive_proof_lists_and_audit_logs() {
         let mut ctrl = make_controller();
 
-        // Test with massive number of required proofs
+        // bd-uwcal: a 10,000-entry required_proofs list is now REFUSED at
+        // issuance, which is the strongest possible answer to this test's own
+        // question — the list is never stored at all, so there is nothing to
+        // exhaust. (The flow accepts exactly one proof, so any multi-proof
+        // challenge could only ever be denied or time out; expressing one is now
+        // an immediate error rather than a silent dead end.)
         let massive_proofs: Vec<RequiredProofType> = (0..10_000)
             .map(|i| RequiredProofType::Custom(format!("massive_proof_type_{}", i)))
             .collect();
 
         let mass_artifact = ArtifactId::new("massive_proof_artifact");
-        let cid = ctrl
+        let refused = ctrl
             .issue_challenge(
                 mass_artifact.clone(),
                 SuspicionReason::PolicyRule("massive_policy".to_string()),
@@ -2788,17 +2841,38 @@ mod tests {
                 "mass_operator",
                 1000,
             )
+            .expect_err("a 10,000-proof challenge must be refused as unsatisfiable");
+        assert_eq!(refused.code, ERR_UNSATISFIABLE_CHALLENGE);
+
+        // The submission-pressure half of this test still needs a live challenge,
+        // so issue the satisfiable single-proof form and stress that.
+        let required_type = RequiredProofType::Custom("massive_proof_type_0".to_string());
+        let cid = ctrl
+            .issue_challenge(
+                mass_artifact.clone(),
+                SuspicionReason::PolicyRule("massive_policy".to_string()),
+                vec![required_type.clone()],
+                "mass_operator",
+                1000,
+            )
             .unwrap();
 
-        // Verify challenge handles massive proof requirements
         let challenge = ctrl.get_challenge(&cid).unwrap();
-        assert_eq!(challenge.required_proofs.len(), 10_000);
+        assert_eq!(challenge.required_proofs.len(), 1);
 
         // Submit massive number of proof artifacts
         for i in 0..1000 {
             let proof = ProofSubmission {
-                proof_type: RequiredProofType::Custom(format!("submitted_proof_{}", i)),
-                data_hash: format!("hash_{}_{}_{}", i, "x".repeat(1000), i), // Large hash strings
+                // proof_type must be one of the challenge's required_proofs: prod
+                // rejects unrequired types ("not required for this challenge").
+                // bd-uwcal: the challenge now declares exactly one required type,
+                // so every submission uses it — which keeps the assertion below
+                // about ERR_INVALID_TRANSITION (rather than a not-required error)
+                // measuring what it was written to measure.
+                proof_type: required_type.clone(),
+                // data_hash must be valid hex, 32..=128 chars (prod format validation).
+                // 128 hex chars preserves the "large hash" stress intent within bounds.
+                data_hash: "a".repeat(128),
                 submitter_id: format!("submitter_{}_{}", i, "y".repeat(500)), // Large submitter IDs
                 submitted_at_ms: 2000 + i as u64,
             };
@@ -2833,13 +2907,17 @@ mod tests {
                 )
                 .unwrap();
 
-            // Perform full flow to generate maximum audit entries
-            let stress_proof = ProofSubmission {
-                proof_type: RequiredProofType::IntegrityProof,
-                data_hash: format!("stress_hash_{}", i),
-                submitter_id: format!("stress_prover_{}", i),
-                submitted_at_ms: 11_000 + i as u64,
-            };
+            // Perform full flow to generate maximum audit entries. data_hash
+            // must be valid hex AND match the injected verifier's expected hash
+            // (prod tightened both submit-time format validation and
+            // verify-time hash matching), so build it via make_valid_proof,
+            // which derives the expected hash for this artifact + proof type.
+            let stress_proof = make_valid_proof(
+                &ArtifactId::new(&format!("audit_stress_artifact_{}", i)),
+                RequiredProofType::IntegrityProof,
+                &format!("stress_prover_{}", i),
+                11_000 + i as u64,
+            );
 
             ctrl.submit_proof(
                 &stress_cid,
@@ -2975,7 +3053,11 @@ mod tests {
             required_proofs: vec![RequiredProofType::ProvenanceAttestation],
             received_proofs: vec![],
             created_at_ms: u64::MAX - 1000, // Near overflow
-            timeout_ms: 5000,
+            // The maximum representable elapsed time for this near-overflow created_at is
+            // exactly 1000ms (u64::MAX.saturating_sub(u64::MAX - 1000)), so the timeout
+            // must be < 1000 for the u64::MAX clock to trip it, yet > 500 so the nearer
+            // "current" probes below stay within timeout. Exercises overflow-safe math.
+            timeout_ms: 800,
             trace_id: "overflow_trace".to_string(),
         };
 
@@ -3033,10 +3115,17 @@ mod tests {
                 assert!(issue_result.is_ok());
                 let cid = issue_result.unwrap();
 
-                // Test counter overflow in operations
+                // Test counter overflow in operations.
+                // data_hash must be the verifier's expected SHA256 hex so that both
+                // submit_proof (hex/length format validation) and the subsequent
+                // verify_proof (verifier hash match) succeed.
+                let proof_type = RequiredProofType::Custom(format!("proof_{}", i));
+                let data_hash =
+                    ChallengeFlowController::compute_expected_proof_hash(&artifact_id, &proof_type)
+                        .unwrap();
                 let proof = ProofSubmission {
-                    proof_type: RequiredProofType::Custom(format!("proof_{}", i)),
-                    data_hash: format!("hash_{}", i),
+                    proof_type,
+                    data_hash,
                     submitter_id: format!("prover_{}", i),
                     submitted_at_ms: 2000 + i as u64,
                 };
@@ -3060,8 +3149,12 @@ mod tests {
                     .unwrap();
                 }
             } else {
-                // Should fail when next_id would overflow
-                assert!(issue_result.is_err());
+                // next_id is hardened with saturating_add (issue_challenge, no
+                // overflow failure path): it pins at u64::MAX rather than wrapping to a
+                // reusable small id, and issue keeps succeeding. Verify the saturating
+                // behavior instead of the obsolete fail-on-overflow expectation.
+                assert!(issue_result.is_ok());
+                assert_eq!(ctrl.next_id, u64::MAX);
             }
         }
 
@@ -3142,10 +3235,12 @@ mod tests {
                         )),
                     };
 
-                    let proof_types = vec![
-                        RequiredProofType::ProvenanceAttestation,
-                        RequiredProofType::Custom(format!("thread_{}_proof_{}", thread_id, op_id)),
-                    ];
+                    // A challenge accepts only a single proof (ProofReceived has no
+                    // self-loop in the state machine), while verify_proof requires every
+                    // required type to be present. Use exactly one required type -- the
+                    // canonical issue_basic/make_proof pattern -- so the full
+                    // issue->submit->verify->promote/deny flow can complete concurrently.
+                    let proof_types = vec![RequiredProofType::ProvenanceAttestation];
 
                     let issue_result = controller.issue_challenge(
                         artifact_id.clone(),
@@ -3156,13 +3251,15 @@ mod tests {
                     );
 
                     if let Ok(cid) = issue_result {
-                        // Submit proof
-                        let proof = ProofSubmission {
-                            proof_type: RequiredProofType::ProvenanceAttestation,
-                            data_hash: format!("thread_{}_hash_{}", thread_id, op_id),
-                            submitter_id: format!("thread_{}_prover_{}", thread_id, op_id),
-                            submitted_at_ms: 2000 + thread_id as u64 * 1000 + op_id as u64,
-                        };
+                        // Submit proof. data_hash must be the verifier's expected SHA256
+                        // hex so submit_proof (hex/length format) and verify_proof
+                        // (verifier hash match) both succeed.
+                        let proof = make_valid_proof(
+                            &artifact_id,
+                            RequiredProofType::ProvenanceAttestation,
+                            &format!("thread_{}_prover_{}", thread_id, op_id),
+                            2000 + thread_id as u64 * 1000 + op_id as u64,
+                        );
 
                         let submit_result = controller.submit_proof(
                             &cid,
@@ -3401,32 +3498,42 @@ mod tests {
     #[test]
     fn test_proof_max_age_exact_boundary_rejection() {
         // Regression test for bd-3hqpz: proof exactly at max age (3600_000ms) should be rejected
-        let mut ctrl = ChallengeController::new();
-        let challenge_type = "boundary_test";
-        let challenger = "test_challenger";
-
-        // Issue challenge at time 0
-        let challenge_result = ctrl.issue_challenge(challenge_type, challenger, 0);
-        assert!(challenge_result.is_ok());
-
-        let challenge_id = challenge_result.unwrap();
-
-        // Submit proof exactly 1 hour (3600_000ms) later - should be rejected
-        let proof = ChallengeProof {
-            challenge_id: challenge_id.clone(),
-            response_data: vec![1, 2, 3],
-            submitted_at_ms: 0, // Proof submitted at time 0
+        // (fail-closed `>=` on proof age). `deny_on_timeout: false` keeps the challenge-level
+        // timeout from auto-denying first, so verify_proof reaches the proof-age boundary check.
+        let config = ChallengeConfig {
+            timeout_ms: 3_600_000,
+            deny_on_timeout: false,
         };
+        let mut ctrl =
+            ChallengeFlowController::with_proof_verifier(config, |artifact_id, proof| {
+                let expected = ChallengeFlowController::compute_expected_proof_hash(
+                    artifact_id,
+                    &proof.proof_type,
+                )?;
+                if proof_data_hash_matches_constant_time(&proof.data_hash, &expected) {
+                    Ok(())
+                } else {
+                    Err(ChallengeError::new(
+                        ERR_PROOF_INVALID,
+                        "proof digest mismatch",
+                    ))
+                }
+            });
 
-        // Verify at exactly 3600_000ms later (exact boundary)
-        let result = ctrl.verify_proof(proof, challenge_type, 3600_000);
+        // Issue challenge at time 0 and submit a valid proof at time 0.
+        let challenge_id = issue_basic(&mut ctrl, 0);
+        ctrl.submit_proof(&challenge_id, make_proof(0), "prover", 0)
+            .unwrap();
+
+        // Verify at exactly 3600_000ms later (exact boundary) - should be rejected.
+        let result = ctrl.verify_proof(&challenge_id, "verifier", 3_600_000);
 
         // Should be rejected due to >= comparison (fail-closed expiry)
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.error_code(), ERR_PROOF_INVALID);
-        assert!(err.message().contains("too old"));
-        assert!(err.message().contains("3600000ms")); // age should be exactly 3600000ms
+        assert_eq!(err.code, ERR_PROOF_INVALID);
+        assert!(err.message.contains("too old"));
+        assert!(err.message.contains("3600000ms")); // age should be exactly 3600000ms
     }
 
     // Frozen SHA-256 hex outputs of the public method

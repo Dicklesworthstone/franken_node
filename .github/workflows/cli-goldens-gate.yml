@@ -1,0 +1,67 @@
+name: CLI Subcommand Goldens Gate
+
+# bd-27gbr: the `cli_subcommand_goldens` [[test]] target requires the
+# `test-support` feature, so no default `cargo test` lane ever ran it and its
+# snapshots drifted silently RED for months. This gate runs the target
+# explicitly whenever the CLI contract surface or its goldens change.
+
+on:
+  pull_request:
+    paths:
+      - "crates/franken-node/tests/cli_subcommand_goldens.rs"
+      - "crates/franken-node/tests/cli_golden_helpers.rs"
+      - "crates/franken-node/tests/goldens/**"
+      - "crates/franken-node/src/cli.rs"
+      - "crates/franken-node/src/main.rs"
+      - ".github/workflows/cli-goldens-gate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/franken-node/tests/cli_subcommand_goldens.rs"
+      - "crates/franken-node/tests/cli_golden_helpers.rs"
+      - "crates/franken-node/tests/goldens/**"
+      - "crates/franken-node/src/cli.rs"
+      - "crates/franken-node/src/main.rs"
+      - ".github/workflows/cli-goldens-gate.yml"
+  workflow_dispatch: {}
+
+jobs:
+  cli-subcommand-goldens:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+        working-directory: franken_node
+    steps:
+      - name: Check out franken_node
+        uses: actions/checkout@v4
+        with:
+          path: franken_node
+
+      - name: Check out franken_engine sibling
+        uses: actions/checkout@v4
+        with:
+          repository: Dicklesworthstone/franken_engine
+          path: franken_engine
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo home and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cli-goldens
+          key: ${{ hashFiles('franken_node/Cargo.lock', 'franken_node/crates/franken-node/Cargo.toml') }}
+          workspaces: |
+            franken_node -> target
+          cache-all-crates: "true"
+
+      - name: Run CLI subcommand goldens (fail on snapshot drift)
+        run: |
+          set -euo pipefail
+          # CI=true makes insta fail on mismatch instead of writing pending
+          # snapshots; drift must be re-blessed deliberately via
+          # `cargo insta review` after verifying the surface change intent.
+          cargo test -p frankenengine-node --features test-support \
+            --test cli_subcommand_goldens

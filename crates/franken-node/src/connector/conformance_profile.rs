@@ -789,7 +789,11 @@ mod tests {
             .expect("evaluation should report mixed duplicate/missing status");
 
         assert_eq!(err.code(), "CPM_CLAIM_BLOCKED");
-        assert_eq!(eval.metadata.capabilities_passed, 1);
+        // bd-o776s: `evaluate_claim` dedup only overwrites on `!result.passed`, so a
+        // later pass cannot mask an earlier failure (fail-wins). With [auth=false,
+        // auth=true] auth stays FAILED and lifecycle is missing, so zero pass — the
+        // later auth pass does NOT count. (Prior expectation of 1 assumed last-pass-wins.)
+        assert_eq!(eval.metadata.capabilities_passed, 0);
         assert_eq!(eval.metadata.capabilities_total, 2);
         assert!(eval.results.iter().any(|result| {
             result.capability == "lifecycle" && !result.passed && result.details == "no test result"

@@ -19,6 +19,10 @@ pub fn pretty_json_stdout(command_name: &str, stdout: &[u8]) -> String {
     serde_json::to_string_pretty(&value).expect("pretty json")
 }
 
+// bd-6r7c4: shared helper module, `#[path]`-included by several golden test
+// targets. Not every including target calls every helper, so `dead_code` fires
+// per-target even though the function is live overall.
+#[allow(dead_code)]
 pub fn with_scrubbed_snapshot_settings<R>(snapshot_dir: &str, assertion: impl FnOnce() -> R) -> R {
     let mut settings = Settings::clone_current();
     settings.set_snapshot_path(
@@ -36,6 +40,11 @@ pub fn with_scrubbed_snapshot_settings<R>(snapshot_dir: &str, assertion: impl Fn
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?",
         "[TIMESTAMP]",
     );
-    settings.add_filter(r"/[A-Za-z0-9_./-]+", "[PATH]");
+    // Scrub only genuine filesystem paths: a `/…` run that begins at a boundary
+    // (start-of-value, whitespace, quote, or colon), e.g. a JSON string value
+    // `"…": "/abs/path"`. Do NOT scrub `word/word` prose fragments such as
+    // "install/build" or "JavaScript/TypeScript". The `regex` crate has no
+    // lookbehind, so capture the leading boundary char and re-emit it. (bd-9buhn)
+    settings.add_filter(r#"(?P<lead>^|[\s":])/[A-Za-z0-9_./-]+"#, "${lead}[PATH]");
     settings.bind(assertion)
 }

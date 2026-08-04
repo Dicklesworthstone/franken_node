@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -37,6 +38,9 @@ CLAIMS_PATH = ROOT / "docs" / "headline_claims.toml"
 PLAYBOOK_PATH = ROOT / "docs" / "reproduction_playbook.md"
 REPORT_PATH = ROOT / "reproduction_report.json"
 SCHEMA_VERSION = "erp-report.v2"
+ARTIFACT_DIR_REL = Path("artifacts") / "tnr"
+TRANSCRIPT_FILENAME = "reproduction_transcript.jsonl"
+METRICS_FILENAME = "reproduction_metrics_snapshot.json"
 DEFAULT_TIMEOUT_SECONDS = 300
 SUPPORTED_HARNESS_KINDS = {"python"}
 EMPTY_CLAIMS: list[dict[str, Any]] = []
@@ -52,6 +56,100 @@ def _display_path(path: Path) -> str:
         return str(path.relative_to(ROOT))
     except ValueError:
         return str(path)
+
+
+def _artifact_dir() -> Path:
+    return ROOT / ARTIFACT_DIR_REL
+
+
+def _report_digest(report: dict[str, Any]) -> str:
+    digest_payload = {
+        key: value
+        for key, value in report.items()
+        if key != "artifact_paths"
+    }
+    canonical = json.dumps(
+        digest_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _build_metrics_snapshot(
+    report: dict[str, Any],
+    *,
+    report_digest_sha256: str,
+) -> dict[str, Any]:
+    claims = report.get("claims", [])
+    result_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    for claim in claims:
+        result_kind = str(claim.get("result_kind", "unknown"))
+        category = str(claim.get("category", "unknown"))
+        result_counts[result_kind] = result_counts.get(result_kind, 0) + 1
+        category_counts[category] = category_counts.get(category, 0) + 1
+
+    return {
+        "schema_version": "tnr-reproduction-metrics.v1",
+        "report_schema_version": report.get("schema_version"),
+        "run_mode": report.get("run_mode"),
+        "verdict": report.get("verdict"),
+        "timestamp": _utc_now_iso(),
+        "report_timestamp": report.get("timestamp"),
+        "report_digest_sha256": report_digest_sha256,
+        "claim_count": report.get("claim_count", 0),
+        "passed_count": report.get("passed_count", 0),
+        "failed_count": report.get("failed_count", 0),
+        "error_count": report.get("error_count", 0),
+        "duration_seconds": report.get("duration_seconds", 0),
+        "claim_result_counts": result_counts,
+        "claim_category_counts": category_counts,
+        "claim_ids": [claim.get("claim_id", "unknown") for claim in claims],
+        "execution_event_count": len(report.get("execution_log", [])),
+    }
+
+
+def _write_evidence_artifacts(report: dict[str, Any]) -> dict[str, str]:
+    if report.get("run_mode") != "executed":
+        return {}
+
+    artifact_dir = _artifact_dir()
+    transcript_path = artifact_dir / TRANSCRIPT_FILENAME
+    metrics_path = artifact_dir / METRICS_FILENAME
+    transcript_rows = [
+        {
+            "schema_version": "tnr-reproduction-transcript-event.v1",
+            "event_index": index,
+            "run_mode": report.get("run_mode"),
+            "report_timestamp": report.get("timestamp"),
+            "event": event,
+        }
+        for index, event in enumerate(report.get("execution_log", []))
+    ]
+    _write_jsonl(transcript_path, transcript_rows)
+
+    report_digest_sha256 = _report_digest(report)
+    metrics = _build_metrics_snapshot(
+        report,
+        report_digest_sha256=report_digest_sha256,
+    )
+    metrics_path.write_text(
+        json.dumps(metrics, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    return {
+        "transcript_jsonl": _display_path(transcript_path),
+        "metrics_json": _display_path(metrics_path),
+    }
 
 
 def _append_execution_log(
@@ -593,6 +691,9 @@ def run_reproduction(
         report_path=_display_path(REPORT_PATH),
     )
     report["execution_log"] = execution_log
+    artifact_paths = _write_evidence_artifacts(report)
+    if artifact_paths:
+        report["artifact_paths"] = artifact_paths
     REPORT_PATH.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report
 

@@ -1,0 +1,6025 @@
+{
+  "claims": [
+    {
+      "claim_id": "integration_tests_run_by_cargo_test",
+      "items": [
+        {
+          "count": 10,
+          "source": "crates/franken-node/tests/activation_pipeline_metamorphic.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/adversarial_compromise_reduction_tampering.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/adversarial_detection_latency.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/adversarial_extension_harness.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/adversarial_remote_cap_replay.rs"
+        },
+        {
+          "count": 20,
+          "source": "crates/franken-node/tests/adversarial_supply_chain_poisoning.rs"
+        },
+        {
+          "count": 14,
+          "source": "crates/franken-node/tests/adversarial_trust_card_forgery.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/anti_entropy_reconciliation_loom.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/api_session_auth_real_service_integration.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/artifact_gate_goldens.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/artifact_signing_golden_tests.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/artifact_signing_key_loading.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/artifact_signing_metamorphic.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/asupersync_control_lane_integration.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/atc_signal_extractor_integration.rs"
+        },
+        {
+          "count": 20,
+          "source": "crates/franken-node/tests/atc_sketches_integration.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/atc_verifier_api_routes.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/auth_failure_limiter_loom.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/auth_failure_limiter_per_source_isolation.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/tests/bd_15u3_decision_engine_conformance.rs"
+        },
+        {
+          "count": 13,
+          "source": "crates/franken-node/tests/bd_1daz_retroactive_hardening_conformance.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/tests/bd_1fp4_integrity_sweep_scheduler_conformance.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/bd_1m8r_revocation_freshness_gate_conformance.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/tests/bd_1zym_hardening_auto_trigger_conformance.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/bd_91gg_repair_controller_conformance.rs"
+        },
+        {
+          "count": 14,
+          "source": "crates/franken-node/tests/bd_sddz_correctness_envelope_conformance.rs"
+        },
+        {
+          "count": 14,
+          "source": "crates/franken-node/tests/bd_sh3_approval_workflow_conformance.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/bench_conformance_matrix.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/bench_run_e2e.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/bounded_input_policy_contract.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/cancellation_protocol_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/canonical_serializer_conformance.rs"
+        },
+        {
+          "count": 19,
+          "source": "crates/franken-node/tests/canonical_serializer_fuzz_harness.rs"
+        },
+        {
+          "count": 11,
+          "source": "crates/franken-node/tests/canonical_serializer_metamorphic.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/canonical_serializer_real_inputs.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/capability_artifact_real_inputs.rs"
+        },
+        {
+          "count": 10,
+          "source": "crates/franken-node/tests/cas_effect_receipt_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/category_shift_real_inputs.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/challenge_flow_timing_attack_resistance.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/challenge_response_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/claims_compiler_metamorphic.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/claims_proptest.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/cli_arg_validation.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/cli_error_goldens.rs"
+        },
+        {
+          "count": 26,
+          "source": "crates/franken-node/tests/cli_subcommand_goldens.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/close_condition_path_gate_regressions.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/closed_bead_compliance.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/compat_lockstep_oracle_conformance.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/compatibility_corpus_stream.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/compatibility_regression_dashboard.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/compromise_reduction_baseline_bench.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/conformance/ct_eq_timing_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/conformance/fail_closed_expiry_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/conformance/fail_stale_time_math_conformance.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/conformance_proptest.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/connector_interop_suite_revocation.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/connector_jcq1z_lifecycle_stress.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/connector_lifecycle_conformance_matrix.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/connector_lifecycle_message_fuzz_harness.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/connector_lifecycle_public_api_e2e.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/connector_lifecycle_real_service_integration.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/connector_method_contract_artifact_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/connector_reconcile_idempotence_metamorphic.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/control_epoch_metamorphic.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/control_lane_mapping_policy.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/control_lane_policy.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/control_lane_policy_metamorphic.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/control_plane_epoch_key_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/counterfactual_policy_matrix.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/cross_substrate_vector_consumer_conformance.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/cuckoo_filter_telemetry_gauge.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/decision_receipt_crypto_trait_adoption.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/decision_receipt_golden_vectors_conformance.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/decision_receipt_json_golden.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/decision_receipt_round_trip_metamorphic.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/decision_receipt_signed_golden_conformance.rs"
+        },
+        {
+          "count": 10,
+          "source": "crates/franken-node/tests/deterministic_seed_metamorphic.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/deterministic_swarm_scenario_runner.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/doctor_close_condition_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/doctor_close_condition_e2e.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/doctor_json_schema_conformance.rs"
+        },
+        {
+          "count": 19,
+          "source": "crates/franken-node/tests/doctor_policy_activation_e2e.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/doctor_policy_activation_golden_vectors_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/doctor_structured_logs_jsonl.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/e2e_audience_token_chain_lifecycle.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/e2e_cancellation_protocol_lifecycle.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/e2e_control_epoch_lifecycle.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/e2e_control_lane_scheduler_lifecycle.rs"
+        },
+        {
+          "count": 10,
+          "source": "crates/franken-node/tests/e2e_divergence_gate_state_machine.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/e2e_epoch_transition_barrier_lifecycle.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/e2e_evidence_ledger_lifecycle.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/e2e_evidence_replay_gate_lifecycle.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/e2e_fork_detection_lifecycle.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/e2e_incident_bundle_lifecycle.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/e2e_key_role_separation_registry.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/e2e_marker_stream_lifecycle.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/e2e_migration_pipeline_real_cohort.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/e2e_mmr_proofs_lifecycle.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/e2e_provenance_gate_evaluation.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/e2e_quarantine_registry_lifecycle.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/e2e_revocation_registry_state_machine.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/e2e_transparency_inclusion_real_pipeline.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/e2e_trust_card_lifecycle.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/encoding_proptest.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/engine_dispatcher_pipe_drain.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/engine_dispatcher_profile_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/engine_dispatcher_profile_golden.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/epoch_key_derivation_metamorphic.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/epoch_transitions_fuzz_harness.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/evidence_index.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/evidence_ledger_append_ordering_loom.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/evidence_ledger_chain_order_metamorphic.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/evidence_verification_spine_contract.rs"
+        },
+        {
+          "count": 16,
+          "source": "crates/franken-node/tests/evolution_risk_scorer_integration.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/exploit_audience_token.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/extension_artifact_contract_conformance.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/fake_coverage_fix_verification.rs"
+        },
+        {
+          "count": 24,
+          "source": "crates/franken-node/tests/fastapi_rust_control_plane_integration.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/federation_dgis_atc_bridge_conformance.rs"
+        },
+        {
+          "count": 44,
+          "source": "crates/franken-node/tests/fleet_cli_e2e.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/fleet_decision_contract_harness.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/fleet_quarantine_e2e_full.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/fleet_quarantine_metamorphic.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/fleet_quarantine_rollback_receipt.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/fleet_quarantine_serde_fuzz_harness.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/fleet_quarantine_state_machine_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/fleet_transport_canonical_byte_stability.rs"
+        },
+        {
+          "count": 13,
+          "source": "crates/franken-node/tests/frame_parser_fuzz_harness.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/frankensqlite_adapter_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/frankensqlite_persistence_integration.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/frankentui_operator_surface_integration.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/golden/canonical_serializer_golden_tests.rs"
+        },
+        {
+          "count": 11,
+          "source": "crates/franken-node/tests/golden/claims_golden_tests.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/golden/connector_lifecycle_message_golden_tests.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/golden/incident_golden_tests.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/golden/mod.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/tests/golden/registry_golden_tests.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/golden/remote_capability_envelope_golden_tests.rs"
+        },
+        {
+          "count": 10,
+          "source": "crates/franken-node/tests/golden/trust_card_golden_tests.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/tests/golden/vef_receipt_envelope_golden_tests.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/golden_artifacts_comprehensive.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/golden_remote_api_connector_vef.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/golden_security_serialization.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/hot_path_perf_budget_contract.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/incident_bundle_integrity_conformance.rs"
+        },
+        {
+          "count": 11,
+          "source": "crates/franken-node/tests/incident_cli_e2e.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/incident_real_crypto_e2e.rs"
+        },
+        {
+          "count": 16,
+          "source": "crates/franken-node/tests/incident_replay_counterfactual_cli_e2e.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/incident_timeline_report.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/init_bootstrap_smoke.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/instrumentation_zero_cost_audit.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/integration_api_session_auth_real_service.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/integration_connector_lifecycle_stress.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/integration_remote_capability_real_enforcement.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/integration_vef_receipt_chain_real_service.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/isolation_rail_router.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/lane_scheduler_fuzz_harness.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/lane_scheduler_golden_artifacts.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/mcp_control_surface_contract.rs"
+        },
+        {
+          "count": 13,
+          "source": "crates/franken-node/tests/metamorphic_canonical_serializer.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/metamorphic_supply_chain.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/migrate_audit_goldens.rs"
+        },
+        {
+          "count": 17,
+          "source": "crates/franken-node/tests/migrate_cli_e2e.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/migrate_rewrite_goldens.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/migrate_throughput_bench.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/migrate_validate_goldens.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/migration_e2e_gate_artifacts.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/migration_pipeline_hash_length_regression.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/migration_report_conformance.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/migration_report_schema_golden.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/mitigation_synthesis_length_framing.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/module_resolution_graph.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/native_engine_compat.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/observability_adversarial_regressions.rs"
+        },
+        {
+          "count": 15,
+          "source": "crates/franken-node/tests/observability_evidence_ledger_regressions.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/observability_witness_metamorphic.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/operator_json_contract_registry.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/operator_process_start_initialization_loom.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/operator_transcripts.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/policy_e2e_evidence_matrix.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/policy_evidence_linkage_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/project_scanner.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/proof_carrying_decode.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/proof_generator_timeout_race.rs"
+        },
+        {
+          "count": 22,
+          "source": "crates/franken-node/tests/rch_adapter_classification.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/registry_cli_e2e.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/registry_cli_wire_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/registry_staking_governance_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/remote_api_conformance_harness.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/remote_cap_jcq1z_real_enforcement.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/remote_cap_replay_token_set_loom.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/remote_cap_replay_token_state_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/remote_cap_scope_tightening_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/remote_capability_gate_fuzz_regression.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/remote_capability_scope_fuzz_harness.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/remote_idempotency_store_conformance.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/remote_virtual_transport_faults_regressions.rs"
+        },
+        {
+          "count": 15,
+          "source": "crates/franken-node/tests/remotecap_cli_e2e.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/remotecap_cli_wire_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/replay_bundle_adversarial_fuzz.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/replay_bundle_byte_counter_no_vec_alloc.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/replay_bundle_crypto_trait_adoption.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/replay_bundle_event_reorder_metamorphic.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/replay_bundle_golden_artifacts.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/replay_bundle_integrity_conformance.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/replay_bundle_metamorphic.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/replay_coverage_gate_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/replay_import_anchor.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/replay_trace_canonical_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/replay_window_metamorphic.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/resolution_receipt.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/revocation_freshness_regressions.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/rewrite_suggestion_engine.rs"
+        },
+        {
+          "count": 11,
+          "source": "crates/franken-node/tests/rollout_state_obligation.rs"
+        },
+        {
+          "count": 15,
+          "source": "crates/franken-node/tests/runtime_checkpoint_conformance.rs"
+        },
+        {
+          "count": 10,
+          "source": "crates/franken-node/tests/runtime_checkpoint_envelopes_fuzz_harness.rs"
+        },
+        {
+          "count": 14,
+          "source": "crates/franken-node/tests/runtime_cli_e2e.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/runtime_lane_golden_artifacts.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/runtime_lane_router_priority.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/runtime_lane_router_security.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/tests/runtime_lane_scheduler_conformance.rs"
+        },
+        {
+          "count": 28,
+          "source": "crates/franken-node/tests/runtime_lane_scheduler_queue_identity.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/sdk_verifier_public_api_fuzz_harness.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/sdk_verifier_public_api_golden_conformance.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/sdk_verifier_replay_bundle_frame_conformance.rs"
+        },
+        {
+          "count": 24,
+          "source": "crates/franken-node/tests/security_adversary_graph_conformance.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/security_perfect_e2e_enforcement.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/security_remote_cap_validation_conformance.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/security_timing_attack_resistance.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/session_auth_jcq1z_real_service.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/session_auth_key_roles.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/session_auth_real_lifecycle.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/session_auth_real_lifecycle_structured.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/spec_derived_fuzz_seeds.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/sqlmodel_rust_schema_integration.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/tests/storage_crash_recovery_persistence_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/storage_metamorphic.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/supervision_temporal_kernel.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/supply_chain_attestation_manifest_golden.rs"
+        },
+        {
+          "count": 19,
+          "source": "crates/franken-node/tests/supply_chain_golden_artifacts.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/supply_chain_manifest_replay_conformance.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/supply_chain_registry_attestation_receipt_conformance.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/supply_chain_registry_claims_e2e_integration.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/supply_chain_trust_card_golden_bytes.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/swarm_bead_templates.rs"
+        },
+        {
+          "count": 33,
+          "source": "crates/franken-node/tests/swarm_handoff_evidence.rs"
+        },
+        {
+          "count": 16,
+          "source": "crates/franken-node/tests/swarm_validation_admission.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/sync_durability_regression.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/telemetry_bridge_regressions.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/test_chrono_fallback.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/test_chrono_max.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/test_multi_delegation.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/test_rfd_gap.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/test_validation_readiness_flight_recorder.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/threshold_sig_conformance.rs"
+        },
+        {
+          "count": 10,
+          "source": "crates/franken-node/tests/threshold_sig_quorum_metamorphic.rs"
+        },
+        {
+          "count": 13,
+          "source": "crates/franken-node/tests/time_travel_metamorphic.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/traceparent_parser_fuzz_harness.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/trust_card_admission_conformance.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/trust_card_authoritative_state_real_inputs.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/trust_card_canonical_encoding_conformance.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/trust_card_cross_version_conformance.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/tests/trust_card_extension_id_length_boundary_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/trust_card_field_reorder_metamorphic.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/trust_card_metamorphic.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/trust_card_schema_conformance.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/tests/trust_card_streaming_encoder_golden_preservation.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/trust_card_wire_conformance.rs"
+        },
+        {
+          "count": 41,
+          "source": "crates/franken-node/tests/trust_cli_e2e.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/trust_cli_e2e_real_node_runtime.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/trust_cli_e2e_real_runtime.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/trust_object_id_real_inputs.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/tests/trust_osv_e2e_no_mocks.rs"
+        },
+        {
+          "count": 26,
+          "source": "crates/franken-node/tests/validation_broker.rs"
+        },
+        {
+          "count": 15,
+          "source": "crates/franken-node/tests/validation_closeout.rs"
+        },
+        {
+          "count": 33,
+          "source": "crates/franken-node/tests/validation_planner.rs"
+        },
+        {
+          "count": 50,
+          "source": "crates/franken-node/tests/validation_proof_cache.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/validation_proof_coalescer.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/validation_proof_debt_ledger.rs"
+        },
+        {
+          "count": 21,
+          "source": "crates/franken-node/tests/validation_readiness.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/vef_proof_generator_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/tests/vef_proof_generator_test_support_gate.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/vef_proof_scheduler_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/vef_proof_service.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/vef_proof_service_fail_closed.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/vef_receipt_chain_integrity.rs"
+        },
+        {
+          "count": 10,
+          "source": "crates/franken-node/tests/vef_receipt_envelope_fuzz_harness.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/tests/vef_receipt_jcq1z_real_service.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/tests/vef_receipt_real_service_integration.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/tests/vef_receipt_schema_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/tests/verifier_economy_conformance.rs"
+        },
+        {
+          "count": 41,
+          "source": "crates/franken-node/tests/verify_release_cli_e2e.rs"
+        },
+        {
+          "count": 24,
+          "source": "crates/franken-node/tests/workspace_pressure_governance_e2e.rs"
+        },
+        {
+          "count": 10,
+          "source": "sdk/verifier/tests/bundle_roundtrip.rs"
+        },
+        {
+          "count": 5,
+          "source": "sdk/verifier/tests/bundle_roundtrip_negative.rs"
+        },
+        {
+          "count": 1,
+          "source": "sdk/verifier/tests/chain_verify_registry.rs"
+        },
+        {
+          "count": 3,
+          "source": "sdk/verifier/tests/compliance_report.rs"
+        },
+        {
+          "count": 1,
+          "source": "sdk/verifier/tests/conformance_harness.rs"
+        },
+        {
+          "count": 1,
+          "source": "sdk/verifier/tests/counterfactual_verify.rs"
+        },
+        {
+          "count": 3,
+          "source": "sdk/verifier/tests/facade.rs"
+        },
+        {
+          "count": 6,
+          "source": "sdk/verifier/tests/honesty_manifest_recompute.rs"
+        },
+        {
+          "count": 1,
+          "source": "sdk/verifier/tests/public_api_contract.rs"
+        },
+        {
+          "count": 4,
+          "source": "sdk/verifier/tests/signed_bundle.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/bd_98xo5_3_3_btree_switch_verification.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/cleanup_executor_integration.rs"
+        },
+        {
+          "count": 39,
+          "source": "tests/conformance/adjacent_claim_language_gate.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/conformance/adjacent_substrate_gate.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/conformance/ambient_authority_gate.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/conformance/atc_verifier_apis.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_137_decision_engine_basic_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_137_policy_compatibility_gate_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/bd_137_policy_decision_engine_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/bd_1fp4_integrity_sweep_scheduler_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/bd_1nfu_remote_capability_gate_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_1p2r_engine_dispatch_hooks_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_1xbc_time_travel_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_1xwz_perf_budget_guard_conformance.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/conformance/bd_21fo_governor_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_21fo_optimization_governor_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/bd_2gk8_ecosystem_compliance_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/bd_2igi_bayesian_diagnostics_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/bd_2wjg_timing_instrumentation_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/bd_2wz_mode_band_matrix_conformance.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/conformance/bd_3a3q_guardrail_monitor_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/bd_3h7k_anti_entropy_reconciliation_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_3i6c_frankensqlite_inspired_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_3ku8_capability_artifact_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/bd_3rya_hardening_state_machine_conformance.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/conformance/bd_3v9p_deterministic_seed_encoding_conformance.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/conformance/bd_3v9p_retrievability_gate_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/conformance/bd_3vm_authority_audit_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/bd_4m2n_supply_chain_extension_registry_conformance.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/conformance/bd_5k7w_runtime_resource_governor_conformance.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/conformance/bd_5k7w_sybil_defense_conformance.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/conformance/bd_7s2p_connector_method_validator_conformance.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/conformance/bd_b9b6_durability_violation_conformance.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/conformance/bd_bq4p_controller_boundary_checks_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_kpygy_metamorphic_invariant_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/bd_ncwlf_hot_path_budget_smoke_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/bd_tg2_fleet_quarantine_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/bd_w0jq_degraded_mode_audit_conformance.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/conformance/bpet_feature_extraction.rs"
+        },
+        {
+          "count": 19,
+          "source": "tests/conformance/cancel_drain_finalize.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/conformance/capability_artifact_admission.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/capability_artifact_trust_card_integration_conformance.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/conformance/claim_compiler_gate.rs"
+        },
+        {
+          "count": 20,
+          "source": "tests/conformance/claim_language_gate.rs"
+        },
+        {
+          "count": 8,
+          "source": "tests/conformance/compat_api_parity_conformance.rs"
+        },
+        {
+          "count": 8,
+          "source": "tests/conformance/connector_lifecycle_transitions.rs"
+        },
+        {
+          "count": 8,
+          "source": "tests/conformance/connector_protocol_harness.rs"
+        },
+        {
+          "count": 19,
+          "source": "tests/conformance/control_evidence_replay.rs"
+        },
+        {
+          "count": 11,
+          "source": "tests/conformance/control_lane_policy.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/conformance/control_policy_evidence_required.rs"
+        },
+        {
+          "count": 13,
+          "source": "tests/conformance/crdt_merge_fixtures.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/cx_first_api_gate.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/conformance/degraded_mode_audit_events.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/epoch_key_derivation.rs"
+        },
+        {
+          "count": 44,
+          "source": "tests/conformance/fsqlite_inspired_suite.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/conformance/idempotency_key_derivation.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/conformance/interface_hash_verification.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/isolation_rail_router_conformance.rs"
+        },
+        {
+          "count": 8,
+          "source": "tests/conformance/lease_coordinator_selection.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/conformance/manifest_negotiation_fail_closed.rs"
+        },
+        {
+          "count": 8,
+          "source": "tests/conformance/marker_stream_invariants.rs"
+        },
+        {
+          "count": 8,
+          "source": "tests/conformance/mmr_proof_verification.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/mmr_proof_verification_conformance.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/conformance/network_guard_policy.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/ownership_boundary_checks.rs"
+        },
+        {
+          "count": 20,
+          "source": "tests/conformance/perf_budget_guard.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/performance_hardening_metrics_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/placement_policy_schema.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/conformance/proof_carrying_decode_conformance.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/conformance/proof_speculation_guards.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/remote_name_registry.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/conformance/replay_clock_drift_detection.rs"
+        },
+        {
+          "count": 19,
+          "source": "tests/conformance/replica_artifact_determinism.rs"
+        },
+        {
+          "count": 8,
+          "source": "tests/conformance/revocation_head_monotonicity.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/conformance/rfc_7807_problem_details_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/rollback_bundle_conformance.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/conformance/sandbox_profile_conformance.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/conformance/singleton_writer_fencing.rs"
+        },
+        {
+          "count": 12,
+          "source": "tests/conformance/snapshot_policy_conformance.rs"
+        },
+        {
+          "count": 42,
+          "source": "tests/conformance/sqlmodel_contracts.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/trust_card_api_surface_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/trust_card_manifest_reference_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance/trust_card_routes_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/conformance/vef_claim_gate.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/conformance/vef_perf_budget_gate_conformance.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/conformance/vef_policy_constraint_compiler.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/vef_proof_scheduler_support.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/vef_proof_service_support.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/conformance/vef_receipt_chain_integrity.rs"
+        },
+        {
+          "count": 11,
+          "source": "tests/conformance/verifier_sdk_capsule_replay.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/conformance/verifier_session_monotonic.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/conformance_runner.rs"
+        },
+        {
+          "count": 56,
+          "source": "tests/e2e/adjacent_substrate_flow.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/e2e_rch_validation_fixture_replay.rs"
+        },
+        {
+          "count": 34,
+          "source": "tests/harness/control_virtual_transport_faults.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/integration/activation_pipeline_determinism.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/admission_budget_enforcement.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/anti_amplification_harness.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/artifact_replay_hooks.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/atc_partition_fallback.rs"
+        },
+        {
+          "count": 14,
+          "source": "tests/integration/bayesian_risk_quarantine.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/bpet_atc_temporal_interop.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/integration/bpet_dgis_priority_escalation.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/bpet_migration_stability_gate.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/integration/canonical_serializer_fuzz_harness.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/integration/compatibility_policy_pipeline.rs"
+        },
+        {
+          "count": 12,
+          "source": "tests/integration/connector_runtime_integration.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/integration/connector_state_persistence.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/control_channel_replay.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/control_epoch_barrier.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/integration/crash_loop_rollback.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/integration/cross_module_integration_index.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/integration/decision_receipt_export.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/integration/dgis_atc_interop.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/dgis_migration_gate.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/integration/dgis_trust_card_integration.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/error_contract_stability.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/execution_planner_determinism.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/extension_manifest_admission.rs"
+        },
+        {
+          "count": 38,
+          "source": "tests/integration/fastapi_control_plane_endpoints.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/frame_decode_guardrails.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/integration/frame_parser_fuzz_harness.rs"
+        },
+        {
+          "count": 56,
+          "source": "tests/integration/frankensqlite_adapter_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/integration/frankensqlite_conformance_harness.rs"
+        },
+        {
+          "count": 46,
+          "source": "tests/integration/frankentui_surface_migration.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/integration/fuzz_corpus_gates.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/golden_vector_verification.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/integration/interop_mandatory_suites.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/integration/isolation_hot_elevation.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/integration/lease_service_contract.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/integration/lifecycle_health_gate.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/integration/marker_divergence_detection.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/metric_schema_stability.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/offline_coverage_metrics.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/integration/overlapping_lease_conflicts.rs"
+        },
+        {
+          "count": 12,
+          "source": "tests/integration/policy_observability_integration.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/prestaging_coverage_improvement.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/profile_claim_gate.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/integration/provenance_verification_chain.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/quarantine_promotion_gate.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/quarantine_retention.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/integration/region_owned_lifecycle.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/repair_fairness.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/integration/retention_class_enforcement.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/integration/revocation_integration_workflow.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/integration/root_pointer_crash_safety.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/integration/runtime_checkpoint_conformance.rs"
+        },
+        {
+          "count": 13,
+          "source": "tests/integration/security_economy_integration.rs"
+        },
+        {
+          "count": 8,
+          "source": "tests/integration/staking_slashing_flows.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/integration/state_migration_contract.rs"
+        },
+        {
+          "count": 14,
+          "source": "tests/integration/storage_migration_integration.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/integration/strict_plus_isolation.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/integration/trace_correlation_end_to_end.rs"
+        },
+        {
+          "count": 31,
+          "source": "tests/lab/control_cancellation_injection.rs"
+        },
+        {
+          "count": 19,
+          "source": "tests/lab/control_dpor_exploration.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/lab/control_protocol_scenarios.rs"
+        },
+        {
+          "count": 13,
+          "source": "tests/lab/counterfactual_mitigation_eval.rs"
+        },
+        {
+          "count": 12,
+          "source": "tests/lab/time_travel_replay_equivalence.rs"
+        },
+        {
+          "count": 12,
+          "source": "tests/migration/frankensqlite_migration_idempotence.rs"
+        },
+        {
+          "count": 9,
+          "source": "tests/oracle/n_version_semantic_oracle.rs"
+        },
+        {
+          "count": 50,
+          "source": "tests/perf/adjacent_substrate_overhead_gate.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/perf/bpet_budget_gate.rs"
+        },
+        {
+          "count": 17,
+          "source": "tests/perf/control_plane_overhead_gate.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/perf/dgis_budget_gate.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/perf/governor_safety_envelope.rs"
+        },
+        {
+          "count": 14,
+          "source": "tests/perf/hardware_planner_policy_conformance.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/perf/marker_lookup_complexity.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/perf/remote_bulkhead_under_load.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/perf/vef_proof_scheduler_support_perf.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/perf/vef_proof_service_support_perf.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/policy/bpet_override_audit.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/security/anti_amplification_harness.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/security/attestation_gate.rs"
+        },
+        {
+          "count": 15,
+          "source": "tests/security/bpet_adversarial_evolution_suite.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/security/bpet_calibration_benchmark.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/security/camouflage_detector.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/security/control_epoch_validity.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/security/dgis_adversarial_suite.rs"
+        },
+        {
+          "count": 26,
+          "source": "tests/security/dgis_contagion_simulator.rs"
+        },
+        {
+          "count": 13,
+          "source": "tests/security/dgis_fragility_spof.rs"
+        },
+        {
+          "count": 12,
+          "source": "tests/security/dgis_graph_ingestion.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/security/dgis_immunization_planner.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/security/dgis_quarantine_containment.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/security/durable_claim_gate.rs"
+        },
+        {
+          "count": 2,
+          "source": "tests/security/ed25519_verifier_rejects_malleable_signatures.rs"
+        },
+        {
+          "count": 21,
+          "source": "tests/security/exfiltration_sentinel_scenarios.rs"
+        },
+        {
+          "count": 3,
+          "source": "tests/security/future_epoch_rejection.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/security/intent_firewall_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/security/obligation_tracked_channels.rs"
+        },
+        {
+          "count": 26,
+          "source": "tests/security/remote_cap_enforcement.rs"
+        },
+        {
+          "count": 10,
+          "source": "tests/security/revocation_freshness_gate.rs"
+        },
+        {
+          "count": 6,
+          "source": "tests/security/root_bootstrap_fail_closed.rs"
+        },
+        {
+          "count": 25,
+          "source": "tests/security/security_hardening_conformance.rs"
+        },
+        {
+          "count": 4,
+          "source": "tests/security/signed_lineage_graph_builder.rs"
+        },
+        {
+          "count": 17,
+          "source": "tests/security/ssrf_default_deny.rs"
+        },
+        {
+          "count": 16,
+          "source": "tests/security/threshold_signature_verification.rs"
+        },
+        {
+          "count": 8,
+          "source": "tests/security/transparency_inclusion.rs"
+        },
+        {
+          "count": 12,
+          "source": "tests/security/vef_adversarial_suite.rs"
+        },
+        {
+          "count": 29,
+          "source": "tests/security/zk_attestation_verification.rs"
+        },
+        {
+          "count": 5,
+          "source": "tests/security_conformance.rs"
+        },
+        {
+          "count": 1,
+          "source": "tests/test_multi_delegation.rs"
+        },
+        {
+          "count": 7,
+          "source": "tests/tui/frankentui_snapshots.rs"
+        }
+      ],
+      "scalar": null
+    },
+    {
+      "claim_id": "inline_tests_behind_inline_lane",
+      "items": [
+        {
+          "count": 11,
+          "source": "crates/franken-node/src/api/compat_conformance.rs"
+        },
+        {
+          "count": 104,
+          "source": "crates/franken-node/src/api/compat_gate.rs"
+        },
+        {
+          "count": 68,
+          "source": "crates/franken-node/src/api/error.rs"
+        },
+        {
+          "count": 70,
+          "source": "crates/franken-node/src/api/fleet_control_routes.rs"
+        },
+        {
+          "count": 170,
+          "source": "crates/franken-node/src/api/fleet_quarantine.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/src/api/mcp.rs"
+        },
+        {
+          "count": 95,
+          "source": "crates/franken-node/src/api/middleware.rs"
+        },
+        {
+          "count": 39,
+          "source": "crates/franken-node/src/api/mod.rs"
+        },
+        {
+          "count": 55,
+          "source": "crates/franken-node/src/api/operator_routes.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/src/api/proof_pipeline_routes.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/api/safe_mode_routes.rs"
+        },
+        {
+          "count": 90,
+          "source": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "count": 151,
+          "source": "crates/franken-node/src/api/session_auth.rs"
+        },
+        {
+          "count": 62,
+          "source": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "count": 76,
+          "source": "crates/franken-node/src/api/verifier_routes.rs"
+        },
+        {
+          "count": 162,
+          "source": "crates/franken-node/src/atc/mod.rs"
+        },
+        {
+          "count": 34,
+          "source": "crates/franken-node/src/capacity_defaults.rs"
+        },
+        {
+          "count": 87,
+          "source": "crates/franken-node/src/claims/claim_compiler.rs"
+        },
+        {
+          "count": 35,
+          "source": "crates/franken-node/src/claims/mod.rs"
+        },
+        {
+          "count": 54,
+          "source": "crates/franken-node/src/cli.rs"
+        },
+        {
+          "count": 82,
+          "source": "crates/franken-node/src/config.rs"
+        },
+        {
+          "count": 44,
+          "source": "crates/franken-node/src/conformance/connector_method_validator.rs"
+        },
+        {
+          "count": 37,
+          "source": "crates/franken-node/src/conformance/fsqlite_inspired_suite.rs"
+        },
+        {
+          "count": 25,
+          "source": "crates/franken-node/src/conformance/mod.rs"
+        },
+        {
+          "count": 34,
+          "source": "crates/franken-node/src/conformance/protocol_harness.rs"
+        },
+        {
+          "count": 67,
+          "source": "crates/franken-node/src/connector/activation_pipeline.rs"
+        },
+        {
+          "count": 61,
+          "source": "crates/franken-node/src/connector/admission_budget.rs"
+        },
+        {
+          "count": 51,
+          "source": "crates/franken-node/src/connector/anti_amplification.rs"
+        },
+        {
+          "count": 44,
+          "source": "crates/franken-node/src/connector/artifact_persistence.rs"
+        },
+        {
+          "count": 254,
+          "source": "crates/franken-node/src/connector/bocpd.rs"
+        },
+        {
+          "count": 33,
+          "source": "crates/franken-node/src/connector/bocpd_conformance_tests.rs"
+        },
+        {
+          "count": 56,
+          "source": "crates/franken-node/src/connector/cancel_injection_gate.rs"
+        },
+        {
+          "count": 65,
+          "source": "crates/franken-node/src/connector/cancellation_protocol.rs"
+        },
+        {
+          "count": 158,
+          "source": "crates/franken-node/src/connector/canonical_serializer.rs"
+        },
+        {
+          "count": 91,
+          "source": "crates/franken-node/src/connector/capability_artifact.rs"
+        },
+        {
+          "count": 83,
+          "source": "crates/franken-node/src/connector/capability_guard.rs"
+        },
+        {
+          "count": 56,
+          "source": "crates/franken-node/src/connector/claim_compiler.rs"
+        },
+        {
+          "count": 47,
+          "source": "crates/franken-node/src/connector/conformance_profile.rs"
+        },
+        {
+          "count": 62,
+          "source": "crates/franken-node/src/connector/control_channel.rs"
+        },
+        {
+          "count": 76,
+          "source": "crates/franken-node/src/connector/control_evidence.rs"
+        },
+        {
+          "count": 89,
+          "source": "crates/franken-node/src/connector/control_evidence_replay.rs"
+        },
+        {
+          "count": 61,
+          "source": "crates/franken-node/src/connector/crdt.rs"
+        },
+        {
+          "count": 50,
+          "source": "crates/franken-node/src/connector/device_profile.rs"
+        },
+        {
+          "count": 59,
+          "source": "crates/franken-node/src/connector/diagnostic_registry.rs"
+        },
+        {
+          "count": 45,
+          "source": "crates/franken-node/src/connector/dpor_schedule_gate.rs"
+        },
+        {
+          "count": 76,
+          "source": "crates/franken-node/src/connector/durability.rs"
+        },
+        {
+          "count": 40,
+          "source": "crates/franken-node/src/connector/durable_claim_gate.rs"
+        },
+        {
+          "count": 57,
+          "source": "crates/franken-node/src/connector/ecosystem_compliance.rs"
+        },
+        {
+          "count": 57,
+          "source": "crates/franken-node/src/connector/ecosystem_registry.rs"
+        },
+        {
+          "count": 68,
+          "source": "crates/franken-node/src/connector/ecosystem_reputation.rs"
+        },
+        {
+          "count": 50,
+          "source": "crates/franken-node/src/connector/error_code_registry.rs"
+        },
+        {
+          "count": 51,
+          "source": "crates/franken-node/src/connector/error_surface.rs"
+        },
+        {
+          "count": 68,
+          "source": "crates/franken-node/src/connector/eviction_saga.rs"
+        },
+        {
+          "count": 49,
+          "source": "crates/franken-node/src/connector/execution_scorer.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/connector/fencing.rs"
+        },
+        {
+          "count": 51,
+          "source": "crates/franken-node/src/connector/frame_parser.rs"
+        },
+        {
+          "count": 43,
+          "source": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        },
+        {
+          "count": 38,
+          "source": "crates/franken-node/src/connector/golden_vectors.rs"
+        },
+        {
+          "count": 50,
+          "source": "crates/franken-node/src/connector/health_gate.rs"
+        },
+        {
+          "count": 54,
+          "source": "crates/franken-node/src/connector/high_assurance_promotion.rs"
+        },
+        {
+          "count": 64,
+          "source": "crates/franken-node/src/connector/incident_bundle_retention.rs"
+        },
+        {
+          "count": 44,
+          "source": "crates/franken-node/src/connector/interop_suite.rs"
+        },
+        {
+          "count": 59,
+          "source": "crates/franken-node/src/connector/lease_conflict.rs"
+        },
+        {
+          "count": 201,
+          "source": "crates/franken-node/src/connector/lease_coordinator.rs"
+        },
+        {
+          "count": 48,
+          "source": "crates/franken-node/src/connector/lease_service.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/connector/lifecycle.rs"
+        },
+        {
+          "count": 58,
+          "source": "crates/franken-node/src/connector/manifest_negotiation.rs"
+        },
+        {
+          "count": 84,
+          "source": "crates/franken-node/src/connector/migration_artifact.rs"
+        },
+        {
+          "count": 96,
+          "source": "crates/franken-node/src/connector/migration_pipeline.rs"
+        },
+        {
+          "count": 30,
+          "source": "crates/franken-node/src/connector/mod.rs"
+        },
+        {
+          "count": 38,
+          "source": "crates/franken-node/src/connector/n_version_oracle.rs"
+        },
+        {
+          "count": 79,
+          "source": "crates/franken-node/src/connector/obligation_tracker.rs"
+        },
+        {
+          "count": 58,
+          "source": "crates/franken-node/src/connector/offline_coverage.rs"
+        },
+        {
+          "count": 85,
+          "source": "crates/franken-node/src/connector/operator_intelligence.rs"
+        },
+        {
+          "count": 89,
+          "source": "crates/franken-node/src/connector/perf_budget_guard.rs"
+        },
+        {
+          "count": 90,
+          "source": "crates/franken-node/src/connector/policy_checkpoint.rs"
+        },
+        {
+          "count": 47,
+          "source": "crates/franken-node/src/connector/prestage_engine.rs"
+        },
+        {
+          "count": 46,
+          "source": "crates/franken-node/src/connector/quarantine_promotion.rs"
+        },
+        {
+          "count": 43,
+          "source": "crates/franken-node/src/connector/quarantine_store.rs"
+        },
+        {
+          "count": 52,
+          "source": "crates/franken-node/src/connector/region_ownership.rs"
+        },
+        {
+          "count": 48,
+          "source": "crates/franken-node/src/connector/repair_controller.rs"
+        },
+        {
+          "count": 43,
+          "source": "crates/franken-node/src/connector/retention_policy.rs"
+        },
+        {
+          "count": 82,
+          "source": "crates/franken-node/src/connector/rollback_bundle.rs"
+        },
+        {
+          "count": 44,
+          "source": "crates/franken-node/src/connector/rollout_state.rs"
+        },
+        {
+          "count": 48,
+          "source": "crates/franken-node/src/connector/saga.rs"
+        },
+        {
+          "count": 61,
+          "source": "crates/franken-node/src/connector/schema_migration.rs"
+        },
+        {
+          "count": 54,
+          "source": "crates/franken-node/src/connector/snapshot_policy.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/connector/state_model.rs"
+        },
+        {
+          "count": 52,
+          "source": "crates/franken-node/src/connector/supervision.rs"
+        },
+        {
+          "count": 55,
+          "source": "crates/franken-node/src/connector/telemetry_namespace.rs"
+        },
+        {
+          "count": 23,
+          "source": "crates/franken-node/src/connector/test_bocpd_hardening.rs"
+        },
+        {
+          "count": 78,
+          "source": "crates/franken-node/src/connector/tiered_trust_storage.rs"
+        },
+        {
+          "count": 65,
+          "source": "crates/franken-node/src/connector/trace_context.rs"
+        },
+        {
+          "count": 58,
+          "source": "crates/franken-node/src/connector/transport_fault_gate.rs"
+        },
+        {
+          "count": 68,
+          "source": "crates/franken-node/src/connector/trust_fabric.rs"
+        },
+        {
+          "count": 80,
+          "source": "crates/franken-node/src/connector/trust_object_id.rs"
+        },
+        {
+          "count": 70,
+          "source": "crates/franken-node/src/connector/trust_zone.rs"
+        },
+        {
+          "count": 99,
+          "source": "crates/franken-node/src/connector/universal_verifier_sdk.rs"
+        },
+        {
+          "count": 60,
+          "source": "crates/franken-node/src/connector/vef_claim_integration.rs"
+        },
+        {
+          "count": 45,
+          "source": "crates/franken-node/src/connector/vef_execution_receipt.rs"
+        },
+        {
+          "count": 38,
+          "source": "crates/franken-node/src/connector/vef_perf_budget.rs"
+        },
+        {
+          "count": 59,
+          "source": "crates/franken-node/src/connector/vef_policy_constraints.rs"
+        },
+        {
+          "count": 106,
+          "source": "crates/franken-node/src/connector/verifier_sdk.rs"
+        },
+        {
+          "count": 90,
+          "source": "crates/franken-node/src/control_plane/audience_token.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/control_plane/cancellation_injection.rs"
+        },
+        {
+          "count": 62,
+          "source": "crates/franken-node/src/control_plane/cancellation_protocol.rs"
+        },
+        {
+          "count": 69,
+          "source": "crates/franken-node/src/control_plane/control_epoch.rs"
+        },
+        {
+          "count": 45,
+          "source": "crates/franken-node/src/control_plane/control_lane_mapping.rs"
+        },
+        {
+          "count": 51,
+          "source": "crates/franken-node/src/control_plane/control_lane_policy.rs"
+        },
+        {
+          "count": 29,
+          "source": "crates/franken-node/src/control_plane/control_plane_conformance_tests.rs"
+        },
+        {
+          "count": 70,
+          "source": "crates/franken-node/src/control_plane/divergence_gate.rs"
+        },
+        {
+          "count": 34,
+          "source": "crates/franken-node/src/control_plane/dpor_exploration.rs"
+        },
+        {
+          "count": 72,
+          "source": "crates/franken-node/src/control_plane/epoch_transition_barrier.rs"
+        },
+        {
+          "count": 48,
+          "source": "crates/franken-node/src/control_plane/evidence_replay_gate.rs"
+        },
+        {
+          "count": 67,
+          "source": "crates/franken-node/src/control_plane/fleet_transport.rs"
+        },
+        {
+          "count": 80,
+          "source": "crates/franken-node/src/control_plane/fork_detection.rs"
+        },
+        {
+          "count": 84,
+          "source": "crates/franken-node/src/control_plane/key_role_separation.rs"
+        },
+        {
+          "count": 71,
+          "source": "crates/franken-node/src/control_plane/marker_stream.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/control_plane/metamorphic_epoch_tests.rs"
+        },
+        {
+          "count": 41,
+          "source": "crates/franken-node/src/control_plane/mmr_proofs.rs"
+        },
+        {
+          "count": 28,
+          "source": "crates/franken-node/src/control_plane/mod.rs"
+        },
+        {
+          "count": 53,
+          "source": "crates/franken-node/src/control_plane/root_pointer.rs"
+        },
+        {
+          "count": 49,
+          "source": "crates/franken-node/src/control_plane/transition_abort.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/src/crypto/key_material.rs"
+        },
+        {
+          "count": 28,
+          "source": "crates/franken-node/src/crypto/schemes.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/src/crypto/signer.rs"
+        },
+        {
+          "count": 21,
+          "source": "crates/franken-node/src/crypto/tests.rs"
+        },
+        {
+          "count": 22,
+          "source": "crates/franken-node/src/dgis/contagion_graph.rs"
+        },
+        {
+          "count": 21,
+          "source": "crates/franken-node/src/dgis/contagion_profiles.rs"
+        },
+        {
+          "count": 17,
+          "source": "crates/franken-node/src/dgis/contagion_simulator.rs"
+        },
+        {
+          "count": 15,
+          "source": "crates/franken-node/src/dgis/fragility_fixtures.rs"
+        },
+        {
+          "count": 27,
+          "source": "crates/franken-node/src/dgis/fragility_model.rs"
+        },
+        {
+          "count": 30,
+          "source": "crates/franken-node/src/dgis/graph_ingestion.rs"
+        },
+        {
+          "count": 10,
+          "source": "crates/franken-node/src/dgis/graph_seeds.rs"
+        },
+        {
+          "count": 16,
+          "source": "crates/franken-node/src/dgis/node_interner.rs"
+        },
+        {
+          "count": 17,
+          "source": "crates/franken-node/src/dgis/spof_detection.rs"
+        },
+        {
+          "count": 21,
+          "source": "crates/franken-node/src/encoding/additional_edge_tests.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/src/encoding/canonical_serializer.rs"
+        },
+        {
+          "count": 101,
+          "source": "crates/franken-node/src/encoding/deterministic_seed.rs"
+        },
+        {
+          "count": 39,
+          "source": "crates/franken-node/src/encoding/mod.rs"
+        },
+        {
+          "count": 83,
+          "source": "crates/franken-node/src/extensions/artifact_contract.rs"
+        },
+        {
+          "count": 33,
+          "source": "crates/franken-node/src/extensions/mod.rs"
+        },
+        {
+          "count": 18,
+          "source": "crates/franken-node/src/federation/additional_edge_tests.rs"
+        },
+        {
+          "count": 61,
+          "source": "crates/franken-node/src/federation/atc_participation_weighting.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/federation/atc_reciprocity.rs"
+        },
+        {
+          "count": 14,
+          "source": "crates/franken-node/src/federation/atc_signal_extractor.rs"
+        },
+        {
+          "count": 23,
+          "source": "crates/franken-node/src/federation/atc_sketches.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/src/federation/bpet_atc_bridge.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/federation/dgis_atc_bridge.rs"
+        },
+        {
+          "count": 31,
+          "source": "crates/franken-node/src/federation/mod.rs"
+        },
+        {
+          "count": 64,
+          "source": "crates/franken-node/src/lib.rs"
+        },
+        {
+          "count": 541,
+          "source": "crates/franken-node/src/main.rs"
+        },
+        {
+          "count": 57,
+          "source": "crates/franken-node/src/migration/bpet_migration_gate.rs"
+        },
+        {
+          "count": 39,
+          "source": "crates/franken-node/src/migration/dgis_migration_gate.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/migration/migration_protocol_conformance_tests.rs"
+        },
+        {
+          "count": 66,
+          "source": "crates/franken-node/src/migration/mod.rs"
+        },
+        {
+          "count": 66,
+          "source": "crates/franken-node/src/observability/durability_violation.rs"
+        },
+        {
+          "count": 180,
+          "source": "crates/franken-node/src/observability/evidence_ledger.rs"
+        },
+        {
+          "count": 30,
+          "source": "crates/franken-node/src/observability/evidence_ledger_conformance_tests.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/src/observability/metrics.rs"
+        },
+        {
+          "count": 30,
+          "source": "crates/franken-node/src/observability/mod.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/observability/system_metrics_exporter.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/src/observability/validation_proof_economics.rs"
+        },
+        {
+          "count": 75,
+          "source": "crates/franken-node/src/observability/witness_ref.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/src/operator_json_contracts.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/src/ops/cleanup_executor.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/src/ops/close_condition.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/src/ops/doctor.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/src/ops/doctor_integration_tests.rs"
+        },
+        {
+          "count": 66,
+          "source": "crates/franken-node/src/ops/engine_dispatcher.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/src/ops/evidence_index.rs"
+        },
+        {
+          "count": 48,
+          "source": "crates/franken-node/src/ops/mitigation_synthesis.rs"
+        },
+        {
+          "count": 26,
+          "source": "crates/franken-node/src/ops/mod.rs"
+        },
+        {
+          "count": 31,
+          "source": "crates/franken-node/src/ops/ops_conformance_tests.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/src/ops/proof_pipeline.rs"
+        },
+        {
+          "count": 31,
+          "source": "crates/franken-node/src/ops/rch_adapter.rs"
+        },
+        {
+          "count": 20,
+          "source": "crates/franken-node/src/ops/swarm_validation_admission.rs"
+        },
+        {
+          "count": 77,
+          "source": "crates/franken-node/src/ops/telemetry_bridge.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/ops/tokio_drift_checker.rs"
+        },
+        {
+          "count": 27,
+          "source": "crates/franken-node/src/ops/validation_broker.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/src/ops/validation_planner.rs"
+        },
+        {
+          "count": 11,
+          "source": "crates/franken-node/src/ops/validation_proof_cache.rs"
+        },
+        {
+          "count": 24,
+          "source": "crates/franken-node/src/ops/validation_proof_coalescer.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/src/ops/validation_readiness.rs"
+        },
+        {
+          "count": 34,
+          "source": "crates/franken-node/src/ops/validation_recovery_planner.rs"
+        },
+        {
+          "count": 32,
+          "source": "crates/franken-node/src/ops/workspace_pressure_policy.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/src/perf/metamorphic_tests.rs"
+        },
+        {
+          "count": 57,
+          "source": "crates/franken-node/src/perf/mod.rs"
+        },
+        {
+          "count": 97,
+          "source": "crates/franken-node/src/perf/optimization_governor.rs"
+        },
+        {
+          "count": 56,
+          "source": "crates/franken-node/src/policy/approval_workflow.rs"
+        },
+        {
+          "count": 64,
+          "source": "crates/franken-node/src/policy/bayesian_diagnostics.rs"
+        },
+        {
+          "count": 98,
+          "source": "crates/franken-node/src/policy/compat_gates.rs"
+        },
+        {
+          "count": 48,
+          "source": "crates/franken-node/src/policy/compatibility_gate.rs"
+        },
+        {
+          "count": 49,
+          "source": "crates/franken-node/src/policy/controller_boundary_checks.rs"
+        },
+        {
+          "count": 67,
+          "source": "crates/franken-node/src/policy/correctness_envelope.rs"
+        },
+        {
+          "count": 60,
+          "source": "crates/franken-node/src/policy/decision_engine.rs"
+        },
+        {
+          "count": 56,
+          "source": "crates/franken-node/src/policy/evidence_emission.rs"
+        },
+        {
+          "count": 91,
+          "source": "crates/franken-node/src/policy/guardrail_monitor.rs"
+        },
+        {
+          "count": 36,
+          "source": "crates/franken-node/src/policy/hardening_auto_trigger.rs"
+        },
+        {
+          "count": 45,
+          "source": "crates/franken-node/src/policy/hardening_clamps.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/policy/hardening_state_machine.rs"
+        },
+        {
+          "count": 68,
+          "source": "crates/franken-node/src/policy/integrity_sweep_scheduler.rs"
+        },
+        {
+          "count": 36,
+          "source": "crates/franken-node/src/policy/mod.rs"
+        },
+        {
+          "count": 47,
+          "source": "crates/franken-node/src/policy/object_class_tuning.rs"
+        },
+        {
+          "count": 99,
+          "source": "crates/franken-node/src/policy/perf_budget_guard.rs"
+        },
+        {
+          "count": 50,
+          "source": "crates/franken-node/src/policy/policy_explainer.rs"
+        },
+        {
+          "count": 66,
+          "source": "crates/franken-node/src/policy/retroactive_hardening.rs"
+        },
+        {
+          "count": 15,
+          "source": "crates/franken-node/src/policy/runtime_sentinel.rs"
+        },
+        {
+          "count": 46,
+          "source": "crates/franken-node/src/registry/mod.rs"
+        },
+        {
+          "count": 101,
+          "source": "crates/franken-node/src/registry/staking_governance.rs"
+        },
+        {
+          "count": 47,
+          "source": "crates/franken-node/src/remote/computation_registry.rs"
+        },
+        {
+          "count": 80,
+          "source": "crates/franken-node/src/remote/eviction_saga.rs"
+        },
+        {
+          "count": 45,
+          "source": "crates/franken-node/src/remote/idempotency.rs"
+        },
+        {
+          "count": 61,
+          "source": "crates/franken-node/src/remote/idempotency_store.rs"
+        },
+        {
+          "count": 29,
+          "source": "crates/franken-node/src/remote/mod.rs"
+        },
+        {
+          "count": 49,
+          "source": "crates/franken-node/src/remote/remote_bulkhead.rs"
+        },
+        {
+          "count": 41,
+          "source": "crates/franken-node/src/remote/remote_conformance_tests.rs"
+        },
+        {
+          "count": 53,
+          "source": "crates/franken-node/src/remote/virtual_transport_faults.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/src/repair/metamorphic_tests.rs"
+        },
+        {
+          "count": 62,
+          "source": "crates/franken-node/src/repair/mod.rs"
+        },
+        {
+          "count": 117,
+          "source": "crates/franken-node/src/repair/proof_carrying_decode.rs"
+        },
+        {
+          "count": 26,
+          "source": "crates/franken-node/src/replay/mod.rs"
+        },
+        {
+          "count": 35,
+          "source": "crates/franken-node/src/replay/replay_conformance_tests.rs"
+        },
+        {
+          "count": 115,
+          "source": "crates/franken-node/src/replay/time_travel_engine.rs"
+        },
+        {
+          "count": 129,
+          "source": "crates/franken-node/src/runtime/anti_entropy.rs"
+        },
+        {
+          "count": 72,
+          "source": "crates/franken-node/src/runtime/authority_audit.rs"
+        },
+        {
+          "count": 38,
+          "source": "crates/franken-node/src/runtime/bounded_mask.rs"
+        },
+        {
+          "count": 37,
+          "source": "crates/franken-node/src/runtime/bulkhead.rs"
+        },
+        {
+          "count": 99,
+          "source": "crates/franken-node/src/runtime/cancellable_task.rs"
+        },
+        {
+          "count": 41,
+          "source": "crates/franken-node/src/runtime/checkpoint.rs"
+        },
+        {
+          "count": 39,
+          "source": "crates/franken-node/src/runtime/checkpoint_guard.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/src/runtime/clock.rs"
+        },
+        {
+          "count": 67,
+          "source": "crates/franken-node/src/runtime/crash_loop_detector.rs"
+        },
+        {
+          "count": 15,
+          "source": "crates/franken-node/src/runtime/effect_receipt.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/runtime/epoch_guard.rs"
+        },
+        {
+          "count": 34,
+          "source": "crates/franken-node/src/runtime/epoch_transition.rs"
+        },
+        {
+          "count": 62,
+          "source": "crates/franken-node/src/runtime/hardware_planner.rs"
+        },
+        {
+          "count": 86,
+          "source": "crates/franken-node/src/runtime/incident_lab.rs"
+        },
+        {
+          "count": 48,
+          "source": "crates/franken-node/src/runtime/isolation_mesh.rs"
+        },
+        {
+          "count": 46,
+          "source": "crates/franken-node/src/runtime/lane_router.rs"
+        },
+        {
+          "count": 64,
+          "source": "crates/franken-node/src/runtime/lane_scheduler.rs"
+        },
+        {
+          "count": 66,
+          "source": "crates/franken-node/src/runtime/lockstep_harness.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/runtime/metamorphic_scheduler_tests.rs"
+        },
+        {
+          "count": 28,
+          "source": "crates/franken-node/src/runtime/mod.rs"
+        },
+        {
+          "count": 73,
+          "source": "crates/franken-node/src/runtime/nversion_oracle.rs"
+        },
+        {
+          "count": 57,
+          "source": "crates/franken-node/src/runtime/obligation_channel.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/runtime/optimization_governor.rs"
+        },
+        {
+          "count": 54,
+          "source": "crates/franken-node/src/runtime/region_tree.rs"
+        },
+        {
+          "count": 46,
+          "source": "crates/franken-node/src/runtime/resource_governor.rs"
+        },
+        {
+          "count": 140,
+          "source": "crates/franken-node/src/runtime/safe_mode.rs"
+        },
+        {
+          "count": 25,
+          "source": "crates/franken-node/src/runtime/speculation/mod.rs"
+        },
+        {
+          "count": 35,
+          "source": "crates/franken-node/src/runtime/speculation/proof_executor.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/runtime/time_travel.rs"
+        },
+        {
+          "count": 54,
+          "source": "crates/franken-node/src/schema_versions.rs"
+        },
+        {
+          "count": 3,
+          "source": "crates/franken-node/src/schema_versions_byte_layout_golden.rs"
+        },
+        {
+          "count": 44,
+          "source": "crates/franken-node/src/sdk/mod.rs"
+        },
+        {
+          "count": 101,
+          "source": "crates/franken-node/src/sdk/replay_capsule.rs"
+        },
+        {
+          "count": 136,
+          "source": "crates/franken-node/src/sdk/verifier_sdk.rs"
+        },
+        {
+          "count": 59,
+          "source": "crates/franken-node/src/security/adversarial_runner.rs"
+        },
+        {
+          "count": 55,
+          "source": "crates/franken-node/src/security/adversary_graph.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/src/security/blake3_adapter.rs"
+        },
+        {
+          "count": 24,
+          "source": "crates/franken-node/src/security/bpet/adversarial_evolution.rs"
+        },
+        {
+          "count": 13,
+          "source": "crates/franken-node/src/security/bpet/adversarial_harness.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/src/security/bpet/adversarial_scenarios.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/src/security/bpet/calibration_benchmark.rs"
+        },
+        {
+          "count": 16,
+          "source": "crates/franken-node/src/security/bpet/camouflage_detector.rs"
+        },
+        {
+          "count": 14,
+          "source": "crates/franken-node/src/security/bpet/camouflage_fixtures.rs"
+        },
+        {
+          "count": 23,
+          "source": "crates/franken-node/src/security/bpet/cohort_baselines.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/src/security/bpet/dgis_fusion.rs"
+        },
+        {
+          "count": 18,
+          "source": "crates/franken-node/src/security/bpet/drift_features.rs"
+        },
+        {
+          "count": 43,
+          "source": "crates/franken-node/src/security/bpet/economic_integration.rs"
+        },
+        {
+          "count": 24,
+          "source": "crates/franken-node/src/security/bpet/evolution_risk_scorer.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/security/bpet/mod.rs"
+        },
+        {
+          "count": 5,
+          "source": "crates/franken-node/src/security/bpet/trust_surface_integration.rs"
+        },
+        {
+          "count": 96,
+          "source": "crates/franken-node/src/security/challenge_flow.rs"
+        },
+        {
+          "count": 11,
+          "source": "crates/franken-node/src/security/conformal.rs"
+        },
+        {
+          "count": 72,
+          "source": "crates/franken-node/src/security/constant_time.rs"
+        },
+        {
+          "count": 54,
+          "source": "crates/franken-node/src/security/copilot_engine.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/src/security/crypto.rs"
+        },
+        {
+          "count": 8,
+          "source": "crates/franken-node/src/security/cuckoo_filter.rs"
+        },
+        {
+          "count": 79,
+          "source": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/security/degraded_mode_audit.rs"
+        },
+        {
+          "count": 45,
+          "source": "crates/franken-node/src/security/degraded_mode_policy.rs"
+        },
+        {
+          "count": 60,
+          "source": "crates/franken-node/src/security/dgis/barrier_primitives.rs"
+        },
+        {
+          "count": 17,
+          "source": "crates/franken-node/src/security/dgis/contagion_graph.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/src/security/dgis/immunization_planner.rs"
+        },
+        {
+          "count": 52,
+          "source": "crates/franken-node/src/security/dgis/mod.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/security/dgis/risk_surface_integration.rs"
+        },
+        {
+          "count": 59,
+          "source": "crates/franken-node/src/security/dgis/update_copilot.rs"
+        },
+        {
+          "count": 54,
+          "source": "crates/franken-node/src/security/epoch_scoped_keys.rs"
+        },
+        {
+          "count": 25,
+          "source": "crates/franken-node/src/security/fuzz_regression_tests.rs"
+        },
+        {
+          "count": 81,
+          "source": "crates/franken-node/src/security/impossible_default.rs"
+        },
+        {
+          "count": 83,
+          "source": "crates/franken-node/src/security/intent_firewall.rs"
+        },
+        {
+          "count": 95,
+          "source": "crates/franken-node/src/security/interface_hash.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/security/isolation_backend.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/security/isolation_rail_router.rs"
+        },
+        {
+          "count": 120,
+          "source": "crates/franken-node/src/security/lineage_tracker.rs"
+        },
+        {
+          "count": 28,
+          "source": "crates/franken-node/src/security/mod.rs"
+        },
+        {
+          "count": 83,
+          "source": "crates/franken-node/src/security/network_guard.rs"
+        },
+        {
+          "count": 68,
+          "source": "crates/franken-node/src/security/quarantine_controller.rs"
+        },
+        {
+          "count": 87,
+          "source": "crates/franken-node/src/security/remote_cap.rs"
+        },
+        {
+          "count": 58,
+          "source": "crates/franken-node/src/security/revocation_freshness.rs"
+        },
+        {
+          "count": 76,
+          "source": "crates/franken-node/src/security/revocation_freshness_gate.rs"
+        },
+        {
+          "count": 58,
+          "source": "crates/franken-node/src/security/sandbox_policy_compiler.rs"
+        },
+        {
+          "count": 112,
+          "source": "crates/franken-node/src/security/ssrf_policy.rs"
+        },
+        {
+          "count": 52,
+          "source": "crates/franken-node/src/security/staking_governance.rs"
+        },
+        {
+          "count": 95,
+          "source": "crates/franken-node/src/security/sybil_defense.rs"
+        },
+        {
+          "count": 110,
+          "source": "crates/franken-node/src/security/threshold_sig.rs"
+        },
+        {
+          "count": 12,
+          "source": "crates/franken-node/src/security/trajectory_gaming.rs"
+        },
+        {
+          "count": 84,
+          "source": "crates/franken-node/src/security/trust_complexity.rs"
+        },
+        {
+          "count": 108,
+          "source": "crates/franken-node/src/security/trust_zone.rs"
+        },
+        {
+          "count": 65,
+          "source": "crates/franken-node/src/security/vef_degraded_mode.rs"
+        },
+        {
+          "count": 62,
+          "source": "crates/franken-node/src/security/zk_attestation.rs"
+        },
+        {
+          "count": 13,
+          "source": "crates/franken-node/src/storage/cas.rs"
+        },
+        {
+          "count": 9,
+          "source": "crates/franken-node/src/storage/cleanup_receipts.rs"
+        },
+        {
+          "count": 96,
+          "source": "crates/franken-node/src/storage/frankensqlite_adapter.rs"
+        },
+        {
+          "count": 24,
+          "source": "crates/franken-node/src/storage/mod.rs"
+        },
+        {
+          "count": 62,
+          "source": "crates/franken-node/src/storage/models.rs"
+        },
+        {
+          "count": 130,
+          "source": "crates/franken-node/src/storage/retrievability_gate.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/storage/storage_conformance_tests.rs"
+        },
+        {
+          "count": 78,
+          "source": "crates/franken-node/src/supply_chain/artifact_signing.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/src/supply_chain/canonical_perf_test.rs"
+        },
+        {
+          "count": 67,
+          "source": "crates/franken-node/src/supply_chain/category_shift.rs"
+        },
+        {
+          "count": 65,
+          "source": "crates/franken-node/src/supply_chain/certification.rs"
+        },
+        {
+          "count": 54,
+          "source": "crates/franken-node/src/supply_chain/ecosystem_telemetry.rs"
+        },
+        {
+          "count": 72,
+          "source": "crates/franken-node/src/supply_chain/extension_registry.rs"
+        },
+        {
+          "count": 64,
+          "source": "crates/franken-node/src/supply_chain/manifest.rs"
+        },
+        {
+          "count": 55,
+          "source": "crates/franken-node/src/supply_chain/migration_kit.rs"
+        },
+        {
+          "count": 28,
+          "source": "crates/franken-node/src/supply_chain/mod.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/supply_chain/module_resolution_graph.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/src/supply_chain/project_scanner.rs"
+        },
+        {
+          "count": 52,
+          "source": "crates/franken-node/src/supply_chain/provenance.rs"
+        },
+        {
+          "count": 57,
+          "source": "crates/franken-node/src/supply_chain/provenance_gate.rs"
+        },
+        {
+          "count": 61,
+          "source": "crates/franken-node/src/supply_chain/quarantine.rs"
+        },
+        {
+          "count": 49,
+          "source": "crates/franken-node/src/supply_chain/reputation.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/supply_chain/resolution_receipt.rs"
+        },
+        {
+          "count": 33,
+          "source": "crates/franken-node/src/supply_chain/revocation_integration.rs"
+        },
+        {
+          "count": 58,
+          "source": "crates/franken-node/src/supply_chain/revocation_registry.rs"
+        },
+        {
+          "count": 1,
+          "source": "crates/franken-node/src/supply_chain/test_canonical_optimization.rs"
+        },
+        {
+          "count": 60,
+          "source": "crates/franken-node/src/supply_chain/transparency_verifier.rs"
+        },
+        {
+          "count": 114,
+          "source": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/supply_chain/trust_card_fuzz_test.rs"
+        },
+        {
+          "count": 7,
+          "source": "crates/franken-node/src/test_strategies/metamorphic_tests.rs"
+        },
+        {
+          "count": 167,
+          "source": "crates/franken-node/src/testing/lab_runtime.rs"
+        },
+        {
+          "count": 54,
+          "source": "crates/franken-node/src/testing/mod.rs"
+        },
+        {
+          "count": 139,
+          "source": "crates/franken-node/src/testing/scenario_builder.rs"
+        },
+        {
+          "count": 133,
+          "source": "crates/franken-node/src/testing/virtual_transport.rs"
+        },
+        {
+          "count": 37,
+          "source": "crates/franken-node/src/tools/adversarial_resilience_metrics.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/tools/benchmark_methodology.rs"
+        },
+        {
+          "count": 77,
+          "source": "crates/franken-node/src/tools/benchmark_suite.rs"
+        },
+        {
+          "count": 45,
+          "source": "crates/franken-node/src/tools/benchmark_suite_conformance_tests.rs"
+        },
+        {
+          "count": 49,
+          "source": "crates/franken-node/src/tools/compatibility_correctness_metrics.rs"
+        },
+        {
+          "count": 6,
+          "source": "crates/franken-node/src/tools/compatibility_regression_dashboard.rs"
+        },
+        {
+          "count": 55,
+          "source": "crates/franken-node/src/tools/containment_revocation_metrics.rs"
+        },
+        {
+          "count": 27,
+          "source": "crates/franken-node/src/tools/counterfactual_replay.rs"
+        },
+        {
+          "count": 49,
+          "source": "crates/franken-node/src/tools/enterprise_governance.rs"
+        },
+        {
+          "count": 28,
+          "source": "crates/franken-node/src/tools/evidence_replay_edge_cases.rs"
+        },
+        {
+          "count": 61,
+          "source": "crates/franken-node/src/tools/evidence_replay_validator.rs"
+        },
+        {
+          "count": 24,
+          "source": "crates/franken-node/src/tools/evidence_replay_validator_edge_tests.rs"
+        },
+        {
+          "count": 50,
+          "source": "crates/franken-node/src/tools/external_replication_claims.rs"
+        },
+        {
+          "count": 84,
+          "source": "crates/franken-node/src/tools/frontier_demo_gate.rs"
+        },
+        {
+          "count": 4,
+          "source": "crates/franken-node/src/tools/metrics_collection.rs"
+        },
+        {
+          "count": 44,
+          "source": "crates/franken-node/src/tools/migration_incident_datasets.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/tools/migration_speed_failure_metrics.rs"
+        },
+        {
+          "count": 44,
+          "source": "crates/franken-node/src/tools/migration_validation_cohorts.rs"
+        },
+        {
+          "count": 20,
+          "source": "crates/franken-node/src/tools/mod.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/tools/partner_lighthouse_programs.rs"
+        },
+        {
+          "count": 40,
+          "source": "crates/franken-node/src/tools/performance_hardening_metrics.rs"
+        },
+        {
+          "count": 76,
+          "source": "crates/franken-node/src/tools/profile_tuning_harness.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/tools/redteam_evaluations.rs"
+        },
+        {
+          "count": 76,
+          "source": "crates/franken-node/src/tools/replay_bundle.rs"
+        },
+        {
+          "count": 22,
+          "source": "crates/franken-node/src/tools/replay_bundle_conformance_tests.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/tools/replay_bundle_edge_case_tests.rs"
+        },
+        {
+          "count": 28,
+          "source": "crates/franken-node/src/tools/replay_bundle_logic_tests.rs"
+        },
+        {
+          "count": 39,
+          "source": "crates/franken-node/src/tools/replay_determinism_metrics.rs"
+        },
+        {
+          "count": 50,
+          "source": "crates/franken-node/src/tools/report_output_contract.rs"
+        },
+        {
+          "count": 2,
+          "source": "crates/franken-node/src/tools/repro_bundle_export.rs"
+        },
+        {
+          "count": 69,
+          "source": "crates/franken-node/src/tools/reputation_graph_apis.rs"
+        },
+        {
+          "count": 41,
+          "source": "crates/franken-node/src/tools/safe_extension_onboarding.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/tools/security_ops_case_studies.rs"
+        },
+        {
+          "count": 34,
+          "source": "crates/franken-node/src/tools/security_trust_metrics.rs"
+        },
+        {
+          "count": 49,
+          "source": "crates/franken-node/src/tools/transparent_reports.rs"
+        },
+        {
+          "count": 53,
+          "source": "crates/franken-node/src/tools/trust_economics_dashboard.rs"
+        },
+        {
+          "count": 59,
+          "source": "crates/franken-node/src/tools/vef_perf_budget_gate.rs"
+        },
+        {
+          "count": 34,
+          "source": "crates/franken-node/src/tools/verifier_benchmark_releases.rs"
+        },
+        {
+          "count": 71,
+          "source": "crates/franken-node/src/tools/verifier_toolkit.rs"
+        },
+        {
+          "count": 56,
+          "source": "crates/franken-node/src/tools/version_benchmark_standards.rs"
+        },
+        {
+          "count": 55,
+          "source": "crates/franken-node/src/vef/constraint_compiler.rs"
+        },
+        {
+          "count": 52,
+          "source": "crates/franken-node/src/vef/control_integration.rs"
+        },
+        {
+          "count": 48,
+          "source": "crates/franken-node/src/vef/evidence_capsule.rs"
+        },
+        {
+          "count": 25,
+          "source": "crates/franken-node/src/vef/mod.rs"
+        },
+        {
+          "count": 65,
+          "source": "crates/franken-node/src/vef/proof_generator.rs"
+        },
+        {
+          "count": 44,
+          "source": "crates/franken-node/src/vef/proof_scheduler.rs"
+        },
+        {
+          "count": 38,
+          "source": "crates/franken-node/src/vef/proof_service.rs"
+        },
+        {
+          "count": 47,
+          "source": "crates/franken-node/src/vef/proof_verifier.rs"
+        },
+        {
+          "count": 21,
+          "source": "crates/franken-node/src/vef/proof_verifier_conformance_tests.rs"
+        },
+        {
+          "count": 33,
+          "source": "crates/franken-node/src/vef/receipt_chain.rs"
+        },
+        {
+          "count": 63,
+          "source": "crates/franken-node/src/vef/sdk_integration.rs"
+        },
+        {
+          "count": 42,
+          "source": "crates/franken-node/src/vef/verification_state.rs"
+        },
+        {
+          "count": 144,
+          "source": "crates/franken-node/src/verifier_economy/mod.rs"
+        },
+        {
+          "count": 25,
+          "source": "sdk/verifier/src/bundle.rs"
+        },
+        {
+          "count": 7,
+          "source": "sdk/verifier/src/calibration.rs"
+        },
+        {
+          "count": 111,
+          "source": "sdk/verifier/src/capsule.rs"
+        },
+        {
+          "count": 22,
+          "source": "sdk/verifier/src/counterfactual.rs"
+        },
+        {
+          "count": 11,
+          "source": "sdk/verifier/src/honesty_manifest.rs"
+        },
+        {
+          "count": 108,
+          "source": "sdk/verifier/src/lib.rs"
+        },
+        {
+          "count": 3,
+          "source": "sdk/verifier/src/resolution.rs"
+        }
+      ],
+      "scalar": null
+    },
+    {
+      "claim_id": "fuzz_targets_registered",
+      "items": [
+        {
+          "count": 1,
+          "source": "fuzz_targets/canonical_encoder_parity.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/ed25519_preparsed_parity.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_adversary_graph_replay.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_api_request_deserialization.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_api_traceparent_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_audience_token_deserialize.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_baseline_csv_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_blocked_proof_rehydration_input.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_blocked_proof_rehydration_plan.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_cancellation_protocol_transitions.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_canonical_decode_boundary.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_canonical_serializer_deserialize.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_canonical_serializer_roundtrip.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_capability_token_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_checksum_manifest_parse_canonical.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_claim_compiler_external_claim.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_cleanup_receipts_storage.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_cli_path_validation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_cmdline_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_compat_gates_key_id_from_bytes.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_compromise_reduction_report_json.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_config_env_parsing.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_config_toml_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_config_toml_parsing.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_connector_lifecycle_inputs.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_connector_method_validator_contract.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_constant_time_comparison.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_contagion_graph_validate.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_cookie_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_counterfactual_receipt_verify.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_crypto_base64_decode.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_crypto_hex_decode.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_crypto_scheme_cross_domain.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_crypto_scheme_roundtrip.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_crypto_signature_verification.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_crypto_signer_chain.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_cuckoo_filter_insert_contains_remove.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_decision_receipt_verify.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_degraded_mode_audit_validate.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_deterministic_seed_derivation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_deterministic_seed_encoding.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_dgis_spof_detection.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_doctor_input_parsing.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_ed25519_public_key_hex_decode.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_ed25519_signature_boundaries.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_email_validate.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_engine_dispatcher_capability_validation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_env_var_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_epoch_key_derivation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_epoch_validity.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_evidence_ledger_entry_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_evidence_ledger_jsonl_spill.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_extension_registration_manifest_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_federation_atc_reciprocity.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_federation_atc_sketches.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_federation_participation_weighting.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_federation_signal_kind_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_fleet_canonical_payload_float_rejection.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_fleet_decision_receipt_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_fleet_decision_receipt_payload_hash.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_fleet_operation_slot_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_fork_detection_divergence_compare.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_fork_detection_state_hash.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_fragility_fixture_json_loader.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_frame_parser_guardrails.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_frankensqlite_adapter_auth_ops.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_git_status_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_hardening_state_machine_escalate.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_http_header_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_incident_bundle_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_intent_firewall.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_interface_hash_compute_verify.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_ip_address_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_js_string_literal_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_json_parse_value.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_key_role_separation_validation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_lease_coordinator_select.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_merkle_hash_hex_decoder.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_metrics_exporter_statistics.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_metrics_registry_record.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_migration_format_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_migration_report_serialization.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_migration_rewrite_rules.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_migration_rollback.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_migration_smoke_hash.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_mmr_hash_hex_decoder.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_network_allowlist_entry_toml_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_network_guard_egress_rule_match.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_observability_hash_update.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_operator_json_validation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_parse_signed_registration_manifest.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_path_validation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_perf_budget_guard_evaluate.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_policy_override_spec_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_proc_cmdline_decoder.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_product_lane_parse_label.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_quarantine_audit_timestamp_rfc3339.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_quarantine_controller_action.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_receipt_trust_card_roundtrip.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_regex_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_release_manifest_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_remote_cap_scope_check.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_remote_cap_token_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_remote_computation_registry.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_remote_idempotency_derivation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_repair_proof_verify.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_replay_bundle_adversarial_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_replay_bundle_chunking_export.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_replay_bundle_deserialization.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_replay_signature_decode.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_replay_trace_canonical_digest.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_reputation_deterministic_score.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_retrievability_gate_proof_verification.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_revocation_registry_monotonic.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_rewrite_suggestion_engine.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_safe_mode_parse_args.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_sandbox_policy_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_schema_byte_layout_canonical.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_sdk_verifier_bundle_parsing.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_session_mac_deserialize.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_signed_extension_manifest.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_signing_key_blob_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_signing_key_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_ssrf_ipv4_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_ssrf_policy.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_storage_content_hash.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_swarm_timestamp_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_system_metrics_exporter.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_threshold_sig_parser.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_threshold_signature_verification.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_time_travel_engine_replay_validation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_timestamp_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_toml_parse_value.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_trajectory_gaming_camouflage_kind_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_transparency_verifier_inclusion.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_trust_card_canonicalize.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_trust_card_compare_cbor.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_trust_card_envelope_parsing.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_url_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_validation_proof_economics.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_vef_execution_receipt_validate.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_vef_policy_constraints_compile.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_vef_proof_input_envelope.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_version_parse.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/fuzz_witness_ref_validation.rs"
+        },
+        {
+          "count": 1,
+          "source": "fuzz_targets/threshold_sig_parity.rs"
+        }
+      ],
+      "scalar": null
+    },
+    {
+      "claim_id": "validators",
+      "items": [
+        {
+          "count": 1,
+          "source": "scripts/check_activation_pipeline.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_adjacent_substrate_policy.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_admission_budget.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_adversarial_resilience_metrics.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_adversarial_runner.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_adversary_graph.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_ambient_authority.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_anti_amplification.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_anti_entropy_reconciliation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_api_test_support_migration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_architecture_blueprint.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_artifact_persistence.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_artifact_signing.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_atc_claim_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_atc_participation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_atc_reciprocity.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_atc_verifier.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_audience_tokens.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bayesian_diagnostics.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bd_1z5a_evidence_pack.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bd_274s_bayesian_quarantine.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bd_3tw7_evidence_pack.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bd_721z_ambient_authority_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_benchmark_correctness_artifacts.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_benchmark_external.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_benchmark_infra.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_benchmark_methodology.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_benchmark_specs_package.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_benchmark_suite.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_blocked_bead_freshness.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bocpd.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bootstrap_foundation_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bounded_masking.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bpet_adversarial_evolution.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bpet_claim_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bpet_economic.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bpet_governance.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_bpet_migration_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_build_program.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_cancel_injection_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_cancellable_task_protocol.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_cancellation_injection.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_cancellation_protocol.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_canonical_serialization.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_canonical_vectors.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_capability_artifact_format.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_capability_profiles.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_case_study_registry.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_category_shift.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_category_shift_reports.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_certification_levels.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_challenge_flow.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_change_summary_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_checkpoint_placement.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_chokepoint_false_positives.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_claim_compiler.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_claim_language.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_claim_language_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_claim_language_policy.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_claims_manifest.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_close_reason_quality.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compat_bands.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compat_ci_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compat_corpus_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compat_dashboard.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compat_gates.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compat_modes.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compat_registry.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compatibility_corpus.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compatibility_corpus_pass_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compatibility_correctness.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compatibility_correctness_metrics.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compatibility_threat_evidence.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_compromise_reduction_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_computation_registry.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_confidence_report.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_conformance_harness.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_conformance_profile.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_conformance_suite.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_connector_lifecycle.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_containment_revocation_metrics.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_cancel_injection.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_channel.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_dpor_scope.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_epoch.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_evidence.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_evidence_replay.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_idempotency_adoption.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_lab_scenarios.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_lane_mapping.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_lane_policy.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_surface_burndown.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_control_transport_faults.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_controller_boundary.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_copilot_api.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_correctness_envelope.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_counterfactual.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_counterfactual_lab.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_crash_loop_detector.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_crdt.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_cross_repo_validation_drift.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_cross_substrate_e2e.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_decision_engine.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_degraded_mode.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_degraded_mode_audit.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_determinism_conformance.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_deterministic_lab.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_deterministic_seed.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_device_profile.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_dgis_barrier.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_dgis_claim_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_dgis_contagion_simulator.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_dgis_copilot.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_dgis_graph_ingestion.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_dgis_migration_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_divergence_ledger.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_docs_claim_traceability.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_dpor_exploration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_dr_drills.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_durability_modes.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_durability_violation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_ecosystem_apis.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_ecosystem_telemetry.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_effects_firewall.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_enterprise_governance.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_epoch_barrier.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_epoch_barrier_adoption.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_epoch_integration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_epoch_scoped_keys.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_epoch_transition_barrier.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_error_code_registry.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_error_compat.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_error_coverage.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_error_namespace.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_ev_score.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_eviction_saga.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_evidence_emission.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_evidence_entry_schema.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_evidence_ledger.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_evidence_replay_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_evidence_replay_validator.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_execution_scorer.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_expected_loss.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_extension_manifest_schema.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_external_replication_claims.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_external_reproduction.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_failure_replay.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fallback_trigger.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fastapi_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fastapi_skeleton.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_federated_privacy_leakage.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fencing.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fixture_corpus.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fleet_quarantine.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fork_detection.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_foundation_e2e_bundle.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_foundation_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fragility_spof.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_frame_parser.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_frankensqlite_adapter.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_frankensqlite_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_frankensqlite_migration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_frankentui_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_frankentui_migration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_frankentui_snapshots.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_friction_pathway.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_frontier_demo_gates.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fuzz_corpus.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_fuzz_testing.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_gate_api.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_golden_vectors.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_guardrail_monitor.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_hardening_auto_trigger.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_hardening_clamps.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_hardening_perf_regression.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_hardening_state.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_hardening_state_machine.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_hardware_planner.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_harness_throughput.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_health_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_high_assurance_promotion.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_idempotency_key_derivation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_idempotency_store.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_impl_governance.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_impossible_adoption.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_impossible_capabilities.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_impossible_default.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_incident_bundles.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_incident_containment.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_incident_lab.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_independent_replications_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_info_flow_lineage.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_inline_lib_tests.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_integrity_sweep_scheduler.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_intent_firewall.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_interface_hash.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_interop_suite.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_isolation_backend.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_isolation_mesh.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_jcq1z_metamorphic_restoration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_key_role_separation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_l2_oracle.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_lane_scheduler.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_latency_gates.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_lease_conflict.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_lease_coordinator.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_lease_service.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_lineage_sentinel.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_lockstep_runner.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_lockstep_validation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_longitudinal_privacy.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_loss_scoring.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_manifest_negotiation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_marker_lookup.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_marker_stream.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_metamorphic_testing.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_method_stack_compliance.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_method_validator.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migrate_report.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_artifacts.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_cohort_validation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_demo.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_friction_persistence.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_kit.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_pathways.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_pipeline.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_speed_failure_metrics.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_validation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_validation_cohorts.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_migration_velocity_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_minimized_fixtures.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_network_guard.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_no_contract_no_merge.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_no_ready_recovery_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_no_self_compare.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_non_negotiable_constraints.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_nversion_oracle.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_object_class_profiles.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_object_class_tuning.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_obligation_channel_protocol.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_obligation_channels.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_obligation_tracking.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_observability_dashboards.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_offline_coverage.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_open_trust_compat_specs.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_operator_copilot.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_operator_intelligence.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_operator_runbooks.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_optimization_governor.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_oracle_close_condition.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_ownership_violations.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_packaging_profiles.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_partner_lighthouse_programs.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_perf_budget_guard.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_performance_doctrine.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_performance_hardening_metrics.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_placeholder_surface_inventory.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_policy_approval.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_policy_change_workflow.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_policy_checkpoint.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_policy_explainer.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_prestage_engine.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_profile_tuning_harness.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_project_scanner.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_proof_carrying_decode.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_proof_carrying_execution_ledger.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_proof_carrying_speculation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_proof_generator.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_proof_verifier.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_provenance_attestation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_provenance_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_publisher_reputation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_push_bounded_duplicates.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_quarantine_promotion.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_quarantine_store.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_quarantine_workflow.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_rch_dependency_convergence.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_readme_cli_drift.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_redteam_evaluations.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_region_owned_lifecycle.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_region_ownership.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_region_tree_topology.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_release_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_release_perf_profile.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_release_vectors.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_remote_bulkhead.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_remote_idempotency_saga.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_remote_registry_adoption.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_repair_controller.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_replacement_truthfulness_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_replay_bundle.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_replay_bundle_golden_artifacts.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_replay_coverage_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_replay_determinism_metrics.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_replica_artifact_determinism.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_report_output_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_repro_bundle_export.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_reproducible_datasets.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_reputation_graph_apis.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_retention_policy.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_retrievability_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_retroactive_hardening.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_revocation_freshness.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_revocation_integration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_revocation_registry.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_rewrite_engine.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_risk_compatibility.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_risk_scorer.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_rollback_bundles.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_rollback_command.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_rollout_planner.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_rollout_wedge.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_runbook_links.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_safe_extension_onboarding.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_safe_mode.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_saga_wrappers.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_sandbox_profiles.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_scanner_throughput.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_scheduler_lanes.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_schema_migration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_scope_explosion.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_0_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_10_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_10_plan_epic.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_11_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_12_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_13_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_14_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_15_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_16_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_17_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_18_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_19_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_1_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_20_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_21_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_2_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_3_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_4_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_5_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_6_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_7_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_8_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_8_plan_epic.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_10_9_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_11_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_12_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_13_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_14_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_15_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_16_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_section_bootstrap_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_security_doctrine.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_security_trust_metrics.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_semantic_oracle.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_session_auth.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_signal_sybil.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_signed_extension_registry.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_signed_receipt.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_snapshot_policy.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_spec_pack.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_split_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_sqlmodel_integration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_sqlmodel_policy.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_ssrf_policy.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_staking_governance.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_staking_slashing.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_state_model.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_strategic_foundations.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_structured_observability.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_substrate_dependency_map.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_substrate_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_substrate_overhead.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_supervision_tree.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_swarm_validation_evidence_pack.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_telemetry_namespace.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_temporal_concept_drift.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_test_coverage_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_threshold_sig.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_tiered_trust_storage.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_time_travel_replay.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_tnr_ci_verification_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_tnr_observability_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_tokio_bootstrap_guardrail.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_topology_blind_spots.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_trace_context.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_tracker_actionability.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_trajectory_gaming_camouflage.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_transition_abort.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_transparency_verifier.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_transparent_reports.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_transport_fault_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_trust_card.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_trust_complexity.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_trust_economics.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_trust_fabric.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_trust_object_ids.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_universal_verifier_sdk.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_validation_autopilot.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_validation_broker_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_validation_flight_recorder.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_validation_proof_cache_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_validation_proof_coalescer_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_validation_swarm_scheduler_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_adversarial_suite.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_claim_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_claim_integration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_control_integration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_degraded_mode.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_evidence_capsule.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_execution_receipt.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_perf_budget.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_perf_budget_gate.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_policy_constraints.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_proof_scheduler.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_proof_service.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_proof_verifier.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_receipt_chain.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_sdk_integration.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_vef_verification_state.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_verifiable_claims.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_verification_targets_compile.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_verifier_benchmark_releases.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_verifier_contract.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_verifier_economy.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_verifier_replay_operator_e2e.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_verifier_sdk.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_verifier_sdk_capsule.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_verifier_toolkit.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_version_benchmark_standards.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_virtual_transport_faults.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_voi_scheduler.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_waiver_workflow.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_witness_ref.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_workflow_primitive_map.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_zk_attestation.py"
+        },
+        {
+          "count": 1,
+          "source": "scripts/check_zone_segmentation.py"
+        }
+      ],
+      "scalar": null
+    },
+    {
+      "claim_id": "unsafe_blocks",
+      "items": [],
+      "scalar": null
+    },
+    {
+      "claim_id": "license",
+      "items": [],
+      "scalar": "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+    },
+    {
+      "claim_id": "replay_verdict_load_bearing",
+      "items": [],
+      "scalar": "true"
+    }
+  ],
+  "generated_at": "1970-01-01T00:00:00Z",
+  "schema_version": "franken-node/honesty-manifest-evidence/v1"
+}

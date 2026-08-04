@@ -3656,7 +3656,7 @@ mod tests {
     #[test]
     fn staleness_check_uses_fail_closed_boundary_semantics() {
         // Test for bd-l05d8 fix: observation age exactly at threshold should be treated as stale
-        let observation = ResourceGovernorObservation::default();
+        let observation = ResourceGovernorObservation::new(Utc::now(), "test", Vec::new());
         let mut thresholds = ResourceGovernorThresholds::default();
         thresholds.stale_observation_after_ms = 1000;
 

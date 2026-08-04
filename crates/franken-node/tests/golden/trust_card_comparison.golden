@@ -1,0 +1,36 @@
+{
+  "left_extension_id": "npm:@acme/auth-guard",
+  "right_extension_id": "npm:@beta/telemetry-bridge",
+  "changes": [
+    {
+      "field": "certification_level",
+      "left": "gold",
+      "right": "bronze"
+    },
+    {
+      "field": "reputation_score_basis_points",
+      "left": "920",
+      "right": "410"
+    },
+    {
+      "field": "revocation_status",
+      "left": "active",
+      "right": "revoked { reason: \"publisher key compromised\", revoked_at: \"[DATE]t12:01:00z\" }"
+    },
+    {
+      "field": "active_quarantine",
+      "left": "false",
+      "right": "true"
+    },
+    {
+      "field": "capability_declarations",
+      "left": "auth.revoke-session,auth.validate-token",
+      "right": "telemetry.forward"
+    },
+    {
+      "field": "extension_version",
+      "left": "1.4.2",
+      "right": "0.9.1"
+    }
+  ]
+}

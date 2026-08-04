@@ -1,0 +1,5 @@
+{
+  "success": false,
+  "error": "REMOTECAP_TTL_INVALID: ttl must be > 0 (got 0)",
+  "test_case": "zero_expiry_time"
+}

@@ -22,15 +22,11 @@
 //! - SHOULD: 4/4 (100%) ✓
 //! - Total: 11/11 (100%) ✓
 
-use franken_node::policy::{
+use frankenengine_node::policy::{
     bayesian_diagnostics::{CandidateRef, RankedCandidate},
-    decision_engine::{
-        BlockedCandidate, DecisionEngine, DecisionOutcome, DecisionReason, GuardrailId,
-        EVD_DECIDE_001, EVD_DECIDE_002, EVD_DECIDE_003, EVD_DECIDE_004,
-    },
+    decision_engine::{DecisionEngine, DecisionReason, GuardrailId},
     guardrail_monitor::{
-        BudgetId, GuardrailMonitorCertificate, GuardrailMonitorFinding, GuardrailMonitorSet,
-        GuardrailVerdict, SystemState,
+        BudgetId, GuardrailMonitor, GuardrailMonitorSet, GuardrailVerdict, SystemState,
     },
     hardening_state_machine::HardeningLevel,
 };
@@ -45,6 +41,9 @@ struct ConformanceCase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+// RFC-2119 requirement levels: the model is complete even though the current
+// conformance cases only exercise Must/Should.
+#[allow(dead_code)]
 enum RequirementLevel {
     Must,
     Should,
@@ -67,17 +66,8 @@ impl ConformanceResult {
 
 // ── Helper Functions ───────────────────────────────────────────────
 
-/// Create a test candidate reference.
-fn candidate(id: &str) -> CandidateRef {
-    CandidateRef::new(id)
-}
-
 /// Create a test ranked candidate.
-fn ranked_candidate(
-    id: &str,
-    posterior: f64,
-    guardrail_filtered: bool,
-) -> RankedCandidate {
+fn ranked_candidate(id: &str, posterior: f64, guardrail_filtered: bool) -> RankedCandidate {
     RankedCandidate {
         candidate_ref: CandidateRef::new(id),
         posterior_prob: posterior,
@@ -103,21 +93,61 @@ fn healthy_system_state() -> SystemState {
     }
 }
 
-/// Create a mock monitor set that can be configured to produce violations.
-fn mock_monitor_set_with_violations(violations: Vec<(String, BudgetId, String)>) -> GuardrailMonitorSet {
-    // In a real implementation, we would configure the monitors to produce these violations
-    // For testing purposes, we'll create a simplified mock that returns predetermined findings
-    let mut monitors = GuardrailMonitorSet::with_defaults();
-    // Note: This is a simplified approach for testing - in production, the monitor set
-    // would be configured with actual monitor instances that evaluate the system state
+/// A test double monitor that unconditionally blocks with a fixed budget id and
+/// reason, regardless of the system state. Lets a conformance case inject a
+/// deterministic system-level guardrail violation (the production monitors only
+/// block when the live `SystemState` crosses their thresholds).
+#[derive(Debug)]
+struct AlwaysBlockMonitor {
+    name: String,
+    budget_id: BudgetId,
+    reason: String,
+}
+
+impl GuardrailMonitor for AlwaysBlockMonitor {
+    fn check(&self, _state: &SystemState) -> GuardrailVerdict {
+        GuardrailVerdict::Block {
+            reason: self.reason.clone(),
+            budget_id: self.budget_id.clone(),
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn budget_id(&self) -> &BudgetId {
+        &self.budget_id
+    }
+}
+
+/// Create a monitor set that deterministically produces the requested
+/// system-level violations. Each `(name, budget_id, reason)` becomes an
+/// [`AlwaysBlockMonitor`] registered in the set, so `DecisionEngine::decide`
+/// sees a real Block verdict from `certify` and blocks all candidates with those
+/// guardrail ids — rather than the previous no-op stub that returned the default
+/// (non-blocking) monitor set and never produced a system-level block.
+fn mock_monitor_set_with_violations(
+    violations: Vec<(String, BudgetId, String)>,
+) -> GuardrailMonitorSet {
+    let mut monitors = GuardrailMonitorSet::new();
+    for (name, budget_id, reason) in violations {
+        monitors.register(Box::new(AlwaysBlockMonitor {
+            name,
+            budget_id,
+            reason,
+        }));
+    }
     monitors
 }
 
 /// Create a monitor set that blocks with specific violations.
 fn blocking_monitor_set() -> GuardrailMonitorSet {
-    mock_monitor_set_with_violations(vec![
-        ("memory_guardrail".to_string(), BudgetId::new("memory_budget"), "Memory usage exceeded threshold".to_string()),
-    ])
+    mock_monitor_set_with_violations(vec![(
+        "memory_guardrail".to_string(),
+        BudgetId::new("memory_budget"),
+        "Memory usage exceeded threshold".to_string(),
+    )])
 }
 
 /// Create a monitor set that allows all candidates through.
@@ -133,7 +163,7 @@ fn inv_decide_precedence_guardrail_override() -> ConformanceResult {
 
     // Create candidates with high-to-low posterior rankings
     let candidates = vec![
-        ranked_candidate("best", 0.95, true),  // Highest posterior but filtered
+        ranked_candidate("best", 0.95, true), // Highest posterior but filtered
         ranked_candidate("good", 0.80, false), // Should be chosen despite lower rank
         ranked_candidate("okay", 0.60, false),
     ];
@@ -145,7 +175,7 @@ fn inv_decide_precedence_guardrail_override() -> ConformanceResult {
 
     // Verify the guardrail-filtered candidate was blocked despite best posterior
     if let Some(ref chosen) = outcome.chosen {
-        if chosen.as_str() != "good" {
+        if chosen.0.as_str() != "good" {
             return ConformanceResult::Fail {
                 reason: format!("Expected 'good' to be chosen, got {:?}", chosen),
             };
@@ -157,8 +187,10 @@ fn inv_decide_precedence_guardrail_override() -> ConformanceResult {
     }
 
     // Verify the best candidate was blocked
-    let blocked_best = outcome.blocked.iter()
-        .find(|b| b.candidate.as_str() == "best");
+    let blocked_best = outcome
+        .blocked
+        .iter()
+        .find(|b| b.candidate.0.as_str() == "best");
 
     if blocked_best.is_none() {
         return ConformanceResult::Fail {
@@ -206,14 +238,21 @@ fn inv_decide_deterministic_reproducibility() -> ConformanceResult {
     // Verify chosen candidates are identical
     if outcome1.chosen != outcome2.chosen {
         return ConformanceResult::Fail {
-            reason: format!("Chosen candidates differ: {:?} vs {:?}", outcome1.chosen, outcome2.chosen),
+            reason: format!(
+                "Chosen candidates differ: {:?} vs {:?}",
+                outcome1.chosen, outcome2.chosen
+            ),
         };
     }
 
     // Verify blocked candidates are identical
     if outcome1.blocked.len() != outcome2.blocked.len() {
         return ConformanceResult::Fail {
-            reason: format!("Blocked count differs: {} vs {}", outcome1.blocked.len(), outcome2.blocked.len()),
+            reason: format!(
+                "Blocked count differs: {} vs {}",
+                outcome1.blocked.len(),
+                outcome2.blocked.len()
+            ),
         };
     }
 
@@ -228,7 +267,10 @@ fn inv_decide_deterministic_reproducibility() -> ConformanceResult {
     // Verify decision reasons are identical
     if outcome1.reason != outcome2.reason {
         return ConformanceResult::Fail {
-            reason: format!("Decision reasons differ: {:?} vs {:?}", outcome1.reason, outcome2.reason),
+            reason: format!(
+                "Decision reasons differ: {:?} vs {:?}",
+                outcome1.reason, outcome2.reason
+            ),
         };
     }
 
@@ -262,7 +304,11 @@ fn inv_decide_no_panic_all_blocked() -> ConformanceResult {
     // Verify all candidates were blocked
     if outcome.blocked.len() != candidates.len() {
         return ConformanceResult::Fail {
-            reason: format!("Expected {} blocked candidates, got {}", candidates.len(), outcome.blocked.len()),
+            reason: format!(
+                "Expected {} blocked candidates, got {}",
+                candidates.len(),
+                outcome.blocked.len()
+            ),
         };
     }
 
@@ -301,18 +347,27 @@ fn system_level_guardrail_blocking() -> ConformanceResult {
     // Verify all candidates were blocked
     if outcome.blocked.len() != candidates.len() {
         return ConformanceResult::Fail {
-            reason: format!("Expected {} blocked candidates, got {}", candidates.len(), outcome.blocked.len()),
+            reason: format!(
+                "Expected {} blocked candidates, got {}",
+                candidates.len(),
+                outcome.blocked.len()
+            ),
         };
     }
 
     // Verify each blocked candidate has system-level block reasons
     for blocked in &outcome.blocked {
-        let has_system_block = blocked.blocked_by.iter()
+        let has_system_block = blocked
+            .blocked_by
+            .iter()
             .any(|gid| gid.as_str().contains("memory_budget"));
 
         if !has_system_block {
             return ConformanceResult::Fail {
-                reason: format!("Expected system-level block for candidate {}", blocked.candidate.as_str()),
+                reason: format!(
+                    "Expected system-level block for candidate {}",
+                    blocked.candidate.0.as_str()
+                ),
             };
         }
     }
@@ -337,9 +392,9 @@ fn top_candidate_acceptance() -> ConformanceResult {
 
     // Verify the top candidate was chosen
     if let Some(ref chosen) = outcome.chosen {
-        if chosen.as_str() != "perfect" {
+        if chosen.0.as_str() != "perfect" {
             return ConformanceResult::Fail {
-                reason: format!("Expected 'perfect' to be chosen, got {}", chosen.as_str()),
+                reason: format!("Expected 'perfect' to be chosen, got {}", chosen.0.as_str()),
             };
         }
     } else {
@@ -351,7 +406,10 @@ fn top_candidate_acceptance() -> ConformanceResult {
     // Verify no candidates were blocked
     if !outcome.blocked.is_empty() {
         return ConformanceResult::Fail {
-            reason: format!("Expected no blocked candidates, got {}", outcome.blocked.len()),
+            reason: format!(
+                "Expected no blocked candidates, got {}",
+                outcome.blocked.len()
+            ),
         };
     }
 
@@ -404,7 +462,7 @@ fn blocked_candidate_details() -> ConformanceResult {
     let engine = DecisionEngine::new(1000);
 
     let candidates = vec![
-        ranked_candidate("filtered", 0.95, true),  // Per-candidate filter
+        ranked_candidate("filtered", 0.95, true), // Per-candidate filter
         ranked_candidate("allowed", 0.85, false),
     ];
 
@@ -416,16 +474,22 @@ fn blocked_candidate_details() -> ConformanceResult {
     // Verify one candidate was blocked
     if outcome.blocked.len() != 1 {
         return ConformanceResult::Fail {
-            reason: format!("Expected 1 blocked candidate, got {}", outcome.blocked.len()),
+            reason: format!(
+                "Expected 1 blocked candidate, got {}",
+                outcome.blocked.len()
+            ),
         };
     }
 
     let blocked = &outcome.blocked[0];
 
     // Verify blocked candidate details
-    if blocked.candidate.as_str() != "filtered" {
+    if blocked.candidate.0.as_str() != "filtered" {
         return ConformanceResult::Fail {
-            reason: format!("Expected 'filtered' to be blocked, got {}", blocked.candidate.as_str()),
+            reason: format!(
+                "Expected 'filtered' to be blocked, got {}",
+                blocked.candidate.0.as_str()
+            ),
         };
     }
 
@@ -448,7 +512,9 @@ fn blocked_candidate_details() -> ConformanceResult {
     }
 
     // Verify per-candidate guardrail is in the blocking list
-    let has_per_candidate_block = blocked.blocked_by.iter()
+    let has_per_candidate_block = blocked
+        .blocked_by
+        .iter()
         .any(|gid| gid.as_str() == "per_candidate_guardrail");
 
     if !has_per_candidate_block {
@@ -472,7 +538,7 @@ fn guardrail_id_formatting() -> ConformanceResult {
 
     if gid.to_string() != "test-guardrail-001" {
         return ConformanceResult::Fail {
-            reason: format!("GuardrailId to_string() wrong: {}", gid.to_string()),
+            reason: format!("GuardrailId to_string() wrong: {gid}"),
         };
     }
 
@@ -506,9 +572,9 @@ fn fallback_rank_accuracy() -> ConformanceResult {
 
     // Verify rank2 candidate was chosen
     if let Some(ref chosen) = outcome.chosen {
-        if chosen.as_str() != "rank2" {
+        if chosen.0.as_str() != "rank2" {
             return ConformanceResult::Fail {
-                reason: format!("Expected 'rank2' to be chosen, got {}", chosen.as_str()),
+                reason: format!("Expected 'rank2' to be chosen, got {}", chosen.0.as_str()),
             };
         }
     } else {
@@ -536,7 +602,10 @@ fn fallback_rank_accuracy() -> ConformanceResult {
     // Verify exactly 2 candidates were blocked
     if outcome.blocked.len() != 2 {
         return ConformanceResult::Fail {
-            reason: format!("Expected 2 blocked candidates, got {}", outcome.blocked.len()),
+            reason: format!(
+                "Expected 2 blocked candidates, got {}",
+                outcome.blocked.len()
+            ),
         };
     }
 
@@ -548,9 +617,9 @@ fn mixed_blocking_scenarios() -> ConformanceResult {
     let engine = DecisionEngine::new(1000);
 
     let candidates = vec![
-        ranked_candidate("sys_and_per", 0.95, true),  // Both system and per-candidate blocks
-        ranked_candidate("sys_only", 0.85, false),    // Only system block
-        ranked_candidate("per_only", 0.75, true),     // Only per-candidate block (if no system blocks)
+        ranked_candidate("sys_and_per", 0.95, true), // Both system and per-candidate blocks
+        ranked_candidate("sys_only", 0.85, false),   // Only system block
+        ranked_candidate("per_only", 0.75, true), // Only per-candidate block (if no system blocks)
     ];
 
     let monitors = blocking_monitor_set(); // Creates system-level blocks
@@ -568,20 +637,34 @@ fn mixed_blocking_scenarios() -> ConformanceResult {
     // All candidates should be blocked
     if outcome.blocked.len() != candidates.len() {
         return ConformanceResult::Fail {
-            reason: format!("Expected {} blocked candidates, got {}", candidates.len(), outcome.blocked.len()),
+            reason: format!(
+                "Expected {} blocked candidates, got {}",
+                candidates.len(),
+                outcome.blocked.len()
+            ),
         };
     }
 
     // Verify the mixed blocked candidate has both system and per-candidate blocks
-    let mixed_blocked = outcome.blocked.iter()
-        .find(|b| b.candidate.as_str() == "sys_and_per")
-        .ok_or_else(|| ConformanceResult::Fail {
-            reason: "Could not find 'sys_and_per' in blocked candidates".to_string(),
-        })?;
+    let mixed_blocked = match outcome
+        .blocked
+        .iter()
+        .find(|b| b.candidate.0.as_str() == "sys_and_per")
+    {
+        Some(blocked) => blocked,
+        None => {
+            return ConformanceResult::Fail {
+                reason: "Could not find 'sys_and_per' in blocked candidates".to_string(),
+            };
+        }
+    };
 
     if mixed_blocked.blocked_by.len() < 2 {
         return ConformanceResult::Fail {
-            reason: format!("Expected at least 2 blocking guardrails for mixed candidate, got {}", mixed_blocked.blocked_by.len()),
+            reason: format!(
+                "Expected at least 2 blocking guardrails for mixed candidate, got {}",
+                mixed_blocked.blocked_by.len()
+            ),
         };
     }
 
@@ -593,9 +676,7 @@ fn epoch_id_preservation() -> ConformanceResult {
     let test_epoch = 12345;
     let engine = DecisionEngine::new(test_epoch);
 
-    let candidates = vec![
-        ranked_candidate("test", 0.90, false),
-    ];
+    let candidates = vec![ranked_candidate("test", 0.90, false)];
 
     let monitors = permissive_monitor_set();
     let state = healthy_system_state();
@@ -633,7 +714,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "INV-DECIDE-NO-PANIC: AllBlocked returned (never panic) when no candidate passes",
         test_fn: inv_decide_no_panic_all_blocked,
     },
-
     // Decision Logic (MUST)
     ConformanceCase {
         id: "BD15U3-SYSTEM-BLOCK-001",
@@ -659,7 +739,6 @@ const CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Blocked candidate details validation",
         test_fn: blocked_candidate_details,
     },
-
     // Utility and Edge Cases (SHOULD)
     ConformanceCase {
         id: "BD15U3-ID-FORMAT-001",
@@ -720,15 +799,21 @@ impl ConformanceStats {
         match level {
             RequirementLevel::Must => {
                 self.must_total += 1;
-                if is_pass { self.must_pass += 1; }
+                if is_pass {
+                    self.must_pass += 1;
+                }
             }
             RequirementLevel::Should => {
                 self.should_total += 1;
-                if is_pass { self.should_pass += 1; }
+                if is_pass {
+                    self.should_pass += 1;
+                }
             }
             RequirementLevel::May => {
                 self.may_total += 1;
-                if is_pass { self.may_pass += 1; }
+                if is_pass {
+                    self.may_pass += 1;
+                }
             }
         }
     }
@@ -755,6 +840,8 @@ impl ConformanceStats {
 
 #[derive(Debug)]
 struct ConformanceReport {
+    // Recorded for report provenance; not asserted on directly.
+    #[allow(dead_code)]
     spec_id: String,
     stats: ConformanceStats,
     results: Vec<(String, RequirementLevel, ConformanceResult)>,
@@ -789,12 +876,27 @@ impl ConformanceReport {
              ## Detailed Results\n\n\
              | Test ID | Level | Status | Description |\n\
              |---------|-------|--------|--------------|\n",
-            self.stats.must_pass, self.stats.must_total,
-            if self.stats.must_total > 0 { self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0 } else { 0.0 },
-            self.stats.should_pass, self.stats.should_total,
-            if self.stats.should_total > 0 { self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0 } else { 0.0 },
-            self.stats.may_pass, self.stats.may_total,
-            if self.stats.may_total > 0 { self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0 } else { 0.0 },
+            self.stats.must_pass,
+            self.stats.must_total,
+            if self.stats.must_total > 0 {
+                self.stats.must_pass as f64 / self.stats.must_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.should_pass,
+            self.stats.should_total,
+            if self.stats.should_total > 0 {
+                self.stats.should_pass as f64 / self.stats.should_total as f64 * 100.0
+            } else {
+                0.0
+            },
+            self.stats.may_pass,
+            self.stats.may_total,
+            if self.stats.may_total > 0 {
+                self.stats.may_pass as f64 / self.stats.may_total as f64 * 100.0
+            } else {
+                0.0
+            },
             self.stats.compliance_score(),
         );
 
@@ -811,12 +913,16 @@ impl ConformanceReport {
             };
 
             // Find the description from the case
-            let description = CONFORMANCE_CASES.iter()
+            let description = CONFORMANCE_CASES
+                .iter()
                 .find(|case| case.id == test_id)
                 .map(|case| case.description)
                 .unwrap_or("Unknown test case");
 
-            md.push_str(&format!("| {} | {} | {} | {} |\n", test_id, level_str, status, description));
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                test_id, level_str, status, description
+            ));
         }
 
         md
@@ -838,38 +944,85 @@ mod tests {
 
         // Verify all MUST requirements pass
         if report.stats.must_total > 0 && report.stats.must_pass < report.stats.must_total {
-            let failed_musts: Vec<_> = report.results.iter()
-                .filter(|(_, level, result)| *level == RequirementLevel::Must && matches!(result, ConformanceResult::Fail { .. }))
+            let failed_musts: Vec<_> = report
+                .results
+                .iter()
+                .filter(|(_, level, result)| {
+                    *level == RequirementLevel::Must
+                        && matches!(result, ConformanceResult::Fail { .. })
+                })
                 .collect();
 
-            panic!("❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
+            panic!(
+                "❌ CRITICAL: {}/{} MUST requirements failed:\n{:#?}",
                 report.stats.must_total - report.stats.must_pass,
                 report.stats.must_total,
-                failed_musts);
+                failed_musts
+            );
         }
 
         // Check compliance threshold (95% for bd specifications)
         let compliance = report.stats.compliance_score();
         if compliance < 95.0 {
-            panic!("❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold", compliance);
+            panic!(
+                "❌ COMPLIANCE: {:.1}% < 95.0% minimum threshold",
+                compliance
+            );
         }
 
-        println!("✅ bd-15u3 CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
+        println!(
+            "✅ bd-15u3 CONFORMANCE: {:.1}% ({}/{} MUST, {}/{} SHOULD)",
             compliance,
-            report.stats.must_pass, report.stats.must_total,
-            report.stats.should_pass, report.stats.should_total);
+            report.stats.must_pass,
+            report.stats.must_total,
+            report.stats.should_pass,
+            report.stats.should_total
+        );
     }
 
     // Individual test method for each conformance case
-    #[test] fn inv_precedence() { inv_decide_precedence_guardrail_override().unwrap_pass(); }
-    #[test] fn inv_deterministic() { inv_decide_deterministic_reproducibility().unwrap_pass(); }
-    #[test] fn inv_no_panic() { inv_decide_no_panic_all_blocked().unwrap_pass(); }
-    #[test] fn system_blocking() { system_level_guardrail_blocking().unwrap_pass(); }
-    #[test] fn top_acceptance() { top_candidate_acceptance().unwrap_pass(); }
-    #[test] fn empty_list() { empty_candidate_list_handling().unwrap_pass(); }
-    #[test] fn blocked_details() { blocked_candidate_details().unwrap_pass(); }
-    #[test] fn id_formatting() { guardrail_id_formatting().unwrap_pass(); }
-    #[test] fn fallback_rank() { fallback_rank_accuracy().unwrap_pass(); }
-    #[test] fn mixed_blocking() { mixed_blocking_scenarios().unwrap_pass(); }
-    #[test] fn epoch_preserve() { epoch_id_preservation().unwrap_pass(); }
+    #[test]
+    fn inv_precedence() {
+        inv_decide_precedence_guardrail_override().unwrap_pass();
+    }
+    #[test]
+    fn inv_deterministic() {
+        inv_decide_deterministic_reproducibility().unwrap_pass();
+    }
+    #[test]
+    fn inv_no_panic() {
+        inv_decide_no_panic_all_blocked().unwrap_pass();
+    }
+    #[test]
+    fn system_blocking() {
+        system_level_guardrail_blocking().unwrap_pass();
+    }
+    #[test]
+    fn top_acceptance() {
+        top_candidate_acceptance().unwrap_pass();
+    }
+    #[test]
+    fn empty_list() {
+        empty_candidate_list_handling().unwrap_pass();
+    }
+    #[test]
+    fn blocked_details() {
+        blocked_candidate_details().unwrap_pass();
+    }
+    #[test]
+    fn id_formatting() {
+        guardrail_id_formatting().unwrap_pass();
+    }
+    #[test]
+    fn fallback_rank() {
+        fallback_rank_accuracy().unwrap_pass();
+    }
+    #[test]
+    fn mixed_blocking() {
+        mixed_blocking_scenarios().unwrap_pass();
+    }
+    #[test]
+    fn epoch_preserve() {
+        epoch_id_preservation().unwrap_pass();
+    }
 }

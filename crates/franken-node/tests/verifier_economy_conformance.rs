@@ -335,7 +335,7 @@ fn trace_commitment_root(trace_chunk_hashes: &[String]) -> Option<String> {
         .map(|hash| normalize_sha256_prefixed(hash))
         .collect::<Option<Vec<_>>>()?;
     while level.len() > 1 {
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut index = 0;
         while index < level.len() {
             let left = &level[index];

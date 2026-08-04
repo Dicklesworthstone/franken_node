@@ -170,6 +170,7 @@ impl DegradedModeAuditLog {
 #[cfg(test)]
 mod tests {
     use super::{AuditError, DegradedModeAuditLog, DegradedModeEvent, validate_schema};
+    use crate::push_bounded;
 
     fn valid_event() -> DegradedModeEvent {
         DegradedModeEvent {

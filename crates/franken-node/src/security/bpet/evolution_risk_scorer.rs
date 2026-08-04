@@ -30,6 +30,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::security::conformal::{
+    ConformalRiskSet, FrozenConformalArtifact, MAX_BASIS_POINTS, calibrated_mondrian_risk_set,
+};
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -52,6 +56,9 @@ pub const SCHEMA_VERSION: &str = "evolution-risk-scorer-v1";
 
 /// Identifier reported by [`WeightingPolicy::policy_v1`].
 pub const POLICY_V1_VERSION: &str = "policy_v1";
+
+/// Default Mondrian risk class used when calibrating evolution-risk scores.
+pub const EVOLUTION_CONFORMAL_RISK_CLASS: &str = "bpet_evolution";
 
 /// Tolerance used by [`WeightingPolicy::validate`] when checking the
 /// sum-to-one invariant on weights.
@@ -92,6 +99,8 @@ pub enum ScorerError {
     ZeroBootstrapIterations,
     #[error("noise distribution std_dev must be finite and >= 0, got {0}")]
     InvalidNoiseStdDev(f64),
+    #[error("conformal calibration failed: {0}")]
+    ConformalCalibration(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +306,19 @@ impl ConfidenceInterval {
     }
 }
 
+/// Evolution-risk score enriched with a Mondrian conformal risk set.
+///
+/// This intentionally wraps [`compute_risk_score`] instead of replacing it so
+/// existing BPET callers keep their current explainability contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibratedEvolutionRiskScore {
+    pub score: f64,
+    pub score_basis_points: u16,
+    pub explanation: ExplanationVector,
+    pub risk_set: ConformalRiskSet,
+    pub empirical_coverage_basis_points: u16,
+}
+
 // ---------------------------------------------------------------------------
 // NoiseDistribution
 // ---------------------------------------------------------------------------
@@ -376,6 +398,43 @@ pub fn compute_risk_score(
     Ok((score, explanation))
 }
 
+/// Compute the normal BPET evolution score and attach a conformal risk set.
+///
+/// The score path is unchanged: validation, feature contributions, and the
+/// final scalar score all come from [`compute_risk_score`]. The wrapper only
+/// converts the scalar to basis points and resolves the requested Mondrian
+/// quantile from a frozen conformal artifact.
+pub fn compute_calibrated_risk_score(
+    sample_id: &str,
+    risk_class: &str,
+    features: &FeatureVector,
+    policy: &WeightingPolicy,
+    artifact: &FrozenConformalArtifact,
+) -> Result<CalibratedEvolutionRiskScore, ScorerError> {
+    let (score, explanation) = compute_risk_score(features, policy)?;
+    let score_basis_points = score_to_basis_points(score);
+    let quantile = artifact
+        .quantiles
+        .iter()
+        .find(|quantile| quantile.risk_class == risk_class)
+        .ok_or_else(|| {
+            ScorerError::ConformalCalibration(format!(
+                "missing conformal quantile for risk class `{risk_class}`"
+            ))
+        })?;
+    let risk_set =
+        calibrated_mondrian_risk_set(sample_id, risk_class, score_basis_points, artifact)
+            .map_err(|err| ScorerError::ConformalCalibration(err.to_string()))?;
+
+    Ok(CalibratedEvolutionRiskScore {
+        score,
+        score_basis_points,
+        explanation,
+        risk_set,
+        empirical_coverage_basis_points: quantile.finite_sample_coverage_floor_bp,
+    })
+}
+
 /// Compute a percentile-based bootstrap confidence interval around the
 /// risk score.
 ///
@@ -450,6 +509,10 @@ fn quantile(sorted: &[f64], q: f64) -> f64 {
     }
     let idx = idx as usize;
     sorted[idx.min(n - 1)]
+}
+
+fn score_to_basis_points(score: f64) -> u16 {
+    (score.clamp(0.0, 1.0) * f64::from(MAX_BASIS_POINTS)).round() as u16
 }
 
 /// Perturb a feature with a Gaussian sample and clip into [0, 1].
@@ -543,6 +606,7 @@ impl DeterministicPrng {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::conformal::FrozenConformalQuantile;
 
     fn features(drift: f64, regime: f64, hazard: f64, provenance: f64) -> FeatureVector {
         FeatureVector {
@@ -550,6 +614,32 @@ mod tests {
             regime_shift: regime,
             hazard,
             provenance,
+        }
+    }
+
+    fn conformal_artifact() -> FrozenConformalArtifact {
+        FrozenConformalArtifact {
+            schema_version: "conformal.frozen_quantile_artifact.v1".to_string(),
+            generated_at: "1970-01-01T00:00:00Z".to_string(),
+            sample_schema_version: "conformal.score_sample.v1".to_string(),
+            corpus_hash: "sha256:test".to_string(),
+            sample_count: 20,
+            risk_class_count: 1,
+            target_alpha_bp: 500,
+            quantiles: vec![FrozenConformalQuantile {
+                risk_class: EVOLUTION_CONFORMAL_RISK_CLASS.to_string(),
+                sample_count: 20,
+                positive_count: 10,
+                negative_count: 10,
+                target_alpha_bp: 500,
+                quantile_rank: 19,
+                quantile_bp: 3_000,
+                min_nonconformity_bp: 100,
+                max_nonconformity_bp: 3_000,
+                finite_sample_coverage_floor_bp: 9_500,
+            }],
+            event_codes: vec!["FN-CONFORMAL-001".to_string()],
+            audit_notes: vec!["test artifact".to_string()],
         }
     }
 
@@ -791,5 +881,27 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted, "BTreeMap should iterate in sorted key order");
+    }
+
+    #[test]
+    fn calibrated_wrapper_preserves_score_and_emits_risk_set() {
+        let fv = features(1.0, 1.0, 1.0, 1.0);
+        let calibrated = compute_calibrated_risk_score(
+            "pkg-a@1.0.0",
+            EVOLUTION_CONFORMAL_RISK_CLASS,
+            &fv,
+            &WeightingPolicy::policy_v1(),
+            &conformal_artifact(),
+        )
+        .unwrap();
+
+        assert_eq!(calibrated.score_basis_points, 10_000);
+        assert_eq!(calibrated.empirical_coverage_basis_points, 9_500);
+        assert_eq!(
+            calibrated.risk_set.risk_class,
+            EVOLUTION_CONFORMAL_RISK_CLASS
+        );
+        assert_eq!(calibrated.risk_set.included_labels, vec!["positive"]);
+        assert!((calibrated.explanation.total_contribution() - calibrated.score).abs() < 1e-12);
     }
 }

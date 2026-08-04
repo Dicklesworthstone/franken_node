@@ -5,9 +5,9 @@
 //! update the constant here and grep for its old value to find any hardcoded
 //! references that were missed.
 //!
-//! **Note:** existing modules still define their own local copies.  This registry
-//! is the *authoritative* catalogue — a future migration task will re-export from
-//! here.
+//! **Note:** some existing modules still define their own local copies.  This
+//! registry is the *authoritative* catalogue; product modules should re-export
+//! from here as their schemas are centralized.
 
 // ── Runtime & Scheduling ───────────────────────────────────────────
 pub const LANE_SCHEDULER: &str = "ls-v1.0";
@@ -23,6 +23,9 @@ pub const HARDWARE_PLANNER: &str = "hwp-v1.0";
 pub const INCIDENT_LAB: &str = "incident-lab-v1.0";
 pub const AUTHORITY_AUDIT: &str = "aa-v1.0";
 pub const SPECULATION_PROOF_EXECUTOR: &str = "speculation-proof-v1.0";
+pub const EFFECT_RECEIPT: &str = "effect-receipt-v1.1";
+pub const HOST_EFFECT_LEDGER: &str = "host-effect-ledger-v1.0";
+pub const RUN_SENTINEL_REPORT: &str = "runtime_sentinel.run_report.v1";
 
 // ── Control Plane ──────────────────────────────────────────────────
 pub const TRANSITION_ABORT: &str = "ta-v1.0";
@@ -56,6 +59,52 @@ pub const VEF_POLICY_LANGUAGE: &str = "vef-policy-lang-v1";
 pub const VEF_CONSTRAINT_COMPILER: &str = "vef-constraint-compiler-v1";
 pub const VEF_POLICY_CONSTRAINTS: &str = "vef-policy-constraints-v1";
 
+// ── Compatibility ─────────────────────────────────────────────────
+pub const COMPAT_OPERATION_CONTRACT: &str = "compat-operation-contract-v1";
+pub const COMPAT_FS_READ_FILE_ARGS: &str = "compat-fs-read-file-args-v1";
+pub const COMPAT_FS_READ_FILE_RESULT: &str = "compat-fs-read-file-result-v1";
+pub const COMPAT_FS_READ_FILE_ERROR: &str = "compat-fs-read-file-error-v1";
+pub const COMPAT_FS_WRITE_FILE_ARGS: &str = "compat-fs-write-file-args-v1";
+pub const COMPAT_FS_WRITE_FILE_RESULT: &str = "compat-fs-write-file-result-v1";
+pub const COMPAT_FS_WRITE_FILE_ERROR: &str = "compat-fs-write-file-error-v1";
+pub const COMPAT_HTTP_REQUEST_ARGS: &str = "compat-http-request-args-v1";
+pub const COMPAT_HTTP_REQUEST_RESULT: &str = "compat-http-request-result-v1";
+pub const COMPAT_HTTP_REQUEST_ERROR: &str = "compat-http-request-error-v1";
+pub const COMPAT_PROCESS_ENV_ARGS: &str = "compat-process-env-args-v1";
+pub const COMPAT_PROCESS_ENV_RESULT: &str = "compat-process-env-result-v1";
+pub const COMPAT_PROCESS_ENV_ERROR: &str = "compat-process-env-error-v1";
+pub const COMPAT_MODULE_RESOLVE_ARGS: &str = "compat-module-resolve-args-v1";
+pub const COMPAT_MODULE_RESOLVE_RESULT: &str = "compat-module-resolve-result-v1";
+pub const COMPAT_MODULE_RESOLVE_ERROR: &str = "compat-module-resolve-error-v1";
+/// Schema for the `proof_carrying_effects` evidence block consumed by the
+/// dual-oracle close-condition gate (`ops::close_condition`) and mirrored by
+/// `scripts/check_oracle_close_condition.py`.
+pub const L1_PROOF_CARRYING_EFFECTS: &str = "franken-node/l1-proof-carrying-effects/v1";
+/// v2 of the `proof_carrying_effects` evidence block: adds mandatory
+/// `receipt_chain_entries` (serialized `EffectReceiptChainEntry` array) that
+/// the close-condition gate RE-DERIVES — chain integrity, per-receipt
+/// validity, subjects, and counts are recomputed and cross-checked against
+/// the declared summary fields, failing closed on any mismatch. v1 remains
+/// the legacy declared-summary form until the real-run producer lands
+/// (bd-qr5i2.2).
+pub const L1_PROOF_CARRYING_EFFECTS_V2: &str = "franken-node/l1-proof-carrying-effects/v2";
+/// Acceptance-invariant subject list (bd-f5b04.2.4): the canonical
+/// first-tranche operations that must be BOTH lockstep/parity-GREEN AND
+/// proof-carrying (a verified `EffectReceipt`) before the L1 Product Oracle
+/// may report GREEN. Single authoritative list: the `api::compat_gate`
+/// contract layer proves it stays derivable from
+/// `FIRST_TRANCHE_OPERATION_CONTRACTS`, `ops::close_condition` enforces it
+/// fail-closed, and the Python CI gate mirrors it.
+pub const L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS: &[&str] = &["fs.read", "fs.write", "http.request"];
+/// Schema for the `lockstep_verdict` evidence block carried by
+/// `artifacts/oracle/l1_product_verdict.json` (bd-ry7d1). Produced by a REAL
+/// dual-runtime lockstep-oracle run (`ops::proof_carrying_evidence`), it
+/// embeds the full `runtime::nversion_oracle::DivergenceReport`; the
+/// close-condition gate and the Python CI mirror RE-DERIVE the verdict from
+/// the embedded report (runtimes, checks, divergences) and fail closed on
+/// any declared↔derived mismatch — a declared "pass" is never trusted.
+pub const L1_LOCKSTEP_VERDICT_V1: &str = "franken-node/l1-lockstep-verdict/v1";
+
 // ── Verifier & Evidence ────────────────────────────────────────────
 pub const VERIFIER_SDK_API: &str = "1.0.0";
 pub const VERIFIER_SDK_SCHEMA_TAG: &str = "vsk-v1.0";
@@ -75,6 +124,8 @@ pub const VEF_SDK_INTEGRATION_FORMAT: &str = "1.0.0";
 pub const VEF_SDK_INTEGRATION_MIN_FORMAT: &str = "1.0.0";
 pub const VEF_RECEIPT_CHAIN: &str = "vef-receipt-chain-v1";
 pub const VEF_CONTROL_INTEGRATION: &str = "vef-control-integration-v1";
+pub const CAPABILITY_PROOF: &str = "capability-proof-v1";
+pub const CAPABILITY_RECEIPT: &str = "capability-receipt-v1";
 
 // ── Extensions ─────────────────────────────────────────────────────
 pub const CAPABILITY_ARTIFACT_CONTRACT: &str = "capability-artifact-v1.0";
@@ -90,6 +141,7 @@ pub const CONFORMANCE_SUITE_VERSION: &str = "1.0.0";
 pub const INTENT_FIREWALL: &str = "fw-v1.0";
 pub const ADVERSARY_CORPUS_RECORD: &str = "bpet-adversary-corpus-record-v1";
 pub const DECISION_RECEIPT_CBOR_EXPORT: &str = "decision-receipt-cbor-v2";
+pub const CRYPTO_SUITE_REGISTRY: &str = "crypto-suite-registry-v1";
 pub const ZK_ATTESTATION: &str = "zka-v1.0";
 pub const STAKING_GOVERNANCE: &str = "staking-v1.0";
 pub const LINEAGE_TRACKER: &str = "ifl-v1.0";
@@ -99,12 +151,14 @@ pub const REGISTRY_STAKING_GOVERNANCE: &str = "staking-v1.0";
 
 // ── Storage ────────────────────────────────────────────────────────
 pub const STORAGE_MODEL: &str = "1.0.0";
+pub const CONTENT_ADDRESSED_STORE: &str = "cas-v1.0";
 
 // ── Supply Chain ───────────────────────────────────────────────────
 pub const MANIFEST: &str = "1.0";
 pub const EXTENSION_REGISTRY: &str = "ser-v2.0";
 pub const MIGRATION_KIT: &str = "mke-v1.0";
 pub const MODULE_RESOLUTION_GRAPH: &str = "module-resolution-graph-v1";
+pub const RESOLUTION_RECEIPT: &str = "resolution-receipt-v1";
 
 // ── Remote ─────────────────────────────────────────────────────────
 pub const IDEMPOTENCY_STORE: &str = "ids-v1.0";
@@ -172,6 +226,9 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("incident_lab", INCIDENT_LAB),
         ("authority_audit", AUTHORITY_AUDIT),
         ("speculation_proof_executor", SPECULATION_PROOF_EXECUTOR),
+        ("effect_receipt", EFFECT_RECEIPT),
+        ("host_effect_ledger", HOST_EFFECT_LEDGER),
+        ("run_sentinel_report", RUN_SENTINEL_REPORT),
         // Control Plane
         ("transition_abort", TRANSITION_ABORT),
         ("control_lane_policy", CONTROL_LANE_POLICY),
@@ -205,6 +262,26 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("vef_policy_language", VEF_POLICY_LANGUAGE),
         ("vef_constraint_compiler", VEF_CONSTRAINT_COMPILER),
         ("vef_policy_constraints", VEF_POLICY_CONSTRAINTS),
+        // Compatibility
+        ("compat_operation_contract", COMPAT_OPERATION_CONTRACT),
+        ("compat_fs_read_file_args", COMPAT_FS_READ_FILE_ARGS),
+        ("compat_fs_read_file_result", COMPAT_FS_READ_FILE_RESULT),
+        ("compat_fs_read_file_error", COMPAT_FS_READ_FILE_ERROR),
+        ("compat_fs_write_file_args", COMPAT_FS_WRITE_FILE_ARGS),
+        ("compat_fs_write_file_result", COMPAT_FS_WRITE_FILE_RESULT),
+        ("compat_fs_write_file_error", COMPAT_FS_WRITE_FILE_ERROR),
+        ("compat_http_request_args", COMPAT_HTTP_REQUEST_ARGS),
+        ("compat_http_request_result", COMPAT_HTTP_REQUEST_RESULT),
+        ("compat_http_request_error", COMPAT_HTTP_REQUEST_ERROR),
+        ("compat_process_env_args", COMPAT_PROCESS_ENV_ARGS),
+        ("compat_process_env_result", COMPAT_PROCESS_ENV_RESULT),
+        ("compat_process_env_error", COMPAT_PROCESS_ENV_ERROR),
+        ("compat_module_resolve_args", COMPAT_MODULE_RESOLVE_ARGS),
+        ("compat_module_resolve_result", COMPAT_MODULE_RESOLVE_RESULT),
+        ("compat_module_resolve_error", COMPAT_MODULE_RESOLVE_ERROR),
+        ("l1_proof_carrying_effects", L1_PROOF_CARRYING_EFFECTS),
+        ("l1_proof_carrying_effects_v2", L1_PROOF_CARRYING_EFFECTS_V2),
+        ("l1_lockstep_verdict_v1", L1_LOCKSTEP_VERDICT_V1),
         // Verifier & Evidence
         ("verifier_sdk_api", VERIFIER_SDK_API),
         ("verifier_sdk_schema_tag", VERIFIER_SDK_SCHEMA_TAG),
@@ -233,6 +310,8 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ),
         ("vef_receipt_chain", VEF_RECEIPT_CHAIN),
         ("vef_control_integration", VEF_CONTROL_INTEGRATION),
+        ("capability_proof", CAPABILITY_PROOF),
+        ("capability_receipt", CAPABILITY_RECEIPT),
         // Extensions
         ("capability_artifact_contract", CAPABILITY_ARTIFACT_CONTRACT),
         // Claims
@@ -244,6 +323,7 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("intent_firewall", INTENT_FIREWALL),
         ("adversary_corpus_record", ADVERSARY_CORPUS_RECORD),
         ("decision_receipt_cbor_export", DECISION_RECEIPT_CBOR_EXPORT),
+        ("crypto_suite_registry", CRYPTO_SUITE_REGISTRY),
         ("zk_attestation", ZK_ATTESTATION),
         ("staking_governance", STAKING_GOVERNANCE),
         ("lineage_tracker", LINEAGE_TRACKER),
@@ -251,11 +331,13 @@ pub fn all_versions() -> Vec<(&'static str, &'static str)> {
         ("registry_staking_governance", REGISTRY_STAKING_GOVERNANCE),
         // Storage
         ("storage_model", STORAGE_MODEL),
+        ("content_addressed_store", CONTENT_ADDRESSED_STORE),
         // Supply Chain
         ("manifest", MANIFEST),
         ("extension_registry", EXTENSION_REGISTRY),
         ("migration_kit", MIGRATION_KIT),
         ("module_resolution_graph", MODULE_RESOLUTION_GRAPH),
+        ("resolution_receipt", RESOLUTION_RECEIPT),
         // Remote
         ("idempotency_store", IDEMPOTENCY_STORE),
         ("remote_eviction_saga", REMOTE_EVICTION_SAGA),
@@ -429,10 +511,22 @@ mod tests {
     #[test]
     fn representative_supply_chain_and_storage_versions_match_authoritative_sources() {
         assert_eq!(
+            CRYPTO_SUITE_REGISTRY,
+            crate::crypto::CRYPTO_SUITE_REGISTRY_SCHEMA
+        );
+        assert_eq!(
             EXTENSION_REGISTRY,
             crate::supply_chain::extension_registry::REGISTRY_VERSION
         );
+        assert_eq!(
+            EFFECT_RECEIPT,
+            crate::runtime::effect_receipt::EFFECT_RECEIPT_SCHEMA
+        );
         assert_eq!(STORAGE_MODEL, crate::storage::models::MODEL_SCHEMA_VERSION);
+        assert_eq!(
+            CONTENT_ADDRESSED_STORE,
+            crate::storage::cas::CONTENT_ADDRESSED_STORE_SCHEMA
+        );
     }
 
     #[test]
@@ -461,11 +555,21 @@ mod tests {
         assert_eq!(lookup("lane_scheduler"), Some(LANE_SCHEDULER));
         assert_eq!(lookup("control_lane_policy"), Some(CONTROL_LANE_POLICY));
         assert_eq!(lookup("n_version_oracle"), Some(N_VERSION_ORACLE));
+        assert_eq!(
+            lookup("compat_operation_contract"),
+            Some(COMPAT_OPERATION_CONTRACT)
+        );
         assert_eq!(lookup("vef_proof_generator"), Some(VEF_PROOF_GENERATOR));
         assert_eq!(
             lookup("adversary_corpus_record"),
             Some(ADVERSARY_CORPUS_RECORD)
         );
+        assert_eq!(lookup("effect_receipt"), Some(EFFECT_RECEIPT));
+        assert_eq!(
+            lookup("content_addressed_store"),
+            Some(CONTENT_ADDRESSED_STORE)
+        );
+        assert_eq!(lookup("crypto_suite_registry"), Some(CRYPTO_SUITE_REGISTRY));
         assert_eq!(lookup("extension_registry"), Some(EXTENSION_REGISTRY));
         assert_eq!(lookup("verify_cli_contract"), Some(VERIFY_CLI_CONTRACT));
     }
@@ -1135,14 +1239,16 @@ mod tests {
             for case in &boundary_cases {
                 let result = is_semver_triplet(case);
 
-                // Only "1.2.3", "9.9.9", "1.22.333", "123.4.56789", and pure numeric triplets should pass
+                // `is_semver_triplet` accepts any three non-empty, all-ASCII-digit
+                // segments. This is a structural numeric-triplet check (not strict
+                // SemVer), so leading zeros are valid digits and pure numeric triplets
+                // such as "00.0.0" and "001.002.003" are accepted. The oracle mirrors
+                // that contract exactly; malformed inputs (missing/extra segments,
+                // empty, single component) remain rejected.
                 let should_pass = case.split('.').count() == 3
                     && case
                         .split('.')
-                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-                    && !case
-                        .split('.')
-                        .any(|part| part.starts_with('0') && part.len() > 1);
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
 
                 if should_pass {
                     assert!(result, "Should accept valid semver: {:?}", case);
@@ -1155,13 +1261,14 @@ mod tests {
         #[test]
         fn timing_attack_resistance_in_lookup_operations() {
             // Test that lookup time is consistent regardless of input
+            let long_similar_prefix = "lane_scheduler".to_string() + &"x".repeat(1000);
             let test_cases = vec![
-                "lane_scheduler",                     // Valid, exists
-                "nonexistent_scheduler",              // Valid format, doesn't exist
-                "lane_scheduler" + &"x".repeat(1000), // Long but similar prefix
-                "zzzzzzzzzz_scheduler",               // Different prefix
-                "",                                   // Empty
-                "a",                                  // Very short
+                "lane_scheduler",             // Valid, exists
+                "nonexistent_scheduler",      // Valid format, doesn't exist
+                long_similar_prefix.as_str(), // Long but similar prefix
+                "zzzzzzzzzz_scheduler",       // Different prefix
+                "",                           // Empty
+                "a",                          // Very short
             ];
 
             let mut timings = Vec::new();

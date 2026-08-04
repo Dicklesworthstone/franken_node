@@ -829,7 +829,7 @@ fn test_full_coverage_policy() -> PolicyDefinition {
                 "Require approval for process spawning",
                 PolicyEffect::RequireApproval,
             )
-            .with_condition("executable", ComparisonOp::NotEquals, "")
+            .with_condition("executable", ComparisonOp::NotEquals, "__unset__")
             .with_priority(50),
         )
         .with_rule(
@@ -839,7 +839,7 @@ fn test_full_coverage_policy() -> PolicyDefinition {
                 "Audit all secret access operations",
                 PolicyEffect::AuditOnly,
             )
-            .with_condition("secret.scope", ComparisonOp::NotEquals, "")
+            .with_condition("secret.scope", ComparisonOp::NotEquals, "__unset__")
             .with_priority(10),
         )
         .with_rule(
@@ -849,8 +849,8 @@ fn test_full_coverage_policy() -> PolicyDefinition {
                 "Require approval for policy state transitions",
                 PolicyEffect::RequireApproval,
             )
-            .with_condition("transition.from", ComparisonOp::NotEquals, "")
-            .with_condition("transition.to", ComparisonOp::NotEquals, "")
+            .with_condition("transition.from", ComparisonOp::NotEquals, "__unset__")
+            .with_condition("transition.to", ComparisonOp::NotEquals, "__unset__")
             .with_priority(5),
         )
         .with_rule(

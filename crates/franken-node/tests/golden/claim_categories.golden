@@ -1,0 +1,22 @@
+[
+  {
+    "category": "Tui",
+    "label": "tui",
+    "display": "tui"
+  },
+  {
+    "category": "Api",
+    "label": "api",
+    "display": "api"
+  },
+  {
+    "category": "Storage",
+    "label": "storage",
+    "display": "storage"
+  },
+  {
+    "category": "Model",
+    "label": "model",
+    "display": "model"
+  }
+]

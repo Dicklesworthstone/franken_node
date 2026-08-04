@@ -7,6 +7,7 @@ Usage:
     python3 scripts/check_compatibility_corpus_pass_gate.py --self-test --json
 """
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -19,6 +20,37 @@ from pathlib import Path
 BEAD_ID = "bd-28sz"
 SECTION = "13"
 TITLE = "Concrete target gate: >=95% compatibility corpus pass"
+
+# bd-ihusm: the only corpus provenance the release gate accepts. Anything else
+# (or absent) means the pass rate was not produced by a genuine oracle run, so
+# the gate fails closed rather than consume synthesized totals as if real.
+ONLINE_PROVENANCE = "lockstep-oracle-run"
+# Must byte-match crates/franken-node/src/ops/close_condition.rs
+# (CCG_RESULT_DIGEST_DOMAIN + compute_compatibility_corpus_result_digest).
+_RESULT_DIGEST_DOMAIN = b"ccg_corpus_result_digest_v1:"
+
+
+def compute_result_digest(per_test_results: list[dict]) -> str:
+    """Canonical content digest over per-test results. Domain-separated,
+    field-separated (US=0x1f), record-separated (RS=0x1e), sorted by row."""
+    rows = sorted(
+        [
+            str(r.get("test_id", "")),
+            str(r.get("api_family", "")),
+            str(r.get("band", "")),
+            str(r.get("risk_band", "")),
+            str(r.get("status", "")),
+        ]
+        for r in per_test_results
+    )
+    hasher = hashlib.sha256()
+    hasher.update(_RESULT_DIGEST_DOMAIN)
+    for row in rows:
+        for field in row:
+            hasher.update(field.encode("utf-8"))
+            hasher.update(b"\x1f")
+        hasher.update(b"\x1e")
+    return f"sha256:{hasher.hexdigest()}"
 
 CONTRACT = ROOT / "docs" / "specs" / "section_13" / "bd-28sz_contract.md"
 REPORT = ROOT / "artifacts" / "13" / "compatibility_corpus_results.json"
@@ -52,6 +84,8 @@ REQUIRED_CONTRACT_TERMS = [
     "INV-CCG-TRACKING",
     "INV-CCG-REPRODUCIBILITY",
     "INV-CCG-RATCHET",
+    "INV-CCG-PROVENANCE",
+    "INV-CCG-DIGEST-BINDING",
     "Scenario A",
     "Scenario B",
     "Scenario C",
@@ -241,6 +275,28 @@ def check_report(data: dict | None) -> list[dict]:
         "detail": f"observed={sorted(observed_risk_bands)}",
     })
 
+    # bd-ihusm: provenance honesty + digest binding. The pass rate is only real
+    # if the corpus attests a genuine oracle run and its per-test results are
+    # content-bound by a recomputable digest — a fabricated `result_digest` or
+    # authored/synthesized provenance fails the gate closed.
+    corpus_meta = data.get("corpus", {})
+    provenance = corpus_meta.get("provenance")
+    checks.append({
+        "check": "provenance: corpus attests a genuine oracle run",
+        "pass": provenance == ONLINE_PROVENANCE,
+        "detail": f"provenance={provenance!r} expected={ONLINE_PROVENANCE!r}",
+    })
+    declared_digest = corpus_meta.get("result_digest")
+    recomputed_digest = compute_result_digest(per_tests) if per_tests else None
+    checks.append({
+        "check": "provenance: result_digest recomputes from per_test_results",
+        "pass": (
+            recomputed_digest is not None
+            and declared_digest == recomputed_digest
+        ),
+        "detail": f"declared={declared_digest} computed={recomputed_digest}",
+    })
+
     gate_eval = evaluate_gate(data)
     checks.append({
         "check": "gate: overall threshold >=95 met",
@@ -396,6 +452,20 @@ def self_test() -> tuple[bool, list[dict]]:
     checks = []
     checks.append({"check": "self: pass_rate helper", "pass": pass_rate(95, 100) == 95.0})
     checks.append({"check": "self: evaluate gate release blocked", "pass": evaluate_gate(sample)["release_blocked"]})
+    # bd-ihusm: cross-language digest pin. This exact vector + digest is
+    # asserted by the Rust gate test
+    # (doctor_close_condition_e2e::ccg_result_digest_cross_language_pin_bd_ihusm);
+    # if either implementation drifts, one side fails.
+    digest_vector = [
+        {"test_id": "tc::fs::0001", "api_family": "fs", "band": "core", "risk_band": "critical", "status": "pass"},
+        {"test_id": "tc::http::0002", "api_family": "http", "band": "high-value", "risk_band": "high", "status": "fail"},
+    ]
+    expected_digest = "sha256:06e98e8bb825890faefa66f04c5e9682ed86738c3eac75725db7f636881257b0"
+    checks.append({
+        "check": "self: result_digest cross-language vector",
+        "pass": compute_result_digest(digest_vector) == expected_digest
+        and compute_result_digest(list(reversed(digest_vector))) == expected_digest,
+    })
     return all(c["pass"] for c in checks), checks
 
 

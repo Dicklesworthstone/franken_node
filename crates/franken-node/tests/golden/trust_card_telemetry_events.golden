@@ -1,0 +1,16 @@
+[
+  {
+    "event_code": "TRUST_CARD_CREATED",
+    "extension_id": "npm:@test/golden-extension",
+    "trace_id": "test-trace",
+    "timestamp_secs": 1000,
+    "detail": "Created trust card for npm:@test/golden-extension@[VERSION]"
+  },
+  {
+    "event_code": "TRUST_CARD_QUERIED",
+    "extension_id": "npm:@test/golden-extension",
+    "trace_id": "test-trace",
+    "timestamp_secs": 1001,
+    "detail": "Queried trust card details"
+  }
+]

@@ -15,6 +15,9 @@ fn validate_fixture_json(fixture: &str, expect_success: bool) -> String {
             fixture_path(fixture).to_str().expect("utf-8 fixture path"),
             "--format",
             "json",
+            // Deterministic golden: skip the transformed-runtime smoke test, whose
+            // outcome depends on which JS runtime is installed (bd-di42u).
+            "--static-only",
         ])
         .assert();
 

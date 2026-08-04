@@ -113,7 +113,27 @@ fn fuzz_profile_tracker(input: &SandboxPolicyParseInput) {
             continue;
         }
 
-        if before_profile.is_downgrade_to(&target) && !change.allow_downgrade {
+        // bd-4sh1w: `change_profile` no longer expresses relaxation at all — the
+        // authority-granting direction has its own entry point. A relaxing target
+        // must be refused here whatever `allow_downgrade` says, and the tracker
+        // must be untouched.
+        if before_profile.is_relaxation_to(&target) {
+            assert!(matches!(result, Err(SandboxError::RelaxationBlocked { .. })));
+            assert_eq!(tracker.current_profile, before_profile);
+            assert_eq!(tracker.compiled_policy, before_policy);
+            assert_eq!(tracker.audit_log.len(), before_len);
+
+            // The dedicated entry point accepts exactly the same transition.
+            let relaxed = tracker
+                .relax_profile(target, reason.clone(), timestamp.clone())
+                .expect("relax_profile must accept a relaxing target");
+            assert_eq!(tracker.current_profile, target);
+            assert_eq!(tracker.compiled_policy, compile_policy(target));
+            validate_policy(&tracker.compiled_policy)
+                .expect("relaxed tracker policy must validate");
+            assert_eq!(relaxed.old_profile, Some(before_profile));
+            assert_eq!(relaxed.new_profile, target);
+        } else if before_profile.is_downgrade_to(&target) && !change.allow_downgrade {
             assert!(matches!(result, Err(SandboxError::DowngradeBlocked { .. })));
             assert_eq!(tracker.current_profile, before_profile);
             assert_eq!(tracker.compiled_policy, before_policy);

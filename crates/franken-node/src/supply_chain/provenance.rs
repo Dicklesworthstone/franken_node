@@ -1182,13 +1182,16 @@ fn canonicalize_value(value: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
-        AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, MAX_ATTESTATION_LINKS,
-        MAX_CUSTOM_CLAIM_VALUE_BYTES, MAX_CUSTOM_CLAIMS, MAX_CUSTOM_CLAIMS_CANONICAL_BYTES,
-        ProvenanceAttestation, ProvenanceLevel, VerificationErrorCode, VerificationFailure,
-        VerificationMode, VerificationPolicy, canonical_attestation_json,
-        sign_links_in_place as sign_links_in_place_with_keys, verify_and_project_gates,
-        verify_attestation_chain,
+        AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, ChainValidityReport,
+        DownstreamGateRequirements, MAX_ATTESTATION_LINKS, MAX_CUSTOM_CLAIM_VALUE_BYTES,
+        MAX_CUSTOM_CLAIMS, MAX_CUSTOM_CLAIMS_CANONICAL_BYTES, ProvenanceAttestation,
+        ProvenanceEventCode, ProvenanceLevel, VerificationErrorCode, VerificationFailure,
+        VerificationMode, VerificationPolicy, canonical_attestation_json, canonicalize_value,
+        enforce_fail_closed, sign_links_in_place as sign_links_in_place_with_keys,
+        verify_and_project_gates, verify_attestation_chain,
     };
 
     fn test_signing_key_for(signer_id: &str) -> ed25519_dalek::SigningKey {
@@ -1465,6 +1468,9 @@ mod tests {
             revoked: false,
         }];
         attestation.slsa_level_claim = 1;
+        // bd-o776s: prod now rejects a build timestamp newer than the verification
+        // time; align it with the link issuance epoch (verified at 1_700_000_050).
+        attestation.build_timestamp_epoch = 1_700_000_000;
         sign_links_in_place(&mut attestation).expect("re-sign self link");
 
         let policy = development_policy_for(&attestation);
@@ -1493,6 +1499,9 @@ mod tests {
             revoked: false,
         }];
         attestation.slsa_level_claim = 0;
+        // bd-o776s: prod now rejects a build timestamp newer than the verification
+        // time; align it with the link issuance epoch (verified at 1_700_000_050).
+        attestation.build_timestamp_epoch = 1_700_000_000;
         sign_links_in_place(&mut attestation).expect("re-sign degraded links");
 
         let policy = development_policy_for(&attestation);
@@ -1776,6 +1785,10 @@ mod tests {
             link.issued_at_epoch = 1_700_000_000;
             link.expires_at_epoch = 1_700_000_100;
         }
+        // bd-o776s: prod now rejects a build timestamp newer than the verification
+        // time; pin it to the link issuance epoch so the pre-expiry boundary case
+        // (verified at 1_700_000_099) is not flagged as a future-dated build.
+        attestation.build_timestamp_epoch = 1_700_000_000;
         sign_links_in_place(&mut attestation).expect("re-sign bounded links");
 
         let policy = VerificationPolicy {
@@ -2392,9 +2405,17 @@ mod tests {
         // Create variations that could potentially collide
         let mut variant1 = base.clone();
         variant1.output_hash = "prefix_suffix".to_string();
+        // bd-o776s: prod binds each link's signed_payload_hash to the attested
+        // output_hash; rebind it so the changed output is still a valid chain.
+        for link in &mut variant1.links {
+            link.signed_payload_hash = "prefix_suffix".to_string();
+        }
 
         let mut variant2 = base.clone();
         variant2.output_hash = "prefi_x_suffix".to_string(); // Different split point
+        for link in &mut variant2.links {
+            link.signed_payload_hash = "prefi_x_suffix".to_string();
+        }
 
         let mut variant3 = base.clone();
         variant3

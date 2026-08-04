@@ -499,7 +499,15 @@ impl SagaExecutor {
         // Compensate in reverse order (INV-SAGA-REVERSE-COMP)
         let mut comp_records = Vec::new();
         for &idx in succeeded_indices.iter().rev() {
-            let step_name = saga.steps[idx].name.clone();
+            // Defensive bounds check: a corrupted/tampered record may carry a
+            // `step_index` outside `saga.steps` (e.g. an overflowed index). A
+            // non-existent step has no compensation to run, so skip it rather than
+            // panic on out-of-bounds indexing — fail-safe (bd-o776s; matches the
+            // ".get() not [index]" hardening mandate).
+            let Some(step) = saga.steps.get(idx) else {
+                continue;
+            };
+            let step_name = step.name.clone();
             let record = StepRecord {
                 step_index: idx,
                 step_name: step_name.clone(),
@@ -1593,9 +1601,25 @@ mod tests {
         assert!(saga2.steps[0].name.contains('\0'));
         assert!(saga2.steps[0].name.contains('\n'));
 
-        // Verify audit log preserves Unicode injection for analysis
+        // Verify audit log preserves Unicode injection for analysis. The trace id
+        // is JSON-escaped in the serialized log (control chars become \uXXXX/\n/\r/\t),
+        // so it does not appear verbatim; confirm it round-trips by parsing each
+        // record back to the original trace id.
         let audit_jsonl = exec.export_audit_log_jsonl();
-        assert!(audit_jsonl.contains(malicious_trace_id));
+        let trace_preserved = audit_jsonl.lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| {
+                    v.get("trace_id")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == malicious_trace_id)
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            trace_preserved,
+            "audit log must preserve the malicious trace id (round-trips through JSON)"
+        );
     }
 
     #[test]
@@ -1648,30 +1672,37 @@ mod tests {
         // Verify audit log is bounded
         assert!(exec.audit_log.len() <= MAX_AUDIT_LOG_ENTRIES);
 
-        // Test massive failure reasons and skip reasons
-        let failure_saga = exec
-            .create_saga(make_steps(&["fail", "skip"]), "fail_trace")
-            .unwrap();
+        // Test massive failure reasons and skip reasons. Use a fresh executor: the
+        // loop above saturated `exec`'s registry against the fail-closed MAX_SAGAS
+        // capacity limit (no terminal sagas to reclaim), so further create_saga calls
+        // fail closed. Also, a saga that executed a Failed forward step enters the
+        // Failed state and rejects further forward steps, so the failure and skip
+        // outcomes must live on separate sagas.
+        let mut reason_exec = SagaExecutor::new();
 
+        let failure_saga = reason_exec
+            .create_saga(make_steps(&["fail"]), "fail_trace")
+            .unwrap();
         let massive_failure = StepOutcome::Failed {
             reason: "A".repeat(1_000_000), // 1MB error message
         };
-
-        let _ = exec
+        reason_exec
             .execute_step(&failure_saga, massive_failure, 1, "fail")
             .unwrap();
 
+        let skip_saga = reason_exec
+            .create_saga(make_steps(&["skip"]), "skip_trace")
+            .unwrap();
         let massive_skip = StepOutcome::Skipped {
             reason: "B".repeat(1_000_000), // 1MB skip reason
         };
-
-        let _ = exec
-            .execute_step(&failure_saga, massive_skip, 1, "skip")
+        reason_exec
+            .execute_step(&skip_saga, massive_skip, 1, "skip")
             .unwrap();
 
         // Verify large data is preserved but bounded by collection limits
-        let fail_saga = exec.get_saga(&failure_saga).unwrap();
-        assert!(fail_saga.records.len() <= MAX_RECORDS_PER_SAGA);
+        assert!(reason_exec.get_saga(&failure_saga).unwrap().records.len() <= MAX_RECORDS_PER_SAGA);
+        assert!(reason_exec.get_saga(&skip_saga).unwrap().records.len() <= MAX_RECORDS_PER_SAGA);
     }
 
     #[test]
@@ -2332,7 +2363,17 @@ mod tests {
         }
 
         let error_hash = corrupt_exec.content_hash();
-        assert!(error_hash.starts_with("e3b0c44298fc1c149afbf4c8996fb924")); // Empty string SHA256 when serde fails
+        // content_hash domain-separates ("saga_content_hash_v1:") and serializes
+        // successfully even for saga ids with embedded control characters (still
+        // valid UTF-8), yielding a well-formed 64-char hex digest — not the
+        // empty-string SHA-256.
+        assert_eq!(error_hash.len(), 64);
+        assert!(error_hash.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            error_hash,
+            corrupt_exec.content_hash(),
+            "content hash must be deterministic"
+        );
 
         // Test deterministic hashing across multiple operations
         let mut deterministic_exec = SagaExecutor::new();

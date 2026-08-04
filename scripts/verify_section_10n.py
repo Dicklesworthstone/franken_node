@@ -47,15 +47,21 @@ CHECKS = [
         "command": ["python3", str(ROOT / "scripts" / "check_ownership_violations.py"), "--json"],
     },
     {
+        # bd-ry7d1: RUN the dual-oracle gate over the committed verdict
+        # artifacts (with the corpus binding it enforces by default on the
+        # live repo) instead of merely checking that the script file exists.
+        # This is the CI hook that makes the committed L1 evidence — proof
+        # chain, lockstep verdict, cross-file binding — actually re-derive on
+        # every gate run.
         "id": "10N-ORACLE",
         "name": "Dual-Oracle Close Condition Gate",
         "bead": "bd-1oyt",
-        "type": "artifact_exists",
-        "paths": [
-            ROOT / "scripts" / "check_oracle_close_condition.py",
-            ROOT / "docs" / "DUAL_ORACLE_CLOSE_CONDITION.md",
+        "type": "script_run",
+        "command": [
+            "python3",
+            str(ROOT / "scripts" / "check_oracle_close_condition.py"),
+            "--json",
         ],
-        "validation": "script_parseable",
     },
     {
         "id": "10N-XREF",

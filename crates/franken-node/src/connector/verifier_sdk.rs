@@ -378,6 +378,26 @@ fn is_sha256_hex(value: &str) -> bool {
     normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+// Trace-commitment / capsule-integrity primitives.
+//
+// These implement the signed-capsule commitment scheme (trace-chunk Merkle
+// root + length-prefixed integrity hash + signature payload, see
+// `replay_capsule_signature_payload`) consumed in production by
+// `crate::verifier_economy` (`verify_capsule_integrity_with_freshness` /
+// `verify_replay_capsule`), which is gated behind the `verifier-tools`
+// feature. The scheme deliberately coexists with
+// `connector::universal_verifier_sdk`: that module is the stable external
+// capsule API (vsdk-v1.0, whole-payload signing under
+// `universal_verifier_sdk_signing_v2:`), while the verifier-economy
+// `ReplayCapsule` verified here commits to per-chunk trace hashes via a
+// Merkle root so individual trace chunks stay independently auditable
+// (bd-2qan9 reconciliation verdict). This module's own public
+// `replay_capsule` remains intentionally
+// `STRUCTURAL_ONLY_REPLAY_HELPER_POSTURE` (a deterministic smoke-check, not
+// replacement-critical). Without `verifier-tools` the sole production
+// consumer is compiled out, so `dead_code` is allowed for that configuration
+// only — if the consumer ever disappears, default builds warn again.
+#[cfg_attr(not(feature = "verifier-tools"), allow(dead_code))]
 fn normalize_sha256_prefixed(value: &str) -> Option<String> {
     if !is_sha256_hex(value) {
         return None;
@@ -388,6 +408,8 @@ fn normalize_sha256_prefixed(value: &str) -> Option<String> {
     })
 }
 
+// See `normalize_sha256_prefixed` note (verifier-economy capsule primitive).
+#[cfg_attr(not(feature = "verifier-tools"), allow(dead_code))]
 fn hash_trace_commitment_pair(left: &str, right: &str) -> String {
     let mut payload = Vec::new();
     payload.extend_from_slice(b"connector_trace_commitment_v1:");
@@ -403,6 +425,8 @@ pub(crate) struct TraceCommitmentProofStep {
     pub sibling_on_left: bool,
 }
 
+// See `normalize_sha256_prefixed` note (verifier-economy capsule primitive).
+#[cfg_attr(not(feature = "verifier-tools"), allow(dead_code))]
 pub(crate) fn compute_trace_commitment_root(trace_chunk_hashes: &[String]) -> Option<String> {
     if trace_chunk_hashes.is_empty() {
         return None;
@@ -414,7 +438,7 @@ pub(crate) fn compute_trace_commitment_root(trace_chunk_hashes: &[String]) -> Op
         .collect::<Option<Vec<_>>>()?;
 
     while level.len() > 1 {
-        let mut next_level = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next_level = Vec::with_capacity(level.len().div_ceil(2));
         let mut index = 0;
         while index < level.len() {
             let left = &level[index];
@@ -455,7 +479,7 @@ pub(crate) fn build_trace_commitment_proof(
             sibling_on_left: sibling_index < index,
         });
 
-        let mut next_level = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next_level = Vec::with_capacity(level.len().div_ceil(2));
         let mut pair_index = 0;
         while pair_index < level.len() {
             let left = &level[pair_index];
@@ -500,7 +524,9 @@ pub(crate) fn verify_trace_commitment_proof(
     crate::security::constant_time::ct_eq(&current, &expected_root)
 }
 
+// See `normalize_sha256_prefixed` note (verifier-economy capsule primitive).
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "verifier-tools"), allow(dead_code))]
 pub(crate) fn compute_capsule_integrity_hash(
     capsule_id: &str,
     schema_version: &str,
@@ -535,8 +561,9 @@ pub(crate) fn compute_capsule_integrity_hash(
     format!("sha256:{}", hex::encode(Sha256::digest(payload)))
 }
 
+// See `normalize_sha256_prefixed` note (verifier-economy capsule primitive).
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "verifier-tools"), allow(dead_code))]
 pub(crate) fn replay_capsule_signature_payload(
     capsule_id: &str,
     schema_version: &str,

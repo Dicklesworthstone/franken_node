@@ -231,7 +231,11 @@ impl DurableClaimGate {
         self.evaluate_claim_internal(claim, input, current_epoch, None)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    // Inline-test seam for injecting a deterministic elapsed_ms into
+    // `evaluate_claim_internal`. Private and only exercised by this module's
+    // inline `#[cfg(test)]` tests, so it is test-gated (not `test-support`,
+    // which would compile it into the non-test lib and leave it dead) (bd-saj9c).
+    #[cfg(test)]
     fn evaluate_claim_with_test_elapsed_ms(
         &mut self,
         claim: &DurableClaim,

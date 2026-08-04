@@ -200,7 +200,10 @@ pub fn domain_keyed_hash(domain: &str, key: &[u8], data: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use super::{HashProvider, HmacSha256, Sha2HmacProvider};
+    #[cfg(feature = "blake3")]
+    use super::Blake3Provider;
+    use super::{FastHashContext, HashProvider, HmacSha256, Sha2HmacProvider, domain_keyed_hash};
+    use hmac::{KeyInit, Mac};
     use sha2::{Digest, Sha256};
 
     #[test]
@@ -212,13 +215,14 @@ mod tests {
         // Basic functionality
         let hash = provider.hash(data);
         assert_eq!(hash.len(), 32);
-        assert_ne!(hash, Sha256::digest(data).into());
+        assert_ne!(hash.as_slice(), Sha256::digest(data).as_slice());
 
         let keyed = provider.keyed_hash(key, data);
         assert_eq!(keyed.len(), 32);
         let mut raw_mac = HmacSha256::new_from_slice(key).expect("test key");
         raw_mac.update(data);
-        assert_ne!(keyed, raw_mac.finalize().into_bytes().into());
+        let raw_mac: [u8; 32] = raw_mac.finalize().into_bytes().into();
+        assert_ne!(keyed, raw_mac);
 
         // Deterministic
         assert_eq!(provider.hash(data), provider.hash(data));
@@ -241,7 +245,8 @@ mod tests {
 
         let hash = provider.hash(data);
         assert_eq!(hash.len(), 32);
-        assert_ne!(hash, blake3::hash(data).into());
+        let raw_hash = *blake3::hash(data).as_bytes();
+        assert_ne!(hash, raw_hash);
 
         let keyed = provider.keyed_hash(key, data);
         assert_eq!(keyed.len(), 32);

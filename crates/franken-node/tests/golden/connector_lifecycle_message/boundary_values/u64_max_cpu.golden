@@ -1,0 +1,16 @@
+{
+  "success": true,
+  "input": {
+    "raw_bytes_len": 1000,
+    "nesting_depth": 5,
+    "decode_cpu_ms": 18446744073709551615
+  },
+  "resource_usage": {
+    "bytes_parsed": 1000,
+    "nesting_depth": 5,
+    "cpu_ms": 18446744073709551615
+  },
+  "allowed": false,
+  "violation_count": 1,
+  "test_case": "u64_max_cpu"
+}

@@ -39,6 +39,7 @@ def test_rule_catalog_populated():
         "OWN-SEMB-001",
         "OWN-SEMB-002",
         "OWN-SEMB-003",
+        "OWN-SEMB-004",
     ]
 
 
@@ -188,6 +189,62 @@ class TestForbiddenInternalImports:
         filepath.write_text("use franken_engine::control_plane::Cx;\n")
 
         violations = mod.check_forbidden_internal_imports(filepath, project_root=project_root)
+
+        assert violations == []
+
+
+class TestEngineEffectProducerBoundary:
+    def test_current_contracts_align_with_engine_effect_handoff(self):
+        split_contract = mod.load_engine_split_contract_text()
+        ownership_contract = mod.load_policy_contract_text()
+
+        assert (
+            mod.check_engine_effect_producer_contract_alignment(
+                split_contract,
+                ownership_contract,
+            )
+            == []
+        )
+
+    def test_missing_engine_effect_contract_term_fails_closed(self):
+        split_contract = mod.load_engine_split_contract_text().replace("compat:http:request", "")
+        ownership_contract = mod.load_policy_contract_text()
+
+        violations = mod.check_engine_effect_producer_contract_alignment(
+            split_contract,
+            ownership_contract,
+        )
+
+        assert any(v["rule_id"] == "OWN-SEMB-004" for v in violations)
+        assert any(v.get("required_term") == "compat:http:request" for v in violations)
+
+    def test_local_engine_hostcall_producer_marker_detected(self, tmp_path):
+        project_root = tmp_path
+        filepath = (
+            project_root
+            / "crates"
+            / "franken-node"
+            / "src"
+            / "runtime"
+            / "hostcall_effects_migration.rs"
+        )
+        filepath.parent.mkdir(parents=True)
+        filepath.write_text(
+            'pub struct FullCapsHandler;\nconst TAG: &str = "hostcall:fs:read";\n'
+        )
+
+        violations = mod.check_engine_effect_producer_duplicate(filepath, project_root=project_root)
+
+        assert len(violations) == 1
+        violation = violations[0]
+        assert violation["rule_id"] == "OWN-SEMB-004"
+        assert violation["reason_code"] == "ENGINE_EFFECT_PRODUCER_BOUNDARY_VIOLATION"
+        assert "pub struct FullCapsHandler" in violation["markers"]
+
+    def test_receipt_contract_path_allowed_to_mention_effects(self):
+        filepath = ROOT / "crates" / "franken-node" / "src" / "runtime" / "effect_receipt.rs"
+
+        violations = mod.check_engine_effect_producer_duplicate(filepath)
 
         assert violations == []
 

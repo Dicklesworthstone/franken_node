@@ -1,0 +1,21 @@
+{
+  "left_extension_id": "npm:@beta/telemetry-bridge@1",
+  "right_extension_id": "npm:@beta/telemetry-bridge@2",
+  "changes": [
+    {
+      "field": "certification_level",
+      "left": "silver",
+      "right": "bronze"
+    },
+    {
+      "field": "reputation_score_basis_points",
+      "left": "680",
+      "right": "410"
+    },
+    {
+      "field": "revocation_status",
+      "left": "active",
+      "right": "revoked { reason: \"publisher key compromised\", revoked_at: \"[DATE]t12:01:00z\" }"
+    }
+  ]
+}

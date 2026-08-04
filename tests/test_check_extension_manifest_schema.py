@@ -22,7 +22,7 @@ def write_comment_only_fixture(root: Path) -> dict[str, Path]:
     impl_markers = [
         "pub struct SignedExtensionManifest",
         "pub fn validate_signed_manifest",
-        "validate_engine_manifest",
+        "validate_manifest_with_config",
         "to_engine_manifest",
         "ManifestSchemaError",
         *checker.REQUIRED_LOG_CODES,

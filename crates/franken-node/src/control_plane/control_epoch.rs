@@ -11,9 +11,11 @@
 //! - INV-EPOCH-SIGNED-EVENT: every epoch change produces a signed transition event
 //! - INV-EPOCH-NO-GAP: epoch advances by exactly 1 per call
 
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
+use sha2::Sha256;
 use std::fmt;
+use zeroize::Zeroize;
 
 use crate::push_bounded;
 use crate::security::constant_time;
@@ -152,35 +154,102 @@ pub struct EpochTransition {
     pub trace_id: String,
 }
 
+/// Signing key for epoch transition events.
+///
+/// # Why this type exists (bd-kpjrz)
+///
+/// `EpochTransition::compute_mac` used to be a plain, UNKEYED SHA-256 over
+/// `b"control_epoch_mac_v1:"` plus the fields — the doc comment said so outright
+/// ("In production, this would use HMAC-SHA256 with a signing key"). `verify()`
+/// then compared against a value *anyone* could recompute, so any party could
+/// mint an `EpochTransition { old_epoch: 5, new_epoch: 1_000_000, .. }` with a
+/// perfectly valid `event_mac`. INV-EPOCH-SIGNED-EVENT — "every epoch change
+/// produces a signed transition event" — was vacuous, and the e2e suite asserted
+/// it held, so green tests actively masked the gap.
+///
+/// Holding the key in a dedicated type rather than passing a bare `&[u8]` means
+/// the emptiness check happens exactly once, at construction: an empty key is
+/// precisely the unkeyed-hash bug re-introduced, and HMAC would otherwise accept
+/// it silently.
+#[derive(Clone)]
+pub struct EpochSigningKey {
+    material: Vec<u8>,
+}
+
+impl EpochSigningKey {
+    /// Build a signing key, refusing empty material.
+    pub fn new(material: &[u8]) -> Result<Self, EpochError> {
+        if material.is_empty() {
+            return Err(EpochError::InvalidSigningKey {
+                reason: "epoch signing key must not be empty".to_string(),
+            });
+        }
+        Ok(Self {
+            material: material.to_vec(),
+        })
+    }
+
+    fn material(&self) -> &[u8] {
+        &self.material
+    }
+}
+
+impl fmt::Debug for EpochSigningKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EpochSigningKey")
+            .field("material", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for EpochSigningKey {
+    fn drop(&mut self) {
+        self.material.zeroize();
+    }
+}
+
 impl EpochTransition {
     /// Compute a keyed MAC over the transition event fields.
     ///
-    /// This binds the event to the specific epoch change and manifest state.
-    /// In production, this would use HMAC-SHA256 with a signing key.
+    /// This binds the event to the specific epoch change and manifest state, and
+    /// — since bd-kpjrz — to the holder of `key`. HMAC-SHA256 following the
+    /// pattern `control_plane::root_pointer::sign_payload` already uses:
+    /// domain separator first, then every variable-length field length-prefixed.
     fn compute_mac(
+        key: &EpochSigningKey,
         old_epoch: ControlEpoch,
         new_epoch: ControlEpoch,
         timestamp: u64,
         manifest_hash: &str,
         trace_id: &str,
     ) -> String {
-        let mut hasher = sha2::Sha256::new();
-        sha2::Digest::update(&mut hasher, b"control_epoch_mac_v1:");
-        sha2::Digest::update(&mut hasher, old_epoch.value().to_le_bytes());
-        sha2::Digest::update(&mut hasher, new_epoch.value().to_le_bytes());
-        sha2::Digest::update(&mut hasher, timestamp.to_le_bytes());
+        // HMAC accepts a key of any length, so this cannot fail in practice, and
+        // the empty key that would reduce this to an unkeyed hash is already
+        // rejected by `EpochSigningKey::new`. Handle the error arm anyway, and
+        // fail CLOSED rather than panicking: an unusable key yields a sentinel
+        // that no genuine MAC can equal (real values are `mac:<64 hex>`), so
+        // `verify` returns false instead of taking down a control-plane path.
+        // Matches the `control_plane::divergence_gate` idiom.
+        let Ok(mut mac) = <Hmac<Sha256> as KeyInit>::new_from_slice(key.material()) else {
+            return "INVALID_SIGNING_KEY".to_string();
+        };
+        mac.update(b"control_epoch_mac_v1:");
+        mac.update(&old_epoch.value().to_le_bytes());
+        mac.update(&new_epoch.value().to_le_bytes());
+        mac.update(&timestamp.to_le_bytes());
         // Length-prefixed encoding prevents delimiter-collision ambiguity.
         for field in [manifest_hash, trace_id] {
             let field_len = u64::try_from(field.len()).unwrap_or(u64::MAX);
-            sha2::Digest::update(&mut hasher, field_len.to_le_bytes());
-            sha2::Digest::update(&mut hasher, field.as_bytes());
+            mac.update(&field_len.to_le_bytes());
+            mac.update(field.as_bytes());
         }
-        format!("mac:{}", hex::encode(sha2::Digest::finalize(hasher)))
+        format!("mac:{}", hex::encode(mac.finalize().into_bytes()))
     }
 
-    /// Verify the MAC on this transition event.
-    pub fn verify(&self) -> bool {
+    /// Verify the MAC on this transition event against the issuing key.
+    pub fn verify(&self, key: &EpochSigningKey) -> bool {
         let expected = Self::compute_mac(
+            key,
             self.old_epoch,
             self.new_epoch,
             self.timestamp,
@@ -203,6 +272,12 @@ pub enum EpochError {
     EpochOverflow { current: ControlEpoch },
     /// Manifest hash is empty or invalid.
     InvalidManifestHash { reason: String },
+    /// Signing key material is unusable (bd-kpjrz: an empty key would reduce the
+    /// event MAC back to the forgeable unkeyed hash it replaced).
+    InvalidSigningKey { reason: String },
+    /// Trace id is empty or malformed (bd-6n2xv: a signed transition nobody can
+    /// correlate is not an audit trail).
+    InvalidTraceId { reason: String },
 }
 
 impl EpochError {
@@ -211,6 +286,8 @@ impl EpochError {
             Self::EpochRegression { .. } => "EPOCH_REGRESSION",
             Self::EpochOverflow { .. } => "EPOCH_OVERFLOW",
             Self::InvalidManifestHash { .. } => "EPOCH_INVALID_MANIFEST",
+            Self::InvalidSigningKey { .. } => "EPOCH_INVALID_SIGNING_KEY",
+            Self::InvalidTraceId { .. } => "EPOCH_INVALID_TRACE_ID",
         }
     }
 }
@@ -235,6 +312,12 @@ impl fmt::Display for EpochError {
             }
             Self::InvalidManifestHash { reason } => {
                 write!(f, "EPOCH_INVALID_MANIFEST: {reason}")
+            }
+            Self::InvalidSigningKey { reason } => {
+                write!(f, "EPOCH_INVALID_SIGNING_KEY: {reason}")
+            }
+            Self::InvalidTraceId { reason } => {
+                write!(f, "EPOCH_INVALID_TRACE_ID: {reason}")
             }
         }
     }
@@ -425,27 +508,41 @@ pub struct EpochStore {
     transitions: Vec<EpochTransition>,
     /// Durable commit log (simulates fsync'd persistence).
     committed: ControlEpoch,
+    /// Key the store signs transition events with (bd-kpjrz).
+    signing_key: EpochSigningKey,
 }
 
 impl EpochStore {
     /// Create a new epoch store starting at genesis (epoch 0).
-    pub fn new() -> Self {
+    ///
+    /// bd-kpjrz: the signing key is mandatory. INV-EPOCH-SIGNED-EVENT is only
+    /// meaningful if the event MAC is keyed, so there is no keyless constructor
+    /// to fall back to.
+    pub fn new(signing_key: EpochSigningKey) -> Self {
         Self {
             current: ControlEpoch::GENESIS,
             transitions: Vec::new(),
             committed: ControlEpoch::GENESIS,
+            signing_key,
         }
     }
 
     /// Create an epoch store recovered from durable state.
     ///
     /// INV-EPOCH-DURABLE: on restart, the store sees the last committed epoch.
-    pub fn recover(committed_epoch: u64) -> Self {
+    pub fn recover(committed_epoch: u64, signing_key: EpochSigningKey) -> Self {
         Self {
             current: ControlEpoch::new(committed_epoch),
             transitions: Vec::new(),
             committed: ControlEpoch::new(committed_epoch),
+            signing_key,
         }
+    }
+
+    /// The key this store signs transition events with, for callers that need to
+    /// verify events it produced.
+    pub fn signing_key(&self) -> &EpochSigningKey {
+        &self.signing_key
     }
 
     /// Read the current epoch. O(1) non-mutating read.
@@ -472,6 +569,16 @@ impl EpochStore {
         if let Some(reason) = invalid_required_text_reason("manifest_hash", manifest_hash) {
             return Err(EpochError::InvalidManifestHash { reason });
         }
+        // bd-6n2xv (found by registering tests/epoch_transitions_fuzz_harness.rs,
+        // which had never run): `trace_id` was accepted unvalidated, so an empty
+        // or whitespace-only one produced a perfectly well-formed "signed"
+        // transition that no operator could ever correlate to anything. It is
+        // committed into the MAC preimage and it is the audit trail's only
+        // correlation handle, so INV-EPOCH-SIGNED-EVENT is only as useful as this
+        // field is well-formed. Same validator the manifest hash uses.
+        if let Some(reason) = invalid_required_text_reason("trace_id", trace_id) {
+            return Err(EpochError::InvalidTraceId { reason });
+        }
 
         let old_epoch = self.current;
         let new_epoch = old_epoch
@@ -479,8 +586,14 @@ impl EpochStore {
             .ok_or(EpochError::EpochOverflow { current: old_epoch })?;
 
         // Compute signed event MAC
-        let event_mac =
-            EpochTransition::compute_mac(old_epoch, new_epoch, timestamp, manifest_hash, trace_id);
+        let event_mac = EpochTransition::compute_mac(
+            &self.signing_key,
+            old_epoch,
+            new_epoch,
+            timestamp,
+            manifest_hash,
+            trace_id,
+        );
 
         let transition = EpochTransition {
             old_epoch,
@@ -522,12 +635,28 @@ impl EpochStore {
         if let Some(reason) = invalid_required_text_reason("manifest_hash", manifest_hash) {
             return Err(EpochError::InvalidManifestHash { reason });
         }
+        // bd-6n2xv (found by registering tests/epoch_transitions_fuzz_harness.rs,
+        // which had never run): `trace_id` was accepted unvalidated, so an empty
+        // or whitespace-only one produced a perfectly well-formed "signed"
+        // transition that no operator could ever correlate to anything. It is
+        // committed into the MAC preimage and it is the audit trail's only
+        // correlation handle, so INV-EPOCH-SIGNED-EVENT is only as useful as this
+        // field is well-formed. Same validator the manifest hash uses.
+        if let Some(reason) = invalid_required_text_reason("trace_id", trace_id) {
+            return Err(EpochError::InvalidTraceId { reason });
+        }
 
         let old_epoch = self.current;
         let new_epoch = attempted;
 
-        let event_mac =
-            EpochTransition::compute_mac(old_epoch, new_epoch, timestamp, manifest_hash, trace_id);
+        let event_mac = EpochTransition::compute_mac(
+            &self.signing_key,
+            old_epoch,
+            new_epoch,
+            timestamp,
+            manifest_hash,
+            trace_id,
+        );
 
         let transition = EpochTransition {
             old_epoch,
@@ -574,19 +703,39 @@ impl EpochStore {
     }
 }
 
-impl Default for EpochStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// bd-kpjrz: no `Default for EpochStore`. A default store would have to invent a
+// signing key, and both available choices are wrong: a hardcoded key is a
+// published secret that makes the event MAC forgeable again (exactly the bug
+// this bead fixed), and a random per-store key silently breaks verification of
+// any transition that crosses a process boundary — `EpochTransition` is
+// `Serialize`/`Deserialize`, so that is a supported thing to do. Callers must
+// supply an `EpochSigningKey` and therefore decide where it comes from.
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlEpoch, EpochArtifactEvent, EpochError, EpochRejectionReason, EpochStore,
-        EpochTransition, RESERVED_ARTIFACT_ID, ValidityWindowPolicy, check_artifact_epoch,
-        event_codes,
+        ControlEpoch, EpochArtifactEvent, EpochError, EpochRejectionReason, EpochSigningKey,
+        EpochStore, EpochTransition, MAX_TRANSITIONS, RESERVED_ARTIFACT_ID, ValidityWindowPolicy,
+        check_artifact_epoch, constant_time, event_codes, push_bounded,
     };
+    // bd-yom8c: nested test mod does not inherit the file-level `use sha2::Digest`;
+    // re-import so `sha2::Sha256::new()` (a Digest trait fn) resolves.
+    use sha2::Digest;
+
+    /// bd-kpjrz: one fixed key for the whole suite, so a transition signed by any
+    /// store here verifies against any other store here. Tests that care about
+    /// key separation construct their own key explicitly.
+    fn epoch_test_key() -> EpochSigningKey {
+        EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+    }
+
+    fn epoch_test_store() -> EpochStore {
+        EpochStore::new(epoch_test_key())
+    }
+
+    fn epoch_test_store_at(committed_epoch: u64) -> EpochStore {
+        EpochStore::recover(committed_epoch, epoch_test_key())
+    }
 
     fn mhash(n: u32) -> String {
         format!("manifest-hash-{n:016x}")
@@ -668,20 +817,23 @@ mod tests {
 
     #[test]
     fn store_starts_at_genesis() {
-        let store = EpochStore::new();
+        let store = epoch_test_store();
         assert_eq!(store.epoch_read(), ControlEpoch::GENESIS);
         assert_eq!(store.transition_count(), 0);
     }
 
     #[test]
-    fn store_default_is_genesis() {
-        let store = EpochStore::default();
+    fn new_store_starts_at_genesis() {
+        // bd-kpjrz: was `store_default_is_genesis`. `Default` is gone because a
+        // default store would have to invent a signing key; see the note where
+        // the impl used to be.
+        let store = epoch_test_store();
         assert_eq!(store.epoch_read(), ControlEpoch::GENESIS);
     }
 
     #[test]
     fn single_advance() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let t = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         assert_eq!(t.old_epoch, ControlEpoch::GENESIS);
         assert_eq!(t.new_epoch, ControlEpoch::new(1));
@@ -692,7 +844,7 @@ mod tests {
 
     #[test]
     fn sequential_advances() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         for i in 1..=100_u64 {
             let t = store
                 .epoch_advance(&mhash(i as u32), 1000_u64.saturating_add(i), &tid(i as u32))
@@ -706,7 +858,7 @@ mod tests {
 
     #[test]
     fn thousand_advances_monotonic() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         for i in 1..=1000_u64 {
             store
                 .epoch_advance(&mhash(i as u32), 1000_u64.saturating_add(i), &tid(i as u32))
@@ -729,7 +881,7 @@ mod tests {
 
     #[test]
     fn regression_same_value_rejected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         // Current is 1; attempt to set to 1 (same value)
         let err = store.epoch_set(1, &mhash(2), 1001, &tid(2)).unwrap_err();
@@ -740,7 +892,7 @@ mod tests {
 
     #[test]
     fn regression_lower_value_rejected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         store.epoch_advance(&mhash(2), 1001, &tid(2)).unwrap();
         // Current is 2; attempt to set to 1
@@ -751,7 +903,7 @@ mod tests {
 
     #[test]
     fn regression_zero_rejected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         let err = store.epoch_set(0, &mhash(2), 1001, &tid(2)).unwrap_err();
         assert_eq!(err.code(), "EPOCH_REGRESSION");
@@ -761,22 +913,86 @@ mod tests {
 
     #[test]
     fn transition_event_verifiable() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let t = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
-        assert!(t.verify(), "Transition event MAC should verify");
+        assert!(
+            t.verify(&epoch_test_key()),
+            "Transition event MAC should verify"
+        );
     }
 
     #[test]
     fn transition_event_tamper_detected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let mut t = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         t.manifest_hash = "tampered".to_string();
-        assert!(!t.verify(), "Tampered transition should fail verification");
+        assert!(
+            !t.verify(&epoch_test_key()),
+            "Tampered transition should fail verification"
+        );
+    }
+
+    #[test]
+    fn transition_event_mac_is_unforgeable_without_the_key() {
+        // bd-kpjrz: this is the property INV-EPOCH-SIGNED-EVENT claims and did
+        // not have. `compute_mac` was an UNKEYED SHA-256, so anyone could mint a
+        // transition with a valid `event_mac` — including the epoch jump below,
+        // which is precisely what the invariant is supposed to make impossible.
+        let mut store = epoch_test_store();
+        let genuine = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
+        assert!(genuine.verify(&epoch_test_key()));
+
+        // An adversary who knows the whole scheme but not the key cannot produce
+        // a MAC that verifies.
+        let adversary_key =
+            EpochSigningKey::new(b"an-attacker-key-of-their-own").expect("non-empty key");
+        let forged = EpochTransition {
+            old_epoch: ControlEpoch::new(5),
+            new_epoch: ControlEpoch::new(1_000_000),
+            timestamp: 1000,
+            manifest_hash: mhash(9),
+            event_mac: EpochTransition::compute_mac(
+                &adversary_key,
+                ControlEpoch::new(5),
+                ControlEpoch::new(1_000_000),
+                1000,
+                &mhash(9),
+                &tid(9),
+            ),
+            trace_id: tid(9),
+        };
+        assert!(
+            !forged.verify(&epoch_test_key()),
+            "a transition signed with a different key must not verify"
+        );
+
+        // ...and the same event under the real key does verify, so the failure
+        // above is about the key rather than about the payload being malformed.
+        let legitimate = EpochTransition {
+            event_mac: EpochTransition::compute_mac(
+                &epoch_test_key(),
+                ControlEpoch::new(5),
+                ControlEpoch::new(1_000_000),
+                1000,
+                &mhash(9),
+                &tid(9),
+            ),
+            ..forged
+        };
+        assert!(legitimate.verify(&epoch_test_key()));
+    }
+
+    #[test]
+    fn empty_signing_key_is_refused() {
+        // An empty key would make HMAC-SHA256 a fixed, publicly recomputable
+        // function of the payload — the unkeyed hash this bead removed.
+        let err = EpochSigningKey::new(b"").expect_err("empty key must be refused");
+        assert_eq!(err.code(), "EPOCH_INVALID_SIGNING_KEY");
     }
 
     #[test]
     fn transition_contains_required_fields() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let t = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         assert_eq!(t.old_epoch, ControlEpoch::GENESIS);
         assert_eq!(t.new_epoch, ControlEpoch::new(1));
@@ -790,7 +1006,7 @@ mod tests {
 
     #[test]
     fn crash_recovery_preserves_committed() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         store.epoch_advance(&mhash(2), 1001, &tid(2)).unwrap();
         store.epoch_advance(&mhash(3), 1002, &tid(3)).unwrap();
@@ -805,14 +1021,14 @@ mod tests {
 
     #[test]
     fn crash_recovery_from_specific_epoch() {
-        let store = EpochStore::recover(42);
+        let store = epoch_test_store_at(42);
         assert_eq!(store.epoch_read(), ControlEpoch::new(42));
         assert_eq!(store.committed_epoch(), ControlEpoch::new(42));
     }
 
     #[test]
     fn advance_after_recovery() {
-        let mut store = EpochStore::recover(10);
+        let mut store = epoch_test_store_at(10);
         let t = store.epoch_advance(&mhash(1), 2000, &tid(1)).unwrap();
         assert_eq!(t.old_epoch, ControlEpoch::new(10));
         assert_eq!(t.new_epoch, ControlEpoch::new(11));
@@ -822,7 +1038,7 @@ mod tests {
 
     #[test]
     fn empty_manifest_hash_rejected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let err = store.epoch_advance("", 1000, &tid(1)).unwrap_err();
         assert_eq!(err.code(), "EPOCH_INVALID_MANIFEST");
     }
@@ -831,7 +1047,7 @@ mod tests {
 
     #[test]
     fn epoch_at_max_overflows_on_advance() {
-        let mut store = EpochStore::recover(u64::MAX);
+        let mut store = epoch_test_store_at(u64::MAX);
         let err = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap_err();
         assert_eq!(err.code(), "EPOCH_OVERFLOW");
         // State unchanged
@@ -868,7 +1084,7 @@ mod tests {
 
     #[test]
     fn committed_tracks_advances() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         assert_eq!(store.committed_epoch(), ControlEpoch::GENESIS);
         store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         assert_eq!(store.committed_epoch(), ControlEpoch::new(1));
@@ -878,7 +1094,7 @@ mod tests {
 
     #[test]
     fn committed_unchanged_on_regression_attempt() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         assert!(store.epoch_set(0, &mhash(2), 1001, &tid(2)).is_err());
         assert_eq!(store.committed_epoch(), ControlEpoch::new(1));
@@ -889,6 +1105,7 @@ mod tests {
     #[test]
     fn same_inputs_produce_same_mac() {
         let mac1 = EpochTransition::compute_mac(
+            &epoch_test_key(),
             ControlEpoch::new(0),
             ControlEpoch::new(1),
             1000,
@@ -896,6 +1113,7 @@ mod tests {
             "trace1",
         );
         let mac2 = EpochTransition::compute_mac(
+            &epoch_test_key(),
             ControlEpoch::new(0),
             ControlEpoch::new(1),
             1000,
@@ -908,6 +1126,7 @@ mod tests {
     #[test]
     fn different_inputs_produce_different_mac() {
         let mac1 = EpochTransition::compute_mac(
+            &epoch_test_key(),
             ControlEpoch::new(0),
             ControlEpoch::new(1),
             1000,
@@ -915,6 +1134,7 @@ mod tests {
             "trace1",
         );
         let mac2 = EpochTransition::compute_mac(
+            &epoch_test_key(),
             ControlEpoch::new(0),
             ControlEpoch::new(1),
             1000,
@@ -1206,7 +1426,7 @@ mod tests {
 
     #[test]
     fn epoch_set_rejects_empty_manifest_for_forward_jump() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let err = store
             .epoch_set(5, "", 1000, &tid(1))
             .expect_err("forward jump with empty manifest hash must fail");
@@ -1219,7 +1439,7 @@ mod tests {
 
     #[test]
     fn epoch_set_regression_precedes_empty_manifest_validation() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
 
         let err = store
@@ -1240,29 +1460,29 @@ mod tests {
 
     #[test]
     fn transition_event_tamper_timestamp_detected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let mut transition = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         transition.timestamp = 1001;
 
-        assert!(!transition.verify());
+        assert!(!transition.verify(&epoch_test_key()));
     }
 
     #[test]
     fn transition_event_tamper_trace_detected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let mut transition = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         transition.trace_id = tid(2);
 
-        assert!(!transition.verify());
+        assert!(!transition.verify(&epoch_test_key()));
     }
 
     #[test]
     fn transition_event_tamper_epoch_pair_detected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let mut transition = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         transition.new_epoch = ControlEpoch::new(2);
 
-        assert!(!transition.verify());
+        assert!(!transition.verify(&epoch_test_key()));
     }
 
     #[test]
@@ -1324,7 +1544,7 @@ mod tests {
 
     #[test]
     fn epoch_advance_rejects_whitespace_manifest_hash() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let err = store
             .epoch_advance(" \t\n", 1000, &tid(1))
             .expect_err("whitespace manifest hash must fail closed");
@@ -1337,7 +1557,7 @@ mod tests {
 
     #[test]
     fn epoch_advance_rejects_padded_manifest_hash() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let err = store
             .epoch_advance(" manifest ", 1000, &tid(1))
             .expect_err("padded manifest hash must fail closed");
@@ -1350,7 +1570,7 @@ mod tests {
 
     #[test]
     fn epoch_set_rejects_null_manifest_hash_without_mutating() {
-        let mut store = EpochStore::recover(7);
+        let mut store = epoch_test_store_at(7);
         let err = store
             .epoch_set(8, "manifest\0shadow", 1000, &tid(1))
             .expect_err("null-byte manifest hash must fail closed");
@@ -1363,7 +1583,7 @@ mod tests {
 
     #[test]
     fn epoch_set_rejects_whitespace_manifest_hash_without_mutating() {
-        let mut store = EpochStore::recover(7);
+        let mut store = epoch_test_store_at(7);
         let err = store
             .epoch_set(8, "   ", 1000, &tid(1))
             .expect_err("forward set with whitespace manifest hash must fail");
@@ -1376,7 +1596,7 @@ mod tests {
 
     #[test]
     fn epoch_set_regression_masks_whitespace_manifest_hash() {
-        let mut store = EpochStore::recover(7);
+        let mut store = epoch_test_store_at(7);
         let err = store
             .epoch_set(7, "   ", 1000, &tid(1))
             .expect_err("regression order must stay fail-closed and stable");
@@ -1389,20 +1609,20 @@ mod tests {
 
     #[test]
     fn transition_event_empty_mac_is_rejected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let mut transition = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         transition.event_mac.clear();
 
-        assert!(!transition.verify());
+        assert!(!transition.verify(&epoch_test_key()));
     }
 
     #[test]
     fn transition_event_wrong_mac_prefix_is_rejected() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let mut transition = store.epoch_advance(&mhash(1), 1000, &tid(1)).unwrap();
         transition.event_mac = transition.event_mac.replacen("mac:", "hash:", 1);
 
-        assert!(!transition.verify());
+        assert!(!transition.verify(&epoch_test_key()));
     }
 
     #[test]
@@ -1433,6 +1653,7 @@ mod tests {
         let normal_trace = "trace-001";
 
         let mac1 = EpochTransition::compute_mac(
+            &epoch_test_key(),
             old_epoch,
             new_epoch,
             timestamp,
@@ -1462,6 +1683,7 @@ mod tests {
             // Test that extremely large fields are handled safely
             if field_len <= u64::MAX as usize {
                 let mac = EpochTransition::compute_mac(
+                    &epoch_test_key(),
                     old_epoch,
                     new_epoch,
                     timestamp,
@@ -1597,6 +1819,7 @@ mod tests {
 
         // Test that domain separator is actually effective
         let mac_with_domain = EpochTransition::compute_mac(
+            &epoch_test_key(),
             old_epoch,
             new_epoch,
             timestamp,
@@ -1661,9 +1884,13 @@ mod tests {
             mac_with_domain.starts_with("mac:"),
             "MAC should have proper format"
         );
-        assert!(
-            mac_with_domain.len() > 70,
-            "MAC should include domain-separated content"
+        // bd-o776s: compute_mac returns "mac:" + 64 hex chars (SHA-256 digest) = 68
+        // chars. The original `> 70` bound predates the current fixed MAC encoding;
+        // reconcile to the exact domain-separated digest length.
+        assert_eq!(
+            mac_with_domain.len(),
+            "mac:".len() + 64,
+            "MAC should be the domain-separated SHA-256 hex digest"
         );
 
         // Production code should use domain separators like:
@@ -1675,7 +1902,7 @@ mod tests {
     fn negative_vector_operations_must_use_push_bounded() {
         // Test that transition storage uses push_bounded instead of raw Vec::push
         // The file has push_bounded function - ensure it's used correctly
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
 
         // Test transition history bounded storage
         for i in 0..(MAX_TRANSITIONS * 2) {
@@ -1803,6 +2030,7 @@ mod tests {
 
         // Test MAC verification uses constant-time comparison
         let mac1 = EpochTransition::compute_mac(
+            &epoch_test_key(),
             ControlEpoch::new(1),
             ControlEpoch::new(2),
             1000,
@@ -1810,6 +2038,7 @@ mod tests {
             "trace1",
         );
         let mac2 = EpochTransition::compute_mac(
+            &epoch_test_key(),
             ControlEpoch::new(1),
             ControlEpoch::new(2),
             1000,
@@ -1817,6 +2046,7 @@ mod tests {
             "trace1",
         );
         let mac3 = EpochTransition::compute_mac(
+            &epoch_test_key(),
             ControlEpoch::new(1),
             ControlEpoch::new(2),
             1000,
@@ -1832,16 +2062,22 @@ mod tests {
 
         // MAC comparison should use constant-time when used in security contexts
         // The EpochTransition::verify() method should use ct_eq for MAC comparison
+        // bd-o776s: the transition's fields MUST match the inputs `mac1` was
+        // computed over (hash1/trace1); otherwise verify() correctly rejects the
+        // mismatched MAC (fail-closed) and this "valid transition" assertion fails.
         let transition = EpochTransition {
             old_epoch: ControlEpoch::new(1),
             new_epoch: ControlEpoch::new(2),
             timestamp: 1000,
-            manifest_hash: "test-hash".to_string(),
-            trace_id: "test-trace".to_string(),
+            manifest_hash: "hash1".to_string(),
+            trace_id: "trace1".to_string(),
             event_mac: mac1,
         };
 
-        assert!(transition.verify(), "Valid transition should verify");
+        assert!(
+            transition.verify(&epoch_test_key()),
+            "Valid transition should verify"
+        );
 
         // Production code should use: constant_time::ct_eq(mac1, mac2) ✓
         // NOT: mac1 == mac2 ✗ (timing attack vulnerable for cryptographic values)
@@ -1850,11 +2086,11 @@ mod tests {
     #[test]
     fn negative_comprehensive_hardening_patterns_validation() {
         // Test all hardening patterns together to catch interaction bugs
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
 
         // Test with boundary epoch values and safe arithmetic
         let max_safe_epoch = u64::MAX - 1000;
-        let recovered_store = EpochStore::recover(max_safe_epoch);
+        let recovered_store = epoch_test_store_at(max_safe_epoch);
         assert_eq!(recovered_store.committed_epoch().value(), max_safe_epoch);
 
         // Test epoch advancement near overflow boundary
@@ -1875,6 +2111,7 @@ mod tests {
         let large_trace_id = "trace-".repeat(1000);
 
         let mac_result = EpochTransition::compute_mac(
+            &epoch_test_key(),
             ControlEpoch::new(1),
             ControlEpoch::new(2),
             1000,
@@ -1959,7 +2196,7 @@ mod tests {
 
         let latest_transition = &store.transitions()[store.transitions().len() - 1];
         assert!(
-            latest_transition.verify(),
+            latest_transition.verify(&epoch_test_key()),
             "Latest transition should verify correctly"
         );
         assert!(

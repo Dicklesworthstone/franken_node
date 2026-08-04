@@ -16,7 +16,7 @@ const FRANKENSQLITE_PERSISTENCE_MATRIX: &str =
 
 #[cfg(feature = "advanced-features")]
 use frankenengine_node::conformance::fsqlite_inspired_suite::{
-    ConformanceDomain, ConformanceFixture, ConformanceId, ConformanceSuiteRunner,
+    ConformanceDomain, ConformanceError, ConformanceFixture, ConformanceId, ConformanceSuiteRunner,
 };
 
 fn persistence_matrix() -> Value {
@@ -341,22 +341,41 @@ fn fixture(number: u16) -> ConformanceFixture {
 
 #[cfg(feature = "advanced-features")]
 #[test]
-fn conformance_suite_fixture_overflow_evicts_oldest_id() {
+fn conformance_suite_fixture_overflow_fails_closed_at_capacity() {
     let mut runner = ConformanceSuiteRunner::new();
 
-    for number in 1..=4097 {
+    // Fill exactly to capacity.
+    for number in 1..=4096 {
         runner
             .register_fixture(fixture(number))
             .expect("unique fixture should register");
     }
-
     assert_eq!(runner.fixture_count(), 4096);
-    runner
-        .register_fixture(fixture(1))
-        .expect("evicted oldest fixture id should be reusable");
+
+    // Registration past capacity must FAIL CLOSED rather than silently evicting
+    // the oldest fixture: a conformance suite that drops test coverage on overflow
+    // is a silent regression, so push_fixture deliberately returns CapacityExceeded
+    // (commit "fix(capacity): fail closed on capacity overflow instead of silently
+    // evicting"). The matching results/audit ring buffers still evict-oldest.
+    let overflow = runner
+        .register_fixture(fixture(4097))
+        .expect_err("registration past capacity must fail closed, not evict");
+    assert!(
+        matches!(
+            overflow,
+            ConformanceError::CapacityExceeded { capacity: 4096 }
+        ),
+        "expected CapacityExceeded {{ capacity: 4096 }}, got {overflow:?}"
+    );
+
+    // Nothing was evicted: the count is unchanged and every previously-registered
+    // id is still present, so re-registering one is a DuplicateId, not a success.
     assert_eq!(runner.fixture_count(), 4096);
     assert!(
-        runner.register_fixture(fixture(3)).is_err(),
-        "non-evicted fixture id should remain registered"
+        matches!(
+            runner.register_fixture(fixture(1)),
+            Err(ConformanceError::DuplicateId { .. })
+        ),
+        "previously-registered id must remain registered (no eviction occurred)"
     );
 }

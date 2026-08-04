@@ -348,7 +348,16 @@ impl ZoneSegmentationEngine {
             }
             IsolationLevel::Permissive => {
                 // Permissive: reads allowed, writes require bridge.
-                if (req.action == "write" || req.action == "delete")
+                //
+                // bd-djpur: the classification used to be
+                // `req.action == "write" || req.action == "delete"`, an
+                // exact-match pair that treated every other verb as a read —
+                // `update`, `put`, `truncate`, `insert`, and notably
+                // `write:delete_all` all crossed the boundary without a bridge.
+                // `security::trust_zone::is_read_only_action` is the shared
+                // fail-closed classifier: only positively-recognized read verbs
+                // skip the bridge requirement.
+                if !crate::security::trust_zone::is_read_only_action(&req.action)
                     && !source.allowed_cross_zone_targets.contains(&req.target_zone)
                 {
                     return Err(SegmentationError::IsolationViolation {

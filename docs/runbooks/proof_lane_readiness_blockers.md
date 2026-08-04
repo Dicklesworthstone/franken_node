@@ -34,6 +34,28 @@ This runbook covers the source-only blocker path for:
 5. If a source-only blocker is recorded, state whether cargo was launched. For
    this runbook the expected answer is `cargo_launched=false`.
 
+## Blocked-Bead Freshness Policy
+
+A blocked Bead is fresh enough for triage only when its notes, description, or
+timestamped comments preserve all of the following facts:
+
+- the exact command, deferred command, or affected symbol that was being proven;
+- the first real blocker string, not a later summary or inferred cause;
+- the external owner, worker, repository, or dependency when the blocker is not
+  local to `franken_node`;
+- a UTC timestamp no older than the active freshness window.
+
+The helper `scripts/check_blocked_bead_freshness.py` applies this policy to a
+Beads JSON snapshot. Its default freshness window is 168 hours. A result of
+`fresh` means agents should leave the issue blocked and continue elsewhere. A
+result of `stale`, `missing_evidence`, or `incomplete_evidence` means the next
+agent should refresh the Beads comment before relying on the blocker, preserving
+the exact command and first blocker string verbatim.
+
+Do not unblock an issue solely because the freshness checker fails. The failure
+means the blocker record is not currently auditable enough for handoff; it does
+not prove the underlying blocker is gone.
+
 ## Detection
 
 Start here when `franken-node ops validation-readiness` reports

@@ -1,0 +1,5 @@
+{
+  "code": "ERR-VEF-CHAIN-INTERNAL",
+  "event_code": "VEF-CHAIN-ERR-004",
+  "message": "Serialization failure during hash computation"
+}

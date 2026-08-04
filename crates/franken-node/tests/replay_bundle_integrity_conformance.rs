@@ -505,7 +505,10 @@ fn create_test_event_log() -> Vec<RawEvent> {
             json!({
                 "policy_id": "test_policy",
                 "decision": "allow",
-                "confidence": 0.95
+                // Integer, not a float: the replay-bundle canonicalizer rejects
+                // non-deterministic f64 payload values (ReplayBundleError::
+                // NonDeterministicFloat), matching the golden fixtures' convention.
+                "confidence": 95
             }),
         )
         .with_causal_parent(1),

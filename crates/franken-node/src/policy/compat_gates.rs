@@ -2273,7 +2273,7 @@ mod tests {
             CompatibilityMode::Balanced,
             CompatibilityMode::LegacyRisky,
         ];
-        let mut count = 0;
+        let mut count = 0u32;
         for band in &bands {
             for mode in &modes {
                 let _ = divergence_action(*band, *mode);

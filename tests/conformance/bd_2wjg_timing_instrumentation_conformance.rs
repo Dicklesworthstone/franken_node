@@ -9,12 +9,11 @@
 //! - INV-SAMPLE-SEPARATION: track baseline vs integrated samples separately
 //! - INV-COLD-START-TRACKING: track cold-start timings per hot path
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use frankenengine_node::policy::perf_budget_guard::{
-    BenchmarkMeasurement, PRF_006_TIMING_SAMPLE, PRF_007_PERCENTILE_COMPUTED,
-    PRF_008_COLD_START_TIMING, PercentileStats, TimingCollector, TimingSample,
+    PRF_006_TIMING_SAMPLE, PRF_007_PERCENTILE_COMPUTED, PRF_008_COLD_START_TIMING, PercentileStats,
+    TimingCollector,
 };
 
 #[derive(Debug, Clone)]
@@ -597,7 +596,7 @@ fn test_measurements_synthesis_emits_prf_007() -> TestResult {
     let _measurements = collector.to_measurements();
 
     let events = collector.events();
-    let new_events = events.len() - initial_event_count;
+    let _new_events = events.len() - initial_event_count;
 
     // Should have at least one PRF-007 event for percentile computation
     let prf_007_events: Vec<_> = events

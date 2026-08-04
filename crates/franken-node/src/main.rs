@@ -60,6 +60,8 @@ mod observability {
 }
 #[allow(dead_code)]
 mod security {
+    #[path = "conformal.rs"]
+    pub mod conformal;
     #[path = "constant_time.rs"]
     pub mod constant_time;
     #[path = "crypto.rs"]
@@ -106,16 +108,17 @@ use crate::api::{
 use crate::cli::{
     BenchCommand, Cli, Command, DebugCommand, DebugEvidenceArgs, DebugEvidenceKind,
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
-    DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorWorkspacePressureArgs,
-    FleetAgentArgs, FleetCommand, IncidentCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
-    OpsConfigAuditArgs, OpsMetricsFormat, OpsResourceGovernorArgs, OpsValidationCloseoutArgs,
-    OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand,
-    ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs,
-    RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand,
-    SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
-    TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifyTransparencyLogArgs,
-    load_doctor_policy_activation_input,
+    DoctorEvidenceReadinessArgs, DoctorPolicyActivationInput, DoctorProcessSpawnReadinessArgs,
+    DoctorWorkspacePressureArgs, FleetAgentArgs, FleetCommand, IncidentCommand, LtvCommand,
+    MigrateCommand, MigrateReportArgs, OpsCommand, OpsCompatCorpusRunArgs, OpsConfigAuditArgs,
+    OpsMetricsFormat, OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs,
+    OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
+    ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
+    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
+    RuntimeLaneCommand, SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs,
+    TrustCardCommand, TrustCommand, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
+    VerifyMigrationArgs, VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs,
+    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -155,8 +158,9 @@ use frankenengine_node::{
     ops, runtime,
     security::{
         decision_receipt::{
-            DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt, ReceiptQuery,
-            append_signed_receipt, export_receipts_to_path, sign_receipt, write_receipts_markdown,
+            DECISION_RECEIPT_CRYPTO_SUITE, DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt,
+            ReceiptQuery, append_signed_receipt, export_receipts_to_path, sign_receipt,
+            write_receipts_markdown,
         },
         remote_cap::{
             CapabilityGate, CapabilityProvider, RemoteCap, RemoteCapError, RemoteOperation,
@@ -293,11 +297,21 @@ const INCIDENT_EVIDENCE_FILE_NAME: &str = "evidence.v1.json";
 const RUN_EXECUTION_RECEIPT_SCHEMA_VERSION: &str = "franken-node/run-execution-receipt/v1";
 const RUN_EXECUTION_RECEIPT_DEFAULT_MAX_RECEIPTS: usize = 100;
 const RUN_EXECUTION_RECEIPT_AUTO_QUARANTINE_THRESHOLD: usize = 1;
+// bd-fp1je: durable sentinel run-subject quarantine records, keyed by the
+// sha256 of the run target's bytes, consulted fail-closed by the run
+// preflight and released only by an explicit `trust release`.
+const SENTINEL_QUARANTINE_RECORD_SCHEMA_VERSION: &str =
+    "franken-node/sentinel-quarantine-record/v1";
+const SENTINEL_QUARANTINE_STATE_RELATIVE_DIR: &str = ".franken-node/state/sentinel/quarantine";
+const MAX_SENTINEL_QUARANTINE_RECORD_BYTES: u64 = 1 << 20;
+const MAX_SENTINEL_QUARANTINE_SUBJECT_BYTES: u64 = 64 << 20;
 const TRUST_SCAN_NPM_REGISTRY_BASE_URL: &str = "https://registry.npmjs.org";
 const TRUST_SCAN_OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const TRUST_SCAN_DEPS_DEV_BASE_URL: &str = "https://api.deps.dev/v3alpha";
 const TRUST_SCAN_REMOTECAP_TOKEN_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN";
+#[cfg(feature = "http-client")]
 const TRUST_SCAN_HTTP_TIMEOUT_MS_ENV: &str = "FRANKEN_NODE_TRUST_SCAN_HTTP_TIMEOUT_MS";
+#[cfg(feature = "http-client")]
 const TRUST_SCAN_HTTP_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const OPS_HEALTH_LEDGER_FILE_CANDIDATES: &[&str] = &[
     "evidence_spill.jsonl",
@@ -611,6 +625,9 @@ enum TrustViolationKind {
     RegistryCorrupt,
     Revoked,
     Quarantined,
+    /// bd-fp1je: the run target itself is under an active Sentinel
+    /// quarantine record; blocks in every policy mode until released.
+    SentinelQuarantined,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -669,6 +686,57 @@ struct RunExecutionTelemetrySummary {
     recent_event_codes: Vec<String>,
 }
 
+/// bd-fp1je: what the run did (or would do) about a Sentinel escalation.
+/// `enforced` means a durable run-subject quarantine record was written (or
+/// already active) and any Trusted dependency trust cards were quarantined;
+/// `recommend-only` means `trust.quarantine_on_high_risk` is disabled for the
+/// resolved profile, so the escalation stays operator-facing evidence.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct SentinelEnforcementSummary {
+    mode: String,
+    decision_id: String,
+    selected_action: String,
+    e_value_ppm: u64,
+    false_alarm_bound_ppm: u64,
+    app_content_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quarantine_record_path: Option<String>,
+    quarantine_record_preexisting: bool,
+    quarantined_extensions: Vec<String>,
+    release_command: String,
+}
+
+/// Durable proof-carrying record of a Sentinel-driven run-subject quarantine.
+/// The embedded FN-SENTINEL-008 escalation receipt (plus its ephemeral
+/// verifying key) makes the enforcement decision offline-verifiable. Release
+/// never deletes the file; it flips `released` with an audited operator entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct SentinelQuarantineRecord {
+    schema_version: String,
+    subject_id: String,
+    app_content_hash: String,
+    trace_id: String,
+    decision_id: String,
+    selected_action: String,
+    e_value_ppm: u64,
+    false_alarm_bound_ppm: u64,
+    posterior_malice_bp: u16,
+    policy_mode: String,
+    profile: String,
+    quarantined_at: String,
+    escalation_receipt: frankenengine_node::observability::evidence_ledger::EvidenceEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    escalation_verifying_key_hex: Option<String>,
+    release_command: String,
+    released: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    released_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_operator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 struct RunExecutionReceiptCore {
     receipt_id: String,
@@ -686,8 +754,12 @@ struct RunExecutionReceiptCore {
     telemetry_summary: Option<RunExecutionTelemetrySummary>,
     ssrf_violations: Vec<String>,
     lockstep_verdict: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compat_preflight: Option<serde_json::Value>,
     violation_count: usize,
     auto_quarantined_extensions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sentinel_enforcement: Option<SentinelEnforcementSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -4986,8 +5058,23 @@ fn resolve_receipt_signing_key_path(
         return Ok(Some((path.to_path_buf(), "cli")));
     }
 
-    let resolved = config::Config::resolve(None, CliOverrides::default())
-        .context("failed resolving configuration for receipt export")?;
+    // We only need the OPTIONAL `security.decision_receipt_signing_key_path`
+    // field here, so resolve through the merge pipeline WITHOUT running full
+    // `Config::validate()`. Full validation enforces unrelated fail-closed
+    // security boundaries (e.g. `trust.registry_signing_key` and
+    // `security.authorized_api_keys` must be explicitly configured); enforcing
+    // them while merely probing for an optional key path would make the command
+    // abort with a misleading "failed resolving configuration" error in any
+    // workspace that has not yet run `franken-node init`. When no key path is
+    // discoverable we fall through to `Ok(None)` so the caller can emit the
+    // specific, fail-closed "no signing key was configured" refusal. A genuinely
+    // unreadable/malformed config file still surfaces its load error here.
+    let resolved = config::Config::resolve_without_validation_with_env(
+        None,
+        CliOverrides::default(),
+        &|key| std::env::var(key).ok(),
+    )
+    .context("failed resolving configuration for receipt export")?;
     if let Some(path) = resolved
         .config
         .security
@@ -5890,7 +5977,8 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 let policy = runtime::lane_scheduler::default_policy();
                 let scheduler = runtime::lane_scheduler::LaneScheduler::new(policy.clone())
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-                let telemetry = scheduler.telemetry_snapshot(runtime_cli_timestamp_ms(None));
+                let telemetry =
+                    scheduler.telemetry_snapshot(runtime_cli_timestamp_ms(args.timestamp_ms));
                 let report = RuntimeLaneStatusReport {
                     schema_version: runtime::lane_scheduler::SCHEMA_VERSION,
                     command: "runtime.lane.status",
@@ -6135,6 +6223,133 @@ fn parse_runtime_override(raw: Option<&str>) -> Result<Option<config::PreferredR
     .transpose()
 }
 
+#[cfg(feature = "control-plane")]
+fn sanitize_run_trace_segment(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "run".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[cfg(feature = "control-plane")]
+fn run_compat_preflight_report(
+    project_root: &Path,
+    trace_id: &str,
+    requested_runtime: config::PreferredRuntime,
+) -> Result<serde_json::Value> {
+    use frankenengine_node::api::compat_conformance::{
+        COMPAT_CONFORMANCE_SCHEMA, ConformanceConfig, DEFAULT_HARNESS_TIMEOUT_MS, FrankenLeg,
+        LockstepSignal, run_first_tranche_conformance,
+    };
+
+    let state_dir = ensure_state_dir(project_root)?;
+    let fixture_dir = state_dir
+        .join("compat-divergence-fixtures")
+        .join(sanitize_run_trace_segment(trace_id));
+    let sandbox = tempfile::Builder::new()
+        .prefix("franken_node_run_compat_")
+        .tempdir()
+        .context("failed creating run compat preflight sandbox")?;
+    let franken = FrankenLeg::new(sandbox.path());
+    let verdicts = run_first_tranche_conformance(
+        &franken,
+        &[],
+        &ConformanceConfig {
+            timeout_ms: DEFAULT_HARNESS_TIMEOUT_MS,
+            fixture_output_dir: Some(fixture_dir.clone()),
+        },
+    );
+
+    let mut total_cases = 0usize;
+    let mut total_divergences = 0usize;
+    let mut red_operations = Vec::new();
+    let mut emitted_fixtures = Vec::new();
+    let mut operations = Vec::new();
+
+    for verdict in &verdicts {
+        total_cases += verdict.cases_tested;
+        total_divergences += verdict.oracle.stats.total_divergences;
+        if verdict.signal == LockstepSignal::Red {
+            red_operations.push(verdict.operation_id.clone());
+        }
+        emitted_fixtures.extend(verdict.emitted_fixtures.clone());
+        operations.push(serde_json::json!({
+            "operation_id": verdict.operation_id,
+            "signal": verdict.signal.as_str(),
+            "cases_tested": verdict.cases_tested,
+            "reference_runtimes": verdict.reference_runtimes,
+            "total_divergences": verdict.oracle.stats.total_divergences,
+            "high_risk_divergences": verdict.oracle.stats.high_risk_count,
+            "diverged_boundaries": verdict.diverged_boundaries,
+            "emitted_fixtures": verdict.emitted_fixtures,
+            "skipped_legs": verdict.skipped_legs,
+        }));
+    }
+
+    let status = if red_operations.is_empty() {
+        "green"
+    } else {
+        "red"
+    };
+    let report = serde_json::json!({
+        "schema_version": "run-compat-preflight-v1.0",
+        "compat_conformance_schema": COMPAT_CONFORMANCE_SCHEMA,
+        "trace_id": trace_id,
+        "requested_runtime": requested_runtime.to_string(),
+        "status": status,
+        "operation_count": operations.len(),
+        "total_cases": total_cases,
+        "total_divergences": total_divergences,
+        "red_operations": red_operations,
+        "fixture_output_dir": fixture_dir.display().to_string(),
+        "emitted_fixtures": emitted_fixtures,
+        "operations": operations,
+    });
+
+    if !report["red_operations"]
+        .as_array()
+        .is_some_and(|operations| operations.is_empty())
+    {
+        return Err(ActionableError::new(
+            format!(
+                "run compat preflight diverged for operation(s): {}",
+                report["red_operations"]
+            ),
+            format!(
+                "inspect divergence fixtures under {} and fix the compat-op implementation before rerunning",
+                fixture_dir.display()
+            ),
+        )
+        .into());
+    }
+
+    Ok(report)
+}
+
+#[cfg(not(feature = "control-plane"))]
+fn run_compat_preflight_report(
+    _project_root: &Path,
+    _trace_id: &str,
+    _requested_runtime: config::PreferredRuntime,
+) -> Result<serde_json::Value> {
+    Err(ActionableError::new(
+        "run compat preflight requires the control-plane feature",
+        "rebuild franken-node with --features control-plane or omit --compat-preflight",
+    )
+    .into())
+}
+
 fn write_migration_report_file(
     rendered: &str,
     out_path: &Path,
@@ -6225,7 +6440,11 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_doctor_close_condition(args: &DoctorCloseConditionArgs) -> Result<()> {
+fn handle_doctor_close_condition(
+    args: &DoctorCloseConditionArgs,
+    trace_id: &str,
+    structured_logs_jsonl: bool,
+) -> Result<()> {
     let root = std::env::current_dir()
         .context("failed resolving current working directory for close-condition receipt")?;
     let signing_material = load_receipt_signing_material(args.receipt_signing_key.as_deref())?
@@ -6243,6 +6462,13 @@ fn handle_doctor_close_condition(args: &DoctorCloseConditionArgs) -> Result<()> 
     let receipt_path = ops::close_condition::write_close_condition_receipt(&root, &receipt)
         .context("failed writing close-condition receipt")?;
     let rendered = ops::close_condition::render_close_condition_receipt_json(&receipt)?;
+
+    if structured_logs_jsonl {
+        eprint!(
+            "{}",
+            ops::close_condition::render_close_condition_structured_logs_jsonl(&receipt, trace_id)?
+        );
+    }
 
     if args.json {
         println!("{rendered}");
@@ -6275,12 +6501,111 @@ fn handle_doctor_evidence_readiness(
     Ok(())
 }
 
+const PROCESS_SPAWN_READINESS_SCHEMA_VERSION: &str = "franken-node/process-spawn-readiness/v1";
+
+#[derive(Debug, Serialize)]
+struct ProcessSpawnReadinessReport {
+    schema_version: &'static str,
+    status: &'static str,
+    supported_os: &'static str,
+    backend: &'static str,
+    resolved_path: Option<String>,
+    binary_sha256: Option<String>,
+    functional_probe_passed: bool,
+    reason: String,
+    remediation: String,
+}
+
+fn build_process_spawn_readiness_report(
+    configured_path: Option<&Path>,
+) -> ProcessSpawnReadinessReport {
+    match frankenengine_node::security::isolation_backend::probe_process_spawn_containment(
+        configured_path,
+    ) {
+        Ok(readiness) => ProcessSpawnReadinessReport {
+            schema_version: PROCESS_SPAWN_READINESS_SCHEMA_VERSION,
+            status: "ready",
+            supported_os: "linux",
+            backend: "bubblewrap",
+            resolved_path: Some(readiness.binary_path().display().to_string()),
+            binary_sha256: Some(readiness.binary_sha256().to_string()),
+            functional_probe_passed: readiness.functional_probe_passed(),
+            reason: "Bubblewrap passed secure metadata and functional namespace checks."
+                .to_string(),
+            remediation: "No backend remediation required. A signed ChildProcessSpawn token is still required, and process spawning remains disabled until launch-time containment is active."
+                .to_string(),
+        },
+        Err(error) => {
+            let unsupported = matches!(
+                error,
+                frankenengine_node::security::isolation_backend::ProcessSpawnContainmentError::UnsupportedOs {
+                    ..
+                }
+            );
+            ProcessSpawnReadinessReport {
+                schema_version: PROCESS_SPAWN_READINESS_SCHEMA_VERSION,
+                status: if unsupported {
+                    "unsupported"
+                } else {
+                    "unavailable"
+                },
+                supported_os: "linux",
+                backend: "bubblewrap",
+                resolved_path: configured_path.map(|path| path.display().to_string()),
+                binary_sha256: None,
+                functional_probe_passed: false,
+                reason: error.to_string(),
+                remediation: if unsupported {
+                    "Run process-spawn workloads on a Linux host with a validated Bubblewrap backend; unsupported operating systems fail closed."
+                        .to_string()
+                } else {
+                    "Install a root-owned, non-setuid, non-writable Bubblewrap binary, configure its absolute path, and rerun doctor process-spawn-readiness."
+                        .to_string()
+                },
+            }
+        }
+    }
+}
+
+fn handle_doctor_process_spawn_readiness(
+    args: &DoctorProcessSpawnReadinessArgs,
+    parent_json: bool,
+) -> Result<()> {
+    let report = build_process_spawn_readiness_report(args.bubblewrap_path.as_deref());
+    if args.json || parent_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "process-spawn readiness: {} backend={} path={}\nreason: {}\nremediation: {}",
+            report.status,
+            report.backend,
+            report.resolved_path.as_deref().unwrap_or("unresolved"),
+            report.reason,
+            report.remediation
+        );
+    }
+
+    if report.status == "ready" {
+        Ok(())
+    } else {
+        anyhow::bail!("process-spawn containment backend is not ready")
+    }
+}
+
 fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Result<()> {
     use crate::ops::doctor::WorkspacePressureDoctor;
     use crate::ops::workspace_pressure_policy::PolicyThresholds;
     use std::fs;
 
-    let inputs = collect_workspace_pressure_inputs()?;
+    let coordination_report = collect_coordination_health();
+    if !coordination_report.is_healthy() {
+        eprintln!(
+            "Warning: Agent coordination degraded: {}",
+            coordination_report.reason
+        );
+    }
+    let inputs =
+        collect_workspace_pressure_inputs_with_coordination(coordination_report.is_healthy())?;
 
     // Determine thresholds based on CLI flags
     let doctor = if args.conservative {
@@ -6291,7 +6616,10 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
         WorkspacePressureDoctor::new() // Uses balanced defaults
     };
 
-    let report = doctor.generate_report(&inputs);
+    let report = doctor.generate_report_with_agent_mail_coordination(
+        &inputs,
+        coordination_report.agent_mail_coordination,
+    );
 
     // Output JSON report
     if args.json || args.output.is_some() {
@@ -6323,6 +6651,19 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
 }
 
 fn collect_workspace_pressure_inputs() -> Result<WorkspacePressureInputs> {
+    // Intentionally does NOT print a coordination-degraded warning to stderr.
+    // This helper feeds the DR-WORKSPACE-001 check inside the machine-readable
+    // `doctor` report, whose output already surfaces `coordination=<healthy|
+    // degraded>`. A plain-text stderr warning here would corrupt the pure-JSONL
+    // stderr stream emitted under `doctor --structured-logs-jsonl` (the SIEM
+    // ingestion contract asserted by doctor_json_schema_conformance).
+    let coordination_report = collect_coordination_health();
+    collect_workspace_pressure_inputs_with_coordination(coordination_report.is_healthy())
+}
+
+fn collect_workspace_pressure_inputs_with_coordination(
+    coordination_healthy: bool,
+) -> Result<WorkspacePressureInputs> {
     use crate::ops::workspace_pressure_policy::{
         get_workspace_disk_space, get_workspace_file_reservations,
     };
@@ -6337,7 +6678,7 @@ fn collect_workspace_pressure_inputs() -> Result<WorkspacePressureInputs> {
         active_reservations: get_workspace_file_reservations().map_err(|err| {
             anyhow::anyhow!("failed collecting workspace file reservations: {err}")
         })?,
-        coordination_healthy: get_coordination_health()?,
+        coordination_healthy,
     })
 }
 
@@ -6455,20 +6796,13 @@ impl CoordinationHealth {
 struct CoordinationHealthReport {
     status: CoordinationHealth,
     reason: String,
+    agent_mail_coordination: crate::ops::doctor::AgentMailCoordinationSummary,
 }
 
 impl CoordinationHealthReport {
     fn is_healthy(&self) -> bool {
         self.status.is_healthy()
     }
-}
-
-fn get_coordination_health() -> Result<bool> {
-    let report = collect_coordination_health();
-    if !report.is_healthy() {
-        eprintln!("Warning: Agent coordination degraded: {}", report.reason);
-    }
-    Ok(report.is_healthy())
 }
 
 fn collect_coordination_health() -> CoordinationHealthReport {
@@ -6484,8 +6818,12 @@ fn assess_coordination_health(
     active_reservations: Option<u32>,
     latest_message_age_secs: Option<u64>,
 ) -> CoordinationHealthReport {
-    let mut status = mail_health.status;
-    let mut reasons = vec![mail_health.reason];
+    let CoordinationHealthReport {
+        mut status,
+        reason,
+        agent_mail_coordination,
+    } = mail_health;
+    let mut reasons = vec![reason];
 
     match active_reservations {
         Some(count) => {
@@ -6518,6 +6856,7 @@ fn assess_coordination_health(
     CoordinationHealthReport {
         status,
         reason: reasons.join("; "),
+        agent_mail_coordination,
     }
 }
 
@@ -6563,30 +6902,46 @@ fn probe_agent_mail_health() -> CoordinationHealthReport {
                 Err(err) => CoordinationHealthReport {
                     status: CoordinationHealth::Degraded,
                     reason: format!("agent_mail_health_unparseable={err}"),
+                    agent_mail_coordination:
+                        crate::ops::doctor::AgentMailCoordinationSummary::degraded(
+                            crate::ops::doctor::AgentMailHealthState::Unknown,
+                            format!("agent_mail_health_unparseable={err}"),
+                            "Use Beads-visible coordination and retry Agent Mail health with parseable JSON.",
+                        ),
                 },
             }
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let reason = format!(
+                "agent_mail_health_probe_failed=status:{} stderr:{}",
+                output.status,
+                stderr.trim()
+            );
             CoordinationHealthReport {
                 status: CoordinationHealth::Unhealthy,
-                reason: format!(
-                    "agent_mail_health_probe_failed=status:{} stderr:{}",
-                    output.status,
-                    stderr.trim()
-                ),
+                reason: reason.clone(),
+                agent_mail_coordination:
+                    crate::ops::doctor::AgentMailCoordinationSummary::unavailable(reason),
             }
         }
-        Err(err) => CoordinationHealthReport {
-            status: CoordinationHealth::Unhealthy,
-            reason: format!("agent_mail_health_probe_unavailable={err}"),
-        },
+        Err(err) => {
+            let reason = format!("agent_mail_health_probe_unavailable={err}");
+            CoordinationHealthReport {
+                status: CoordinationHealth::Unhealthy,
+                reason: reason.clone(),
+                agent_mail_coordination:
+                    crate::ops::doctor::AgentMailCoordinationSummary::unavailable(reason),
+            }
+        }
     }
 }
 
 fn coordination_health_from_agent_mail_payload(
     payload: &serde_json::Value,
 ) -> CoordinationHealthReport {
+    let agent_mail_coordination =
+        crate::ops::doctor::AgentMailCoordinationSummary::from_health_payload(payload);
     let mut status = CoordinationHealth::Healthy;
     let mut reasons = Vec::new();
 
@@ -6620,10 +6975,30 @@ fn coordination_health_from_agent_mail_payload(
     {
         reasons.push(format!("agent_mail_message_count={count}"));
     }
+    status = worst_coordination_health(
+        status,
+        coordination_health_from_agent_mail_summary(&agent_mail_coordination),
+    );
+    reasons.push(agent_mail_coordination.diagnostic_reason());
 
     CoordinationHealthReport {
         status,
         reason: reasons.join("; "),
+        agent_mail_coordination,
+    }
+}
+
+fn coordination_health_from_agent_mail_summary(
+    summary: &crate::ops::doctor::AgentMailCoordinationSummary,
+) -> CoordinationHealth {
+    match summary.health_state {
+        crate::ops::doctor::AgentMailHealthState::Healthy => CoordinationHealth::Healthy,
+        crate::ops::doctor::AgentMailHealthState::LockOwnerActive
+        | crate::ops::doctor::AgentMailHealthState::Unavailable => CoordinationHealth::Unhealthy,
+        crate::ops::doctor::AgentMailHealthState::DegradedReadOnly
+        | crate::ops::doctor::AgentMailHealthState::ArchiveAheadIndex
+        | crate::ops::doctor::AgentMailHealthState::RepairRecommended
+        | crate::ops::doctor::AgentMailHealthState::Unknown => CoordinationHealth::Degraded,
     }
 }
 
@@ -7355,7 +7730,9 @@ fn build_run_execution_receipt(
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
     ssrf_violations: Vec<String>,
     auto_quarantined_extensions: Vec<String>,
+    sentinel_enforcement: Option<SentinelEnforcementSummary>,
     lockstep_verdict: Option<serde_json::Value>,
+    compat_preflight: Option<serde_json::Value>,
 ) -> Result<RunExecutionReceipt> {
     let violation_count = ssrf_violations.len();
     let mut core = RunExecutionReceiptCore {
@@ -7374,8 +7751,10 @@ fn build_run_execution_receipt(
         telemetry_summary: summarize_run_telemetry(dispatch.telemetry.as_ref()),
         ssrf_violations,
         lockstep_verdict,
+        compat_preflight,
         violation_count,
         auto_quarantined_extensions,
+        sentinel_enforcement,
     };
     let seed_hash = compute_run_execution_receipt_seed_hash(&core)?;
     core.receipt_id = deterministic_run_execution_receipt_id(&seed_hash);
@@ -7385,6 +7764,203 @@ fn build_run_execution_receipt(
 
 fn run_execution_receipts_root(project_root: &Path) -> Result<PathBuf> {
     Ok(ensure_state_dir(project_root)?.join("execution-receipts"))
+}
+
+/// bd-qr5i2.2: produce L1 proof-carrying host-effect evidence (v2) from a
+/// real native-engine run, optionally writing it to a file and/or merging it
+/// into the compatibility-corpus results artifact the close-condition gate
+/// reads.
+#[cfg(feature = "engine")]
+fn handle_ops_proof_carrying_evidence(args: &OpsProofCarryingEvidenceArgs) -> Result<()> {
+    use ops::proof_carrying_evidence::{
+        merge_into_corpus_results, merge_into_l1_verdict, produce_lockstep_verdict_evidence,
+        produce_proof_carrying_effects_evidence,
+    };
+
+    let evidence = produce_proof_carrying_effects_evidence()?;
+    // bd-ry7d1: the L1 verdict artifact additionally requires a REAL
+    // dual-runtime lockstep-oracle pass; run it before any file is written so
+    // a diverged run leaves every artifact untouched (fail-closed).
+    let lockstep_evidence = if args.merge_l1_verdict.is_some() {
+        Some(produce_lockstep_verdict_evidence()?)
+    } else {
+        None
+    };
+    if let Some(out) = args.out.as_deref() {
+        if let Some(parent) = out.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create evidence output directory {}", parent.display())
+            })?;
+        }
+        std::fs::write(
+            out,
+            format!("{}\n", serde_json::to_string_pretty(&evidence)?),
+        )
+        .with_context(|| format!("write evidence to {}", out.display()))?;
+    }
+    if let Some(corpus) = args.merge_corpus.as_deref() {
+        merge_into_corpus_results(corpus, &evidence)?;
+    }
+    if let (Some(verdict_path), Some(lockstep)) =
+        (args.merge_l1_verdict.as_deref(), lockstep_evidence.as_ref())
+    {
+        merge_into_l1_verdict(verdict_path, &evidence, lockstep)?;
+    }
+    if args.json {
+        if let Some(lockstep) = lockstep_evidence.as_ref() {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "proof_carrying_effects": evidence,
+                    "lockstep_verdict": lockstep,
+                }))?
+            );
+            return Ok(());
+        }
+        println!("{}", serde_json::to_string_pretty(&evidence)?);
+    } else {
+        let mut rendered = format!(
+            "L1 proof-carrying host-effect evidence (v2)\n\
+             trace_id: {}\n\
+             verified subjects: {}\n\
+             effect receipts verified: {}\n\
+             invalid receipts: {}\n\
+             receipt chain verified: {}\n\
+             chain entries: {}",
+            evidence.trace_id,
+            evidence.verified_subjects.join(", "),
+            evidence.effect_receipts_verified,
+            evidence.invalid_receipts,
+            evidence.receipt_chain_verified,
+            evidence.receipt_chain_entries.len(),
+        );
+        if let Some(lockstep) = lockstep_evidence.as_ref() {
+            rendered.push_str(&format!(
+                "\nlockstep oracle verdict: {} (runtimes: {}; checks: {}; divergences: {})",
+                lockstep.oracle_verdict,
+                lockstep.runtimes.join(", "),
+                lockstep.checks_total,
+                lockstep.divergence_count,
+            ));
+        }
+        if let Some(out) = args.out.as_deref() {
+            rendered.push_str(&format!("\nwritten to: {}", out.display()));
+        }
+        if let Some(corpus) = args.merge_corpus.as_deref() {
+            rendered.push_str(&format!("\nmerged into: {}", corpus.display()));
+        }
+        if let Some(verdict_path) = args.merge_l1_verdict.as_deref() {
+            rendered.push_str(&format!(
+                "\nL1 verdict artifact updated: {}",
+                verdict_path.display()
+            ));
+        }
+        emit_operator_surface_output("ops-proof-carrying-evidence", &rendered)?;
+    }
+    Ok(())
+}
+
+/// Without the `engine` feature there is no native effect-producing run, so
+/// the producer fails closed instead of fabricating evidence.
+#[cfg(not(feature = "engine"))]
+fn handle_ops_proof_carrying_evidence(_args: &OpsProofCarryingEvidenceArgs) -> Result<()> {
+    anyhow::bail!(
+        "ops proof-carrying-evidence requires the `engine` feature: the evidence is \
+         produced by a real native franken_engine run and cannot be fabricated"
+    )
+}
+
+/// bd-kfseq: run the committed compatibility corpus across bun (reference
+/// leg) and the native franken_engine (this binary's own `run
+/// --console-only` path), adjudicate every case through the lockstep oracle,
+/// and write the genuine, digest-bound corpus results artifact.
+#[cfg(feature = "engine")]
+fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
+    use ops::compat_corpus_run::{
+        build_corpus_results_document, capture_corpus, content_addressed_corpus_version,
+        corpus_generated_at_utc, run_corpus,
+    };
+
+    let snapshot = capture_corpus(&args.corpus_root)?;
+    let corpus_version = content_addressed_corpus_version(&snapshot)?;
+    let (outcomes, bun_version) = run_corpus(
+        &snapshot,
+        std::time::Duration::from_secs(args.case_timeout_secs.clamp(1, 600)),
+    )?;
+
+    let existing = match std::fs::read_to_string(&args.out) {
+        Ok(raw) => Some(
+            serde_json::from_str::<serde_json::Value>(&raw).with_context(|| {
+                format!(
+                    "existing corpus results artifact {} is not valid JSON; refusing to overwrite",
+                    args.out.display()
+                )
+            })?,
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("read existing artifact {}", args.out.display()));
+        }
+    };
+
+    let document = build_corpus_results_document(
+        existing.as_ref(),
+        &outcomes,
+        &corpus_version,
+        &bun_version,
+        &corpus_generated_at_utc(),
+        &args.corpus_root.display().to_string(),
+    )?;
+
+    if let Some(parent) = args.out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create artifact directory {}", parent.display()))?;
+    }
+    std::fs::write(
+        &args.out,
+        format!("{}\n", serde_json::to_string_pretty(&document)?),
+    )
+    .with_context(|| format!("write corpus results artifact {}", args.out.display()))?;
+
+    let totals = document.get("totals").cloned().unwrap_or_default();
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "corpus_version": corpus_version,
+                "reference_runtime": format!("bun {bun_version}"),
+                "totals": totals,
+                "ci_gate": document.get("ci_gate"),
+                "out": args.out.display().to_string(),
+            }))?
+        );
+    } else {
+        let rendered = format!(
+            "compatibility corpus lockstep run (genuine)\n\
+             corpus version: {corpus_version}\n\
+             reference runtime: bun {bun_version}\n\
+             totals: {totals}\n\
+             written to: {}",
+            args.out.display()
+        );
+        emit_operator_surface_output("ops-compat-corpus-run", &rendered)?;
+    }
+    Ok(())
+}
+
+/// Without the `engine` feature the franken leg cannot execute natively, so
+/// the corpus runner fails closed instead of measuring a fallback runtime.
+#[cfg(not(feature = "engine"))]
+fn handle_ops_compat_corpus_run(_args: &OpsCompatCorpusRunArgs) -> Result<()> {
+    anyhow::bail!(
+        "ops compat-corpus-run requires the `engine` feature: the franken leg must be \
+         the real native engine, not a fallback runtime"
+    )
 }
 
 fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> {
@@ -8817,7 +9393,32 @@ fn maybe_auto_quarantine_run_dependencies(
     {
         return Ok(Vec::new());
     }
+    quarantine_trusted_run_dependencies(
+        project_root,
+        config,
+        preflight,
+        now_secs,
+        &format!(
+            "Automatically quarantined after runtime policy violations ({violation_count} violation(s))"
+        ),
+        "trace-cli-run-auto-quarantine",
+        None,
+    )
+}
 
+/// Quarantine + risk-bump every Trusted dependency of the current run in the
+/// authoritative trust registry. Shared by the SSRF-violation trigger above
+/// and the Sentinel escalation trigger (bd-fp1je), which differ only in the
+/// recorded rationale and evidence binding.
+fn quarantine_trusted_run_dependencies(
+    project_root: &Path,
+    config: &config::Config,
+    preflight: &RunPreFlightReport,
+    now_secs: u64,
+    risk_summary: &str,
+    trace: &str,
+    evidence_refs: Option<Vec<VerifiedEvidenceRef>>,
+) -> Result<Vec<String>> {
     let registry_path = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
     if !registry_path.is_file() {
         tracing::warn!(
@@ -8865,15 +9466,13 @@ fn maybe_auto_quarantine_run_dependencies(
                     reputation_trend: Some(ReputationTrend::Declining),
                     user_facing_risk_assessment: Some(RiskAssessment {
                         level: RiskLevel::High,
-                        summary: format!(
-                            "Automatically quarantined after runtime policy violations ({violation_count} violation(s))"
-                        ),
+                        summary: risk_summary.to_string(),
                     }),
                     last_verified_timestamp: Some(now_rfc3339.clone()),
-                    evidence_refs: None,
+                    evidence_refs: evidence_refs.clone(),
                 },
                 now_secs,
-                "trace-cli-run-auto-quarantine",
+                trace,
             )
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         quarantined.push(extension_id);
@@ -8883,6 +9482,335 @@ fn maybe_auto_quarantine_run_dependencies(
         .persist_authoritative_state(&registry_path)
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     Ok(quarantined)
+}
+
+// ---------------------------------------------------------------------------
+// bd-fp1je: Sentinel escalation -> product-side enforcement
+// ---------------------------------------------------------------------------
+
+/// Content address of the run target's bytes; the identity a sentinel
+/// quarantine record is keyed by (paths can move, bytes are what escalated).
+fn sentinel_subject_content_hash(app_path: &Path) -> Result<String> {
+    let bytes = crate::bounded_read(app_path, MAX_SENTINEL_QUARANTINE_SUBJECT_BYTES).with_context(
+        || {
+            format!(
+                "failed reading run target {} for sentinel subject hashing",
+                app_path.display()
+            )
+        },
+    )?;
+    Ok(format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(&bytes))
+    ))
+}
+
+fn sentinel_quarantine_record_path(project_root: &Path, app_content_hash: &str) -> Result<PathBuf> {
+    let hex_digest = app_content_hash.strip_prefix("sha256:").ok_or_else(|| {
+        anyhow::anyhow!("sentinel subject hash `{app_content_hash}` is not sha256:<hex>")
+    })?;
+    Ok(project_root
+        .join(SENTINEL_QUARANTINE_STATE_RELATIVE_DIR)
+        .join(format!("{hex_digest}.json")))
+}
+
+fn load_sentinel_quarantine_record(path: &Path) -> Result<Option<SentinelQuarantineRecord>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw =
+        crate::bounded_read(path, MAX_SENTINEL_QUARANTINE_RECORD_BYTES).with_context(|| {
+            format!(
+                "failed reading sentinel quarantine record {}",
+                path.display()
+            )
+        })?;
+    let record: SentinelQuarantineRecord = serde_json::from_slice(&raw).with_context(|| {
+        format!(
+            "sentinel quarantine record {} is corrupt; refusing to guess (fail closed)",
+            path.display()
+        )
+    })?;
+    Ok(Some(record))
+}
+
+fn persist_sentinel_quarantine_record(
+    path: &Path,
+    record: &SentinelQuarantineRecord,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed creating sentinel quarantine dir {}",
+                parent.display()
+            )
+        })?;
+    }
+    let rendered = serde_json::to_string_pretty(record)?;
+    std::fs::write(path, rendered.as_bytes()).with_context(|| {
+        format!(
+            "failed writing sentinel quarantine record {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn sentinel_release_command(app_path: &str) -> String {
+    format!(
+        "franken-node trust release --app {app_path} --operator-id <operator> --reason \"<remediation summary>\""
+    )
+}
+
+/// bd-fp1je: consume a run's Sentinel escalation and drive product-side
+/// enforcement. Writes are gated by the profile-differentiated
+/// `trust.quarantine_on_high_risk` knob (strict/balanced act, legacy-risky
+/// recommends); the run's own exit code stays with the engine's expected-loss
+/// selector. Enforcement is idempotent per subject: an existing ACTIVE
+/// quarantine record is preserved (first decision wins), a released one is
+/// superseded by a fresh escalation.
+#[allow(clippy::too_many_arguments)]
+fn maybe_enforce_sentinel_escalation(
+    project_root: &Path,
+    config: &config::Config,
+    profile: Profile,
+    policy_mode: &str,
+    app_path: &Path,
+    preflight: &RunPreFlightReport,
+    dispatch: &ops::engine_dispatcher::RunDispatchReport,
+    now_secs: u64,
+) -> Result<Option<SentinelEnforcementSummary>> {
+    let Some(sentinel) = dispatch.sentinel.as_ref() else {
+        return Ok(None);
+    };
+    if !sentinel.escalated {
+        return Ok(None);
+    }
+    let (Some(decision), Some(escalation_receipt)) = (
+        sentinel.decision.as_ref(),
+        sentinel.escalation_receipt.as_ref(),
+    ) else {
+        // `escalated` guarantees both today; stay fail-safe if that drifts.
+        return Ok(None);
+    };
+
+    let app_content_hash = sentinel_subject_content_hash(app_path)?;
+    let release_command = sentinel_release_command(&app_path.display().to_string());
+    if !config.trust.quarantine_on_high_risk {
+        return Ok(Some(SentinelEnforcementSummary {
+            mode: "recommend-only".to_string(),
+            decision_id: decision.decision_id.clone(),
+            selected_action: decision.selected_action.as_str().to_string(),
+            e_value_ppm: sentinel.e_value_ppm,
+            false_alarm_bound_ppm: sentinel.false_alarm_bound_ppm,
+            app_content_hash,
+            quarantine_record_path: None,
+            quarantine_record_preexisting: false,
+            quarantined_extensions: Vec::new(),
+            release_command,
+        }));
+    }
+
+    let record_path = sentinel_quarantine_record_path(project_root, &app_content_hash)?;
+    let preexisting_active =
+        load_sentinel_quarantine_record(&record_path)?.is_some_and(|existing| !existing.released);
+    if !preexisting_active {
+        let record = SentinelQuarantineRecord {
+            schema_version: SENTINEL_QUARANTINE_RECORD_SCHEMA_VERSION.to_string(),
+            subject_id: sentinel.subject_id.clone(),
+            app_content_hash: app_content_hash.clone(),
+            trace_id: sentinel.trace_id.clone(),
+            decision_id: decision.decision_id.clone(),
+            selected_action: decision.selected_action.as_str().to_string(),
+            e_value_ppm: sentinel.e_value_ppm,
+            false_alarm_bound_ppm: sentinel.false_alarm_bound_ppm,
+            posterior_malice_bp: sentinel.posterior_malice_bp,
+            policy_mode: policy_mode.to_string(),
+            profile: profile.to_string(),
+            quarantined_at: rfc3339_timestamp_from_secs(now_secs),
+            escalation_receipt: escalation_receipt.clone(),
+            escalation_verifying_key_hex: sentinel.escalation_verifying_key_hex.clone(),
+            release_command: release_command.clone(),
+            released: false,
+            released_at: None,
+            release_operator: None,
+            release_reason: None,
+        };
+        persist_sentinel_quarantine_record(&record_path, &record)?;
+    }
+
+    let quarantined_extensions = quarantine_trusted_run_dependencies(
+        project_root,
+        config,
+        preflight,
+        now_secs,
+        &format!(
+            "Automatically quarantined after Runtime Sentinel escalation (decision {}, action {}, e_value_ppm {})",
+            decision.decision_id,
+            decision.selected_action.as_str(),
+            sentinel.e_value_ppm
+        ),
+        "trace-cli-run-sentinel-enforcement",
+        Some(vec![VerifiedEvidenceRef {
+            evidence_id: format!("sentinel-escalation:{}", decision.decision_id),
+            evidence_type: EvidenceType::ReputationSignal,
+            verified_at_epoch: now_secs,
+            verification_receipt_hash: decision.evidence_hash.clone(),
+        }]),
+    )?;
+
+    Ok(Some(SentinelEnforcementSummary {
+        mode: "enforced".to_string(),
+        decision_id: decision.decision_id.clone(),
+        selected_action: decision.selected_action.as_str().to_string(),
+        e_value_ppm: sentinel.e_value_ppm,
+        false_alarm_bound_ppm: sentinel.false_alarm_bound_ppm,
+        app_content_hash,
+        quarantine_record_path: Some(record_path.display().to_string()),
+        quarantine_record_preexisting: preexisting_active,
+        quarantined_extensions,
+        release_command,
+    }))
+}
+
+/// bd-fp1je: fail-closed sentinel subject gate. An ACTIVE sentinel quarantine
+/// record for this run target blocks the preflight in EVERY policy mode (the
+/// same posture as revoked dependencies); the violation detail names the
+/// exact release command.
+fn apply_sentinel_subject_quarantine_gate(
+    verdict: PreFlightVerdict,
+    project_root: &Path,
+    app_path: &Path,
+) -> Result<PreFlightVerdict> {
+    let app_content_hash = match sentinel_subject_content_hash(app_path) {
+        Ok(hash) => hash,
+        Err(err) => {
+            // The dispatcher fails on an unreadable target anyway; an
+            // unhashable subject cannot match a stored record.
+            tracing::warn!(
+                app_path = %app_path.display(),
+                error = %err,
+                "skipping sentinel quarantine gate: run target is unhashable"
+            );
+            return Ok(verdict);
+        }
+    };
+    let record_path = sentinel_quarantine_record_path(project_root, &app_content_hash)?;
+    let Some(record) = load_sentinel_quarantine_record(&record_path)? else {
+        return Ok(verdict);
+    };
+    if record.released {
+        return Ok(verdict);
+    }
+
+    let detail = format!(
+        "run target {} is quarantined by the Runtime Sentinel (decision {}, action {}, e_value_ppm {}, quarantined_at {}); release with `{}` after remediation",
+        app_path.display(),
+        record.decision_id,
+        record.selected_action,
+        record.e_value_ppm,
+        record.quarantined_at,
+        record.release_command
+    );
+    let violation = TrustViolation {
+        dependency_name: None,
+        extension_id: None,
+        kind: TrustViolationKind::SentinelQuarantined,
+        detail: detail.clone(),
+    };
+    Ok(match verdict {
+        PreFlightVerdict::Blocked {
+            reason,
+            warnings,
+            mut violations,
+            results,
+        } => {
+            violations.insert(0, violation);
+            PreFlightVerdict::Blocked {
+                reason: format!("{detail}; {reason}"),
+                warnings,
+                violations,
+                results,
+            }
+        }
+        PreFlightVerdict::Passed {
+            warnings, results, ..
+        } => PreFlightVerdict::Blocked {
+            reason: detail,
+            warnings,
+            violations: vec![violation],
+            results,
+        },
+        PreFlightVerdict::Skipped { reason } => PreFlightVerdict::Blocked {
+            reason: detail,
+            warnings: vec![reason],
+            violations: vec![violation],
+            results: Vec::new(),
+        },
+    })
+}
+
+fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
+    if args.operator_id.trim().is_empty() || args.reason.trim().is_empty() {
+        anyhow::bail!("trust release requires non-empty --operator-id and --reason");
+    }
+    let project_root = run_project_root(&args.app);
+    let app_content_hash = sentinel_subject_content_hash(&args.app)?;
+    let record_path = sentinel_quarantine_record_path(&project_root, &app_content_hash)?;
+    let Some(mut record) = load_sentinel_quarantine_record(&record_path)? else {
+        return Err(ActionableError::new(
+            format!(
+                "no sentinel quarantine record exists for {} ({})",
+                args.app.display(),
+                app_content_hash
+            ),
+            "franken-node run <app> --json   # inspect receipt.sentinel_enforcement",
+        )
+        .into());
+    };
+    if record.released {
+        anyhow::bail!(
+            "sentinel quarantine for {} was already released at {} by {}",
+            args.app.display(),
+            record.released_at.as_deref().unwrap_or("<unknown>"),
+            record.release_operator.as_deref().unwrap_or("<unknown>")
+        );
+    }
+
+    let released_at = chrono::Utc::now().to_rfc3339();
+    record.released = true;
+    record.released_at = Some(released_at.clone());
+    record.release_operator = Some(args.operator_id.clone());
+    record.release_reason = Some(args.reason.clone());
+    persist_sentinel_quarantine_record(&record_path, &record)?;
+
+    eprintln!(
+        "trust release: sentinel quarantine lifted for {} (decision {}, operator {})",
+        args.app.display(),
+        record.decision_id,
+        args.operator_id
+    );
+    if args.json {
+        let payload = serde_json::json!({
+            "command": "trust.release",
+            "schema_version": "franken-node/trust-release-cli/v1",
+            "app_path": args.app.display().to_string(),
+            "app_content_hash": app_content_hash,
+            "decision_id": record.decision_id,
+            "released_at": released_at,
+            "release_operator": args.operator_id,
+            "release_reason": args.reason,
+            "record_path": record_path.display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "trust release: {} released (was decision {})",
+            args.app.display(),
+            record.decision_id
+        );
+    }
+    Ok(())
 }
 
 fn render_run_execution_receipt_summary(
@@ -8903,12 +9831,54 @@ fn render_run_execution_receipt_summary(
     )
 }
 
+// bd-muy9u: a native run that aborts after the engine has already performed or
+// been denied host effects produces no completion report, so the ledger that
+// `run --json` normally carries inside that report has nowhere to go. This
+// self-describing envelope is that home: it exists only on the failure path and
+// carries the identical, SDK-verifiable `HostEffectLedger` shape, so a denial
+// stays visible instead of vanishing because the program aborted afterwards.
+const RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA: &str = "franken-node/run-failure-effect-evidence/v1";
+
+/// Surface the host-effect ledger recovered from a failed native run.
+///
+/// The run stays failed; this only stops its receipts from being discarded.
+/// Console-only mode emits nothing, for the same reason it suppresses the
+/// preflight banner: anything beyond the guest's own streams registers as
+/// behavioral divergence when a reference runtime is compared in lockstep.
+fn emit_failed_run_effect_evidence(
+    ledger: &ops::engine_dispatcher::HostEffectLedger,
+    json: bool,
+    console_only: bool,
+) -> Result<()> {
+    if console_only {
+        return Ok(());
+    }
+    if json {
+        let evidence = serde_json::json!({
+            "schema_version": RUN_FAILURE_EFFECT_EVIDENCE_SCHEMA,
+            "host_effect_ledger": ledger,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&evidence)
+                .context("failed serializing failed-run host-effect evidence")?
+        );
+        return Ok(());
+    }
+    println!(
+        "run failed after host effects were already recorded; the signed ledger below is complete for the attempt"
+    );
+    println!("{}", render_host_effect_ledger_human(ledger));
+    Ok(())
+}
+
 fn emit_run_completion_output(
     preflight: &RunPreFlightReport,
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
     receipt: &RunExecutionReceipt,
     receipt_path: &Path,
     json: bool,
+    console_only: bool,
 ) -> Result<()> {
     if json {
         let output = RunCommandOutput {
@@ -8932,11 +9902,62 @@ fn emit_run_completion_output(
     if !dispatch.captured_output.stderr.is_empty() {
         eprint!("{}", dispatch.captured_output.stderr);
     }
+    // bd-zi9hj: console-only mode ends at the guest's own streams — the
+    // receipt summary and ledger lines below are runtime metadata that would
+    // register as behavioral divergence when a reference runtime (bun/node)
+    // is compared against this run in lockstep. Receipts are still persisted.
+    if console_only {
+        return Ok(());
+    }
     println!(
         "{}",
         render_run_execution_receipt_summary(receipt, receipt_path)
     );
+    // bd-5r99w.12: surface the trust-native host-effect ledger in human output.
+    if let Some(ledger) = dispatch.host_effect_ledger.as_ref()
+        && ledger.effect_count > 0
+    {
+        println!("{}", render_host_effect_ledger_human(ledger));
+    }
+    // bd-bg2hy: surface the Runtime Sentinel verdict in human output.
+    if let Some(sentinel) = dispatch.sentinel.as_ref()
+        && let Some(decision) = sentinel.decision.as_ref()
+    {
+        println!(
+            "runtime sentinel: action={} posterior_malice_bp={} e_value_ppm={} escalated={}",
+            decision.selected_action.as_str(),
+            sentinel.posterior_malice_bp,
+            sentinel.e_value_ppm,
+            sentinel.escalated,
+        );
+    }
     Ok(())
+}
+
+/// bd-5r99w.12: render the capability-metered host-effect ledger for human
+/// `run` output — one line per effect with its kind, allow/deny verdict, and the
+/// authorizing capability or refusal reason, plus the tamper-evident chain head.
+fn render_host_effect_ledger_human(ledger: &ops::engine_dispatcher::HostEffectLedger) -> String {
+    use runtime::effect_receipt::PolicyOutcome;
+    let mut out = format!(
+        "host-effect ledger: {} effect(s) ({} allowed, {} denied) chain_head={}",
+        ledger.effect_count, ledger.allowed_count, ledger.denied_count, ledger.chain_head_hash,
+    );
+    for entry in &ledger.entries {
+        let receipt = &entry.receipt;
+        let (verdict, detail) = match &receipt.policy_outcome {
+            PolicyOutcome::Allowed { capability_ref } => ("allowed", capability_ref.as_str()),
+            PolicyOutcome::Denied { reason } => ("denied", reason.as_str()),
+        };
+        out.push_str(&format!(
+            "\n  [{}] {} {} ({})",
+            entry.index,
+            receipt.effect_kind.label(),
+            verdict,
+            detail,
+        ));
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -11080,6 +12101,8 @@ struct RunStructuredLogLine {
     trace_id: String,
     span_id: String,
     surface: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
 }
 
 fn run_structured_log_line(
@@ -11089,6 +12112,17 @@ fn run_structured_log_line(
     trace_id: &str,
     span_name: &str,
 ) -> RunStructuredLogLine {
+    run_structured_log_line_with_details(timestamp, event_code, message, trace_id, span_name, None)
+}
+
+fn run_structured_log_line_with_details(
+    timestamp: &str,
+    event_code: &str,
+    message: &str,
+    trace_id: &str,
+    span_name: &str,
+    details: Option<serde_json::Value>,
+) -> RunStructuredLogLine {
     RunStructuredLogLine {
         timestamp: timestamp.to_string(),
         level: "info",
@@ -11097,6 +12131,7 @@ fn run_structured_log_line(
         trace_id: trace_id.to_string(),
         span_id: format!("run-{}", span_name),
         surface: "CLI-RUN",
+        details,
     }
 }
 
@@ -11151,6 +12186,329 @@ fn render_run_structured_logs_jsonl(
     );
     lines.push_str(&serde_json::to_string(&dispatch_line)?);
     lines.push('\n');
+
+    // bd-ihtox: surface each host-effect receipt as the registered TNR event
+    // FN-EFFECT-002 ("effect receipt chained",
+    // docs/observability/tnr_event_metrics_registry.md) so SIEM filters can
+    // pin host crossings without parsing the `--json` report. The signed
+    // ledger remains the authority; these lines mirror its entries in chain
+    // order and carry the CLI trace id like every other run event.
+    if let Some(ledger) = dispatch.host_effect_ledger.as_ref() {
+        for entry in &ledger.entries {
+            let (outcome, outcome_detail) = match &entry.receipt.policy_outcome {
+                runtime::effect_receipt::PolicyOutcome::Allowed { capability_ref } => {
+                    ("allowed", capability_ref.as_str())
+                }
+                runtime::effect_receipt::PolicyOutcome::Denied { reason } => {
+                    ("denied", reason.as_str())
+                }
+            };
+            let effect_line = run_structured_log_line_with_details(
+                &now,
+                "FN-EFFECT-002",
+                &format!(
+                    "host effect receipt chained: kind={} outcome={outcome} index={}",
+                    entry.receipt.effect_kind.label(),
+                    entry.index
+                ),
+                trace_id,
+                "host-effect",
+                Some(serde_json::json!({
+                    "effect_kind": entry.receipt.effect_kind.label(),
+                    "outcome": outcome,
+                    "outcome_detail": outcome_detail,
+                    "index": entry.index,
+                    "chain_hash": entry.chain_hash,
+                    "chain_head_hash": ledger.chain_head_hash,
+                })),
+            );
+            lines.push_str(&serde_json::to_string(&effect_line)?);
+            lines.push('\n');
+
+            // bd-plhag: surface the information-flow verdict as its registered
+            // TNR event when the receipt carries a real (non-empty) label set.
+            // FN-FLOW-001 = a labeled datum crossed the boundary; FN-FLOW-003 =
+            // a forbidden-labeled effect was blocked (denied); FN-FLOW-004 = an
+            // otherwise-forbidden flow rode a declassification receipt.
+            use runtime::effect_receipt::{
+                EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT, FlowPolicyVerdict,
+            };
+            let carries_label =
+                entry.receipt.label_set_commitment != EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT;
+            let flow_event = match entry.receipt.flow_policy_verdict {
+                FlowPolicyVerdict::Blocked => Some(("FN-FLOW-003", "flow sink blocked")),
+                FlowPolicyVerdict::Declassified => {
+                    Some(("FN-FLOW-004", "flow declassification accepted"))
+                }
+                FlowPolicyVerdict::LabelClean if carries_label => {
+                    Some(("FN-FLOW-001", "flow label attached"))
+                }
+                FlowPolicyVerdict::LabelClean => None,
+            };
+            if let Some((event_code, message)) = flow_event {
+                let flow_line = run_structured_log_line_with_details(
+                    &now,
+                    event_code,
+                    &format!(
+                        "{message}: kind={} verdict={} index={}",
+                        entry.receipt.effect_kind.label(),
+                        entry.receipt.flow_policy_verdict.label(),
+                        entry.index
+                    ),
+                    trace_id,
+                    "host-effect-flow",
+                    Some(serde_json::json!({
+                        "effect_kind": entry.receipt.effect_kind.label(),
+                        "flow_policy_verdict": entry.receipt.flow_policy_verdict.label(),
+                        "label_set_commitment": entry.receipt.label_set_commitment,
+                        "declassification_ref": entry.receipt.declassification_ref,
+                        "index": entry.index,
+                    })),
+                );
+                lines.push_str(&serde_json::to_string(&flow_line)?);
+                lines.push('\n');
+            }
+        }
+    }
+
+    // bd-bg2hy: mirror the Runtime Sentinel's per-run feed as its registered
+    // TNR events so SIEM filters can pin sentinel activity without parsing the
+    // `--json` report. The report under `dispatch.sentinel` stays the
+    // authority; these lines follow its derivation order: observation ingest
+    // (FN-SENTINEL-001) → one e-process update per evidence item
+    // (FN-SENTINEL-002) → expected-loss selection (FN-SENTINEL-007) → signed
+    // escalation receipt when the run escalated (FN-SENTINEL-008).
+    if let Some(sentinel) = dispatch.sentinel.as_ref() {
+        use crate::policy::bayesian_diagnostics::{
+            FN_SENTINEL_E_PROCESS_UPDATED, FN_SENTINEL_OBSERVATION_INGESTED,
+        };
+        use frankenengine_node::policy::runtime_sentinel::{
+            FN_SENTINEL_ESCALATION_RECEIPT_SIGNED, FN_SENTINEL_EXPECTED_LOSS_SELECTED,
+        };
+
+        let observation_line = run_structured_log_line_with_details(
+            &now,
+            FN_SENTINEL_OBSERVATION_INGESTED,
+            &format!(
+                "sentinel observation ingested: signals={} subject={}",
+                sentinel.observation.signals.len(),
+                sentinel.subject_id
+            ),
+            trace_id,
+            "sentinel",
+            Some(serde_json::json!({
+                "subject_id": sentinel.subject_id,
+                "signal_count": sentinel.observation.signals.len(),
+                "observation_hash": sentinel.observation_hash,
+                "observation_log_digest": sentinel.observation_log_digest,
+            })),
+        );
+        lines.push_str(&serde_json::to_string(&observation_line)?);
+        lines.push('\n');
+
+        for update in &sentinel.e_process_updates {
+            let update_line = run_structured_log_line_with_details(
+                &now,
+                FN_SENTINEL_E_PROCESS_UPDATED,
+                &format!(
+                    "sentinel e-process updated: sequence={} signal={} e_value_ppm={}",
+                    update.sequence, update.signal_id, update.posterior_e_value_ppm
+                ),
+                trace_id,
+                "sentinel",
+                Some(serde_json::json!({
+                    "sequence": update.sequence,
+                    "signal_id": update.signal_id,
+                    "likelihood_ratio_ppm": update.likelihood_ratio_ppm,
+                    "prior_e_value_ppm": update.prior_e_value_ppm,
+                    "posterior_e_value_ppm": update.posterior_e_value_ppm,
+                    "false_alarm_bound_ppm": update.false_alarm_bound_ppm,
+                })),
+            );
+            lines.push_str(&serde_json::to_string(&update_line)?);
+            lines.push('\n');
+        }
+
+        if let Some(decision) = sentinel.decision.as_ref() {
+            let decision_line = run_structured_log_line_with_details(
+                &now,
+                FN_SENTINEL_EXPECTED_LOSS_SELECTED,
+                &format!(
+                    "sentinel expected-loss action selected: action={} posterior_malice_bp={} e_value_ppm={}",
+                    decision.selected_action.as_str(),
+                    decision.posterior_malice_bp,
+                    decision.e_value_ppm
+                ),
+                trace_id,
+                "sentinel",
+                Some(serde_json::json!({
+                    "decision_id": decision.decision_id,
+                    "selected_action": decision.selected_action.as_str(),
+                    "raw_selected_action": decision.raw_selected_action.as_str(),
+                    "guardrail_applied": decision.guardrail_applied,
+                    "posterior_malice_bp": decision.posterior_malice_bp,
+                    "e_value_ppm": decision.e_value_ppm,
+                    "false_alarm_bound_ppm": decision.false_alarm_bound_ppm,
+                    "alpha_ppm": sentinel.alpha_ppm,
+                    "escalated": sentinel.escalated,
+                })),
+            );
+            lines.push_str(&serde_json::to_string(&decision_line)?);
+            lines.push('\n');
+        }
+
+        if let Some(receipt_entry) = sentinel.escalation_receipt.as_ref() {
+            let escalation_line = run_structured_log_line_with_details(
+                &now,
+                FN_SENTINEL_ESCALATION_RECEIPT_SIGNED,
+                &format!(
+                    "sentinel escalation receipt signed: decision={} e_value_ppm={}",
+                    receipt_entry.decision_id, sentinel.e_value_ppm
+                ),
+                trace_id,
+                "sentinel",
+                Some(serde_json::json!({
+                    "decision_id": receipt_entry.decision_id,
+                    "e_value_ppm": sentinel.e_value_ppm,
+                    "false_alarm_bound_ppm": sentinel.false_alarm_bound_ppm,
+                    "verifying_key_hex": sentinel.escalation_verifying_key_hex,
+                })),
+            );
+            lines.push_str(&serde_json::to_string(&escalation_line)?);
+            lines.push('\n');
+        }
+    }
+
+    // bd-fp1je: emitted only when the escalation actually drove product-side
+    // action; recommend-only stays visible in the `--json` receipt alone.
+    if let Some(enforcement) = receipt.core.sentinel_enforcement.as_ref()
+        && enforcement.mode == "enforced"
+    {
+        use frankenengine_node::policy::runtime_sentinel::FN_SENTINEL_ESCALATION_ENFORCED;
+        let enforcement_line = run_structured_log_line_with_details(
+            &now,
+            FN_SENTINEL_ESCALATION_ENFORCED,
+            &format!(
+                "sentinel escalation enforced: action={} subject_quarantined={} deps_quarantined={}",
+                enforcement.selected_action,
+                enforcement.quarantine_record_path.is_some(),
+                enforcement.quarantined_extensions.len()
+            ),
+            trace_id,
+            "sentinel",
+            Some(serde_json::json!({
+                "decision_id": enforcement.decision_id,
+                "selected_action": enforcement.selected_action,
+                "app_content_hash": enforcement.app_content_hash,
+                "quarantine_record_path": enforcement.quarantine_record_path,
+                "quarantine_record_preexisting": enforcement.quarantine_record_preexisting,
+                "quarantined_extensions": enforcement.quarantined_extensions,
+                "release_command": enforcement.release_command,
+            })),
+        );
+        lines.push_str(&serde_json::to_string(&enforcement_line)?);
+        lines.push('\n');
+    }
+
+    if let Some(compat) = receipt.core.compat_preflight.as_ref() {
+        let status = compat
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let operation_count = compat
+            .get("operation_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let total_cases = compat
+            .get("total_cases")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let total_divergences = compat
+            .get("total_divergences")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let compat_start = run_structured_log_line_with_details(
+            &now,
+            "FN-COMPAT-001",
+            &format!(
+                "run compat preflight {status}: operations={operation_count} cases={total_cases} divergences={total_divergences}"
+            ),
+            trace_id,
+            "compat-preflight",
+            Some(serde_json::json!({
+                "status": status,
+                "operation_count": operation_count,
+                "total_cases": total_cases,
+                "total_divergences": total_divergences,
+            })),
+        );
+        lines.push_str(&serde_json::to_string(&compat_start)?);
+        lines.push('\n');
+
+        if let Some(operations) = compat
+            .get("operations")
+            .and_then(serde_json::Value::as_array)
+        {
+            for operation in operations {
+                let signal = operation
+                    .get("signal")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let event_code = if signal == "green" {
+                    "FN-COMPAT-002"
+                } else {
+                    "FN-COMPAT-003"
+                };
+                let operation_id = operation
+                    .get("operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let cases_tested = operation
+                    .get("cases_tested")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let divergences = operation
+                    .get("total_divergences")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let op_line = run_structured_log_line_with_details(
+                    &now,
+                    event_code,
+                    &format!(
+                        "compat operation {signal}: operation={operation_id} cases={cases_tested} divergences={divergences}"
+                    ),
+                    trace_id,
+                    &format!("compat-{operation_id}"),
+                    Some(serde_json::json!({
+                        "operation_id": operation_id,
+                        "signal": signal,
+                        "cases_tested": cases_tested,
+                        "total_divergences": divergences,
+                    })),
+                );
+                lines.push_str(&serde_json::to_string(&op_line)?);
+                lines.push('\n');
+            }
+        }
+
+        if let Some(fixtures) = compat
+            .get("emitted_fixtures")
+            .and_then(serde_json::Value::as_array)
+        {
+            for fixture in fixtures.iter().filter_map(serde_json::Value::as_str) {
+                let fixture_line = run_structured_log_line_with_details(
+                    &now,
+                    "FN-COMPAT-004",
+                    &format!("compat divergence fixture emitted: {fixture}"),
+                    trace_id,
+                    "compat-fixture",
+                    Some(serde_json::json!({ "path": fixture })),
+                );
+                lines.push_str(&serde_json::to_string(&fixture_line)?);
+                lines.push('\n');
+            }
+        }
+    }
 
     // Event: receipt written
     let receipt_line = run_structured_log_line(
@@ -13080,6 +14438,9 @@ mod registry_command_tests {
             stored.manifest.artifact_sha256,
             compute_registry_artifact_sha256(payload)
         );
+        // The version lineage stores the bare 64-hex content hash; the manifest's
+        // `artifact_sha256` carries the `sha256:` digest-URI prefix. They match
+        // modulo that prefix.
         assert_eq!(
             stored
                 .manifest
@@ -13087,7 +14448,7 @@ mod registry_command_tests {
                 .versions
                 .last()
                 .map(|version| version.content_hash.as_str()),
-            Some(stored.manifest.artifact_sha256.as_str())
+            stored.manifest.artifact_sha256.strip_prefix("sha256:")
         );
     }
 
@@ -14431,6 +15792,9 @@ mod incident_list_tests {
 
         assert_eq!(summary.total_decisions, 3);
         assert!(summary.changed_decisions > 0);
+        // bd-5r99w.4: the default executor is the sandboxed synthetic model, and
+        // it must be labeled so it is never silently read as a production decision.
+        assert_eq!(summary.executor, "synthetic");
         assert_eq!(canonical["mode"], "single");
         assert_eq!(
             canonical["summary_statistics"]["changed_decisions"],
@@ -16289,6 +17653,10 @@ fn evaluate_run_trust_preflight(
         }
     };
 
+    // bd-fp1je: the sentinel subject gate composes over the dependency
+    // verdict and fails closed in every policy mode.
+    let verdict = apply_sentinel_subject_quarantine_gate(verdict, &project_root, app_path)?;
+
     let receipt = build_run_preflight_receipt(
         app_path,
         &project_root,
@@ -16400,6 +17768,397 @@ fn resolve_incident_evidence_path(
         .join(INCIDENT_EVIDENCE_FILE_NAME))
 }
 
+// bd-rgkd2: operator-facing LTV surface. `ltv attest` turns a
+// signature-verified incident bundle (plus, optionally, its run's host-effect
+// chain hashes) into self-contained SDK LTV evidence via the verifier SDK's
+// public builder; `ltv verify-as-of` re-verifies that evidence offline through
+// `VerifierSdk::verify_as_of_ltv`. All LTV hashing lives in the SDK crate.
+const LTV_ATTEST_CLI_SCHEMA: &str = "franken-node/ltv-attest-cli/v1";
+const LTV_VERIFY_AS_OF_CLI_SCHEMA: &str = "franken-node/ltv-verify-as-of-cli/v1";
+const LTV_CLI_CRYPTO_SUITE: &str = "ed25519-v1";
+const MAX_LTV_RUN_REPORT_BYTES: u64 = 64 << 20;
+const MAX_LTV_EVIDENCE_BYTES: u64 = 16 << 20;
+
+fn ltv_structured_log_line(
+    event_code: &str,
+    message: String,
+    trace_id: &str,
+    span_id: &str,
+    details: serde_json::Value,
+) -> RunStructuredLogLine {
+    RunStructuredLogLine {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        level: if event_code.contains("-ERR-") {
+            "error"
+        } else {
+            "info"
+        },
+        event_code: event_code.to_string(),
+        message,
+        trace_id: trace_id.to_string(),
+        span_id: span_id.to_string(),
+        surface: "CLI-LTV",
+        details: Some(details),
+    }
+}
+
+/// Chain hashes from a saved `run --json` report's signed host-effect ledger.
+fn run_report_chain_hashes(path: &Path) -> Result<Vec<String>> {
+    let raw = crate::bounded_read(path, MAX_LTV_RUN_REPORT_BYTES)
+        .with_context(|| format!("failed reading run report {}", path.display()))?;
+    let report: serde_json::Value = serde_json::from_slice(&raw)
+        .with_context(|| format!("run report {} is not valid JSON", path.display()))?;
+    let entries = report["dispatch"]["host_effect_ledger"]["entries"]
+        .as_array()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "run report {} carries no dispatch.host_effect_ledger.entries array",
+                path.display()
+            )
+        })?;
+    let mut chain_hashes = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let chain_hash = entry["chain_hash"].as_str().ok_or_else(|| {
+            anyhow::anyhow!("run report ledger entry {index} carries no chain_hash")
+        })?;
+        // The ledger wire shape is `sha256:<hex>`; the SDK builder consumes
+        // bare canonical digests and re-validates them.
+        let bare = chain_hash.strip_prefix("sha256:").ok_or_else(|| {
+            anyhow::anyhow!(
+                "run report ledger entry {index} chain_hash `{chain_hash}` is not sha256:<hex>"
+            )
+        })?;
+        chain_hashes.push(bare.to_string());
+    }
+    Ok(chain_hashes)
+}
+
+fn load_ltv_witness_signers(
+    paths: &[PathBuf],
+) -> Result<Vec<frankenengine_verifier_sdk::LongTermWitnessSigner>> {
+    let mut signers = Vec::with_capacity(paths.len());
+    let mut seen_key_ids = BTreeSet::new();
+    for path in paths {
+        let material =
+            load_ed25519_signing_material_from_path(path, "ltv witness signing key", "cli")?;
+        let key_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "witness key {} has no UTF-8 file stem to use as a key id",
+                    path.display()
+                )
+            })?;
+        if !seen_key_ids.insert(key_id.clone()) {
+            anyhow::bail!(
+                "duplicate witness key id `{key_id}`; witness key file stems must be unique"
+            );
+        }
+        signers.push(frankenengine_verifier_sdk::LongTermWitnessSigner {
+            key_id,
+            signing_key: material.signing_key,
+        });
+    }
+    Ok(signers)
+}
+
+fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
+    eprintln!("franken-node ltv attest: bundle={}", args.bundle.display());
+    let trusted_key_ids = replay_trusted_key_ids(
+        args.trusted_public_key.as_deref(),
+        args.trusted_key_dir.as_deref(),
+    )?;
+    let bundle = read_bundle_from_path_with_trusted_keys(&args.bundle, &trusted_key_ids)
+        .with_context(|| format!("failed reading replay bundle {}", args.bundle.display()))?;
+
+    let claimed_at = DateTime::parse_from_rfc3339(&bundle.created_at)
+        .with_context(|| format!("bundle created_at `{}` is not RFC 3339", bundle.created_at))?
+        .timestamp();
+    let claimed_at_unix_seconds = u64::try_from(claimed_at).map_err(|_| {
+        anyhow::anyhow!(
+            "bundle created_at `{}` precedes the unix epoch",
+            bundle.created_at
+        )
+    })?;
+
+    let co_marker_hashes = match args.run_report.as_deref() {
+        Some(path) => run_report_chain_hashes(path)?,
+        None => Vec::new(),
+    };
+    let witness_signers = load_ltv_witness_signers(&args.witness_keys)?;
+    let witness_threshold = match args.witness_threshold {
+        Some(threshold) => threshold,
+        None => u32::try_from(witness_signers.len())
+            .map_err(|_| anyhow::anyhow!("too many witness keys"))?,
+    };
+
+    let now_unix_seconds = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock precedes the unix epoch")?
+        .as_secs();
+    let as_of_unix_seconds = args.as_of.unwrap_or(now_unix_seconds);
+
+    let request = frankenengine_verifier_sdk::LongTermEvidenceRequest {
+        artifact_id: bundle.bundle_id.to_string(),
+        artifact_hash: bundle.integrity_hash.clone(),
+        crypto_suite: LTV_CLI_CRYPTO_SUITE.to_string(),
+        claimed_at_unix_seconds,
+        co_marker_hashes,
+        reattestation_appended_marker_hashes: Vec::new(),
+        reattested_at_unix_seconds: now_unix_seconds,
+        observed_at_unix_seconds: now_unix_seconds,
+        as_of_unix_seconds,
+        suite_valid_from_unix_seconds: claimed_at_unix_seconds,
+        witness_group_id: args.witness_group_id.clone(),
+        witness_policy_id: args.witness_policy_id.clone(),
+        witness_threshold,
+        trace_id: args.trace_id.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    let evidence = frankenengine_verifier_sdk::build_long_term_verification_evidence(
+        &request,
+        &witness_signers,
+    )
+    .map_err(|reason| anyhow::anyhow!("ltv attest failed to build evidence: {reason}"))?;
+
+    let rendered = serde_json::to_string_pretty(&evidence)?;
+    std::fs::write(&args.out, rendered.as_bytes())
+        .with_context(|| format!("failed writing LTV evidence to {}", args.out.display()))?;
+
+    let origin_root = &evidence.reattestation_chain.origin_root;
+    let attested_root = &evidence.witness_receipt.statement.root;
+    if args.structured_logs_jsonl {
+        let reattested = ltv_structured_log_line(
+            "FN-LTV-002",
+            format!(
+                "MMR root re-attested: origin_tree_size={} attested_tree_size={} suite={}",
+                origin_root.tree_size, attested_root.tree_size, evidence.artifact.crypto_suite
+            ),
+            &args.trace_id,
+            "ltv-attest",
+            serde_json::json!({
+                "artifact_id": &evidence.artifact.artifact_id,
+                "artifact_hash": &evidence.artifact.artifact_hash,
+                "origin_root_hash": &origin_root.root_hash,
+                "attested_root_hash": &attested_root.root_hash,
+                "crypto_suite": &evidence.artifact.crypto_suite,
+                "reattested_at_unix_seconds": now_unix_seconds,
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&reattested)?);
+        let cosigned = ltv_structured_log_line(
+            "FN-LTV-001",
+            format!(
+                "evidence anchor cosigned: witnesses={} threshold={}",
+                evidence.witness_receipt.witness_artifact.signatures.len(),
+                evidence.witness_receipt.threshold_config.threshold
+            ),
+            &args.trace_id,
+            "ltv-attest",
+            serde_json::json!({
+                "witness_group_id": &evidence.witness_receipt.statement.witness_group_id,
+                "witness_policy_id": &evidence.witness_receipt.statement.witness_policy_id,
+                "content_hash": &evidence.witness_receipt.statement.content_hash,
+                "witnesses": evidence.witness_receipt.witness_artifact.signatures.len(),
+                "threshold": evidence.witness_receipt.threshold_config.threshold,
+                "observed_at_unix_seconds": now_unix_seconds,
+                "as_of_unix_seconds": as_of_unix_seconds,
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&cosigned)?);
+    }
+    eprintln!(
+        "ltv attest result: artifact_id={} origin_tree_size={} attested_root={} witnesses={}/{} out={}",
+        evidence.artifact.artifact_id,
+        origin_root.tree_size,
+        attested_root.root_hash,
+        evidence.witness_receipt.witness_artifact.signatures.len(),
+        evidence.witness_receipt.threshold_config.total_signers,
+        args.out.display()
+    );
+
+    if args.json {
+        let payload = serde_json::json!({
+            "command": "ltv.attest",
+            "schema_version": LTV_ATTEST_CLI_SCHEMA,
+            "artifact_id": &evidence.artifact.artifact_id,
+            "artifact_hash": &evidence.artifact.artifact_hash,
+            "claimed_at_unix_seconds": claimed_at_unix_seconds,
+            "origin_tree_size": origin_root.tree_size,
+            "attested_tree_size": attested_root.tree_size,
+            "attested_root_hash": &attested_root.root_hash,
+            "witnesses": evidence.witness_receipt.witness_artifact.signatures.len(),
+            "witness_threshold": evidence.witness_receipt.threshold_config.threshold,
+            "observed_at_unix_seconds": now_unix_seconds,
+            "as_of_unix_seconds": as_of_unix_seconds,
+            "evidence_path": args.out.display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "ltv attest: artifact_id={} attested_root={} witnesses={}/{} evidence={}",
+            evidence.artifact.artifact_id,
+            attested_root.root_hash,
+            evidence.witness_receipt.witness_artifact.signatures.len(),
+            evidence.witness_receipt.threshold_config.total_signers,
+            args.out.display()
+        );
+    }
+    Ok(())
+}
+
+fn handle_ltv_verify_as_of_command(args: &cli::LtvVerifyAsOfArgs) -> Result<()> {
+    eprintln!(
+        "franken-node ltv verify-as-of: evidence={}",
+        args.evidence.display()
+    );
+    let raw = crate::bounded_read(&args.evidence, MAX_LTV_EVIDENCE_BYTES)
+        .with_context(|| format!("failed reading LTV evidence {}", args.evidence.display()))?;
+    let mut evidence: frankenengine_verifier_sdk::LongTermVerificationEvidence =
+        serde_json::from_slice(&raw).with_context(|| {
+            format!(
+                "LTV evidence {} does not parse as {}",
+                args.evidence.display(),
+                frankenengine_verifier_sdk::LONG_TERM_VERIFICATION_SCHEMA_VERSION
+            )
+        })?;
+    if let Some(as_of) = args.as_of {
+        evidence.as_of_unix_seconds = as_of;
+    }
+
+    // bd-7fubt: the witness trust anchor is operator-supplied and mandatory.
+    let anchor_raw = crate::bounded_read(&args.witness_anchor, MAX_LTV_EVIDENCE_BYTES)
+        .with_context(|| {
+            format!(
+                "failed reading witness trust anchor {}",
+                args.witness_anchor.display()
+            )
+        })?;
+    let witness_anchor: frankenengine_verifier_sdk::LongTermWitnessTrustAnchor =
+        serde_json::from_slice(&anchor_raw).with_context(|| {
+            format!(
+                "witness trust anchor {} does not parse as \
+                 {{witness_group_id, witness_policy_id, threshold_config}}",
+                args.witness_anchor.display()
+            )
+        })?;
+
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new(args.verifier_identity.as_str());
+    let result = sdk
+        .verify_as_of_ltv(&evidence, &witness_anchor)
+        .map_err(|err| anyhow::anyhow!("verifier SDK refused the LTV evidence: {err}"))?;
+    let passed = matches!(
+        result.verdict,
+        frankenengine_verifier_sdk::VerificationVerdict::Pass
+    );
+    let failed_assertions: Vec<String> = result
+        .checked_assertions
+        .iter()
+        .filter(|assertion| !assertion.passed)
+        .map(|assertion| assertion.assertion.clone())
+        .collect();
+    let anteriority_unproven = failed_assertions.iter().any(|assertion| {
+        matches!(
+            assertion.as_str(),
+            "ltv_witness_anterior_to_as_of" | "ltv_witness_precedes_key_compromise_records"
+        )
+    });
+
+    if args.structured_logs_jsonl {
+        let completed = ltv_structured_log_line(
+            "FN-LTV-003",
+            format!(
+                "ltv verify-as-of completed: verdict={:?} assertions={}",
+                result.verdict,
+                result.checked_assertions.len()
+            ),
+            &args.trace_id,
+            "ltv-verify-as-of",
+            serde_json::json!({
+                "verdict": format!("{:?}", result.verdict),
+                "as_of_unix_seconds": evidence.as_of_unix_seconds,
+                "artifact_id": &evidence.artifact.artifact_id,
+                "artifact_binding_hash": &result.artifact_binding_hash,
+                "failed_assertions": &failed_assertions,
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&completed)?);
+        if anteriority_unproven {
+            let unproven = ltv_structured_log_line(
+                "FN-LTV-ERR-001",
+                format!(
+                    "anteriority unproven for as_of={}: {}",
+                    evidence.as_of_unix_seconds,
+                    failed_assertions.join(", ")
+                ),
+                &args.trace_id,
+                "ltv-verify-as-of",
+                serde_json::json!({
+                    "as_of_unix_seconds": evidence.as_of_unix_seconds,
+                    "failed_assertions": &failed_assertions,
+                }),
+            );
+            eprintln!("{}", serde_json::to_string(&unproven)?);
+        }
+    }
+    eprintln!(
+        "ltv verify-as-of result: verdict={:?} assertions={} as_of={}",
+        result.verdict,
+        result.checked_assertions.len(),
+        evidence.as_of_unix_seconds
+    );
+
+    if args.json {
+        let sdk_transcript: Vec<serde_json::Value> =
+            frankenengine_verifier_sdk::long_term_verification_audit_events(&result)
+                .iter()
+                .map(|event| {
+                    serde_json::json!({
+                        "event_code": event.event_code,
+                        "detail": event.detail,
+                    })
+                })
+                .collect();
+        let payload = serde_json::json!({
+            "command": "ltv.verify-as-of",
+            "schema_version": LTV_VERIFY_AS_OF_CLI_SCHEMA,
+            "verdict": format!("{:?}", result.verdict),
+            "as_of_unix_seconds": evidence.as_of_unix_seconds,
+            "artifact_id": &evidence.artifact.artifact_id,
+            "artifact_binding_hash": &result.artifact_binding_hash,
+            "checked_assertions": result
+                .checked_assertions
+                .iter()
+                .map(|assertion| {
+                    serde_json::json!({
+                        "assertion": assertion.assertion,
+                        "passed": assertion.passed,
+                        "detail": assertion.detail,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "sdk_transcript": sdk_transcript,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "ltv verify-as-of: verdict={:?} artifact_id={} as_of={}",
+            result.verdict, evidence.artifact.artifact_id, evidence.as_of_unix_seconds
+        );
+    }
+
+    if !passed {
+        anyhow::bail!(
+            "LTV verification failed for evidence {}: {}",
+            args.evidence.display(),
+            failed_assertions.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> {
     // Prepare receipt export context upfront - fails immediately if receipt export
     // is requested but signing material is unavailable (sign-or-fail).
@@ -16498,6 +18257,9 @@ struct IncidentReplayCliSummary {
     event_count: usize,
     expected_sequence_hash: String,
     replayed_sequence_hash: String,
+    /// Verified timeline events from the bundle, surfaced so `--json` can emit
+    /// the reconstructed incident timeline alongside the replay result.
+    timeline: Vec<tools::replay_bundle::TimelineEvent>,
 }
 
 fn incident_replay_cli_summary(
@@ -16515,6 +18277,7 @@ fn incident_replay_cli_summary(
         event_count: outcome.event_count,
         expected_sequence_hash: outcome.expected_sequence_hash,
         replayed_sequence_hash: outcome.replayed_sequence_hash,
+        timeline: bundle.timeline,
     })
 }
 
@@ -16528,6 +18291,76 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         args.trusted_key_dir.as_deref(),
     )?;
     let summary = incident_replay_cli_summary(&args.bundle, &trusted_key_ids)?;
+    // bd-x8d9t: mirror the replay lifecycle into the registered TNR event
+    // stream (docs/observability/tnr_event_metrics_registry.md) so one
+    // --trace-id correlates a run's effects with the replay of its incident
+    // bundle. FN-TTR-001 = bundle loaded + signature-verified; FN-TTR-002 =
+    // verdict emitted; FN-TTR-ERR-001 precedes the fail-closed mismatch exit.
+    let ttr_structured_log_line =
+        |event_code: &str, message: String, details: serde_json::Value| -> RunStructuredLogLine {
+            RunStructuredLogLine {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                level: if event_code.contains("-ERR-") {
+                    "error"
+                } else {
+                    "info"
+                },
+                event_code: event_code.to_string(),
+                message,
+                trace_id: args.trace_id.clone(),
+                span_id: "incident-replay".to_string(),
+                surface: "CLI-INCIDENT",
+                details: Some(details),
+            }
+        };
+    if args.structured_logs_jsonl {
+        let loaded = ttr_structured_log_line(
+            "FN-TTR-001",
+            format!(
+                "replay bundle loaded: incident_id={} timeline_events={}",
+                summary.incident_id,
+                summary.timeline.len()
+            ),
+            serde_json::json!({
+                "incident_id": &summary.incident_id,
+                "bundle": args.bundle.display().to_string(),
+                "timeline_events": summary.timeline.len(),
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&loaded)?);
+        let verdict = ttr_structured_log_line(
+            "FN-TTR-002",
+            format!(
+                "replay verdict emitted: matched={} event_count={}",
+                summary.matched, summary.event_count
+            ),
+            serde_json::json!({
+                "incident_id": &summary.incident_id,
+                "matched": summary.matched,
+                "event_count": summary.event_count,
+                "expected_sequence_hash": &summary.expected_sequence_hash,
+                "replayed_sequence_hash": &summary.replayed_sequence_hash,
+            }),
+        );
+        eprintln!("{}", serde_json::to_string(&verdict)?);
+        if !summary.matched {
+            let diverged = ttr_structured_log_line(
+                "FN-TTR-ERR-001",
+                format!(
+                    "replay divergence: expected={} replayed={}",
+                    summary.expected_sequence_hash, summary.replayed_sequence_hash
+                ),
+                serde_json::json!({
+                    "incident_id": &summary.incident_id,
+                    "expected_sequence_hash": &summary.expected_sequence_hash,
+                    "replayed_sequence_hash": &summary.replayed_sequence_hash,
+                }),
+            );
+            eprintln!("{}", serde_json::to_string(&diverged)?);
+        }
+    }
+    // Preserve the machine-parseable stderr contract consumed by
+    // tests/incident_cli_e2e.rs (`parse_replay_result`) regardless of --json.
     eprintln!(
         "incident replay result: matched={} event_count={} expected={} replayed={}",
         summary.matched,
@@ -16535,6 +18368,38 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         summary.expected_sequence_hash,
         summary.replayed_sequence_hash
     );
+    if args.verbose {
+        eprintln!(
+            "incident replay verbose: incident_id={} timeline_events={} expected_hash={} replayed_hash={}",
+            summary.incident_id,
+            summary.timeline.len(),
+            summary.expected_sequence_hash,
+            summary.replayed_sequence_hash
+        );
+    }
+    if args.json {
+        let payload = serde_json::json!({
+            "command": "incident.replay",
+            "schema_version": "incident-replay-cli-v1",
+            "incident_id": &summary.incident_id,
+            "replay_result": {
+                "matched": summary.matched,
+                "event_count": summary.event_count,
+                "expected_sequence_hash": &summary.expected_sequence_hash,
+                "replayed_sequence_hash": &summary.replayed_sequence_hash,
+            },
+            "timeline": &summary.timeline,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "incident replay: incident_id={} matched={} timeline_events={} (replayed {} steps)",
+            summary.incident_id,
+            summary.matched,
+            summary.timeline.len(),
+            summary.event_count
+        );
+    }
     if !summary.matched {
         anyhow::bail!(
             "replay mismatch for incident {} in bundle {}",
@@ -16557,6 +18422,8 @@ struct IncidentCounterfactualCliSummary {
     changed_decisions: usize,
     severity_delta: i64,
     canonical_json: String,
+    /// bd-5r99w.4: which decision model produced the diff (`synthetic`|`production`).
+    executor: String,
 }
 
 impl std::fmt::Debug for IncidentCounterfactualCliSummary {
@@ -16572,12 +18439,17 @@ impl std::fmt::Debug for IncidentCounterfactualCliSummary {
             .field("changed_decisions", &self.changed_decisions)
             .field("severity_delta", &self.severity_delta)
             .field("canonical_json_length", &self.canonical_json.len())
+            .field("executor", &self.executor)
             .finish_non_exhaustive()
     }
 }
 
+// bd-5r99w.4: bumped v1 -> v2 to add the `executor` discriminator and bind it
+// into the counterfactual digest preimage. The diff machinery is real, but the
+// default executor is a synthetic risk-score stand-in; v2 makes that explicit so
+// a synthetic re-evaluation is never silently read as a production decision.
 const INCIDENT_COUNTERFACTUAL_REPORT_SCHEMA: &str =
-    "franken-node/incident-counterfactual-report/v1";
+    "franken-node/incident-counterfactual-report/v2";
 const COUNTERFACTUAL_PROMOTION_VALIDITY_MS: i64 = 24 * 60 * 60 * 1_000;
 
 fn incident_counterfactual_cli_summary(
@@ -16591,6 +18463,7 @@ fn incident_counterfactual_cli_summary(
     let mode = PolicyConfig::from_cli_spec(policy, &baseline_policy)
         .with_context(|| format!("invalid policy override spec `{policy}`"))?;
     let engine = CounterfactualReplayEngine::default();
+    let executor = engine.executor_kind().to_string();
     let output = engine
         .simulate(&bundle, &baseline_policy, mode)
         .with_context(|| {
@@ -16615,6 +18488,7 @@ fn incident_counterfactual_cli_summary(
         changed_decisions,
         severity_delta,
         canonical_json,
+        executor,
     })
 }
 
@@ -16627,7 +18501,17 @@ fn incident_counterfactual_report_json(
     let timestamp = Utc::now().to_rfc3339();
     let counterfactual_value: serde_json::Value = serde_json::from_str(&summary.canonical_json)
         .context("failed parsing canonical counterfactual output for structured report")?;
-    let counterfactual_digest = incident_counterfactual_sha256(summary.canonical_json.as_bytes());
+    // bd-5r99w.4: bind the executor discriminator into the digest preimage so the
+    // digest commits to *which* decision model produced the diff. A synthetic
+    // re-evaluation and a (future) production one over identical inputs therefore
+    // yield different digests and can never be conflated.
+    let counterfactual_digest = incident_counterfactual_sha256(
+        format!(
+            "incident-counterfactual-report/v2\nexecutor={}\n{}",
+            summary.executor, summary.canonical_json
+        )
+        .as_bytes(),
+    );
     let (promotion_contract, promotion_contract_digest, promotion_signature) =
         if let Some(signing_material) = promotion_signing_material {
             let (contract, contract_digest, signature) = build_incident_counterfactual_promotion(
@@ -16644,6 +18528,15 @@ fn incident_counterfactual_report_json(
             (None, None, None)
         };
 
+    // Surface the per-decision divergences as a first-class array so consumers
+    // can read the decision deltas without re-parsing the nested counterfactual
+    // output. `divergence_points` is always serialized (even when empty) for the
+    // single-policy-swap mode the CLI drives.
+    let decision_deltas = counterfactual_value
+        .get("divergence_points")
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
     let report = serde_json::json!({
         "schema_version": INCIDENT_COUNTERFACTUAL_REPORT_SCHEMA,
         "timestamp": timestamp,
@@ -16652,10 +18545,14 @@ fn incident_counterfactual_report_json(
         "bundle_created_at": &summary.bundle_created_at,
         "bundle_integrity_hash": &summary.bundle_integrity_hash,
         "policy": policy,
+        "original_policy": &summary.bundle_policy_version,
+        "counterfactual_policy": policy,
+        "executor": &summary.executor,
         "evidence_refs": &summary.evidence_refs,
         "total_decisions": summary.total_decisions,
         "changed_decisions": summary.changed_decisions,
         "severity_delta": summary.severity_delta,
+        "decision_deltas": decision_deltas,
         "counterfactual_digest": counterfactual_digest,
         "counterfactual": counterfactual_value,
         "promotion_contract": promotion_contract,
@@ -16822,6 +18719,7 @@ fn sign_incident_counterfactual_contract_receipt(
         actor_identity: input.operator_id.to_string(),
         timestamp: input.timestamp.to_string(),
         signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
+        crypto_suite: DECISION_RECEIPT_CRYPTO_SUITE.to_string(),
         nonce: Uuid::now_v7().simple().to_string(),
         audience: "franken-node".to_string(), // audience binding
         input_hash: input.input_hash.to_string(),
@@ -16866,10 +18764,32 @@ fn incident_counterfactual_sha256(bytes: &[u8]) -> String {
 }
 
 fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs) -> Result<()> {
+    // bd-5r99w.4: the synthetic, sandboxed risk-score model is the only executor
+    // available today; the production decision engine is gated on the engine-split
+    // runtime decision kernel (bd-f5b04.2). Make the model explicit so a synthetic
+    // re-evaluation is never the silent default, and refuse `production` honestly
+    // rather than quietly falling back to synthetic.
+    match args.model.as_str() {
+        tools::counterfactual_replay::EXECUTOR_KIND_SYNTHETIC => {}
+        tools::counterfactual_replay::EXECUTOR_KIND_PRODUCTION => {
+            anyhow::bail!(
+                "counterfactual --model production requires the runtime's real policy decision \
+                 engine, which is gated on the engine-split decision kernel (bd-f5b04.2) and is \
+                 not available in this build; re-run with --model synthetic for the sandboxed \
+                 risk-score model (labeled `executor: synthetic` in the report)"
+            );
+        }
+        other => {
+            anyhow::bail!(
+                "invalid counterfactual --model `{other}`; expected `synthetic` or `production`"
+            );
+        }
+    }
     eprintln!(
-        "franken-node incident counterfactual: bundle={} policy={}",
+        "franken-node incident counterfactual: bundle={} policy={} model={}",
         args.bundle.display(),
-        args.policy
+        args.policy,
+        args.model
     );
     let trusted_key_ids = replay_trusted_key_ids(
         args.trusted_public_key.as_deref(),
@@ -16898,6 +18818,15 @@ fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs
             args.operator_id.as_deref(),
         )?;
         println!("{report_json}");
+    } else {
+        println!(
+            "incident counterfactual: policy={} executor={} total_decisions={} changed_decisions={} severity_delta={}",
+            args.policy,
+            summary.executor,
+            summary.total_decisions,
+            summary.changed_decisions,
+            summary.severity_delta
+        );
     }
     Ok(())
 }
@@ -17608,9 +19537,18 @@ fn persist_local_registry_artifact(
 ) -> Result<StoredRegistryArtifact> {
     ensure_registry_storage_root(project_root)?;
     let expected_hash = compute_registry_artifact_sha256(package_bytes);
+    // `content_hash` in the registry version lineage is the bare 64-hex digest,
+    // while `artifact_sha256`/`expected_hash` carry the `sha256:` digest-URI prefix;
+    // compare the two representations modulo that prefix.
+    let expected_content_hash = expected_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(expected_hash.as_str());
     anyhow::ensure!(
-        security::constant_time::ct_eq(&request.initial_version.content_hash, &expected_hash),
-        "registry publish artifact hash mismatch: request={} actual={expected_hash}",
+        security::constant_time::ct_eq(
+            &request.initial_version.content_hash,
+            expected_content_hash
+        ),
+        "registry publish artifact hash mismatch: request={} actual={expected_content_hash}",
         request.initial_version.content_hash
     );
 
@@ -17797,7 +19735,14 @@ fn inspect_local_registry_artifact(
         };
     };
 
-    if !security::constant_time::ct_eq(version_hash, &artifact.manifest.artifact_sha256) {
+    // `version_hash` is the bare 64-hex content hash from the version lineage;
+    // `artifact_sha256` is the `sha256:`-prefixed digest URI. Compare modulo prefix.
+    let manifest_content_hash = artifact
+        .manifest
+        .artifact_sha256
+        .strip_prefix("sha256:")
+        .unwrap_or(artifact.manifest.artifact_sha256.as_str());
+    if !security::constant_time::ct_eq(version_hash, manifest_content_hash) {
         return RegistryArtifactVerification {
             status: RegistryArtifactIntegrityStatus::InvalidMetadata,
             detail: format!(
@@ -18447,10 +20392,17 @@ fn build_registry_publish_request_with_context(
         build_timestamp_epoch,
     } = provenance_context;
     let publisher_id = builder_identity.clone();
+    // The registry's canonical `VersionEntry.content_hash` is a bare 64-char
+    // lowercase SHA-256 digest (validated by `register_version`), whereas
+    // `compute_registry_artifact_sha256` yields the `sha256:`-prefixed digest URI
+    // used for the manifest's `artifact_sha256` and human-facing display. Strip the
+    // prefix here so the CLI publish path conforms to the registry content-address
+    // format instead of being rejected as a 71-char non-hex value.
+    let version_content_hash = content_hash.strip_prefix("sha256:").unwrap_or(content_hash);
     let initial_version = VersionEntry {
         version: version.to_string(),
         parent_version: None,
-        content_hash: content_hash.to_string(),
+        content_hash: version_content_hash.to_string(),
         registered_at: chrono::Utc::now().to_rfc3339(),
         compatible_with: vec!["franken-node".to_string()],
     };
@@ -22721,6 +24673,7 @@ fn generate_test_scenario(
         rch_workers: vec![],
         proof_lane_readiness: vec![],
         swarm_scheduler_decisions: vec![],
+        swarm_admission_decisions: vec![],
         resource_governor: None,
         max_receipt_age_secs: 3600,
     })
@@ -26130,6 +28083,13 @@ fn handle_debug_evidence(args: &DebugEvidenceArgs) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // bd-wwjxn: the private native-session worker must be selected before
+    // Clap parses public commands. It receives a bounded, versioned request on
+    // stdin and never recursively re-enters `run` dispatch.
+    if ops::engine_dispatcher::EngineDispatcher::maybe_run_internal_native_session_worker()? {
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -26269,12 +28229,13 @@ fn main() -> Result<()> {
                 app_path,
                 policy,
                 json,
+                console_only,
                 structured_logs_jsonl,
                 trace_id,
                 config,
                 runtime,
                 engine_bin,
-                lockstep_preflight,
+                compat_preflight,
             } = args;
 
             let profile_override = parse_profile_override(Some(&policy))?;
@@ -26292,53 +28253,28 @@ fn main() -> Result<()> {
                 &resolved.config,
                 now_unix_secs(),
             )?;
-            emit_run_preflight_report(&preflight, json)?;
+            // bd-zi9hj: in console-only mode the advisory preflight banner is
+            // suppressed (it writes to stderr and would register as guest
+            // divergence in lockstep comparison); blocking still blocks below.
+            if !console_only {
+                emit_run_preflight_report(&preflight, json)?;
+            }
             if preflight.verdict.is_blocked() {
                 return Err(run_preflight_block_error(&preflight).into());
             }
 
-            // Optional lockstep pre-flight check (bd-3p0qh)
-            let lockstep_verdict = if lockstep_preflight {
-                eprintln!("Running lockstep pre-flight check across supported runtimes...");
-                let harness = runtime::lockstep_harness::LockstepHarness::new(vec![
-                    "bun".to_string(),
-                    "franken-node".to_string(),
-                ]);
-                match harness.verify_lockstep(&app_path, false) {
-                    Ok(()) => {
-                        eprintln!("Lockstep pre-flight: PASSED");
-                        Some(serde_json::json!({
-                            "status": "passed",
-                            "runtimes": ["bun", "franken-node"]
-                        }))
-                    }
-                    Err(e) => {
-                        let error_msg = e.to_string();
-                        eprintln!("Lockstep pre-flight: DIVERGENCE DETECTED - {}", error_msg);
-                        if resolved.config.migration.require_lockstep_validation {
-                            return Err(ActionableError::new(
-                                format!(
-                                    "run blocked by lockstep pre-flight divergence: {}",
-                                    error_msg
-                                ),
-                                "franken-node verify lockstep . --emit-fixtures",
-                            )
-                            .into());
-                        }
-                        Some(serde_json::json!({
-                            "status": "diverged",
-                            "error": error_msg,
-                            "runtimes": ["bun", "franken-node"],
-                            "blocked": false
-                        }))
-                    }
-                }
+            let requested_runtime = parse_runtime_override(runtime.as_deref())?
+                .unwrap_or(resolved.config.runtime.preferred);
+            let project_root = run_project_root(&app_path);
+            let compat_preflight_report = if compat_preflight {
+                Some(run_compat_preflight_report(
+                    &project_root,
+                    &trace_id,
+                    requested_runtime,
+                )?)
             } else {
                 None
             };
-
-            let requested_runtime = parse_runtime_override(runtime.as_deref())?
-                .unwrap_or(resolved.config.runtime.preferred);
 
             // Extract trusted extension IDs from preflight for TOCTOU validation (bd-zqz0q)
             let trusted_extension_ids = match &preflight.verdict {
@@ -26350,22 +28286,76 @@ fn main() -> Result<()> {
                 _ => Vec::new(),
             };
 
+            // Linux resolves /proc/self/exe to the already-running executable
+            // inode at spawn time, avoiding a path-replacement race between
+            // worker selection and exec. Other platforms use the validated
+            // absolute current-executable path.
+            #[cfg(target_os = "linux")]
+            let native_session_worker_path = PathBuf::from("/proc/self/exe");
+            #[cfg(not(target_os = "linux"))]
+            let native_session_worker_path = std::env::current_exe()
+                .context("failed resolving current franken-node binary for native execution")?;
             let dispatcher =
-                ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime);
-            let dispatch = dispatcher.dispatch_run(
+                ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime)
+                    .with_native_session_worker_path(native_session_worker_path);
+            let dispatch = match dispatcher.dispatch_run(
                 &app_path,
                 &resolved.config,
                 &policy,
                 &trusted_extension_ids,
                 now_unix_secs(),
-            )?;
-            let project_root = run_project_root(&app_path);
+            ) {
+                Ok(dispatch) => dispatch,
+                Err(err) => {
+                    // bd-muy9u: when the attempt aborted after the engine had
+                    // already performed or been denied host effects, those
+                    // receipts are recovered on the error. Emit them before
+                    // propagating: a denial must not become invisible merely
+                    // because the guest aborted afterwards. The run still
+                    // fails — only the evidence is preserved.
+                    if let Some(failure) =
+                        err.downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
+                    {
+                        emit_failed_run_effect_evidence(
+                            failure.host_effect_ledger(),
+                            json,
+                            console_only,
+                        )?;
+                    }
+                    // bd-rpo4f: `dispatch_run` surfaces requested-runtime
+                    // unavailability as a typed error instead of exiting the
+                    // process from library code. The CLI boundary owns the
+                    // operator contract: actionable message on stderr, exit
+                    // 127 (pinned by test_native_engine_missing_binary_error_handling).
+                    if let Some(
+                        unavailable @ ops::engine_dispatcher::DispatchResolutionError::RequestedRuntimeUnavailable(_),
+                    ) = err.downcast_ref::<ops::engine_dispatcher::DispatchResolutionError>()
+                    {
+                        eprintln!("{unavailable}");
+                        std::process::exit(127);
+                    }
+                    return Err(err);
+                }
+            };
             let ssrf_violations = extract_ssrf_violations(dispatch.telemetry.as_ref());
             let auto_quarantined_extensions = maybe_auto_quarantine_run_dependencies(
                 &project_root,
                 &resolved.config,
                 &preflight,
                 ssrf_violations.len(),
+                now_unix_secs(),
+            )?;
+            // bd-fp1je: a Sentinel escalation drives product-side enforcement
+            // (run-subject auto-quarantine + trust-card risk bump) per the
+            // resolved profile's `trust.quarantine_on_high_risk`.
+            let sentinel_enforcement = maybe_enforce_sentinel_escalation(
+                &project_root,
+                &resolved.config,
+                resolved.selected_profile,
+                &policy,
+                &app_path,
+                &preflight,
+                &dispatch,
                 now_unix_secs(),
             )?;
             let receipt = build_run_execution_receipt(
@@ -26376,7 +28366,9 @@ fn main() -> Result<()> {
                 &dispatch,
                 ssrf_violations,
                 auto_quarantined_extensions,
-                lockstep_verdict,
+                sentinel_enforcement,
+                None,
+                compat_preflight_report,
             )?;
             let receipt_path = persist_run_execution_receipt(
                 &project_root,
@@ -26391,7 +28383,14 @@ fn main() -> Result<()> {
                 );
             }
 
-            emit_run_completion_output(&preflight, &dispatch, &receipt, &receipt_path, json)?;
+            emit_run_completion_output(
+                &preflight,
+                &dispatch,
+                &receipt,
+                &receipt_path,
+                json,
+                console_only,
+            )?;
 
             if dispatch.terminated_by_signal {
                 anyhow::bail!(
@@ -26478,12 +28477,13 @@ fn main() -> Result<()> {
             MigrateCommand::Validate(args) => {
                 let format = migration::ValidateOutputFormat::parse(&args.format)
                     .map_err(|err| anyhow::anyhow!(err))?;
-                let report = migration::run_validate(&args.project_path).with_context(|| {
-                    format!(
-                        "failed running migration validate for {}",
-                        args.project_path.display()
-                    )
-                })?;
+                let report = migration::run_validate(&args.project_path, args.static_only)
+                    .with_context(|| {
+                        format!(
+                            "failed running migration validate for {}",
+                            args.project_path.display()
+                        )
+                    })?;
                 match format {
                     migration::ValidateOutputFormat::Json => {
                         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -26647,6 +28647,9 @@ fn main() -> Result<()> {
                         ctx,
                     )?;
                 }
+            }
+            TrustCommand::Release(args) => {
+                handle_trust_release_command(&args)?;
             }
             TrustCommand::Sync(args) => {
                 let now_secs = now_unix_secs();
@@ -26860,6 +28863,15 @@ fn main() -> Result<()> {
             }
         },
 
+        Command::Ltv(sub) => match sub {
+            LtvCommand::Attest(args) => {
+                handle_ltv_attest_command(&args)?;
+            }
+            LtvCommand::VerifyAsOf(args) => {
+                handle_ltv_verify_as_of_command(&args)?;
+            }
+        },
+
         Command::Incident(sub) => match sub {
             IncidentCommand::Bundle(args) => {
                 handle_incident_bundle_command(&args)?;
@@ -26880,6 +28892,9 @@ fn main() -> Result<()> {
                         "command": "incident.list",
                         "schema_version": "incident-list-v1",
                         "severity_filter": severity_filter,
+                        "filters": {
+                            "severity": severity_filter,
+                        },
                         "count": entries.len(),
                         "incidents": entries,
                     });
@@ -26925,6 +28940,12 @@ fn main() -> Result<()> {
                 let report = ops_metrics_report(Path::new("."))?;
                 emit_ops_metrics_report(&report, args.format)?;
             }
+            OpsCommand::ProofCarryingEvidence(args) => {
+                handle_ops_proof_carrying_evidence(&args)?;
+            }
+            OpsCommand::CompatCorpusRun(args) => {
+                handle_ops_compat_corpus_run(&args)?;
+            }
         },
 
         Command::Registry(sub) => match sub {
@@ -26964,7 +28985,11 @@ fn main() -> Result<()> {
             if let Some(command) = &args.command {
                 match command {
                     DoctorCommand::CloseCondition(close_args) => {
-                        handle_doctor_close_condition(close_args)?;
+                        handle_doctor_close_condition(
+                            close_args,
+                            &args.trace_id,
+                            args.structured_logs_jsonl,
+                        )?;
                     }
                     DoctorCommand::EvidenceReadiness(readiness_args) => {
                         handle_doctor_evidence_readiness(
@@ -26976,16 +29001,30 @@ fn main() -> Result<()> {
                     DoctorCommand::WorkspacePressure(pressure_args) => {
                         handle_doctor_workspace_pressure(pressure_args)?;
                     }
+                    DoctorCommand::ProcessSpawnReadiness(readiness_args) => {
+                        handle_doctor_process_spawn_readiness(readiness_args, args.json)?;
+                    }
                 }
                 return Ok(());
             }
 
             let profile_override = parse_profile_override(args.profile.as_deref())?;
-            let resolved = config::Config::resolve(
+            // `doctor` is a read-only diagnostic that only READS merged config
+            // fields to build its report (it reports on config state via the
+            // DR-CONFIG/DR-TRUST checks rather than enforcing it). Resolve WITHOUT
+            // running full `Config::validate()`, whose fail-closed boundaries
+            // (`trust.registry_signing_key`, `security.authorized_api_keys`) only
+            // matter for `run`. Validating here made `doctor` abort with a
+            // misleading "failed resolving configuration" error on any workspace
+            // that had not yet run `franken-node init`, defeating the purpose of a
+            // diagnostic meant to run anywhere. Mirrors the receipt-export probe
+            // (bd-3c2ie) which uses the same lenient entry point for the same reason.
+            let resolved = config::Config::resolve_without_validation_with_env(
                 args.config.as_deref(),
                 CliOverrides {
                     profile: profile_override,
                 },
+                &|key| std::env::var(key).ok(),
             )
             .context("failed resolving configuration for doctor")?;
             let report = build_doctor_report_with_policy_input(
@@ -27441,6 +29480,12 @@ mod run_trust_gate_tests {
                 stdout: String::new(),
                 stderr: String::new(),
             },
+            host_effect_ledger: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture: None,
+            #[cfg(feature = "engine")]
+            runtime_evidence_identity_capture_path: None,
+            sentinel: None,
         }
     }
 
@@ -27715,6 +29760,8 @@ mod run_trust_gate_tests {
             ssrf_violations.clone(),
             Vec::new(),
             None,
+            None,
+            None,
         )
         .expect("first receipt");
         let second = build_run_execution_receipt(
@@ -27725,6 +29772,8 @@ mod run_trust_gate_tests {
             &dispatch,
             ssrf_violations,
             Vec::new(),
+            None,
+            None,
             None,
         )
         .expect("second receipt");
@@ -27800,6 +29849,8 @@ mod run_trust_gate_tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
+            None,
         )
         .expect("receipt");
 
@@ -27833,6 +29884,8 @@ mod run_trust_gate_tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
+            None,
         )
         .expect("receipt one");
         let receipt_two = build_run_execution_receipt(
@@ -27849,6 +29902,8 @@ mod run_trust_gate_tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
+            None,
         )
         .expect("receipt two");
         let receipt_three = build_run_execution_receipt(
@@ -27864,6 +29919,8 @@ mod run_trust_gate_tests {
             ),
             Vec::new(),
             Vec::new(),
+            None,
+            None,
             None,
         )
         .expect("receipt three");
@@ -29299,7 +31356,9 @@ mod run_trust_gate_tests {
                 &dispatch,
                 vec![], // ssrf_violations
                 vec![], // auto_quarantined_extensions
+                None,   // sentinel_enforcement
                 None,   // lockstep_verdict
+                None,   // compat_preflight
             )
             .expect("receipt generation should succeed");
 
@@ -29332,6 +31391,8 @@ mod run_trust_gate_tests {
                 &dispatch,
                 vec![],
                 vec![],
+                None,
+                None,
                 None,
             )
             .expect("second receipt generation should succeed");

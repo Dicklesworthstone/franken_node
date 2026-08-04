@@ -187,7 +187,7 @@ fn apply_mutation(request: &mut RegistrationRequest, mutation: Mutation) {
     }
 }
 
-fn registry(transparency_required: bool) -> SignedExtensionRegistry {
+fn make_registry(transparency_required: bool) -> SignedExtensionRegistry {
     let signing_key = signing_key();
     let mut key_ring = KeyRing::new();
     key_ring.add_key(signing_key.verifying_key());
@@ -232,7 +232,7 @@ fn execute_vector(vector: &ReceiptVector) -> TestResult {
     apply_mutation(&mut request, vector.mutation);
 
     let trace = trace_id(&vector.name);
-    let mut registry = registry(vector.transparency_required);
+    let mut registry = make_registry(vector.transparency_required);
     let result = registry.register(request.clone(), &trace, FIXED_NOW_EPOCH);
     let receipt = registry.admission_receipts().last().ok_or_else(|| {
         format!(
@@ -241,7 +241,7 @@ fn execute_vector(vector: &ReceiptVector) -> TestResult {
         )
     })?;
 
-    let mut replay_registry = registry(vector.transparency_required);
+    let mut replay_registry = make_registry(vector.transparency_required);
     let replay_result = replay_registry.register(request, &trace, FIXED_NOW_EPOCH);
     let replay_receipt = replay_registry.admission_receipts().last().ok_or_else(|| {
         format!(

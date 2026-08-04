@@ -1,0 +1,10 @@
+{
+  "checkpoint_id": 18446744073709551615,
+  "start_index": 18446744073709551614,
+  "end_index": 18446744073709551615,
+  "entry_count": 1,
+  "chain_head_hash": "sha256:max_values_head",
+  "commitment_hash": "sha256:max_values_commit",
+  "created_at_millis": 18446744073709551615,
+  "trace_id": "trace-max-values"
+}

@@ -483,6 +483,16 @@ mod tests {
         }
     }
 
+    // bd-yom8c: prod `MigrationValidationCohorts::new(schema_version)` was removed in favor of
+    // `Default` (schema_version is now a private field). This helper preserves the tests' intent
+    // of constructing an engine with a specific schema version by setting the private field
+    // directly (legal from this child module).
+    fn engine_with_schema(version: &str) -> MigrationValidationCohorts {
+        let mut e = MigrationValidationCohorts::default();
+        e.schema_version = version.to_string();
+        e
+    }
+
     #[test]
     fn five_categories() {
         assert_eq!(CohortCategory::all().len(), 5);
@@ -976,20 +986,25 @@ mod tests {
 
     #[test]
     fn report_hash_large_input_saturation() {
-        // Test boundary case: oversized inputs trigger saturation (u64::MAX)
-        // This verifies the fix prevents integer truncation on large schema versions
-
-        // Create engine with very long schema version that would overflow usize → u64 cast
-        let mut engine = MigrationValidationCohorts::new(&"schema_".repeat(std::usize::MAX / 32));
+        // Boundary case: multi-megabyte inputs must hash cleanly without
+        // truncation. The original version called `"schema_".repeat(usize::MAX
+        // / 32)` — a ~2^61-byte allocation that aborted the whole test process
+        // (allocation failure aborts, it does not panic). On 64-bit targets the
+        // `u64::try_from(len).unwrap_or(u64::MAX)` saturation arm is
+        // structurally unreachable via real allocations (usize::MAX <=
+        // u64::MAX), so a real multi-megabyte input is the honest boundary.
+        let mut engine = engine_with_schema(&"schema_".repeat(1024 * 1024));
 
         let mut large_cohort = sample_cohort("large_cohort", CohortCategory::NodeMinimal);
         large_cohort.name = "n".repeat(1000000); // 1MB name
-        large_cohort.description = "d".repeat(1000000); // 1MB description
+        // bd-yom8c: ProjectCohort.description was removed; map the 1MB input onto a project id to
+        // preserve the large-input/saturation intent.
+        large_cohort.project_ids = vec!["d".repeat(1000000)]; // 1MB project id (was: description)
 
         engine.create_cohort(large_cohort, &trace()).unwrap();
 
         // Add projects with large IDs to test flagged collection length prefixing
-        for i in 0..10 {
+        for _i in 0..10 {
             let large_project = format!("project_{}", "x".repeat(100000)); // ~700KB each
             engine
                 .add_project("large_cohort", &large_project, &trace())
@@ -1013,7 +1028,7 @@ mod tests {
         // This verifies hash collision resistance is maintained after the fix
 
         // Normal engine
-        let mut normal_engine = MigrationValidationCohorts::new("v1.0");
+        let mut normal_engine = engine_with_schema("v1.0");
         normal_engine
             .create_cohort(
                 sample_cohort("normal", CohortCategory::NodeMinimal),
@@ -1024,7 +1039,7 @@ mod tests {
         let normal_hash = normal_engine.generate_report(&trace()).content_hash;
 
         // Large input engine that would trigger saturation
-        let mut large_engine = MigrationValidationCohorts::new(&"large_schema_".repeat(100000));
+        let mut large_engine = engine_with_schema(&"large_schema_".repeat(100000));
         let mut large_cohort = sample_cohort("large", CohortCategory::NodeMinimal);
         large_cohort.name = "large_name".repeat(50000);
         large_engine.create_cohort(large_cohort, &trace()).unwrap();
@@ -1044,12 +1059,12 @@ mod tests {
         // This verifies the security properties of the saturation fix
 
         // Test case: different schema/flagged boundaries that could collide without length prefixes
-        let mut engine1 = MigrationValidationCohorts::new("ab");
+        let mut engine1 = engine_with_schema("ab");
         let mut cohort1 = sample_cohort("c1", CohortCategory::NodeMinimal);
         cohort1.project_ids = vec!["cd".to_string()];
         engine1.cohorts.insert("c1".to_string(), cohort1);
 
-        let mut engine2 = MigrationValidationCohorts::new("a");
+        let mut engine2 = engine_with_schema("a");
         let mut cohort2 = sample_cohort("c1", CohortCategory::NodeMinimal);
         cohort2.project_ids = vec!["bcd".to_string()];
         engine2.cohorts.insert("c1".to_string(), cohort2);
@@ -1076,11 +1091,15 @@ mod tests {
         // 4. coverage.len()
         // 5. cat.len() (for each category in coverage)
 
+        // Hoisted (bd-yom8c): a temporary String cannot be borrowed inside an
+        // otherwise-&str array; bind the long values first and use `.as_str()`.
+        let long_schema_version = "long".repeat(1000);
+        let long_cohort_name = "long_cohort".repeat(1000);
         let test_cases = vec![
             // (schema_version, cohort_name, project_count)
             ("short", "short_cohort", 1),
             ("medium_schema_version", "medium_cohort_name", 3),
-            (&"long".repeat(1000), &"long_cohort".repeat(1000), 5),
+            (long_schema_version.as_str(), long_cohort_name.as_str(), 5),
             ("", "empty_schema_test", 2),
             ("incremental", "a", 0), // No projects (empty flagged)
         ];
@@ -1088,7 +1107,7 @@ mod tests {
         let mut hashes = Vec::new();
 
         for (schema_version, cohort_name, project_count) in test_cases {
-            let mut engine = MigrationValidationCohorts::new(schema_version);
+            let mut engine = engine_with_schema(schema_version);
 
             let cohort = sample_cohort(cohort_name, CohortCategory::NodeMinimal);
             engine.create_cohort(cohort, &trace()).unwrap();
@@ -1150,7 +1169,7 @@ mod tests {
 
         // Should have coverage for each category
         assert!(
-            report.category_coverage.len() > 1,
+            report.coverage_by_category.len() > 1,
             "Should have multiple categories in coverage"
         );
 

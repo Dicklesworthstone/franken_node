@@ -214,6 +214,114 @@
       "expected_pinned_artifacts": 0,
       "expected_protected_artifacts": 0,
       "expected_log_event": "OP-WHATIF-008"
+    },
+    {
+      "name": "healthy_idle_rch",
+      "bead_id": "bd-bf06i.2",
+      "work_class": "Validation",
+      "bead_priority": 1,
+      "requested_command": "cargo test -p frankenengine-node validation_planner",
+      "workspace": {
+        "free_disk_bytes": 5000000000,
+        "target_dir_bytes": 1000000000,
+        "active_build_count": 0,
+        "rch_available_slots": 8,
+        "memory_pressure": 0.2,
+        "active_reservations": 2,
+        "coordination_healthy": true
+      },
+      "rch_queue": {
+        "available_slots": 8,
+        "queued_jobs": 0,
+        "degraded_workers": 0,
+        "local_fallback_allowed": false,
+        "active_builds": []
+      },
+      "artifacts": [],
+      "ledger_kind": null,
+      "stale_sibling_blocker": null,
+      "expected_action": "require_rch",
+      "expected_reason_code": "OP_WHATIF_REQUIRE_RCH",
+      "expected_command_prefix": "rch exec -- cargo test",
+      "expected_cleanup_actions": 0,
+      "expected_pinned_artifacts": 0,
+      "expected_protected_artifacts": 0,
+      "expected_log_event": "OP-WHATIF-002"
+    },
+    {
+      "name": "stale_progress_rch",
+      "bead_id": "bd-bf06i.2",
+      "work_class": "Validation",
+      "bead_priority": 1,
+      "requested_command": "cargo test -p frankenengine-node workspace_pressure_governance_e2e",
+      "workspace": {
+        "free_disk_bytes": 5000000000,
+        "target_dir_bytes": 1000000000,
+        "active_build_count": 2,
+        "rch_available_slots": 6,
+        "memory_pressure": 0.25,
+        "active_reservations": 5,
+        "coordination_healthy": true
+      },
+      "rch_queue": {
+        "available_slots": 6,
+        "queued_jobs": 0,
+        "degraded_workers": 0,
+        "local_fallback_allowed": false,
+        "active_builds": [
+          {
+            "build_id": "29893806476230668",
+            "worker_id": "vmi1152480",
+            "command": "cargo check -p frankenengine-node --no-default-features --bin franken-node",
+            "heartbeat_fresh": true,
+            "progress_stale": true,
+            "progress_age_secs": 111
+          }
+        ]
+      },
+      "artifacts": [],
+      "ledger_kind": null,
+      "stale_sibling_blocker": null,
+      "expected_action": "wait",
+      "expected_reason_code": "VAL_DEFER_RCH_STALE",
+      "expected_command_prefix": "rch exec -- cargo test",
+      "expected_cleanup_actions": 0,
+      "expected_pinned_artifacts": 0,
+      "expected_protected_artifacts": 0,
+      "expected_log_event": "OP-WHATIF-010"
+    },
+    {
+      "name": "rch_unavailable_no_fallback",
+      "bead_id": "bd-bf06i.2",
+      "work_class": "Benchmark",
+      "bead_priority": 1,
+      "requested_command": "cargo bench -p frankenengine-node validation_broker",
+      "workspace": {
+        "free_disk_bytes": 5000000000,
+        "target_dir_bytes": 1000000000,
+        "active_build_count": 1,
+        "rch_available_slots": null,
+        "memory_pressure": 0.25,
+        "active_reservations": 4,
+        "coordination_healthy": true
+      },
+      "rch_queue": {
+        "available_slots": null,
+        "queued_jobs": 0,
+        "degraded_workers": 0,
+        "local_fallback_allowed": false,
+        "active_builds": []
+      },
+      "artifacts": [],
+      "ledger_kind": null,
+      "stale_sibling_blocker": null,
+      "expected_action": "refuse_local_fallback",
+      "expected_reason_code": "OP_WHATIF_REFUSE_LOCAL_FALLBACK",
+      "expected_command_prefix": "rch exec -- cargo bench",
+      "expected_cleanup_actions": 0,
+      "expected_pinned_artifacts": 0,
+      "expected_protected_artifacts": 0,
+      "expected_log_event": "OP-WHATIF-001"
     }
   ]
 }

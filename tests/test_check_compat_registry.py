@@ -15,11 +15,18 @@ from check_compat_registry import (
     check_entry_fields,
     check_unique_ids,
     check_band_coverage,
+    check_first_tranche_contracts,
+    check_error_parity_table,
     VALID_BANDS,
     VALID_SHIM_TYPES,
     VALID_ORACLE_STATUSES,
+    VALID_SIDE_EFFECT_CATEGORIES,
+    VALID_POLICY_HOOKS,
+    FIRST_TRANCHE_REQUIRED_IDS,
     EVIDENCE_PATHS,
     ID_PATTERN,
+    SCHEMA_ID_PATTERN,
+    ERROR_CODE_PATTERN,
 )
 
 
@@ -59,6 +66,18 @@ def test_band_coverage():
     assert result["details"]["bands_represented"]["core"]
 
 
+def test_first_tranche_contracts():
+    result = check_first_tranche_contracts()
+    assert result["status"] == "PASS"
+    assert set(result["details"]["present_ids"]) == FIRST_TRANCHE_REQUIRED_IDS
+
+
+def test_error_parity_table():
+    result = check_error_parity_table()
+    assert result["status"] == "PASS"
+    assert result["details"]["errors"] == []
+
+
 def test_valid_bands_set():
     assert VALID_BANDS == {"core", "high-value", "edge", "unsafe"}
 
@@ -73,6 +92,23 @@ def test_valid_oracle_statuses_set():
         raise AssertionError(f"unexpected oracle statuses: {VALID_ORACLE_STATUSES}")
 
 
+def test_valid_side_effect_categories_set():
+    expected = {
+        "pure",
+        "filesystem_read",
+        "filesystem_write",
+        "network_egress",
+        "network_listener",
+        "environment_read",
+        "module_graph_read",
+    }
+    assert VALID_SIDE_EFFECT_CATEGORIES == expected
+
+
+def test_valid_policy_hooks_set():
+    assert VALID_POLICY_HOOKS == {"capability", "ssrf", "profile"}
+
+
 def test_id_pattern_valid():
     assert ID_PATTERN.match("compat:fs:readFile")
     assert ID_PATTERN.match("compat:http:createServer")
@@ -80,11 +116,25 @@ def test_id_pattern_valid():
     assert not ID_PATTERN.match("compat:fs")
 
 
+def test_schema_and_error_code_patterns_valid():
+    assert SCHEMA_ID_PATTERN.match("compat-fs-read-file-args-v1")
+    assert SCHEMA_ID_PATTERN.match("ccm-v1.0")
+    assert not SCHEMA_ID_PATTERN.match("CompatFsReadFileArgsV1")
+    assert ERROR_CODE_PATTERN.match("ERR_INVALID_ARG_TYPE")
+    assert ERROR_CODE_PATTERN.match("MODULE_NOT_FOUND")
+    assert ERROR_CODE_PATTERN.match("ENOENT")
+    assert not ERROR_CODE_PATTERN.match("err_invalid_arg_type")
+
+
 def test_registry_json_parses():
     data = json.loads((ROOT / "docs" / "COMPATIBILITY_REGISTRY.json").read_text(encoding="utf-8"))
     assert data["schema_version"] == "1.0"
     assert isinstance(data["behaviors"], list)
     assert len(data["behaviors"]) >= 5
+    by_id = {entry["id"]: entry for entry in data["behaviors"]}
+    assert FIRST_TRANCHE_REQUIRED_IDS.issubset(by_id)
+    assert by_id["compat:http:request"]["policy_hooks"] == ["capability", "ssrf", "profile"]
+    assert by_id["compat:http:request"]["side_effect_category"] == "network_egress"
 
 
 def test_report_cites_primary_registry_implementation():

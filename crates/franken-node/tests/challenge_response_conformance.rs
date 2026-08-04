@@ -84,7 +84,7 @@ fn create_valid_message(
     secret: &RootSecret,
 ) -> ChannelMessage {
     let nonce = {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let input = format!("{}:{}", id, seq);
         let hash = Sha256::digest(input.as_bytes());
         let mut n = [0u8; 16];
@@ -110,6 +110,21 @@ fn create_valid_message(
         credential,
         payload_hash: "test-payload-hash".into(),
     }
+}
+
+/// Build a validly-signed message with a nonce derived from the sequence
+/// number, so repeated valid messages carry distinct nonces and are not
+/// rejected by the channel's nonce-replay gate (`seen_nonces`).
+fn create_message(
+    id: &str,
+    dir: Direction,
+    seq: u64,
+    config: &ChannelConfig,
+    secret: &RootSecret,
+) -> ChannelMessage {
+    let mut nonce = [0u8; 16];
+    nonce[..8].copy_from_slice(&seq.to_le_bytes());
+    create_message_with_nonce(id, dir, seq, nonce, config, secret)
 }
 
 fn create_message_with_nonce(
@@ -140,11 +155,7 @@ fn create_message_with_nonce(
     }
 }
 
-fn create_message_with_forged_mac(
-    id: &str,
-    dir: Direction,
-    seq: u64,
-) -> ChannelMessage {
+fn create_message_with_forged_mac(id: &str, dir: Direction, seq: u64) -> ChannelMessage {
     let credential = ChannelCredential {
         subject_id: "attacker".into(),
         epoch: ControlEpoch::new(1),
@@ -172,20 +183,28 @@ fn conformance_nonce_reuse_within_epoch_rejected() -> TestResult {
     let shared_nonce = [0x42; 16];
 
     // First message with nonce succeeds
-    let msg1 = create_message_with_nonce("msg1", Direction::Send, 1, shared_nonce, &config, &secret);
-    channel.process_message(&msg1, "ts1")
+    let msg1 =
+        create_message_with_nonce("msg1", Direction::Send, 1, shared_nonce, &config, &secret);
+    channel
+        .process_message(&msg1, "ts1")
         .map_err(|e| format!("First message should succeed: {e}"))?;
 
     // Second message with same nonce fails
-    let msg2 = create_message_with_nonce("msg2", Direction::Send, 2, shared_nonce, &config, &secret);
+    let msg2 =
+        create_message_with_nonce("msg2", Direction::Send, 2, shared_nonce, &config, &secret);
     let result = channel.process_message(&msg2, "ts2");
 
     match result {
         Err(e) if e.code() == "ACC_AUTH_FAILED" => {
-            let audit = channel.audit_log().last()
+            let audit = channel
+                .audit_log()
+                .last()
                 .ok_or("Expected audit entry for nonce reuse")?;
             if audit.reason_code.as_deref() != Some("nonce_reuse_detected") {
-                return Err(format!("Expected nonce_reuse_detected, got {:?}", audit.reason_code));
+                return Err(format!(
+                    "Expected nonce_reuse_detected, got {:?}",
+                    audit.reason_code
+                ));
             }
         }
         _ => return Err("Expected nonce reuse to be rejected".into()),
@@ -224,7 +243,8 @@ fn conformance_nonce_reuse_across_epochs_allowed() -> TestResult {
         payload_hash: "test-payload-hash".into(),
     };
 
-    channel.process_message(&msg1, "ts1")
+    channel
+        .process_message(&msg1, "ts1")
         .map_err(|e| format!("First message should succeed: {e}"))?;
 
     // Message with epoch 2 and same nonce should succeed
@@ -247,7 +267,8 @@ fn conformance_nonce_reuse_across_epochs_allowed() -> TestResult {
         payload_hash: "test-payload-hash".into(),
     };
 
-    channel.process_message(&msg2, "ts2")
+    channel
+        .process_message(&msg2, "ts2")
         .map_err(|e| format!("Nonce reuse across epochs should be allowed: {e}"))?;
 
     Ok(())
@@ -264,8 +285,15 @@ fn conformance_expired_challenge_replay_rejected() -> TestResult {
 
     // Fill the replay window
     for seq in 1..=5 {
-        let msg = create_valid_message(&format!("msg{}", seq), Direction::Send, seq, &config, &secret);
-        channel.process_message(&msg, &format!("ts{}", seq))
+        let msg = create_valid_message(
+            &format!("msg{}", seq),
+            Direction::Send,
+            seq,
+            &config,
+            &secret,
+        );
+        channel
+            .process_message(&msg, &format!("ts{}", seq))
             .map_err(|e| format!("Message {} should succeed: {e}", seq))?;
     }
 
@@ -294,10 +322,15 @@ fn conformance_signature_substitution_rejected() -> TestResult {
 
     match result {
         Err(e) if e.code() == "ACC_AUTH_FAILED" => {
-            let audit = channel.audit_log().last()
+            let audit = channel
+                .audit_log()
+                .last()
                 .ok_or("Expected audit entry for signature failure")?;
             if audit.reason_code.as_deref() != Some("transcript_mac_mismatch") {
-                return Err(format!("Expected transcript_mac_mismatch, got {:?}", audit.reason_code));
+                return Err(format!(
+                    "Expected transcript_mac_mismatch, got {:?}",
+                    audit.reason_code
+                ));
             }
         }
         _ => return Err("Expected signature substitution to be rejected".into()),
@@ -324,10 +357,15 @@ fn conformance_cross_context_signature_substitution_rejected() -> TestResult {
 
     match result {
         Err(e) if e.code() == "ACC_AUTH_FAILED" => {
-            let audit = channel2.audit_log().last()
+            let audit = channel2
+                .audit_log()
+                .last()
                 .ok_or("Expected audit entry for cross-context signature failure")?;
             if audit.reason_code.as_deref() != Some("transcript_mac_mismatch") {
-                return Err(format!("Expected transcript_mac_mismatch, got {:?}", audit.reason_code));
+                return Err(format!(
+                    "Expected transcript_mac_mismatch, got {:?}",
+                    audit.reason_code
+                ));
             }
         }
         _ => return Err("Expected cross-context signature to be rejected".into()),
@@ -346,15 +384,21 @@ fn conformance_scope_mismatch_rejected() -> TestResult {
         .map_err(|e| format!("Channel creation failed: {e}"))?;
 
     // Create message signed for wrong_config but sent to config channel
-    let mismatched_msg = create_valid_message("mismatch", Direction::Send, 1, &wrong_config, &secret);
+    let mismatched_msg =
+        create_valid_message("mismatch", Direction::Send, 1, &wrong_config, &secret);
     let result = channel.process_message(&mismatched_msg, "ts");
 
     match result {
         Err(e) if e.code() == "ACC_AUTH_FAILED" => {
-            let audit = channel.audit_log().last()
+            let audit = channel
+                .audit_log()
+                .last()
                 .ok_or("Expected audit entry for scope mismatch")?;
             if audit.reason_code.as_deref() != Some("transcript_mac_mismatch") {
-                return Err(format!("Expected transcript_mac_mismatch, got {:?}", audit.reason_code));
+                return Err(format!(
+                    "Expected transcript_mac_mismatch, got {:?}",
+                    audit.reason_code
+                ));
             }
         }
         _ => return Err("Expected scope mismatch to be rejected".into()),
@@ -370,14 +414,10 @@ fn conformance_timing_attack_resistance() -> TestResult {
 
     let config = test_config();
     let secret = test_secret();
-    let mut channel = ControlChannel::new(config.clone(), secret.clone())
+    // Prove channel creation succeeds before timing; the measurement loops
+    // below build a fresh channel + message per iteration.
+    let _channel = ControlChannel::new(config.clone(), secret.clone())
         .map_err(|e| format!("Channel creation failed: {e}"))?;
-
-    // Create valid message with correct MAC
-    let valid_msg = create_message("valid-msg", Direction::Send, 1, &config, &secret);
-
-    // Create invalid message with forged MAC
-    let invalid_msg = create_message_with_forged_mac("invalid-msg", Direction::Send, 2);
 
     const ITERATIONS: usize = 100;
     let mut valid_times = Vec::new();
@@ -385,7 +425,13 @@ fn conformance_timing_attack_resistance() -> TestResult {
 
     // Measure timing for valid messages
     for i in 0..ITERATIONS {
-        let msg = create_message(&format!("valid-{}", i), Direction::Send, i as u64 + 10, &config, &secret);
+        let msg = create_message(
+            &format!("valid-{}", i),
+            Direction::Send,
+            i as u64 + 10,
+            &config,
+            &secret,
+        );
         let mut test_channel = ControlChannel::new(config.clone(), secret.clone())
             .map_err(|e| format!("Channel creation failed: {e}"))?;
 
@@ -397,7 +443,11 @@ fn conformance_timing_attack_resistance() -> TestResult {
 
     // Measure timing for invalid messages
     for i in 0..ITERATIONS {
-        let msg = create_message_with_forged_mac(&format!("invalid-{}", i), Direction::Send, i as u64 + 1000);
+        let msg = create_message_with_forged_mac(
+            &format!("invalid-{}", i),
+            Direction::Send,
+            i as u64 + 1000,
+        );
         let mut test_channel = ControlChannel::new(config.clone(), secret.clone())
             .map_err(|e| format!("Channel creation failed: {e}"))?;
 
@@ -412,12 +462,16 @@ fn conformance_timing_attack_resistance() -> TestResult {
     let invalid_mean = invalid_times.iter().sum::<u128>() / invalid_times.len() as u128;
 
     // Calculate variance for both sets
-    let valid_variance: f64 = valid_times.iter()
+    let valid_variance: f64 = valid_times
+        .iter()
         .map(|&x| (x as f64 - valid_mean as f64).powi(2))
-        .sum::<f64>() / valid_times.len() as f64;
-    let invalid_variance: f64 = invalid_times.iter()
+        .sum::<f64>()
+        / valid_times.len() as f64;
+    let invalid_variance: f64 = invalid_times
+        .iter()
         .map(|&x| (x as f64 - invalid_mean as f64).powi(2))
-        .sum::<f64>() / invalid_times.len() as f64;
+        .sum::<f64>()
+        / invalid_times.len() as f64;
 
     let valid_stddev = valid_variance.sqrt();
     let invalid_stddev = invalid_variance.sqrt();
@@ -429,13 +483,15 @@ fn conformance_timing_attack_resistance() -> TestResult {
     if mean_diff > 2.0 * combined_stddev {
         return Err(format!(
             "Potential timing attack vulnerability: mean difference {} ns exceeds 2σ threshold {} ns",
-            mean_diff, 2.0 * combined_stddev
+            mean_diff,
+            2.0 * combined_stddev
         ));
     }
 
     // Static assertion: verify production code uses constant_time::ct_eq_bytes
     // This is a compile-time check that the right function is being used
-    let _static_check: fn(&[u8], &[u8]) -> bool = frankenengine_node::security::constant_time::ct_eq_bytes;
+    let _static_check: fn(&[u8], &[u8]) -> bool =
+        frankenengine_node::security::constant_time::ct_eq_bytes;
 
     Ok(())
 }
@@ -447,12 +503,18 @@ fn conformance_coverage_verification() -> TestResult {
 
     for row in COVERAGE {
         if !row.tested {
-            missing_coverage.push(format!("{}: {}", row.spec_section, row.invariant));
+            missing_coverage.push(format!(
+                "{}: {} ({})",
+                row.spec_section, row.invariant, row.level
+            ));
         }
     }
 
     if !missing_coverage.is_empty() {
-        return Err(format!("Missing test coverage for: {}", missing_coverage.join(", ")));
+        return Err(format!(
+            "Missing test coverage for: {}",
+            missing_coverage.join(", ")
+        ));
     }
 
     Ok(())
@@ -466,17 +528,40 @@ fn conformance_adversarial_comprehensive() -> TestResult {
     let mut channel = ControlChannel::new(config.clone(), secret.clone())
         .map_err(|e| format!("Channel creation failed: {e}"))?;
 
-    // Valid baseline
-    let msg1 = create_valid_message("baseline", Direction::Send, 1, &config, &secret);
-    channel.process_message(&msg1, "ts1")
+    // Valid baseline. It must consume the SAME nonce ([0x42; 16]) that the
+    // nonce_reuse attack below replays, so the channel's seen-nonce gate has a
+    // prior occurrence to reject against; otherwise attack2 is just a fresh
+    // validly-signed message and is (correctly) accepted.
+    let msg1 =
+        create_message_with_nonce("baseline", Direction::Send, 1, [0x42; 16], &config, &secret);
+    channel
+        .process_message(&msg1, "ts1")
         .map_err(|e| format!("Baseline message should succeed: {e}"))?;
 
     // Test all attack vectors sequentially
     let attacks = vec![
-        (create_message_with_forged_mac("attack1", Direction::Send, 2), "signature_substitution"),
-        (create_message_with_nonce("attack2", Direction::Send, 3, [0x42; 16], &config, &secret), "nonce_reuse"),
-        (create_valid_message("attack3", Direction::Send, 1, &config, &secret), "sequence_replay"),
-        (create_valid_message("attack4", Direction::Send, 4, &alternative_config(), &secret), "scope_mismatch"),
+        (
+            create_message_with_forged_mac("attack1", Direction::Send, 2),
+            "signature_substitution",
+        ),
+        (
+            create_message_with_nonce("attack2", Direction::Send, 3, [0x42; 16], &config, &secret),
+            "nonce_reuse",
+        ),
+        (
+            create_valid_message("attack3", Direction::Send, 1, &config, &secret),
+            "sequence_replay",
+        ),
+        (
+            create_valid_message(
+                "attack4",
+                Direction::Send,
+                4,
+                &alternative_config(),
+                &secret,
+            ),
+            "scope_mismatch",
+        ),
     ];
 
     for (attack_msg, attack_type) in attacks {
@@ -485,11 +570,16 @@ fn conformance_adversarial_comprehensive() -> TestResult {
             return Err(format!("Attack {} should have been rejected", attack_type));
         }
 
-        let audit = channel.audit_log().last()
+        let audit = channel
+            .audit_log()
+            .last()
             .ok_or(format!("Expected audit entry for attack {}", attack_type))?;
 
         if audit.authenticated && attack_type != "nonce_reuse" && attack_type != "sequence_replay" {
-            return Err(format!("Attack {} should not have passed authentication", attack_type));
+            return Err(format!(
+                "Attack {} should not have passed authentication",
+                attack_type
+            ));
         }
     }
 

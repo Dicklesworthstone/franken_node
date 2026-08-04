@@ -1,0 +1,111 @@
+---
+source: crates/franken-node/tests/golden_security_serialization.rs
+assertion_line: 123
+expression: replay_capsule
+---
+{
+  "capsule_id": "capsule-fixture-v1-001",
+  "format_version": 1,
+  "inputs": [
+    {
+      "seq": 1,
+      "data": [
+        118,
+        101,
+        114,
+        105,
+        102,
+        121,
+        32,
+        45,
+        45,
+        105,
+        110,
+        112,
+        117,
+        116,
+        32,
+        100,
+        97,
+        116,
+        97,
+        46,
+        106,
+        115,
+        111,
+        110
+      ],
+      "metadata": {
+        "type": "command"
+      }
+    },
+    {
+      "seq": 2,
+      "data": [
+        102,
+        105,
+        108,
+        101,
+        58,
+        100,
+        97,
+        116,
+        97,
+        46,
+        106,
+        115,
+        111,
+        110,
+        58,
+        115,
+        104,
+        97,
+        50,
+        53,
+        54,
+        58,
+        102,
+        105,
+        108,
+        101,
+        100,
+        97,
+        116,
+        97,
+        49,
+        50,
+        51
+      ],
+      "metadata": {
+        "filename": "data.json",
+        "type": "file"
+      }
+    }
+  ],
+  "expected_outputs": [
+    {
+      "seq": 1,
+      "data": [
+        80,
+        65,
+        83,
+        83,
+        58,
+        48,
+        46,
+        57,
+        53
+      ],
+      "output_hash": "sha256:passoutput123"
+    }
+  ],
+  "environment": {
+    "runtime_version": "franken-v1.0.0",
+    "platform": "linux-x86_64",
+    "config_hash": "sha256:config123",
+    "properties": {
+      "PATH": "/usr/bin:/bin",
+      "USER": "testuser"
+    }
+  }
+}

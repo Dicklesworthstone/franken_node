@@ -5,16 +5,17 @@
 //!
 //! Bead: bd-1sgm4
 
+use ed25519_dalek::SigningKey;
 use frankenengine_node::api::fleet_quarantine::{
     DecisionReceipt, DecisionReceiptPayload, DecisionReceiptScope,
-    canonical_decision_receipt_payload_hash, sign_decision_receipt,
+    canonical_decision_receipt_payload_hash, decision_receipt_payload_bytes, sign_decision_receipt,
 };
-use ed25519_dalek::SigningKey;
 use hex;
 use serde_json;
 
 /// Fixed Ed25519 signing key for reproducible golden vectors
-const GOLDEN_SIGNING_KEY_HEX: &str = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
+const GOLDEN_SIGNING_KEY_HEX: &str =
+    "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
 
 fn create_golden_decision_receipt() -> DecisionReceipt {
     let scope = DecisionReceiptScope::zone("abc123");
@@ -88,8 +89,7 @@ fn decision_receipt_signature_golden_vector() {
     let receipt = create_golden_decision_receipt();
 
     // Create signing key from fixed bytes for reproducible signatures
-    let key_bytes = hex::decode(GOLDEN_SIGNING_KEY_HEX)
-        .expect("Valid hex key");
+    let key_bytes = hex::decode(GOLDEN_SIGNING_KEY_HEX).expect("Valid hex key");
     let signing_key = SigningKey::from_bytes(&key_bytes.try_into().unwrap());
 
     // Sign the receipt
@@ -101,10 +101,16 @@ fn decision_receipt_signature_golden_vector() {
     );
 
     eprintln!("Golden signature algorithm: {}", signature.algorithm);
-    eprintln!("Golden signature public_key_hex: {}", signature.public_key_hex);
+    eprintln!(
+        "Golden signature public_key_hex: {}",
+        signature.public_key_hex
+    );
     eprintln!("Golden signature key_id: {}", signature.key_id);
     eprintln!("Golden signature trust_scope: {}", signature.trust_scope);
-    eprintln!("Golden signature payload_sha256: {}", signature.signed_payload_sha256);
+    eprintln!(
+        "Golden signature payload_sha256: {}",
+        signature.signed_payload_sha256
+    );
     eprintln!("Golden signature hex: {}", signature.signature_hex);
 
     // Verify basic signature properties
@@ -120,8 +126,7 @@ fn decision_receipt_full_signed_golden_vector() {
     let mut receipt = create_golden_decision_receipt();
 
     // Create signing key and sign
-    let key_bytes = hex::decode(GOLDEN_SIGNING_KEY_HEX)
-        .expect("Valid hex key");
+    let key_bytes = hex::decode(GOLDEN_SIGNING_KEY_HEX).expect("Valid hex key");
     let signing_key = SigningKey::from_bytes(&key_bytes.try_into().unwrap());
 
     let signature = sign_decision_receipt(
@@ -134,14 +139,13 @@ fn decision_receipt_full_signed_golden_vector() {
     receipt.signature = Some(signature);
 
     // Serialize to JSON and verify structure
-    let json_str = serde_json::to_string_pretty(&receipt)
-        .expect("Receipt should serialize");
+    let json_str = serde_json::to_string_pretty(&receipt).expect("Receipt should serialize");
 
     eprintln!("Golden signed receipt JSON:\n{}", json_str);
 
     // Verify JSON roundtrip
-    let deserialized: DecisionReceipt = serde_json::from_str(&json_str)
-        .expect("Receipt should deserialize");
+    let deserialized: DecisionReceipt =
+        serde_json::from_str(&json_str).expect("Receipt should deserialize");
 
     assert_eq!(deserialized, receipt);
 
@@ -152,27 +156,7 @@ fn decision_receipt_full_signed_golden_vector() {
     assert_eq!(sig.trust_scope, "fleet_decision");
 }
 
-/// Helper function to extract canonical bytes (duplicated from fleet_quarantine.rs for testing)
-fn decision_receipt_payload_bytes(receipt: &DecisionReceipt) -> Vec<u8> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(b"franken_node_fleet_decision_receipt_v1:");
-    for field in [
-        receipt.operation_id.as_str(),
-        receipt.receipt_id.as_str(),
-        receipt.issuer.as_str(),
-        receipt.issued_at.as_str(),
-        receipt.zone_id.as_str(),
-        receipt.payload_hash.as_str(),
-    ] {
-        extend_len_prefixed(&mut payload, field);
-    }
-    receipt.decision_payload.append_framed(&mut payload);
-    payload
-}
-
-/// Helper function to append length-prefixed string
-fn extend_len_prefixed(buffer: &mut Vec<u8>, field: &str) {
-    let field_len = u64::try_from(field.len()).unwrap_or(u64::MAX);
-    buffer.extend_from_slice(&field_len.to_le_bytes());
-    buffer.extend_from_slice(field.as_bytes());
-}
+// The canonical payload byte-reconstruction (previously duplicated here, which
+// drifted and reached into the now-private `append_framed`) is provided by the
+// public `decision_receipt_payload_bytes` in fleet_quarantine.rs, so these golden
+// vectors track the exact bytes prod signs. See bd-qtciw.

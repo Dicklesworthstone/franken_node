@@ -34,6 +34,27 @@ pub const EVD_BAYES_002: &str = "EVD-BAYES-002";
 pub const EVD_BAYES_003: &str = "EVD-BAYES-003";
 /// Replay from stored observations completed.
 pub const EVD_BAYES_004: &str = "EVD-BAYES-004";
+/// Runtime Sentinel e-process evidence accepted.
+pub const EVD_SENTINEL_E_PROCESS_001: &str = "EVD-SENTINEL-EPROCESS-001";
+/// Runtime Sentinel e-process replay completed.
+pub const EVD_SENTINEL_E_PROCESS_002: &str = "EVD-SENTINEL-EPROCESS-002";
+/// Runtime Sentinel canonical observation accepted into the replay log.
+pub const FN_SENTINEL_OBSERVATION_INGESTED: &str = "FN-SENTINEL-001";
+/// Runtime Sentinel e-process update emitted after applying evidence.
+pub const FN_SENTINEL_E_PROCESS_UPDATED: &str = "FN-SENTINEL-002";
+/// Runtime Sentinel guardrail precedence overrode a probabilistic recommendation.
+pub const FN_SENTINEL_GUARDRAIL_PRECEDENCE: &str = "FN-SENTINEL-003";
+/// Runtime Sentinel escalation evidence was signed and appended to the ledger.
+pub const FN_SENTINEL_LEDGER_RECEIPT_APPENDED: &str = "FN-SENTINEL-004";
+/// Runtime Sentinel hardening transition preserved monotonicity or valid rollback.
+pub const FN_SENTINEL_HARDENING_MONOTONIC: &str = "FN-SENTINEL-005";
+/// Runtime Sentinel verifier replay recomputed the same e-process state.
+pub const FN_SENTINEL_REPLAY_VERIFIED: &str = "FN-SENTINEL-006";
+
+/// Schema version for replay-safe Runtime Sentinel e-process evidence.
+pub const RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION: &str = "runtime-sentinel-e-process-v1";
+/// Fixed-point scale for likelihood ratios, e-values, and alpha bounds.
+pub const E_PROCESS_SCALE_PPM: u64 = 1_000_000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,6 +89,284 @@ impl Observation {
             epoch_id,
         }
     }
+}
+
+/// One fixed-point likelihood-ratio evidence item for the Runtime Sentinel.
+///
+/// `likelihood_ratio_ppm` is P(evidence | malicious) / P(evidence | benign)
+/// multiplied by [`E_PROCESS_SCALE_PPM`]. It intentionally avoids floating point
+/// so replay and verifier recomputation are bit-exact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LikelihoodRatioEvidence {
+    /// Version tag for verifier-compatible evidence replay.
+    pub schema_version: String,
+    /// Strictly increasing sequence number in the Runtime Sentinel evidence log.
+    pub sequence: u64,
+    /// Stable identifier for the signal family that produced this likelihood ratio.
+    pub signal_id: String,
+    /// Fixed-point likelihood ratio scaled by [`E_PROCESS_SCALE_PPM`].
+    pub likelihood_ratio_ppm: u64,
+    /// Canonical metadata carried alongside the evidence item.
+    pub metadata: BTreeMap<String, String>,
+}
+
+impl LikelihoodRatioEvidence {
+    pub fn new(signal_id: impl Into<String>, sequence: u64, likelihood_ratio_ppm: u64) -> Self {
+        Self {
+            schema_version: RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION.to_string(),
+            sequence,
+            signal_id: signal_id.into(),
+            likelihood_ratio_ppm,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), EProcessError> {
+        if self.signal_id.is_empty() {
+            return Err(EProcessError::EmptySignalId);
+        }
+        reject_e_process_control_chars("signal_id", &self.signal_id)?;
+        for (key, value) in &self.metadata {
+            if key.is_empty() {
+                return Err(EProcessError::EmptyMetadataKey);
+            }
+            reject_e_process_control_chars("metadata.key", key)?;
+            reject_e_process_control_chars("metadata.value", value)?;
+        }
+        Ok(())
+    }
+
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn from_mixture(
+        signal_id: impl Into<String>,
+        sequence: u64,
+        components: &[MixtureSprtComponent],
+    ) -> Result<Self, EProcessError> {
+        let evidence = Self::new(
+            signal_id,
+            sequence,
+            mixture_likelihood_ratio_ppm(components)?,
+        );
+        evidence.validate()?;
+        Ok(evidence)
+    }
+}
+
+/// One deterministic mixture-SPRT component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MixtureSprtComponent {
+    /// Stable component identifier used to canonicalize mixture order.
+    pub component_id: String,
+    /// Component weight scaled by [`E_PROCESS_SCALE_PPM`].
+    pub weight_ppm: u64,
+    /// Component likelihood ratio scaled by [`E_PROCESS_SCALE_PPM`].
+    pub likelihood_ratio_ppm: u64,
+}
+
+impl MixtureSprtComponent {
+    pub fn new(
+        component_id: impl Into<String>,
+        weight_ppm: u64,
+        likelihood_ratio_ppm: u64,
+    ) -> Self {
+        Self {
+            component_id: component_id.into(),
+            weight_ppm,
+            likelihood_ratio_ppm,
+        }
+    }
+
+    fn validate(&self) -> Result<(), EProcessError> {
+        if self.component_id.is_empty() {
+            return Err(EProcessError::EmptyMixtureComponentId);
+        }
+        reject_e_process_control_chars("component_id", &self.component_id)?;
+        if self.weight_ppm == 0 {
+            return Err(EProcessError::ZeroMixtureComponentWeight {
+                component_id: self.component_id.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Snapshot emitted after applying one e-process evidence item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EProcessUpdate {
+    /// Version tag for verifier-compatible e-process updates.
+    pub schema_version: String,
+    /// Evidence sequence applied by this update.
+    pub sequence: u64,
+    /// Signal family applied by this update.
+    pub signal_id: String,
+    /// E-value before the evidence was applied, scaled by [`E_PROCESS_SCALE_PPM`].
+    pub prior_e_value_ppm: u64,
+    /// Likelihood ratio applied by this update, scaled by [`E_PROCESS_SCALE_PPM`].
+    pub likelihood_ratio_ppm: u64,
+    /// E-value after the evidence was applied, scaled by [`E_PROCESS_SCALE_PPM`].
+    pub posterior_e_value_ppm: u64,
+    /// Ville false-alarm bound implied by the posterior e-value.
+    pub false_alarm_bound_ppm: u64,
+}
+
+/// Replay-safe anytime-valid e-process state for Runtime Sentinel evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSentinelEProcess {
+    /// Version tag for verifier-compatible e-process replay.
+    pub schema_version: String,
+    /// Current anytime-valid e-value scaled by [`E_PROCESS_SCALE_PPM`].
+    pub e_value_ppm: u64,
+    /// Number of evidence items accepted by this state.
+    pub evidence_count: u64,
+    /// Last accepted sequence number, if any.
+    pub last_sequence: Option<u64>,
+}
+
+impl RuntimeSentinelEProcess {
+    pub fn new() -> Self {
+        Self {
+            schema_version: RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION.to_string(),
+            e_value_ppm: E_PROCESS_SCALE_PPM,
+            evidence_count: 0,
+            last_sequence: None,
+        }
+    }
+
+    pub fn observe(
+        &mut self,
+        evidence: &LikelihoodRatioEvidence,
+    ) -> Result<EProcessUpdate, EProcessError> {
+        if evidence.schema_version != RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION {
+            return Err(EProcessError::SchemaVersionMismatch {
+                declared: evidence.schema_version.clone(),
+                expected: RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION.to_string(),
+            });
+        }
+        evidence.validate()?;
+        if let Some(previous) = self.last_sequence
+            && evidence.sequence <= previous
+        {
+            return Err(EProcessError::NonMonotonicSequence {
+                previous,
+                attempted: evidence.sequence,
+            });
+        }
+
+        let prior_e_value_ppm = self.e_value_ppm;
+        self.e_value_ppm = multiply_fixed_ppm(self.e_value_ppm, evidence.likelihood_ratio_ppm);
+        self.evidence_count = self.evidence_count.saturating_add(1);
+        self.last_sequence = Some(evidence.sequence);
+
+        Ok(EProcessUpdate {
+            schema_version: RUNTIME_SENTINEL_E_PROCESS_SCHEMA_VERSION.to_string(),
+            sequence: evidence.sequence,
+            signal_id: evidence.signal_id.clone(),
+            prior_e_value_ppm,
+            likelihood_ratio_ppm: evidence.likelihood_ratio_ppm,
+            posterior_e_value_ppm: self.e_value_ppm,
+            false_alarm_bound_ppm: self.false_alarm_bound_ppm(),
+        })
+    }
+
+    pub fn replay_from(evidence: &[LikelihoodRatioEvidence]) -> Result<Self, EProcessError> {
+        let mut state = Self::new();
+        for item in evidence {
+            state.observe(item)?;
+        }
+        Ok(state)
+    }
+
+    pub fn false_alarm_bound_ppm(&self) -> u64 {
+        false_alarm_bound_ppm_for_e_value(self.e_value_ppm)
+    }
+
+    pub fn should_escalate(&self, alpha_ppm: u64) -> bool {
+        self.false_alarm_bound_ppm() <= alpha_ppm
+    }
+}
+
+impl Default for RuntimeSentinelEProcess {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EProcessError {
+    SchemaVersionMismatch { declared: String, expected: String },
+    EmptySignalId,
+    EmptyMetadataKey,
+    ForbiddenControlChar { field: &'static str },
+    NonMonotonicSequence { previous: u64, attempted: u64 },
+    EmptyMixture,
+    EmptyMixtureComponentId,
+    DuplicateMixtureComponent { component_id: String },
+    ZeroMixtureComponentWeight { component_id: String },
+    ZeroMixtureWeight,
+}
+
+pub fn mixture_likelihood_ratio_ppm(
+    components: &[MixtureSprtComponent],
+) -> Result<u64, EProcessError> {
+    if components.is_empty() {
+        return Err(EProcessError::EmptyMixture);
+    }
+
+    let mut ordered = BTreeMap::new();
+    for component in components {
+        component.validate()?;
+        if ordered
+            .insert(
+                component.component_id.clone(),
+                (component.weight_ppm, component.likelihood_ratio_ppm),
+            )
+            .is_some()
+        {
+            return Err(EProcessError::DuplicateMixtureComponent {
+                component_id: component.component_id.clone(),
+            });
+        }
+    }
+
+    let mut weighted_sum: u128 = 0;
+    let mut total_weight: u128 = 0;
+    for (weight_ppm, likelihood_ratio_ppm) in ordered.values() {
+        weighted_sum = weighted_sum.saturating_add(
+            u128::from(*weight_ppm).saturating_mul(u128::from(*likelihood_ratio_ppm)),
+        );
+        total_weight = total_weight.saturating_add(u128::from(*weight_ppm));
+    }
+    if total_weight == 0 {
+        return Err(EProcessError::ZeroMixtureWeight);
+    }
+
+    Ok(u64::try_from(weighted_sum / total_weight).unwrap_or(u64::MAX))
+}
+
+fn multiply_fixed_ppm(left_ppm: u64, right_ppm: u64) -> u64 {
+    let product = u128::from(left_ppm).saturating_mul(u128::from(right_ppm));
+    u64::try_from(product / u128::from(E_PROCESS_SCALE_PPM)).unwrap_or(u64::MAX)
+}
+
+pub fn false_alarm_bound_ppm_for_e_value(e_value_ppm: u64) -> u64 {
+    if e_value_ppm <= E_PROCESS_SCALE_PPM {
+        return E_PROCESS_SCALE_PPM;
+    }
+
+    let numerator = u128::from(E_PROCESS_SCALE_PPM).saturating_mul(u128::from(E_PROCESS_SCALE_PPM));
+    let bound = numerator.div_ceil(u128::from(e_value_ppm));
+    u64::try_from(bound.min(u128::from(E_PROCESS_SCALE_PPM))).unwrap_or(E_PROCESS_SCALE_PPM)
+}
+
+fn reject_e_process_control_chars(field: &'static str, value: &str) -> Result<(), EProcessError> {
+    if value.chars().any(char::is_control) {
+        return Err(EProcessError::ForbiddenControlChar { field });
+    }
+    Ok(())
 }
 
 /// Confidence level of the diagnostic ranking (distinct from GuaranteeConfidence).
@@ -426,6 +725,10 @@ fn _assert_send_sync() {
     assert_sync::<BayesianDiagnostics>();
     assert_send::<RankedCandidate>();
     assert_sync::<RankedCandidate>();
+    assert_send::<RuntimeSentinelEProcess>();
+    assert_sync::<RuntimeSentinelEProcess>();
+    assert_send::<LikelihoodRatioEvidence>();
+    assert_sync::<LikelihoodRatioEvidence>();
 }
 
 // ===========================================================================
@@ -1260,9 +1563,9 @@ mod tests {
             let deserialized: DiagnosticConfidence = serde_json::from_str(&serialized).unwrap();
             assert_eq!(confidence, deserialized);
 
-            // Should be orderable
-            let ordering = confidence.cmp(&confidence);
-            assert_eq!(ordering, std::cmp::Ordering::Equal);
+            // Equality is reflexive (Ord was removed from DiagnosticConfidence; Eq-only now).
+            let same = confidence;
+            assert_eq!(confidence, same);
         }
 
         // Test deserialization with invalid enum values
@@ -1694,14 +1997,21 @@ mod tests {
 
             match json_result {
                 Ok(json) => {
-                    // If serialization succeeds, verify no injection
+                    // JSON serialization neutralizes injection by ESCAPING
+                    // structural metacharacters (quotes, control bytes), NOT by
+                    // stripping payload text. Opaque candidate names such as
+                    // `<script>`/`HTTP/1.1` are preserved verbatim as inert data
+                    // and must survive a lossless round-trip (asserted below).
+                    // The structural defenses are: embedded `"` is escaped to
+                    // `\"`, and raw control bytes (NUL/CR/LF) never appear
+                    // unescaped — so the payload cannot break out of its token.
                     assert!(
-                        !json.contains("<script>"),
-                        "Should not contain script injection"
+                        json.contains("\\\""),
+                        "embedded double-quote must be escaped to prevent JSON breakout"
                     );
                     assert!(
-                        !json.contains("HTTP/1.1"),
-                        "Should not contain HTTP injection"
+                        !json.contains('\u{0000}'),
+                        "raw NUL byte must be escaped, not emitted literally"
                     );
 
                     // Verify can be safely deserialized
@@ -1725,12 +2035,33 @@ mod tests {
             let ranked = diagnostics.rank_candidates(&json_injection_candidates, &[]);
             assert_eq!(ranked.len(), json_injection_candidates.len());
 
-            // Verify ranking serialization is safe
+            // Verify ranking serialization is safe. As documented above, JSON
+            // safety is achieved by ESCAPING structural metacharacters, NOT by
+            // stripping payload text: an opaque candidate name such as
+            // `<script>` is preserved verbatim as inert data (angle brackets are
+            // not JSON metacharacters) and must survive a lossless round-trip.
+            // The structural defense asserted here is that no raw control byte
+            // (NUL/CR/LF, < 0x20) is ever emitted unescaped, so a payload cannot
+            // break out of its JSON token.
             for candidate in &ranked {
                 let candidate_json = serde_json::to_string(candidate);
                 match candidate_json {
                     Ok(json) => {
-                        assert!(!json.contains("<script>"), "Candidate JSON should be safe");
+                        assert!(
+                            !json.chars().any(|c| (c as u32) < 0x20),
+                            "raw control bytes must be escaped, not emitted literally"
+                        );
+                        let round_trip: Result<RankedCandidate, _> = serde_json::from_str(&json);
+                        assert!(
+                            round_trip.is_ok(),
+                            "serialized candidate must deserialize safely"
+                        );
+                        if let Ok(rt) = round_trip {
+                            assert_eq!(
+                                rt.candidate_ref, candidate.candidate_ref,
+                                "candidate name must survive a lossless round-trip"
+                            );
+                        }
                     }
                     Err(_) => {
                         // Acceptable to reject unsafe serialization
@@ -1810,7 +2141,7 @@ mod tests {
             ];
 
             // Add observations with boundary epochs
-            for (epoch, description) in epoch_boundaries {
+            for &(epoch, description) in &epoch_boundaries {
                 for (i, candidate) in candidates.iter().enumerate() {
                     let adjusted_epoch = epoch.saturating_add(u64::try_from(i).unwrap_or(u64::MAX));
                     let obs = Observation::new(candidate.clone(), adjusted_epoch % 2 == 0, epoch);
@@ -1827,7 +2158,10 @@ mod tests {
             }
 
             // Should handle all epoch boundaries gracefully
-            assert_eq!(diagnostics.total_observations(), epoch_boundaries.len() * 2);
+            assert_eq!(
+                diagnostics.total_observations(),
+                epoch_boundaries.len() as u64 * 2
+            );
 
             let ranked = diagnostics.rank_candidates(&candidates, &[]);
             assert_eq!(ranked.len(), 2);

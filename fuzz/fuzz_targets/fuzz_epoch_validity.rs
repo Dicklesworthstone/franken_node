@@ -2,11 +2,33 @@
 
 use arbitrary::Arbitrary;
 use frankenengine_node::control_plane::control_epoch::{
-    check_artifact_epoch, ControlEpoch, EpochArtifactEvent, EpochError, EpochRejectionReason,
-    EpochStore, ValidityWindowPolicy,
+    ControlEpoch,
+    EpochArtifactEvent,
+    EpochError,
+    EpochRejectionReason,
+    EpochSigningKey,
+    EpochStore,
+    ValidityWindowPolicy,
+    check_artifact_epoch,
 };
 use libfuzzer_sys::fuzz_target;
 use serde::de::DeserializeOwned;
+
+/// bd-kpjrz: `EpochStore` now signs transition events with an HMAC key, so the
+/// event MAC is an authenticity check rather than a hash anyone can recompute.
+/// One fixed key across this file keeps every transition cross-verifiable here.
+fn epoch_test_key() -> EpochSigningKey {
+    EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+}
+
+fn epoch_test_store() -> EpochStore {
+    EpochStore::new(epoch_test_key())
+}
+
+fn epoch_test_store_at(committed_epoch: u64) -> EpochStore {
+    EpochStore::recover(committed_epoch, epoch_test_key())
+}
+
 
 const MAX_TEXT_BYTES: usize = 4_112;
 const MAX_OPS: usize = 32;
@@ -86,7 +108,7 @@ fn fuzz_validity_window(input: &FuzzInput) {
 }
 
 fn fuzz_epoch_store_schedule(input: &FuzzInput) {
-    let mut store = EpochStore::recover(input.initial_epoch);
+    let mut store = epoch_test_store_at(input.initial_epoch);
     let mut expected_current = input.initial_epoch;
 
     for operation in input.operations.iter().take(MAX_OPS) {
@@ -105,6 +127,12 @@ fn fuzz_epoch_store_schedule(input: &FuzzInput) {
                         result,
                         Err(EpochError::InvalidManifestHash { .. })
                     ));
+                } else if invalid_required_text(&trace_id) {
+                    // bd-6n2xv: `trace_id` is now validated too. It is committed
+                    // into the MAC preimage and is the audit trail's only
+                    // correlation handle, so a blank one used to yield a signed
+                    // transition nobody could attribute.
+                    assert!(matches!(result, Err(EpochError::InvalidTraceId { .. })));
                 } else if expected_current == u64::MAX {
                     assert!(matches!(result, Err(EpochError::EpochOverflow { .. })));
                 } else {
@@ -115,7 +143,7 @@ fn fuzz_epoch_store_schedule(input: &FuzzInput) {
                     assert_eq!(transition.timestamp, *timestamp);
                     assert_eq!(transition.manifest_hash, manifest_hash);
                     assert_eq!(transition.trace_id, trace_id);
-                    assert!(transition.verify());
+                    assert!(transition.verify(&epoch_test_key()));
                     json_roundtrip(&transition);
                 }
             }
@@ -136,6 +164,8 @@ fn fuzz_epoch_store_schedule(input: &FuzzInput) {
                         result,
                         Err(EpochError::InvalidManifestHash { .. })
                     ));
+                } else if invalid_required_text(&trace_id) {
+                    assert!(matches!(result, Err(EpochError::InvalidTraceId { .. })));
                 } else {
                     let transition = result.expect("valid epoch set must produce a transition");
                     assert_eq!(transition.old_epoch.value(), expected_current);
@@ -144,7 +174,7 @@ fn fuzz_epoch_store_schedule(input: &FuzzInput) {
                     assert_eq!(transition.timestamp, *timestamp);
                     assert_eq!(transition.manifest_hash, manifest_hash);
                     assert_eq!(transition.trace_id, trace_id);
-                    assert!(transition.verify());
+                    assert!(transition.verify(&epoch_test_key()));
                     json_roundtrip(&transition);
                 }
             }
@@ -156,7 +186,7 @@ fn fuzz_epoch_store_schedule(input: &FuzzInput) {
         assert!(store
             .transitions()
             .iter()
-            .all(|transition| transition.verify()));
+            .all(|transition| transition.verify(&epoch_test_key())));
     }
 }
 

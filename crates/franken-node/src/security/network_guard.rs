@@ -88,8 +88,11 @@ impl EgressRule {
 /// Null bytes in hostnames are rejected to prevent C-string truncation bypass
 /// where the policy sees "evil.com\0.safe.com" but DNS resolves "evil.com".
 fn host_matches(pattern: &str, host: &str) -> bool {
-    // Reject null bytes in the host to prevent truncation-based bypass.
-    if host.contains('\0') {
+    // Reject control characters in the host. Null bytes enable C-string truncation bypass
+    // ("evil.com\0.safe.com"); CR/LF (and other C0/C1 controls, TAB, DEL) enable HTTP
+    // request-smuggling / header-injection when the host is later framed into a request line
+    // or `Host:` header (bd-17thg). A control-bearing host is never a legitimate DNS name.
+    if host_has_control_chars(host) {
         return false;
     }
     let p = normalize_host_for_match(pattern);
@@ -113,6 +116,16 @@ fn host_matches(pattern: &str, host: &str) -> bool {
 
 fn has_empty_dns_label(host: &str) -> bool {
     host.split('.').any(str::is_empty)
+}
+
+/// Whether `host` contains any control character (C0 incl. NUL/CR/LF/TAB, DEL, or C1).
+///
+/// A legitimate DNS hostname never contains control characters; embedded CR/LF in particular
+/// is an HTTP request-smuggling / `Host:`-header-injection vector. Such hosts are rejected
+/// structurally (fail-closed) before allow/deny matching so they can never fall through to a
+/// permissive `default_action` (bd-17thg).
+fn host_has_control_chars(host: &str) -> bool {
+    host.chars().any(char::is_control)
 }
 
 fn normalize_host_for_match(host: &str) -> String {
@@ -204,6 +217,12 @@ impl EgressPolicy {
     /// Evaluate a request against the policy. Returns the action and
     /// the index of the matching rule (None if default).
     pub fn evaluate(&self, host: &str, port: u16, protocol: Protocol) -> (Action, Option<usize>) {
+        // Structurally reject control-bearing hosts (CR/LF/NUL/TAB/DEL/...) before any rule or
+        // default-action evaluation. Otherwise a CRLF-injection host that matches no rule would
+        // fall through to a permissive `default_action`, reaching default-Allow (bd-17thg).
+        if host_has_control_chars(host) {
+            return (Action::Deny, None);
+        }
         let normalized_host = normalize_host_for_match(host);
         if normalized_host.is_empty()
             || normalized_host.contains('\0')
@@ -558,14 +577,25 @@ mod tests {
     }
 
     fn egress_scope() -> RemoteScope {
+        // Prod's RemoteScope issuance now rejects bare-scheme prefixes
+        // ("http://", "tcp://") because they fail URL validation (empty host /
+        // non-network scheme). Enumerate the exact http hosts these guard tests
+        // exercise so the capability layer ALLOWS each request and the egress
+        // POLICY remains the sole decider of allow/deny (preserving every test's
+        // policy-level ALLOW/DENY intent).
         RemoteScope::new(
             vec![RemoteOperation::NetworkEgress],
-            vec!["http://".to_string(), "tcp://".to_string()],
+            vec![
+                "http://api.example.com".to_string(),
+                "http://unknown.com".to_string(),
+                "http://evil.com".to_string(),
+            ],
         )
     }
 
     fn gate_and_cap(single_use: bool) -> (CapabilityGate, RemoteCap) {
-        let provider = CapabilityProvider::new("guard-secret");
+        let provider =
+            CapabilityProvider::new("network-guard-secret-7f3a9c2e").expect("capability provider");
         let (cap, _) = provider
             .issue(
                 "network-guard-tests",
@@ -577,7 +607,7 @@ mod tests {
                 "trace-cap-issue",
             )
             .expect("issue remote cap");
-        let gate = CapabilityGate::new("guard-secret");
+        let gate = CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
         (gate, cap)
     }
 
@@ -897,7 +927,8 @@ mod tests {
     #[test]
     fn missing_remote_cap_is_denied() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let mut gate = CapabilityGate::new("guard-secret");
+        let mut gate =
+            CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
         let err = guard
             .process_egress(
                 "api.example.com",
@@ -1093,7 +1124,8 @@ mod tests {
     #[test]
     fn missing_remote_cap_is_audited_as_denied_even_when_policy_would_allow() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let mut gate = CapabilityGate::new("guard-secret");
+        let mut gate =
+            CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
 
         let err = guard
             .process_egress(
@@ -1196,7 +1228,11 @@ mod tests {
             )
             .expect_err("null byte host must not match allow rule");
 
-        assert!(matches!(err, GuardError::EgressDenied { .. }));
+        // The embedded NUL makes the request endpoint fail the capability
+        // layer's URL validation (control characters are rejected), so the
+        // request is denied earlier — at the cap scope check — than the policy
+        // layer. Either way the null-byte host is hard-denied and audited.
+        assert!(matches!(err, GuardError::RemoteCapDenied { .. }));
         assert_eq!(guard.audit_events().len(), 1);
         assert_eq!(guard.audit_events()[0].action, Action::Deny);
         assert_eq!(guard.audit_events()[0].rule_matched, None);
@@ -1261,13 +1297,17 @@ mod tests {
     #[test]
     fn remote_cap_scope_denial_is_audited_before_policy_allow() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let provider = CapabilityProvider::new("guard-secret");
+        let provider =
+            CapabilityProvider::new("network-guard-secret-7f3a9c2e").expect("capability provider");
         let (cap, _) = provider
             .issue(
                 "network-guard-tests",
                 RemoteScope::new(
                     vec![RemoteOperation::TelemetryExport],
-                    vec!["http://".into()],
+                    // Valid URL prefix (prod rejects bare "http://"); the denial
+                    // under test comes from the wrong OPERATION (TelemetryExport,
+                    // not NetworkEgress), not from the endpoint.
+                    vec!["http://api.example.com".into()],
                 ),
                 1_700_000_000,
                 3_600,
@@ -1276,7 +1316,8 @@ mod tests {
                 "trace-scope-issue",
             )
             .expect("issue remote cap with non-egress scope");
-        let mut gate = CapabilityGate::new("guard-secret");
+        let mut gate =
+            CapabilityGate::new("network-guard-secret-7f3a9c2e").expect("verification gate");
 
         let err = guard
             .process_egress(
@@ -2064,23 +2105,37 @@ mod network_guard_additional_negative_tests {
             .expect("wildcard rule should fit");
 
         // Subdomain traversal attack vectors
+        let massive_subdomain = format!("x{}.safe.internal", "a".repeat(10000));
         let traversal_attacks = [
-            "evil.com.safe.internal",                    // Domain confusion
-            "safe.internal.evil.com",                    // Suffix confusion
-            "api.safe.internal.evil.com",                // Double suffix
-            "safe-internal.evil.com",                    // Dash confusion
-            "sub.safe.internalevil.com",                 // Concatenation attack
-            "sub.safe.internal.evil.com",                // Chain traversal
-            "..safe.internal",                           // Path-like traversal
-            ".safe.internal",                            // Leading dot
-            "safe.internal.",                            // Trailing dot (should normalize)
-            "x" + &"a".repeat(10000) + ".safe.internal", // Massive subdomain
+            "evil.com.safe.internal",     // Domain confusion
+            "safe.internal.evil.com",     // Suffix confusion
+            "api.safe.internal.evil.com", // Double suffix
+            "safe-internal.evil.com",     // Dash confusion
+            "sub.safe.internalevil.com",  // Concatenation attack
+            "sub.safe.internal.evil.com", // Chain traversal
+            "..safe.internal",            // Path-like traversal
+            ".safe.internal",             // Leading dot
+            "safe.internal.",             // Trailing dot (should normalize)
+            massive_subdomain.as_str(),   // Massive subdomain
         ];
 
         for attack_host in traversal_attacks {
             let (action, rule_idx) = policy.evaluate(attack_host, 443, Protocol::Http);
 
-            if attack_host == "safe.internal." {
+            if attack_host == "evil.com.safe.internal" {
+                // bd-o776s: `*.safe.internal` legitimately matches this multi-label
+                // subdomain under prod's loose-wildcard suffix semantics (any host
+                // ending in `.safe.internal`), consistent with `wildcard_host_match`
+                // asserting `*.example.com` matches `sub.api.example.com`. It is a real
+                // subdomain of safe.internal, not a traversal bypass, so prod allows it.
+                assert_eq!(
+                    action,
+                    Action::Allow,
+                    "Legitimate subdomain '{}' matches the wildcard allow rule",
+                    attack_host
+                );
+                assert_eq!(rule_idx, Some(0));
+            } else if attack_host == "safe.internal." {
                 // Trailing dot should normalize and be denied (wildcard requires subdomain)
                 assert_eq!(
                     action,
@@ -2257,11 +2312,11 @@ mod network_guard_additional_negative_tests {
 
         // Should not contain oldest events
         assert!(
-            !remaining_events.contains("trace-flood-0"),
+            !remaining_events.contains(&"trace-flood-0"),
             "Oldest event should be evicted"
         );
         assert!(
-            !remaining_events.contains("trace-flood-50"),
+            !remaining_events.contains(&"trace-flood-50"),
             "Early event should be evicted"
         );
     }
@@ -2279,6 +2334,7 @@ mod network_guard_additional_negative_tests {
             .expect("legitimate rule should fit");
 
         // Punycode and internationalized domain attacks
+        let malformed_punycode = format!("{}a.com", "xn--".repeat(100));
         let punycode_attacks = [
             "xn--lgitimate-9wa.com",      // Punycode for "légitimate.com"
             "xn--legtimate-9wa.com",      // Punycode variant
@@ -2287,12 +2343,12 @@ mod network_guard_additional_negative_tests {
             "xn--nxasmq6b.xn--j1amh",     // Full IDN (тест.укр)
             "xn--fsq.com",                // Punycode for "中.com"
             "sub.xn--nxasmq6b.com",       // Subdomain with punycode
-            "xn--".repeat(100) + "a.com", // Malformed punycode
+            malformed_punycode.as_str(),  // Malformed punycode
             "legitimate.com.xn--invalid", // Invalid punycode TLD
         ];
 
         for punycode_host in punycode_attacks {
-            let (action, rule_idx) = policy.evaluate(&punycode_host, 443, Protocol::Http);
+            let (action, rule_idx) = policy.evaluate(punycode_host, 443, Protocol::Http);
 
             // All punycode attacks should be denied (don't match ASCII rule)
             assert_eq!(
@@ -2309,7 +2365,7 @@ mod network_guard_additional_negative_tests {
 
             // Verify direct matching also fails
             assert!(
-                !host_matches("legitimate.com", &punycode_host),
+                !host_matches("legitimate.com", punycode_host),
                 "Punycode '{}' should not match ASCII pattern",
                 punycode_host
             );

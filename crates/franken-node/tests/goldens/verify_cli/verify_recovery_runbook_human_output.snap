@@ -1,0 +1,27 @@
+---
+source: crates/franken-node/tests/cli_subcommand_goldens.rs
+---
+# RCH Validation Recovery Runbook
+
+⚠️  **Status**: WARN - Some validation evidence has issues
+
+## Summary
+- **Flight Recorder Refs**: 1
+- **Failed Attempts**: 1
+- **Pending Recoveries**: 1
+
+## Failed Attempts
+
+### bead-rch-e104 / cargo_build
+- **Outcome Class**: worker_timeout
+- **Execution Mode**: remote
+- **Worker ID**: worker-002
+- **Reason Code**: RCH_E104_WORKER_TIMEOUT
+- **Flight Recorder**: [PATH]
+- **Retryable**: Yes
+- **Product Failure**: No
+
+## Pending Recoveries
+
+### bead-rch-e104 / cargo_build
+- **Action**: RetryRemoteDifferentWorker

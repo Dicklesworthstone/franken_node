@@ -251,6 +251,9 @@ fn one_step_replay_trace(trace_id: &str, side_effects: Vec<SideEffect>) -> Workf
     trace
 }
 
+type ReplayMutation = fn(&TraceStep, &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>);
+type DivergenceClassificationCase = (&'static str, ReplayMutation, DivergenceKind, &'static str);
+
 fn output_mismatch_replay(
     step: &TraceStep,
     _env: &EnvironmentSnapshot,
@@ -683,12 +686,7 @@ fn typed_side_effect_json_round_trip_preserves_capability_and_hashes() {
 
 #[test]
 fn replay_divergence_kind_classifications_cover_output_effect_full_and_clock() {
-    let cases: [(
-        &str,
-        fn(&TraceStep, &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>),
-        DivergenceKind,
-        &str,
-    ); 3] = [
+    let cases: [DivergenceClassificationCase; 3] = [
         (
             "classification-output-mismatch",
             output_mismatch_replay,

@@ -4,7 +4,7 @@
 // from `security::lineage_tracker` against simulated exfiltration scenarios.
 
 use frankenengine_node::security::lineage_tracker::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn default_config() -> SentinelConfig {
     SentinelConfig::default()
@@ -38,6 +38,100 @@ fn make_edge(edge_id: &str, source: &str, sink: &str, timestamp_ms: u64) -> Flow
         timestamp_ms,
         quarantined: false,
     }
+}
+
+fn make_sink_policy_for_label(sink_id: &str, label_id: &str) -> FlowSinkPolicy {
+    FlowSinkPolicy {
+        policy_id: format!("sink-policy:{sink_id}"),
+        sink_id: sink_id.to_string(),
+        sink_kind: FlowSinkKind::NetworkEgress,
+        epoch: 7,
+        actor: "agent-alpha".to_string(),
+        purpose: "support-case-123".to_string(),
+        forbidden_labels: BTreeSet::from([label_id.to_string()]),
+        deny_all: false,
+        max_revocation_age_ms: 10,
+    }
+}
+
+fn operator_secret_descriptor() -> SensitiveSourceDescriptor {
+    SensitiveSourceDescriptor {
+        source_class: SensitiveSourceClass::EnvVar,
+        policy_domain: "runtime:prod".to_string(),
+        owner: "platform-security".to_string(),
+        epoch: 42,
+        digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_string(),
+        severity: 90,
+        disclosure: BTreeMap::from([("display_name".to_string(), "operator_secret".to_string())]),
+    }
+}
+
+fn operator_secret_external_flow(
+    sink_id: &str,
+    timestamp_ms: u64,
+) -> (LineageGraph, FlowLedger, String, String) {
+    let mut graph = LineageGraph::new(default_config());
+    let mut ledger = FlowLedger::new();
+    let label_id = ledger
+        .register_sensitive_source(
+            &mut graph,
+            "internal:.env",
+            operator_secret_descriptor(),
+            b"operator-secret-salt",
+        )
+        .unwrap();
+    graph
+        .propagate_transform(
+            ["internal:.env"],
+            "internal:parsed-env",
+            LineageTransformKind::Parse,
+            timestamp_ms.saturating_sub(3),
+        )
+        .unwrap();
+    graph
+        .propagate_transform(
+            ["internal:parsed-env"],
+            "internal:rendered-config",
+            LineageTransformKind::Template,
+            timestamp_ms.saturating_sub(2),
+        )
+        .unwrap();
+    let edge_id = graph
+        .propagate_transform(
+            ["internal:rendered-config"],
+            sink_id,
+            LineageTransformKind::Serialize,
+            timestamp_ms,
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    (graph, ledger, label_id, edge_id)
+}
+
+fn assert_selective_disclosure_only(graph: &LineageGraph, ledger: &FlowLedger, label_id: &str) {
+    let graph_snapshot = graph.snapshot("operator-secret-graph-proof", 121);
+    let label_record = graph_snapshot
+        .labels
+        .get(label_id)
+        .expect("graph snapshot includes sensitive-source label");
+    assert!(!label_record.description.contains("operator_secret"));
+    assert!(!label_record.description.contains("operator-secret-salt"));
+
+    let ledger_snapshot = ledger.snapshot("operator-secret-ledger-proof");
+    assert_eq!(ledger_snapshot.source_count, 1);
+    assert_eq!(ledger_snapshot.binding_count, 1);
+    assert_eq!(ledger_snapshot.bindings[0].datum_id, "internal:.env");
+    assert_eq!(ledger_snapshot.bindings[0].label_id, label_id);
+    assert_eq!(ledger_snapshot.commitments[0].label_id, label_id);
+
+    let serialized_snapshot =
+        serde_json::to_string(&ledger_snapshot).expect("ledger snapshot serializes");
+    assert!(!serialized_snapshot.contains("operator-secret-salt"));
+    assert!(!serialized_snapshot.contains("actual-operator-secret-value"));
 }
 
 // ---- Scenario: PII data exported to external API ----
@@ -138,6 +232,187 @@ fn scenario_multi_hop_taint_propagation() {
         .track_flow(&mut graph, "staging-cache", "external-log", "export", 200)
         .unwrap();
     assert_eq!(v2, FlowVerdict::Quarantine);
+}
+
+#[test]
+fn scenario_operator_secret_external_sink_fail_closed_declassification_and_transcript() {
+    let (mut blocked_graph, blocked_ledger, blocked_label, blocked_edge_id) =
+        operator_secret_external_flow("external:api", 120);
+    let blocked_policy = make_sink_policy_for_label("external:api", &blocked_label);
+    let mut blocked_sentinel = ExfiltrationSentinel::new(default_config());
+
+    let blocked_verdict = blocked_sentinel
+        .evaluate_sink(
+            &mut blocked_graph,
+            &blocked_edge_id,
+            &blocked_policy,
+            None,
+            120,
+        )
+        .unwrap();
+    let blocked_edge = blocked_graph.get_edge(&blocked_edge_id).unwrap();
+    let blocked_alert = blocked_sentinel.alerts().values().next().unwrap();
+    let blocked_receipt = blocked_sentinel.receipts().values().next().unwrap();
+
+    assert_eq!(blocked_verdict, FlowVerdict::Quarantine);
+    assert!(blocked_edge.quarantined);
+    assert!(blocked_edge.taint_set.contains(&blocked_label));
+    assert!(blocked_ledger.verify_graph_binding(&blocked_graph, "internal:.env", &blocked_label));
+    assert_eq!(blocked_alert.violated_boundary, "sink-policy:external:api");
+    assert!(blocked_alert.taint_labels.contains(&blocked_label));
+    assert_eq!(blocked_receipt.containment_action, "quarantine_sink_flow");
+    assert_eq!(blocked_receipt.edge_id, blocked_edge_id);
+    assert_selective_disclosure_only(&blocked_graph, &blocked_ledger, &blocked_label);
+
+    let (mut allowed_graph, allowed_ledger, allowed_label, allowed_edge_id) =
+        operator_secret_external_flow("external:api", 120);
+    let allowed_policy = make_sink_policy_for_label("external:api", &allowed_label);
+    let allowed_receipt = DeclassificationReceipt::scoped(
+        &allowed_policy,
+        BTreeSet::from([allowed_label.clone()]),
+        100,
+        140,
+        119,
+        "ops-signer",
+        "signature:declass-operator-secret",
+    )
+    .unwrap();
+    let mut allowed_sentinel = ExfiltrationSentinel::new(default_config());
+
+    let allowed_verdict = allowed_sentinel
+        .evaluate_sink(
+            &mut allowed_graph,
+            &allowed_edge_id,
+            &allowed_policy,
+            Some(&allowed_receipt),
+            120,
+        )
+        .unwrap();
+    let allowed_edge = allowed_graph.get_edge(&allowed_edge_id).unwrap();
+
+    assert_eq!(allowed_label, blocked_label);
+    assert_eq!(allowed_verdict, FlowVerdict::Pass);
+    assert!(!allowed_edge.quarantined);
+    assert!(allowed_ledger.verify_graph_binding(&allowed_graph, "internal:.env", &allowed_label));
+    assert_eq!(allowed_sentinel.alert_count(), 0);
+    assert_eq!(allowed_sentinel.receipt_count(), 0);
+    assert_selective_disclosure_only(&allowed_graph, &allowed_ledger, &allowed_label);
+
+    let (mut wrong_sink_graph, _, wrong_sink_label, wrong_sink_edge_id) =
+        operator_secret_external_flow("external:api", 120);
+    let wrong_sink_policy = make_sink_policy_for_label("external:api", &wrong_sink_label);
+    let wrong_sink_receipt_scope =
+        make_sink_policy_for_label("external:wrong-api", &wrong_sink_label);
+    let wrong_sink_receipt = DeclassificationReceipt::scoped(
+        &wrong_sink_receipt_scope,
+        BTreeSet::from([wrong_sink_label.clone()]),
+        100,
+        140,
+        119,
+        "ops-signer",
+        "signature:wrong-sink",
+    )
+    .unwrap();
+    let mut wrong_sink_sentinel = ExfiltrationSentinel::new(default_config());
+    let wrong_sink_verdict = wrong_sink_sentinel
+        .evaluate_sink(
+            &mut wrong_sink_graph,
+            &wrong_sink_edge_id,
+            &wrong_sink_policy,
+            Some(&wrong_sink_receipt),
+            120,
+        )
+        .unwrap();
+
+    assert_eq!(wrong_sink_verdict, FlowVerdict::Quarantine);
+    assert!(
+        wrong_sink_graph
+            .get_edge(&wrong_sink_edge_id)
+            .unwrap()
+            .quarantined
+    );
+
+    let (mut wrong_epoch_graph, _, wrong_epoch_label, wrong_epoch_edge_id) =
+        operator_secret_external_flow("external:api", 120);
+    let wrong_epoch_policy = make_sink_policy_for_label("external:api", &wrong_epoch_label);
+    let mut receipt_epoch = wrong_epoch_policy.clone();
+    receipt_epoch.epoch = receipt_epoch.epoch.saturating_add(1);
+    let wrong_epoch_receipt = DeclassificationReceipt::scoped(
+        &receipt_epoch,
+        BTreeSet::from([wrong_epoch_label.clone()]),
+        100,
+        140,
+        119,
+        "ops-signer",
+        "signature:wrong-epoch",
+    )
+    .unwrap();
+    let mut wrong_epoch_sentinel = ExfiltrationSentinel::new(default_config());
+    let wrong_epoch_verdict = wrong_epoch_sentinel
+        .evaluate_sink(
+            &mut wrong_epoch_graph,
+            &wrong_epoch_edge_id,
+            &wrong_epoch_policy,
+            Some(&wrong_epoch_receipt),
+            120,
+        )
+        .unwrap();
+
+    assert_eq!(wrong_epoch_verdict, FlowVerdict::Quarantine);
+    assert!(
+        wrong_epoch_graph
+            .get_edge(&wrong_epoch_edge_id)
+            .unwrap()
+            .quarantined
+    );
+
+    let (mut expired_graph, _, expired_label, expired_edge_id) =
+        operator_secret_external_flow("external:api", 120);
+    let expired_policy = make_sink_policy_for_label("external:api", &expired_label);
+    let expired_receipt = DeclassificationReceipt::scoped(
+        &expired_policy,
+        BTreeSet::from([expired_label.clone()]),
+        100,
+        120,
+        119,
+        "ops-signer",
+        "signature:expired",
+    )
+    .unwrap();
+    let mut expired_sentinel = ExfiltrationSentinel::new(default_config());
+    let expired_verdict = expired_sentinel
+        .evaluate_sink(
+            &mut expired_graph,
+            &expired_edge_id,
+            &expired_policy,
+            Some(&expired_receipt),
+            120,
+        )
+        .unwrap();
+
+    assert_eq!(expired_verdict, FlowVerdict::Quarantine);
+    assert!(
+        expired_graph
+            .get_edge(&expired_edge_id)
+            .unwrap()
+            .quarantined
+    );
+
+    let transcript = format!(
+        "{EVENT_FLOW_SOURCE_REGISTERED} datum=internal:.env class=env_var\n\
+         {EVENT_FLOW_TRANSFORM_PROPAGATED} parse=pass template=pass serialize=pass\n\
+         {EVENT_FLOW_SINK_BLOCKED} sink=network_egress verdict={blocked_verdict}\n\
+         {EVENT_FLOW_DECLASSIFICATION_ACCEPTED} sink=network_egress verdict={allowed_verdict}\n\
+         {EVENT_FLOW_NON_EXFILTRATION_PROOF_READY} claim=operator_secret external_sink=http_request\n"
+    );
+    let expected_transcript = "\
+FN-FLOW-001 datum=internal:.env class=env_var\n\
+FN-FLOW-002 parse=pass template=pass serialize=pass\n\
+FN-FLOW-003 sink=network_egress verdict=quarantine\n\
+FN-FLOW-004 sink=network_egress verdict=pass\n\
+FN-FLOW-005 claim=operator_secret external_sink=http_request\n";
+
+    assert_eq!(transcript, expected_transcript);
 }
 
 // ---- Scenario: Deny-all boundary ----
@@ -458,6 +733,11 @@ fn scenario_snapshot_faithfulness_rejects_label_content_substitution() {
 
 #[test]
 fn all_canonical_event_codes_defined() {
+    assert_eq!(EVENT_FLOW_SOURCE_REGISTERED, "FN-FLOW-001");
+    assert_eq!(EVENT_FLOW_TRANSFORM_PROPAGATED, "FN-FLOW-002");
+    assert_eq!(EVENT_FLOW_SINK_BLOCKED, "FN-FLOW-003");
+    assert_eq!(EVENT_FLOW_DECLASSIFICATION_ACCEPTED, "FN-FLOW-004");
+    assert_eq!(EVENT_FLOW_NON_EXFILTRATION_PROOF_READY, "FN-FLOW-005");
     assert_eq!(LINEAGE_TAG_ATTACHED, "LINEAGE_TAG_ATTACHED");
     assert_eq!(LINEAGE_FLOW_TRACKED, "LINEAGE_FLOW_TRACKED");
     assert_eq!(SENTINEL_SCAN_START, "SENTINEL_SCAN_START");

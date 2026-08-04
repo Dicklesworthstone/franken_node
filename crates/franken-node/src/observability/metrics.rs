@@ -592,7 +592,7 @@ mod tests {
                     MetricKind::Gauge => "gauge",
                 },
                 "value": metric.value(),
-                "labels": metric.labels().iter().collect::<std::collections::BTreeMap<_, _>>(),
+                "labels": metric.labels().iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
             });
             snapshot_entries.push(entry);
         }
@@ -965,8 +965,8 @@ mod tests {
                 let output2 = registry2.render_prometheus();
                 let output3 = registry3.render_prometheus();
 
-                prop_assert_eq!(output1, output2, "Registry with same metrics should produce identical output");
-                prop_assert_eq!(output1, output3, "Metric insertion order should not affect output");
+                prop_assert_eq!(&output1, &output2, "Registry with same metrics should produce identical output");
+                prop_assert_eq!(&output1, &output3, "Metric insertion order should not affect output");
 
                 // Verify output contains expected number of metrics
                 let metric_lines = output1.lines().filter(|line| !line.starts_with('#') && !line.is_empty()).count();
@@ -1073,8 +1073,8 @@ mod tests {
                 // Verify round-trip consistency
                 let stored_metric = registry.iter().next().unwrap();
                 prop_assert_eq!(
-                    stored_metric.labels()[0].1,
-                    label_value,
+                    &stored_metric.labels()[0].1,
+                    &label_value,
                     "Stored label value should match input exactly"
                 );
 

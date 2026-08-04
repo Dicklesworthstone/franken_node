@@ -576,7 +576,13 @@ mod tests {
 
     #[test]
     fn epoch_scoped_validation_rejects_invalid_artifact_id() {
-        let mut fs = FenceState::new(" obj-epoch-invalid ".into());
+        // bd-o776s: prod now routes invalid-artifact-id rejection through
+        // `control_epoch::check_artifact_epoch`, which validates the *wrapped*
+        // `fencing:{object_id}:{lease_seq}` artifact id. `invalid_artifact_id_reason`
+        // only flags leading/trailing whitespace via `trimmed != artifact_id`, so the
+        // object id's edge whitespace becomes interior (allowed) once wrapped. Seed an
+        // object id whose wrapped artifact id is genuinely invalid (NUL byte).
+        let mut fs = FenceState::new("obj\0epoch-invalid".into());
         let lease = fs.acquire_lease_with_epoch(
             "writer-a".into(),
             "2026-01-01T00:00:00Z".into(),
@@ -585,7 +591,7 @@ mod tests {
         );
         let write = FencedWrite {
             fence_seq: Some(1),
-            target_object_id: " obj-epoch-invalid ".into(),
+            target_object_id: "obj\0epoch-invalid".into(),
             payload: json!({"ok": true}),
         };
         let policy = ValidityWindowPolicy::new(ControlEpoch::new(5), 2);

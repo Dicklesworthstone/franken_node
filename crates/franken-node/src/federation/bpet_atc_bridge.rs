@@ -177,6 +177,8 @@ pub struct BpetTrajectoryExchangeInput {
 }
 
 impl BpetTrajectoryExchangeInput {
+    // Constructor maps one argument per exchange-input field.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_explanation(
         package_name: impl Into<String>,
         version: impl Into<String>,

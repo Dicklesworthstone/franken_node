@@ -9,15 +9,15 @@
 //! - Thread safety and poison recovery
 
 use super::cancellation_protocol::{
-    AbortReason, CancellationProtocol, DrainConfig, ResourceTracker,
-    error_codes as cancel_error_codes,
+    CancellationProtocol, DrainConfig, ResourceTracker, error_codes as cancel_error_codes,
 };
 use super::control_epoch::{
-    ControlEpoch, EpochError, EpochRejectionReason, EpochStore, ValidityWindowPolicy,
-    check_artifact_epoch,
+    ControlEpoch, EpochError, EpochRejectionReason, EpochSigningKey, EpochStore,
+    ValidityWindowPolicy, check_artifact_epoch,
 };
+// bd-yom8c: `AbortReason` moved from `cancellation_protocol` to `epoch_transition_barrier`.
 use super::epoch_transition_barrier::{
-    BarrierConfig, BarrierError, BarrierPhase, DrainAck, EpochTransitionBarrier,
+    AbortReason, BarrierConfig, BarrierError, BarrierPhase, DrainAck, EpochTransitionBarrier,
     error_codes as barrier_error_codes,
 };
 use super::fork_detection::{
@@ -30,11 +30,25 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// bd-kpjrz: `EpochStore` now signs transition events with an HMAC key. One fixed
+/// key across this harness keeps every transition cross-verifiable here.
+fn epoch_test_key() -> EpochSigningKey {
+    EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+}
+
+fn epoch_test_store() -> EpochStore {
+    EpochStore::new(epoch_test_key())
+}
+
+fn epoch_test_store_at(committed_epoch: u64) -> EpochStore {
+    EpochStore::recover(committed_epoch, epoch_test_key())
+}
+
 // ---- Control Epoch Hardening Tests ----
 
 #[test]
 fn epoch_store_overflow_protection() {
-    let mut store = EpochStore::recover(u64::MAX - 1);
+    let mut store = epoch_test_store_at(u64::MAX - 1);
 
     // Should advance to MAX successfully
     let t1 = store
@@ -136,7 +150,7 @@ fn validity_window_rejects_padded_artifact_id() {
 
 #[test]
 fn epoch_store_rejects_empty_manifest_without_advancing() {
-    let mut store = EpochStore::new();
+    let mut store = epoch_test_store();
 
     let err = store
         .epoch_advance("", 1000, "trace-empty-manifest")
@@ -148,7 +162,7 @@ fn epoch_store_rejects_empty_manifest_without_advancing() {
 
 #[test]
 fn epoch_concurrent_access_safety() {
-    let store = Arc::new(Mutex::new(EpochStore::new()));
+    let store = Arc::new(Mutex::new(epoch_test_store()));
     let mut handles = Vec::new();
 
     // Spawn multiple threads trying to advance epochs
@@ -715,7 +729,7 @@ fn control_plane_components_thread_safe() {
 #[test]
 fn control_plane_full_integration() {
     // Create a complete control plane scenario with epoch management, barriers, and fork detection
-    let mut epoch_store = EpochStore::new();
+    let mut epoch_store = epoch_test_store();
     let mut barrier = EpochTransitionBarrier::default();
     let mut detector = DivergenceDetector::new();
 

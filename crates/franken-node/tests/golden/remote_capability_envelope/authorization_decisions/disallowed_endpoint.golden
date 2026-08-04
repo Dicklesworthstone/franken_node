@@ -1,0 +1,5 @@
+{
+  "authorized": false,
+  "error": "REMOTECAP_SCOPE_DENIED: operation=network_egress endpoint=https://malicious.example.com/api",
+  "test_case": "disallowed_endpoint"
+}

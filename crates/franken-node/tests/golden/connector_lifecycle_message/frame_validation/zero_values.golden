@@ -1,0 +1,25 @@
+{
+  "success": true,
+  "verdict": {
+    "frame_id": "zero-values",
+    "allowed": true,
+    "violations": [],
+    "resource_usage": {
+      "bytes_parsed": 0,
+      "nesting_depth": 0,
+      "cpu_ms": 0
+    }
+  },
+  "audit": {
+    "frame_id": "zero-values",
+    "size": 0,
+    "depth": 0,
+    "cpu_used": 0,
+    "size_limit": 1000000,
+    "depth_limit": 32,
+    "cpu_limit": 100,
+    "verdict": "ALLOW",
+    "timestamp": "[TIMESTAMP]"
+  },
+  "test_case": "zero_values"
+}

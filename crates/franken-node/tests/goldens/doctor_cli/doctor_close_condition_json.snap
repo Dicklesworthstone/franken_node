@@ -9,6 +9,7 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
     "verdict": "GREEN",
     "source_path": "artifacts/13/compatibility_corpus_results.json",
     "corpus_version": "compat-corpus-golden",
+    "corpus_provenance": "lockstep-oracle-run",
     "total_test_cases": 100,
     "passed_test_cases": 98,
     "failed_test_cases": 2,
@@ -108,7 +109,7 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
     "algorithm": "SHA-256",
     "canonicalization": "lexicographically-sorted-json-keys/no-whitespace",
     "hash_scope": "close_condition_receipt_v1_len_prefixed_core",
-    "sha256": "sha256:1c2bc70efd5720be96ecba49e506a1679ed9103caa93cc2e318722bc37959f61",
+    "sha256": "sha256:9ff2d58c70ad8a43033203fc0e65c14c99e0272386319991b48796fc2632e1ce",
     "signature": {
       "algorithm": "ed25519",
       "public_key_hex": "fa4834147f6e690c3693eff61336046403cd8ae2a14f31b3c407358569239565",
@@ -116,8 +117,8 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
       "key_source": "cli",
       "signing_identity": "oracle-close-condition",
       "trust_scope": "oracle_close_condition",
-      "signed_payload_sha256": "1c2bc70efd5720be96ecba49e506a1679ed9103caa93cc2e318722bc37959f61",
-      "signature_hex": "58c89a7ba88c59b40d821bc7035c4ede77a5fe190d1ecb2520400815cf2c87d3772cf89c87f96c13aea59c3f7ba9355179a326a8d7b5066b5e934f8246849d08"
+      "signed_payload_sha256": "9ff2d58c70ad8a43033203fc0e65c14c99e0272386319991b48796fc2632e1ce",
+      "signature_hex": "785231fc59d9b505406f6fcf784d6a93591ef552abf293b2e9cfaa1110b54b72b0b4df411c897f97a0ff2a0c85e4898bb2fec4036f399cf3d5a8ad2c16382c09"
     }
   }
 }

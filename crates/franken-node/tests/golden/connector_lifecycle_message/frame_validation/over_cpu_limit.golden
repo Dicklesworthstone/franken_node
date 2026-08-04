@@ -1,0 +1,31 @@
+{
+  "success": true,
+  "verdict": {
+    "frame_id": "over-cpu-limit",
+    "allowed": false,
+    "violations": [
+      {
+        "type": "CpuExceeded",
+        "actual": 100,
+        "limit": 100
+      }
+    ],
+    "resource_usage": {
+      "bytes_parsed": 1000,
+      "nesting_depth": 5,
+      "cpu_ms": 100
+    }
+  },
+  "audit": {
+    "frame_id": "over-cpu-limit",
+    "size": 1000,
+    "depth": 5,
+    "cpu_used": 100,
+    "size_limit": 1000000,
+    "depth_limit": 32,
+    "cpu_limit": 100,
+    "verdict": "BLOCK",
+    "timestamp": "[TIMESTAMP]"
+  },
+  "test_case": "over_cpu_limit"
+}

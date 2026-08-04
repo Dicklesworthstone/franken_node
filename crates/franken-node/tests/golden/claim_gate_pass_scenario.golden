@@ -1,0 +1,31 @@
+{
+  "bead_id": "bd-2ji2",
+  "section": "10.16",
+  "gate_verdict": "PASS",
+  "summary": {
+    "total_claims": 2,
+    "linked": 2,
+    "unlinked": 0,
+    "broken_links": 0
+  },
+  "claims": [
+    {
+      "file": "docs/api.md",
+      "line": 10,
+      "claim_text": "API endpoint responds in under [DURATION]",
+      "category": "Api",
+      "linked_artifact": "artifacts/10.16/api_performance_test.json",
+      "artifact_exists": true,
+      "status": "Linked"
+    },
+    {
+      "file": "docs/storage.md",
+      "line": 20,
+      "claim_text": "Storage encryption uses AES-256-GCM",
+      "category": "Storage",
+      "linked_artifact": "artifacts/10.16/storage_encryption_test.json",
+      "artifact_exists": true,
+      "status": "Linked"
+    }
+  ]
+}

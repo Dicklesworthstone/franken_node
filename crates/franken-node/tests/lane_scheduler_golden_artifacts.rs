@@ -9,8 +9,7 @@
 //! validation rather than behavioral correctness testing.
 
 use frankenengine_node::runtime::lane_scheduler::{
-    LaneConfig, LaneMappingPolicy, LaneScheduler, LaneSchedulerError,
-    SchedulerLane, TaskClass, task_classes,
+    LaneConfig, LaneMappingPolicy, LaneScheduler, LaneSchedulerError, SchedulerLane, task_classes,
 };
 use insta::Settings;
 
@@ -29,17 +28,32 @@ fn multi_lane_policy() -> LaneMappingPolicy {
     let mut policy = LaneMappingPolicy::new();
 
     // Control critical lane - high priority, low concurrency
-    policy.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 1)).unwrap();
-    policy.add_rule(&task_classes::epoch_transition(), SchedulerLane::ControlCritical);
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 1))
+        .unwrap();
+    policy.add_rule(
+        &task_classes::epoch_transition(),
+        SchedulerLane::ControlCritical,
+    );
 
     // Remote effect lane - medium priority, medium concurrency
-    policy.add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 4)).unwrap();
-    policy.add_rule(&task_classes::remote_computation(), SchedulerLane::RemoteEffect);
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 4))
+        .unwrap();
+    policy.add_rule(
+        &task_classes::remote_computation(),
+        SchedulerLane::RemoteEffect,
+    );
 
     // Background lane - low priority, high concurrency
-    policy.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 8)).unwrap();
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::Background, 10, 8))
+        .unwrap();
     policy.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
-    policy.add_rule(&task_classes::garbage_collection(), SchedulerLane::Background);
+    policy.add_rule(
+        &task_classes::garbage_collection(),
+        SchedulerLane::Background,
+    );
 
     policy
 }
@@ -51,18 +65,23 @@ fn golden_telemetry_snapshot_minimal_scheduler() {
     // Scrub dynamic values for deterministic golden comparison
     settings.add_filter(r"\d{13,}", "[TIMESTAMP]");
     settings.add_filter(r"golden-test-\d+", "[TASK_ID]");
-    settings.add_filter(r"trace_id[\":]?\s*[\"'][^\"']+[\"']", "trace_id: \"[TRACE_ID]\"");
+    settings.add_filter(
+        r#"trace_id[":]?\s*["'][^"']+["']"#,
+        "trace_id: \"[TRACE_ID]\"",
+    );
 
     settings.bind(|| {
         let mut scheduler = LaneScheduler::new(minimal_policy()).unwrap();
 
         // Admit a single task for deterministic state
-        let _assignment = scheduler
+        let assignment = scheduler
             .assign_task(&task_classes::log_rotation(), 1000000, "golden-test-1")
             .unwrap();
 
         // Mark task as completed for deterministic telemetry
-        scheduler.mark_task_completed("golden-test-1", 1000100).unwrap();
+        scheduler
+            .complete_task(assignment.task_id.as_ref(), 1000100, "golden-test-1")
+            .unwrap();
 
         let snapshot = scheduler.telemetry_snapshot(1000200);
         insta::assert_json_snapshot!(snapshot);
@@ -76,27 +95,38 @@ fn golden_telemetry_snapshot_multi_lane_scheduler() {
     // Scrub dynamic values
     settings.add_filter(r"\d{13,}", "[TIMESTAMP]");
     settings.add_filter(r"(epoch|remote|log)-task-\d+", "[TASK_ID]");
-    settings.add_filter(r"trace_id[\":]?\s*[\"'][^\"']+[\"']", "trace_id: \"[TRACE_ID]\"");
+    settings.add_filter(
+        r#"trace_id[":]?\s*["'][^"']+["']"#,
+        "trace_id: \"[TRACE_ID]\"",
+    );
 
     settings.bind(|| {
         let mut scheduler = LaneScheduler::new(multi_lane_policy()).unwrap();
 
         // Admit tasks across different lanes for comprehensive telemetry
-        let _assignment1 = scheduler
+        let assignment1 = scheduler
             .assign_task(&task_classes::epoch_transition(), 2000000, "epoch-task-1")
             .unwrap();
 
         let _assignment2 = scheduler
-            .assign_task(&task_classes::remote_computation(), 2000100, "remote-task-1")
+            .assign_task(
+                &task_classes::remote_computation(),
+                2000100,
+                "remote-task-1",
+            )
             .unwrap();
 
-        let _assignment3 = scheduler
+        let assignment3 = scheduler
             .assign_task(&task_classes::log_rotation(), 2000200, "log-task-1")
             .unwrap();
 
         // Complete some tasks to show different lane states
-        scheduler.mark_task_completed("epoch-task-1", 2000300).unwrap();
-        scheduler.mark_task_completed("log-task-1", 2000400).unwrap();
+        scheduler
+            .complete_task(assignment1.task_id.as_ref(), 2000300, "epoch-task-1")
+            .unwrap();
+        scheduler
+            .complete_task(assignment3.task_id.as_ref(), 2000400, "log-task-1")
+            .unwrap();
 
         let snapshot = scheduler.telemetry_snapshot(2000500);
         insta::assert_json_snapshot!(snapshot);
@@ -113,8 +143,13 @@ fn golden_telemetry_snapshot_capacity_enforcement() {
     settings.bind(|| {
         // Create policy with capacity of 1 to test cap enforcement
         let mut policy = LaneMappingPolicy::new();
-        policy.add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 1)).unwrap();
-        policy.add_rule(&task_classes::remote_computation(), SchedulerLane::RemoteEffect);
+        policy
+            .add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 1))
+            .unwrap();
+        policy.add_rule(
+            &task_classes::remote_computation(),
+            SchedulerLane::RemoteEffect,
+        );
 
         let mut scheduler = LaneScheduler::new(policy).unwrap();
 
@@ -124,14 +159,17 @@ fn golden_telemetry_snapshot_capacity_enforcement() {
             .unwrap();
 
         // Second admission should fail due to capacity
-        let assignment2_result = scheduler
-            .assign_task(&task_classes::remote_computation(), 3000100, "cap-test-2");
+        let assignment2_result =
+            scheduler.assign_task(&task_classes::remote_computation(), 3000100, "cap-test-2");
 
         let snapshot = scheduler.telemetry_snapshot(3000200);
 
         // Verify assignment failure was due to capacity
         assert!(assignment2_result.is_err());
-        assert!(matches!(assignment2_result.unwrap_err(), LaneSchedulerError::CapExceeded { .. }));
+        assert!(matches!(
+            assignment2_result.unwrap_err(),
+            LaneSchedulerError::CapExceeded { .. }
+        ));
 
         insta::assert_json_snapshot!(snapshot);
     });
@@ -154,7 +192,9 @@ fn golden_scheduler_policy_validation_errors() {
 
     // Policy with lane but no rules
     let mut no_rules_policy = LaneMappingPolicy::new();
-    no_rules_policy.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 2)).unwrap();
+    no_rules_policy
+        .add_lane(LaneConfig::new(SchedulerLane::Background, 10, 2))
+        .unwrap();
     invalid_policies.push(("no_rules_policy", no_rules_policy.validate()));
 
     // Policy with zero priority weight
@@ -169,7 +209,7 @@ fn golden_scheduler_policy_validation_errors() {
     for (name, result) in invalid_policies {
         validation_results.push(serde_json::json!({
             "policy_type": name,
-            "validation_result": result.map(|_| "valid").unwrap_or_else(|e| e.as_str()),
+            "validation_result": result.as_ref().map(|_| "valid").unwrap_or_else(|e| e.as_str()),
             "is_valid": result.is_ok()
         }));
     }

@@ -1,0 +1,58 @@
+{
+  "success": true,
+  "frame_count": 4,
+  "results": [
+    {
+      "verdict": {
+        "frame_id": "batch-frame-1",
+        "allowed": true,
+        "violation_count": 0,
+        "violations": []
+      },
+      "audit": {
+        "frame_id": "batch-frame-1",
+        "verdict": "ALLOW"
+      }
+    },
+    {
+      "verdict": {
+        "frame_id": "batch-frame-2-oversized",
+        "allowed": false,
+        "violation_count": 1,
+        "violations": [
+          "SizeExceeded"
+        ]
+      },
+      "audit": {
+        "frame_id": "batch-frame-2-oversized",
+        "verdict": "BLOCK"
+      }
+    },
+    {
+      "verdict": {
+        "frame_id": "batch-frame-3",
+        "allowed": true,
+        "violation_count": 0,
+        "violations": []
+      },
+      "audit": {
+        "frame_id": "batch-frame-3",
+        "verdict": "ALLOW"
+      }
+    },
+    {
+      "verdict": {
+        "frame_id": "batch-frame-4-deep",
+        "allowed": false,
+        "violation_count": 1,
+        "violations": [
+          "DepthExceeded"
+        ]
+      },
+      "audit": {
+        "frame_id": "batch-frame-4-deep",
+        "verdict": "BLOCK"
+      }
+    }
+  ]
+}

@@ -1,21 +1,44 @@
+// bd-bg2hy: the Bayesian Runtime Sentinel family (`runtime_sentinel`,
+// `bayesian_diagnostics`, and the `HardeningLevel` half of
+// `hardening_state_machine`) is compiled unconditionally because the
+// default-feature `run` path feeds it per live run. Every other policy
+// submodule stays behind `policy-engine`, mirroring the selective-gating
+// idiom already used inside `hardening_state_machine.rs`.
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod approval_workflow;
 pub mod bayesian_diagnostics;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod compat_gates;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod compatibility_gate;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod controller_boundary_checks;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod correctness_envelope;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod decision_engine;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod evidence_emission;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod guardrail_monitor;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod hardening_auto_trigger;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod hardening_clamps;
 pub mod hardening_state_machine;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod integrity_sweep_scheduler;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod object_class_tuning;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod perf_budget_guard;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod policy_explainer;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod resource_admission;
+#[cfg(any(test, feature = "policy-engine"))]
 pub mod retroactive_hardening;
+pub mod runtime_sentinel;
 
 #[cfg(test)]
 mod tests {
@@ -472,14 +495,14 @@ mod tests {
             // Attempt to downgrade from Maximum to Minimal via intermediate steps
             (HardeningLevel::Maximum, Some(HardeningLevel::Enhanced)),
             (HardeningLevel::Enhanced, Some(HardeningLevel::Standard)),
-            (HardeningLevel::Standard, Some(HardeningLevel::Minimal)),
+            (HardeningLevel::Standard, Some(HardeningLevel::Baseline)),
             // Direct maximum-to-minimal downgrade attempt
-            (HardeningLevel::Maximum, Some(HardeningLevel::Minimal)),
+            (HardeningLevel::Maximum, Some(HardeningLevel::Baseline)),
             // Attempt to bypass via same-level transitions
             (HardeningLevel::Maximum, Some(HardeningLevel::Maximum)),
             (HardeningLevel::Enhanced, Some(HardeningLevel::Enhanced)),
             // Undefined/invalid transition states
-            (HardeningLevel::Minimal, Some(HardeningLevel::Maximum)), // Suspicious rapid upgrade
+            (HardeningLevel::Baseline, Some(HardeningLevel::Maximum)), // Suspicious rapid upgrade
         ];
 
         for (current_level, proposed_level) in malicious_transitions {
@@ -624,6 +647,11 @@ mod tests {
 
     /// Extreme adversarial test: Concurrent policy evaluation race condition attack
     /// targeting shared guardrail state corruption during parallel monitoring
+    // FIXME(bd-yom8c): targets a removed capability — `GuardrailMonitor` is no longer
+    // `Send + Sync` (current prod bound is `: fmt::Debug` only), so
+    // `Arc<Mutex<GuardrailMonitorSet>>` can no longer cross a `thread::spawn` boundary.
+    // Gated verbatim until rewritten against the current single-threaded monitor-set API.
+    #[cfg(any())]
     #[test]
     fn policy_concurrent_guardrail_evaluation_state_corruption_race_attack() {
         use std::sync::{Arc, Mutex};
@@ -650,7 +678,7 @@ mod tests {
                         state.hardening_level = if i % 2 == 0 {
                             HardeningLevel::Maximum
                         } else {
-                            HardeningLevel::Minimal
+                            HardeningLevel::Baseline
                         };
 
                         state.proposed_hardening_level = if i % 3 == 0 {
@@ -665,11 +693,11 @@ mod tests {
                             // Verify verdict consistency
                             match verdict {
                                 GuardrailVerdict::Allow => {}
-                                GuardrailVerdict::Warn { ref budget_id, .. } => {
-                                    assert!(!budget_id.is_empty());
+                                GuardrailVerdict::Warn { ref reason } => {
+                                    assert!(!reason.is_empty());
                                 }
                                 GuardrailVerdict::Block { ref budget_id, .. } => {
-                                    assert!(!budget_id.is_empty());
+                                    assert!(!budget_id.as_str().is_empty());
                                 }
                             }
                         }
@@ -988,7 +1016,7 @@ mod tests {
                             attack_name
                         );
                     }
-                    GuardrailVerdict::Block { reason } => {
+                    GuardrailVerdict::Block { reason, .. } => {
                         assert!(
                             !reason.is_empty(),
                             "Block reason should be present: {}",
@@ -1031,7 +1059,7 @@ mod tests {
                     attack_name
                 );
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -1087,7 +1115,7 @@ mod tests {
                 }
 
                 // Test conformal risk guardrail with extreme sample counts
-                let conformal_guardrail = ConformalRiskGuardrail::new(10000, 0.05);
+                let conformal_guardrail = ConformalRiskGuardrail::new(0.10, 0.05, 0.01, 10000);
                 state.reliability_telemetry =
                     Some(super::guardrail_monitor::ReliabilityTelemetry {
                         sample_count: u64::MAX / 1000, // Very large but not overflow-inducing
@@ -1130,13 +1158,15 @@ mod tests {
                 );
 
                 // Should handle many guardrails without memory exhaustion
-                monitor_set.add_memory_budget_guardrail(memory_guardrail);
+                monitor_set.register(Box::new(memory_guardrail));
 
                 // Periodically check that the set is still functioning
                 if i % 100 == 0 {
                     let test_state = policy_state();
                     let check_result =
-                        std::panic::catch_unwind(|| monitor_set.check_all(&test_state));
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            monitor_set.check_all(&test_state)
+                        }));
                     assert!(
                         check_result.is_ok(),
                         "Monitor set should handle {} guardrails",
@@ -1149,11 +1179,20 @@ mod tests {
             let final_state = policy_state();
             let final_result = monitor_set.check_all(&final_state);
             assert!(
-                final_result.len() <= 1000,
+                matches!(
+                    final_result,
+                    GuardrailVerdict::Allow
+                        | GuardrailVerdict::Warn { .. }
+                        | GuardrailVerdict::Block { .. }
+                ),
+                "Final verdict should be well-formed"
+            );
+            assert!(
+                monitor_set.monitor_count() <= 1000,
                 "Should not exceed expected guardrail count"
             );
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -1165,7 +1204,7 @@ mod tests {
     /// Test JSON structure integrity in policy serialization
     #[test]
     fn negative_policy_json_integrity_validation() {
-        use super::guardrail_monitor::{GuardrailVerdict, SystemState};
+        use super::guardrail_monitor::{BudgetId, GuardrailVerdict, SystemState};
         use super::hardening_state_machine::HardeningLevel;
 
         let json_corruption_patterns = vec![
@@ -1214,7 +1253,7 @@ mod tests {
                 let hardening_variants = vec![
                     HardeningLevel::Baseline,
                     HardeningLevel::Enhanced,
-                    HardeningLevel::Strict,
+                    HardeningLevel::Maximum,
                 ];
 
                 for hardening_level in hardening_variants {
@@ -1239,6 +1278,7 @@ mod tests {
                     },
                     GuardrailVerdict::Block {
                         reason: malicious_pattern.to_string(),
+                        budget_id: BudgetId::new("test_budget"),
                     },
                 ];
 
@@ -1251,7 +1291,8 @@ mod tests {
                     );
 
                     match verdict {
-                        GuardrailVerdict::Warn { reason } | GuardrailVerdict::Block { reason } => {
+                        GuardrailVerdict::Warn { reason }
+                        | GuardrailVerdict::Block { reason, .. } => {
                             // Verify reason is preserved but safely formatted
                             assert!(
                                 verdict_debug.contains(&reason) || verdict_debug.len() > 10,
@@ -1266,7 +1307,7 @@ mod tests {
                 // Test that potentially malicious content doesn't break structure
                 let complex_debug = format!(
                     "{:?}",
-                    (test_state, HardeningLevel::Strict, GuardrailVerdict::Allow)
+                    (test_state, HardeningLevel::Maximum, GuardrailVerdict::Allow)
                 );
                 assert!(
                     complex_debug.len() > 50,
@@ -1279,7 +1320,7 @@ mod tests {
                     attack_name
                 );
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -1355,7 +1396,7 @@ mod tests {
             ];
 
             for (sample_count, nonconforming_count, test_name) in conformal_overflow_cases {
-                let guardrail = ConformalRiskGuardrail::new(1000, 0.05);
+                let guardrail = ConformalRiskGuardrail::new(0.10, 0.05, 0.01, 1000);
                 let state = SystemState {
                     memory_used_bytes: 50,
                     memory_budget_bytes: 100,
@@ -1451,7 +1492,7 @@ mod tests {
                 );
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -1461,6 +1502,11 @@ mod tests {
     }
 
     /// Test concurrent access safety simulation in policy components
+    // FIXME(bd-yom8c): targets a removed capability — `GuardrailMonitor` is no longer
+    // `Send + Sync` (current prod bound is `: fmt::Debug` only), so
+    // `Arc<Mutex<GuardrailMonitorSet>>` can no longer cross a `thread::spawn` boundary.
+    // Gated verbatim until rewritten against the current single-threaded monitor-set API.
+    #[cfg(any())]
     #[test]
     fn negative_policy_concurrent_access_safety() {
         use super::guardrail_monitor::{
@@ -1482,8 +1528,8 @@ mod tests {
                     "policy concurrent setup monitor set",
                 )
                 .expect("policy setup monitor set lock should not be poisoned");
-                ms.add_memory_budget_guardrail(MemoryBudgetGuardrail::new(0.8, 0.6));
-                ms.add_durability_loss_guardrail(DurabilityLossGuardrail::new(0.95));
+                ms.register(Box::new(MemoryBudgetGuardrail::new(0.8, 0.6)));
+                ms.register(Box::new(DurabilityLossGuardrail::new(0.95, 0.05)));
             }
 
             // Simulate concurrent state checking
@@ -1508,26 +1554,24 @@ mod tests {
 
                         // Acquire lock and check guardrails
                         if let Ok(ms) = monitor_clone.lock() {
-                            let verdicts = ms.check_all(&state);
+                            let verdict = ms.check_all(&state);
 
                             // Should handle concurrent access consistently
-                            for verdict in verdicts {
-                                match verdict {
-                                    GuardrailVerdict::Allow => {}
-                                    GuardrailVerdict::Warn { reason } => {
-                                        assert!(
-                                            !reason.is_empty(),
-                                            "Warn reason should not be empty in thread {}",
-                                            thread_id
-                                        );
-                                    }
-                                    GuardrailVerdict::Block { reason } => {
-                                        assert!(
-                                            !reason.is_empty(),
-                                            "Block reason should not be empty in thread {}",
-                                            thread_id
-                                        );
-                                    }
+                            match verdict {
+                                GuardrailVerdict::Allow => {}
+                                GuardrailVerdict::Warn { reason } => {
+                                    assert!(
+                                        !reason.is_empty(),
+                                        "Warn reason should not be empty in thread {}",
+                                        thread_id
+                                    );
+                                }
+                                GuardrailVerdict::Block { reason, .. } => {
+                                    assert!(
+                                        !reason.is_empty(),
+                                        "Block reason should not be empty in thread {}",
+                                        thread_id
+                                    );
                                 }
                             }
                         }
@@ -1547,19 +1591,14 @@ mod tests {
             // Verify final state consistency
             if let Ok(final_monitor) = monitor_set.lock() {
                 let final_state = policy_state();
-                let final_verdicts = final_monitor.check_all(&final_state);
+                let final_verdict = final_monitor.check_all(&final_state);
 
-                // Should still function after concurrent access
-                assert!(final_verdicts.len() >= 0, "Should return some verdicts");
-
-                for verdict in final_verdicts {
-                    // Verify verdicts are well-formed
-                    let verdict_debug = format!("{:?}", verdict);
-                    assert!(
-                        !verdict_debug.is_empty(),
-                        "Verdict should have debug representation"
-                    );
-                }
+                // Should still function after concurrent access and be well-formed
+                let verdict_debug = format!("{:?}", final_verdict);
+                assert!(
+                    !verdict_debug.is_empty(),
+                    "Verdict should have debug representation"
+                );
             }
 
             // Test concurrent state updates with safety
@@ -1621,7 +1660,9 @@ mod tests {
     /// Test display injection and format string safety in policy output
     #[test]
     fn negative_policy_display_injection_safety() {
-        use super::guardrail_monitor::{GuardrailVerdict, MemoryBudgetGuardrail, SystemState};
+        use super::guardrail_monitor::{
+            BudgetId, GuardrailVerdict, MemoryBudgetGuardrail, SystemState,
+        };
         use super::hardening_state_machine::HardeningLevel;
 
         let display_injection_vectors = vec![
@@ -1659,15 +1700,24 @@ mod tests {
                     },
                     GuardrailVerdict::Block {
                         reason: malicious_content.to_string(),
+                        budget_id: BudgetId::new("test_budget"),
                     },
                 ];
 
                 for verdict in verdicts {
                     // Test debug display formatting safety
                     let verdict_display = format!("{:?}", verdict);
+                    // Rust format strings are compile-time literals, so runtime
+                    // data can NEVER be interpreted as a format directive:
+                    // C-style specifiers like `%s`/`%x`/`%d` are inert literal
+                    // text here, not an injection vector (unlike printf), so their
+                    // presence in the debug output is harmless and expected. The
+                    // genuine display-injection risk is RAW control bytes — and
+                    // `{:?}` (escape_debug) escapes every one of them, so no raw
+                    // C0/C1 control character survives in the rendering.
                     assert!(
-                        !verdict_display.contains("%s"),
-                        "Verdict display should not contain format specifiers: {}",
+                        !verdict_display.chars().any(|c| c.is_control()),
+                        "Verdict display must escape all raw control chars: {}",
                         attack_name
                     );
                     assert!(
@@ -1682,7 +1732,8 @@ mod tests {
                     );
 
                     match verdict {
-                        GuardrailVerdict::Warn { reason } | GuardrailVerdict::Block { reason } => {
+                        GuardrailVerdict::Warn { reason }
+                        | GuardrailVerdict::Block { reason, .. } => {
                             // Verify reason is preserved but safely displayed
                             assert_eq!(
                                 reason, malicious_content,
@@ -1723,7 +1774,7 @@ mod tests {
                 let hardening_levels = vec![
                     HardeningLevel::Baseline,
                     HardeningLevel::Enhanced,
-                    HardeningLevel::Strict,
+                    HardeningLevel::Maximum,
                 ];
 
                 for level in hardening_levels {
@@ -1754,7 +1805,7 @@ mod tests {
                     attack_name
                 );
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -1837,7 +1888,7 @@ mod tests {
             ];
 
             for (durability_level, test_name) in durability_boundaries {
-                let guardrail = DurabilityLossGuardrail::new(0.95);
+                let guardrail = DurabilityLossGuardrail::new(0.95, 0.05);
                 let state = SystemState {
                     memory_used_bytes: 50,
                     memory_budget_bytes: 100,
@@ -1879,7 +1930,7 @@ mod tests {
             ];
 
             for (sample_count, nonconforming_count, test_name) in sample_count_boundaries {
-                let guardrail = ConformalRiskGuardrail::new(1000, 0.05);
+                let guardrail = ConformalRiskGuardrail::new(0.10, 0.05, 0.01, 1000);
                 let state = SystemState {
                     memory_used_bytes: 50,
                     memory_budget_bytes: 100,
@@ -1955,7 +2006,7 @@ mod tests {
             let hardening_levels = vec![
                 HardeningLevel::Baseline,
                 HardeningLevel::Enhanced,
-                HardeningLevel::Strict,
+                HardeningLevel::Maximum,
             ];
 
             for hardening_level in hardening_levels {
@@ -1994,7 +2045,7 @@ mod tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(

@@ -13,7 +13,23 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "api_family", "api_name", "band", "shim_type", "spec_ref", "oracle_status"],
+        "required": [
+          "id",
+          "api_family",
+          "api_name",
+          "band",
+          "shim_type",
+          "spec_ref",
+          "oracle_status",
+          "args_schema",
+          "result_schema",
+          "error_schema",
+          "node_error_codes",
+          "bun_error_codes",
+          "side_effect_category",
+          "resource_budget",
+          "policy_hooks"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -54,6 +70,91 @@
           "notes": {
             "type": ["string", "null"],
             "description": "Optional implementation notes."
+          },
+          "args_schema": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*-v[0-9]+(\\.[0-9]+)?$",
+            "description": "Canonical argument schema version."
+          },
+          "result_schema": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*-v[0-9]+(\\.[0-9]+)?$",
+            "description": "Canonical successful result schema version."
+          },
+          "error_schema": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*-v[0-9]+(\\.[0-9]+)?$",
+            "description": "Canonical operation error schema version."
+          },
+          "node_error_codes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^(ERR_[A-Z0-9_]+|[A-Z][A-Z0-9_]+)$"
+            },
+            "description": "Node.js error codes this compatibility operation must preserve or map."
+          },
+          "bun_error_codes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^(ERR_[A-Z0-9_]+|[A-Z][A-Z0-9_]+)$"
+            },
+            "description": "Bun error codes tracked for parity against the Node-compatible surface."
+          },
+          "side_effect_category": {
+            "type": "string",
+            "enum": [
+              "pure",
+              "filesystem_read",
+              "filesystem_write",
+              "network_egress",
+              "network_listener",
+              "environment_read",
+              "module_graph_read"
+            ],
+            "description": "Declared side-effect class for policy and budget selection."
+          },
+          "resource_budget": {
+            "type": "object",
+            "required": [
+              "max_input_bytes",
+              "max_output_bytes",
+              "max_duration_ms",
+              "max_side_effects"
+            ],
+            "properties": {
+              "max_input_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_output_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_duration_ms": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_side_effects": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "description": "Static resource budget for one operation invocation."
+          },
+          "policy_hooks": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": ["capability", "ssrf", "profile"]
+            },
+            "description": "Policy gates that must pass before invoking this operation."
           }
         },
         "additionalProperties": false

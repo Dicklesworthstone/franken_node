@@ -632,7 +632,7 @@ impl ReplaySession {
         self.snapshot
             .frames
             .get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
-            .ok_or_else(|| TimeTravelError::StepOutOfBounds {
+            .ok_or(TimeTravelError::StepOutOfBounds {
                 requested: self.cursor,
                 total_frames: self.snapshot.frame_count,
             })
@@ -653,7 +653,7 @@ impl ReplaySession {
         self.snapshot
             .frames
             .get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
-            .ok_or_else(|| TimeTravelError::StepOutOfBounds {
+            .ok_or(TimeTravelError::StepOutOfBounds {
                 requested: self.cursor,
                 total_frames: self.snapshot.frame_count,
             })
@@ -676,7 +676,7 @@ impl ReplaySession {
         self.snapshot
             .frames
             .get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
-            .ok_or_else(|| TimeTravelError::StepOutOfBounds {
+            .ok_or(TimeTravelError::StepOutOfBounds {
                 requested: self.cursor,
                 total_frames: self.snapshot.frame_count,
             })
@@ -692,7 +692,7 @@ impl ReplaySession {
             .snapshot
             .frames
             .get(usize::try_from(self.cursor).unwrap_or(usize::MAX))
-            .ok_or_else(|| TimeTravelError::StepOutOfBounds {
+            .ok_or(TimeTravelError::StepOutOfBounds {
                 requested: self.cursor,
                 total_frames: self.snapshot.frame_count,
             })?;

@@ -1,0 +1,11 @@
+{
+  "schema_version": "franken-node/registry-manifest/v1",
+  "extension_id": "plugin-test-golden-[KEY_ID]",
+  "publisher_key_id": "[KEY_ID]",
+  "artifact_sha256": "sha256:[HASH]",
+  "artifact_size_bytes": 1024,
+  "published_at": "[TIMESTAMP]",
+  "manifest_bytes_b64": "dGVzdC1tYW5pZmVzdC1kYXRh",
+  "signature_b64": "dGVzdC1zaWduYXR1cmUtZGF0YQ==",
+  "signature_scheme": "ed25519"
+}

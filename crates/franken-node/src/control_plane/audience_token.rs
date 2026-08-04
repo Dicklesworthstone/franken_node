@@ -1557,11 +1557,14 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{
-        ActionScope, AudienceBoundToken, ERR_ABT_ATTENUATION_VIOLATION, ERR_ABT_AUDIENCE_MISMATCH,
-        ERR_ABT_REPLAY_DETECTED, ERR_ABT_SIGNATURE_INVALID, ERR_ABT_TOKEN_EXPIRED,
-        ERR_ABT_TOKEN_TOO_LARGE, TokenChain, TokenError, TokenId, TokenValidator, len_to_u64,
+        ABT_001, ABT_002, ABT_003, ABT_004, ActionScope, AudienceBoundToken,
+        ERR_ABT_ATTENUATION_VIOLATION, ERR_ABT_AUDIENCE_MISMATCH, ERR_ABT_REPLAY_DETECTED,
+        ERR_ABT_SIGNATURE_INVALID, ERR_ABT_TOKEN_EXPIRED, ERR_ABT_TOKEN_TOO_LARGE,
+        INV_ABT_ATTENUATION, INV_ABT_AUDIENCE, INV_ABT_EXPIRY, INV_ABT_REPLAY, TokenChain,
+        TokenError, TokenEvent, TokenId, TokenValidator, insert_nonce_bounded, len_to_u64,
+        push_bounded,
     };
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, VecDeque};
 
     // -- Helpers --
 
@@ -1715,7 +1718,9 @@ mod tests {
 
         // Get hash via hash() method and decode hex (original approach)
         let hash_string = token.hash();
-        let hash_decoded = Vec::<u8>::from_hex(&hash_string).unwrap_or_else(|error| {
+        // bd-yom8c: `Vec::<u8>::from_hex` needs `hex::FromHex` in scope (not inherited by
+        // this nested test mod); use the equivalent free fn `hex::decode` instead.
+        let hash_decoded = hex::decode(&hash_string).unwrap_or_else(|error| {
             assert!(false, "hash() must produce valid hex: {error}");
             Vec::new()
         });
@@ -2928,7 +2933,12 @@ mod tests {
 
         assert_eq!(err.code, ERR_ABT_AUDIENCE_MISMATCH);
         assert_eq!(validator.tokens_rejected(), 1);
-        assert_eq!(validator.nonce_count(), 0);
+        // bd-o776s: verify_chain now records EVERY token's nonce (root + child)
+        // BEFORE the audience check, deliberately closing the replay timing window
+        // where a failed verification left nonces unrecorded (see verify_chain's
+        // "immediately record" loop). Both chain nonces are therefore present even
+        // though the chain is ultimately rejected on audience mismatch.
+        assert_eq!(validator.nonce_count(), 2);
     }
 
     #[test]
@@ -2945,13 +2955,16 @@ mod tests {
             "verify_token_signature must use verify_strict for forgery hardening"
         );
 
-        // Ensure we don't have a plain .verify( call on verifying_key
-        // (exclude verify_strict and verify_chain which are legitimate)
+        // Ensure we don't have a plain non-strict verify call on verifying_key
+        // (exclude verify_strict and verify_chain which are legitimate).
+        // bd-o776s: skip comment lines so this meta-test's own explanatory prose
+        // (which necessarily mentions the forbidden pattern) is not flagged as a hit.
         let verify_calls: Vec<_> = source_content
             .lines()
             .enumerate()
             .filter(|(_, line)| {
-                line.contains("verifying_key")
+                !line.trim_start().starts_with("//")
+                    && line.contains("verifying_key")
                     && line.contains(".verify(")
                     && !line.contains(".verify_strict(")
                     && !line.contains(".verify_chain(")

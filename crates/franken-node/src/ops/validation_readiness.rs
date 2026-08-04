@@ -4,6 +4,10 @@
 //! state, worker observations, and resource-governor hints into a stable report
 //! that explains whether validation evidence is trustworthy right now.
 
+use crate::ops::swarm_validation_admission::{
+    SwarmValidationAdmissionDecision, SwarmValidationAdmissionDecisionRecord,
+    SwarmValidationTargetDirStrategy, SwarmValidationWorkerRequirement,
+};
 use crate::ops::validation_broker::{
     DigestRef, FlightRecorderAdapterOutcomeClass, ProofEvidenceSource, ProofStatusKind, RchMode,
     SourceOnlyReason, TimeoutClass, ValidationErrorClass, ValidationExit, ValidationExitKind,
@@ -28,6 +32,8 @@ pub const VALIDATION_HANDOFF_SUMMARY_SCHEMA_VERSION: &str =
     "franken-node/validation-handoff-summary/report/v1";
 pub const VALIDATION_SWARM_PERFORMANCE_EVIDENCE_SCHEMA_VERSION: &str =
     "franken-node/validation-swarm-performance/evidence/v1";
+pub const VALIDATION_SWARM_ADMISSION_READINESS_SCHEMA_VERSION: &str =
+    "franken-node/validation-swarm-admission/readiness/v1";
 pub const VALIDATION_READINESS_FIXTURE_SCHEMA_VERSION: &str =
     "franken-node/validation-readiness/fixtures/v1";
 pub const PROOF_LANE_READINESS_CAPSULE_SCHEMA_VERSION: &str =
@@ -160,7 +166,7 @@ pub struct RchWorkerReadiness {
     pub failure: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationReadinessInput {
     #[serde(default = "default_input_schema_version")]
     pub schema_version: String,
@@ -177,6 +183,8 @@ pub struct ValidationReadinessInput {
     #[serde(default)]
     pub swarm_scheduler_decisions: Vec<ValidationSwarmSchedulerDecision>,
     #[serde(default)]
+    pub swarm_admission_decisions: Vec<SwarmValidationAdmissionDecisionRecord>,
+    #[serde(default)]
     pub resource_governor: Option<ResourceContentionSnapshot>,
     #[serde(default = "default_max_receipt_age_secs")]
     pub max_receipt_age_secs: u64,
@@ -192,6 +200,7 @@ impl Default for ValidationReadinessInput {
             rch_workers: Vec::new(),
             proof_lane_readiness: Vec::new(),
             swarm_scheduler_decisions: Vec::new(),
+            swarm_admission_decisions: Vec::new(),
             resource_governor: None,
             max_receipt_age_secs: DEFAULT_MAX_RECEIPT_AGE_SECS,
         }
@@ -643,6 +652,68 @@ pub struct SwarmSchedulerDecisionSummary {
     pub fail_closed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdmissionDecisionSummary {
+    pub trace_id: String,
+    pub bead_id: String,
+    pub thread_id: String,
+    pub agent: String,
+    pub decision: String,
+    pub reason_code: String,
+    pub event_code: String,
+    pub required_action: String,
+    pub next_action: String,
+    pub input_fresh: bool,
+    pub proof_work_key: Option<String>,
+    pub command_digest: Option<String>,
+    pub owner_agent: Option<String>,
+    pub safe_command_shape: Option<String>,
+    pub target_dir_strategy: String,
+    pub target_dir: Option<String>,
+    pub worker_requirement: String,
+    pub max_parallel_rch_jobs: u16,
+    pub retry_after_ms: Option<u64>,
+    pub green_proof_eligible: bool,
+    pub retryable: bool,
+    pub fail_closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdmissionReadinessSummary {
+    pub schema_version: String,
+    pub decisions: usize,
+    pub run: usize,
+    pub coalesce: usize,
+    pub defer: usize,
+    pub handoff: usize,
+    pub blocked: usize,
+    pub stale_inputs: usize,
+    pub fail_closed: usize,
+    pub green_proof_eligible: usize,
+    pub rch_jobs_budgeted: u16,
+    #[serde(default)]
+    pub decision_details: Vec<SwarmAdmissionDecisionSummary>,
+}
+
+impl Default for SwarmAdmissionReadinessSummary {
+    fn default() -> Self {
+        Self {
+            schema_version: VALIDATION_SWARM_ADMISSION_READINESS_SCHEMA_VERSION.to_string(),
+            decisions: 0,
+            run: 0,
+            coalesce: 0,
+            defer: 0,
+            handoff: 0,
+            blocked: 0,
+            stale_inputs: 0,
+            fail_closed: 0,
+            green_proof_eligible: 0,
+            rch_jobs_budgeted: 0,
+            decision_details: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationControlTowerSummary {
     pub rows: usize,
@@ -707,6 +778,8 @@ pub struct ValidationReadinessSummary {
     pub proof_lane_readiness: Vec<ProofLaneReadinessSummary>,
     #[serde(default)]
     pub swarm_scheduler: SwarmSchedulerReadinessSummary,
+    #[serde(default)]
+    pub swarm_admission: SwarmAdmissionReadinessSummary,
     #[serde(default)]
     pub control_tower: ValidationControlTowerSummary,
     #[serde(default)]
@@ -934,6 +1007,7 @@ pub fn build_validation_readiness_report(
         evaluate_proof_status_check(input, &summary),
         evaluate_proof_coalescer_check(&summary),
         evaluate_swarm_scheduler_slo_check(&summary),
+        evaluate_swarm_admission_check(&summary),
         evaluate_rch_worker_check(input, &summary),
         evaluate_proof_lane_readiness_check(&summary),
         evaluate_resource_contention_check(input),
@@ -1409,6 +1483,18 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
             report.summary.swarm_scheduler.breached_decisions
         ),
         format!(
+            "  swarm_admission=decisions:{} run:{} coalesce:{} defer:{} handoff:{} blocked:{} stale_inputs:{} fail_closed:{} rch_jobs_budgeted:{}",
+            report.summary.swarm_admission.decisions,
+            report.summary.swarm_admission.run,
+            report.summary.swarm_admission.coalesce,
+            report.summary.swarm_admission.defer,
+            report.summary.swarm_admission.handoff,
+            report.summary.swarm_admission.blocked,
+            report.summary.swarm_admission.stale_inputs,
+            report.summary.swarm_admission.fail_closed,
+            report.summary.swarm_admission.rch_jobs_budgeted
+        ),
+        format!(
             "  stale_receipts={} missing_required_receipts={} malformed_receipts={}",
             report.summary.stale_receipt_count,
             report.summary.missing_required_receipts,
@@ -1521,6 +1607,35 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
                 decision.coalescer_state,
                 decision.recorder_path.as_deref().unwrap_or("none"),
                 decision.slo_breached
+            ));
+        }
+    }
+
+    for decision in &report.summary.swarm_admission.decision_details {
+        if matches!(
+            decision.decision.as_str(),
+            "coalesce" | "defer" | "handoff" | "blocked"
+        ) || decision.fail_closed
+            || !decision.input_fresh
+        {
+            lines.push(format!(
+                "    swarm_admission bead={} agent={} decision={} reason_code={} event_code={} action={} input_fresh={} proof_work_key={} owner={} target_dir_strategy={} worker_requirement={} max_parallel_rch_jobs={} retry_after_ms={} safe_command={}",
+                decision.bead_id,
+                decision.agent,
+                decision.decision,
+                decision.reason_code,
+                decision.event_code,
+                decision.next_action,
+                decision.input_fresh,
+                decision.proof_work_key.as_deref().unwrap_or("none"),
+                decision.owner_agent.as_deref().unwrap_or("none"),
+                decision.target_dir_strategy,
+                decision.worker_requirement,
+                decision.max_parallel_rch_jobs,
+                decision
+                    .retry_after_ms
+                    .map_or_else(|| "none".to_string(), |retry| retry.to_string()),
+                decision.safe_command_shape.as_deref().unwrap_or("none")
             ));
         }
     }
@@ -1931,6 +2046,7 @@ fn summarize_validation_readiness(
     let mut proof_cache_hits = 0usize;
     let mut proof_coalescer = ProofCoalescerCounts::default();
     let swarm_scheduler = summarize_swarm_scheduler_decisions(&input.swarm_scheduler_decisions);
+    let swarm_admission = summarize_swarm_admission_decisions(&input.swarm_admission_decisions);
     let control_tower = build_validation_control_tower(input, now);
 
     for status in &input.proof_statuses {
@@ -2143,6 +2259,7 @@ fn summarize_validation_readiness(
             .map(summarize_proof_lane_capsule)
             .collect(),
         swarm_scheduler,
+        swarm_admission,
         control_tower,
         flight_recorder_refs: flight_recorder_refs_count,
         failed_attempt_details,
@@ -2907,6 +3024,116 @@ fn evaluate_proof_coalescer_check(
 }
 
 #[must_use]
+pub fn summarize_swarm_admission_decisions(
+    decisions: &[SwarmValidationAdmissionDecisionRecord],
+) -> SwarmAdmissionReadinessSummary {
+    let mut summary = SwarmAdmissionReadinessSummary {
+        decisions: decisions.len(),
+        decision_details: decisions
+            .iter()
+            .map(summarize_swarm_admission_decision)
+            .collect::<Vec<_>>(),
+        ..SwarmAdmissionReadinessSummary::default()
+    };
+
+    for decision in decisions {
+        match decision.decision {
+            SwarmValidationAdmissionDecision::Run => {
+                summary.run = summary.run.saturating_add(1);
+            }
+            SwarmValidationAdmissionDecision::Coalesce => {
+                summary.coalesce = summary.coalesce.saturating_add(1);
+            }
+            SwarmValidationAdmissionDecision::Defer => {
+                summary.defer = summary.defer.saturating_add(1);
+            }
+            SwarmValidationAdmissionDecision::Handoff => {
+                summary.handoff = summary.handoff.saturating_add(1);
+            }
+            SwarmValidationAdmissionDecision::Blocked => {
+                summary.blocked = summary.blocked.saturating_add(1);
+            }
+        }
+        if !decision.diagnostics.input_freshness.fresh {
+            summary.stale_inputs = summary.stale_inputs.saturating_add(1);
+        }
+        if decision.fail_closed {
+            summary.fail_closed = summary.fail_closed.saturating_add(1);
+        }
+        if decision.green_proof_eligible {
+            summary.green_proof_eligible = summary.green_proof_eligible.saturating_add(1);
+        }
+        summary.rch_jobs_budgeted = summary
+            .rch_jobs_budgeted
+            .saturating_add(decision.execution_hints.lane_budget.max_parallel_rch_jobs);
+    }
+
+    summary
+}
+
+fn summarize_swarm_admission_decision(
+    decision: &SwarmValidationAdmissionDecisionRecord,
+) -> SwarmAdmissionDecisionSummary {
+    SwarmAdmissionDecisionSummary {
+        trace_id: decision.trace_id.clone(),
+        bead_id: decision.bead_id.clone(),
+        thread_id: decision.thread_id.clone(),
+        agent: decision.agent_name.clone(),
+        decision: decision.decision.as_str().to_string(),
+        reason_code: decision.reason_code.clone(),
+        event_code: decision.event_code.clone(),
+        required_action: decision.required_action.clone(),
+        next_action: decision.required_action.clone(),
+        input_fresh: decision.diagnostics.input_freshness.fresh,
+        proof_work_key: decision.execution_hints.coalescing_key.clone(),
+        command_digest: decision
+            .coalescing_target
+            .as_ref()
+            .and_then(|target| target.command_digest.clone()),
+        owner_agent: decision
+            .coalescing_target
+            .as_ref()
+            .and_then(|target| target.owner_agent.clone()),
+        safe_command_shape: decision.safe_command_shape.clone(),
+        target_dir_strategy: target_dir_strategy_as_str(
+            decision.execution_hints.target_dir_strategy,
+        )
+        .to_string(),
+        target_dir: decision.execution_hints.target_dir.clone(),
+        worker_requirement: worker_requirement_as_str(decision.execution_hints.worker_requirement)
+            .to_string(),
+        max_parallel_rch_jobs: decision.execution_hints.lane_budget.max_parallel_rch_jobs,
+        retry_after_ms: decision
+            .retry_after_ms
+            .or(decision.execution_hints.lane_budget.retry_after_ms),
+        green_proof_eligible: decision.green_proof_eligible,
+        retryable: decision.retryable,
+        fail_closed: decision.fail_closed,
+    }
+}
+
+const fn target_dir_strategy_as_str(strategy: SwarmValidationTargetDirStrategy) -> &'static str {
+    match strategy {
+        SwarmValidationTargetDirStrategy::NoTargetDirRequired => "no_target_dir_required",
+        SwarmValidationTargetDirStrategy::ReuseIsolated => "reuse_isolated",
+        SwarmValidationTargetDirStrategy::CreateUniqueTemp => "create_unique_temp",
+        SwarmValidationTargetDirStrategy::JoinExistingProofLease => "join_existing_proof_lease",
+        SwarmValidationTargetDirStrategy::DeferForTargetDirLease => "defer_for_target_dir_lease",
+        SwarmValidationTargetDirStrategy::DeferForDiskPressure => "defer_for_disk_pressure",
+    }
+}
+
+const fn worker_requirement_as_str(requirement: SwarmValidationWorkerRequirement) -> &'static str {
+    match requirement {
+        SwarmValidationWorkerRequirement::SourceOnlyLocal => "source_only_local",
+        SwarmValidationWorkerRequirement::RequireHealthyRemote => "require_healthy_remote",
+        SwarmValidationWorkerRequirement::PreferHighMemoryRemote => "prefer_high_memory_remote",
+        SwarmValidationWorkerRequirement::WaitForRchCapacity => "wait_for_rch_capacity",
+        SwarmValidationWorkerRequirement::RestoreRchBeforeCargo => "restore_rch_before_cargo",
+    }
+}
+
+#[must_use]
 pub fn summarize_swarm_scheduler_decisions(
     decisions: &[ValidationSwarmSchedulerDecision],
 ) -> SwarmSchedulerReadinessSummary {
@@ -3143,6 +3370,85 @@ fn evaluate_swarm_scheduler_slo_check(
             "Do not count breached scheduler decisions as green proof; surface product/source-only failures or refresh capacity evidence.",
         ),
     }
+}
+
+fn evaluate_swarm_admission_check(
+    summary: &ValidationReadinessSummary,
+) -> ValidationReadinessCheck {
+    let admission = &summary.swarm_admission;
+    if admission.decisions == 0 {
+        return check(
+            "VR-SWARM-ADMISSION-011",
+            "SVA-000",
+            "validation_swarm_admission.decisions",
+            ValidationReadinessStatus::Pass,
+            "No swarm-admission decisions were supplied.",
+            "No action required.",
+        );
+    }
+
+    let failing = admission
+        .decision_details
+        .iter()
+        .filter(|decision| {
+            decision.fail_closed || !decision.input_fresh || decision.decision == "blocked"
+        })
+        .collect::<Vec<_>>();
+    if let Some(first_failing) = failing.first() {
+        let labels = failing
+            .iter()
+            .map(|decision| swarm_admission_decision_label(decision))
+            .collect::<Vec<_>>()
+            .join(",");
+        return check(
+            "VR-SWARM-ADMISSION-011",
+            first_failing.event_code.clone(),
+            "validation_swarm_admission.decisions",
+            ValidationReadinessStatus::Fail,
+            format!("Swarm admission refuses or cannot trust validation launch for {labels}."),
+            "Follow each admission required_action; refresh stale inputs before launching or counting proof evidence.",
+        );
+    }
+
+    let waiting = admission
+        .decision_details
+        .iter()
+        .filter(|decision| matches!(decision.decision.as_str(), "defer" | "handoff"))
+        .collect::<Vec<_>>();
+    if let Some(first_waiting) = waiting.first() {
+        let labels = waiting
+            .iter()
+            .map(|decision| swarm_admission_decision_label(decision))
+            .collect::<Vec<_>>()
+            .join(",");
+        return check(
+            "VR-SWARM-ADMISSION-011",
+            first_waiting.event_code.clone(),
+            "validation_swarm_admission.decisions",
+            ValidationReadinessStatus::Warn,
+            format!("Swarm admission is deferring or handing off validation work for {labels}."),
+            "Wait, request handoff, reuse target-dir evidence, or join existing proof according to each next_action.",
+        );
+    }
+
+    check(
+        "VR-SWARM-ADMISSION-011",
+        "SVA-001",
+        "validation_swarm_admission.decisions",
+        ValidationReadinessStatus::Pass,
+        format!(
+            "Swarm admission permits validation progress (run={}, coalesce={}, rch_jobs_budgeted={}).",
+            admission.run, admission.coalesce, admission.rch_jobs_budgeted
+        ),
+        "No action required.",
+    )
+}
+
+fn swarm_admission_decision_label(decision: &SwarmAdmissionDecisionSummary) -> String {
+    format!(
+        "{}:{}:{}",
+        decision.bead_id, decision.reason_code, decision.next_action
+    )
 }
 
 fn evaluate_rch_worker_check(
@@ -4108,13 +4414,13 @@ const fn default_max_receipt_age_secs() -> u64 {
     DEFAULT_MAX_RECEIPT_AGE_SECS
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationReadinessFixtureCatalog {
     pub schema_version: String,
     pub fixtures: Vec<ValidationReadinessFixture>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationReadinessFixture {
     pub name: String,
     pub input: ValidationReadinessInput,
@@ -4148,57 +4454,141 @@ pub fn known_check_codes(report: &ValidationReadinessReport) -> BTreeSet<String>
 #[cfg(test)]
 mod fail_closed_boundary_tests {
     use super::*;
-    use crate::ops::validation_readiness::validation_proof_capabilities::ValidationProofCapabilitySnapshot;
+
+    // bd-yom8c reconciliation: these helpers build *current-API* fixtures so the
+    // fail-closed boundary tests below exercise the same `>=` semantics they always
+    // did, against the present `ProofLaneReadinessInput` / `classify_proof_lane_decision`
+    // / `ProofLaneWorkerCapability` shapes (which drifted from the originals).
+    fn ts(secs: u64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(i64::try_from(secs).unwrap_or(i64::MAX), 0)
+            .expect("valid unix timestamp")
+    }
+
+    // A fully-valid input (passes `invalid_proof_lane_input`) whose only varying
+    // axis is `freshness_expires_at`, so the staleness branch is the one under test.
+    fn valid_readiness_input(freshness_expires_at: DateTime<Utc>) -> ProofLaneReadinessInput {
+        ProofLaneReadinessInput {
+            capsule_id: "capsule-boundary".to_string(),
+            trace_id: "test_trace_boundary".to_string(),
+            bead_id: "bd-jlt7p".to_string(),
+            thread_id: "thread-boundary".to_string(),
+            created_at: ts(0),
+            freshness_expires_at,
+            producer: ProofLaneReadinessProducer {
+                name: "validation-readiness".to_string(),
+                agent_name: "test-agent".to_string(),
+                git_commit: "deadbeef".to_string(),
+                dirty_worktree: false,
+            },
+            command: ProofLaneCommandIntent {
+                program: "cargo".to_string(),
+                argv: vec!["test".to_string()],
+                cwd: "/data/projects/franken_node".to_string(),
+                digest: DigestRef::sha256(b"boundary-command"),
+            },
+            rch: ProofLaneRchSnapshot {
+                daemon_source: "rch".to_string(),
+                daemon_version: "1.0.0".to_string(),
+                socket_path: "/run/rch.sock".to_string(),
+                require_remote: false,
+                local_fallback_allowed: true,
+                local_fallback_refused: false,
+            },
+            worker_selection: ProofLaneWorkerSelection {
+                requested_workers: Vec::new(),
+                selected_worker: None,
+                override_effective: false,
+                selection_source: "auto".to_string(),
+                selection_observed_at: None,
+            },
+            toolchain: ProofLaneToolchainRequirement {
+                local_rustc: "rustc 1.0.0".to_string(),
+                required_toolchain: "nightly".to_string(),
+            },
+            worker_capabilities: BTreeMap::new(),
+            observed_validation_error_class: None,
+        }
+    }
+
+    fn toolchain_snapshot() -> ProofLaneToolchainSnapshot {
+        ProofLaneToolchainSnapshot {
+            local_rustc: "rustc 1.0.0".to_string(),
+            required_toolchain: "nightly".to_string(),
+            selected_worker_rustc: "rustc 1.0.0".to_string(),
+            same_toolchain: true,
+        }
+    }
+
+    fn worker_access_snapshot() -> ProofLaneWorkerAccessSnapshot {
+        ProofLaneWorkerAccessSnapshot {
+            auth_status: ProofLaneWorkerAuthStatus::Ok,
+            capability_status: ProofLaneCapabilityStatus::Fresh,
+            pressure_status: ProofLanePressureStatus::Healthy,
+            detail: "ok".to_string(),
+        }
+    }
 
     #[test]
     fn test_freshness_expires_at_boundary_fail_closed() {
         // Test the fix for bd-jlt7p: freshness_expires_at check should use >= for fail-closed semantics
-        let trace_id = "test_trace_boundary";
-        let expires_at = 1000u64;
+        let expires_at = ts(1000);
+        let input_at_expiry = valid_readiness_input(expires_at);
+        let toolchain = toolchain_snapshot();
+        let worker_access = worker_access_snapshot();
 
         // Test case 1: exactly at expiry time should FAIL (fail-closed)
-        let input_at_expiry = ProofLaneReadinessInput {
-            schema_version: PROOF_LANE_READINESS_INPUT_SCHEMA_VERSION.to_string(),
-            freshness_expires_at: expires_at,
-        };
-
-        let decision_at_expiry =
-            classify_proof_lane_decision(&input_at_expiry, expires_at, trace_id);
+        let decision_at_expiry = classify_proof_lane_decision(
+            &input_at_expiry,
+            expires_at,
+            None,
+            None,
+            &toolchain,
+            &worker_access,
+        );
         assert_eq!(
-            decision_at_expiry.kind,
+            decision_at_expiry.decision,
             ProofLaneReadinessDecisionKind::FailClosed,
-            "At exactly expiry time t={}, should fail closed",
-            expires_at
+            "At exactly expiry time t={expires_at}, should fail closed",
         );
         assert_eq!(
             decision_at_expiry.reason_code,
             proof_lane_reason_codes::STALE_READINESS_CAPSULE
         );
 
-        // Test case 2: one nanosecond before expiry should PASS
-        let now_before_expiry = expires_at - 1;
-        let decision_before_expiry =
-            classify_proof_lane_decision(&input_at_expiry, now_before_expiry, trace_id);
+        // Test case 2: one tick before expiry should PASS the staleness gate
+        let now_before_expiry = ts(999);
+        let decision_before_expiry = classify_proof_lane_decision(
+            &input_at_expiry,
+            now_before_expiry,
+            None,
+            None,
+            &toolchain,
+            &worker_access,
+        );
         assert_ne!(
-            decision_before_expiry.kind,
+            decision_before_expiry.decision,
             ProofLaneReadinessDecisionKind::FailClosed,
-            "At t={} (1 before expiry), should not fail closed",
-            now_before_expiry
+            "At t={now_before_expiry} (before expiry), should not fail closed",
         );
         assert_ne!(
             decision_before_expiry.reason_code,
             proof_lane_reason_codes::STALE_READINESS_CAPSULE
         );
 
-        // Test case 3: one after expiry should definitely FAIL
-        let now_after_expiry = expires_at + 1;
-        let decision_after_expiry =
-            classify_proof_lane_decision(&input_at_expiry, now_after_expiry, trace_id);
+        // Test case 3: one tick after expiry should definitely FAIL
+        let now_after_expiry = ts(1001);
+        let decision_after_expiry = classify_proof_lane_decision(
+            &input_at_expiry,
+            now_after_expiry,
+            None,
+            None,
+            &toolchain,
+            &worker_access,
+        );
         assert_eq!(
-            decision_after_expiry.kind,
+            decision_after_expiry.decision,
             ProofLaneReadinessDecisionKind::FailClosed,
-            "At t={} (1 after expiry), should fail closed",
-            now_after_expiry
+            "At t={now_after_expiry} (after expiry), should fail closed",
         );
         assert_eq!(
             decision_after_expiry.reason_code,
@@ -4209,13 +4599,18 @@ mod fail_closed_boundary_tests {
     #[test]
     fn test_capability_freshness_expires_at_boundary_fail_closed() {
         // Test the fix for bd-jlt7p: capability freshness check should use >= for fail-closed semantics
-        let expires_at = 2000u64;
+        let expires_at = ts(2000);
 
-        let capability_with_expiry = ValidationProofCapabilitySnapshot {
-            capability_name: "test_capability".to_string(),
-            status: "active".to_string(),
-            observed_at: Some(expires_at - 100), // Observed before expiry
+        // A capability that is otherwise fresh/observed, so only its expiry drives staleness.
+        let capability_with_expiry = ProofLaneWorkerCapability {
+            auth_status: ProofLaneWorkerAuthStatus::Ok,
+            capability_status: ProofLaneCapabilityStatus::Fresh,
+            pressure_status: ProofLanePressureStatus::Healthy,
+            observed_at: Some(ts(1900)), // Observed before expiry
             freshness_expires_at: Some(expires_at),
+            rustc: None,
+            observed_toolchains: Vec::new(),
+            detail: None,
         };
 
         // Test case 1: exactly at expiry time should be STALE (fail-closed)
@@ -4223,36 +4618,37 @@ mod fail_closed_boundary_tests {
             capability_snapshot_unknown_or_stale(&capability_with_expiry, expires_at);
         assert!(
             is_stale_at_expiry,
-            "At exactly expiry time t={}, capability should be stale (fail-closed)",
-            expires_at
+            "At exactly expiry time t={expires_at}, capability should be stale (fail-closed)",
         );
 
-        // Test case 2: one nanosecond before expiry should NOT be stale
-        let now_before_expiry = expires_at - 1;
+        // Test case 2: one tick before expiry should NOT be stale
+        let now_before_expiry = ts(1999);
         let is_stale_before_expiry =
             capability_snapshot_unknown_or_stale(&capability_with_expiry, now_before_expiry);
         assert!(
             !is_stale_before_expiry,
-            "At t={} (1 before expiry), capability should not be stale",
-            now_before_expiry
+            "At t={now_before_expiry} (before expiry), capability should not be stale",
         );
 
-        // Test case 3: one after expiry should definitely be STALE
-        let now_after_expiry = expires_at + 1;
+        // Test case 3: one tick after expiry should definitely be STALE
+        let now_after_expiry = ts(2001);
         let is_stale_after_expiry =
             capability_snapshot_unknown_or_stale(&capability_with_expiry, now_after_expiry);
         assert!(
             is_stale_after_expiry,
-            "At t={} (1 after expiry), capability should be stale",
-            now_after_expiry
+            "At t={now_after_expiry} (after expiry), capability should be stale",
         );
 
         // Test case 4: None expiry should be stale (always fail-closed when no expiry)
-        let capability_no_expiry = ValidationProofCapabilitySnapshot {
-            capability_name: "test_capability".to_string(),
-            status: "active".to_string(),
+        let capability_no_expiry = ProofLaneWorkerCapability {
+            auth_status: ProofLaneWorkerAuthStatus::Ok,
+            capability_status: ProofLaneCapabilityStatus::Fresh,
+            pressure_status: ProofLanePressureStatus::Healthy,
             observed_at: Some(expires_at),
             freshness_expires_at: None,
+            rustc: None,
+            observed_toolchains: Vec::new(),
+            detail: None,
         };
         let is_stale_no_expiry =
             capability_snapshot_unknown_or_stale(&capability_no_expiry, expires_at);

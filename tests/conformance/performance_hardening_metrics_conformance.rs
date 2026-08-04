@@ -28,20 +28,12 @@
 //! Uses Pattern 4: Spec-Derived Test Matrix with structured conformance cases.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 use frankenengine_node::tools::performance_hardening_metrics::{
-    CategoryStats, METRIC_VERSION, OperationCategory, Percentiles, PerformanceHardeningMetrics,
-    PerformanceMetric, PerformanceReport, PhmAuditRecord,
+    METRIC_VERSION, OperationCategory, Percentiles, PerformanceHardeningMetrics, PerformanceMetric,
     event_codes::{
-        PHM_BUDGET_CHECKED, PHM_CATEGORY_REGISTERED, PHM_COLD_START_MEASURED,
-        PHM_ERR_BUDGET_EXCEEDED, PHM_ERR_INVALID_METRIC, PHM_METRIC_SUBMITTED,
-        PHM_OVERHEAD_COMPUTED, PHM_PERCENTILES_COMPUTED, PHM_REPORT_GENERATED,
-        PHM_THRESHOLD_CHECKED, PHM_TREND_DETECTED, PHM_VERSION_EMBEDDED,
-    },
-    invariants::{
-        INV_PHM_AUDITABLE, INV_PHM_DETERMINISTIC, INV_PHM_GATED, INV_PHM_OVERHEAD,
-        INV_PHM_PERCENTILE, INV_PHM_VERSIONED,
+        PHM_COLD_START_MEASURED, PHM_METRIC_SUBMITTED, PHM_OVERHEAD_COMPUTED,
+        PHM_PERCENTILES_COMPUTED, PHM_REPORT_GENERATED, PHM_THRESHOLD_CHECKED,
     },
 };
 

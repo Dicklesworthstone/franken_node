@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
 
 use chrono::{Duration, Utc};
+use ed25519_dalek::SigningKey;
 use frankenengine_node::api::fleet_quarantine::{
     ConvergencePhase, DecisionReceipt, DecisionReceiptPayload, FleetActionResult,
-    FleetControlError, FleetControlManager, QuarantineScope, RevocationScope, RevocationSeverity,
-    canonical_decision_receipt_payload_hash, sign_decision_receipt,
+    FleetControlError, FleetControlManager, PositiveValidation, QuarantineScope,
+    ReleaseValidationPolicy, RevocationScope, RevocationSeverity,
+    canonical_decision_receipt_payload_hash, sign_decision_receipt, sign_positive_validation,
 };
 use frankenengine_node::api::middleware::{AuthIdentity, AuthMethod, TraceContext};
 use serde::Deserialize;
@@ -127,7 +129,48 @@ fn activated_manager() -> FleetControlManager {
         SIGNING_IDENTITY,
     );
     manager.activate();
+    // bd-o776s: release() now fails closed until a configured k-of-n quorum of
+    // signed positive validations attests the trigger conditions are resolved.
+    // Install a 1-of-1 policy so the release vectors can drive the real gate
+    // (release-with-valid-rollback satisfies it; release-with-expired-rollback's
+    // stale validation is rejected, leaving the quorum unmet → fail closed).
+    let policy =
+        ReleaseValidationPolicy::from_validator_keys(&[release_validator_key().verifying_key()])
+            .with_quorum(1);
+    manager.configure_release_validation(policy);
     manager
+}
+
+/// Fixed Ed25519 validator the conformance harness trusts to attest release
+/// readiness. A deterministic seed keeps the signed validations reproducible.
+fn release_validator_key() -> SigningKey {
+    SigningKey::from_bytes(&[211u8; 32])
+}
+
+/// Mint a positive validation bound to `incident_id`, signed by
+/// [`release_validator_key`] and issued at `issued_at`. Reads the incident's
+/// extension/action/zone off the manager so the binding (and the
+/// [`FleetControlManager::expected_control_epoch`]) matches exactly what
+/// `submit_release_validation` checks. Returns `None` if the incident is absent.
+fn signed_release_validation(
+    manager: &FleetControlManager,
+    incident_id: &str,
+    issued_at: &str,
+) -> Option<PositiveValidation> {
+    let incident = manager
+        .active_incidents()
+        .into_iter()
+        .find(|incident| incident.incident_id == incident_id)?;
+    Some(sign_positive_validation(
+        &release_validator_key(),
+        incident_id,
+        &incident.extension_id,
+        &incident.action_type,
+        &incident.zone_id,
+        FleetControlManager::expected_control_epoch(incident_id),
+        true,
+        issued_at,
+    ))
 }
 
 fn quarantine_scope() -> QuarantineScope {
@@ -388,6 +431,15 @@ fn apply_event(
                 incident_id,
                 rollback_receipt(incident_id, context.zone_id, Utc::now()),
             );
+            // bd-o776s: satisfy the configured 1-of-1 release-validation quorum
+            // with a fresh, correctly-bound signed positive validation so the
+            // release gate authorizes the rollback.
+            let validation =
+                signed_release_validation(manager, incident_id, &Utc::now().to_rfc3339())
+                    .ok_or_else(|| format!("{}: incident missing for validation", vector.name))?;
+            manager
+                .submit_release_validation(validation)
+                .map_err(|err| format!("{}: positive validation rejected: {err:?}", vector.name))?;
             manager.release(incident_id, &admin_identity(), &trace_context(&label))
         }
         FleetEventName::ReleaseWithExpiredRollback => {
@@ -403,6 +455,16 @@ fn apply_event(
                     Utc::now() - Duration::hours(48),
                 ),
             );
+            // bd-o776s: a back-dated positive validation is rejected by the
+            // freshness gate (DEFAULT_RELEASE_VALIDATION_MAX_AGE_SECS = 1h), so the
+            // quorum stays unmet and release fails closed without state drift.
+            if let Some(validation) = signed_release_validation(
+                manager,
+                incident_id,
+                &(Utc::now() - Duration::hours(48)).to_rfc3339(),
+            ) {
+                let _ = manager.submit_release_validation(validation);
+            }
             manager.release(incident_id, &admin_identity(), &trace_context(&label))
         }
         FleetEventName::EmergencyRevoke => manager.revoke(

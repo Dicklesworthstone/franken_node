@@ -8,15 +8,59 @@
 //! - map_config_to_orchestrator_config()
 //! - OptimizationConfig/ExtensionHostConfig profile mappings
 
+use frankenengine_engine::{ast::ParseGoal, lowering_pipeline::AmbientAuthorityGrant};
 use frankenengine_node::{
     config::{Config, Profile},
     ops::engine_dispatcher::EngineDispatcher,
 };
+use std::path::Path;
 
 fn config_with_profile(profile: Profile) -> Config {
     Config {
         profile,
         ..Config::default()
+    }
+}
+
+#[test]
+#[cfg(feature = "engine")]
+fn process_shape_ambient_grant_is_legacy_risky_only_bd_y30zw() {
+    assert_eq!(
+        EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::Strict),
+        AmbientAuthorityGrant::DenyAll
+    );
+    assert_eq!(
+        EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::Balanced),
+        AmbientAuthorityGrant::DenyAll
+    );
+    assert_eq!(
+        EngineDispatcher::map_profile_to_ambient_authority_grant_for_tests(Profile::LegacyRisky),
+        AmbientAuthorityGrant::TrustedProcessShape
+    );
+}
+
+#[test]
+#[cfg(feature = "engine")]
+fn mjs_entrypoints_select_module_goal_bd_ergy0() {
+    let config = config_with_profile(Profile::LegacyRisky);
+    assert_eq!(
+        EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+            &config,
+            Path::new("fixture.mjs"),
+        )
+        .parse_goal,
+        ParseGoal::Module
+    );
+    for script_path in ["fixture.js", "fixture.cjs", "fixture", "fixture.MJS"] {
+        assert_eq!(
+            EngineDispatcher::map_config_to_orchestrator_config_for_entrypoint_for_tests(
+                &config,
+                Path::new(script_path),
+            )
+            .parse_goal,
+            ParseGoal::Script,
+            "{script_path} must retain ScriptGoal"
+        );
     }
 }
 
@@ -137,10 +181,16 @@ fn conformance_strict_profile_config_values() {
         "Strict profile MUST use shallow recursion: 128"
     );
 
-    // Profile-based policy ID
+    // Profile-based policy ID.
+    // Source deliberately emits an OPAQUE, domain-separated SHA-256 policy ID
+    // (`generate_opaque_policy_id`, bd-3rlp8) to prevent profile-name information
+    // disclosure, instead of a readable `franken-node-<Profile>` string. The
+    // `_for_tests` path maps through `map_config_to_orchestrator_config`, which
+    // hashes with `policy_mode = None` ("no_mode" tail). Frozen byte layout golden:
+    // commit 82118e169.
     assert_eq!(
-        orchestrator_config.policy_id, "franken-node-Strict",
-        "Strict profile MUST use profile-specific policy ID"
+        orchestrator_config.policy_id, "franken-policy-565162d63a7903cb",
+        "Strict profile MUST use opaque hashed policy ID (bd-3rlp8)"
     );
 
     println!("✓ Strict profile conformance: all field values match specification");
@@ -238,10 +288,10 @@ fn conformance_balanced_profile_config_values() {
         "Balanced profile MUST use standard recursion: 256"
     );
 
-    // Profile-based policy ID
+    // Profile-based policy ID (opaque hashed; bd-3rlp8 — see Strict test).
     assert_eq!(
-        orchestrator_config.policy_id, "franken-node-Balanced",
-        "Balanced profile MUST use profile-specific policy ID"
+        orchestrator_config.policy_id, "franken-policy-014006ca2acb0187",
+        "Balanced profile MUST use opaque hashed policy ID (bd-3rlp8)"
     );
 
     println!("✓ Balanced profile conformance: all field values match specification");
@@ -346,28 +396,31 @@ fn conformance_legacy_risky_profile_config_values() {
         "LegacyRisky profile MUST use legacy security epoch: 1"
     );
 
-    // MUST: Generous parser budgets for complex legacy code
+    // MUST: Generous parser budgets for complex legacy code, but clamped by the
+    // bd-1lmtm absolute hard caps that defend against DoS via profile manipulation.
+    // The LegacyRisky requests (4MB / 256K / 512) are intentionally capped to the
+    // absolute maxima (2MB / 128K / 384) in `map_config_to_orchestrator_config`.
     assert_eq!(
-        orchestrator_config.parser_options.budget.max_source_bytes, 4_194_304,
-        "LegacyRisky profile MUST use 4MB source limit"
+        orchestrator_config.parser_options.budget.max_source_bytes, 2_097_152,
+        "LegacyRisky profile source limit MUST be clamped to the 2MB absolute cap (bd-1lmtm)"
     );
     assert_eq!(
-        orchestrator_config.parser_options.budget.max_token_count, 262_144,
-        "LegacyRisky profile MUST use 256K token limit"
+        orchestrator_config.parser_options.budget.max_token_count, 131_072,
+        "LegacyRisky profile token limit MUST be clamped to the 128K absolute cap (bd-1lmtm)"
     );
     assert_eq!(
         orchestrator_config
             .parser_options
             .budget
             .max_recursion_depth,
-        512,
-        "LegacyRisky profile MUST allow deep recursion: 512"
+        384,
+        "LegacyRisky profile recursion depth MUST be clamped to the 384 absolute cap (bd-1lmtm)"
     );
 
-    // Profile-based policy ID
+    // Profile-based policy ID (opaque hashed; bd-3rlp8 — see Strict test).
     assert_eq!(
-        orchestrator_config.policy_id, "franken-node-LegacyRisky",
-        "LegacyRisky profile MUST use profile-specific policy ID"
+        orchestrator_config.policy_id, "franken-policy-ac1305e0c5e0108f",
+        "LegacyRisky profile MUST use opaque hashed policy ID (bd-3rlp8)"
     );
 
     println!("✓ LegacyRisky profile conformance: all field values match specification");
@@ -420,7 +473,6 @@ fn conformance_profile_capability_mappings() {
                 "network_egress",
                 "builtin",
                 "env_read",
-                "process_spawn",
                 "timer",
             ],
         ),
@@ -448,6 +500,10 @@ fn conformance_profile_capability_mappings() {
                 expected_cap
             );
         }
+        assert!(
+            !capabilities.contains(&"process_spawn".to_string()),
+            "{profile:?} must never grant process_spawn ambiently"
+        );
 
         println!(
             "✓ Profile {:?}: {} capabilities validated",

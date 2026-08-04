@@ -1784,9 +1784,12 @@ mod transport_fault_gate_extreme_adversarial_negative_tests {
             ));
         }
 
-        // Verify different inputs produce different hashes
-        let result_a = gate.test_protocol(ControlProtocol::HealthCheck, &FaultMode::None, 1);
-        let result_b = gate.test_protocol(ControlProtocol::HealthCheck, &FaultMode::None, 2);
+        // Verify different inputs produce different hashes. bd-o776s: use a
+        // seed-consuming fault mode — under `None`, `FaultSchedule::from_seed` yields
+        // an empty schedule and `campaign_content_hash` omits the seed, so the content
+        // hash is seed-independent (None-mode seeds 1 vs 2 collide by construction).
+        let result_a = gate.test_protocol(ControlProtocol::HealthCheck, &FaultMode::Reorder, 1);
+        let result_b = gate.test_protocol(ControlProtocol::HealthCheck, &FaultMode::Reorder, 2);
 
         assert_ne!(
             result_a.content_hash, result_b.content_hash,

@@ -7,11 +7,21 @@ use std::collections::HashSet;
 pub struct DomainSeparationTest;
 
 impl ConformanceTest for DomainSeparationTest {
-    fn id(&self) -> &str { "R7.1" }
-    fn name(&self) -> &str { "Domain-separated hashing" }
-    fn category(&self) -> TestCategory { TestCategory::Security }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "7" }
+    fn id(&self) -> &str {
+        "R7.1"
+    }
+    fn name(&self) -> &str {
+        "Domain-separated hashing"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Security
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "7"
+    }
     fn description(&self) -> &str {
         "MUST use distinct domain separators for leaf and node hashing"
     }
@@ -28,12 +38,14 @@ impl ConformanceTest for DomainSeparationTest {
 
         // Create a stream with markers that would create collision-prone scenarios
         let mut stream = MarkerStream::new();
-        stream.append(
-            MarkerEventType::PolicyChange,
-            test_input,
-            1_000_000_000,
-            "trace-1",
-        ).expect("append");
+        stream
+            .append(
+                MarkerEventType::PolicyChange,
+                test_input,
+                1_000_000_000,
+                "trace-1",
+            )
+            .expect("append");
 
         let mut cp = MmrCheckpoint::enabled();
         cp.rebuild_from_stream(&stream).expect("rebuild");
@@ -50,12 +62,7 @@ impl ConformanceTest for DomainSeparationTest {
         }
 
         // Test collision resistance between different input formats
-        let collision_test_inputs = vec![
-            ("a", "b"),
-            ("ab", "cd"),
-            ("test", "test2"),
-            ("", " "),
-        ];
+        let collision_test_inputs = vec![("a", "b"), ("ab", "cd"), ("test", "test2"), ("", " ")];
 
         for (input1, input2) in collision_test_inputs {
             let hash1 = marker_leaf_hash(input1);
@@ -73,8 +80,9 @@ impl ConformanceTest for DomainSeparationTest {
                 return TestResult::fail("Hash length is not 64 characters");
             }
 
-            if !hash1.chars().all(|c| c.is_ascii_hexdigit()) ||
-               !hash2.chars().all(|c| c.is_ascii_hexdigit()) {
+            if !hash1.chars().all(|c| c.is_ascii_hexdigit())
+                || !hash2.chars().all(|c| c.is_ascii_hexdigit())
+            {
                 return TestResult::fail("Hash contains non-hex characters");
             }
         }
@@ -87,11 +95,21 @@ impl ConformanceTest for DomainSeparationTest {
 pub struct LengthPrefixingTest;
 
 impl ConformanceTest for LengthPrefixingTest {
-    fn id(&self) -> &str { "R7.2" }
-    fn name(&self) -> &str { "Length-prefixed hash inputs" }
-    fn category(&self) -> TestCategory { TestCategory::Security }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "7" }
+    fn id(&self) -> &str {
+        "R7.2"
+    }
+    fn name(&self) -> &str {
+        "Length-prefixed hash inputs"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Security
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "7"
+    }
     fn description(&self) -> &str {
         "MUST use length-prefixed inputs to prevent boundary attacks"
     }
@@ -100,10 +118,10 @@ impl ConformanceTest for LengthPrefixingTest {
         // Test boundary attack resistance through different input combinations
         // that would have the same concatenated content without length prefixing
         let boundary_tests = vec![
-            ("ab", "cd"),   // "abcd"
-            ("a", "bcd"),   // "abcd"
-            ("abc", "d"),   // "abcd"
-            ("", "abcd"),   // "abcd"
+            ("ab", "cd"), // "abcd"
+            ("a", "bcd"), // "abcd"
+            ("abc", "d"), // "abcd"
+            ("", "abcd"), // "abcd"
         ];
 
         for (input1, input2) in boundary_tests {
@@ -148,12 +166,15 @@ impl ConformanceTest for LengthPrefixingTest {
             if all_hashes.contains(&hash) {
                 return TestResult::fail(format!(
                     "Hash collision with special characters: input '{}' hash: {}",
-                    input.replace('\0', "\\0").replace('\n', "\\n").replace('\t', "\\t"),
+                    input
+                        .replace('\0', "\\0")
+                        .replace('\n', "\\n")
+                        .replace('\t', "\\t"),
                     hash
                 ));
             }
 
-            all_hashes.insert(hash);
+            all_hashes.insert(hash.clone());
 
             // Verify determinism for special characters
             let hash2 = marker_leaf_hash(input);
@@ -173,11 +194,21 @@ impl ConformanceTest for LengthPrefixingTest {
 pub struct HashCollisionResistanceTest;
 
 impl ConformanceTest for HashCollisionResistanceTest {
-    fn id(&self) -> &str { "R7.3" }
-    fn name(&self) -> &str { "Hash collision resistance" }
-    fn category(&self) -> TestCategory { TestCategory::Security }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "7" }
+    fn id(&self) -> &str {
+        "R7.3"
+    }
+    fn name(&self) -> &str {
+        "Hash collision resistance"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Security
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "7"
+    }
     fn description(&self) -> &str {
         "MUST resist hash collision attacks across all hash operations"
     }
@@ -185,9 +216,7 @@ impl ConformanceTest for HashCollisionResistanceTest {
     fn run(&self, ctx: &TestContext) -> TestResult {
         // Test systematic collision resistance
         let mut all_hashes = HashSet::new();
-        let test_inputs: Vec<String> = (0..1000)
-            .map(|i| format!("test-input-{:04}", i))
-            .collect();
+        let test_inputs: Vec<String> = (0..1000).map(|i| format!("test-input-{:04}", i)).collect();
 
         // Test leaf hash collision resistance
         for input in &test_inputs {
@@ -206,15 +235,13 @@ impl ConformanceTest for HashCollisionResistanceTest {
             if hash.len() != 64 {
                 return TestResult::fail(format!(
                     "Invalid hash length for '{}': {} (expected 64)",
-                    input, hash.len()
+                    input,
+                    hash.len()
                 ));
             }
 
             if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-                return TestResult::fail(format!(
-                    "Invalid hash format for '{}': {}",
-                    input, hash
-                ));
+                return TestResult::fail(format!("Invalid hash format for '{}': {}", input, hash));
             }
         }
 
@@ -236,25 +263,14 @@ impl ConformanceTest for HashCollisionResistanceTest {
         }
 
         // Test leaf hash collision resistance with crafted inputs
-        let crafted_inputs = vec![
-            "aaaa",
-            "aaab",
-            "aaba",
-            "abaa",
-            "baaa",
-            "bbbb",
-            "cccc",
-        ];
+        let crafted_inputs = vec!["aaaa", "aaab", "aaba", "abaa", "baaa", "bbbb", "cccc"];
 
         let mut crafted_hashes = HashSet::new();
         for input in crafted_inputs {
             let hash = marker_leaf_hash(input);
 
             if crafted_hashes.contains(&hash) {
-                return TestResult::fail(format!(
-                    "Hash collision in crafted inputs: '{}'",
-                    input
-                ));
+                return TestResult::fail(format!("Hash collision in crafted inputs: '{}'", input));
             }
 
             crafted_hashes.insert(hash);
@@ -268,11 +284,21 @@ impl ConformanceTest for HashCollisionResistanceTest {
 pub struct ConstantTimeComparisonsTest;
 
 impl ConformanceTest for ConstantTimeComparisonsTest {
-    fn id(&self) -> &str { "R7.4" }
-    fn name(&self) -> &str { "Constant-time comparisons" }
-    fn category(&self) -> TestCategory { TestCategory::Security }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "7" }
+    fn id(&self) -> &str {
+        "R7.4"
+    }
+    fn name(&self) -> &str {
+        "Constant-time comparisons"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Security
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "7"
+    }
     fn description(&self) -> &str {
         "MUST use constant-time comparisons for security-sensitive hash operations"
     }
@@ -345,8 +371,8 @@ impl ConformanceTest for ConstantTimeComparisonsTest {
         }
 
         // Test prefix proof verification constant-time properties
-        let small_stream = ctx.generate_markers(3, "prefix_small");
-        let large_stream = ctx.generate_markers(8, "prefix_large");
+        let small_stream = ctx.generate_markers(3, "prefix-chain");
+        let large_stream = ctx.generate_markers(8, "prefix-chain");
         let small_cp = ctx.create_checkpoint(&small_stream);
         let large_cp = ctx.create_checkpoint(&large_stream);
 
@@ -358,22 +384,32 @@ impl ConformanceTest for ConstantTimeComparisonsTest {
         for tamper_pos in [0, 10, 60] {
             if tamper_pos < prefix_proof.prefix_root_hash.len() {
                 let mut tampered_prefix_proof = prefix_proof.clone();
-                tampered_prefix_proof.prefix_root_hash
-                    .replace_range(tamper_pos..tamper_pos+1, "f");
+                let replacement =
+                    if tampered_prefix_proof.prefix_root_hash.as_bytes()[tamper_pos] == b'f' {
+                        "0"
+                    } else {
+                        "f"
+                    };
+                tampered_prefix_proof
+                    .prefix_root_hash
+                    .replace_range(tamper_pos..tamper_pos + 1, replacement);
 
                 match verify_prefix(&tampered_prefix_proof, small_root, large_root) {
                     Err(err) => {
                         if err.code() != "MMR_ROOT_MISMATCH" {
                             return TestResult::fail(format!(
                                 "Expected MMR_ROOT_MISMATCH for prefix tamper at {}, got: {}",
-                                tamper_pos, err.code()
+                                tamper_pos,
+                                err.code()
                             ));
                         }
                     }
-                    Ok(_) => return TestResult::fail(format!(
-                        "Should reject prefix tamper at position {}",
-                        tamper_pos
-                    )),
+                    Ok(_) => {
+                        return TestResult::fail(format!(
+                            "Should reject prefix tamper at position {}",
+                            tamper_pos
+                        ));
+                    }
                 }
             }
         }
@@ -386,11 +422,21 @@ impl ConformanceTest for ConstantTimeComparisonsTest {
 pub struct DeterministicHashingTest;
 
 impl ConformanceTest for DeterministicHashingTest {
-    fn id(&self) -> &str { "R7.5" }
-    fn name(&self) -> &str { "Deterministic hashing" }
-    fn category(&self) -> TestCategory { TestCategory::Security }
-    fn requirement_level(&self) -> RequirementLevel { RequirementLevel::Must }
-    fn spec_section(&self) -> &str { "7" }
+    fn id(&self) -> &str {
+        "R7.5"
+    }
+    fn name(&self) -> &str {
+        "Deterministic hashing"
+    }
+    fn category(&self) -> TestCategory {
+        TestCategory::Security
+    }
+    fn requirement_level(&self) -> RequirementLevel {
+        RequirementLevel::Must
+    }
+    fn spec_section(&self) -> &str {
+        "7"
+    }
     fn description(&self) -> &str {
         "MUST produce identical hashes for identical inputs across all operations"
     }
@@ -398,18 +444,16 @@ impl ConformanceTest for DeterministicHashingTest {
     fn run(&self, ctx: &TestContext) -> TestResult {
         // Test deterministic leaf hashing
         let test_inputs = vec![
-            "",
-            "a",
-            "test-marker-hash",
-            "unicode-test-🔥",
-            "null\0test",
+            String::new(),
+            "a".to_string(),
+            "test-marker-hash".to_string(),
+            "unicode-test-🔥".to_string(),
+            "null\0test".to_string(),
             "long".repeat(100),
         ];
 
         for input in test_inputs {
-            let hashes: Vec<String> = (0..10)
-                .map(|_| marker_leaf_hash(&input))
-                .collect();
+            let hashes: Vec<String> = (0..10).map(|_| marker_leaf_hash(&input)).collect();
 
             // All hashes should be identical
             let first_hash = &hashes[0];
@@ -417,7 +461,8 @@ impl ConformanceTest for DeterministicHashingTest {
                 if hash != first_hash {
                     return TestResult::fail(format!(
                         "Non-deterministic leaf hash for '{}': iteration {} differs",
-                        input.replace('\0', "\\0"), i
+                        input.replace('\0', "\\0"),
+                        i
                     ));
                 }
             }
@@ -426,9 +471,8 @@ impl ConformanceTest for DeterministicHashingTest {
         // Test deterministic checkpoint rebuilding
         let stream = ctx.generate_markers(50, "deterministic");
 
-        let checkpoints: Vec<MmrCheckpoint> = (0..5)
-            .map(|_| ctx.create_checkpoint(&stream))
-            .collect();
+        let checkpoints: Vec<MmrCheckpoint> =
+            (0..5).map(|_| ctx.create_checkpoint(&stream)).collect();
 
         let first_root = checkpoints[0].root().expect("first root");
         for (i, cp) in checkpoints.iter().enumerate() {
@@ -459,21 +503,23 @@ impl ConformanceTest for DeterministicHashingTest {
         // Test deterministic proof generation
         for seq in [0, 25, 49] {
             let proofs: Vec<InclusionProof> = (0..5)
-                .map(|_| mmr_inclusion_proof(&stream, &checkpoints[0], seq)
-                    .expect("proof"))
+                .map(|_| mmr_inclusion_proof(&stream, &checkpoints[0], seq).expect("proof"))
                 .collect();
 
             let first_proof = &proofs[0];
             for (i, proof) in proofs.iter().enumerate() {
                 if proof != first_proof {
                     return TestResult::fail_with_details(
-                        format!("Non-deterministic proof for sequence {}: iteration {} differs", seq, i),
+                        format!(
+                            "Non-deterministic proof for sequence {}: iteration {} differs",
+                            seq, i
+                        ),
                         serde_json::json!({
                             "sequence": seq,
                             "iteration": i,
                             "first_proof": first_proof,
                             "different_proof": proof
-                        })
+                        }),
                     );
                 }
             }

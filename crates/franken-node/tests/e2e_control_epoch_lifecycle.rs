@@ -6,7 +6,10 @@
 //!
 //!   - INV-EPOCH-MONOTONIC      `epoch_advance` only ever increases the epoch
 //!   - INV-EPOCH-NO-GAP         `epoch_advance` advances by exactly +1
-//!   - INV-EPOCH-SIGNED-EVENT   every `EpochTransition.verify()` returns true
+//!   - INV-EPOCH-SIGNED-EVENT   every `EpochTransition::verify(key)` returns true
+//!     (bd-kpjrz: the MAC is HMAC-keyed, so this is a
+//!     real authenticity check rather than a hash
+//!     anyone could recompute)
 //!   - INV-EPOCH-DURABLE        `recover(committed)` round-trips state across
 //!     a simulated restart
 //!   - epoch_set: regression to `<= current` is rejected with
@@ -25,7 +28,7 @@
 //!
 //! Bead: bd-2xm9v.
 //!
-//! No mocks: real `EpochStore`, real SHA-256-backed MAC on every transition,
+//! No mocks: real `EpochStore`, real HMAC-SHA256 keyed MAC on every transition,
 //! real `ValidityWindowPolicy`. Each phase emits a structured tracing event
 //! plus a JSON-line on stderr so a CI failure can be reconstructed from the
 //! test transcript alone.
@@ -34,11 +37,26 @@ use std::sync::Once;
 use std::time::Instant;
 
 use frankenengine_node::control_plane::control_epoch::{
-    ControlEpoch, EpochError, EpochRejectionReason, EpochStore, ValidityWindowPolicy,
-    check_artifact_epoch,
+    ControlEpoch, EpochError, EpochRejectionReason, EpochSigningKey, EpochStore,
+    ValidityWindowPolicy, check_artifact_epoch,
 };
 use serde_json::json;
 use tracing::{error, info};
+
+/// bd-kpjrz: `EpochStore` now signs transition events with an HMAC key, so the
+/// event MAC is an authenticity check rather than a hash anyone can recompute.
+/// One fixed key across this file keeps every transition cross-verifiable here.
+fn epoch_test_key() -> EpochSigningKey {
+    EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+}
+
+fn epoch_test_store() -> EpochStore {
+    EpochStore::new(epoch_test_key())
+}
+
+fn epoch_test_store_at(committed_epoch: u64) -> EpochStore {
+    EpochStore::recover(committed_epoch, epoch_test_key())
+}
 
 static TEST_TRACING_INIT: Once = Once::new();
 
@@ -110,7 +128,7 @@ fn e2e_epoch_store_full_lifecycle_advance_set_recover() {
     let h = Harness::new("e2e_epoch_store_full_lifecycle_advance_set_recover");
 
     // ── ARRANGE: real store at genesis ──────────────────────────────
-    let mut store = EpochStore::new();
+    let mut store = epoch_test_store();
     assert_eq!(store.epoch_read(), ControlEpoch::GENESIS);
     assert_eq!(store.committed_epoch(), ControlEpoch::GENESIS);
     assert_eq!(store.transition_count(), 0);
@@ -123,7 +141,7 @@ fn e2e_epoch_store_full_lifecycle_advance_set_recover() {
     assert_eq!(t1.old_epoch, ControlEpoch::GENESIS);
     assert_eq!(t1.new_epoch, ControlEpoch::new(1));
     assert!(
-        t1.verify(),
+        t1.verify(&epoch_test_key()),
         "INV-EPOCH-SIGNED-EVENT: MAC must verify on the issued transition"
     );
     h.log_phase("advance_to_1", true, json!({"mac_ok": true}));
@@ -133,7 +151,7 @@ fn e2e_epoch_store_full_lifecycle_advance_set_recover() {
         .expect("advance to 2");
     assert_eq!(t2.old_epoch, ControlEpoch::new(1));
     assert_eq!(t2.new_epoch, ControlEpoch::new(2));
-    assert!(t2.verify());
+    assert!(t2.verify(&epoch_test_key()));
     assert_eq!(store.epoch_read(), ControlEpoch::new(2));
     assert_eq!(store.committed_epoch(), ControlEpoch::new(2));
     assert_eq!(store.transition_count(), 2);
@@ -161,7 +179,7 @@ fn e2e_epoch_store_full_lifecycle_advance_set_recover() {
         .expect("jump to 10");
     assert_eq!(t10.old_epoch, ControlEpoch::new(2));
     assert_eq!(t10.new_epoch, ControlEpoch::new(10));
-    assert!(t10.verify());
+    assert!(t10.verify(&epoch_test_key()));
     assert_eq!(store.epoch_read(), ControlEpoch::new(10));
     h.log_phase("epoch_set_jump", true, json!({"new_epoch": 10}));
 
@@ -187,7 +205,7 @@ fn e2e_epoch_store_full_lifecycle_advance_set_recover() {
 
     // ── ASSERT: INV-EPOCH-DURABLE — recover sees committed epoch ────
     let committed = store.committed_epoch();
-    let recovered = EpochStore::recover(committed.value());
+    let recovered = epoch_test_store_at(committed.value());
     assert_eq!(recovered.epoch_read(), committed);
     assert_eq!(recovered.committed_epoch(), committed);
     h.log_phase(
@@ -198,7 +216,10 @@ fn e2e_epoch_store_full_lifecycle_advance_set_recover() {
 
     // ── ASSERT: every transition still self-verifies ────────────────
     for t in store.transitions() {
-        assert!(t.verify(), "transition MAC must verify: {t:?}");
+        assert!(
+            t.verify(&epoch_test_key()),
+            "transition MAC must verify: {t:?}"
+        );
     }
     h.log_phase(
         "all_macs_verify",
@@ -212,7 +233,7 @@ fn e2e_epoch_store_advance_overflow_is_fail_closed() {
     let h = Harness::new("e2e_epoch_store_advance_overflow_is_fail_closed");
 
     // Recover into a store at the u64 ceiling — the next advance must overflow.
-    let mut store = EpochStore::recover(u64::MAX);
+    let mut store = epoch_test_store_at(u64::MAX);
     assert_eq!(store.epoch_read().value(), u64::MAX);
     let err = store
         .epoch_advance("sha256:overflow", 0, "trace-overflow")

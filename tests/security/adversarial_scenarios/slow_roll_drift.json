@@ -1,6 +1,6 @@
 {
   "name": "slow_roll_drift",
-  "description": "Drift-via-many-small-updates: a steady linear ramp publishes a small declared capability increase while the adversary hides a 5% bonus on every step. Default thresholds should fire only in the second half of the campaign.",
+  "description": "Drift-via-many-small-updates: a steady linear ramp publishes a small declared capability increase while the adversary hides an accumulating capability gap. Default thresholds should fire only in the second half of the campaign.",
   "scenario": {
     "id": "scenario-slow-roll-001",
     "kind": "slow_roll_drift",

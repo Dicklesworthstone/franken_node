@@ -1584,8 +1584,13 @@ targets = []
 
     #[test]
     fn dispatch_target_rejects_unknown_truthful_target() {
-        let error = dispatch_target("unknown_truthful_target", b"{}")
-            .expect_err("unknown target must fail closed");
+        // `dispatch_target` returns `Result<TargetDispatch, String>` and
+        // `TargetDispatch` is not `Debug`, so `expect_err` is unavailable; match
+        // explicitly to extract the error string while preserving fail-closed intent.
+        let error = match dispatch_target("unknown_truthful_target", b"{}") {
+            Ok(_) => panic!("unknown target must fail closed"),
+            Err(error) => error,
+        };
 
         assert!(error.contains("unsupported truthful fuzz target"));
         assert!(error.contains("unknown_truthful_target"));
@@ -1971,7 +1976,11 @@ targets = ["directory_scan"]
         adapter
             .add_seed(make_seed(
                 "parser_fuzz",
-                "invalid_but_non_crashing",
+                // bd-o776s: the fixture gate promotes any seed whose input contains the
+                // substring "crash" (run_fixture_gate). "non_crashing" embeds "crash"
+                // (via "crashing"), so the prior input self-triggered a crash. Use an
+                // input with no "crash" marker so the rejected fixture is NOT promoted.
+                "invalid_but_rejected_cleanly",
                 DeterministicSeedOutcome::Rejected,
             ))
             .unwrap();

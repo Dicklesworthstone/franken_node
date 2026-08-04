@@ -13,20 +13,20 @@
     "first_timestamp": "2026-02-20T10:00:00.000000Z",
     "last_timestamp": "2026-02-20T10:00:09.000000Z",
     "time_span_micros": 9000000,
-    "compressed_size_bytes": 324,
+    "compressed_size_bytes": 2063,
     "chunk_count": 1,
     "decision_sequence_hash": "0b5be05ccafbc8838f0739e2dff4aed1a94a31fe6801cda4dc4a4b69e74fc4ea"
   },
-  "integrity_hash": "b43fce2b6dd9ccef0ec2fca309e79ec8b8b12cfd22b94e2fcbc52228092aaf0a",
+  "integrity_hash": "a62426b20c9031e2ecfbc84af480438b6a945e088cc07c8d4b47d82cdbe948e0",
   "signature": {
     "algorithm": "ed25519",
-    "public_key_hex": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
-    "key_id": "d5c00cd437f29db5",
+    "public_key_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+    "key_id": "8cab4af922e0f48b",
     "key_source": "config",
     "signing_identity": "incident-control-plane",
     "trust_scope": "incident_replay_bundle",
-    "signed_payload_sha256": "4beae9911c886fbbe52dcff6841ae2a1bb410709ae7e110fb1f1e6f66c862613",
-    "signature_hex": "bf83bc752fc1517c10529f00bc6183ffbb82deaa8c6a2313f3018711d0d2a4fe9d51274086b1d7154c8b522000f4c24679316ceb264ffe07f448445799a92d0b"
+    "signed_payload_sha256": "37ec0675e75d952730d976e4e6cc4631922d0c0e9fe9c01b1f05955cdcfdf917",
+    "signature_hex": "176af873066caa65d40b95ea737b71e3fceb51e202b70924945f8301d09d627c2893a345ac45ac9f19ae87e0fad22987264d382e0af7547be9de1e479536a50b"
   },
   "timeline": [
     {
@@ -158,7 +158,7 @@
       "event_count": 10,
       "first_sequence_number": 1,
       "last_sequence_number": 10,
-      "compressed_size_bytes": 324,
+      "compressed_size_bytes": 2063,
       "chunk_hash": "db9de601d6ce3581114f0c6c439e8b68f9b15b6eb5708d3908e877a7dee03d54",
       "event_sequence_numbers": [
         1,

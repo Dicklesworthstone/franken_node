@@ -70,10 +70,17 @@ name = "collect-production-metrics"
 path = "src/bin/collect_production_metrics.rs"
 test = false
 
-[[bin]]
-name = "vef-degraded-mode-metamorphic"
-path = "tests/vef_degraded_mode_metamorphic.rs"
-test = false
+# bd-8m3oc: the `[[bin]] vef-degraded-mode-metamorphic` registration over
+# tests/vef_degraded_mode_metamorphic.rs was removed here. It duplicated the
+# `[[test]] vef_degraded_mode_metamorphic` entry below over the same path, which
+# made cargo warn on every build of this workspace, and it compiled the file in
+# default feature configs where the test form is deliberately gated behind
+# `advanced-features`. The file now carries `#[test]` attributes instead of a
+# hand-rolled `fn main()`, so the `[[test]]` entry is the single authoritative
+# registration and the file's own two metamorphic checks actually execute
+# (65 -> 67 tests; the other 65 come from the `#[path]`-included
+# `vef_degraded_mode` module and were already running, which is what made the
+# missing two easy to overlook).
 
 [lib]
 path = "src/lib.rs"
@@ -128,7 +135,7 @@ default = ["engine", "http-client", "external-commands"]
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
-clap = { version = "4.5.32", features = ["derive"] }
+clap = { version = "4.5.32", features = ["derive", "env"] }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -151,6 +158,10 @@ asupersync = { version = "=0.3.4", optional = true }
 hdrhistogram = { version = "7.5", default-features = false, optional = true }
 frankentui.workspace = true
 fs2 = "0.4.3"
+# bd-rgkd2: the product binary produces LTV evidence through the SDK's public
+# builder and verifies it via verify_as_of_ltv, so all LTV crypto stays in one
+# crate. The SDK never depends on the product; verifier independence holds.
+frankenengine-verifier-sdk = { path = "../../sdk/verifier" }
 frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine", optional = true }
 frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host", optional = true }
 tracing = { workspace = true }
@@ -169,6 +180,12 @@ blake3 = { version = "1.5", optional = true }
 lazy_static = "1.5.0"
 loom = { version = "0.7", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["std", "event", "fs", "process"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31.2", default-features = false, features = ["socket"] }
+
 # Windows: AF_UNIX socket support for the telemetry bridge (Unix uses std's
 # os::unix::net). uds_windows mirrors std's UnixListener/UnixStream API.
 [target.'cfg(windows)'.dependencies]
@@ -177,9 +194,31 @@ uds_windows = "1"
 [dev-dependencies]
 assert_cmd = "2.0.16"
 assert2 = "0.4.0"
-fsqlite = { path = "../../../frankensqlite/crates/fsqlite", default-features = false, features = ["native"] }
-frankenengine-verifier-sdk = { path = "../../sdk/verifier" }
-fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false }
+# bd-6n2xv: the PUBLISHED crate, not `path = "../../../frankensqlite/..."`.
+#
+# Same lesson as the `[patch.crates-io]` removal in the workspace manifest
+# (bd-3mj98): a path dependency on a sibling *development checkout* silently
+# adopts whatever unreleased breaking change that checkout is mid-way through.
+# `/dp/frankensqlite` is currently migrating `Connection` from sync to async
+# under an unchanged 0.1.19 version, which broke every franken_node test written
+# against the sync API (`Connection::open(..).expect(..)` became `.expect()` on
+# an `impl Future`) — while the published 0.1.19 keeps the sync surface and puts
+# the async one in `async_api`.
+#
+# Binding to the published crate also makes our fsqlite the SAME one the engine
+# resolves through `sqlmodel-frankensqlite`, so the graph no longer carries two
+# different 0.1.19s. Re-point at the path only once frankensqlite's async
+# migration (their bd-2jpu6) has landed and been released.
+fsqlite = { version = "0.1.19", default-features = false, features = ["native"] }
+# bd-6n2xv: `features = ["testing"]` is required by
+# tests/fastapi_rust_control_plane_integration.rs — `TestClient`,
+# `RequestBuilder` and `TestResponse` are all behind `#[cfg(feature = "testing")]`
+# in fastapi-rust, so with `default-features = false` alone that target failed to
+# compile with E0432/E0425. This is a dev-dependency and the workspace uses
+# resolver = "2", so the feature does not leak into non-test builds.
+fastapi_rust = { package = "fastapi-rust", path = "/dp/fastapi_rust/crates/fastapi", default-features = false, features = [
+    "testing",
+] }
 tokio = { workspace = true, features = ["sync", "time"] }
 regex = "1.11.1"
 sqlmodel = { path = "/dp/sqlmodel_rust/crates/sqlmodel", default-features = false }
@@ -189,6 +228,12 @@ syn = { version = "2.0", features = ["full"] }
 tracing-subscriber = { workspace = true }
 insta = { version = "1.40", features = ["json", "filters", "redactions"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+# bd-3894s slice (5): mock-free https e2e — a real rustls TLS listener on
+# loopback with a fresh rcgen self-signed anchor (no external network). The
+# `ring` provider matches the engine mechanism's TLS stack.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [[test]]
 name = "migrate_cli_e2e"
@@ -211,8 +256,27 @@ name = "incident_cli_e2e"
 path = "tests/incident_cli_e2e.rs"
 
 [[test]]
+name = "run_console_exit_e2e"
+path = "tests/run_console_exit_e2e.rs"
+
+# bd-f5b04.8.1: master mock-free TNR pipeline e2e (one trace-id across
+# run -> effect ledger -> structured logs -> incident replay chain ->
+# verifier SDK -> LTV witness leg). Lane wrapper: scripts/run_tnr_full_pipeline.sh
+[[test]]
+name = "tnr_full_pipeline_e2e"
+path = "tests/tnr_full_pipeline_e2e.rs"
+
+[[test]]
+name = "replay_fidelity_oracle"
+path = "tests/replay_fidelity_oracle.rs"
+
+[[test]]
 name = "counterfactual_policy_matrix"
 path = "tests/counterfactual_policy_matrix.rs"
+
+[[test]]
+name = "counterfactual_soundness"
+path = "tests/counterfactual_soundness.rs"
 
 [[test]]
 name = "rch_adapter_classification"
@@ -241,6 +305,10 @@ path = "tests/operator_transcripts.rs"
 [[test]]
 name = "swarm_bead_templates"
 path = "tests/swarm_bead_templates.rs"
+
+[[test]]
+name = "swarm_validation_admission"
+path = "tests/swarm_validation_admission.rs"
 
 [[test]]
 name = "validation_planner"
@@ -297,6 +365,32 @@ path = "tests/remotecap_cli_wire_conformance.rs"
 [[test]]
 name = "remote_cap_enforcement"
 path = "tests/remote_cap_enforcement.rs"
+
+[[test]]
+name = "remote_cap_revocation_durability"
+path = "tests/remote_cap_revocation_durability.rs"
+
+[[test]]
+name = "trust_zone_cross_zone_isolation"
+path = "tests/trust_zone_cross_zone_isolation.rs"
+
+# bd-kpjrz: this harness carries 9 `#[test]` fns over the public
+# `control_plane::control_epoch` surface — including MAC verification of a
+# round-tripped `EpochTransition`, which is exactly the authenticity property
+# that bead fixed — but it had no Cargo registration, so none of them ran. The
+# .G2 census had it in the allowlisted `[fuzz]` bucket rather than flagged.
+[[test]]
+name = "epoch_transitions_fuzz_harness"
+path = "tests/epoch_transitions_fuzz_harness.rs"
+
+# bd-4sh1w: tests/conformance/sandbox_profile_conformance.rs had NO Cargo
+# registration and no crate-local `#[path]` shim, so nothing ever ran it — it sat
+# outside both the .G1 and .G2 orphan censuses because those scan
+# crates/franken-node/tests/, not the workspace-root tree. Registering it here so
+# the sandbox profile direction gates are actually enforced by `cargo test`.
+[[test]]
+name = "sandbox_profile_conformance"
+path = "../../tests/conformance/sandbox_profile_conformance.rs"
 
 [[test]]
 name = "remote_capability_gate_fuzz_regression"
@@ -452,6 +546,11 @@ path = "../../tests/conformance/idempotency_key_derivation.rs"
 required-features = ["extended-surfaces"]
 
 [[test]]
+name = "remote_idempotency_store_conformance"
+path = "tests/remote_idempotency_store_conformance.rs"
+required-features = ["remote-ops"]
+
+[[test]]
 name = "isolation_rail_router_conformance"
 path = "../../tests/conformance/isolation_rail_router_conformance.rs"
 required-features = ["advanced-features"]
@@ -603,6 +702,11 @@ path = "tests/policy_evidence_linkage_conformance.rs"
 required-features = ["policy-engine"]
 
 [[test]]
+name = "bd_2igi_bayesian_diagnostics_conformance"
+path = "../../tests/conformance/bd_2igi_bayesian_diagnostics_conformance.rs"
+required-features = ["policy-engine"]
+
+[[test]]
 name = "control_policy_evidence_required"
 path = "../../tests/conformance/control_policy_evidence_required.rs"
 
@@ -642,6 +746,18 @@ path = "tests/storage_metamorphic.rs"
 [[test]]
 name = "cas_effect_receipt_conformance"
 path = "tests/cas_effect_receipt_conformance.rs"
+
+# bd-f5b04.2.1.2 (TNR keystone): lockstep-oracle compat conformance harness
+[[test]]
+name = "compat_lockstep_oracle_conformance"
+path = "tests/compat_lockstep_oracle_conformance.rs"
+required-features = ["control-plane"]
+
+# bd-f5b04.2.1.3 (TNR keystone): compat-API parity conformance + golden + proptest
+[[test]]
+name = "compat_api_parity_conformance"
+path = "../../tests/conformance/compat_api_parity_conformance.rs"
+required-features = ["control-plane"]
 
 [[test]]
 name = "control_lane_mapping_policy"
@@ -767,6 +883,10 @@ path = "tests/project_scanner.rs"
 [[test]]
 name = "module_resolution_graph"
 path = "tests/module_resolution_graph.rs"
+
+[[test]]
+name = "resolution_receipt"
+path = "tests/resolution_receipt.rs"
 
 [[test]]
 name = "rewrite_suggestion_engine"
@@ -940,6 +1060,7 @@ path = "../../tests/security/dgis_adversarial_suite.rs"
 [[test]]
 name = "bayesian_risk_quarantine"
 path = "tests/bayesian_risk_quarantine.rs"
+required-features = ["policy-engine"]
 
 [[test]]
 name = "fleet_quarantine_metamorphic"
@@ -1093,6 +1214,11 @@ path = "tests/engine_dispatcher_profile_conformance.rs"
 required-features = ["engine"]
 
 [[test]]
+name = "ssrf_gated_host_io_egress"
+path = "tests/ssrf_gated_host_io_egress.rs"
+required-features = ["engine"]
+
+[[test]]
 name = "replay_bundle_event_reorder_metamorphic"
 path = "tests/replay_bundle_event_reorder_metamorphic.rs"
 
@@ -1151,8 +1277,18 @@ name = "e2e_audience_token_chain_lifecycle"
 path = "tests/e2e_audience_token_chain_lifecycle.rs"
 
 [[test]]
+name = "mcp_control_surface_contract"
+path = "tests/mcp_control_surface_contract.rs"
+required-features = ["control-plane"]
+
+[[test]]
 name = "e2e_mmr_proofs_lifecycle"
 path = "tests/e2e_mmr_proofs_lifecycle.rs"
+
+[[test]]
+name = "mmr_proof_verification_conformance"
+path = "../../tests/conformance/mmr_proof_verification_conformance.rs"
+harness = false
 
 [[test]]
 name = "e2e_evidence_replay_gate_lifecycle"
@@ -1454,3 +1590,350 @@ required-features = ["advanced-features"]
 [[test]]
 name = "ambient_authority_gate"
 path = "tests/ambient_authority_gate.rs"
+
+# bd-rjc2m .C* re-registration: restore de-registered default-lane metamorphic
+# coverage holes surfaced by the .G2 orphan census (bd-romfp). Self-validating
+# (no golden/snapshot fixtures), default features, correct crate name. Verified
+# to compile AND run green via rch before registration.
+[[test]]
+name = "connector_reconcile_idempotence_metamorphic"
+path = "tests/connector_reconcile_idempotence_metamorphic.rs"
+
+[[test]]
+name = "trust_card_field_reorder_metamorphic"
+path = "tests/trust_card_field_reorder_metamorphic.rs"
+
+# bd-rjc2m .C* re-registration BATCH 1 (CrimsonCrane 2026-07-01): crate-local
+# orphaned conformance/contract tests surfaced by the .G2 orphan census
+# (bd-romfp). Pure-assertion (no golden/snapshot fixtures), ungated modules
+# (default features). Each verified to COMPILE + RUN green via rch before this
+# registration was committed. Preserves all MUST/SHOULD assertions.
+[[test]]
+name = "bd_1m8r_revocation_freshness_gate_conformance"
+path = "tests/bd_1m8r_revocation_freshness_gate_conformance.rs"
+
+[[test]]
+name = "challenge_response_conformance"
+path = "tests/challenge_response_conformance.rs"
+
+[[test]]
+name = "runtime_checkpoint_conformance"
+path = "tests/runtime_checkpoint_conformance.rs"
+
+[[test]]
+name = "state_migration_contract"
+path = "tests/state_migration_contract.rs"
+
+# bd-rjc2m .C5 BATCH 2 (policy cluster): crate-local orphans importing the
+# policy-engine-gated `policy` module. required-features gates them off the
+# plain default lane (they run under --features policy-engine). Verified to
+# compile + RUN green via rch before registration.
+[[test]]
+name = "bd_sddz_correctness_envelope_conformance"
+path = "tests/bd_sddz_correctness_envelope_conformance.rs"
+required-features = ["policy-engine"]
+
+[[test]]
+name = "bd_1daz_retroactive_hardening_conformance"
+path = "tests/bd_1daz_retroactive_hardening_conformance.rs"
+required-features = ["policy-engine"]
+
+[[test]]
+name = "bd_sh3_approval_workflow_conformance"
+path = "tests/bd_sh3_approval_workflow_conformance.rs"
+required-features = ["policy-engine"]
+
+# bd-rjc2m .C5 BATCH 3 (trust-card cluster, bd-dnv23): ungated supply_chain
+# conformance reconciled to the redesigned ProvenanceSummary/RiskAssessment/
+# EvidenceType shapes. Verified to compile + RUN green via rch before registration.
+[[test]]
+name = "trust_card_extension_id_length_boundary_conformance"
+path = "tests/trust_card_extension_id_length_boundary_conformance.rs"
+
+[[test]]
+name = "trust_card_admission_conformance"
+path = "tests/trust_card_admission_conformance.rs"
+
+# bd-rjc2m .C5 BATCH 4 (bd-d5wo9): re-registered crate-local orphan tests that
+# were verified to COMPILE + RUN green via rch under the default lane. Targets
+# that failed verification (deep API drift or stale goldens) are NOT registered
+# here and are tracked on dedicated child beads of bd-d5wo9 (see below), so the
+# default `cargo test` lane stays green:
+#   deep-drift  -> metamorphic_supply_chain=bd-s9rbi, security_remote_cap_validation=bd-t4z0w,
+#                  golden_remote_api_connector_vef=bd-08com, engine_dispatcher_profile_golden=bd-9kyqf,
+#                  golden_artifacts_comprehensive=bd-h4kkw, connector_lifecycle_conformance_matrix=bd-6cdbp,
+#                  decision_receipt_golden_vectors=bd-qtciw, deterministic_seed_metamorphic=bd-ijb98,
+#                  golden_security_serialization=bd-d8nel, lane_scheduler_golden_artifacts=bd-pa692
+#   stale-golden -> runtime_lane_golden_artifacts=bd-yozhq, trust_card_cross_version=bd-tb7e3,
+#                   supply_chain_attestation_manifest_golden=bd-nb0i6,
+#                   decision_receipt_signed_golden_conformance=bd-8uv6i (prod added crypto_suite field)
+#   cli-drift    -> incident_replay_counterfactual_cli_e2e=bd-1qq5m (asserts incident replay --json/--verbose)
+#   verified-RED under test-support(,policy-engine) — compile+run but assertions fail (session 2026-07-02):
+#                  migrate_validate_goldens=bd-di42u (risky=STALE GOLDEN: prod added check mig-validate-005
+#                    "runtime smoke test skipped..." -> re-bless; hardened=`migrate validate` now exits 1 on the fixture),
+#                  doctor_policy_activation_e2e=bd-86wc3 (14/19 "failed resolving configuration for doctor" + 5 downstream)
+#   (migrate_audit_goldens=bd-9buhn was in this list but is now FIXED + re-registered green — see block below)
+[[test]]
+name = "security_adversary_graph_conformance"
+path = "tests/security_adversary_graph_conformance.rs"
+
+[[test]]
+name = "supply_chain_registry_attestation_receipt_conformance"
+path = "tests/supply_chain_registry_attestation_receipt_conformance.rs"
+
+[[test]]
+name = "frankensqlite_conformance_harness"
+path = "tests/frankensqlite_conformance_harness.rs"
+
+# bd-9buhn CLOSED (session 2026-07-02): re-registered VERIFIED-GREEN (2/2) after
+# fixing the over-greedy path scrubber in tests/migrate_golden_helpers.rs (it was
+# rewriting prose like "install/build" -> "install[PATH]"). No re-bless needed.
+# Verified via `cargo test -p frankenengine-node --no-default-features
+# --features test-support,http-client,external-commands --test migrate_audit_goldens`
+# (rch workers offline -> local no-engine build; migrate audit is static JS analysis,
+# engine-independent). required-features=[test-support] => skipped in the default lane.
+[[test]]
+name = "migrate_audit_goldens"
+path = "tests/migrate_audit_goldens.rs"
+required-features = ["test-support"]
+
+# bd-d5wo9 .C5 BATCH 5 (session 2026-07-02): engine-independent orphans triaged via
+# no-engine build (rch workers offline): `cargo test -p frankenengine-node
+# --no-default-features --features test-support,extended-surfaces,http-client,external-commands
+# --test <name>`. Only the 6 VERIFIED-GREEN below are registered. The 16 that still fail
+# (compile drift or runtime/semantic drift) stay UN-registered with compile-progress kept
+# in-tree and precise findings on their child beads of bd-d5wo9:
+#   metamorphic_canonical_serializer=bd-x3mjo (strict-schema "unknown field" 12f);
+#   decision_receipt_golden_vectors=bd-qtciw (append_framed private); decision_receipt_signed=bd-8uv6i
+#   (crypto_suite signed-golden); metamorphic_supply_chain=bd-s9rbi (trust_card redesign fixed,
+#   2 append-only MR-semantics fails); trust_card_cross_version=bd-tb7e3 (CardHashMismatch + 2 snaps);
+#   security_remote_cap_validation=bd-t4z0w (compile fixed, 3 operator-auth runtime); bd_15u3 (deeper
+#   guardrail_monitor import drift); bd_91gg=bd-l6xn8 (compliance 85%<95%); runtime_lane_scheduler=bd-idt0o
+#   (cap/queue); storage_crash=bd-hlpwm (ReadResult/AdapterError fixed, 3 append-only/crash-recovery);
+#   connector_lifecycle_matrix=bd-6cdbp (ProtocolNegotiationResult redesign); golden_artifacts_comprehensive
+#   (included-file supply_chain::artifact_signing drift); golden_remote_api_connector_vef=bd-08com
+#   (VerificationContext removed from prod); runtime_lane_golden=bd-yozhq (4 snaps); incident_replay=bd-1qq5m
+#   (CLI drift); doctor_policy_activation_e2e=bd-86wc3 (config resolution). engine-dependent
+#   engine_dispatcher_profile_golden + supply_chain_attestation_manifest_golden await rch recovery.
+[[test]]
+name = "golden_security_serialization"
+path = "tests/golden_security_serialization.rs"
+required-features = ["verifier-tools"]
+
+[[test]]
+name = "deterministic_seed_metamorphic"
+path = "tests/deterministic_seed_metamorphic.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "bd_1zym_hardening_auto_trigger_conformance"
+path = "tests/bd_1zym_hardening_auto_trigger_conformance.rs"
+required-features = ["policy-engine"]
+
+[[test]]
+name = "lane_scheduler_golden_artifacts"
+path = "tests/lane_scheduler_golden_artifacts.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "vef_degraded_mode_metamorphic"
+path = "tests/vef_degraded_mode_metamorphic.rs"
+required-features = ["advanced-features"]
+
+[[test]]
+name = "migrate_validate_goldens"
+path = "tests/migrate_validate_goldens.rs"
+required-features = ["test-support"]
+
+# bd-86wc3: doctor_policy_activation_e2e stays UN-registered. Its primary root
+# cause — `doctor` aborting with "failed resolving configuration" on any workspace
+# that had not run `franken-node init` — is FIXED in prod (main.rs now uses the
+# lenient resolve_without_validation_with_env; doctor is a read-only diagnostic).
+# But the file has THREE further independent failures, so it is not green: (A)
+# debug_trace `--policy <abs temp path>` is rejected by the content-path guard
+# ("Absolute paths not allowed for user content") — real prod-vs-test conflict;
+# (B) overall_status=fail is driven by LIVE environmental checks DR-WORKSPACE-001
+# (workspace pressure CRITICAL under the concurrent build swarm + rch offline) and
+# DR-BENCH-015 (benchmark thresholds) — passes only on an idle machine; (C) the
+# pass-report snapshot needs a clean-machine re-bless for new merge_decisions /
+# merge_decision_count fields. Register once (A)-(C) resolve. See bd-86wc3.
+
+# bd-d5wo9 .C5 BATCH 6 (session 2026-07-02): re-bless cluster — deterministic
+# goldens where prod output legitimately drifted (benign field additions /
+# ordering). Diff-reviewed then accepted; verified green under the no-engine build.
+[[test]]
+name = "decision_receipt_signed_golden_conformance"
+path = "tests/decision_receipt_signed_golden_conformance.rs"
+required-features = ["extended-surfaces"]
+
+# bd_15u3_decision_engine_conformance (bd-2pbtu): re-registered (session 2026-07-02).
+# Was RUNTIME-RED because mock_monitor_set_with_violations() was a no-op stub that
+# returned the default (non-blocking) monitor set, so system-level-blocking cases
+# (BD15U3-SYSTEM-BLOCK-001, BD15U3-MIXED-BLOCK-001) never saw a block. Fixed by
+# implementing the mock as an AlwaysBlockMonitor test double that honors its
+# violations arg (registers real Block-verdict monitors), so DecisionEngine::decide
+# blocks all candidates with the requested guardrail ids. required-features=[policy-engine].
+[[test]]
+name = "bd_15u3_decision_engine_conformance"
+path = "tests/bd_15u3_decision_engine_conformance.rs"
+required-features = ["policy-engine"]
+
+# --- batch-6 runtime-semantic capture wave (registered locally to capture failures;
+#     only the ones that verify GREEN are kept) ---
+[[test]]
+name = "metamorphic_supply_chain"
+path = "tests/metamorphic_supply_chain.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "storage_crash_recovery_persistence_conformance"
+path = "tests/storage_crash_recovery_persistence_conformance.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "security_remote_cap_validation_conformance"
+path = "tests/security_remote_cap_validation_conformance.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "runtime_lane_scheduler_conformance"
+path = "tests/runtime_lane_scheduler_conformance.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "bd_91gg_repair_controller_conformance"
+path = "tests/bd_91gg_repair_controller_conformance.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "metamorphic_canonical_serializer"
+path = "tests/metamorphic_canonical_serializer.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "incident_replay_counterfactual_cli_e2e"
+path = "tests/incident_replay_counterfactual_cli_e2e.rs"
+required-features = ["extended-surfaces"]
+
+# golden_artifacts_comprehensive (bd-h4kkw/bd-ossc4): the golden/ submodules now
+# compile, but the top-level file is still blocked by its #[path]-included
+# adjacent_claim_language_gate.rs (bd-ossc4), which does not export
+# ClaimLanguageGate/Claim/ClaimCategory/ClaimStatus/ClaimGateEvent/ClaimGateSummary
+# (E0432 — that file has its own supply_chain::artifact_signing drift). AND its
+# goldens do not exist yet (need UPDATE_GOLDENS bootstrap + review). Deferred.
+
+[[test]]
+name = "decision_receipt_golden_vectors_conformance"
+path = "tests/decision_receipt_golden_vectors_conformance.rs"
+required-features = ["extended-surfaces"]
+
+# trust_card_cross_version_conformance (bd-tb7e3): re-registered (session 2026-07-02).
+# Prod now signs schema_version (schema-downgrade defense), so the old test premise
+# (post-signing schema override, then expect it to verify) is no longer valid. Fixed
+# by exposing a public re-sign seam (supply_chain::trust_card::sign_card_in_place) so
+# create_card_with_schema produces a GENUINELY signed card at each schema, routing the
+# forward-incompat rejection through the real from_snapshot registry-schema gate, and
+# adding schema_downgrade_tamper_is_rejected to keep the tamper-rejection coverage.
+# insta snapshots re-blessed after review. required-features=[extended-surfaces].
+[[test]]
+name = "trust_card_cross_version_conformance"
+path = "tests/trust_card_cross_version_conformance.rs"
+required-features = ["extended-surfaces"]
+
+[[test]]
+name = "runtime_lane_golden_artifacts"
+path = "tests/runtime_lane_golden_artifacts.rs"
+required-features = ["extended-surfaces"]
+
+# connector_lifecycle_conformance_matrix (bd-6cdbp): re-registered (session 2026-07-02).
+# Only imports the ungated connector::{frame_parser,lifecycle} modules, so no
+# required-features (runs in the default lane). Runtime drift fixed: (1) the
+# old_connector_new_host scenario now expects NegotiatedCompatibility (a legacy
+# connector legitimately lacks the bd-1cs7 Cancelling state -> 0.9459, backward-compat
+# negotiation, not full); (2) the self-contradictory session-negotiation assert (v0.9.0
+# vs v1.0.0 straddles a major boundary -> INCOMPATIBLE) was moved to the major-mismatch
+# test and replaced with a same-major FUTURE->CURRENT case; (3) 5 insta snapshots
+# bootstrapped + reviewed.
+[[test]]
+name = "connector_lifecycle_conformance_matrix"
+path = "tests/connector_lifecycle_conformance_matrix.rs"
+
+# supply_chain_attestation_manifest_golden (bd-nb0i6): re-registered after rch
+# remote-worker recovery (session 2026-07-02). ENGINE-DEPENDENT (imports
+# frankenengine_extension_host::Capability) => needs default features (engine). Golden
+# artifacts/golden/supply_chain_attestation_manifest.json re-blessed via UPDATE_GOLDENS
+# after diff review, verified 3/3 green under the default-features engine build on rch.
+[[test]]
+name = "supply_chain_attestation_manifest_golden"
+path = "tests/supply_chain_attestation_manifest_golden.rs"
+
+# engine_dispatcher_profile_golden (bd-9kyqf): re-registered (session 2026-07-02).
+# franken-engine's execution_orchestrator::OrchestratorConfig dropped its Serialize
+# derive (engine-boundary decision), so the golden now serializes a franken_node-side
+# field-by-field JSON projection instead of the engine struct directly (do NOT force
+# an engine derive). Goldens tests/golden/engine_dispatcher_{strict,balanced,
+# legacy_risky}.json bootstrapped + reviewed. required-features=[engine] (the test
+# calls the #[cfg(feature="engine")] map_config_to_orchestrator_config_for_tests helper).
+[[test]]
+name = "engine_dispatcher_profile_golden"
+path = "tests/engine_dispatcher_profile_golden.rs"
+required-features = ["engine"]
+
+# golden_remote_api_connector_vef (bd-08com): re-registered (session 2026-07-02).
+# Golden serialization suite for remote_cap / frame_parser / vef receipt-chain
+# canonical forms (3 #[path] submodules under tests/golden/). All imported modules
+# (security::remote_cap, connector::frame_parser, connector::vef_execution_receipt,
+# vef::receipt_chain) live in the default surface, so no required-features. Fixed
+# submodule drift: ExecutionActionType enum was redesigned (old policy/trust
+# variants -> host-action variants; test now iterates ExecutionActionType::all()),
+# ChainError constructors went private (build the public struct from error_codes/
+# event_codes consts), FrameInput/ParserConfig lost Serialize (hand-build json!),
+# and VerificationContext/ReceiptOperationType were removed (dropped the dead
+# VerificationContext golden + unused imports).
+[[test]]
+name = "golden_remote_api_connector_vef"
+path = "tests/golden_remote_api_connector_vef.rs"
+
+# golden_artifacts_comprehensive (bd-ossc4): re-registered (session 2026-07-02).
+# Golden serialization suite for supply_chain trust-card / registry / claims
+# canonical forms. required-features=[advanced-features] because the claims path
+# (claims_golden_tests -> tests/conformance/adjacent_claim_language_gate.rs, wired
+# via the tests/adjacent_claim_language_gate.rs #[path] shim) pulls in the
+# advanced-features-gated `claims` surface. The only compile breaker was the shim
+# nesting the conformance types a private module level too deep — fixed by a
+# `pub use` re-export in the shim; trust_card/registry/conformance had no prod
+# drift (only unused-import cleanup). Shares tests/golden/mod.rs (+ incident /
+# canonical submodules) with golden_remote_api_connector_vef.
+[[test]]
+name = "golden_artifacts_comprehensive"
+path = "tests/golden_artifacts_comprehensive.rs"
+required-features = ["advanced-features", "test-support"]
+
+# doctor_policy_activation_e2e (bd-86wc3): re-registered verified-green
+# (session 2026-07-03). Live CLI e2e for the `doctor` diagnostic + policy-
+# activation telemetry. `doctor` is a core (ungated) command, so no required-
+# features. Four historical failure families were resolved:
+#   0. config resolution: fixed in prod at main.rs:27497 (resolve_without_
+#      validation_with_env, mirrors the bd-3c2ie receipt-export probe) so the
+#      read-only diagnostic runs on workspaces without a prior `franken-node init`.
+#   A. debug-trace path guard: `debug trace --policy/--input` reject absolute
+#      paths (parse_safe_content_pathbuf); tests now run the binary with CWD
+#      pinned to the tempdir and pass workspace-relative names (guard unchanged).
+#   B/C. env-sensitive doctor checks (DR-WORKSPACE-001/DR-BENCH-015/DR-RESOURCE-
+#      GOVERNOR-014) flap under the concurrent build swarm; the policy-activation
+#      asserts and the golden canonicalizer now fold those out (ENV_SENSITIVE_SCOPES).
+# The env var FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT is not a prod input
+# channel (bd-lmbt0); its tests assert that inert contract.
+[[test]]
+name = "doctor_policy_activation_e2e"
+path = "tests/doctor_policy_activation_e2e.rs"
+
+# compat_corpus_run_e2e (bd-kfseq): genuine compatibility-corpus lockstep
+# runner. Pure contract tests (manifest discovery fail-closed validation,
+# results-document digest binding / honest gate evaluation / ratchet
+# semantics) plus a mock-free CLI e2e that runs a tiny corpus across a real
+# bun reference leg and the native engine leg (skips itself when bun is not
+# on PATH). No required-features: the e2e self-gates on `engine` via cfg.
+[[test]]
+name = "compat_corpus_run_e2e"
+path = "tests/compat_corpus_run_e2e.rs"

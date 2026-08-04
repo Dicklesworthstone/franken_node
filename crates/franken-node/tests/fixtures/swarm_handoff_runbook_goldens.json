@@ -54,6 +54,28 @@
             "blocker_summary": null
           },
           {
+            "bead_id": "bd-proof-wait",
+            "title": "Live proof lease",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
+            "bead_id": "bd-proof-ready",
+            "title": "Stale proof lease handoff",
+            "status": "in_progress",
+            "assignee": "StaleAgent",
+            "updated_at": "1970-01-01T00:01:00Z",
+            "last_comment_at": null,
+            "dependency_ids": [],
+            "dependent_ids": [],
+            "blocker_summary": null
+          },
+          {
             "bead_id": "bd-contested",
             "title": "Self reservation still active",
             "status": "in_progress",
@@ -157,6 +179,34 @@
             "blocker_bead_id": "bd-rch-wait"
           }
         ],
+        "validation_proof_leases": [
+          {
+            "lease_id": "lease-bd-proof-wait",
+            "project_key": "/data/projects/franken_node",
+            "owner_agent": "StaleAgent",
+            "owner_bead_id": "bd-proof-wait",
+            "state": "running",
+            "proof_work_key": "proof-work-key-bd-proof-wait",
+            "command_digest": "sha256:bd-proof-wait",
+            "lease_path": "artifacts/validation-proof-leases/bd-proof-wait.json",
+            "updated_at": "1970-01-01T00:01:39Z",
+            "expires_at": "1970-01-01T00:02:40Z",
+            "waiter_agents": []
+          },
+          {
+            "lease_id": "lease-bd-proof-ready",
+            "project_key": "/data/projects/franken_node",
+            "owner_agent": "StaleAgent",
+            "owner_bead_id": "bd-proof-ready",
+            "state": "stale",
+            "proof_work_key": "proof-work-key-bd-proof-ready",
+            "command_digest": "sha256:bd-proof-ready",
+            "lease_path": "artifacts/validation-proof-leases/bd-proof-ready.json",
+            "updated_at": "1970-01-01T00:00:20Z",
+            "expires_at": "1970-01-01T00:01:20Z",
+            "waiter_agents": []
+          }
+        ],
         "git_activity_summary": [
           {
             "project_key": "/data/projects/franken_node",
@@ -223,12 +273,30 @@
             "evidence_pointer_contains": "rch:rch-bd-rch-wait"
           },
           {
+            "bead_id": "bd-proof-wait",
+            "agent": "StaleAgent",
+            "reservation_holder": null,
+            "decision_code": "waiting_on_proof_lease",
+            "required_action_contains": "live validation proof lease",
+            "must_not_do": "Do not steal, fence, or reopen around a fresh validation proof lease.",
+            "evidence_pointer_contains": "proof_lease:StaleAgent:bd-proof-wait"
+          },
+          {
+            "bead_id": "bd-proof-ready",
+            "agent": "StaleAgent",
+            "reservation_holder": null,
+            "decision_code": "ready_to_reopen",
+            "required_action_contains": "validation proof lease is stale or expired",
+            "must_not_do": "Do not delete files, override reservations, or skip the explicit reopen command.",
+            "evidence_pointer_contains": "proof_lease:StaleAgent:bd-proof-ready"
+          },
+          {
             "bead_id": "bd-contested",
             "agent": "StaleAgent",
             "reservation_holder": "StaleAgent",
             "decision_code": "stale_but_contested",
             "required_action_contains": "still holds an active reservation",
-            "must_not_do": "Do not override the active reservation without an acknowledgement from the holder.",
+            "must_not_do": "Do not override active reservation or proof-lease evidence without an acknowledgement from the holder.",
             "evidence_pointer_contains": "reservation:StaleAgent"
           },
           {
@@ -285,6 +353,22 @@
           },
           {
             "sequence": 5,
+            "bead_id": "bd-proof-wait",
+            "decision_code": "waiting_on_proof_lease",
+            "no_files_deleted": true,
+            "reservations_overridden": false,
+            "evidence_pointer_contains": "proof_lease:StaleAgent:bd-proof-wait"
+          },
+          {
+            "sequence": 6,
+            "bead_id": "bd-proof-ready",
+            "decision_code": "ready_to_reopen",
+            "no_files_deleted": true,
+            "reservations_overridden": false,
+            "evidence_pointer_contains": "proof_lease:StaleAgent:bd-proof-ready"
+          },
+          {
+            "sequence": 7,
             "bead_id": "bd-contested",
             "decision_code": "stale_but_contested",
             "no_files_deleted": true,
@@ -292,7 +376,7 @@
             "evidence_pointer_contains": "reservation:StaleAgent"
           },
           {
-            "sequence": 6,
+            "sequence": 8,
             "bead_id": "bd-abandoned",
             "decision_code": "abandoned",
             "no_files_deleted": true,
@@ -300,7 +384,7 @@
             "evidence_pointer_contains": "issue:bd-abandoned"
           },
           {
-            "sequence": 7,
+            "sequence": 9,
             "bead_id": "bd-ready",
             "decision_code": "ready_to_reopen",
             "no_files_deleted": true,

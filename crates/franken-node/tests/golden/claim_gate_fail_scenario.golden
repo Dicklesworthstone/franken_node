@@ -1,0 +1,31 @@
+{
+  "bead_id": "bd-2ji2",
+  "section": "10.16",
+  "gate_verdict": "FAIL",
+  "summary": {
+    "total_claims": 2,
+    "linked": 0,
+    "unlinked": 1,
+    "broken_links": 1
+  },
+  "claims": [
+    {
+      "file": "docs/tui.md",
+      "line": 30,
+      "claim_text": "TUI supports keyboard navigation",
+      "category": "Tui",
+      "linked_artifact": null,
+      "artifact_exists": false,
+      "status": "Unlinked"
+    },
+    {
+      "file": "docs/model.md",
+      "line": 40,
+      "claim_text": "Model supports concurrent access",
+      "category": "Model",
+      "linked_artifact": "artifacts/10.16/nonexistent.json",
+      "artifact_exists": false,
+      "status": "BrokenLink"
+    }
+  ]
+}

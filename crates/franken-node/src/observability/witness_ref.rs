@@ -673,6 +673,7 @@ mod tests {
             payload: serde_json::json!({}),
             size_bytes: 0,
             signature: String::new(),
+            prev_entry_hash: String::new(),
         }
     }
 
@@ -1423,13 +1424,23 @@ mod tests {
         fn strict_mode_rejects_whitespace_only_locator() {
             let entry = make_entry(DecisionKind::Quarantine);
             let witnesses = locator_set(&[("WIT-A", WitnessKind::Telemetry, " \t\n ")]);
+            // bd-o776s: a whitespace-only locator is now rejected at add-time by
+            // is_valid_witness_structure (strict_replay_bundle_locator_is_safe
+            // fails its trim/non-empty check), so the witness is dropped before
+            // it can consume capacity. The resulting empty high-impact set then
+            // fails closed as MissingWitnesses — the rejection still happens,
+            // one layer earlier than the strict locator check.
+            assert!(
+                witnesses.is_empty(),
+                "whitespace locator must drop the witness"
+            );
             let mut validator = WitnessValidator::strict();
 
             let err = validator
                 .validate(&entry, &witnesses)
-                .expect_err("whitespace locator should be unresolvable");
+                .expect_err("whitespace locator should be rejected (witness dropped)");
 
-            assert_eq!(err.code(), "ERR_UNRESOLVABLE_LOCATOR");
+            assert_eq!(err.code(), "ERR_MISSING_WITNESSES");
             assert_eq!(validator.validated_count(), 0);
             assert_eq!(validator.rejected_count(), 1);
         }
@@ -1582,8 +1593,13 @@ mod tests {
                 WitnessRef::new("X".repeat(2000), WitnessKind::ExternalSignal, make_hash(3)),
                 // All-zero integrity hash
                 WitnessRef::new("WIT-GARBAGE-1", WitnessKind::Telemetry, [0u8; 32]),
-                // All-same-byte integrity hash
-                WitnessRef::new("WIT-GARBAGE-2", WitnessKind::StateSnapshot, [0xFF; 32]),
+                // Witness ID with forbidden characters (interior spaces).
+                // bd-o776s: a uniform *non-zero* hash like [0xFF; 32] is no
+                // longer treated as garbage (only the all-zero sentinel is — see
+                // is_valid_witness_structure / witness_set_accepts_uniform_
+                // nonzero_hashes), so this slot now exercises an invalid-ID
+                // dimension that is still rejected (strict_witness_id_is_safe).
+                WitnessRef::new("WIT GARBAGE 2", WitnessKind::StateSnapshot, make_hash(2)),
                 // Invalid locator (path traversal)
                 WitnessRef::new("WIT-GARBAGE-3", WitnessKind::ProofArtifact, make_hash(4))
                     .with_locator("../../../etc/passwd"),
@@ -1677,6 +1693,8 @@ mod tests {
         #[test]
         fn negative_witness_id_with_extreme_unicode_and_control_patterns() {
             // Test witness IDs with problematic Unicode and control character patterns
+            // Hoisted (bd-yom8c): a String cannot live in an otherwise-&str array.
+            let long_witness_id = "WIT".repeat(10000);
             let malicious_witness_patterns = [
                 "WIT\u{202E}spoofed",                         // Right-to-left override
                 "WIT\u{200B}\u{FEFF}\u{034F}",                // Zero-width/invisible chars
@@ -1685,7 +1703,7 @@ mod tests {
                 "WIT\u{FFFF}\u{10FFFF}",                      // Max Unicode codepoints
                 "\u{0301}\u{0300}WIT\u{0302}",                // Combining diacritical marks
                 "WIT\u{1D11E}\u{1D122}",                      // Musical symbols (outside BMP)
-                "WIT".repeat(10000),                          // Extremely long identifier
+                long_witness_id.as_str(),                     // Extremely long identifier
                 "",                                           // Empty witness ID
                 "WIT\"/><script>alert('xss')</script>",       // XSS injection attempt
                 "WIT\":{\"injected\":true,\"evil\":\"",       // JSON injection attempt
@@ -1694,8 +1712,8 @@ mod tests {
             ];
 
             for pattern in &malicious_witness_patterns {
-                let witness_id = WitnessId::new(pattern);
-                let witness = WitnessRef::new(pattern, WitnessKind::ExternalSignal, make_hash(42))
+                let witness_id = WitnessId::new(*pattern);
+                let witness = WitnessRef::new(*pattern, WitnessKind::ExternalSignal, make_hash(42))
                     .with_locator("test/replay.jsonl");
 
                 // Basic operations should work
@@ -1742,6 +1760,9 @@ mod tests {
         #[test]
         fn negative_replay_bundle_locator_injection_and_traversal_attacks() {
             // Test replay bundle locators with various injection and traversal attacks
+            // Hoisted (bd-yom8c): `&str + &String` does not compile and a String cannot
+            // live in an otherwise-&str array; build the long path up front.
+            let long_file_locator = format!("file://{}", "A".repeat(100000));
             let malicious_locators = [
                 "file:///../../../etc/passwd",                  // Path traversal
                 "file:///C:\\Windows\\System32\\config\\sam",   // Windows system files
@@ -1757,13 +1778,13 @@ mod tests {
                 "file:///replay.jsonl\r\nHost: evil.com",       // HTTP header injection
                 "file:///replay.jsonl#fragment<script>",        // Fragment injection
                 "file:///replay.jsonl?param=<script>alert(1)</script>", // Query injection
-                "file://" + &"A".repeat(100000),                // Extremely long path
+                long_file_locator.as_str(),                     // Extremely long path
                 "file://\u{202E}normal.jsonl\u{202D}evil.exe",  // Bidirectional text attack
             ];
 
             for malicious_locator in &malicious_locators {
                 let witness = WitnessRef::new("WIT-001", WitnessKind::ProofArtifact, make_hash(1))
-                    .with_locator(malicious_locator);
+                    .with_locator(*malicious_locator);
 
                 // Basic locator access should work
                 assert_eq!(
@@ -1862,15 +1883,27 @@ mod tests {
                     assert!(display.contains(&hex));
                 }
 
-                // Should work in witness sets and validation
+                // Should work in witness sets and validation.
                 let mut set = WitnessSet::new();
                 set.add(witness);
                 let entry = make_entry(DecisionKind::Release);
                 let validation_result = WitnessValidator::new().validate(&entry, &set);
-                assert!(
-                    validation_result.is_ok(),
-                    "validation should work with any hash pattern"
-                );
+                // bd-o776s: an all-zero integrity hash is rejected at add-time as
+                // a garbage/uninitialized sentinel (is_valid_witness_structure),
+                // so the set stays empty and a high-impact entry fails closed.
+                // Every other (non-zero) collision-simulation pattern is accepted
+                // and validates.
+                if *test_hash == [0u8; 32] {
+                    assert!(
+                        validation_result.is_err(),
+                        "all-zero hash must be rejected as garbage, leaving an empty high-impact set"
+                    );
+                } else {
+                    assert!(
+                        validation_result.is_ok(),
+                        "validation should work with any non-zero hash pattern"
+                    );
+                }
             }
         }
 
@@ -2024,7 +2057,7 @@ mod tests {
                     mixed_set.add(WitnessRef::new(
                         format!("MIXED-{:02}-{}", i, kind.label()),
                         *kind,
-                        make_hash(((i as u8) ^ (kind.label().as_bytes()[0])) % 256),
+                        make_hash((i as u8) ^ (kind.label().as_bytes()[0])),
                     ));
                 }
                 entries_with_witnesses.push((make_entry(DecisionKind::Escalate), mixed_set));
@@ -2259,16 +2292,26 @@ mod tests {
                     assert_eq!(witness.witness_kind, kind);
                     assert_eq!(witness.witness_id.as_str(), extreme_id);
 
-                    // Should work in witness sets
+                    // bd-o776s: every one of these extreme IDs (empty,
+                    // over-length, raw control bytes, non-ASCII) is rejected by
+                    // is_valid_witness_structure, so WitnessSet::add drops it
+                    // before it can consume capacity. This negative-path test now
+                    // asserts that rejection rather than acceptance.
                     let mut set = WitnessSet::new();
                     set.add(witness);
-                    assert_eq!(set.len(), 1);
+                    assert_eq!(
+                        set.len(),
+                        0,
+                        "extreme witness id must be rejected: {:?}",
+                        extreme_id
+                    );
+                    assert!(set.is_empty());
                     assert!(!set.has_duplicates());
 
-                    // Should work in coverage audit
+                    // A dropped witness contributes nothing to the coverage audit.
                     let entries = vec![(make_entry(DecisionKind::Escalate), set)];
                     let audit = WitnessValidator::coverage_audit(&entries);
-                    assert_eq!(audit.witness_kind_counts.get(label), Some(&1));
+                    assert_eq!(audit.witness_kind_counts.get(label), None);
                 }
             }
 
@@ -2416,8 +2459,12 @@ mod tests {
                 "[A-Z]+[0-9]+",
                 // Missing separators
                 "[A-Z]{6}[0-9]{3}",
-                // Special characters
-                "[A-Z]+-@#$%-[0-9]+",
+                // Special characters. bd-o776s: the bare `$` here is parsed by
+                // proptest-1.11 as an end-of-text anchor, which it cannot use
+                // for string GENERATION ("anchors/boundaries not supported").
+                // Escape it to a literal `$` so the strategy generates while
+                // still exercising special-character content.
+                "[A-Z]+-@#\\$%-[0-9]+",
             ]
             .prop_map(|pattern| match pattern.chars().next().unwrap_or(' ') {
                 ' ' => "   ".to_string(),
@@ -2506,14 +2553,24 @@ mod tests {
                     }
                 }
 
+                // Two codes that share only a prefix and a numeric suffix but
+                // differ in their domain segment (e.g. EVD-WITNESS-003 vs
+                // EVD-VIOLATION-003) are legitimately distinct codes in
+                // different domains — uniqueness is over the FULL code, not the
+                // (prefix, suffix) pair. Flag only genuinely byte-identical
+                // codes landing in the same bucket. (bd-o776s: reconciled to
+                // prod's full-code uniqueness guarantee; the old (prefix,suffix)
+                // key over-rejected prod's domain-namespaced codes.)
                 for ((prefix, suffix), codes) in prefix_suffix_map {
-                    if codes.len() > 1 {
-                        prop_assert!(
-                            codes.len() <= 1,
-                            "Found potential namespace collision for prefix '{}' suffix '{}': {:?}",
-                            prefix, suffix, codes
-                        );
-                    }
+                    let mut distinct = codes.clone();
+                    distinct.sort_unstable();
+                    distinct.dedup();
+                    prop_assert_eq!(
+                        codes.len(),
+                        distinct.len(),
+                        "Found duplicate event code sharing prefix '{}' suffix '{}': {:?}",
+                        prefix, suffix, codes
+                    );
                 }
             }
         }
@@ -2652,7 +2709,7 @@ mod tests {
                 sorted_suffixes.sort();
 
                 prop_assert_eq!(
-                    suffixes, sorted_suffixes,
+                    &suffixes, &sorted_suffixes,
                     "Witness codes should be defined in sequential order: {:?}",
                     suffixes
                 );
@@ -2678,13 +2735,19 @@ mod tests {
 
             // Check basic patterns
             if code.starts_with("EVD-") {
-                // EVD-{DOMAIN}-{NUMBER}
+                // EVD-{DOMAIN}-{NNN}; the DOMAIN segment may itself contain '-'
+                // (e.g. EVD-ADV-GRAPH-001 from security/adversary_graph.rs), so
+                // accept 3+ parts: first is "EVD", the last is a 3-digit number,
+                // and every middle segment is non-empty uppercase-alphabetic.
+                // (bd-o776s: reconciled to prod's multi-segment domain codes.)
                 let parts: Vec<&str> = code.split('-').collect();
-                parts.len() == 3
+                parts.len() >= 3
                     && parts[0] == "EVD"
-                    && parts[1].chars().all(|c| c.is_ascii_uppercase())
-                    && parts[2].chars().all(|c| c.is_ascii_digit())
-                    && parts[2].len() == 3
+                    && parts[parts.len() - 1].len() == 3
+                    && parts[parts.len() - 1].chars().all(|c| c.is_ascii_digit())
+                    && parts[1..parts.len() - 1]
+                        .iter()
+                        .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_uppercase()))
             } else if code.starts_with("STAKE-") {
                 // STAKE-{NUMBER}
                 let parts: Vec<&str> = code.split('-').collect();

@@ -20,14 +20,22 @@ fn rust_dashboard_generates_schema_backed_views_from_corpus_report() -> TestResu
     let live_timestamp_dashboard = build_dashboard(&fixtures, &[])?;
     let dashboard = dashboard_from_corpus_report(&report, &[], TS)?;
     let json = to_json_value(&dashboard)?;
+    let expected_passing = report
+        .pointer("/totals/passed_test_cases")
+        .and_then(Value::as_u64)
+        .ok_or("corpus report must declare totals.passed_test_cases")?;
+    let expected_failing = report
+        .pointer("/totals/failed_test_cases")
+        .and_then(Value::as_u64)
+        .ok_or("corpus report must declare totals.failed_test_cases")?;
 
     assert_eq!(DASHBOARD_EVENT_CODE, "DASH-RUST-001");
     assert_eq!(live_timestamp_dashboard.schema_version, "1.0");
     assert_eq!(dashboard.schema_version, "1.0");
     assert_eq!(dashboard.overall.total_behaviors, 560);
     assert_eq!(dashboard.overall.tested, 560);
-    assert_eq!(dashboard.overall.passing, 553);
-    assert_eq!(dashboard.overall.failing, 7);
+    assert_eq!(dashboard.overall.passing, expected_passing);
+    assert_eq!(dashboard.overall.failing, expected_failing);
     assert_eq!(
         json.get("schema_version").and_then(Value::as_str),
         Some("1.0")

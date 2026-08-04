@@ -8,11 +8,15 @@
 use std::fmt;
 
 use ed25519_dalek::VerifyingKey;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use subtle::ConstantTimeEq;
 
-use crate::bundle::{BundleError, verify_ed25519_signature};
+use crate::bundle::{
+    BundleError, CapabilityPolicyProfile, CapabilityPostcondition, CapabilityProof,
+    CapabilityRevocationFreshness, CapabilityScope, EffectKind, verify_capability_proof_schema,
+    verify_ed25519_signature,
+};
 
 /// Errors returned while verifying signed counterfactual replay receipts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +89,91 @@ impl std::error::Error for CounterfactualReceiptError {}
 /// Standard result type returned by counterfactual receipt verification.
 pub type CounterfactualReceiptResult<T> = Result<T, CounterfactualReceiptError>;
 
+/// Counterfactual capability decision emitted by a producing runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CounterfactualCapabilityDecision {
+    Allow,
+    Deny,
+}
+
+impl CounterfactualCapabilityDecision {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+/// Capability attempt that an external verifier can replay without runtime access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CounterfactualCapabilityRequest {
+    pub actor: String,
+    pub audience: String,
+    pub requested_scope: CapabilityScope,
+    pub policy_profile: CapabilityPolicyProfile,
+    pub epoch: u64,
+    pub side_effect_kind: EffectKind,
+    pub observed_postconditions: Vec<CapabilityPostcondition>,
+}
+
+/// Offline validation report for a counterfactual capability decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterfactualCapabilityValidation {
+    pub proof_id: String,
+    pub proof_hash: String,
+    pub actor: String,
+    pub audience: String,
+    pub scope: CapabilityScope,
+    pub policy_profile: String,
+    pub epoch: u64,
+    pub side_effect_kind: String,
+    pub decision: String,
+    pub expected_decision: String,
+    pub allowed: bool,
+    pub reason: String,
+    pub postcondition_count: usize,
+}
+
+/// Errors returned while replaying counterfactual capability decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CounterfactualCapabilityError {
+    Proof(BundleError),
+    DecisionMismatch {
+        expected: String,
+        actual: String,
+        reason: String,
+    },
+}
+
+impl fmt::Display for CounterfactualCapabilityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Proof(source) => {
+                write!(
+                    formatter,
+                    "counterfactual capability proof invalid: {source}"
+                )
+            }
+            Self::DecisionMismatch {
+                expected,
+                actual,
+                reason,
+            } => write!(
+                formatter,
+                "counterfactual capability decision mismatch: expected {expected}, got {actual} ({reason})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CounterfactualCapabilityError {}
+
+/// Standard result type returned by counterfactual capability validation.
+pub type CounterfactualCapabilityResult<T> = Result<T, CounterfactualCapabilityError>;
+
 /// Verify a signed counterfactual replay receipt.
 ///
 /// `baseline_bundle` may be any serializable baseline bundle shape that carries
@@ -126,6 +215,101 @@ where
     let canonical = canonical_json_bytes(&counterfactual_value)?;
     verify_ed25519_signature(verifying_key, &canonical, signature_bytes)
         .map_err(CounterfactualReceiptError::Signature)
+}
+
+/// Replay a capability allow/deny decision against an independently checkable proof.
+pub fn validate_counterfactual_capability_decision(
+    proof: &CapabilityProof,
+    request: &CounterfactualCapabilityRequest,
+    decision: CounterfactualCapabilityDecision,
+) -> CounterfactualCapabilityResult<CounterfactualCapabilityValidation> {
+    let proof_hash =
+        verify_capability_proof_schema(proof).map_err(CounterfactualCapabilityError::Proof)?;
+    let denial_reason = counterfactual_capability_denial_reason(proof, request);
+    let expected_decision = if denial_reason.is_some() {
+        CounterfactualCapabilityDecision::Deny
+    } else {
+        CounterfactualCapabilityDecision::Allow
+    };
+    let reason =
+        denial_reason.unwrap_or_else(|| "proof and request bindings permit capability".to_string());
+
+    if decision != expected_decision {
+        return Err(CounterfactualCapabilityError::DecisionMismatch {
+            expected: expected_decision.label().to_string(),
+            actual: decision.label().to_string(),
+            reason,
+        });
+    }
+
+    Ok(CounterfactualCapabilityValidation {
+        proof_id: proof.proof_id.clone(),
+        proof_hash,
+        actor: request.actor.clone(),
+        audience: request.audience.clone(),
+        scope: request.requested_scope.clone(),
+        policy_profile: capability_policy_profile_label(request.policy_profile).to_string(),
+        epoch: request.epoch,
+        side_effect_kind: effect_kind_label(request.side_effect_kind).to_string(),
+        decision: decision.label().to_string(),
+        expected_decision: expected_decision.label().to_string(),
+        allowed: decision == CounterfactualCapabilityDecision::Allow,
+        reason,
+        postcondition_count: request.observed_postconditions.len(),
+    })
+}
+
+fn counterfactual_capability_denial_reason(
+    proof: &CapabilityProof,
+    request: &CounterfactualCapabilityRequest,
+) -> Option<String> {
+    if !matches!(
+        proof.revocation_freshness,
+        CapabilityRevocationFreshness::Fresh { .. }
+    ) {
+        return Some("capability proof lacks fresh revocation evidence".to_string());
+    }
+    if !constant_time_eq(&proof.actor, &request.actor) {
+        return Some("actor binding mismatch".to_string());
+    }
+    if !constant_time_eq(&proof.audience, &request.audience) {
+        return Some("audience binding mismatch".to_string());
+    }
+    if proof.policy_profile != request.policy_profile {
+        return Some("policy profile binding mismatch".to_string());
+    }
+    if proof.epoch != request.epoch {
+        return Some("epoch binding mismatch".to_string());
+    }
+    if proof.side_effect_kind != request.side_effect_kind {
+        return Some("side effect kind binding mismatch".to_string());
+    }
+    if !proof.scopes.contains(&request.requested_scope) {
+        return Some("requested scope is outside capability proof".to_string());
+    }
+    if proof.expected_postconditions != request.observed_postconditions {
+        return Some("observed postconditions do not match proof".to_string());
+    }
+    None
+}
+
+fn capability_policy_profile_label(profile: CapabilityPolicyProfile) -> &'static str {
+    match profile {
+        CapabilityPolicyProfile::Strict => "strict",
+        CapabilityPolicyProfile::Balanced => "balanced",
+        CapabilityPolicyProfile::LegacyRisky => "legacy_risky",
+    }
+}
+
+fn effect_kind_label(kind: EffectKind) -> &'static str {
+    match kind {
+        EffectKind::FsRead => "fs_read",
+        EffectKind::FsWrite => "fs_write",
+        EffectKind::NetConnect => "net_connect",
+        EffectKind::HttpRequest => "http_request",
+        EffectKind::Spawn => "spawn",
+        EffectKind::ModuleResolve => "module_resolve",
+    }
 }
 
 fn to_value<T: Serialize>(value: &T) -> Result<Value, CounterfactualReceiptError> {
@@ -268,7 +452,9 @@ fn canonicalize_json(value: &Value) -> Value {
             keys.sort_unstable();
             let mut out = serde_json::Map::with_capacity(map.len());
             for key in keys {
-                out.insert(key.to_string(), canonicalize_json(&map[key]));
+                if let Some(value) = map.get(key) {
+                    out.insert(key.to_string(), canonicalize_json(value));
+                }
             }
             Value::Object(out)
         }

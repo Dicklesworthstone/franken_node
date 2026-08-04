@@ -1859,8 +1859,8 @@ mod tests {
             let cloned = outcome.clone();
             assert_eq!(*outcome, cloned);
 
-            // Should work in collections
-            let mut map = BTreeMap::new();
+            // Should work in collections (AppealOutcome is Hash + Eq, not Ord)
+            let mut map = std::collections::HashMap::new();
             map.insert(*outcome, "test");
             assert_eq!(map.get(outcome), Some(&"test"));
         }
@@ -2139,7 +2139,14 @@ mod tests {
 
             // Test with saturating arithmetic
             let saturating_slash = amount.saturating_mul(percentage as u64).saturating_div(100);
-            assert!(saturating_slash >= slash_amount || saturating_slash == u64::MAX);
+            // The saturating (multiply-first) path dominates the safe (divide-first)
+            // path UNLESS the multiplication itself saturated — once `saturating_mul`
+            // clamps to u64::MAX, the following `saturating_div(100)` drops the result
+            // back below the requested amount, so the dominance only holds when the
+            // product did not overflow.
+            assert!(
+                saturating_slash >= slash_amount || amount.checked_mul(percentage as u64).is_none()
+            );
         }
 
         // Test edge case: zero amounts

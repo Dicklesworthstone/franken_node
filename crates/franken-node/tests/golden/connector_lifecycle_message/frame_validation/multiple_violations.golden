@@ -1,0 +1,41 @@
+{
+  "success": true,
+  "verdict": {
+    "frame_id": "multiple-violations",
+    "allowed": false,
+    "violations": [
+      {
+        "type": "SizeExceeded",
+        "actual": 2000000,
+        "limit": 1000000
+      },
+      {
+        "type": "DepthExceeded",
+        "actual": 50,
+        "limit": 32
+      },
+      {
+        "type": "CpuExceeded",
+        "actual": 200,
+        "limit": 100
+      }
+    ],
+    "resource_usage": {
+      "bytes_parsed": 2000000,
+      "nesting_depth": 50,
+      "cpu_ms": 200
+    }
+  },
+  "audit": {
+    "frame_id": "multiple-violations",
+    "size": 2000000,
+    "depth": 50,
+    "cpu_used": 200,
+    "size_limit": 1000000,
+    "depth_limit": 32,
+    "cpu_limit": 100,
+    "verdict": "BLOCK",
+    "timestamp": "[TIMESTAMP]"
+  },
+  "test_case": "multiple_violations"
+}

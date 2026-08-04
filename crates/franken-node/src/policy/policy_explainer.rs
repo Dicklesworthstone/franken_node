@@ -1365,9 +1365,32 @@ mod tests {
                     field_type
                 );
 
-                // Verify no unescaped injection in final JSON
-                assert!(!json_str.contains(r#""malicious""#));
-                assert!(!json_str.contains(r#""payload""#));
+                // The injection lives inside a STRING field; serde escapes its
+                // quotes (`"` -> `\"`) so it can never introduce a NEW JSON
+                // member. (The literal token `"payload"` can still appear in the
+                // wire form because the value's escaped trailing quote abuts the
+                // string's real closing quote — that is safe escaping, NOT a
+                // structural injection.) The robust invariant is a lossless
+                // round-trip: the payload returns as INERT DATA in its own field,
+                // identical to the input, leaving the JSON structure intact.
+                let reparsed = parse_result.expect("parse asserted ok above");
+                match field_type {
+                    "action_summary" => assert_eq!(reparsed.action_summary, injection_str),
+                    "summary" => {
+                        assert_eq!(reparsed.diagnostic_confidence.summary, injection_str);
+                        assert_eq!(reparsed.guarantee_confidence.summary, injection_str);
+                    }
+                    "explanation" => {
+                        if let Some(blocked) = reparsed.blocked_alternatives.first() {
+                            assert_eq!(blocked.explanation, injection_str);
+                        }
+                    }
+                    "control_chars" => assert_eq!(
+                        reparsed.diagnostic_confidence.confidence_level,
+                        injection_str
+                    ),
+                    _ => {}
+                }
 
                 // Verify proper escaping of quotes and control characters
                 if injection_str.contains('"') {

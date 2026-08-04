@@ -1,0 +1,9 @@
+{
+  "valid": true,
+  "config": {
+    "max_frame_bytes": 1000000,
+    "max_nesting_depth": 32,
+    "max_decode_cpu_ms": 100
+  },
+  "test_case": "valid_config"
+}

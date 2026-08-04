@@ -1,0 +1,135 @@
+---
+source: crates/franken-node/tests/connector_lifecycle_conformance_matrix.rs
+expression: endpoint_results
+---
+[
+  {
+    "api_version": "api-v2.0.0",
+    "auth_methods": [
+      "basic_session"
+    ],
+    "available_endpoints": {
+      "connector_status": {
+        "auth_required": false,
+        "deprecated": false,
+        "method": "GET",
+        "min_api_version": "api-v2.0.0",
+        "path": "/api/v1/connector/status"
+      },
+      "connector_transition": {
+        "auth_required": true,
+        "deprecated": false,
+        "method": "POST",
+        "min_api_version": "api-v2.0.0",
+        "path": "/api/v1/connector/transition"
+      }
+    },
+    "frame_parser_limits": {
+      "max_decode_cpu_ms": 50,
+      "max_frame_bytes": 100000,
+      "max_nesting_depth": 16
+    },
+    "scenario": "legacy_api"
+  },
+  {
+    "api_version": "api-v2.1.0",
+    "auth_methods": [
+      "basic_session",
+      "hmac_session"
+    ],
+    "available_endpoints": {
+      "connector_cancel": {
+        "auth_required": true,
+        "deprecated": false,
+        "method": "POST",
+        "min_api_version": "api-v2.1.0",
+        "path": "/api/v2/connector/lifecycle/cancel"
+      },
+      "connector_health": {
+        "auth_required": false,
+        "deprecated": false,
+        "method": "GET",
+        "min_api_version": "api-v2.1.0",
+        "path": "/api/v2/connector/health"
+      },
+      "connector_status": {
+        "auth_required": false,
+        "deprecated": false,
+        "method": "GET",
+        "min_api_version": "api-v2.1.0",
+        "path": "/api/v2/connector/status"
+      },
+      "connector_transition": {
+        "auth_required": true,
+        "deprecated": false,
+        "method": "POST",
+        "min_api_version": "api-v2.1.0",
+        "path": "/api/v2/connector/lifecycle/transition"
+      }
+    },
+    "frame_parser_limits": {
+      "max_decode_cpu_ms": 100,
+      "max_frame_bytes": 1000000,
+      "max_nesting_depth": 32
+    },
+    "scenario": "current_api"
+  },
+  {
+    "api_version": "api-v2.2.0",
+    "auth_methods": [
+      "basic_session",
+      "hmac_session",
+      "mutual_tls"
+    ],
+    "available_endpoints": {
+      "connector_cancel": {
+        "auth_required": true,
+        "deprecated": false,
+        "method": "POST",
+        "min_api_version": "api-v2.1.0",
+        "path": "/api/v2/connector/lifecycle/cancel"
+      },
+      "connector_health": {
+        "auth_required": false,
+        "deprecated": false,
+        "method": "GET",
+        "min_api_version": "api-v2.1.0",
+        "path": "/api/v2/connector/health"
+      },
+      "connector_metrics": {
+        "auth_required": true,
+        "deprecated": false,
+        "method": "GET",
+        "min_api_version": "api-v2.2.0",
+        "path": "/api/v2/connector/metrics"
+      },
+      "connector_restart": {
+        "auth_required": true,
+        "deprecated": false,
+        "method": "POST",
+        "min_api_version": "api-v2.2.0",
+        "path": "/api/v2/connector/lifecycle/restart"
+      },
+      "connector_status": {
+        "auth_required": false,
+        "deprecated": false,
+        "method": "GET",
+        "min_api_version": "api-v2.1.0",
+        "path": "/api/v2/connector/status"
+      },
+      "connector_transition": {
+        "auth_required": true,
+        "deprecated": false,
+        "method": "POST",
+        "min_api_version": "api-v2.1.0",
+        "path": "/api/v2/connector/lifecycle/transition"
+      }
+    },
+    "frame_parser_limits": {
+      "max_decode_cpu_ms": 500,
+      "max_frame_bytes": 10000000,
+      "max_nesting_depth": 64
+    },
+    "scenario": "future_api"
+  }
+]

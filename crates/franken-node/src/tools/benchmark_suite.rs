@@ -301,6 +301,46 @@ pub struct ConfidenceInterval {
     pub upper: f64,
 }
 
+/// Where a scenario's metric actually comes from.
+///
+/// bd-5r99w.8: even in `Measured` evidence mode, a few sub-scenarios score
+/// pass-rates over a handful of hardcoded input payloads rather than driving the
+/// live security/migration pipelines. That is honest-by-construction, but a
+/// reader of a signed `Measured` report could mistake those metrics for
+/// full-pipeline measurements. This discriminator is carried in the signed
+/// report so the distinction is explicit and verifier-visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScenarioDataSource {
+    /// Metric measured by driving the real pipeline / workload.
+    #[default]
+    MeasuredPipeline,
+    /// Metric scored against a fixed set of hardcoded fixture inputs.
+    FixtureInputs,
+}
+
+impl ScenarioDataSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScenarioDataSource::MeasuredPipeline => "measured-pipeline",
+            ScenarioDataSource::FixtureInputs => "fixture-inputs",
+        }
+    }
+}
+
+/// Classify a scenario by how its metric is produced. The named scenarios score
+/// over hardcoded fixture payloads (see `measured_adversarial_pass_rate`,
+/// `measured_migration_success_rate`, `measured_fixture_identity_replay_rate`)
+/// rather than driving the live pipelines, so they are flagged `fixture-inputs`.
+pub fn scenario_data_source(scenario_name: &str) -> ScenarioDataSource {
+    match scenario_name {
+        "adversarial_pass_rate" | "migration_success_rate" | "replay_bit_identity_rate" => {
+            ScenarioDataSource::FixtureInputs
+        }
+        _ => ScenarioDataSource::MeasuredPipeline,
+    }
+}
+
 /// Result of executing one benchmark scenario.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioResult {
@@ -313,6 +353,11 @@ pub struct ScenarioResult {
     pub score: u32,
     pub iterations: u32,
     pub variance_pct: f64,
+    /// Whether this metric was measured from the live pipeline or scored over
+    /// fixture inputs (bd-5r99w.8). Defaults to `measured-pipeline` for
+    /// backward-compatible deserialization of older reports.
+    #[serde(default)]
+    pub data_source: ScenarioDataSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1296,6 +1341,7 @@ impl BenchmarkSuite {
             score,
             iterations: u32::try_from(raw_measurements.len()).unwrap_or(u32::MAX),
             variance_pct: cv,
+            data_source: scenario_data_source(&scenario.name),
         })
     }
 
@@ -1974,6 +2020,72 @@ mod tests {
         vec![RawMeasurement::fixture(0, value, "2026-02-21T00:00:00Z")]
     }
 
+    #[test]
+    fn fixture_scored_scenarios_are_labeled_fixture_inputs() {
+        // bd-5r99w.8: scenarios that score over hardcoded payloads must be
+        // labeled fixture-inputs even in Measured mode, so a signed report can
+        // never present them as full-pipeline measurements.
+        for fixture_scored in [
+            "adversarial_pass_rate",
+            "migration_success_rate",
+            "replay_bit_identity_rate",
+        ] {
+            assert_eq!(
+                scenario_data_source(fixture_scored),
+                ScenarioDataSource::FixtureInputs,
+                "{fixture_scored} must be flagged fixture-inputs"
+            );
+        }
+        // Real pipeline scenarios stay measured-pipeline.
+        for measured in ["secure-extension-heavy", "migration_scanner_throughput"] {
+            assert_eq!(
+                scenario_data_source(measured),
+                ScenarioDataSource::MeasuredPipeline
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_data_source_round_trips_via_signed_report_json() {
+        // The discriminator must survive the canonical-JSON round trip the
+        // verifier consumes, with the stable kebab-case wire form.
+        assert_eq!(ScenarioDataSource::FixtureInputs.as_str(), "fixture-inputs");
+        assert_eq!(
+            ScenarioDataSource::MeasuredPipeline.as_str(),
+            "measured-pipeline"
+        );
+        let json = serde_json::to_string(&ScenarioDataSource::FixtureInputs).expect("serialize");
+        assert_eq!(json, "\"fixture-inputs\"");
+        let back: ScenarioDataSource = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, ScenarioDataSource::FixtureInputs);
+        // Older reports without the field default to measured-pipeline. Build a
+        // real result, drop the discriminator from its JSON, and confirm it
+        // still deserializes (backward compatibility).
+        let result = ScenarioResult {
+            dimension: BenchmarkDimension::PerformanceUnderHardening,
+            name: "legacy_scenario".to_string(),
+            raw_value: 1.0,
+            unit: "ms".to_string(),
+            raw_samples: vec![],
+            confidence_interval: ConfidenceInterval {
+                lower: 0.0,
+                upper: 2.0,
+            },
+            score: 50,
+            iterations: 1,
+            variance_pct: 0.0,
+            data_source: ScenarioDataSource::FixtureInputs,
+        };
+        let mut value = serde_json::to_value(&result).expect("serialize result");
+        // Fresh reports carry the discriminator...
+        assert_eq!(value["data_source"], serde_json::json!("fixture-inputs"));
+        // ...and stripping it (legacy report) deserializes to the default.
+        value.as_object_mut().expect("object").remove("data_source");
+        let legacy: ScenarioResult =
+            serde_json::from_value(value).expect("legacy report without data_source deserializes");
+        assert_eq!(legacy.data_source, ScenarioDataSource::MeasuredPipeline);
+    }
+
     fn fixture_sample_policy(total_sample_count: usize) -> BenchmarkSamplePolicy {
         BenchmarkSamplePolicy {
             min_measured_samples: MIN_MEASURED_SAMPLES,
@@ -2179,6 +2291,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 150.0,
@@ -2228,6 +2341,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 200.0,
@@ -2247,6 +2361,7 @@ mod tests {
 
         let current = BenchmarkReport {
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 raw_value: 190.0,
                 ..baseline.scenarios[0].clone()
             }],
@@ -2282,6 +2397,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 200.0,
@@ -2301,6 +2417,7 @@ mod tests {
 
         let current = BenchmarkReport {
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 raw_value: 350.0, // 75% increase in latency
                 ..baseline.scenarios[0].clone()
             }],
@@ -2343,6 +2460,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 200.0,
@@ -2362,6 +2480,7 @@ mod tests {
 
         let current = BenchmarkReport {
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 raw_value: 350.0,
                 ..baseline.scenarios[0].clone()
             }],
@@ -2397,6 +2516,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 200.0,
@@ -2416,6 +2536,7 @@ mod tests {
 
         let current = BenchmarkReport {
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 raw_value: 350.0,
                 ..baseline.scenarios[0].clone()
             }],
@@ -2666,7 +2787,17 @@ mod tests {
                 actual
             } if scenario == "test_scenario" && actual == MAX_RAW_BENCHMARK_SAMPLES + 1
         ));
-        assert!(suite.events().is_empty());
+        // `new()` always emits BS_SUITE_INITIALIZED, so events() is never empty.
+        // The "before collecting" contract is that execute_scenario's
+        // validate_sample_count rejects the oversized input BEFORE
+        // execute_scenario_samples emits any BS_SCENARIO_STARTED /
+        // BS_MEASUREMENT_RECORDED event — i.e. no collection ever began.
+        assert!(
+            !suite.events().iter().any(|event| {
+                event.code == BS_SCENARIO_STARTED || event.code == BS_MEASUREMENT_RECORDED
+            }),
+            "oversized measurements must be rejected before any collection event"
+        );
     }
 
     #[test]
@@ -2742,6 +2873,7 @@ mod tests {
             },
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 125.0,
@@ -2801,6 +2933,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: f64::INFINITY,
@@ -2934,9 +3067,11 @@ mod tests {
         // Test NaN input
         assert_eq!(config.score(f64::NAN), 0);
 
-        // Test infinity inputs
+        // Test infinity inputs: BOTH fail closed to 0. The scoring formula maps
+        // +/-inf measured values to a non-finite raw score, which score() now
+        // clamps to 0 (fail-closed on non-finite raw, see ScoringConfig::score).
         assert_eq!(config.score(f64::INFINITY), 0);
-        assert_eq!(config.score(f64::NEG_INFINITY), 100);
+        assert_eq!(config.score(f64::NEG_INFINITY), 0);
 
         // Test normal inputs still work
         assert_eq!(config.score(100.0), 100);
@@ -2958,19 +3093,21 @@ mod tests {
 
     #[test]
     fn test_confidence_interval_handles_nan_infinity() {
-        // Test with NaN values in input
+        // Test with NaN values in input. mean() and std_dev() deterministically
+        // PROPAGATE NaN (their guards surface non-finiteness rather than clamping
+        // it to a finite value), so the confidence interval is NaN on both bounds.
         let values_with_nan = vec![1.0, 2.0, f64::NAN, 4.0, 5.0];
         let ci = confidence_interval_95(&values_with_nan);
-        // Should handle gracefully (mean() and std_dev() have their own guards)
-        assert!(ci.lower.is_finite() || ci.lower == 0.0);
-        assert!(ci.upper.is_finite() || ci.upper == 0.0);
+        assert!(ci.lower.is_nan());
+        assert!(ci.upper.is_nan());
 
-        // Test with infinity values
+        // Test with infinity values. mean()/std_dev() propagate +inf, so the
+        // margin is +inf: the lower bound becomes inf - inf = NaN and the upper
+        // bound stays +inf. Both are deterministically non-finite (propagated).
         let values_with_inf = vec![1.0, 2.0, f64::INFINITY, 4.0, 5.0];
         let ci = confidence_interval_95(&values_with_inf);
-        // Should fallback to mean when margin is not finite
-        assert!(ci.lower.is_finite() || ci.lower == 0.0);
-        assert!(ci.upper.is_finite() || ci.upper == 0.0);
+        assert!(ci.lower.is_nan());
+        assert!(ci.upper.is_infinite() && ci.upper.is_sign_positive());
 
         // Test with very small values that might cause precision issues
         let tiny_values = vec![1e-300, 2e-300, 3e-300];
@@ -3000,10 +3137,15 @@ mod tests {
         assert!(result.is_finite());
         assert!(result.abs() < f64::EPSILON);
 
-        // Test with very spread out values
+        // Test with very spread out values. The variance of [tiny, MAX/2] is so
+        // large that Welford's intermediate `m2` accumulator overflows f64 to
+        // +inf before the final sqrt can bring it back into range, so std_dev
+        // returns +inf. Prod only guards non-finite INPUTS (returns NaN/inf for
+        // NaN/inf elements); it does not guard intermediate overflow on finite
+        // inputs, so the overflow is propagated as +inf.
         let spread_values = vec![f64::MIN_POSITIVE, f64::MAX / 2.0];
         let result = std_dev(&spread_values);
-        assert!(result.is_finite() || result == 0.0);
+        assert!(result.is_infinite() && result.is_sign_positive());
     }
 
     #[test]
@@ -3049,6 +3191,7 @@ mod tests {
             sample_policy: fixture_sample_policy(1),
             events: Vec::new(),
             scenarios: vec![ScenarioResult {
+                data_source: ScenarioDataSource::MeasuredPipeline,
                 dimension: BenchmarkDimension::PerformanceUnderHardening,
                 name: "cold_start_latency".to_string(),
                 raw_value: 125.0,
@@ -3467,17 +3610,18 @@ mod tests {
     #[test]
     fn negative_default_scoring_with_problematic_scenario_names() {
         // Test default_scoring with various problematic input strings
+        let long_name = "very_".to_string() + &"long_".repeat(1000) + "scenario";
         let problematic_names = vec![
-            "",                                                       // Empty string
-            "   ",                                                    // Whitespace only
-            "\0null_terminated",                                      // Null byte
-            "scenario\nwith\nnewlines",                               // Multiline
-            "🚀emoji_scenario🔥",                                     // Unicode emoji
-            "\u{FFFF}max_unicode",                                    // Max BMP character
-            "very_".to_string() + &"long_".repeat(1000) + "scenario", // Very long name
-            "../../../etc/passwd",                                    // Path traversal
-            "<script>alert('xss')</script>",                          // XSS attempt
-            "{\"json\": \"injection\"}",                              // JSON injection
+            "",                              // Empty string
+            "   ",                           // Whitespace only
+            "\0null_terminated",             // Null byte
+            "scenario\nwith\nnewlines",      // Multiline
+            "🚀emoji_scenario🔥",            // Unicode emoji
+            "\u{FFFF}max_unicode",           // Max BMP character
+            long_name.as_str(),              // Very long name
+            "../../../etc/passwd",           // Path traversal
+            "<script>alert('xss')</script>", // XSS attempt
+            "{\"json\": \"injection\"}",     // JSON injection
         ];
 
         for name in problematic_names {
@@ -3500,7 +3644,13 @@ mod tests {
         // Test push_bounded with zero capacity
         let mut items = vec![1, 2, 3];
         push_bounded(&mut items, 4, 0);
-        assert_eq!(items, vec![4], "Zero capacity should keep only new item");
+        // Zero capacity clears the vector AND drops the incoming item (prod:
+        // `if cap == 0 { items.clear(); return; }` in lib.rs::push_bounded), so
+        // nothing is retained — not even the new item.
+        assert!(
+            items.is_empty(),
+            "Zero capacity should clear all and drop the new item"
+        );
 
         // Test with capacity 1
         push_bounded(&mut items, 5, 1);
@@ -3535,23 +3685,23 @@ mod tests {
         let problematic_profiles = vec![
             HardwareProfile {
                 cpu: "\0Intel\x01Core\x7fi7".to_string(),
-                memory_gb: 32,
-                disk_type: "control\nchars".to_string(),
+                memory_mb: 32,
+                os: "control\nchars".to_string(),
             },
             HardwareProfile {
                 cpu: "🚀Quantum🔥Processor💀".to_string(),
-                memory_gb: 128,
-                disk_type: "\u{FFFF}\u{10FFFF}".to_string(),
+                memory_mb: 128,
+                os: "\u{FFFF}\u{10FFFF}".to_string(),
             },
             HardwareProfile {
-                cpu: "".to_string(),          // Empty CPU
-                memory_gb: 0,                 // Zero memory
-                disk_type: "   ".to_string(), // Whitespace disk type
+                cpu: "".to_string(),   // Empty CPU
+                memory_mb: 0,          // Zero memory
+                os: "   ".to_string(), // Whitespace os
             },
             HardwareProfile {
                 cpu: "../../../proc/cpuinfo".to_string(), // Path traversal
-                memory_gb: u32::MAX,                      // Maximum memory
-                disk_type: "<script>alert('hardware')</script>".to_string(), // XSS
+                memory_mb: u64::from(u32::MAX),           // Maximum memory
+                os: "<script>alert('hardware')</script>".to_string(), // XSS
             },
         ];
 
@@ -3566,8 +3716,8 @@ mod tests {
                 match deserialized {
                     Ok(restored) => {
                         assert_eq!(restored.cpu, profile.cpu);
-                        assert_eq!(restored.memory_gb, profile.memory_gb);
-                        assert_eq!(restored.disk_type, profile.disk_type);
+                        assert_eq!(restored.memory_mb, profile.memory_mb);
+                        assert_eq!(restored.os, profile.os);
                     }
                     Err(_) => {
                         // Some characters might not survive JSON round-trip, which is acceptable

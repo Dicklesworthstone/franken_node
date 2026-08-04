@@ -977,6 +977,7 @@ mod tests {
     /// Test workload classification with malicious and edge case workload IDs
     #[test]
     fn test_classify_workload_malicious_ids() {
+        let long_id = "x".repeat(100000);
         let malicious_ids = [
             "",                              // Empty ID (should fail)
             " ",                             // Whitespace only
@@ -991,7 +992,7 @@ mod tests {
             "\u{FEFF}BOM",                   // Byte order mark
             "\u{200B}invisible",             // Zero-width space
             "id\u{1F4A9}emoji",              // Unicode emoji
-            "x".repeat(100000),              // Very long ID
+            long_id.as_str(),                // Very long ID
             "<script>alert('xss')</script>", // XSS attempt
             "'; DROP TABLE workloads; --",   // SQL injection attempt
             "id\x1b[31mred\x1b[0m",          // ANSI escape sequences
@@ -1074,9 +1075,10 @@ mod tests {
         router.classify_workload("full", 0.9).unwrap(); // FullIsolation rail
 
         // Test elevation with malicious reasons
+        let long_reason = "x".repeat(100000);
         let malicious_reasons = [
             "",                              // Empty reason
-            "x".repeat(100000),              // Very long reason
+            long_reason.as_str(),            // Very long reason
             "reason\x00null\r\ninjection",   // Null/CRLF injection
             "\u{202E}spoofed reason",        // Unicode direction override
             "<script>alert('xss')</script>", // XSS attempt
@@ -1175,7 +1177,7 @@ mod tests {
                 }
 
                 // Reset workload rail for next test
-                router.classifications.get_mut(from_id).unwrap().rail = *from_rail;
+                router.classifications.get_mut(*from_id).unwrap().rail = *from_rail;
             }
         }
     }
@@ -1404,7 +1406,12 @@ mod tests {
             },
             RailRouterError::InvalidRiskScore {
                 workload_id: "normal-id".to_string(),
-                score: f64::NAN,
+                // NOTE: serde_json serializes a non-finite f64 (NaN/Infinity) as
+                // JSON `null`, which then fails to deserialize back into f64, so a
+                // NaN score cannot survive the round-trip exercised below. Use a
+                // finite out-of-[0.0, 1.0] score so the InvalidRiskScore variant
+                // still round-trips to the intended variant.
+                score: 1.5,
             },
             RailRouterError::SameRailElevation {
                 workload_id: "test-id".to_string(),
@@ -1541,7 +1548,7 @@ mod tests {
             "missing workload",
         ); // Should fail
 
-        let audit_log = router.audit_log();
+        let audit_log = router.audit_log().to_vec();
 
         // Verify audit log has entries
         assert!(!audit_log.is_empty(), "Audit log should contain entries");
@@ -1624,10 +1631,11 @@ mod tests {
         }
 
         // Test audit log with extreme workload IDs
+        let long_extreme_id = "x".repeat(10000);
         let extreme_ids = [
             "unicode-\u{1F4A9}-test",
             "\x00null\r\ninjection",
-            "x".repeat(10000),
+            long_extreme_id.as_str(),
         ];
 
         for &extreme_id in &extreme_ids {
@@ -1706,7 +1714,8 @@ mod tests {
         );
 
         // Test removal with extreme workload IDs
-        let extreme_ids = ["\x00null", "\u{202E}spoofed", "x".repeat(100000)];
+        let long_removal_id = "x".repeat(100000);
+        let extreme_ids = ["\x00null", "\u{202E}spoofed", long_removal_id.as_str()];
 
         for &extreme_id in &extreme_ids {
             if !extreme_id.trim().is_empty() {

@@ -1,0 +1,12 @@
+{
+  "operations": [
+    "network_egress",
+    "federation_sync",
+    "remote_attestation_verify"
+  ],
+  "endpoint_prefixes": [
+    "https://aaa.example.com/",
+    "https://mmm.example.com/",
+    "https://zzz.example.com/"
+  ]
+}

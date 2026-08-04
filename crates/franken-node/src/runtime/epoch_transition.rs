@@ -10,7 +10,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::control_plane::control_epoch::{EpochError, EpochStore};
+use crate::control_plane::control_epoch::{EpochError, EpochSigningKey, EpochStore};
 use crate::control_plane::epoch_transition_barrier::{
     AbortReason, BarrierCommitOutcome, BarrierConfig, BarrierError, BarrierInstance, DrainAck,
     EpochTransitionBarrier,
@@ -182,13 +182,25 @@ pub struct ProductEpochCoordinator {
 }
 
 impl ProductEpochCoordinator {
+    /// Build a coordinator.
+    ///
+    /// bd-kpjrz: `signing_key` is the key the epoch store signs transition events
+    /// with. It is an explicit parameter rather than something derived here so
+    /// the operator decides where epoch-event authenticity is rooted; there is
+    /// deliberately no default, because a fixed default key is a published
+    /// secret and a random one silently breaks cross-process verification.
     #[must_use]
-    pub fn new(initial_epoch: u64, max_epoch_lag: u64, barrier_config: BarrierConfig) -> Self {
+    pub fn new(
+        initial_epoch: u64,
+        max_epoch_lag: u64,
+        barrier_config: BarrierConfig,
+        signing_key: EpochSigningKey,
+    ) -> Self {
         Self {
             epoch_store: if initial_epoch == 0 {
-                EpochStore::new()
+                EpochStore::new(signing_key)
             } else {
-                EpochStore::recover(initial_epoch)
+                EpochStore::recover(initial_epoch, signing_key)
             },
             barrier: EpochTransitionBarrier::new(barrier_config),
             abort_manager: TransitionAbortManager::new(),
@@ -577,11 +589,11 @@ impl ProductEpochCoordinator {
     }
 }
 
-impl Default for ProductEpochCoordinator {
-    fn default() -> Self {
-        Self::new(0, 1, BarrierConfig::default())
-    }
-}
+// bd-kpjrz: no `Default for ProductEpochCoordinator`, for the same reason
+// `EpochStore` has none — a default coordinator would have to invent the key its
+// epoch store signs transition events with, and both options are wrong (a fixed
+// key is a published secret; a random one silently breaks verification across
+// processes). It had no callers. Construct with an explicit `EpochSigningKey`.
 
 fn participant_states_from_snapshot(
     snapshot: &BarrierInstance,
@@ -644,9 +656,17 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
 
+    /// bd-kpjrz: `ProductEpochCoordinator::new` takes the key its epoch store
+    /// signs transition events with. One fixed key across this module keeps
+    /// every transition it issues cross-verifiable here.
+    fn epoch_test_key() -> EpochSigningKey {
+        EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+    }
+
     #[test]
     fn stale_and_future_operations_are_rejected() {
-        let mut coordinator = ProductEpochCoordinator::new(5, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(5, 1, BarrierConfig::default(), epoch_test_key());
         let stale = coordinator
             .validate_operation_epoch("svc-a", 4, "trace-stale")
             .expect_err("stale must reject");
@@ -660,7 +680,8 @@ mod tests {
 
     #[test]
     fn barrier_blocks_new_epoch_operations_until_commit() {
-        let mut coordinator = ProductEpochCoordinator::new(10, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(10, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         coordinator.register_service("svc-b");
 
@@ -690,7 +711,8 @@ mod tests {
 
     #[test]
     fn timeout_abort_keeps_pre_epoch_and_records_event() {
-        let mut coordinator = ProductEpochCoordinator::new(3, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(3, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         coordinator.register_service("svc-b");
         coordinator.register_service("svc-c");
@@ -713,7 +735,8 @@ mod tests {
 
     #[test]
     fn concurrent_proposals_are_serialized() {
-        let mut coordinator = ProductEpochCoordinator::new(1, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(1, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         coordinator.register_service("svc-b");
         coordinator
@@ -727,7 +750,8 @@ mod tests {
 
     #[test]
     fn replica_lag_guard_enforces_max_epoch_lag() {
-        let mut coordinator = ProductEpochCoordinator::new(20, 2, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(20, 2, BarrierConfig::default(), epoch_test_key());
         // lag=1, max_epoch_lag=2 → 1 < 2 → OK
         coordinator
             .validate_replica_lag("svc-a", 19, "trace-lag-ok")
@@ -741,7 +765,8 @@ mod tests {
 
     #[test]
     fn five_service_quiescence_transition_commits() {
-        let mut coordinator = ProductEpochCoordinator::new(30, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(30, 1, BarrierConfig::default(), epoch_test_key());
         for service_id in ["svc-a", "svc-b", "svc-c", "svc-d", "svc-e"] {
             coordinator.register_service(service_id);
         }
@@ -790,7 +815,8 @@ mod tests {
     }
 
     fn ack_order_digest(ack_order: &[&str]) -> AckOrderDigest {
-        let mut coordinator = ProductEpochCoordinator::new(100, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(100, 1, BarrierConfig::default(), epoch_test_key());
         for service_id in ["svc-a", "svc-b", "svc-c"] {
             coordinator.register_service(service_id);
         }
@@ -888,7 +914,8 @@ mod tests {
 
     #[test]
     fn epoch_transitions_are_monotonic_across_commits() {
-        let mut coordinator = ProductEpochCoordinator::new(1, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(1, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
 
         let mut observed = vec![coordinator.current_epoch()];
@@ -914,7 +941,8 @@ mod tests {
 
     #[test]
     fn history_records_commit_and_abort_metadata() {
-        let mut coordinator = ProductEpochCoordinator::new(9, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(9, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         coordinator.register_service("svc-b");
 
@@ -953,7 +981,8 @@ mod tests {
 
     #[test]
     fn timed_out_commit_attempt_fails_closed_without_advancing_epoch() {
-        let mut coordinator = ProductEpochCoordinator::new(7, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(7, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         coordinator.register_service("svc-b");
 
@@ -984,7 +1013,8 @@ mod tests {
 
     #[test]
     fn commit_without_active_transition_returns_no_active_transition() {
-        let mut coordinator = ProductEpochCoordinator::new(2, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(2, 1, BarrierConfig::default(), epoch_test_key());
 
         let err = coordinator
             .commit_transition(1_000, "trace-no-active-commit")
@@ -998,7 +1028,8 @@ mod tests {
 
     #[test]
     fn ack_without_active_transition_returns_no_active_transition() {
-        let mut coordinator = ProductEpochCoordinator::new(2, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(2, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
 
         let err = coordinator
@@ -1017,7 +1048,8 @@ mod tests {
 
     #[test]
     fn abort_timeout_without_active_transition_returns_no_active_transition() {
-        let mut coordinator = ProductEpochCoordinator::new(2, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(2, 1, BarrierConfig::default(), epoch_test_key());
 
         let err = coordinator
             .abort_transition_timeout(2_000, "trace-no-active-timeout")
@@ -1031,7 +1063,8 @@ mod tests {
 
     #[test]
     fn abort_cancellation_without_active_transition_returns_no_active_transition() {
-        let mut coordinator = ProductEpochCoordinator::new(2, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(2, 1, BarrierConfig::default(), epoch_test_key());
 
         let err = coordinator
             .abort_transition_cancellation("operator-cancel", 2_000, "trace-no-active-cancel")
@@ -1045,7 +1078,8 @@ mod tests {
 
     #[test]
     fn future_replica_lag_rejected_without_stale_event() {
-        let mut coordinator = ProductEpochCoordinator::new(20, 2, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(20, 2, BarrierConfig::default(), epoch_test_key());
 
         let err = coordinator
             .validate_replica_lag("svc-a", 21, "trace-future-lag")
@@ -1062,7 +1096,8 @@ mod tests {
 
     #[test]
     fn commit_without_all_acks_rejects_without_advancing_epoch() {
-        let mut coordinator = ProductEpochCoordinator::new(4, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(4, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         coordinator.register_service("svc-b");
         coordinator
@@ -1097,7 +1132,8 @@ mod tests {
 
     #[test]
     fn unknown_service_ack_is_rejected_without_confirming_drain() {
-        let mut coordinator = ProductEpochCoordinator::new(4, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(4, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         coordinator
             .propose_transition("operator-1", "unknown-ack", 1_000, "trace-unknown-propose")
@@ -1150,7 +1186,8 @@ mod tests {
 
     #[test]
     fn proposal_without_registered_participants_is_rejected_without_events() {
-        let mut coordinator = ProductEpochCoordinator::new(12, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(12, 1, BarrierConfig::default(), epoch_test_key());
 
         let err = coordinator
             .propose_transition(
@@ -1176,7 +1213,8 @@ mod tests {
 
     #[test]
     fn proposal_at_max_epoch_is_rejected_without_pending_state() {
-        let mut coordinator = ProductEpochCoordinator::new(u64::MAX, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(u64::MAX, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
 
         let err = coordinator
@@ -1198,7 +1236,8 @@ mod tests {
 
     #[test]
     fn stale_operation_during_pending_transition_records_context() {
-        let mut coordinator = ProductEpochCoordinator::new(9, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(9, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         let proposal = coordinator
             .propose_transition("operator-1", "stale-check", 1_000, "trace-propose")
@@ -1226,7 +1265,8 @@ mod tests {
 
     #[test]
     fn future_operation_during_pending_transition_records_context() {
-        let mut coordinator = ProductEpochCoordinator::new(9, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(9, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         let proposal = coordinator
             .propose_transition("operator-1", "future-check", 1_000, "trace-propose")
@@ -1254,7 +1294,8 @@ mod tests {
 
     #[test]
     fn replica_lag_at_boundary_records_lag_exceeded_event() {
-        let mut coordinator = ProductEpochCoordinator::new(20, 2, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(20, 2, BarrierConfig::default(), epoch_test_key());
 
         let err = coordinator
             .validate_replica_lag("svc-replica", 18, "trace-lag-boundary")
@@ -1276,7 +1317,8 @@ mod tests {
 
     #[test]
     fn commit_after_cancellation_abort_returns_no_active_transition() {
-        let mut coordinator = ProductEpochCoordinator::new(6, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(6, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         coordinator
             .propose_transition("operator-1", "cancel-before-commit", 1_000, "trace-propose")
@@ -1298,7 +1340,8 @@ mod tests {
 
     #[test]
     fn ack_after_cancellation_abort_is_rejected_without_new_confirmation() {
-        let mut coordinator = ProductEpochCoordinator::new(6, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(6, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-a");
         coordinator
             .propose_transition("operator-1", "cancel-before-ack", 1_000, "trace-propose")
@@ -1334,7 +1377,8 @@ mod tests {
 
     #[test]
     fn unicode_injection_in_identifiers_and_reasons_handled_safely() {
-        let mut coordinator = ProductEpochCoordinator::new(1, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(1, 1, BarrierConfig::default(), epoch_test_key());
         let malicious_service = "svc\u{202e}evil\u{200b}\u{0000}inject";
         let malicious_initiator = "operator\u{feff}\u{1f4a9}\u{2028}bypass";
         let malicious_reason = "reason\u{0085}\u{2029}\u{00ad}payload\u{061c}";
@@ -1362,7 +1406,8 @@ mod tests {
 
     #[test]
     fn extreme_timestamp_arithmetic_near_overflow_boundaries() {
-        let mut coordinator = ProductEpochCoordinator::new(1, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(1, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-boundary");
 
         // Test near u64::MAX boundaries
@@ -1393,7 +1438,8 @@ mod tests {
 
     #[test]
     fn memory_pressure_with_massive_event_and_history_volumes() {
-        let mut coordinator = ProductEpochCoordinator::new(1, 10000, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(1, 10000, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-pressure");
 
         // Force MAX_EVENTS overflow to test push_bounded robustness
@@ -1408,7 +1454,8 @@ mod tests {
 
         // Force MAX_HISTORY_ENTRIES overflow
         for i in 0..MAX_HISTORY_ENTRIES + 500 {
-            let mut temp_coord = ProductEpochCoordinator::new(1, 1, BarrierConfig::default());
+            let mut temp_coord =
+                ProductEpochCoordinator::new(1, 1, BarrierConfig::default(), epoch_test_key());
             temp_coord.register_service("svc-temp");
 
             // Create transition and commit to generate history
@@ -1445,7 +1492,8 @@ mod tests {
 
     #[test]
     fn malformed_service_registration_edge_cases() {
-        let mut coordinator = ProductEpochCoordinator::new(5, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(5, 1, BarrierConfig::default(), epoch_test_key());
 
         // Empty service ID
         coordinator.register_service("");
@@ -1483,7 +1531,8 @@ mod tests {
     #[test]
     fn concurrent_epoch_arithmetic_boundary_conditions() {
         // Test epoch 0 boundaries
-        let mut coord_zero = ProductEpochCoordinator::new(0, u64::MAX, BarrierConfig::default());
+        let mut coord_zero =
+            ProductEpochCoordinator::new(0, u64::MAX, BarrierConfig::default(), epoch_test_key());
         coord_zero.register_service("svc-zero");
 
         // Should handle epoch 0 -> 1 transition
@@ -1494,8 +1543,12 @@ mod tests {
         assert_eq!(proposal.target_epoch, 1);
 
         // Test near-max epoch lag calculations
-        let mut coord_lag =
-            ProductEpochCoordinator::new(u64::MAX - 100, u64::MAX, BarrierConfig::default());
+        let mut coord_lag = ProductEpochCoordinator::new(
+            u64::MAX - 100,
+            u64::MAX,
+            BarrierConfig::default(),
+            epoch_test_key(),
+        );
 
         // Should handle extreme lag validation without overflow
         coord_lag
@@ -1508,7 +1561,8 @@ mod tests {
             .expect("reasonable lag should work");
 
         // Edge case: exactly at max lag boundary
-        let mut coord_boundary = ProductEpochCoordinator::new(100, 50, BarrierConfig::default());
+        let mut coord_boundary =
+            ProductEpochCoordinator::new(100, 50, BarrierConfig::default(), epoch_test_key());
         coord_boundary
             .validate_replica_lag("svc-boundary", 50, "trace-boundary")
             .expect_err("at-boundary lag should fail (fail-closed)");
@@ -1564,7 +1618,8 @@ mod tests {
 
     #[test]
     fn abort_cascades_and_state_consistency_edge_cases() {
-        let mut coordinator = ProductEpochCoordinator::new(10, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(10, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-cascade");
 
         // Start multiple cascading operations
@@ -1612,7 +1667,8 @@ mod tests {
 
     #[test]
     fn error_propagation_and_fail_closed_semantics() {
-        let mut coordinator = ProductEpochCoordinator::new(5, 1, BarrierConfig::default());
+        let mut coordinator =
+            ProductEpochCoordinator::new(5, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-error");
 
         // Test commit failure propagation
@@ -1645,7 +1701,8 @@ mod tests {
             .expect("current epoch should work");
 
         // Test error when no participants registered (fail-closed)
-        let mut empty_coord = ProductEpochCoordinator::new(1, 1, BarrierConfig::default());
+        let mut empty_coord =
+            ProductEpochCoordinator::new(1, 1, BarrierConfig::default(), epoch_test_key());
         let err = empty_coord
             .propose_transition("op", "empty", 1000, "trace")
             .expect_err("no participants should fail closed");

@@ -9,7 +9,8 @@
 //! Pattern 4: Spec-Derived Test Matrix with comprehensive requirement coverage
 
 use frankenengine_node::policy::bayesian_diagnostics::{
-    BayesianDiagnostics, CandidateRef, Observation, RankedCandidate, DiagnosticConfidence
+    BayesianDiagnostics, CandidateRef, E_PROCESS_SCALE_PPM, LikelihoodRatioEvidence,
+    MixtureSprtComponent, Observation, RuntimeSentinelEProcess,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,20 +20,21 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequirementLevel {
-    Must,    // Specification MUST - failure = non-conformant
-    Should,  // Specification SHOULD - failure = degraded conformance
-    May,     // Specification MAY - optional behavior
+    Must,   // Specification MUST - failure = non-conformant
+    Should, // Specification SHOULD - failure = degraded conformance
+    May,    // Specification MAY - optional behavior
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TestCategory {
-    Advisory,            // INV-BAYES-ADVISORY tests
-    Reproducibility,     // INV-BAYES-REPRODUCIBLE tests
-    Normalization,       // INV-BAYES-NORMALIZED tests
-    Transparency,        // INV-BAYES-TRANSPARENT tests
-    EventCodes,          // Event code coverage
-    EdgeCase,            // Boundary conditions
-    Integration,         // Multi-invariant scenarios
+    Advisory,        // INV-BAYES-ADVISORY tests
+    Reproducibility, // INV-BAYES-REPRODUCIBLE tests
+    Normalization,   // INV-BAYES-NORMALIZED tests
+    Transparency,    // INV-BAYES-TRANSPARENT tests
+    EventCodes,      // Event code coverage
+    EdgeCase,        // Boundary conditions
+    EProcess,        // Runtime Sentinel e-process
+    Integration,     // Multi-invariant scenarios
 }
 
 #[derive(Debug, Clone)]
@@ -101,22 +103,22 @@ fn test_advisory_only_returns_rankings() -> TestResult {
     if rankings.len() == 2 {
         // Verify it's purely informational - contains diagnostic data only
         let has_diagnostic_data = rankings.iter().all(|r| {
-            r.posterior_prob.is_finite() &&
-            r.prior_prob.is_finite() &&
-            r.confidence_interval.0.is_finite() &&
-            r.confidence_interval.1.is_finite()
+            r.posterior_prob.is_finite()
+                && r.prior_prob.is_finite()
+                && r.confidence_interval.0.is_finite()
+                && r.confidence_interval.1.is_finite()
         });
 
         if has_diagnostic_data {
             TestResult::Pass
         } else {
             TestResult::Fail {
-                reason: "Rankings missing required diagnostic data".to_string()
+                reason: "Rankings missing required diagnostic data".to_string(),
             }
         }
     } else {
         TestResult::Fail {
-            reason: format!("Expected 2 rankings, got {}", rankings.len())
+            reason: format!("Expected 2 rankings, got {}", rankings.len()),
         }
     }
 }
@@ -130,22 +132,23 @@ fn test_advisory_immutable_ranking_call() -> TestResult {
     let rankings2 = diagnostics.rank_candidates(&candidates, &[]);
 
     // Verify rankings are identical (immutable operation)
-    if rankings1.len() == rankings2.len() &&
-       rankings1.len() == 1 {
+    if rankings1.len() == rankings2.len() && rankings1.len() == 1 {
         let r1 = &rankings1[0];
         let r2 = &rankings2[0];
 
-        if r1.candidate_ref == r2.candidate_ref &&
-           (r1.posterior_prob - r2.posterior_prob).abs() < 1e-10 {
+        if r1.candidate_ref == r2.candidate_ref
+            && (r1.posterior_prob - r2.posterior_prob).abs() < 1e-10
+        {
             TestResult::Pass
         } else {
             TestResult::Fail {
-                reason: "Multiple ranking calls produced different results - not purely advisory".to_string()
+                reason: "Multiple ranking calls produced different results - not purely advisory"
+                    .to_string(),
             }
         }
     } else {
         TestResult::Fail {
-            reason: "Rankings had different lengths between calls".to_string()
+            reason: "Rankings had different lengths between calls".to_string(),
         }
     }
 }
@@ -179,24 +182,26 @@ fn test_reproducible_identical_observations() -> TestResult {
     // Verify bit-identical results
     if rankings1.len() == rankings2.len() {
         let identical = rankings1.iter().zip(rankings2.iter()).all(|(r1, r2)| {
-            r1.candidate_ref == r2.candidate_ref &&
-            r1.posterior_prob.to_bits() == r2.posterior_prob.to_bits() &&
-            r1.prior_prob.to_bits() == r2.prior_prob.to_bits() &&
-            r1.observation_count == r2.observation_count &&
-            r1.confidence_interval.0.to_bits() == r2.confidence_interval.0.to_bits() &&
-            r1.confidence_interval.1.to_bits() == r2.confidence_interval.1.to_bits()
+            r1.candidate_ref == r2.candidate_ref
+                && r1.posterior_prob.to_bits() == r2.posterior_prob.to_bits()
+                && r1.prior_prob.to_bits() == r2.prior_prob.to_bits()
+                && r1.observation_count == r2.observation_count
+                && r1.confidence_interval.0.to_bits() == r2.confidence_interval.0.to_bits()
+                && r1.confidence_interval.1.to_bits() == r2.confidence_interval.1.to_bits()
         });
 
         if identical {
             TestResult::Pass
         } else {
             TestResult::Fail {
-                reason: "Identical observations produced different rankings - reproducibility violated".to_string()
+                reason:
+                    "Identical observations produced different rankings - reproducibility violated"
+                        .to_string(),
             }
         }
     } else {
         TestResult::Fail {
-            reason: "Different ranking counts between identical observation sequences".to_string()
+            reason: "Different ranking counts between identical observation sequences".to_string(),
         }
     }
 }
@@ -218,8 +223,11 @@ fn test_reproducible_deterministic_reduction_order() -> TestResult {
 
     // Verify deterministic ordering
     if rankings1.len() == rankings2.len() && rankings2.len() == rankings3.len() {
-        let order_identical =
-            rankings1.iter().zip(rankings2.iter()).zip(rankings3.iter()).all(|((r1, r2), r3)| {
+        let order_identical = rankings1
+            .iter()
+            .zip(rankings2.iter())
+            .zip(rankings3.iter())
+            .all(|((r1, r2), r3)| {
                 r1.candidate_ref == r2.candidate_ref && r2.candidate_ref == r3.candidate_ref
             });
 
@@ -227,12 +235,12 @@ fn test_reproducible_deterministic_reduction_order() -> TestResult {
             TestResult::Pass
         } else {
             TestResult::Fail {
-                reason: "Reduction order not deterministic - reproducibility violated".to_string()
+                reason: "Reduction order not deterministic - reproducibility violated".to_string(),
             }
         }
     } else {
         TestResult::Fail {
-            reason: "Ranking counts differed between calls".to_string()
+            reason: "Ranking counts differed between calls".to_string(),
         }
     }
 }
@@ -262,8 +270,10 @@ fn test_normalized_posterior_sum() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("Posterior probabilities sum to {}, not 1.0 (tolerance {})",
-                           posterior_sum, tolerance)
+            reason: format!(
+                "Posterior probabilities sum to {}, not 1.0 (tolerance {})",
+                posterior_sum, tolerance
+            ),
         }
     }
 }
@@ -283,8 +293,10 @@ fn test_normalized_uniform_prior_sum() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("Uniform priors: posterior sum = {}, prior sum = {} (expected 1.0)",
-                           posterior_sum, prior_sum)
+            reason: format!(
+                "Uniform priors: posterior sum = {}, prior sum = {} (expected 1.0)",
+                posterior_sum, prior_sum
+            ),
         }
     }
 }
@@ -305,26 +317,31 @@ fn test_transparent_complete_diagnostic_info() -> TestResult {
 
     if rankings.len() != 1 {
         return TestResult::Fail {
-            reason: "Expected exactly one ranking".to_string()
+            reason: "Expected exactly one ranking".to_string(),
         };
     }
 
     let ranking = &rankings[0];
 
     // Verify all required diagnostic information is present and valid
-    let has_posterior = ranking.posterior_prob.is_finite() && ranking.posterior_prob >= 0.0 && ranking.posterior_prob <= 1.0;
-    let has_prior = ranking.prior_prob.is_finite() && ranking.prior_prob >= 0.0 && ranking.prior_prob <= 1.0;
+    let has_posterior = ranking.posterior_prob.is_finite()
+        && ranking.posterior_prob >= 0.0
+        && ranking.posterior_prob <= 1.0;
+    let has_prior =
+        ranking.prior_prob.is_finite() && ranking.prior_prob >= 0.0 && ranking.prior_prob <= 1.0;
     let has_count = ranking.observation_count > 0; // We added observations
-    let has_ci = ranking.confidence_interval.0.is_finite() &&
-                 ranking.confidence_interval.1.is_finite() &&
-                 ranking.confidence_interval.0 <= ranking.confidence_interval.1;
+    let has_ci = ranking.confidence_interval.0.is_finite()
+        && ranking.confidence_interval.1.is_finite()
+        && ranking.confidence_interval.0 <= ranking.confidence_interval.1;
 
     if has_posterior && has_prior && has_count && has_ci {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("Missing transparent diagnostic info: posterior_valid={}, prior_valid={}, count_valid={}, ci_valid={}",
-                           has_posterior, has_prior, has_count, has_ci)
+            reason: format!(
+                "Missing transparent diagnostic info: posterior_valid={}, prior_valid={}, count_valid={}, ci_valid={}",
+                has_posterior, has_prior, has_count, has_ci
+            ),
         }
     }
 }
@@ -343,7 +360,7 @@ fn test_transparent_confidence_interval_properties() -> TestResult {
 
     if rankings.len() != 1 {
         return TestResult::Fail {
-            reason: "Expected exactly one ranking".to_string()
+            reason: "Expected exactly one ranking".to_string(),
         };
     }
 
@@ -356,8 +373,10 @@ fn test_transparent_confidence_interval_properties() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("Invalid confidence interval: [{}, {}] for posterior {}",
-                           ci_lower, ci_upper, posterior)
+            reason: format!(
+                "Invalid confidence interval: [{}, {}] for posterior {}",
+                ci_lower, ci_upper, posterior
+            ),
         }
     }
 }
@@ -374,7 +393,7 @@ fn test_edge_case_empty_candidates() -> TestResult {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: "Empty candidates should return empty rankings".to_string()
+            reason: "Empty candidates should return empty rankings".to_string(),
         }
     }
 }
@@ -400,14 +419,16 @@ fn test_edge_case_guardrail_filtering() -> TestResult {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Guardrail filtering incorrect: a.filtered={}, b.filtered={}",
-                                   a.guardrail_filtered, b.guardrail_filtered)
+                    reason: format!(
+                        "Guardrail filtering incorrect: a.filtered={}, b.filtered={}",
+                        a.guardrail_filtered, b.guardrail_filtered
+                    ),
                 }
             }
         }
         _ => TestResult::Fail {
-            reason: "Missing ranking for one or both candidates".to_string()
-        }
+            reason: "Missing ranking for one or both candidates".to_string(),
+        },
     }
 }
 
@@ -416,7 +437,7 @@ fn test_edge_case_guardrail_filtering() -> TestResult {
 // ---------------------------------------------------------------------------
 
 fn test_integration_full_bayesian_workflow() -> TestResult {
-    let mut diagnostics = BayesianDiagnostics::with_epoch(test_epoch());
+    let mut diagnostics = BayesianDiagnostics::new().with_epoch(test_epoch());
 
     // Simulate a full workflow: observations -> ranking -> transparency check
     let observations = vec![
@@ -443,18 +464,181 @@ fn test_integration_full_bayesian_workflow() -> TestResult {
         (sum - 1.0).abs() < 1e-10
     };
     let transparent = rankings.iter().all(|r| {
-        r.posterior_prob.is_finite() &&
-        r.observation_count > 0 &&
-        r.confidence_interval.0 <= r.confidence_interval.1
+        r.posterior_prob.is_finite()
+            && r.observation_count > 0
+            && r.confidence_interval.0 <= r.confidence_interval.1
     });
-    let descending_order = rankings.windows(2).all(|w| w[0].posterior_prob >= w[1].posterior_prob);
+    let descending_order = rankings
+        .windows(2)
+        .all(|w| w[0].posterior_prob >= w[1].posterior_prob);
 
     if proper_ranking && normalized && transparent && descending_order {
         TestResult::Pass
     } else {
         TestResult::Fail {
-            reason: format!("Full workflow failed: ranking={}, normalized={}, transparent={}, ordered={}",
-                           proper_ranking, normalized, transparent, descending_order)
+            reason: format!(
+                "Full workflow failed: ranking={}, normalized={}, transparent={}, ordered={}",
+                proper_ranking, normalized, transparent, descending_order
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime Sentinel E-Process
+// ---------------------------------------------------------------------------
+
+fn test_e_process_replay_is_bit_exact() -> TestResult {
+    let evidence = vec![
+        LikelihoodRatioEvidence::new("bpet_drift", 1, E_PROCESS_SCALE_PPM * 2),
+        LikelihoodRatioEvidence::new("ssrf_denial", 2, E_PROCESS_SCALE_PPM * 3),
+        LikelihoodRatioEvidence::new("revocation_freshness", 3, E_PROCESS_SCALE_PPM / 2),
+    ];
+
+    let first = match RuntimeSentinelEProcess::replay_from(&evidence) {
+        Ok(state) => state,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("first replay failed: {err:?}"),
+            };
+        }
+    };
+    let second = match RuntimeSentinelEProcess::replay_from(&evidence) {
+        Ok(state) => state,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("second replay failed: {err:?}"),
+            };
+        }
+    };
+
+    if first == second && first.e_value_ppm == E_PROCESS_SCALE_PPM * 3 {
+        TestResult::Pass
+    } else {
+        TestResult::Fail {
+            reason: format!(
+                "e-process replay was not bit-exact: first={first:?}, second={second:?}"
+            ),
+        }
+    }
+}
+
+fn test_e_process_mixture_order_is_deterministic() -> TestResult {
+    let left = vec![
+        MixtureSprtComponent::new("slow_drift", 250_000, E_PROCESS_SCALE_PPM * 4),
+        MixtureSprtComponent::new("capability_denial", 750_000, E_PROCESS_SCALE_PPM * 2),
+    ];
+    let right = vec![
+        MixtureSprtComponent::new("capability_denial", 750_000, E_PROCESS_SCALE_PPM * 2),
+        MixtureSprtComponent::new("slow_drift", 250_000, E_PROCESS_SCALE_PPM * 4),
+    ];
+
+    let left_evidence = match LikelihoodRatioEvidence::from_mixture("mixed", 1, &left) {
+        Ok(evidence) => evidence,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("left mixture failed: {err:?}"),
+            };
+        }
+    };
+    let right_evidence = match LikelihoodRatioEvidence::from_mixture("mixed", 1, &right) {
+        Ok(evidence) => evidence,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("right mixture failed: {err:?}"),
+            };
+        }
+    };
+
+    if left_evidence.likelihood_ratio_ppm == right_evidence.likelihood_ratio_ppm
+        && left_evidence.likelihood_ratio_ppm == 2_500_000
+    {
+        TestResult::Pass
+    } else {
+        TestResult::Fail {
+            reason: format!(
+                "mixture order changed likelihood ratio: left={}, right={}",
+                left_evidence.likelihood_ratio_ppm, right_evidence.likelihood_ratio_ppm
+            ),
+        }
+    }
+}
+
+fn test_e_process_rejects_non_monotonic_replay() -> TestResult {
+    let evidence = vec![
+        LikelihoodRatioEvidence::new("first", 2, E_PROCESS_SCALE_PPM * 2),
+        LikelihoodRatioEvidence::new("second", 2, E_PROCESS_SCALE_PPM * 2),
+    ];
+
+    match RuntimeSentinelEProcess::replay_from(&evidence) {
+        Ok(state) => TestResult::Fail {
+            reason: format!("non-monotonic evidence was accepted: {state:?}"),
+        },
+        Err(_) => TestResult::Pass,
+    }
+}
+
+fn test_e_process_rejects_empty_signal_identity() -> TestResult {
+    let mut state = RuntimeSentinelEProcess::new();
+    let evidence = LikelihoodRatioEvidence::new("", 1, E_PROCESS_SCALE_PPM);
+
+    match state.observe(&evidence) {
+        Ok(update) => TestResult::Fail {
+            reason: format!("empty signal identity was accepted: {update:?}"),
+        },
+        Err(_) => TestResult::Pass,
+    }
+}
+
+fn test_e_process_rejects_duplicate_mixture_components() -> TestResult {
+    let components = vec![
+        MixtureSprtComponent::new("duplicate", 500_000, E_PROCESS_SCALE_PPM * 2),
+        MixtureSprtComponent::new("duplicate", 500_000, E_PROCESS_SCALE_PPM * 4),
+    ];
+
+    match LikelihoodRatioEvidence::from_mixture("ambiguous", 1, &components) {
+        Ok(evidence) => TestResult::Fail {
+            reason: format!("duplicate mixture component was accepted: {evidence:?}"),
+        },
+        Err(_) => TestResult::Pass,
+    }
+}
+
+fn test_e_process_rejects_zero_weight_mixture_component() -> TestResult {
+    let components = vec![
+        MixtureSprtComponent::new("ignored_component", 0, E_PROCESS_SCALE_PPM * 4),
+        MixtureSprtComponent::new("active_component", 1_000_000, E_PROCESS_SCALE_PPM * 2),
+    ];
+
+    match LikelihoodRatioEvidence::from_mixture("zero_weight", 1, &components) {
+        Ok(evidence) => TestResult::Fail {
+            reason: format!("zero-weight mixture component was accepted: {evidence:?}"),
+        },
+        Err(_) => TestResult::Pass,
+    }
+}
+
+fn test_e_process_ville_bound_controls_escalation() -> TestResult {
+    let evidence = vec![LikelihoodRatioEvidence::new(
+        "strong_signal",
+        1,
+        E_PROCESS_SCALE_PPM * 10,
+    )];
+    let state = match RuntimeSentinelEProcess::replay_from(&evidence) {
+        Ok(state) => state,
+        Err(err) => {
+            return TestResult::Fail {
+                reason: format!("replay failed: {err:?}"),
+            };
+        }
+    };
+
+    let bound = state.false_alarm_bound_ppm();
+    if bound == 100_000 && state.should_escalate(100_000) && !state.should_escalate(99_999) {
+        TestResult::Pass
+    } else {
+        TestResult::Fail {
+            reason: format!("unexpected Ville bound/escalation behavior: bound={bound}"),
         }
     }
 }
@@ -479,7 +663,6 @@ const CONFORMANCE_TESTS: &[ConformanceTestCase] = &[
         description: "Ranking calls are immutable operations (purely advisory)",
         test_fn: test_advisory_immutable_ranking_call,
     },
-
     // INV-BAYES-REPRODUCIBLE tests
     ConformanceTestCase {
         id: "BD2IGI-REPRO-001",
@@ -495,7 +678,6 @@ const CONFORMANCE_TESTS: &[ConformanceTestCase] = &[
         description: "Ranking reduction order is deterministic",
         test_fn: test_reproducible_deterministic_reduction_order,
     },
-
     // INV-BAYES-NORMALIZED tests
     ConformanceTestCase {
         id: "BD2IGI-NORM-001",
@@ -511,7 +693,6 @@ const CONFORMANCE_TESTS: &[ConformanceTestCase] = &[
         description: "Uniform priors sum to 1.0 when no observations exist",
         test_fn: test_normalized_uniform_prior_sum,
     },
-
     // INV-BAYES-TRANSPARENT tests
     ConformanceTestCase {
         id: "BD2IGI-TRANS-001",
@@ -527,7 +708,6 @@ const CONFORMANCE_TESTS: &[ConformanceTestCase] = &[
         description: "Confidence intervals contain posterior mean and are well-formed",
         test_fn: test_transparent_confidence_interval_properties,
     },
-
     // Edge cases
     ConformanceTestCase {
         id: "BD2IGI-EDGE-001",
@@ -543,7 +723,6 @@ const CONFORMANCE_TESTS: &[ConformanceTestCase] = &[
         description: "Guardrail filtering correctly marks blocked candidates",
         test_fn: test_edge_case_guardrail_filtering,
     },
-
     // Integration
     ConformanceTestCase {
         id: "BD2IGI-INT-001",
@@ -551,6 +730,56 @@ const CONFORMANCE_TESTS: &[ConformanceTestCase] = &[
         category: TestCategory::Integration,
         description: "Full Bayesian workflow: observations → ranking → transparency verification",
         test_fn: test_integration_full_bayesian_workflow,
+    },
+    // Runtime Sentinel e-process tests
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-001",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Likelihood-ratio e-process replay is bit-exact and fixed-point",
+        test_fn: test_e_process_replay_is_bit_exact,
+    },
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-002",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Mixture-SPRT component ordering is deterministic",
+        test_fn: test_e_process_mixture_order_is_deterministic,
+    },
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-003",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Runtime Sentinel e-process rejects non-monotonic evidence",
+        test_fn: test_e_process_rejects_non_monotonic_replay,
+    },
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-004",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Runtime Sentinel e-process rejects empty signal identity",
+        test_fn: test_e_process_rejects_empty_signal_identity,
+    },
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-005",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Mixture-SPRT rejects duplicate component identifiers",
+        test_fn: test_e_process_rejects_duplicate_mixture_components,
+    },
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-006",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Mixture-SPRT rejects zero-weight components",
+        test_fn: test_e_process_rejects_zero_weight_mixture_component,
+    },
+    ConformanceTestCase {
+        id: "BD2IGI-EPROC-007",
+        requirement_level: RequirementLevel::Must,
+        category: TestCategory::EProcess,
+        description: "Ville false-alarm bound controls escalation",
+        test_fn: test_e_process_ville_bound_controls_escalation,
     },
 ];
 
@@ -587,7 +816,10 @@ pub fn run_conformance_tests() -> ConformanceReport {
         );
 
         if let TestResult::Fail { reason } = &result {
-            eprintln!("FAIL {}: {}\n  Reason: {}", test_case.id, test_case.description, reason);
+            eprintln!(
+                "FAIL {}: {}\n  Reason: {}",
+                test_case.id, test_case.description, reason
+            );
         }
 
         results.push(TestCaseResult {
@@ -601,14 +833,32 @@ pub fn run_conformance_tests() -> ConformanceReport {
 
     let total_must = must_pass + must_fail;
     let total_should = should_pass + should_fail;
-    let must_score = if total_must > 0 { (must_pass as f64 / total_must as f64) * 100.0 } else { 100.0 };
-    let should_score = if total_should > 0 { (should_pass as f64 / total_should as f64) * 100.0 } else { 100.0 };
+    let must_score = if total_must > 0 {
+        (must_pass as f64 / total_must as f64) * 100.0
+    } else {
+        100.0
+    };
+    let should_score = if total_should > 0 {
+        (should_pass as f64 / total_should as f64) * 100.0
+    } else {
+        100.0
+    };
 
     println!("\nbd-2igi Bayesian Diagnostics Conformance Report:");
-    println!("MUST clauses: {}/{} pass ({:.1}%)", must_pass, total_must, must_score);
-    println!("SHOULD clauses: {}/{} pass ({:.1}%)", should_pass, total_should, should_score);
+    println!(
+        "MUST clauses: {}/{} pass ({:.1}%)",
+        must_pass, total_must, must_score
+    );
+    println!(
+        "SHOULD clauses: {}/{} pass ({:.1}%)",
+        should_pass, total_should, should_score
+    );
 
-    assert_eq!(must_fail, 0, "{} MUST-level conformance tests failed", must_fail);
+    assert_eq!(
+        must_fail, 0,
+        "{} MUST-level conformance tests failed",
+        must_fail
+    );
 
     ConformanceReport {
         must_pass,

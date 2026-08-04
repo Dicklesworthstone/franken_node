@@ -1,0 +1,5 @@
+{
+  "authorized": false,
+  "error": "REMOTECAP_SCOPE_DENIED: operation=remote_computation endpoint=https://allowed.example.com/api",
+  "test_case": "disallowed_operation"
+}

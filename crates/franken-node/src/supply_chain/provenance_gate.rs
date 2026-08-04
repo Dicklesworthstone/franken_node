@@ -1366,7 +1366,14 @@ mod tests {
         let err = serde_json::from_value::<ArtifactProvenance>(value)
             .expect_err("object attestations must fail deserialization");
 
-        assert!(err.to_string().contains("attestations"));
+        // bd-o776s: `attestations` is a `Vec<AttestationType>`, so an object value
+        // is a type mismatch that serde reports as `invalid type: map, expected a
+        // sequence` (no field name). Assert the type-mismatch shape instead.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type") || msg.contains("invalid value"),
+            "expected serde to reject object-shaped attestations: {msg}"
+        );
     }
 
     // === Serde ===

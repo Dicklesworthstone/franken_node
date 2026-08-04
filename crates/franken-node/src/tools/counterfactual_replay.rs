@@ -402,12 +402,30 @@ impl CounterfactualReplayError {
 
 pub trait SandboxedExecutor {
     fn evaluate_event(&self, event: &TimelineEvent, policy: &PolicyConfig) -> DecisionPoint;
+
+    /// Stable discriminator naming the decision model that produced the diff.
+    ///
+    /// bd-5r99w.4: counterfactual consumers must be able to tell whether a
+    /// "would strict mode have caught this?" answer came from the runtime's real
+    /// policy decision engine (`"production"`) or from a synthetic, sandboxed
+    /// risk-score stand-in (`"synthetic"`). This is stamped into the report JSON
+    /// and bound into the counterfactual digest so a synthetic re-evaluation can
+    /// never be silently mistaken for a production decision.
+    fn executor_kind(&self) -> &'static str;
 }
+
+/// Canonical executor-model discriminators carried in counterfactual reports.
+pub const EXECUTOR_KIND_SYNTHETIC: &str = "synthetic";
+pub const EXECUTOR_KIND_PRODUCTION: &str = "production";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PureSandboxedExecutor;
 
 impl SandboxedExecutor for PureSandboxedExecutor {
+    fn executor_kind(&self) -> &'static str {
+        EXECUTOR_KIND_SYNTHETIC
+    }
+
     fn evaluate_event(&self, event: &TimelineEvent, policy: &PolicyConfig) -> DecisionPoint {
         let recorded_effects = extract_recorded_host_effects(event);
         let mut risk = base_risk_score(event);
@@ -492,6 +510,13 @@ where
     pub fn with_engine_version(mut self, engine_version: impl Into<String>) -> Self {
         self.engine_version = engine_version.into();
         self
+    }
+
+    /// Discriminator naming the decision model backing this engine
+    /// (`"synthetic"` or `"production"`). See [`SandboxedExecutor::executor_kind`].
+    #[must_use]
+    pub fn executor_kind(&self) -> &'static str {
+        self.executor.executor_kind()
     }
 
     pub fn replay(
@@ -1129,6 +1154,21 @@ mod tests {
         write_bundle_to_path_with_trusted_key,
     };
     use tempfile::TempDir;
+
+    #[test]
+    fn synthetic_executor_is_labeled_synthetic() {
+        // bd-5r99w.4: the sandboxed risk-score model must self-identify as
+        // synthetic so it can never be silently read as a production decision.
+        assert_eq!(
+            PureSandboxedExecutor.executor_kind(),
+            EXECUTOR_KIND_SYNTHETIC
+        );
+        assert_eq!(
+            CounterfactualReplayEngine::default().executor_kind(),
+            EXECUTOR_KIND_SYNTHETIC
+        );
+        assert_ne!(EXECUTOR_KIND_SYNTHETIC, EXECUTOR_KIND_PRODUCTION);
+    }
 
     /// Create test bundle using real file I/O roundtrip to exercise serialization path
     fn fixture_bundle() -> ReplayBundle {

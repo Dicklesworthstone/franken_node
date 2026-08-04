@@ -1,7 +1,7 @@
 {
   "schema_version": "franken-node/docs-claim-traceability/v1",
   "bead_id": "bd-38hez.8",
-  "generated_at_utc": "2026-05-09T00:00:00Z",
+  "generated_at_utc": "2026-06-18T16:28:09Z",
   "summary": {
     "total_claims": 4,
     "covered": 4,
@@ -17,8 +17,8 @@
       "claim_kind": "current",
       "source": {
         "path": "README.md",
-        "line": 194,
-        "claim_text": "| `franken-node doctor` | Diagnose environment and policy setup (optionally with live policy activation telemetry) | `franken-node doctor --verbose --policy-activation-input ./fixtures/policy_activation/doctor_policy_activation_pass.json` |"
+        "line": 636,
+        "claim_text": "| `franken-node doctor` | Diagnose environment and policy setup. Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json`, `--structured-logs-jsonl`. |"
       },
       "command_surfaces": [
         "franken-node doctor"
@@ -52,8 +52,8 @@
       "claim_kind": "current",
       "source": {
         "path": "README.md",
-        "line": 182,
-        "claim_text": "| `franken-node fleet status` | Show policy and quarantine state across nodes | `franken-node fleet status --zone prod-us-east` |"
+        "line": 689,
+        "claim_text": "| `franken-node fleet status` | Show policy and quarantine state across nodes. Flags: `--zone`, `--verbose`, `--json`. |"
       },
       "command_surfaces": [
         "franken-node fleet status"
@@ -79,8 +79,8 @@
       "claim_kind": "current",
       "source": {
         "path": "README.md",
-        "line": 171,
-        "claim_text": "| `franken-node migrate audit` | Inventory migration risk and emit findings | `franken-node migrate audit ./my-app --format json` |"
+        "line": 642,
+        "claim_text": "| `franken-node migrate audit <path>` | Inventory migration risk. Flags: `--format` (json\\|text\\|sarif), `--out`. |"
       },
       "command_surfaces": [
         "franken-node migrate audit"

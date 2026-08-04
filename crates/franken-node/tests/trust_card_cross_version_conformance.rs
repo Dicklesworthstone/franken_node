@@ -20,7 +20,8 @@ use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
     DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
     ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardError,
-    TrustCardInput, TrustCardRegistry, TrustCardRegistrySnapshot, verify_card_signature,
+    TrustCardInput, TrustCardRegistry, TrustCardRegistrySnapshot, sign_card_in_place,
+    verify_card_signature,
 };
 
 // ---------------------------------------------------------------------------
@@ -109,7 +110,16 @@ fn create_test_input_v1() -> TrustCardInput {
     }
 }
 
-/// Create a trust card with explicit schema version for compatibility testing
+/// Create a trust card *genuinely signed* at an explicit schema version, for
+/// cross-version compatibility testing.
+///
+/// `registry.create` always stamps the current schema and signs; to model a
+/// card produced under a different schema we set `schema_version` and then
+/// **re-sign** via [`sign_card_in_place`]. Re-signing (rather than a bare
+/// post-hoc field override) is required because prod now folds `schema_version`
+/// into the signed canonical payload — a schema-downgrade defense — so a
+/// tampered-but-unsigned card would (correctly) fail verification. See
+/// `schema_downgrade_tamper_is_rejected` for the negative case.
 fn create_card_with_schema(
     input: TrustCardInput,
     schema_version: &str,
@@ -119,8 +129,10 @@ fn create_card_with_schema(
     let mut card = registry
         .create(input, now_secs, "conformance-trace")
         .unwrap();
-    // Override schema version for testing
+    // Set the target schema, then re-sign so the card is genuinely valid at it.
     card.schema_version = schema_version.to_string();
+    sign_card_in_place(&mut card, b"conformance-test-key")
+        .expect("re-sign trust card at target schema version");
     card
 }
 
@@ -157,6 +169,9 @@ struct CrossVersionTest {
 }
 
 #[derive(Debug, Clone)]
+// The matrix currently only drives the Current verifier; Legacy/Future model the
+// full cross-version space and are kept for completeness / future cases.
+#[allow(dead_code)]
 enum VerifierVersion {
     Current,
     Legacy,
@@ -164,6 +179,9 @@ enum VerifierVersion {
 }
 
 #[derive(Debug, Clone)]
+// WarningButPass is part of the complete expectation space (handled in the match
+// arms below) even though no current scenario is classified that way.
+#[allow(dead_code)]
 enum TestExpectation {
     Pass,
     Fail(&'static str),
@@ -267,10 +285,21 @@ fn run_cross_version_test(test_case: &CrossVersionTest) -> Result<(), TrustCardE
         }
 
         "future_card_current_verifier" => {
-            // Test: does current verifier gracefully reject future schema?
+            // Forward incompatibility is enforced at the registry/snapshot schema
+            // layer, not by card signature verification. `verify_card_signature`
+            // is schema-agnostic crypto: a *genuinely* signed card verifies
+            // regardless of its schema string (the previous version of this test
+            // only "rejected" the future card by accident, because it tampered
+            // with the schema after signing). The real forward-incompat gate is
+            // `from_snapshot`, which fail-closes on an unsupported registry schema
+            // with `UnsupportedSnapshotSchema` before any card work.
             let card = create_card_with_schema(input, test_case.card_schema, now_secs);
-            // This should fail - we don't support future schemas yet
-            verify_card_signature(&card, b"conformance-test-key")
+            let mut cards_map = BTreeMap::new();
+            cards_map.insert("npm:@conformance/test-extension".to_string(), vec![card]);
+            let snapshot =
+                create_registry_snapshot_with_schema(cards_map, test_case.registry_schema);
+            TrustCardRegistry::from_snapshot(snapshot, b"conformance-test-key", now_secs + 1000)
+                .map(|_| ())
         }
 
         "schema_transition_chain_valid" => {
@@ -312,12 +341,25 @@ fn test_version_chain_across_schemas() -> Result<(), TrustCardError> {
 }
 
 fn test_mixed_schema_registry() -> Result<(), TrustCardError> {
-    // Create registry snapshot with mixed schema versions
+    // Build a genuine, chain-valid card history whose entries carry mixed schema
+    // versions: v1 at the legacy schema, v2 at the current schema. A single
+    // registry is used so the versions are monotonic (v1 -> v2) and the second
+    // card's `previous_version_hash` links to the first. Because setting the
+    // legacy schema on v1 and re-signing changes its `card_hash`, v2's back-link
+    // is re-pointed at the re-signed v1 hash and v2 is re-signed too, so
+    // `validate_snapshot_history` (monotonicity + linkage + signature) accepts it.
     let input = create_test_input_v1();
     let now_secs = 1000;
+    let key = b"conformance-test-key";
+    let mut registry = TrustCardRegistry::new(60, key);
 
-    let legacy_card = create_card_with_schema(input.clone(), LEGACY_CARD_SCHEMA, now_secs);
-    let current_card = create_card_with_schema(input, CURRENT_CARD_SCHEMA, now_secs + 1000);
+    let mut legacy_card = registry.create(input.clone(), now_secs, "conformance-trace")?;
+    legacy_card.schema_version = LEGACY_CARD_SCHEMA.to_string();
+    sign_card_in_place(&mut legacy_card, key).expect("re-sign legacy-schema card");
+
+    let mut current_card = registry.create(input, now_secs + 1000, "conformance-trace")?;
+    current_card.previous_version_hash = Some(legacy_card.card_hash.clone());
+    sign_card_in_place(&mut current_card, key).expect("re-sign current-schema card");
 
     let mut cards_map = BTreeMap::new();
     cards_map.insert(
@@ -409,6 +451,36 @@ fn signature_verification_cross_version() {
     );
 }
 
+/// Schema-downgrade defense: mutating a signed card's `schema_version` *without*
+/// re-signing must be rejected, because prod now folds `schema_version` into the
+/// signed canonical payload. This is the property that makes the genuinely-signed
+/// helper above necessary; it is asserted here directly so the coverage the old
+/// tamper-based helper provided by accident is preserved explicitly.
+#[test]
+fn schema_downgrade_tamper_is_rejected() {
+    let input = create_test_input_v1();
+    let key = b"conformance-test-key";
+
+    // A genuinely signed current-schema card verifies.
+    let mut card = create_card_with_schema(input, CURRENT_CARD_SCHEMA, 1000);
+    assert!(
+        verify_card_signature(&card, key).is_ok(),
+        "freshly signed current-schema card must verify"
+    );
+
+    // Downgrade the schema_version in place without re-signing.
+    card.schema_version = LEGACY_CARD_SCHEMA.to_string();
+
+    // The stale card_hash no longer matches the recomputed canonical hash, so
+    // verification fails closed with CardHashMismatch (the downgrade defense).
+    match verify_card_signature(&card, key) {
+        Err(TrustCardError::CardHashMismatch(_)) => {}
+        other => {
+            panic!("schema-downgrade tamper must be rejected as CardHashMismatch, got {other:?}")
+        }
+    }
+}
+
 #[test]
 fn serialization_round_trip_cross_version() {
     // Test that cards can be serialized and deserialized across versions
@@ -464,12 +536,12 @@ fn generate_conformance_report() {
                 "verifier_version": format!("{:?}", test_case.verifier_version),
                 "expected": format!("{:?}", test_case.expected_result),
                 "actual": if passed { "Pass" } else { "Fail" },
-                "conformant": match (&result, &test_case.expected_result) {
-                    (Ok(_), TestExpectation::Pass) => true,
-                    (Err(_), TestExpectation::Fail(_)) => true,
-                    (Ok(_), TestExpectation::WarningButPass) => true,
-                    _ => false,
-                }
+                "conformant": matches!(
+                    (&result, &test_case.expected_result),
+                    (Ok(_), TestExpectation::Pass)
+                        | (Err(_), TestExpectation::Fail(_))
+                        | (Ok(_), TestExpectation::WarningButPass)
+                )
             }),
         );
     }

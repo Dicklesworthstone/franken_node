@@ -18,6 +18,7 @@ pub const MAX_HANDOFF_ISSUES: usize = 256;
 pub const MAX_HANDOFF_AGENTS: usize = 256;
 pub const MAX_HANDOFF_RESERVATIONS: usize = 512;
 pub const MAX_HANDOFF_RCH_BUILDS: usize = 128;
+pub const MAX_HANDOFF_PROOF_LEASES: usize = 256;
 pub const MAX_HANDOFF_GIT_EVENTS: usize = 512;
 pub const MAX_HANDOFF_CROSS_REPO_BLOCKERS: usize = 128;
 pub const MAX_HANDOFF_LIST_ITEMS: usize = 64;
@@ -50,6 +51,45 @@ pub enum SwarmHandoffRchBuildState {
 impl SwarmHandoffRchBuildState {
     const fn is_active(self) -> bool {
         matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmHandoffProofLeaseState {
+    Proposed,
+    Running,
+    Joined,
+    Completed,
+    Stale,
+    Fenced,
+    Rejected,
+    FailedClosed,
+    Unknown,
+}
+
+impl SwarmHandoffProofLeaseState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Running => "running",
+            Self::Joined => "joined",
+            Self::Completed => "completed",
+            Self::Stale => "stale",
+            Self::Fenced => "fenced",
+            Self::Rejected => "rejected",
+            Self::FailedClosed => "failed_closed",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    const fn is_active(self) -> bool {
+        matches!(self, Self::Proposed | Self::Running | Self::Joined)
+    }
+
+    const fn is_fail_closed(self) -> bool {
+        matches!(self, Self::Rejected | Self::FailedClosed | Self::Unknown)
     }
 }
 
@@ -119,11 +159,14 @@ pub mod handoff_reason_codes {
         "HANDOFF_BLOCKED_CROSS_REPO_RESERVATION";
     pub const HANDOFF_BLOCKED_CROSS_REPO_BLOCKER: &str = "HANDOFF_BLOCKED_CROSS_REPO_BLOCKER";
     pub const HANDOFF_WAITING_RCH_ACTIVE: &str = "HANDOFF_WAITING_RCH_ACTIVE";
+    pub const HANDOFF_WAITING_PROOF_LEASE_ACTIVE: &str = "HANDOFF_WAITING_PROOF_LEASE_ACTIVE";
     pub const HANDOFF_STALE_CONTESTED_RESERVATION: &str = "HANDOFF_STALE_CONTESTED_RESERVATION";
     pub const HANDOFF_STALE_CONTESTED_RCH_STALE: &str = "HANDOFF_STALE_CONTESTED_RCH_STALE";
+    pub const HANDOFF_STALE_CONTESTED_PROOF_LEASE: &str = "HANDOFF_STALE_CONTESTED_PROOF_LEASE";
     pub const HANDOFF_STALE_ACK_REQUIRED: &str = "HANDOFF_STALE_ACK_REQUIRED";
     pub const HANDOFF_ABANDONED_NO_RECENT_SIGNALS: &str = "HANDOFF_ABANDONED_NO_RECENT_SIGNALS";
     pub const HANDOFF_READY_EXPIRED_RESERVATION: &str = "HANDOFF_READY_EXPIRED_RESERVATION";
+    pub const HANDOFF_READY_STALE_PROOF_LEASE: &str = "HANDOFF_READY_STALE_PROOF_LEASE";
     pub const HANDOFF_READY_UNASSIGNED: &str = "HANDOFF_READY_UNASSIGNED";
     pub const HANDOFF_MANUAL_REVIEW_MALFORMED_EVIDENCE: &str =
         "HANDOFF_MANUAL_REVIEW_MALFORMED_EVIDENCE";
@@ -131,6 +174,8 @@ pub mod handoff_reason_codes {
     pub const HANDOFF_MANUAL_REVIEW_UNKNOWN_ISSUE_STATUS: &str =
         "HANDOFF_MANUAL_REVIEW_UNKNOWN_ISSUE_STATUS";
     pub const HANDOFF_MANUAL_REVIEW_CLOSED_ISSUE: &str = "HANDOFF_MANUAL_REVIEW_CLOSED_ISSUE";
+    pub const HANDOFF_MANUAL_REVIEW_PROOF_LEASE_FAIL_CLOSED: &str =
+        "HANDOFF_MANUAL_REVIEW_PROOF_LEASE_FAIL_CLOSED";
 }
 
 pub mod overlap_reason_codes {
@@ -153,6 +198,7 @@ pub enum SwarmHandoffPolicyDecision {
     BlockedOnKnownDependency,
     BlockedOnReservation,
     WaitingOnRch,
+    WaitingOnProofLease,
     StaleButContested,
     Abandoned,
     ReadyToReopen,
@@ -167,6 +213,7 @@ impl SwarmHandoffPolicyDecision {
             Self::BlockedOnKnownDependency => "blocked_on_known_dependency",
             Self::BlockedOnReservation => "blocked_on_reservation",
             Self::WaitingOnRch => "waiting_on_rch",
+            Self::WaitingOnProofLease => "waiting_on_proof_lease",
             Self::StaleButContested => "stale_but_contested",
             Self::Abandoned => "abandoned",
             Self::ReadyToReopen => "ready_to_reopen",
@@ -330,6 +377,27 @@ pub struct SwarmHandoffRchBuildEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffProofLeaseEvidence {
+    pub lease_id: String,
+    pub project_key: String,
+    pub owner_agent: String,
+    pub owner_bead_id: String,
+    pub state: SwarmHandoffProofLeaseState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_work_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub waiter_agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmHandoffGitActivityEvidence {
     pub project_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -475,6 +543,8 @@ pub struct SwarmHandoffEvidenceInput {
     #[serde(default)]
     pub rch_builds: Vec<SwarmHandoffRchBuildEvidence>,
     #[serde(default)]
+    pub proof_leases: Vec<SwarmHandoffProofLeaseEvidence>,
+    #[serde(default)]
     pub git_activity: Vec<SwarmHandoffGitActivityEvidence>,
     #[serde(default)]
     pub cross_repo_blockers: Vec<SwarmHandoffCrossRepoBlockerEvidence>,
@@ -491,6 +561,9 @@ pub struct SwarmHandoffEvidenceSummary {
     pub exclusive_reservation_count: usize,
     pub active_rch_build_count: usize,
     pub stale_rch_build_count: usize,
+    pub proof_lease_count: usize,
+    pub active_proof_lease_count: usize,
+    pub stale_proof_lease_count: usize,
     pub git_activity_count: usize,
     pub cross_repo_blocker_count: usize,
     pub uncleared_cross_repo_blocker_count: usize,
@@ -530,6 +603,8 @@ pub struct SwarmHandoffReadinessReport {
     pub claimed_beads: Vec<SwarmHandoffClaimedBeadView>,
     pub active_reservations: Vec<SwarmHandoffReservationView>,
     pub active_rch_builds: Vec<SwarmHandoffRchBuildView>,
+    pub active_proof_leases: Vec<SwarmHandoffProofLeaseView>,
+    pub stale_proof_leases: Vec<SwarmHandoffProofLeaseView>,
     pub cross_repo_blockers: Vec<SwarmHandoffCrossRepoBlockerView>,
     pub cleared_cross_repo_blockers: Vec<SwarmHandoffCrossRepoBlockerView>,
     pub stale_candidates: Vec<SwarmHandoffDecisionView>,
@@ -665,6 +740,23 @@ pub struct SwarmHandoffRchBuildView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffProofLeaseView {
+    pub lease_id: String,
+    pub project_key: String,
+    pub owner_agent: String,
+    pub owner_bead_id: String,
+    pub state: SwarmHandoffProofLeaseState,
+    pub state_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_age_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<i64>,
+    pub waiter_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmHandoffCrossRepoBlockerView {
     pub local_bead_id: String,
     pub sibling_project_key: String,
@@ -758,11 +850,12 @@ impl Error for SwarmHandoffEvidenceError {}
 pub type SwarmHandoffEvidenceResult<T> = Result<T, SwarmHandoffEvidenceError>;
 
 const SWARM_HANDOFF_READINESS_COMMAND: &str = "ops swarm-handoff-readiness";
-const POLICY_DECISION_ORDER: [SwarmHandoffPolicyDecision; 8] = [
+const POLICY_DECISION_ORDER: [SwarmHandoffPolicyDecision; 9] = [
     SwarmHandoffPolicyDecision::Active,
     SwarmHandoffPolicyDecision::BlockedOnKnownDependency,
     SwarmHandoffPolicyDecision::BlockedOnReservation,
     SwarmHandoffPolicyDecision::WaitingOnRch,
+    SwarmHandoffPolicyDecision::WaitingOnProofLease,
     SwarmHandoffPolicyDecision::StaleButContested,
     SwarmHandoffPolicyDecision::Abandoned,
     SwarmHandoffPolicyDecision::ReadyToReopen,
@@ -783,6 +876,11 @@ impl SwarmHandoffEvidenceInput {
             MAX_HANDOFF_RESERVATIONS,
         )?;
         require_len("rch_builds", self.rch_builds.len(), MAX_HANDOFF_RCH_BUILDS)?;
+        require_len(
+            "proof_leases",
+            self.proof_leases.len(),
+            MAX_HANDOFF_PROOF_LEASES,
+        )?;
         require_len(
             "git_activity",
             self.git_activity.len(),
@@ -805,6 +903,9 @@ impl SwarmHandoffEvidenceInput {
         }
         for build in &self.rch_builds {
             validate_rch_build(build)?;
+        }
+        for lease in &self.proof_leases {
+            validate_proof_lease(lease)?;
         }
         for activity in &self.git_activity {
             validate_git_activity(activity)?;
@@ -839,6 +940,17 @@ impl SwarmHandoffEvidenceInput {
                 .iter()
                 .filter(|build| build.detector_progress_stale || build.detector_heartbeat_stale)
                 .count(),
+            proof_lease_count: self.proof_leases.len(),
+            active_proof_lease_count: self
+                .proof_leases
+                .iter()
+                .filter(|lease| proof_lease_is_active_pending(lease, self.observed_at))
+                .count(),
+            stale_proof_lease_count: self
+                .proof_leases
+                .iter()
+                .filter(|lease| proof_lease_is_stale_for_handoff(lease, self.observed_at))
+                .count(),
             git_activity_count: self.git_activity.len(),
             cross_repo_blocker_count: self.cross_repo_blockers.len(),
             uncleared_cross_repo_blocker_count: self
@@ -861,6 +973,11 @@ impl SwarmHandoffEvidenceInput {
                 .filter(|build| build.state == SwarmHandoffRchBuildState::Unknown)
                 .count()
             + self
+                .proof_leases
+                .iter()
+                .filter(|lease| lease.state == SwarmHandoffProofLeaseState::Unknown)
+                .count()
+            + self
                 .cross_repo_blockers
                 .iter()
                 .filter(|blocker| {
@@ -879,9 +996,11 @@ impl SwarmHandoffEvidenceInput {
             HANDOFF_ABANDONED_NO_RECENT_SIGNALS, HANDOFF_ACTIVE_OWNER_OTHER_PROJECT,
             HANDOFF_BLOCKED_RESERVATION_ACTIVE, HANDOFF_MANUAL_REVIEW_CLOSED_ISSUE,
             HANDOFF_MANUAL_REVIEW_ISSUE_NOT_FOUND, HANDOFF_MANUAL_REVIEW_MALFORMED_EVIDENCE,
+            HANDOFF_MANUAL_REVIEW_PROOF_LEASE_FAIL_CLOSED,
             HANDOFF_MANUAL_REVIEW_UNKNOWN_ISSUE_STATUS, HANDOFF_READY_EXPIRED_RESERVATION,
-            HANDOFF_READY_UNASSIGNED, HANDOFF_STALE_ACK_REQUIRED,
-            HANDOFF_STALE_CONTESTED_RCH_STALE, HANDOFF_STALE_CONTESTED_RESERVATION,
+            HANDOFF_READY_STALE_PROOF_LEASE, HANDOFF_READY_UNASSIGNED, HANDOFF_STALE_ACK_REQUIRED,
+            HANDOFF_STALE_CONTESTED_PROOF_LEASE, HANDOFF_STALE_CONTESTED_RCH_STALE,
+            HANDOFF_STALE_CONTESTED_RESERVATION, HANDOFF_WAITING_PROOF_LEASE_ACTIVE,
             HANDOFF_WAITING_RCH_ACTIVE,
         };
 
@@ -947,6 +1066,7 @@ impl SwarmHandoffEvidenceInput {
 
         let assignee = issue.assignee.as_deref();
         let active_reservations = self.matching_reservations(bead_id, issue, true);
+        let proof_leases = self.matching_proof_leases(bead_id);
         if let Some(reservation) = active_reservations
             .iter()
             .find(|reservation| Some(reservation.holder_agent.as_str()) != assignee)
@@ -975,6 +1095,21 @@ impl SwarmHandoffEvidenceInput {
                 vec![reason_code],
                 vec![pointer],
                 required_action,
+                None,
+            );
+        }
+
+        if let Some(lease) = proof_leases
+            .iter()
+            .find(|lease| proof_lease_is_recently_active(lease, self.observed_at, config))
+        {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::WaitingOnProofLease,
+                vec![HANDOFF_WAITING_PROOF_LEASE_ACTIVE],
+                vec![proof_lease_pointer(lease)],
+                "Do not reopen or steal work; a live validation proof lease still has fresh owner, expiry, and progress evidence.",
                 None,
             );
         }
@@ -1019,6 +1154,51 @@ impl SwarmHandoffEvidenceInput {
                 vec![HANDOFF_STALE_CONTESTED_RCH_STALE],
                 vec![rch_pointer(build)],
                 "RCH evidence is stale or incomplete; record the worker-infra blocker instead of treating validation as green.",
+                None,
+            );
+        }
+
+        if let Some(lease) = proof_leases
+            .iter()
+            .find(|lease| proof_lease_is_fail_closed(lease))
+        {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::ManualReviewRequired,
+                vec![HANDOFF_MANUAL_REVIEW_PROOF_LEASE_FAIL_CLOSED],
+                vec![proof_lease_pointer(lease)],
+                "Validation proof lease evidence is rejected, unknown, or fail-closed; repair the proof coalescer state before reopening.",
+                None,
+            );
+        }
+
+        if let Some(lease) = proof_leases
+            .iter()
+            .find(|lease| proof_lease_is_ready_for_handoff(lease, self.observed_at))
+        {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::ReadyToReopen,
+                vec![HANDOFF_READY_STALE_PROOF_LEASE],
+                vec![proof_lease_pointer(lease)],
+                "Evidence supports an explicit handoff; the validation proof lease is stale or expired and no fresh owner signals remain.",
+                Some(reopen_command(bead_id)),
+            );
+        }
+
+        if let Some(lease) = proof_leases
+            .iter()
+            .find(|lease| proof_lease_is_stale_for_handoff(lease, self.observed_at))
+        {
+            return policy_outcome(
+                bead_id,
+                self.observed_at,
+                SwarmHandoffPolicyDecision::StaleButContested,
+                vec![HANDOFF_STALE_CONTESTED_PROOF_LEASE],
+                vec![proof_lease_pointer(lease)],
+                "The owner looks stale but the validation proof lease is not safely handoff-ready; request acknowledgement or rerun coalescer fencing before reopening.",
                 None,
             );
         }
@@ -1189,6 +1369,13 @@ impl SwarmHandoffEvidenceInput {
         self.rch_builds
             .iter()
             .filter(|build| build.blocker_bead_id.as_deref() == Some(bead_id))
+            .collect()
+    }
+
+    fn matching_proof_leases(&self, bead_id: &str) -> Vec<&SwarmHandoffProofLeaseEvidence> {
+        self.proof_leases
+            .iter()
+            .filter(|lease| lease.owner_bead_id == bead_id)
             .collect()
     }
 
@@ -1579,6 +1766,20 @@ pub fn build_swarm_handoff_readiness_report(
         .take(MAX_HANDOFF_LIST_ITEMS)
         .map(|build| rch_build_view(input, build))
         .collect::<Vec<_>>();
+    let active_proof_leases = input
+        .proof_leases
+        .iter()
+        .filter(|lease| proof_lease_is_active_pending(lease, input.observed_at))
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|lease| proof_lease_view(input, lease))
+        .collect::<Vec<_>>();
+    let stale_proof_leases = input
+        .proof_leases
+        .iter()
+        .filter(|lease| proof_lease_is_stale_for_handoff(lease, input.observed_at))
+        .take(MAX_HANDOFF_LIST_ITEMS)
+        .map(|lease| proof_lease_view(input, lease))
+        .collect::<Vec<_>>();
     let cross_repo_blockers = input
         .cross_repo_blockers
         .iter()
@@ -1653,6 +1854,8 @@ pub fn build_swarm_handoff_readiness_report(
         claimed_beads,
         active_reservations,
         active_rch_builds,
+        active_proof_leases,
+        stale_proof_leases,
         cross_repo_blockers,
         cleared_cross_repo_blockers,
         stale_candidates,
@@ -1690,6 +1893,11 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
         ),
         format!("- active_rch_builds: {}", report.active_rch_builds.len()),
         format!(
+            "- active_proof_leases: {}",
+            report.active_proof_leases.len()
+        ),
+        format!("- stale_proof_leases: {}", report.stale_proof_leases.len()),
+        format!(
             "- cross_repo_blockers: {}",
             report.cross_repo_blockers.len()
         ),
@@ -1709,11 +1917,13 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
 
     if let Some(summary) = &report.evidence_summary {
         lines.push(format!(
-            "- evidence_summary: issues={} agents={} reservations={} active_rch={} cross_repo_uncleared={} unknown_signals={}",
+            "- evidence_summary: issues={} agents={} reservations={} active_rch={} proof_leases={} stale_proof_leases={} cross_repo_uncleared={} unknown_signals={}",
             summary.issue_count,
             summary.agent_count,
             summary.reservation_count,
             summary.active_rch_build_count,
+            summary.proof_lease_count,
+            summary.stale_proof_lease_count,
             summary.uncleared_cross_repo_blocker_count,
             summary.unknown_signal_count
         ));
@@ -1858,6 +2068,42 @@ pub fn render_swarm_handoff_readiness_human(report: &SwarmHandoffReadinessReport
                 render_optional_i64(build.progress_age_secs),
                 build.detector_progress_stale,
                 build.detector_heartbeat_stale
+            ));
+        }
+    }
+
+    if !report.active_proof_leases.is_empty() {
+        lines.push(String::new());
+        lines.push("Active proof leases:".to_string());
+        for lease in &report.active_proof_leases {
+            lines.push(format!(
+                "- lease=`{}` bead=`{}` owner=`{}` state=`{}` updated_age_secs={} expires_in_secs={} waiters={} path=`{}`",
+                lease.lease_id,
+                lease.owner_bead_id,
+                lease.owner_agent,
+                lease.state_label,
+                render_optional_i64(lease.updated_age_secs),
+                render_optional_i64(lease.expires_in_secs),
+                lease.waiter_count,
+                lease.lease_path.as_deref().unwrap_or("")
+            ));
+        }
+    }
+
+    if !report.stale_proof_leases.is_empty() {
+        lines.push(String::new());
+        lines.push("Stale proof leases:".to_string());
+        for lease in &report.stale_proof_leases {
+            lines.push(format!(
+                "- lease=`{}` bead=`{}` owner=`{}` state=`{}` updated_age_secs={} expires_in_secs={} waiters={} path=`{}`",
+                lease.lease_id,
+                lease.owner_bead_id,
+                lease.owner_agent,
+                lease.state_label,
+                render_optional_i64(lease.updated_age_secs),
+                render_optional_i64(lease.expires_in_secs),
+                lease.waiter_count,
+                lease.lease_path.as_deref().unwrap_or("")
             ));
         }
     }
@@ -2065,6 +2311,29 @@ fn rch_build_view(
     }
 }
 
+fn proof_lease_view(
+    input: &SwarmHandoffEvidenceInput,
+    lease: &SwarmHandoffProofLeaseEvidence,
+) -> SwarmHandoffProofLeaseView {
+    SwarmHandoffProofLeaseView {
+        lease_id: lease.lease_id.clone(),
+        project_key: lease.project_key.clone(),
+        owner_agent: lease.owner_agent.clone(),
+        owner_bead_id: lease.owner_bead_id.clone(),
+        state: lease.state,
+        state_label: lease.state.as_str().to_string(),
+        lease_path: lease.lease_path.clone(),
+        updated_age_secs: age_secs(input.observed_at, lease.updated_at),
+        expires_in_secs: lease.expires_at.map(|expires_at| {
+            expires_at
+                .signed_duration_since(input.observed_at)
+                .num_seconds()
+                .max(0)
+        }),
+        waiter_count: lease.waiter_agents.len(),
+    }
+}
+
 fn cross_repo_blocker_view(
     input: &SwarmHandoffEvidenceInput,
     blocker: &SwarmHandoffCrossRepoBlockerEvidence,
@@ -2162,8 +2431,11 @@ fn decision_prohibited_action(decision: SwarmHandoffPolicyDecision) -> String {
         SwarmHandoffPolicyDecision::WaitingOnRch => {
             "Do not treat a pending RCH proof as green or close dependent work."
         }
+        SwarmHandoffPolicyDecision::WaitingOnProofLease => {
+            "Do not steal, fence, or reopen around a fresh validation proof lease."
+        }
         SwarmHandoffPolicyDecision::StaleButContested => {
-            "Do not override the active reservation without an acknowledgement from the holder."
+            "Do not override active reservation or proof-lease evidence without an acknowledgement from the holder."
         }
         SwarmHandoffPolicyDecision::Abandoned => {
             "Do not delete files or assume ownership without an explicit Beads transition."
@@ -2212,9 +2484,20 @@ fn decision_blocker_class(outcome: &SwarmHandoffPolicyOutcome) -> &'static str {
     } else if outcome
         .reason_codes
         .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_WAITING_PROOF_LEASE_ACTIVE)
+    {
+        "proof_lease"
+    } else if outcome
+        .reason_codes
+        .iter()
         .any(|code| code == handoff_reason_codes::HANDOFF_STALE_CONTESTED_RCH_STALE)
     {
         "rch_stale"
+    } else if outcome.reason_codes.iter().any(|code| {
+        code == handoff_reason_codes::HANDOFF_STALE_CONTESTED_PROOF_LEASE
+            || code == handoff_reason_codes::HANDOFF_READY_STALE_PROOF_LEASE
+    }) {
+        "proof_lease_stale"
     } else if outcome.reason_codes.iter().any(|code| {
         code == handoff_reason_codes::HANDOFF_STALE_CONTESTED_RESERVATION
             || code == handoff_reason_codes::HANDOFF_READY_EXPIRED_RESERVATION
@@ -2232,6 +2515,12 @@ fn decision_blocker_class(outcome: &SwarmHandoffPolicyOutcome) -> &'static str {
         .any(|code| code == handoff_reason_codes::HANDOFF_ABANDONED_NO_RECENT_SIGNALS)
     {
         "stale_claim"
+    } else if outcome
+        .reason_codes
+        .iter()
+        .any(|code| code == handoff_reason_codes::HANDOFF_MANUAL_REVIEW_PROOF_LEASE_FAIL_CLOSED)
+    {
+        "proof_lease_fail_closed"
     } else if outcome
         .reason_codes
         .iter()
@@ -2284,6 +2573,15 @@ fn freshness_age_secs(
             .into_iter()
             .flat_map(|build| [build.heartbeat_at, build.progress_at])
             .flatten()
+            .max(),
+    );
+    latest = latest.max(
+        input
+            .matching_proof_leases(&issue.bead_id)
+            .into_iter()
+            .flat_map(|lease| [lease.updated_at, lease.expires_at])
+            .flatten()
+            .filter(|timestamp| *timestamp <= input.observed_at)
             .max(),
     );
     latest = latest.max(
@@ -2408,6 +2706,16 @@ fn rch_pointer(build: &SwarmHandoffRchBuildEvidence) -> String {
     format!("rch:{}:{:?}", build.build_id, build.state)
 }
 
+fn proof_lease_pointer(lease: &SwarmHandoffProofLeaseEvidence) -> String {
+    format!(
+        "proof_lease:{}:{}:{}:state={}",
+        lease.owner_agent,
+        lease.owner_bead_id,
+        lease.lease_id,
+        lease.state.as_str()
+    )
+}
+
 fn git_pointer(activity: &SwarmHandoffGitActivityEvidence) -> String {
     match activity.commit_hash.as_deref() {
         Some(commit) => format!("git:{commit}:{}", activity.authored_at.to_rfc3339()),
@@ -2474,6 +2782,58 @@ fn rch_build_is_recently_active(
             observed_at,
             config.rch_activity_grace_secs,
         ))
+}
+
+fn proof_lease_is_recently_active(
+    lease: &SwarmHandoffProofLeaseEvidence,
+    observed_at: DateTime<Utc>,
+    config: &SwarmHandoffPolicyConfig,
+) -> bool {
+    proof_lease_is_active_pending(lease, observed_at)
+        && timestamp_is_recent(
+            lease.updated_at,
+            observed_at,
+            config.rch_activity_grace_secs,
+        )
+}
+
+fn proof_lease_is_active_pending(
+    lease: &SwarmHandoffProofLeaseEvidence,
+    observed_at: DateTime<Utc>,
+) -> bool {
+    lease.state.is_active()
+        && lease
+            .expires_at
+            .is_some_and(|expires_at| expires_at > observed_at)
+}
+
+fn proof_lease_is_stale_for_handoff(
+    lease: &SwarmHandoffProofLeaseEvidence,
+    observed_at: DateTime<Utc>,
+) -> bool {
+    matches!(
+        lease.state,
+        SwarmHandoffProofLeaseState::Stale | SwarmHandoffProofLeaseState::Fenced
+    ) || (lease.state.is_active()
+        && lease
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= observed_at))
+}
+
+fn proof_lease_is_ready_for_handoff(
+    lease: &SwarmHandoffProofLeaseEvidence,
+    observed_at: DateTime<Utc>,
+) -> bool {
+    !proof_lease_is_fail_closed(lease)
+        && proof_lease_is_stale_for_handoff(lease, observed_at)
+        && (lease.state == SwarmHandoffProofLeaseState::Fenced
+            || lease
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= observed_at))
+}
+
+fn proof_lease_is_fail_closed(lease: &SwarmHandoffProofLeaseEvidence) -> bool {
+    lease.state.is_fail_closed()
 }
 
 fn issue_timestamp_is_recent(
@@ -2861,6 +3221,26 @@ fn validate_rch_build(build: &SwarmHandoffRchBuildEvidence) -> SwarmHandoffEvide
         "rch_build.blocker_bead_id",
         build.blocker_bead_id.as_deref(),
     )?;
+    Ok(())
+}
+
+fn validate_proof_lease(lease: &SwarmHandoffProofLeaseEvidence) -> SwarmHandoffEvidenceResult<()> {
+    require_non_empty_string("proof_lease.lease_id", &lease.lease_id)?;
+    require_non_empty_string("proof_lease.project_key", &lease.project_key)?;
+    require_non_empty_string("proof_lease.owner_agent", &lease.owner_agent)?;
+    require_non_empty_string("proof_lease.owner_bead_id", &lease.owner_bead_id)?;
+    require_optional_string(
+        "proof_lease.proof_work_key",
+        lease.proof_work_key.as_deref(),
+    )?;
+    require_optional_string(
+        "proof_lease.command_digest",
+        lease.command_digest.as_deref(),
+    )?;
+    if let Some(path) = &lease.lease_path {
+        require_path_pattern("proof_lease.lease_path", path)?;
+    }
+    require_string_list("proof_lease.waiter_agents", &lease.waiter_agents)?;
     Ok(())
 }
 

@@ -12,7 +12,6 @@ use frankenengine_node::security::adversary_graph::{
     ADVERSARY_GRAPH_SCHEMA_VERSION, AdversaryGraph, AdversaryGraphError, AdversaryObservation,
     EVD_ADV_GRAPH_001, EVD_ADV_GRAPH_002,
 };
-use std::collections::BTreeMap;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Test Helpers
@@ -107,7 +106,8 @@ fn test_deterministic_replay_empty_graph() {
 fn test_deterministic_replay_single_observation() {
     let obs = make_observation("ext:test", 0.8, 5, "evidence-1", "trace-1");
 
-    let graph1 = AdversaryGraph::replay_from(&[obs.clone()]).expect("single obs replay");
+    let graph1 =
+        AdversaryGraph::replay_from(std::slice::from_ref(&obs)).expect("single obs replay");
     let graph2 = AdversaryGraph::replay_from(&[obs]).expect("single obs replay");
 
     assert_eq!(graph1.export_state_hash(), graph2.export_state_hash());
@@ -472,7 +472,7 @@ fn test_risk_posterior_bounded() {
     for principal in ["ext:test1", "ext:test2", "ext:test3", "ext:nonexistent"] {
         let risk = graph.get_risk_posterior(principal);
         assert!(
-            risk >= 0.0 && risk <= 1.0,
+            (0.0..=1.0).contains(&risk),
             "Risk {risk} for {principal} out of bounds"
         );
     }

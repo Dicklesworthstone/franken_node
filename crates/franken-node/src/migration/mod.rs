@@ -1725,7 +1725,10 @@ fn update_sha256_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateReport> {
+pub fn run_validate(
+    project_path: &Path,
+    static_only: bool,
+) -> anyhow::Result<MigrationValidateReport> {
     let audit = run_audit(project_path)?;
 
     let blocking_findings = audit
@@ -1782,10 +1785,16 @@ pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateRepo
                 .to_string(),
         ),
     });
-    if checks.iter().all(|check| check.passed) {
-        checks.push(runtime_smoke_validation_check(project_path));
-    } else {
-        checks.push(runtime_smoke_prerequisite_failure_check());
+    // The runtime smoke test executes the transformed project, so its outcome
+    // depends on which JavaScript runtime is installed. In `--static-only` mode
+    // (used by deterministic golden/CI contexts) we skip it entirely and derive
+    // the verdict from the deterministic static checks alone.
+    if !static_only {
+        if checks.iter().all(|check| check.passed) {
+            checks.push(runtime_smoke_validation_check(project_path));
+        } else {
+            checks.push(runtime_smoke_prerequisite_failure_check());
+        }
     }
 
     let status = if checks.iter().all(|check| check.passed) {
@@ -1808,7 +1817,7 @@ pub fn run_validate(project_path: &Path) -> anyhow::Result<MigrationValidateRepo
 pub fn run_one_command_report(project_path: &Path) -> anyhow::Result<OneCommandMigrationReport> {
     let audit = run_audit(project_path)?;
     let rewrite_suggestions = run_rewrite(project_path, false)?;
-    let validation = run_validate(project_path)?;
+    let validation = run_validate(project_path, false)?;
     Ok(build_one_command_report(
         project_path,
         audit,
@@ -2629,11 +2638,47 @@ struct EsmImportRewrite {
     manual_findings: Vec<String>,
 }
 
+const COMMONJS_TO_ESM_REWRITE_RULE_ID: &str = "rewrite:cjs-require-to-esm";
+const COMMONJS_TO_ESM_REWRITE_RULE_VERSION: &str = "1.0.0";
+const COMMONJS_TO_ESM_PRECONDITION_ID: &str = "precondition:cjs-static-require-no-dynamic-no-cache";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommonJsRewritePreconditionProof {
+    rule_id: &'static str,
+    rule_version: &'static str,
+    precondition_id: &'static str,
+    parser_rewrite_count: usize,
+    line_rewrite_count: usize,
+    failures: Vec<String>,
+}
+
+impl CommonJsRewritePreconditionProof {
+    fn passed(&self) -> bool {
+        self.failures.is_empty() && self.parser_rewrite_count == self.line_rewrite_count
+    }
+
+    fn rule_context(&self) -> String {
+        format!(
+            "{}@{} {}",
+            self.rule_id, self.rule_version, self.precondition_id
+        )
+    }
+
+    fn manual_findings(&self) -> Vec<String> {
+        let rule_context = self.rule_context();
+        self.failures
+            .iter()
+            .map(|failure| format!("{failure}; refused by {rule_context}"))
+            .collect()
+    }
+}
+
 #[derive(Debug, Default)]
 struct CommonJsParserAnalysis {
     static_require_declarations: usize,
     dynamic_require_calls: usize,
     create_require_calls: usize,
+    require_cache_accesses: usize,
     dynamic_import_calls: usize,
     commonjs_export_objects: usize,
     risky_commonjs_exports: usize,
@@ -2675,66 +2720,20 @@ fn rewrite_commonjs_requires(source: &str) -> CommonJsRewrite {
         }
     }
 
-    let mut manual_findings = BTreeSet::new();
-    if has_esm_syntax && (rewrite_count > 0 || risky_requires > 0 || risky_exports > 0) {
-        manual_findings.insert(
-            "ESM/CJS module mixing detected; automatic require() rewrite skipped".to_string(),
-        );
-    }
-    if let Err(reason) = parser_analysis.as_ref() {
-        manual_findings.insert(reason.clone());
-    }
-    if let Ok(analysis) = parser_analysis.as_ref() {
-        if analysis.dynamic_require_calls > 0 {
-            manual_findings.insert(format!(
-                "dynamic or non-literal require() usage detected in {} place(s); manual migration required",
-                analysis.dynamic_require_calls
-            ));
-        }
-        if analysis.create_require_calls > 0 {
-            manual_findings.insert(format!(
-                "createRequire() usage detected in {} place(s); manual migration required",
-                analysis.create_require_calls
-            ));
-        }
-        if analysis.dynamic_import_calls > 0 {
-            manual_findings.insert(format!(
-                "dynamic import() usage detected in {} place(s); manual migration required",
-                analysis.dynamic_import_calls
-            ));
-        }
-        if analysis.risky_commonjs_exports > 0 {
-            manual_findings.insert(
-                "CommonJS export assignment detected; manual ESM export migration required"
-                    .to_string(),
-            );
-        }
-        let parser_rewrite_count = analysis
-            .static_require_declarations
-            .saturating_add(analysis.commonjs_export_objects);
-        if parser_rewrite_count != rewrite_count && parser_rewrite_count > 0 {
-            manual_findings.insert(
-                "parser-backed CommonJS rewrite coverage mismatch; manual migration required"
-                    .to_string(),
-            );
-        }
-    }
-    if risky_exports > 0 {
-        manual_findings.insert(
-            "CommonJS export assignment detected; manual ESM export migration required".to_string(),
-        );
-    }
-    if risky_requires > 0 {
-        manual_findings.insert(format!(
-            "dynamic or non-literal require() usage detected in {risky_requires} place(s); manual migration required"
-        ));
-    }
+    let precondition_proof = prove_commonjs_to_esm_precondition(
+        parser_analysis.as_ref(),
+        has_esm_syntax,
+        rewrite_count,
+        risky_requires,
+        risky_exports,
+    );
+    let manual_findings = precondition_proof.manual_findings();
 
-    if !manual_findings.is_empty() || rewrite_count == 0 {
+    if !precondition_proof.passed() || rewrite_count == 0 {
         return CommonJsRewrite {
             rewritten_content: source.to_string(),
             rewrite_count: 0,
-            manual_findings: manual_findings.into_iter().collect(),
+            manual_findings,
         };
     }
 
@@ -2756,6 +2755,89 @@ fn rewrite_commonjs_requires(source: &str) -> CommonJsRewrite {
         rewritten_content,
         rewrite_count,
         manual_findings: Vec::new(),
+    }
+}
+
+fn prove_commonjs_to_esm_precondition(
+    parser_analysis: Result<&CommonJsParserAnalysis, &String>,
+    has_esm_syntax: bool,
+    line_rewrite_count: usize,
+    risky_requires: usize,
+    risky_exports: usize,
+) -> CommonJsRewritePreconditionProof {
+    let mut failures = BTreeSet::new();
+    let mut parser_rewrite_count = 0_usize;
+
+    if has_esm_syntax && (line_rewrite_count > 0 || risky_requires > 0 || risky_exports > 0) {
+        failures
+            .insert("ESM/CJS module mixing detected; automatic require() rewrite skipped".into());
+    }
+
+    match parser_analysis {
+        Ok(analysis) => {
+            parser_rewrite_count = analysis
+                .static_require_declarations
+                .saturating_add(analysis.commonjs_export_objects);
+            if analysis.dynamic_require_calls > 0 {
+                failures.insert(format!(
+                    "dynamic or non-literal require() usage detected in {} place(s); manual migration required",
+                    analysis.dynamic_require_calls
+                ));
+            }
+            if analysis.create_require_calls > 0 {
+                failures.insert(format!(
+                    "createRequire() usage detected in {} place(s); manual migration required",
+                    analysis.create_require_calls
+                ));
+            }
+            if analysis.require_cache_accesses > 0 {
+                failures.insert(format!(
+                    "require.cache access detected in {} place(s); manual migration required",
+                    analysis.require_cache_accesses
+                ));
+            }
+            if analysis.dynamic_import_calls > 0 {
+                failures.insert(format!(
+                    "dynamic import() usage detected in {} place(s); manual migration required",
+                    analysis.dynamic_import_calls
+                ));
+            }
+            if analysis.risky_commonjs_exports > 0 || risky_exports > 0 {
+                failures.insert(
+                    "CommonJS export assignment detected; manual ESM export migration required"
+                        .to_string(),
+                );
+            }
+            if parser_rewrite_count != line_rewrite_count {
+                failures.insert(
+                    "parser-backed CommonJS rewrite coverage mismatch; manual migration required"
+                        .to_string(),
+                );
+            }
+        }
+        Err(reason) => {
+            failures.insert(reason.clone());
+            if risky_exports > 0 {
+                failures.insert(
+                    "CommonJS export assignment detected; manual ESM export migration required"
+                        .to_string(),
+                );
+            }
+            if risky_requires > 0 {
+                failures.insert(format!(
+                    "dynamic or non-literal require() usage detected in {risky_requires} place(s); manual migration required"
+                ));
+            }
+        }
+    }
+
+    CommonJsRewritePreconditionProof {
+        rule_id: COMMONJS_TO_ESM_REWRITE_RULE_ID,
+        rule_version: COMMONJS_TO_ESM_REWRITE_RULE_VERSION,
+        precondition_id: COMMONJS_TO_ESM_PRECONDITION_ID,
+        parser_rewrite_count,
+        line_rewrite_count,
+        failures: failures.into_iter().collect(),
     }
 }
 
@@ -2921,6 +3003,7 @@ fn analyze_commonjs_js_node(node: Node<'_>, source: &[u8], analysis: &mut Common
     match node.kind() {
         "variable_declarator" => analyze_commonjs_variable_declarator(node, source, analysis),
         "call_expression" => analyze_commonjs_call_expression(node, source, analysis),
+        "member_expression" => analyze_commonjs_member_expression(node, source, analysis),
         "assignment_expression" => analyze_commonjs_assignment(node, source, analysis),
         _ => {}
     }
@@ -2973,6 +3056,22 @@ fn analyze_commonjs_call_expression(
         }
     } else if function_text == "createRequire" || function_text.ends_with(".createRequire") {
         analysis.create_require_calls = analysis.create_require_calls.saturating_add(1);
+    }
+}
+
+fn analyze_commonjs_member_expression(
+    node: Node<'_>,
+    source: &[u8],
+    analysis: &mut CommonJsParserAnalysis,
+) {
+    let Some(object) = node.child_by_field_name("object") else {
+        return;
+    };
+    let Some(property) = node.child_by_field_name("property") else {
+        return;
+    };
+    if js_node_text_eq(object, source, "require") && js_node_text_eq(property, source, "cache") {
+        analysis.require_cache_accesses = analysis.require_cache_accesses.saturating_add(1);
     }
 }
 
@@ -4652,6 +4751,10 @@ mod tests {
     }
 
     fn write_hardened_manifest(project: &Path) {
+        // bd-o776s: prod now rewrites `node`/`bun` package-script runtimes to `franken-node`,
+        // so a `node test.js` script makes the manifest non-noop (an extra rewrites_planned).
+        // The canonical hardened (no-op) form pins engines.node AND already uses `franken-node`,
+        // matching `run_rewrite_preserves_existing_node_engine_without_rollback_entry`.
         write_project_file(
             project,
             "package.json",
@@ -4659,7 +4762,7 @@ mod tests {
               "name":"demo",
               "version":"1.0.0",
               "engines":{"node":">=20 <23"},
-              "scripts":{"test":"node test.js"}
+              "scripts":{"test":"franken-node test.js"}
             }"#,
         );
     }
@@ -5602,10 +5705,14 @@ mod tests {
         let outside_path = temp.path().join("outside.js");
 
         write_hardened_manifest(project);
+        // bd-o776s: a bare `module.exports = fs;` is now (correctly) a non-automatable CommonJS
+        // export assignment that bails the require rewrite (rewrite_count == 0). The symlink
+        // fail-closed invariant under test only needs a source that DOES rewrite, so use a clean
+        // require with a benign usage line (no CommonJS export assignment).
         write_project_file(
             project,
             "index.js",
-            "const fs = require('fs');\nmodule.exports = fs;\n",
+            "const fs = require('fs');\nconsole.log(fs.existsSync('package.json'));\n",
         );
         std::fs::write(&outside_path, "outside-original\n").expect("write outside target");
 
@@ -5726,6 +5833,21 @@ mod tests {
     }
 
     #[test]
+    fn commonjs_rewrite_precondition_proof_accepts_static_equivalence_class() {
+        let source = "const fs = require('fs');\nmodule.exports = { fs };\n";
+        let analysis = analyze_commonjs_with_js_parser(source).expect("parser analysis");
+        let proof = prove_commonjs_to_esm_precondition(Ok(&analysis), false, 2, 0, 0);
+
+        assert!(proof.passed());
+        assert_eq!(proof.rule_id, COMMONJS_TO_ESM_REWRITE_RULE_ID);
+        assert_eq!(proof.rule_version, COMMONJS_TO_ESM_REWRITE_RULE_VERSION);
+        assert_eq!(proof.precondition_id, COMMONJS_TO_ESM_PRECONDITION_ID);
+        assert_eq!(proof.parser_rewrite_count, 2);
+        assert_eq!(proof.line_rewrite_count, 2);
+        assert!(proof.manual_findings().is_empty());
+    }
+
+    #[test]
     fn rewrite_commonjs_requires_bails_on_computed_require() {
         let source = "const target = './plugin';\nconst plugin = require(target);\n";
 
@@ -5735,6 +5857,21 @@ mod tests {
         assert_eq!(rewrite.rewritten_content, source);
         assert!(rewrite.manual_findings.iter().any(|finding| {
             finding.contains("dynamic or non-literal require() usage detected")
+        }));
+    }
+
+    #[test]
+    fn rewrite_commonjs_requires_bails_on_require_cache_access() {
+        let source = "const fs = require('fs');\nconsole.log(require.cache, fs.existsSync('package.json'));\n";
+
+        let rewrite = rewrite_commonjs_requires(source);
+
+        assert_eq!(rewrite.rewrite_count, 0);
+        assert_eq!(rewrite.rewritten_content, source);
+        assert!(rewrite.manual_findings.iter().any(|finding| {
+            finding.contains("require.cache access detected")
+                && finding.contains(COMMONJS_TO_ESM_REWRITE_RULE_ID)
+                && finding.contains(COMMONJS_TO_ESM_PRECONDITION_ID)
         }));
     }
 
@@ -5886,7 +6023,7 @@ mod tests {
         )
         .expect("write package");
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
         assert!(!report.is_pass());
         assert!(
             report
@@ -5920,7 +6057,7 @@ mod tests {
         .expect("write package");
         std::fs::write(project.join("package-lock.json"), "{}\n").expect("write lockfile");
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
         assert!(report.is_pass());
         assert!(report.blocking_findings.is_empty());
         assert!(report.checks.iter().all(|check| check.passed));
@@ -5935,7 +6072,7 @@ mod tests {
         write_hardened_manifest(project);
         write_lockfile(project);
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
 
         assert!(report.is_pass());
         assert!(report.blocking_findings.is_empty());
@@ -5961,7 +6098,7 @@ mod tests {
         write_hardened_manifest(project);
         write_lockfile(project);
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
         let has_lockstep_warning = report.warning_findings.iter().any(|finding| {
             finding
                 .recommendation
@@ -5982,7 +6119,7 @@ mod tests {
         write_project_file(project, "package.json", r#"{"name":"demo","#);
         write_lockfile(project);
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
 
         assert!(!report.is_pass());
         assert!(report.checks.iter().any(|check| {
@@ -6004,7 +6141,7 @@ mod tests {
         write_project_file(project, "index.ts", "export const answer = 42;");
         write_lockfile(project);
 
-        let report = run_validate(project).expect("validate report");
+        let report = run_validate(project, false).expect("validate report");
 
         assert!(!report.is_pass());
         assert!(report.checks.iter().any(|check| {
@@ -6214,12 +6351,17 @@ mod tests {
 
     #[test]
     fn negative_findings_vector_growth_without_push_bounded() {
-        // Test unlimited findings growth through Vec::push operations
-        // Lines 682, 700, 774 use findings.push() without bounds checking
+        // Prod now BOUNDS findings collection: per-category caps via
+        // push_capped_script_finding (MAX_FINDINGS_PER_CATEGORY) plus a total cap via
+        // push_bounded (MAX_TOTAL_FINDINGS). This test stresses that bounding with many
+        // problematic manifests and asserts the bounded invariants hold.
         let temp = tempfile::tempdir().expect("tempdir");
         let project = temp.path();
 
-        // Create many problematic package.json files to stress findings collection
+        // Create many problematic package.json files to stress findings collection.
+        // FIXME(bd-o776s): the relative path used to be "../package.json", which collapses
+        // every per-module write onto the single project-root manifest; write each manifest
+        // inside its own module directory so the scan actually processes many manifests.
         for i in 0..200 {
             let dir_path = project.join(format!("module-{:03}", i));
             std::fs::create_dir_all(&dir_path).expect("create module dir");
@@ -6232,7 +6374,7 @@ mod tests {
                 // Invalid JSON to trigger parse errors
                 write_project_file(
                     &dir_path,
-                    "../package.json",
+                    "package.json",
                     r#"{
                     "name": "invalid-module-INVALID_JSON
                 "#,
@@ -6241,7 +6383,7 @@ mod tests {
                 // Valid JSON but with risky script and missing engine
                 write_project_file(
                     &dir_path,
-                    "../package.json",
+                    "package.json",
                     &format!(
                         r#"{{
                     "name": "module-{}",
@@ -6260,33 +6402,51 @@ mod tests {
 
         let report = run_audit(project).expect("audit should succeed");
 
-        // Verify findings were collected (demonstrating Vec growth without bounds)
-        assert!(report.findings.len() > 100, "Should generate many findings");
+        // Many manifests still surface findings, but prod now bounds them: capped categories
+        // stay at their per-category limit while uncapped categories (invalid-JSON Project
+        // findings) keep growing, and the total never exceeds MAX_TOTAL_FINDINGS.
+        assert!(
+            report.findings.len() > MAX_FINDINGS_PER_CATEGORY,
+            "many manifests should surface findings beyond a single category cap"
+        );
+        assert!(
+            report.findings.len() <= MAX_TOTAL_FINDINGS,
+            "total findings must stay within MAX_TOTAL_FINDINGS"
+        );
 
-        // Each package.json should have contributed findings
+        // The per-manifest risky-script and missing-engine findings are bounded at
+        // MAX_FINDINGS_PER_CATEGORY by push_capped_script_finding (matched by their exact
+        // per-manifest messages so the aggregate summary findings are excluded).
+        let capped_risky_script_findings = report
+            .findings
+            .iter()
+            .filter(|f| f.message == "risky install/build script pattern detected in package.json")
+            .count();
+        let capped_missing_engine_findings = report
+            .findings
+            .iter()
+            .filter(|f| f.message == "package.json is missing engines.node version pin")
+            .count();
+        assert_eq!(
+            capped_risky_script_findings, MAX_FINDINGS_PER_CATEGORY,
+            "per-manifest risky-script findings are capped at MAX_FINDINGS_PER_CATEGORY"
+        );
+        assert_eq!(
+            capped_missing_engine_findings, MAX_FINDINGS_PER_CATEGORY,
+            "per-manifest missing-engine findings are capped at MAX_FINDINGS_PER_CATEGORY"
+        );
+
+        // Uncapped invalid-JSON (Project/High) findings push total high-severity findings
+        // past the per-category cap, proving findings still accumulate where unbounded.
         let high_severity_count = report
             .findings
             .iter()
             .filter(|f| matches!(f.severity, MigrationSeverity::High))
             .count();
-        let low_severity_count = report
-            .findings
-            .iter()
-            .filter(|f| matches!(f.severity, MigrationSeverity::Low))
-            .count();
-
         assert!(
-            high_severity_count > 50,
-            "Should have many high-severity findings"
+            high_severity_count > MAX_FINDINGS_PER_CATEGORY,
+            "uncapped invalid-JSON Project findings exceed the per-category cap"
         );
-        assert!(
-            low_severity_count > 50,
-            "Should have many low-severity findings"
-        );
-
-        // The current implementation has no protection against findings explosion
-        // A hardened version might use push_bounded with MAX_FINDINGS_TOTAL
-        // or implement per-category limits more strictly
     }
 
     #[test]
@@ -6319,11 +6479,14 @@ mod tests {
 
         let report = run_audit(project).expect("audit should succeed");
 
-        // Count script-related findings
+        // Count the capped per-manifest risky-script findings. bd-o776s: prod also emits a
+        // single aggregate "detected N risky script(s)" Scripts finding (path: None), so match
+        // the exact per-script message to exclude it and isolate the per-category cap behavior
+        // (mirrors negative_findings_vector_growth_without_push_bounded).
         let script_findings = report
             .findings
             .iter()
-            .filter(|f| matches!(f.category, MigrationCategory::Scripts))
+            .filter(|f| f.message == "risky install/build script pattern detected in package.json")
             .count();
 
         // Should be capped at MAX_FINDINGS_PER_CATEGORY
@@ -6363,10 +6526,12 @@ mod tests {
         );
 
         let exact_report = run_audit(project2).expect("audit should succeed");
+        // bd-o776s: same as above — exclude the aggregate Scripts summary finding by matching
+        // the exact per-manifest message so we assert only the capped per-script findings.
         let exact_script_findings = exact_report
             .findings
             .iter()
-            .filter(|f| matches!(f.category, MigrationCategory::Scripts))
+            .filter(|f| f.message == "risky install/build script pattern detected in package.json")
             .count();
 
         // All MAX_FINDINGS_PER_CATEGORY scripts should be reported
@@ -6383,7 +6548,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let project = temp.path();
 
-        // Create many package.json files that need rewriting
+        // Create many package.json files that need rewriting.
+        // FIXME(bd-o776s): the path used to be "../package.json", which collapses every
+        // per-module write onto the single project-root manifest (yielding only one rollback
+        // entry); write each manifest inside its own module directory instead.
         for i in 0..1000 {
             let module_dir = project.join(format!("module-{:04}", i));
             std::fs::create_dir_all(&module_dir).expect("create module dir");
@@ -6391,7 +6559,7 @@ mod tests {
             // Package without node engine - will need rewriting
             write_project_file(
                 &module_dir,
-                "../package.json",
+                "package.json",
                 &format!(
                     r#"{{
                 "name": "module-{}",
@@ -6446,8 +6614,12 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn signal_runtime_smoke_process_group_fails_with_invalid_pid() {
-        // Test that signal_runtime_smoke_process_group returns error for invalid process group
-        let result = signal_runtime_smoke_process_group(0, "-TERM");
+        // Test that signal_runtime_smoke_process_group returns error for invalid process group.
+        // FIXME(bd-o776s): pid 0 lowers to `kill -- -0`, which targets the CALLER's process
+        // group and SUCCEEDS (it would even SIGTERM the test runner), so it never fails closed.
+        // Use a pid far above the kernel pid_max so the process group genuinely does not exist
+        // and `kill` reports "No such process".
+        let result = signal_runtime_smoke_process_group(2_147_480_000, "-TERM");
 
         assert!(
             result.is_err(),
@@ -6465,8 +6637,11 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn terminate_runtime_smoke_process_group_propagates_signal_errors() {
-        // Test that terminate_runtime_smoke_process_group propagates signal errors
-        let result = terminate_runtime_smoke_process_group(0);
+        // Test that terminate_runtime_smoke_process_group propagates signal errors.
+        // FIXME(bd-o776s): pid 0 lowers to `kill -- -0`, which targets the CALLER's process
+        // group and SUCCEEDS (it would even SIGTERM/SIGKILL the test runner). Use a pid far
+        // above the kernel pid_max so the process group does not exist and `kill` fails closed.
+        let result = terminate_runtime_smoke_process_group(2_147_480_000);
 
         assert!(
             result.is_err(),
@@ -6511,10 +6686,17 @@ mod tests {
                 // Expected for already-dead process
             }
             Err(err) => {
-                // If there's an error, it should contain meaningful context
+                // If there's an error, it should contain meaningful context.
+                // FIXME(bd-o776s): terminate_runtime_smoke_process_tree now performs a
+                // process-GROUP kill first (terminate_runtime_smoke_process_group), which fails
+                // for this child because the test spawns it without its own process group; that
+                // surfaces as "kill command failed ..." before child.kill()/child.wait() run, so
+                // accept that message too.
                 let error_msg = err.to_string();
                 assert!(
-                    error_msg.contains("failed to kill") || error_msg.contains("failed to wait"),
+                    error_msg.contains("failed to kill")
+                        || error_msg.contains("failed to wait")
+                        || error_msg.contains("kill command failed"),
                     "Error should contain context about kill or wait failure: {}",
                     error_msg
                 );

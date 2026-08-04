@@ -811,9 +811,14 @@ mod tests {
         ))
         .unwrap();
 
+        // bd-o776s: `parse_subsystem` greedily matches the valid "RUNTIME" subsystem and
+        // accepts a multi-segment suffix, so "FRANKEN_RUNTIME_CONTROL_BAD" parses as
+        // subsystem=RUNTIME + suffix=CONTROL_BAD and would REGISTER. Use a genuinely
+        // unknown subsystem token ("RUNTIMECONTROL", no separator) so the namespace is
+        // actually rejected and the seeded entry is preserved.
         let err = r
             .register(&reg(
-                "FRANKEN_RUNTIME_CONTROL_BAD",
+                "FRANKEN_RUNTIMECONTROL_BAD",
                 Severity::Transient,
                 recovery(true, Some(10), "retry valid namespace"),
                 1,
@@ -828,7 +833,7 @@ mod tests {
                 .map(|entry| entry.code.as_str()),
             Some("FRANKEN_RUNTIME_SEEDED")
         );
-        assert!(r.list_by_subsystem("RUNTIME_CONTROL").is_empty());
+        assert!(r.list_by_subsystem("RUNTIMECONTROL").is_empty());
     }
 
     #[test]

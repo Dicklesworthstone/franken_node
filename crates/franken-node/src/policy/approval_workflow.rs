@@ -1634,6 +1634,7 @@ mod policy_observability_integration_tests {
             payload: serde_json::json!({}),
             size_bytes: 0,
             signature: String::new(),
+            prev_entry_hash: String::new(),
         }
     }
 
@@ -1802,6 +1803,7 @@ mod policy_observability_integration_tests {
             }),
             size_bytes: 0,
             signature: String::new(),
+            prev_entry_hash: String::new(),
         };
         ledger.append(violation_entry).unwrap();
         assert!(detector.is_halted());
@@ -2018,6 +2020,7 @@ mod policy_observability_integration_tests {
                 payload: serde_json::json!({}),
                 size_bytes: 0,
                 signature: String::new(),
+                prev_entry_hash: String::new(),
             };
             ledger.append(entry).unwrap();
         }
@@ -2065,6 +2068,7 @@ mod policy_observability_integration_tests {
             }),
             size_bytes: 0,
             signature: String::new(),
+            prev_entry_hash: String::new(),
         };
         let eid = ledger.append(entry).unwrap();
         assert_eq!(eid.0, 1);

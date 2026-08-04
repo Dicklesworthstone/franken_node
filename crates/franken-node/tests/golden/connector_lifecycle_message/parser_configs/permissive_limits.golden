@@ -1,0 +1,5 @@
+{
+  "max_frame_bytes": 100000000,
+  "max_nesting_depth": 1000,
+  "max_decode_cpu_ms": 10000
+}

@@ -1001,8 +1001,11 @@ mod tests {
             .expect("seeded lease")
             .ttl_secs = 1;
 
+        // bd-o776s: live_lease leases expire at granted_at(100)+ttl(60)=160; lease-0
+        // (ttl reset to 1) expires at 101. Grant at now=150 so ONLY lease-0 is swept
+        // (others stay live); now=200 over-expired every lease and emptied the registry.
         let lease = svc
-            .grant("replacement", LeasePurpose::StateWrite, 60, 200, "tr", "ts")
+            .grant("replacement", LeasePurpose::StateWrite, 60, 150, "tr", "ts")
             .expect("expired lease should be swept before capacity check");
 
         assert_eq!(svc.leases.len(), MAX_LEASES);

@@ -20,11 +20,11 @@
 //!
 //! Predicted order-of-magnitude (from the bead body — sanity check after
 //! first run):
-//!   - generate/N=16:   O(10 µs)   — sha256 update of 16 small inputs
-//!   - generate/N=4096: O(1 ms)    — sha256 + 4k loop iterations
-//!   - verify/N=16:     O(50 µs)   — sha256 of (prev_hash || receipt_hash)
-//!                                   for each of 16 entries
-//!   - verify/N=4096:   O(10 ms)
+//! - generate/N=16:   O(10 µs)   — sha256 update of 16 small inputs
+//! - generate/N=4096: O(1 ms)    — sha256 + 4k loop iterations
+//! - verify/N=16:     O(50 µs)   — sha256 of (prev_hash || receipt_hash)
+//!   for each of 16 entries
+//! - verify/N=4096:   O(10 ms)
 //!
 //! If reality differs from the prediction by 5×+ in either direction,
 //! there's a hidden hot path worth investigating.

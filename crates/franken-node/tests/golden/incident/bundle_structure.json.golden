@@ -1,0 +1,111 @@
+{
+  "bundle_id": "[UUID]",
+  "incident_id": "INC-GOLDEN-001",
+  "created_at": "[TIMESTAMP]",
+  "timeline": [
+    {
+      "sequence_number": 1,
+      "timestamp": "[TIMESTAMP]",
+      "event_type": "external_signal",
+      "payload": {
+        "severity": "high",
+        "signal": "anomaly"
+      },
+      "causal_parent": null
+    },
+    {
+      "sequence_number": 2,
+      "timestamp": "[TIMESTAMP]",
+      "event_type": "policy_eval",
+      "payload": {
+        "policy": "strict-security",
+        "triggered_by": "evt-001"
+      },
+      "causal_parent": 1
+    },
+    {
+      "sequence_number": 3,
+      "timestamp": "[TIMESTAMP]",
+      "event_type": "operator_action",
+      "payload": {
+        "action": "quarantine",
+        "target": "suspicious_process"
+      },
+      "causal_parent": 2
+    }
+  ],
+  "initial_state_snapshot": {
+    "epoch": 7,
+    "mode": "strict"
+  },
+  "policy_version": "1.2.3",
+  "manifest": {
+    "event_count": 3,
+    "first_timestamp": "[TIMESTAMP]",
+    "last_timestamp": "[TIMESTAMP]",
+    "time_span_micros": [KEY_ID],
+    "compressed_size_bytes": 516,
+    "chunk_count": 1,
+    "decision_sequence_hash": "[HASH]"
+  },
+  "chunks": [
+    {
+      "bundle_id": "[UUID]",
+      "chunk_index": 0,
+      "total_chunks": 1,
+      "event_count": 3,
+      "first_sequence_number": 1,
+      "last_sequence_number": 3,
+      "compressed_size_bytes": 516,
+      "chunk_hash": "[HASH]",
+      "events": [
+        {
+          "sequence_number": 1,
+          "timestamp": "[TIMESTAMP]",
+          "event_type": "external_signal",
+          "payload": {
+            "severity": "high",
+            "signal": "anomaly"
+          },
+          "causal_parent": null
+        },
+        {
+          "sequence_number": 2,
+          "timestamp": "[TIMESTAMP]",
+          "event_type": "policy_eval",
+          "payload": {
+            "policy": "strict-security",
+            "triggered_by": "evt-001"
+          },
+          "causal_parent": 1
+        },
+        {
+          "sequence_number": 3,
+          "timestamp": "[TIMESTAMP]",
+          "event_type": "operator_action",
+          "payload": {
+            "action": "quarantine",
+            "target": "suspicious_process"
+          },
+          "causal_parent": 2
+        }
+      ]
+    }
+  ],
+  "evidence_refs": [
+    "refs/logs/event-001.json",
+    "refs/logs/event-002.json",
+    "refs/logs/event-003.json"
+  ],
+  "integrity_hash": "[HASH]",
+  "signature": {
+    "algorithm": "ed25519",
+    "public_key_hex": "[HASH]",
+    "key_id": "[KEY_ID]",
+    "key_source": "config",
+    "signing_identity": "incident-control-plane",
+    "trust_scope": "incident_replay_bundle",
+    "signed_payload_sha256": "[HASH]",
+    "signature_hex": "9858d5bed50c6039610d9be90ed7c0d9ad6c4faf5f6ec9ae754686b3ff2d20df22ddeeea6068170e6c14dc0613fe63060b681989b64681c09a48bd53d356650e"
+  }
+}

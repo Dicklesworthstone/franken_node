@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "error": "BPG_MALFORMED_FRAME: (invalid) frame_id must not contain NUL bytes",
+  "frame_id_length": 16,
+  "test_case": "null_byte_frame_id"
+}

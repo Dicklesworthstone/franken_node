@@ -1,0 +1,109 @@
+---
+source: crates/franken-node/tests/connector_lifecycle_conformance_matrix.rs
+expression: all_results
+---
+[
+  {
+    "scenario_id": "new_connector_old_host_lifecycle",
+    "test_name": "compatibility_new_connector_old_host_lifecycle",
+    "expected": {
+      "NegotiatedCompatibility": {
+        "fallback_version": "lifecycle-v1.2.0"
+      }
+    },
+    "actual_result": "Success",
+    "compatibility_score": 1.0,
+    "discovered_limitations": [],
+    "protocol_negotiation": {
+      "negotiated_lifecycle_version": "lifecycle-v1.2.0",
+      "negotiated_api_version": "api-v2.1.0",
+      "negotiated_session_version": "session-auth-v1.0.0",
+      "feature_intersection": [],
+      "endpoint_intersection": [
+        "connector_status",
+        "connector_transition"
+      ]
+    }
+  },
+  {
+    "scenario_id": "old_connector_new_host_lifecycle",
+    "test_name": "compatibility_old_connector_new_host_lifecycle",
+    "expected": {
+      "NegotiatedCompatibility": {
+        "fallback_version": "lifecycle-v1.1.0"
+      }
+    },
+    "actual_result": {
+      "PartialSuccess": {
+        "issues": [
+          "State compatibility: 0.8888888888888888",
+          "Transition compatibility: 0.8947368421052632",
+          "Endpoint compatibility: 1",
+          "Frame compatibility: 1"
+        ]
+      }
+    },
+    "compatibility_score": 0.945906432748538,
+    "discovered_limitations": [
+      "Protocol negotiation failed: no common version for session"
+    ],
+    "protocol_negotiation": {
+      "negotiated_lifecycle_version": "lifecycle-v1.1.0",
+      "negotiated_api_version": "api-v2.0.0",
+      "negotiated_session_version": "INCOMPATIBLE",
+      "feature_intersection": [],
+      "endpoint_intersection": [
+        "connector_status",
+        "connector_transition"
+      ]
+    }
+  },
+  {
+    "scenario_id": "current_versions_baseline",
+    "test_name": "compatibility_current_versions_baseline",
+    "expected": "FullCompatibility",
+    "actual_result": "Success",
+    "compatibility_score": 1.0,
+    "discovered_limitations": [],
+    "protocol_negotiation": {
+      "negotiated_lifecycle_version": "lifecycle-v1.2.0",
+      "negotiated_api_version": "api-v2.1.0",
+      "negotiated_session_version": "session-auth-v1.0.0",
+      "feature_intersection": [],
+      "endpoint_intersection": [
+        "connector_status",
+        "connector_transition"
+      ]
+    }
+  },
+  {
+    "scenario_id": "major_version_incompatible",
+    "test_name": "compatibility_major_version_incompatible",
+    "expected": {
+      "Incompatible": {
+        "reason": "Major version mismatch - breaking changes"
+      }
+    },
+    "actual_result": {
+      "Failure": {
+        "error": "Low compatibility score: 0.69"
+      }
+    },
+    "compatibility_score": 0.6904761904761905,
+    "discovered_limitations": [
+      "State management compatibility below threshold: 0.33",
+      "State transition compatibility below threshold: 0.43",
+      "Protocol negotiation failed: no common version for lifecycle, api, session"
+    ],
+    "protocol_negotiation": {
+      "negotiated_lifecycle_version": "INCOMPATIBLE",
+      "negotiated_api_version": "INCOMPATIBLE",
+      "negotiated_session_version": "INCOMPATIBLE",
+      "feature_intersection": [],
+      "endpoint_intersection": [
+        "connector_status",
+        "connector_transition"
+      ]
+    }
+  }
+]

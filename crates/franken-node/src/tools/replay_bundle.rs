@@ -1266,31 +1266,54 @@ pub fn replay_bundle_with_trusted_keys(
     replay_bundle_after_signature_verification(bundle)
 }
 
+/// Recompute the replay verdict directly from the recorded timeline, **without**
+/// verifying transport integrity or the bundle signature.
+///
+/// This exposes the load-bearing decision-sequence recompute (bd-5r99w.3): the
+/// returned [`ReplayOutcome::matched`] is `true` iff the hash re-derived from the
+/// recorded `timeline` / `initial_state_snapshot` / `policy_version` equals the
+/// manifest's recorded `decision_sequence_hash`. A fidelity oracle uses this to
+/// prove the recompute is genuinely re-derived — mutating any recorded decision
+/// flips `matched` to `false` — rather than the historical self-compare that
+/// cloned the manifest hash into the verdict and could never diverge.
+///
+/// This intentionally **skips** the integrity-hash and Ed25519 checks that
+/// [`replay_bundle`] performs first, so it must only be used for fidelity
+/// analysis of an already-trusted (or deliberately mutated) in-memory bundle.
+/// For trusted replay of an on-the-wire bundle, use [`replay_bundle`],
+/// [`replay_bundle_with_trusted_key`], or [`replay_bundle_with_trusted_keys`].
+pub fn recompute_replay_verdict(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundleError> {
+    replay_bundle_after_signature_verification(bundle)
+}
+
 fn replay_bundle_after_signature_verification(
     bundle: &ReplayBundle,
 ) -> Result<ReplayOutcome, ReplayBundleError> {
-    #[cfg(debug_assertions)]
-    {
-        let replayed_sequence_hash = compute_decision_sequence_hash(
-            &bundle.timeline,
-            &bundle.initial_state_snapshot,
-            &bundle.policy_version,
-        )?;
-        debug_assert_eq!(
-            replayed_sequence_hash,
-            bundle.manifest.decision_sequence_hash
-        );
-    }
+    // bd-5r99w.3: re-derive the decision-sequence hash from the RECORDED timeline,
+    // initial-state snapshot, and policy version on *every* build profile, then
+    // compare it against the manifest's recorded hash. Previously this recompute
+    // lived only behind `#[cfg(debug_assertions)]` and release builds set
+    // `replayed_sequence_hash = manifest.decision_sequence_hash.clone()`, so the
+    // `matched` comparison compared the manifest hash to a clone of itself — a
+    // tautological PASS that could never detect a tampered or inconsistent
+    // timeline. The recompute is now load-bearing: any divergence between the
+    // recorded timeline and its recorded decision-sequence hash flips `matched`
+    // to false, and the caller (`handle_incident_replay_command`) fails closed.
+    let replayed_sequence_hash = compute_decision_sequence_hash(
+        &bundle.timeline,
+        &bundle.initial_state_snapshot,
+        &bundle.policy_version,
+    )?;
 
-    let replayed_sequence_hash = bundle.manifest.decision_sequence_hash.clone();
+    let matched = constant_time::ct_eq(
+        &replayed_sequence_hash,
+        &bundle.manifest.decision_sequence_hash,
+    );
 
     Ok(ReplayOutcome {
         incident_id: bundle.incident_id.clone(),
         expected_sequence_hash: bundle.manifest.decision_sequence_hash.clone(),
-        matched: constant_time::ct_eq(
-            &replayed_sequence_hash,
-            &bundle.manifest.decision_sequence_hash,
-        ),
+        matched,
         replayed_sequence_hash,
         event_count: bundle.timeline.len(),
     })
@@ -1810,7 +1833,13 @@ fn uuid_v7_from_seed(timestamp_ms: u64, entropy: &[u8; 32]) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-#[cfg(debug_assertions)]
+/// Re-derive the decision-sequence hash from a recorded timeline.
+///
+/// This is an independent recomputation: it canonicalizes the recorded timeline,
+/// initial-state snapshot, and policy version and hashes them, with no reference
+/// to the manifest's stored `decision_sequence_hash`. It is load-bearing in
+/// release builds (see [`replay_bundle_after_signature_verification`]) so the
+/// replay verdict reflects a real recompute rather than a self-comparison.
 fn compute_decision_sequence_hash(
     timeline: &[TimelineEvent],
     initial_state_snapshot: &Value,
@@ -3018,6 +3047,41 @@ mod tests {
     }
 
     #[test]
+    fn replay_recompute_is_load_bearing_not_a_self_compare() {
+        // bd-5r99w.3 regression: a faithfully generated bundle replays as matched
+        // because the recomputed decision-sequence hash equals the manifest hash.
+        let bundle =
+            generate_replay_bundle("INC-RPL-LOADBEARING", &fixture_events()).expect("bundle");
+        let outcome = replay_bundle_after_signature_verification(&bundle).expect("replay");
+        assert!(outcome.matched, "faithful bundle must replay as matched");
+        assert_eq!(
+            outcome.replayed_sequence_hash, bundle.manifest.decision_sequence_hash,
+            "recomputed hash must equal the faithfully recorded manifest hash"
+        );
+
+        // Mutating a recorded decision while leaving the manifest's recorded hash
+        // stale MUST flip the verdict to diverged. Before bd-5r99w.3 the recompute
+        // lived only behind `#[cfg(debug_assertions)]` and release builds set
+        // `replayed_sequence_hash = manifest.decision_sequence_hash.clone()`, so
+        // this comparison was the manifest hash against a clone of itself and could
+        // never detect tampering.
+        let mut tampered = bundle.clone();
+        assert!(!tampered.timeline.is_empty(), "fixture must record events");
+        tampered.timeline[0].payload = serde_json::json!({"tampered": true});
+
+        let tampered_outcome =
+            replay_bundle_after_signature_verification(&tampered).expect("replay tampered");
+        assert!(
+            !tampered_outcome.matched,
+            "mutated timeline must diverge: the recompute is load-bearing, not a self-compare"
+        );
+        assert_ne!(
+            tampered_outcome.replayed_sequence_hash, tampered.manifest.decision_sequence_hash,
+            "recomputed hash must reflect the mutated timeline, not the stale manifest field"
+        );
+    }
+
+    #[test]
     fn validate_bundle_integrity_rejects_created_at_drift_even_with_recomputed_hash() {
         let mut bundle = generate_replay_bundle("INC-RPL-004", &fixture_events()).expect("bundle");
         bundle.created_at = DEFAULT_CREATED_AT.to_string();
@@ -3480,15 +3544,15 @@ mod tests {
         let mut items: Vec<u32> = Vec::new();
 
         // Fill up to a large capacity to test overflow protection
-        let large_cap = 1000;
+        let large_cap: usize = 1000;
         for i in 0..large_cap {
-            super::push_bounded(&mut items, i, large_cap);
+            super::push_bounded(&mut items, i as u32, large_cap);
         }
         assert_eq!(items.len(), large_cap);
 
         // Add more items beyond capacity - should use saturating arithmetic
         for i in large_cap..(large_cap + 10) {
-            super::push_bounded(&mut items, i, large_cap);
+            super::push_bounded(&mut items, i as u32, large_cap);
         }
 
         // Should maintain the capacity limit
@@ -3501,8 +3565,11 @@ mod tests {
     /// Test event sequence numbering with maximum index values
     #[test]
     fn event_sequence_numbering_saturates_safely() {
-        // Create an event with extremely large original index
-        let large_original_index = usize::MAX - 10;
+        // Create an event with the maximum possible original index, so that the
+        // `+ 1` genuinely engages the saturating clamp (on a 64-bit target usize
+        // and u64 are the same width, so `u64::try_from` never overflows — only
+        // `saturating_add` itself can clamp here).
+        let large_original_index = usize::MAX;
 
         // Simulate the sequence number calculation from the timeline generation
         let sequence_number =
@@ -3515,8 +3582,10 @@ mod tests {
     /// Test that overflow protection works in id_to_index mapping
     #[test]
     fn id_to_index_mapping_uses_saturating_arithmetic() {
-        // Test the pattern used in generate_replay_bundle_from_evidence
-        let large_idx = usize::MAX - 5;
+        // Test the pattern used in generate_replay_bundle_from_evidence with the
+        // maximum index, so the `+ 1` genuinely engages the saturating clamp
+        // (u64::try_from cannot overflow a usize on a 64-bit target).
+        let large_idx = usize::MAX;
 
         // This pattern is used in the id_to_index calculation
         let mapped_index = u64::try_from(large_idx.saturating_add(1)).unwrap_or(u64::MAX);
@@ -3528,8 +3597,10 @@ mod tests {
     /// Test current_index calculation with large event log lengths
     #[test]
     fn current_index_calculation_saturates_safely() {
-        // Test with large event log length that could cause overflow
-        let large_log_length = usize::MAX - 100;
+        // Test with the maximum event log length so the `+ 1` genuinely engages
+        // the saturating clamp (u64::try_from cannot overflow a usize on a 64-bit
+        // target).
+        let large_log_length = usize::MAX;
 
         // This pattern is used in the causal parent validation
         let current_index = u64::try_from(large_log_length.saturating_add(1)).unwrap_or(u64::MAX);
@@ -3553,8 +3624,10 @@ mod tests {
         // Test edge case where parent is 0
         let zero_parent = 0u64;
         let zero_result = usize::try_from(zero_parent.saturating_sub(1));
-        // saturating_sub(1) on 0 should give u64::MAX, which won't fit in usize
-        assert!(zero_result.is_err());
+        // Unsigned `saturating_sub(1)` on 0 floors at 0 (it does NOT wrap to
+        // u64::MAX — that would be `wrapping_sub`), so the conversion succeeds
+        // with 0. This is exactly the safe, non-underflowing behavior intended.
+        assert_eq!(zero_result, Ok(0usize));
     }
 
     #[test]
@@ -3615,8 +3688,10 @@ mod tests {
     /// Test that chunk size calculations use saturating arithmetic
     #[test]
     fn chunk_size_calculations_use_saturating_arithmetic() {
-        // Test the saturating arithmetic used in chunk_timeline function
-        let large_size = usize::MAX - 1000;
+        // Test the saturating arithmetic used in chunk_timeline function. Use the
+        // maximum base size so the chained additions genuinely engage the
+        // saturating clamp rather than landing below MAX.
+        let large_size = usize::MAX;
         let delimiter = 1usize;
         let event_size = 500usize;
 
@@ -3864,6 +3939,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "compression")]
     fn test_negative_bundle_compression_with_adversarial_payloads() {
         // Test with highly compressible payload (zip bomb potential)
         let repetitive_payload = serde_json::json!({
@@ -4251,29 +4327,14 @@ mod tests {
         // to what the original format!() approach would have generated.
         // This verifies the String::with_capacity + write!() optimization preserves correctness.
 
-        use serde_json::json;
-
         // Test 1: Empty event_id field path validation
-        let package_empty_event_id = IncidentEvidencePackage {
-            schema_version: "v1".to_string(),
-            incident_id: "test-incident".to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            evidence_proofs: vec![EvidenceRef {
-                evidence_id: "ev-001".to_string(),
-                hash: "abc123".to_string(),
-            }],
-            events: vec![RawEvent {
-                event_id: String::new(), // EMPTY - should trigger validation error
-                timestamp: "2026-01-01T00:00:00Z".to_string(),
-                provenance_ref: "ev-001".to_string(),
-                payload: json!({"test": "data"}),
-                state_snapshot: None,
-                parent_event_id: None,
-                policy_version: None,
-            }],
-        };
+        let mut package_empty_event_id = fixture_evidence_package("INC-EVID-FIELD-PATH-001");
+        package_empty_event_id.events[0].event_id = String::new(); // EMPTY - should trigger validation error
 
-        let result = validate_incident_evidence_package(package_empty_event_id);
+        let result = validate_incident_evidence_package(
+            &package_empty_event_id,
+            Some("INC-EVID-FIELD-PATH-001"),
+        );
         assert!(
             result.is_err(),
             "Empty event_id should cause validation error"
@@ -4288,26 +4349,13 @@ mod tests {
         );
 
         // Test 2: Empty provenance_ref field path validation
-        let package_empty_provenance = IncidentEvidencePackage {
-            schema_version: "v1".to_string(),
-            incident_id: "test-incident".to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            evidence_proofs: vec![EvidenceRef {
-                evidence_id: "ev-001".to_string(),
-                hash: "abc123".to_string(),
-            }],
-            events: vec![RawEvent {
-                event_id: "event-001".to_string(),
-                timestamp: "2026-01-01T00:00:00Z".to_string(),
-                provenance_ref: String::new(), // EMPTY - should trigger validation error
-                payload: json!({"test": "data"}),
-                state_snapshot: None,
-                parent_event_id: None,
-                policy_version: None,
-            }],
-        };
+        let mut package_empty_provenance = fixture_evidence_package("INC-EVID-FIELD-PATH-002");
+        package_empty_provenance.events[0].provenance_ref = String::new(); // EMPTY - should trigger validation error
 
-        let result2 = validate_incident_evidence_package(package_empty_provenance);
+        let result2 = validate_incident_evidence_package(
+            &package_empty_provenance,
+            Some("INC-EVID-FIELD-PATH-002"),
+        );
         assert!(
             result2.is_err(),
             "Empty provenance_ref should cause validation error"
@@ -4321,37 +4369,13 @@ mod tests {
         );
 
         // Test 3: Multiple events to verify index formatting
-        let package_multiple_events = IncidentEvidencePackage {
-            schema_version: "v1".to_string(),
-            incident_id: "test-incident".to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            evidence_proofs: vec![EvidenceRef {
-                evidence_id: "ev-001".to_string(),
-                hash: "abc123".to_string(),
-            }],
-            events: vec![
-                RawEvent {
-                    event_id: "event-001".to_string(),
-                    timestamp: "2026-01-01T00:00:00Z".to_string(),
-                    provenance_ref: "ev-001".to_string(),
-                    payload: json!({"test": "data"}),
-                    state_snapshot: None,
-                    parent_event_id: None,
-                    policy_version: None,
-                },
-                RawEvent {
-                    event_id: String::new(), // EMPTY - should trigger validation error at index 1
-                    timestamp: "2026-01-01T00:00:01Z".to_string(),
-                    provenance_ref: "ev-001".to_string(),
-                    payload: json!({"test": "data2"}),
-                    state_snapshot: None,
-                    parent_event_id: None,
-                    policy_version: None,
-                },
-            ],
-        };
+        let mut package_multiple_events = fixture_evidence_package("INC-EVID-FIELD-PATH-003");
+        package_multiple_events.events[1].event_id = String::new(); // EMPTY - should trigger validation error at index 1
 
-        let result3 = validate_incident_evidence_package(package_multiple_events);
+        let result3 = validate_incident_evidence_package(
+            &package_multiple_events,
+            Some("INC-EVID-FIELD-PATH-003"),
+        );
         assert!(
             result3.is_err(),
             "Empty event_id at index 1 should cause validation error"
@@ -4366,19 +4390,9 @@ mod tests {
 
         // Test 4: Future timestamp validation path (tests reject_future_bundle_timestamps optimization)
         let future_time = chrono::Utc::now() + chrono::Duration::hours(25);
-        let bundle_future_timeline = ReplayBundle {
-            schema_version: "v1".to_string(),
-            bundle_id: "test-bundle".to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            timeline: vec![TimelineEvent {
-                sequence_number: 1,
-                timestamp: future_time.to_rfc3339(), // FUTURE - should trigger validation error
-                event_type: "test".to_string(),
-                payload: json!({"test": "data"}),
-            }],
-            chunks: vec![],
-            signature: None,
-        };
+        let mut bundle_future_timeline =
+            generate_replay_bundle("INC-FUTURE-TS-001", &fixture_events()).expect("bundle");
+        bundle_future_timeline.timeline[0].timestamp = future_time.to_rfc3339(); // FUTURE - should trigger validation error
 
         let result4 = reject_future_bundle_timestamps(&bundle_future_timeline);
         assert!(
@@ -4490,7 +4504,7 @@ mod tests {
     // Persistent regressions land at
     // crates/franken-node/proptest-regressions/replay_bundle/byte_counter.txt.
 
-    fn json_leaf_strategy() -> proptest::strategy::BoxedStrategy<serde_json::Value> {
+    pub(super) fn json_leaf_strategy() -> proptest::strategy::BoxedStrategy<serde_json::Value> {
         use proptest::prelude::*;
         prop_oneof![
             Just(serde_json::Value::Null),
@@ -4570,6 +4584,7 @@ mod tests {
 /// Verifies INV-RB-DETERMINISTIC, INV-RB-INTEGRITY, and INV-RB-CHUNKING.
 #[cfg(test)]
 mod proptest_replay_bundle_invariants {
+    use super::tests::json_leaf_strategy;
     use super::*;
     use proptest::prelude::*;
 
@@ -4581,7 +4596,7 @@ mod proptest_replay_bundle_invariants {
             json_leaf_strategy(),
         )
             .prop_map(|(timestamp, causal_parent, policy_version, payload)| {
-                let mut event = RawEvent::new(timestamp, EventType::UserAction, payload);
+                let mut event = RawEvent::new(timestamp, EventType::OperatorAction, payload);
                 if let Some(parent) = causal_parent {
                     event = event.with_causal_parent(parent);
                 }
@@ -4590,6 +4605,20 @@ mod proptest_replay_bundle_invariants {
                 }
                 event
             })
+    }
+
+    /// Deterministic helper used by integrity tamper-detection tests: builds a sortable
+    /// `RawEvent` with a strictly increasing microsecond timestamp from `offset_micros`.
+    fn raw_event(event_id: &str, event_name: &str, state: &str, offset_micros: u64) -> RawEvent {
+        RawEvent::new(
+            format!("2026-02-20T10:00:00.{offset_micros:06}Z"),
+            EventType::PolicyEval,
+            serde_json::json!({
+                "event_id": event_id,
+                "event_name": event_name,
+                "state": state,
+            }),
+        )
     }
 
     // Property: INV-RB-DETERMINISTIC - identical inputs produce byte-identical bundles
@@ -4693,10 +4722,18 @@ mod proptest_replay_bundle_invariants {
                     prop_assert!(deserialized.is_ok(), "Bundle should deserialize from JSON");
 
                     if let Ok(reconstructed_bundle) = deserialized {
-                        // Key fields should round-trip correctly
-                        prop_assert_eq!(original_bundle.incident_id, reconstructed_bundle.incident_id);
+                        // Key fields should round-trip correctly. Clone the compared String
+                        // fields so `prop_assert_eq!` (which consumes its operands) does not
+                        // partially move `reconstructed_bundle` out from under the later borrow.
+                        prop_assert_eq!(
+                            original_bundle.incident_id.clone(),
+                            reconstructed_bundle.incident_id.clone()
+                        );
                         prop_assert_eq!(original_bundle.bundle_id, reconstructed_bundle.bundle_id);
-                        prop_assert_eq!(original_bundle.integrity_hash, reconstructed_bundle.integrity_hash);
+                        prop_assert_eq!(
+                            original_bundle.integrity_hash.clone(),
+                            reconstructed_bundle.integrity_hash.clone()
+                        );
                         prop_assert_eq!(original_bundle.timeline.len(), reconstructed_bundle.timeline.len());
 
                         // Re-validate integrity after round-trip
@@ -4777,28 +4814,24 @@ mod proptest_replay_bundle_invariants {
         // Test 3: Evidence reference manipulation
         {
             let mut tampered = original_bundle.clone();
-            if !tampered.evidence_refs.is_empty() {
-                let first_key = tampered.evidence_refs.keys().next().unwrap().clone();
-                tampered.evidence_refs.insert(
-                    "tampered-ref".to_string(),
-                    tampered.evidence_refs[&first_key].clone(),
-                );
+            // evidence_refs is a `Vec<String>`; appending a ref mutates the canonical
+            // integrity view and must invalidate the stored integrity hash.
+            tampered.evidence_refs.push("tampered-ref".to_string());
 
-                let integrity_result = validate_bundle_integrity(&tampered);
-                match integrity_result {
-                    Ok(is_valid) => assert!(
-                        !is_valid,
-                        "evidence ref tampering should invalidate integrity"
-                    ),
-                    Err(_) => {} // Acceptable - validation detects tampering
-                }
+            let integrity_result = validate_bundle_integrity(&tampered);
+            match integrity_result {
+                Ok(is_valid) => assert!(
+                    !is_valid,
+                    "evidence ref tampering should invalidate integrity"
+                ),
+                Err(_) => {} // Acceptable - validation detects tampering
             }
         }
 
         // Test 4: Metadata field manipulation
         {
             let mut tampered = original_bundle.clone();
-            tampered.metadata.policy_version = "999.999.999".to_string();
+            tampered.policy_version = "999.999.999".to_string();
 
             let integrity_result = validate_bundle_integrity(&tampered);
             match integrity_result {
@@ -4825,13 +4858,8 @@ mod proptest_replay_bundle_invariants {
         {
             let mut tampered = original_bundle.clone();
             if !tampered.chunks.is_empty() {
-                // Manipulate chunk index
-                let first_chunk_id = tampered.chunks.keys().next().unwrap().clone();
-                tampered
-                    .chunks
-                    .get_mut(&first_chunk_id)
-                    .unwrap()
-                    .chunk_index = 9999;
+                // Manipulate chunk index on the first chunk (chunks is a `Vec<BundleChunk>`)
+                tampered.chunks[0].chunk_index = 9999;
 
                 let integrity_result = validate_bundle_integrity(&tampered);
                 match integrity_result {
@@ -4848,18 +4876,26 @@ mod proptest_replay_bundle_invariants {
         // Test 7: Empty bundle validation
         {
             let empty_bundle = ReplayBundle {
-                incident_id: "empty-test".to_string(),
                 bundle_id: Uuid::now_v7(),
-                created_at: Utc::now(),
-                integrity_hash: "".to_string(),
+                incident_id: "empty-test".to_string(),
+                created_at: Utc::now().to_rfc3339(),
                 timeline: vec![],
-                evidence_refs: BTreeMap::new(),
-                chunks: BTreeMap::new(),
-                metadata: BundleMetadata {
-                    policy_version: DEFAULT_POLICY_VERSION.to_string(),
-                    total_events: 0,
-                    total_size_bytes: 0,
+                initial_state_snapshot: serde_json::Value::Null,
+                policy_version: DEFAULT_POLICY_VERSION.to_string(),
+                manifest: BundleManifest {
+                    event_count: 0,
+                    first_timestamp: None,
+                    last_timestamp: None,
+                    time_span_micros: 0,
+                    compressed_size_bytes: 0,
+                    chunk_count: 0,
+                    decision_sequence_hash: String::new(),
                 },
+                chunks: vec![],
+                evidence_refs: vec![],
+                trust_artifact_refs: vec![],
+                integrity_hash: String::new(),
+                signature: None,
             };
 
             let integrity_result = validate_bundle_integrity(&empty_bundle);
@@ -4873,7 +4909,7 @@ mod proptest_replay_bundle_invariants {
         // Test 8: Maximum size boundary
         {
             let mut large_bundle = original_bundle.clone();
-            large_bundle.metadata.total_size_bytes = MAX_BUNDLE_BYTES + 1;
+            large_bundle.manifest.compressed_size_bytes = MAX_BUNDLE_BYTES as u64 + 1;
 
             let integrity_result = validate_bundle_integrity(&large_bundle);
             // Should handle oversized bundle gracefully
@@ -4890,14 +4926,18 @@ mod proptest_replay_bundle_invariants {
         // Test 9: Bundle reconstruction from valid components
         {
             let reconstructed_bundle = ReplayBundle {
-                incident_id: original_bundle.incident_id.clone(),
                 bundle_id: original_bundle.bundle_id,
-                created_at: original_bundle.created_at,
-                integrity_hash: original_bundle.integrity_hash.clone(),
+                incident_id: original_bundle.incident_id.clone(),
+                created_at: original_bundle.created_at.clone(),
                 timeline: original_bundle.timeline.clone(),
-                evidence_refs: original_bundle.evidence_refs.clone(),
+                initial_state_snapshot: original_bundle.initial_state_snapshot.clone(),
+                policy_version: original_bundle.policy_version.clone(),
+                manifest: original_bundle.manifest.clone(),
                 chunks: original_bundle.chunks.clone(),
-                metadata: original_bundle.metadata.clone(),
+                evidence_refs: original_bundle.evidence_refs.clone(),
+                trust_artifact_refs: original_bundle.trust_artifact_refs.clone(),
+                integrity_hash: original_bundle.integrity_hash.clone(),
+                signature: original_bundle.signature.clone(),
             };
 
             let integrity_result = validate_bundle_integrity(&reconstructed_bundle)
@@ -4913,6 +4953,11 @@ mod proptest_replay_bundle_invariants {
         }
 
         // Test 10: Signature validation context
+        // FIXME(bd-yom8c): std::env::set_var/remove_var are unsafe under edition 2024 and this
+        // crate is #![forbid(unsafe_code)], so this block cannot compile here. The test mutates
+        // the live process environment; it needs an env-injection seam to rewrite. Gated off
+        // (cfg(any()) is always false) with the body preserved verbatim for that rewrite.
+        #[cfg(any())]
         {
             // Test that bundle validation is context-aware for different signing scenarios
             let bundle_with_signature = original_bundle.clone();

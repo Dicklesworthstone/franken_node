@@ -132,6 +132,34 @@ impl DegradedModePolicy {
         actions.sort_unstable();
         actions
     }
+
+    /// Whether `action_name` is on the deny-list, matched fail-closed.
+    ///
+    /// bd-bobea: the deny-list was previously consulted with an exact
+    /// `denied_actions.contains(action_name)`, so case/whitespace variants of a denied
+    /// action (`"Policy.Change"`, `"POLICY.CHANGE"`, `" policy.change"`, `"policy.change "`)
+    /// missed the set and fell through to the Degraded-mode default-ALLOW — a fail-open
+    /// deny-list circumvention. Canonicalize (trim surrounding whitespace + case-fold) both
+    /// the query and each stored entry before comparing, mirroring the dispatch layer, so a
+    /// surface-variant of a denied action can never be permitted.
+    #[must_use]
+    pub fn is_action_denied(&self, action_name: &str) -> bool {
+        // Fast path: canonical exact match (the common, already-normalized case).
+        if self.denied_actions.contains(action_name) {
+            return true;
+        }
+        let canonical = canonical_action(action_name);
+        self.denied_actions
+            .iter()
+            .any(|denied| canonical_action(denied) == canonical)
+    }
+}
+
+/// Canonical form used to match action names against the deny-list: surrounding (Unicode)
+/// whitespace trimmed and case-folded. Internal structure is preserved so genuinely distinct
+/// actions are not collapsed together.
+fn canonical_action(action: &str) -> String {
+    action.trim().to_lowercase()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -436,7 +464,7 @@ impl DegradedModePolicyEngine {
         let (permitted, degraded_annotation, denial_reason) = match self.state {
             DegradedModeState::Normal => (true, false, None),
             DegradedModeState::Degraded => {
-                if self.policy.denied_actions.contains(action_name) {
+                if self.policy.is_action_denied(action_name) {
                     (false, true, Some(format!("denied_actions.{action_name}")))
                 } else {
                     (true, true, None)
@@ -692,9 +720,11 @@ mod tests {
         let authorized_api_keys = std::collections::BTreeSet::new();
         let config = SecurityConfig {
             max_degraded_duration_secs: 42,
+            max_merge_decisions: crate::config::DEFAULT_MAX_MERGE_DECISIONS,
             authorized_api_keys,
             decision_receipt_signing_key_path: None,
             network_policy: crate::config::NetworkPolicyConfig::default(),
+            child_process_spawn: None,
         };
         let policy = DegradedModePolicy::with_security_defaults("trust-input-stale", &config);
         assert_eq!(policy.max_degraded_duration_secs, 42);
@@ -1669,9 +1699,20 @@ mod tests {
                 !json_str.contains(r#""malicious":"#),
                 "JSON injection should be escaped"
             );
+            // serde_json is a codec, not a sanitizer: `<`/`>`/`(`/`)`/`'` are not
+            // JSON-special, so the script payload is preserved verbatim inside a
+            // properly-escaped JSON string — never stripped or executed. The real
+            // injection-safety property is lossless containment plus escaped control
+            // chars so the value can never break out of its string context.
+            let roundtrip: DegradedModeAuditEvent =
+                serde_json::from_str(&json_str).expect("audit event should round-trip");
+            assert_eq!(
+                roundtrip, *event,
+                "Injection payloads must be losslessly contained, not stripped"
+            );
             assert!(
-                !json_str.contains("<script>"),
-                "Script injection should be escaped"
+                !json_str.contains('\n') && !json_str.contains('\r'),
+                "Control chars must be escaped; nothing breaks out of the JSON string"
             );
         }
 
@@ -1694,7 +1735,11 @@ mod tests {
             "trace-circumvent",
         );
 
-        // Attempt to bypass denied actions through case manipulation
+        // Attempt to bypass denied actions through case manipulation.
+        // bd-bobea (fixed): the Degraded-mode deny-list now canonicalizes (trim + case-fold)
+        // action names before matching (`DegradedModePolicy::is_action_denied`), mirroring the
+        // dispatch layer, so these case/whitespace variants of a denied action are correctly
+        // denied instead of falling through to the default-ALLOW. Do NOT relax these assertions.
         let decision1 = engine.evaluate_action("Policy.Change", "attacker", 1_001, "trace-1");
         assert!(
             !decision1.permitted,
@@ -1848,28 +1893,28 @@ mod tests {
         }
 
         // Verify only one activation succeeded (fail-closed behavior)
-        let engine = try_lock(
+        let inspect_guard = try_lock(
             &engine,
             "inspect degraded mode policy engine after activation concurrency",
         )
         .expect("degraded mode policy engine mutex should not be poisoned");
         assert!(
             matches!(
-                engine.state(),
+                inspect_guard.state(),
                 DegradedModeState::Degraded | DegradedModeState::Normal
             ),
             "State should be consistent after concurrent access"
         );
 
         // Verify audit log is coherent (no corruption)
-        let audit_count = engine.audit_log().len();
+        let audit_count = inspect_guard.audit_log().len();
         assert!(
             audit_count <= 20,
             "Audit log should not exceed reasonable bounds"
         );
 
         // Verify all audit events are serializable (no corruption)
-        for event in engine.audit_log() {
+        for event in inspect_guard.audit_log() {
             assert!(
                 serde_json::to_string(event).is_ok(),
                 "Audit events should remain valid"
@@ -1877,7 +1922,7 @@ mod tests {
         }
 
         // Test concurrent action evaluations
-        drop(engine);
+        drop(inspect_guard);
         let mut eval_handles = vec![];
 
         for i in 0..20 {

@@ -24,9 +24,23 @@ mod metamorphic_epoch_tests;
 #[cfg(test)]
 mod epoch_window_negative_tests {
     use super::control_epoch::{
-        ControlEpoch, EpochError, EpochRejectionReason, EpochStore, ValidityWindowPolicy,
-        check_artifact_epoch,
+        ControlEpoch, EpochError, EpochRejectionReason, EpochSigningKey, EpochStore,
+        ValidityWindowPolicy, check_artifact_epoch,
     };
+
+    /// bd-kpjrz: EpochStore now requires an HMAC signing key; one fixed key for
+    /// the whole module keeps transitions cross-verifiable within these tests.
+    fn epoch_test_key() -> EpochSigningKey {
+        EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+    }
+
+    fn epoch_test_store() -> EpochStore {
+        EpochStore::new(epoch_test_key())
+    }
+
+    fn epoch_test_store_at(committed_epoch: u64) -> EpochStore {
+        EpochStore::recover(committed_epoch, epoch_test_key())
+    }
 
     fn policy() -> ValidityWindowPolicy {
         ValidityWindowPolicy::new(ControlEpoch::new(10), 2)
@@ -112,7 +126,7 @@ mod epoch_window_negative_tests {
 
     #[test]
     fn epoch_advance_rejects_empty_manifest_hash() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
 
         let err = store
             .epoch_advance("", 1_700_000_000, "trace-empty")
@@ -124,7 +138,7 @@ mod epoch_window_negative_tests {
 
     #[test]
     fn epoch_set_rejects_regression_to_current_epoch() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
 
         let err = store
             .epoch_set(0, "manifest-a", 1_700_000_000, "trace-regression")
@@ -142,7 +156,7 @@ mod epoch_window_negative_tests {
 
     #[test]
     fn epoch_set_rejects_empty_manifest_after_monotonic_check() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
 
         let err = store
             .epoch_set(1, "", 1_700_000_000, "trace-empty-set")
@@ -154,7 +168,7 @@ mod epoch_window_negative_tests {
 
     #[test]
     fn epoch_advance_rejects_counter_overflow() {
-        let mut store = EpochStore::recover(u64::MAX);
+        let mut store = epoch_test_store_at(u64::MAX);
 
         let err = store
             .epoch_advance("manifest-max", 1_700_000_000, "trace-overflow")
@@ -171,9 +185,24 @@ mod epoch_window_negative_tests {
 #[cfg(test)]
 mod tests {
     use super::control_epoch::{
-        ControlEpoch, EpochError, EpochRejectionReason, EpochStore, ValidityWindowPolicy,
-        check_artifact_epoch,
+        ControlEpoch, EpochError, EpochRejectionReason, EpochSigningKey, EpochStore,
+        ValidityWindowPolicy, check_artifact_epoch,
     };
+
+    /// bd-kpjrz: EpochStore now requires an HMAC signing key; one fixed key for
+    /// the whole module keeps transitions cross-verifiable within these tests.
+    fn epoch_test_key() -> EpochSigningKey {
+        EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+    }
+
+    fn epoch_test_store() -> EpochStore {
+        EpochStore::new(epoch_test_key())
+    }
+
+    fn epoch_test_store_at(committed_epoch: u64) -> EpochStore {
+        EpochStore::recover(committed_epoch, epoch_test_key())
+    }
+
     use super::transition_abort::{
         AbortError, ForceTransitionPolicy, ParticipantAbortState, TransitionAbortEvent,
         TransitionAbortManager, TransitionAbortReason,
@@ -209,7 +238,7 @@ mod tests {
 
     #[test]
     fn negative_epoch_advance_rejects_empty_manifest_hash() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
 
         let err = store
             .epoch_advance("", 100, "trace-empty-manifest")
@@ -221,7 +250,7 @@ mod tests {
 
     #[test]
     fn negative_epoch_set_rejects_equal_current_epoch() {
-        let mut store = EpochStore::recover(7);
+        let mut store = epoch_test_store_at(7);
 
         let err = store
             .epoch_set(7, "manifest-hash", 100, "trace-equal-epoch")
@@ -238,7 +267,7 @@ mod tests {
 
     #[test]
     fn negative_epoch_advance_rejects_overflow() {
-        let mut store = EpochStore::recover(u64::MAX);
+        let mut store = epoch_test_store_at(u64::MAX);
 
         let err = store
             .epoch_advance("manifest-hash", 100, "trace-overflow")
@@ -419,7 +448,7 @@ mod tests {
 
     #[test]
     fn negative_epoch_set_whitespace_manifest_does_not_record_transition() {
-        let mut store = EpochStore::recover(4);
+        let mut store = epoch_test_store_at(4);
 
         let err = store
             .epoch_set(5, " \t\n ", 1_700_000_000, "trace-blank-forward")

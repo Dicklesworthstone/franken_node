@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::push_bounded;
+use crate::runtime::effect_receipt::{EffectReceipt, PolicyOutcome};
 use frankenengine_node::capacity_defaults::aliases::MAX_EVENTS;
 
 /// Constant-time string comparison (inline to avoid cross-crate path issues in test harnesses).
@@ -29,6 +30,11 @@ fn ct_eq_inline(a: &str, b: &str) -> bool {
 }
 
 pub const PROOF_SERVICE_SCHEMA_VERSION: &str = "vef-proof-service-v1";
+pub const CAPABILITY_CONDITION_SCHEMA_VERSION: &str = "vef-capability-condition-v1";
+pub const CAPABILITY_CONDITIONS_HASH_METADATA_KEY: &str = "capability_conditions_hash";
+pub const CAPABILITY_REF_METADATA_KEY: &str = "capability_ref";
+pub const CAPABILITY_EFFECT_SEQ_METADATA_KEY: &str = "capability_effect_seq";
+const MAX_CAPABILITY_CONDITIONS: usize = 64;
 
 pub mod event_codes {
     pub const VEF_PROOF_001_REQUEST_RECEIVED: &str = "VEF-PROOF-001";
@@ -148,6 +154,270 @@ impl fmt::Display for ProofServiceError {
 }
 
 impl std::error::Error for ProofServiceError {}
+
+/// Canonical hash condition bound into a capability proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityCondition {
+    pub field: String,
+    pub expected_hash: String,
+}
+
+/// Capability pre/postcondition material committed into VEF proof inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityConditionBinding {
+    pub schema_version: String,
+    pub capability_ref: String,
+    pub effect_seq: u64,
+    pub preconditions: Vec<CapabilityCondition>,
+    pub postconditions: Vec<CapabilityCondition>,
+}
+
+/// Result of verifying a capability binding against real effect receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityConditionVerification {
+    pub capability_ref: String,
+    pub effect_seq: u64,
+    pub effect_receipt_hash: String,
+    pub condition_hash: String,
+    pub precondition_count: usize,
+    pub postcondition_count: usize,
+    pub trace_id: String,
+}
+
+fn validate_capability_condition_field(
+    field_name: &str,
+    value: &str,
+) -> Result<(), ProofServiceError> {
+    if value.trim().is_empty() {
+        return Err(ProofServiceError::input_error(format!(
+            "{field_name} must not be empty"
+        )));
+    }
+    if value.trim() != value {
+        return Err(ProofServiceError::input_error(format!(
+            "{field_name} must not contain leading or trailing whitespace"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_capability_condition_list(
+    label: &str,
+    conditions: &[CapabilityCondition],
+) -> Result<(), ProofServiceError> {
+    if conditions.is_empty() {
+        return Err(ProofServiceError::input_error(format!(
+            "{label} must not be empty"
+        )));
+    }
+    if conditions.len() > MAX_CAPABILITY_CONDITIONS {
+        return Err(ProofServiceError::input_error(format!(
+            "{label} must not exceed {MAX_CAPABILITY_CONDITIONS} entries"
+        )));
+    }
+
+    let mut seen_fields = BTreeSet::new();
+    for condition in conditions {
+        validate_capability_condition_field(label, &condition.field)?;
+        if !is_sha256_prefixed(&condition.expected_hash) {
+            return Err(ProofServiceError::input_error(format!(
+                "{label}.{} must be sha256:<64hex>",
+                condition.field
+            )));
+        }
+        if !seen_fields.insert(condition.field.clone()) {
+            return Err(ProofServiceError::input_error(format!(
+                "{label} contains duplicate field '{}'",
+                condition.field
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_capability_conditions(conditions: &[CapabilityCondition]) -> Vec<CapabilityCondition> {
+    let mut canonical = conditions.to_vec();
+    canonical.sort_by(|left, right| {
+        left.field
+            .cmp(&right.field)
+            .then(left.expected_hash.cmp(&right.expected_hash))
+    });
+    canonical
+}
+
+fn capability_condition_value<'a>(
+    receipt: &'a EffectReceipt,
+    phase: &str,
+    field: &str,
+) -> Result<&'a str, ProofServiceError> {
+    match (phase, field) {
+        ("precondition", "pre_state_hash") => Ok(receipt.pre_state_hash.as_str()),
+        ("precondition", "args_hash") => Ok(receipt.args_hash.as_str()),
+        ("precondition", "input_lineage_hash") => Ok(receipt.input_lineage_hash.as_str()),
+        ("precondition", "label_set_commitment") => Ok(receipt.label_set_commitment.as_str()),
+        ("postcondition", "result_hash") => receipt
+            .result_hash
+            .as_ref()
+            .map(|hash| hash.as_str())
+            .ok_or_else(|| {
+                ProofServiceError::verify_error(
+                    "postcondition result_hash missing on effect receipt",
+                )
+            }),
+        ("postcondition", "post_state_hash") => receipt
+            .post_state_hash
+            .as_ref()
+            .map(|hash| hash.as_str())
+            .ok_or_else(|| {
+                ProofServiceError::verify_error(
+                    "postcondition post_state_hash missing on effect receipt",
+                )
+            }),
+        ("postcondition", "output_lineage_hash") => {
+            receipt.output_lineage_hash.as_deref().ok_or_else(|| {
+                ProofServiceError::verify_error(
+                    "postcondition output_lineage_hash missing on effect receipt",
+                )
+            })
+        }
+        ("postcondition", "label_set_commitment") => Ok(receipt.label_set_commitment.as_str()),
+        _ => Err(ProofServiceError::input_error(format!(
+            "unsupported {phase} field '{field}'"
+        ))),
+    }
+}
+
+fn verify_condition_list_against_receipt(
+    receipt: &EffectReceipt,
+    phase: &str,
+    conditions: &[CapabilityCondition],
+) -> Result<(), ProofServiceError> {
+    for condition in conditions {
+        let actual = capability_condition_value(receipt, phase, &condition.field)?;
+        if !ct_eq_inline(actual, &condition.expected_hash) {
+            return Err(ProofServiceError::verify_error(format!(
+                "{phase} {} mismatch expected={} actual={}",
+                condition.field, condition.expected_hash, actual
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn insert_capability_metadata(
+    metadata: &mut BTreeMap<String, String>,
+    key: &str,
+    value: &str,
+) -> Result<(), ProofServiceError> {
+    if let Some(existing) = metadata.get(key)
+        && !ct_eq_inline(existing, value)
+    {
+        return Err(ProofServiceError::input_error(format!(
+            "metadata key {key} already has conflicting value"
+        )));
+    }
+    metadata.insert(key.to_string(), value.to_string());
+    Ok(())
+}
+
+impl CapabilityConditionBinding {
+    pub fn validate(&self) -> Result<(), ProofServiceError> {
+        if self.schema_version != CAPABILITY_CONDITION_SCHEMA_VERSION {
+            return Err(ProofServiceError::input_error(format!(
+                "capability condition schema_version '{}' does not match '{}'",
+                self.schema_version, CAPABILITY_CONDITION_SCHEMA_VERSION
+            )));
+        }
+        validate_capability_condition_field("capability_ref", &self.capability_ref)?;
+        validate_capability_condition_list("preconditions", &self.preconditions)?;
+        validate_capability_condition_list("postconditions", &self.postconditions)?;
+        Ok(())
+    }
+
+    pub fn condition_hash(&self) -> Result<String, ProofServiceError> {
+        self.validate()?;
+        let mut canonical = self.clone();
+        canonical.preconditions = canonical_capability_conditions(&canonical.preconditions);
+        canonical.postconditions = canonical_capability_conditions(&canonical.postconditions);
+        sha256_json(&canonical)
+    }
+
+    pub fn bind_into_metadata(
+        &self,
+        metadata: &mut BTreeMap<String, String>,
+    ) -> Result<String, ProofServiceError> {
+        let condition_hash = self.condition_hash()?;
+        insert_capability_metadata(
+            metadata,
+            CAPABILITY_CONDITIONS_HASH_METADATA_KEY,
+            &condition_hash,
+        )?;
+        insert_capability_metadata(metadata, CAPABILITY_REF_METADATA_KEY, &self.capability_ref)?;
+        insert_capability_metadata(
+            metadata,
+            CAPABILITY_EFFECT_SEQ_METADATA_KEY,
+            &self.effect_seq.to_string(),
+        )?;
+        Ok(condition_hash)
+    }
+}
+
+/// Bind capability pre/postconditions into a proof input's canonical metadata.
+pub fn bind_capability_conditions(
+    input: &mut ProofInputEnvelope,
+    binding: &CapabilityConditionBinding,
+) -> Result<String, ProofServiceError> {
+    let condition_hash = binding.bind_into_metadata(&mut input.metadata)?;
+    input.validate()?;
+    Ok(condition_hash)
+}
+
+/// Verify a capability binding against real effect receipts.
+pub fn verify_capability_conditions(
+    binding: &CapabilityConditionBinding,
+    receipts: &[EffectReceipt],
+) -> Result<CapabilityConditionVerification, ProofServiceError> {
+    binding.validate()?;
+    let condition_hash = binding.condition_hash()?;
+
+    for receipt in receipts {
+        receipt.validate().map_err(|err| {
+            ProofServiceError::verify_error(format!("effect receipt invalid: {err}"))
+        })?;
+        if receipt.seq != binding.effect_seq {
+            continue;
+        }
+        let PolicyOutcome::Allowed { capability_ref } = &receipt.policy_outcome else {
+            return Err(ProofServiceError::verify_error(format!(
+                "effect receipt seq {} did not execute",
+                binding.effect_seq
+            )));
+        };
+        if !ct_eq_inline(capability_ref, &binding.capability_ref) {
+            return Err(ProofServiceError::verify_error(format!(
+                "effect receipt capability_ref mismatch for seq {}",
+                binding.effect_seq
+            )));
+        }
+
+        verify_condition_list_against_receipt(receipt, "precondition", &binding.preconditions)?;
+        verify_condition_list_against_receipt(receipt, "postcondition", &binding.postconditions)?;
+        return Ok(CapabilityConditionVerification {
+            capability_ref: binding.capability_ref.clone(),
+            effect_seq: binding.effect_seq,
+            effect_receipt_hash: sha256_json(receipt)?,
+            condition_hash,
+            precondition_count: binding.preconditions.len(),
+            postcondition_count: binding.postconditions.len(),
+            trace_id: receipt.trace_id.clone(),
+        });
+    }
+
+    Err(ProofServiceError::verify_error(format!(
+        "no effect receipt found for capability_ref '{}' seq {}",
+        binding.capability_ref, binding.effect_seq
+    )))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofInputEnvelope {
@@ -701,6 +971,45 @@ impl VefProofService {
         self.run_backend_verify(proof.backend_id, input, proof, &params)
     }
 
+    pub fn generate_capability_proof(
+        &mut self,
+        input: &ProofInputEnvelope,
+        binding: &CapabilityConditionBinding,
+        receipts: &[EffectReceipt],
+        backend_override: Option<ProofBackendId>,
+        now_millis: u64,
+    ) -> Result<(ProofOutputEnvelope, CapabilityConditionVerification), ProofServiceError> {
+        let verification = verify_capability_conditions(binding, receipts)?;
+        let mut bound_input = input.clone();
+        let bound_hash = bind_capability_conditions(&mut bound_input, binding)?;
+        if !ct_eq_inline(&bound_hash, &verification.condition_hash) {
+            return Err(ProofServiceError::verify_error(
+                "capability condition hash mismatch after proof input binding",
+            ));
+        }
+        let proof = self.generate_proof(&bound_input, backend_override, now_millis)?;
+        Ok((proof, verification))
+    }
+
+    pub fn verify_capability_proof(
+        &self,
+        input: &ProofInputEnvelope,
+        binding: &CapabilityConditionBinding,
+        receipts: &[EffectReceipt],
+        proof: &ProofOutputEnvelope,
+    ) -> Result<CapabilityConditionVerification, ProofServiceError> {
+        let verification = verify_capability_conditions(binding, receipts)?;
+        let mut bound_input = input.clone();
+        let bound_hash = bind_capability_conditions(&mut bound_input, binding)?;
+        if !ct_eq_inline(&bound_hash, &verification.condition_hash) {
+            return Err(ProofServiceError::verify_error(
+                "capability condition hash mismatch after proof input binding",
+            ));
+        }
+        self.verify_proof(&bound_input, proof)?;
+        Ok(verification)
+    }
+
     fn resolve_backend(
         &self,
         backend_override: Option<ProofBackendId>,
@@ -771,9 +1080,11 @@ mod tests {
     use super::super::connector::vef_execution_receipt::{
         ExecutionActionType, ExecutionReceipt, RECEIPT_SCHEMA_VERSION,
     };
-    use super::super::proof_scheduler::{SchedulerPolicy, VefProofScheduler};
+    use super::super::proof_scheduler::{ProofJobStatus, SchedulerPolicy, VefProofScheduler};
     use super::super::receipt_chain::{ReceiptChain, ReceiptChainConfig};
     use super::*;
+    use crate::runtime::effect_receipt::{EffectKind, EffectReceipt};
+    use crate::storage::cas::content_hash;
 
     fn receipt(action: ExecutionActionType, n: u64) -> ExecutionReceipt {
         let mut capability_context = BTreeMap::new();
@@ -860,6 +1171,58 @@ mod tests {
         "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string()
     }
 
+    fn capability_effect_receipt() -> EffectReceipt {
+        EffectReceipt::allowed(
+            7,
+            "trace-proof",
+            EffectKind::HttpRequest,
+            "capability-http-client",
+            content_hash(b"pre-state"),
+            content_hash(b"request-args"),
+            content_hash(b"response-body"),
+            content_hash(b"post-state"),
+            1_705_300_000_900,
+        )
+    }
+
+    fn capability_condition_binding(receipt: &EffectReceipt) -> CapabilityConditionBinding {
+        CapabilityConditionBinding {
+            schema_version: CAPABILITY_CONDITION_SCHEMA_VERSION.to_string(),
+            capability_ref: "capability-http-client".to_string(),
+            effect_seq: receipt.seq,
+            preconditions: vec![
+                CapabilityCondition {
+                    field: "args_hash".to_string(),
+                    expected_hash: receipt.args_hash.as_str().to_string(),
+                },
+                CapabilityCondition {
+                    field: "pre_state_hash".to_string(),
+                    expected_hash: receipt.pre_state_hash.as_str().to_string(),
+                },
+            ],
+            postconditions: vec![
+                CapabilityCondition {
+                    field: "post_state_hash".to_string(),
+                    expected_hash: receipt
+                        .post_state_hash
+                        .as_ref()
+                        .expect("allowed receipt has post_state_hash")
+                        .as_str()
+                        .to_string(),
+                },
+                CapabilityCondition {
+                    field: "result_hash".to_string(),
+                    expected_hash: receipt
+                        .result_hash
+                        .as_ref()
+                        .expect("allowed receipt has result_hash")
+                        .as_str()
+                        .to_string(),
+                },
+            ],
+        }
+    }
+
     #[test]
     fn input_envelope_from_scheduler_job_is_self_contained() {
         let (input, window, job) = sample_request();
@@ -913,6 +1276,95 @@ mod tests {
             .expect("generate proof");
         service.verify_proof(&input, &proof).expect("verify proof");
         assert_eq!(proof.backend_id, ProofBackendId::DoubleHashAttestationV1);
+    }
+
+    #[test]
+    fn capability_conditions_bind_into_generated_proof() {
+        let (input, _, _) = sample_request();
+        let receipt = capability_effect_receipt();
+        let binding = capability_condition_binding(&receipt);
+        let mut service =
+            VefProofService::new(ProofServiceConfig::reference_attestation_defaults());
+
+        let (proof, verification) = service
+            .generate_capability_proof(
+                &input,
+                &binding,
+                &[receipt.clone()],
+                Some(ProofBackendId::HashAttestationV1),
+                1_705_300_001_000,
+            )
+            .expect("capability proof should generate");
+        let verified = service
+            .verify_capability_proof(&input, &binding, &[receipt], &proof)
+            .expect("capability proof should verify");
+
+        assert_eq!(verification, verified);
+        assert_eq!(verification.capability_ref, "capability-http-client");
+        assert_eq!(verification.precondition_count, 2);
+        assert_eq!(verification.postcondition_count, 2);
+        assert!(is_sha256_prefixed(&verification.condition_hash));
+        assert!(is_sha256_prefixed(&verification.effect_receipt_hash));
+    }
+
+    #[test]
+    fn capability_proof_rejects_regular_unbound_proof() {
+        let (input, _, _) = sample_request();
+        let receipt = capability_effect_receipt();
+        let binding = capability_condition_binding(&receipt);
+        let mut service =
+            VefProofService::new(ProofServiceConfig::reference_attestation_defaults());
+        let proof = service
+            .generate_proof(
+                &input,
+                Some(ProofBackendId::HashAttestationV1),
+                1_705_300_001_100,
+            )
+            .expect("regular proof should generate");
+
+        let err = service
+            .verify_capability_proof(&input, &binding, &[receipt], &proof)
+            .expect_err("unbound proof must fail capability verification");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_VERIFY);
+        assert!(err.message.contains("input commitment mismatch"));
+    }
+
+    #[test]
+    fn capability_condition_verification_rejects_postcondition_mismatch() {
+        let receipt = capability_effect_receipt();
+        let mut binding = capability_condition_binding(&receipt);
+        binding.postconditions[0].expected_hash = mismatched_sha256();
+
+        let err = verify_capability_conditions(&binding, &[receipt])
+            .expect_err("tampered postcondition must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_VERIFY);
+        assert!(
+            err.message
+                .contains("postcondition post_state_hash mismatch")
+        );
+    }
+
+    #[test]
+    fn capability_condition_verification_rejects_denied_effect_receipt() {
+        let denied = EffectReceipt::denied(
+            7,
+            "trace-proof",
+            EffectKind::HttpRequest,
+            "policy denied",
+            content_hash(b"pre-state"),
+            content_hash(b"request-args"),
+            1_705_300_001_200,
+        );
+        let mut binding = capability_condition_binding(&capability_effect_receipt());
+        binding.effect_seq = denied.seq;
+
+        let err = verify_capability_conditions(&binding, &[denied])
+            .expect_err("denied receipt cannot satisfy capability postconditions");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_VERIFY);
+        assert!(err.message.contains("did not execute"));
     }
 
     #[test]
@@ -1376,24 +1828,33 @@ mod tests {
                 window_id: "extreme-1".to_string(),
                 start_index: u64::MAX - 100,
                 end_index: u64::MAX - 50,
-                tier: WorkloadTier::Emergency,
+                entry_count: 51,
                 aligned_checkpoint_id: None,
+                tier: WorkloadTier::Critical,
+                created_at_millis: 1_705_000_000_000,
+                trace_id: "trace-overflow".to_string(),
             },
             // Adjacent to max value
             ProofWindow {
                 window_id: "extreme-2".to_string(),
                 start_index: u64::MAX - 1,
                 end_index: u64::MAX,
-                tier: WorkloadTier::Emergency,
+                entry_count: 2,
                 aligned_checkpoint_id: None,
+                tier: WorkloadTier::Critical,
+                created_at_millis: 1_705_000_000_000,
+                trace_id: "trace-overflow".to_string(),
             },
             // Zero range but potentially problematic
             ProofWindow {
                 window_id: "extreme-3".to_string(),
                 start_index: u64::MAX,
                 end_index: u64::MAX,
-                tier: WorkloadTier::Emergency,
+                entry_count: 1,
                 aligned_checkpoint_id: None,
+                tier: WorkloadTier::Critical,
+                created_at_millis: 1_705_000_000_000,
+                trace_id: "trace-overflow".to_string(),
             },
         ];
 
@@ -1402,9 +1863,15 @@ mod tests {
                 job_id: format!("job-{}", window.window_id),
                 window_id: window.window_id.clone(),
                 tier: window.tier,
-                trace_id: "trace-overflow".to_string(),
-                queued_at_millis: 1_705_000_000_000,
+                priority_score: window.tier.priority_score(),
                 deadline_millis: 1_705_000_100_000,
+                estimated_compute_millis: 1_000,
+                estimated_memory_mib: 256,
+                status: ProofJobStatus::Pending,
+                created_at_millis: 1_705_000_000_000,
+                dispatched_at_millis: None,
+                completed_at_millis: None,
+                trace_id: "trace-overflow".to_string(),
             };
 
             // This should fail gracefully due to no matching entries, not due to arithmetic overflow
@@ -1454,7 +1921,13 @@ mod tests {
                     ExecutionReceipt {
                         schema_version: RECEIPT_SCHEMA_VERSION.to_string(),
                         action_type: ExecutionActionType::NetworkAccess,
-                        capability_context: BTreeMap::new(),
+                        // Prod's receipt validation now requires a non-empty
+                        // capability_context (ERR-VEF-RECEIPT-MISSING-FIELD); this test
+                        // exercises timestamp arithmetic, so supply a minimal valid context.
+                        capability_context: BTreeMap::from([(
+                            "capability".to_string(),
+                            "network.egress".to_string(),
+                        )]),
                         actor_identity: format!("actor-{i}"),
                         artifact_identity: format!("artifact-{i}"),
                         policy_snapshot_hash: format!("sha256:{i:064x}"),
@@ -1504,6 +1977,7 @@ mod tests {
         let (mut input, window, job) = sample_request();
 
         // Test with various problematic hash formats that could cause unicode issues
+        let long_repeated_hash = "sha256:0123456789abcdef".repeat(10);
         let problematic_hashes = vec![
             // Unicode in hex position (invalid but test boundary behavior)
             "sha256:🔒bcdefghijklmnopqrstuvwxyz1234567890abcdef1234567890abcdef12345",
@@ -1512,7 +1986,7 @@ mod tests {
             // Truncated hash
             "sha256:abc123",
             // Extra long hash-like string
-            "sha256:0123456789abcdef".repeat(10),
+            long_repeated_hash.as_str(),
             // Hash with emoji in prefix area (first 16 chars after sha256:)
             "sha256:🚨🔥💀☠️🚨🔥💀☠️abcdef1234567890abcdef1234567890abcdef",
             // Null bytes in hash area
@@ -1581,7 +2055,7 @@ mod tests {
             // Very long schema string
             "wrong-schema".repeat(1000),
             // Schema with unicode characters
-            "vef-proof-service-v1-🔒-extended",
+            "vef-proof-service-v1-🔒-extended".to_string(),
         ];
 
         for test_schema in schema_variants {
@@ -1661,10 +2135,13 @@ mod tests {
                 vec!["ab".to_string(), "cd".to_string()],
                 vec!["a".to_string(), "bcd".to_string()],
             ),
-            // Test case 2: Empty vs single element
+            // Test case 2: element-count boundary. Prod rejects empty predicate entries
+            // (ERR-VEF-PROOF-INPUT), so probe the count-vs-concatenation collision with a
+            // non-empty single-char element instead of an empty one: with length-prefixing,
+            // ["x","test"] (two entries) must not collide with ["xtest"] (one entry).
             (
-                vec!["".to_string(), "test".to_string()],
-                vec!["test".to_string()],
+                vec!["x".to_string(), "test".to_string()],
+                vec!["xtest".to_string()],
             ),
             // Test case 3: Unicode boundary issues
             (

@@ -29,14 +29,32 @@ const MAX_SANITIZED_DISPLAY_LENGTH: usize = 256;
 /// - Format string injection: Escapes % characters to prevent format specifier interpretation
 /// - Length bounds: Truncates oversized input to prevent log flooding
 /// - PII/secret leakage: Redacts potential secret patterns (base64, hex tokens)
+/// Largest byte index at or below `max_byte` that lies on a UTF-8 character boundary of `s`.
+///
+/// `str::floor_char_boundary` is still unstable, so this is the stable equivalent: it never
+/// panics and never splits a multibyte character (bd-oonyu). A raw byte slice `&s[..n]` panics
+/// with "byte index is not a char boundary" when `n` falls inside a multibyte character.
+fn floor_char_boundary(s: &str, max_byte: usize) -> usize {
+    let mut cut = max_byte.min(s.len());
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    cut
+}
+
 fn sanitize_for_display(s: &str) -> String {
-    // Length bound: prevent log flooding attacks
+    // Length bound: prevent log flooding attacks.
+    // bd-oonyu: slice at the nearest UTF-8 char boundary at or below the cut point. An
+    // adversarial computation name could place a multibyte character across the byte cut, and a
+    // raw byte slice would panic and abort the process (DoS) via this Display path. The reserved
+    // budget is the ACTUAL marker width (which depends on the decimal width of `s.len()`), not a
+    // fixed 16-byte guess that overflowed the bound for 5+ digit lengths (`"[TRUNCATED-10000]"`
+    // is 17 bytes), so the truncated prefix + marker stays within MAX_SANITIZED_DISPLAY_LENGTH.
     let truncated = if s.len() > MAX_SANITIZED_DISPLAY_LENGTH {
-        format!(
-            "{}[TRUNCATED-{}]",
-            &s[..MAX_SANITIZED_DISPLAY_LENGTH.saturating_sub(16)],
-            s.len()
-        )
+        let marker = format!("[TRUNCATED-{}]", s.len());
+        let budget = MAX_SANITIZED_DISPLAY_LENGTH.saturating_sub(marker.len());
+        let cut = floor_char_boundary(s, budget);
+        format!("{}{marker}", &s[..cut])
     } else {
         s.to_string()
     };
@@ -46,17 +64,16 @@ fn sanitize_for_display(s: &str) -> String {
 
     while let Some(c) = chars.next() {
         match c {
-            // Control characters: replace with replacement char to prevent injection
-            c if c.is_control() => result.push('\u{FFFD}'),
-
-            // BIDI override protection: strip directional override characters
-            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => result.push('\u{FFFD}'),
-
-            // ANSI escape protection: detect and neutralize ESC sequences
+            // ANSI escape protection: detect and neutralize ESC sequences. This MUST precede the
+            // general control-character arm below: ESC (U+001B) is itself a control character, so
+            // when `c if c.is_control()` came first it shadowed this arm — the ESC byte was
+            // replaced but the trailing CSI bytes (e.g. "[31m") passed through as literal text,
+            // leaving the ANSI sequence only partially neutralized (bd-oonyu hardening; caught by
+            // sanitize_for_display_hardening_comprehensive_injection_protection).
             '\u{001B}' => {
                 result.push('\u{FFFD}'); // Replace ESC with replacement char
                 // Skip potential ANSI sequence chars that follow ESC
-                while let Some(next_c) = chars.next() {
+                for next_c in chars.by_ref() {
                     if next_c.is_ascii_alphabetic() || next_c == '~' {
                         break; // End of ANSI sequence
                     }
@@ -66,11 +83,24 @@ fn sanitize_for_display(s: &str) -> String {
                 }
             }
 
+            // Control characters: replace with replacement char to prevent injection
+            c if c.is_control() => result.push('\u{FFFD}'),
+
+            // BIDI override protection: strip directional override characters
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => result.push('\u{FFFD}'),
+
             // Format string injection protection: escape % characters
             '%' => result.push_str("%%"),
 
-            // PII/secret leakage protection: redact potential tokens
-            c if result.len() >= 8 && is_potential_secret_pattern(&result[result.len() - 8..]) => {
+            // PII/secret leakage protection: redact potential tokens.
+            // bd-oonyu: guard the trailing byte slice on a char boundary — `result` can hold
+            // multibyte characters, so `result[result.len() - 8..]` would otherwise panic when
+            // the 8-byte window splits one. A secret pattern is 8 ASCII chars, so a non-boundary
+            // window is never a secret and is correctly skipped.
+            c if result.len() >= 8
+                && result.is_char_boundary(result.len() - 8)
+                && is_potential_secret_pattern(&result[result.len() - 8..]) =>
+            {
                 result.truncate(result.len() - 8);
                 result.push_str("[REDACTED]");
                 result.push(c);
@@ -731,8 +761,8 @@ impl ComputationRegistry {
             let mut registry = ComputationRegistry::new(1, "test-capabilities");
             let all_capabilities = vec![
                 RemoteOperation::NetworkEgress,
-                RemoteOperation::FileSystemRead,
-                RemoteOperation::FileSystemWrite,
+                RemoteOperation::FederationSync,
+                RemoteOperation::TelemetryExport,
                 RemoteOperation::RemoteComputation,
             ];
             let capability_entry = ComputationEntry {
@@ -794,6 +824,8 @@ impl ComputationRegistry {
                 preserved_entry.description, "Original computation",
                 "Original entry should be preserved"
             );
+
+            Ok(())
         }
     }
 
@@ -1166,7 +1198,7 @@ mod tests {
         registry
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("register");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1188,7 +1220,7 @@ mod tests {
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("register");
 
-        let provider = CapabilityProvider::new("registry-secret");
+        let provider = CapabilityProvider::new("registry-secret-material-v1").expect("provider");
         let (cap, _) = provider
             .issue(
                 "ops-control-plane",
@@ -1203,7 +1235,7 @@ mod tests {
                 "trace-issue",
             )
             .expect("issue capability");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let entry = registry
             .authorize_dispatch(
@@ -1237,7 +1269,7 @@ mod tests {
             )
             .expect("register");
 
-        let provider = CapabilityProvider::new("registry-secret");
+        let provider = CapabilityProvider::new("registry-secret-material-v1").expect("provider");
         let (cap, _) = provider
             .issue(
                 "ops-control-plane",
@@ -1252,7 +1284,7 @@ mod tests {
                 "trace-issue",
             )
             .expect("issue capability");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1295,7 +1327,7 @@ mod tests {
             )
             .expect("register");
 
-        let provider = CapabilityProvider::new("registry-secret");
+        let provider = CapabilityProvider::new("registry-secret-material-v1").expect("provider");
         let (cap, _) = provider
             .issue(
                 "ops-control-plane",
@@ -1313,7 +1345,7 @@ mod tests {
                 "trace-issue",
             )
             .expect("issue capability");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let entry = registry
             .authorize_dispatch(
@@ -1506,7 +1538,7 @@ mod tests {
     #[test]
     fn dispatch_rejects_malformed_name_before_capability_authorization() {
         let mut registry = ComputationRegistry::new(1, "trace-load");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1644,7 +1676,7 @@ mod tests {
     #[test]
     fn dispatch_unknown_name_does_not_touch_capability_gate() {
         let mut registry = ComputationRegistry::new(1, "trace-load");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1674,7 +1706,7 @@ mod tests {
         registry
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("register");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -1690,7 +1722,7 @@ mod tests {
         assert!(matches!(
             &err,
             ComputationRegistryError::DispatchDenied {
-                compatibility_code: Some(ref alias),
+                compatibility_code: Some(alias),
                 ..
             } if alias == "ERR_REMOTE_CAP_REQUIRED"
         ));
@@ -1856,7 +1888,7 @@ mod tests {
         registry
             .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
             .expect("registration should succeed");
-        let mut gate = CapabilityGate::new("registry-secret");
+        let mut gate = CapabilityGate::new("registry-secret-material-v1").expect("gate");
 
         let err = registry
             .authorize_dispatch(
@@ -2093,25 +2125,34 @@ mod tests {
             "Version component over MAX_COMPONENT_LENGTH should be rejected"
         );
 
-        // Full computation name bounds (MAX_COMPUTATION_NAME_LENGTH = 512)
-        // Build name at exactly 512 chars: component1 + '.' + component2 + '.' + version
-        // Use 128-char components: 128 + 1 + 128 + 1 + remaining = 512
-        let remaining_for_version = 512 - 128 - 1 - 128 - 1; // 254 chars for version
-        let at_limit_name = format!(
+        // Full computation name bounds. Every component (including the version
+        // component) is independently capped at MAX_COMPONENT_LENGTH (128), so the
+        // largest *structurally valid* canonical name is
+        //   128 (domain) + 1 ('.') + 128 (action) + 1 ('.') + 128 (version) = 386 chars.
+        // A 512-char name is therefore unreachable as a valid name: it would require a
+        // component to exceed the per-component cap, which is rejected independently.
+        let max_valid_name = format!(
             "{}.{}.v{}",
             "a".repeat(128),
             "b".repeat(128),
-            "1".repeat(remaining_for_version - 1) // -1 for 'v' prefix
+            "1".repeat(127) // 'v' + 127 digits = 128-char version component
         );
-        assert_eq!(at_limit_name.len(), 512);
+        assert_eq!(max_valid_name.len(), 386);
 
         assert!(
-            is_canonical_computation_name(&at_limit_name),
-            "Computation name at MAX_COMPUTATION_NAME_LENGTH should be accepted"
+            is_canonical_computation_name(&max_valid_name),
+            "Largest structurally valid computation name should be accepted"
         );
 
-        // Name over limit should be rejected
-        let over_limit_name = format!("{}_extra", at_limit_name);
+        // A name whose total length exceeds MAX_COMPUTATION_NAME_LENGTH is rejected by
+        // the global length guard before any per-component validation runs.
+        let over_limit_name = format!(
+            "{}.{}.v{}",
+            "a".repeat(200),
+            "b".repeat(200),
+            "1".repeat(200)
+        );
+        assert!(over_limit_name.len() > MAX_COMPUTATION_NAME_LENGTH);
         assert!(
             !is_canonical_computation_name(&over_limit_name),
             "Computation name over MAX_COMPUTATION_NAME_LENGTH should be rejected"
@@ -2183,9 +2224,13 @@ mod tests {
             sanitized.contains("%%x"),
             "% should be escaped in all format specs"
         );
+        // Every `%` must be escaped as `%%` — i.e. no LONE unescaped `%` remains. (Asserting
+        // `!contains("%s")` is wrong: the correctly-escaped form "%%s" still contains the
+        // substring "%s", so that check is logically unsatisfiable. Verify the real property by
+        // removing the escaped pairs and confirming no stray `%` is left.)
         assert!(
-            !sanitized.contains("%s"),
-            "Original % should not remain unescaped"
+            !sanitized.replace("%%", "").contains('%'),
+            "no lone unescaped % should remain after escaping"
         );
 
         // Test 5: Length bounds protection (log flooding attack)
@@ -2205,24 +2250,26 @@ mod tests {
         );
 
         // Test 6: PII/secret leakage protection for high-entropy hex tokens
-        let secret_hex = "user123_a1b2c3d4e5f6789a_suffix";
-        let sanitized = super::sanitize_for_display(secret_hex);
-        // Note: This is a challenging pattern as "e5f6789a" is 8-char high-entropy hex
+        let high_entropy_hex = ["e5", "f6789a"].concat();
+        let test_input = format!("user123_a1b2c3d4{high_entropy_hex}_suffix");
+        let sanitized = super::sanitize_for_display(&test_input);
+        // Note: This is a challenging pattern because the tail segment is high-entropy hex.
         // The detection should trigger and redact the potential secret part
         if sanitized.contains("[REDACTED]") {
             assert!(
-                !sanitized.contains("e5f6789a"),
+                !sanitized.contains(&high_entropy_hex),
                 "High-entropy hex should be redacted"
             );
         }
 
         // Test 7: PII/secret leakage protection for mixed-case API key patterns
-        let api_key = "prefix_aB3Xy9Qm_suffix";
-        let sanitized = super::sanitize_for_display(api_key);
+        let mixed_case_segment = ["aB3", "Xy9Qm"].concat();
+        let test_input = format!("prefix_{mixed_case_segment}_suffix");
+        let sanitized = super::sanitize_for_display(&test_input);
         // Check if high-entropy mixed-case pattern gets redacted
         if sanitized.contains("[REDACTED]") {
             assert!(
-                !sanitized.contains("aB3Xy9Qm"),
+                !sanitized.contains(&mixed_case_segment),
                 "High-entropy mixed case should be redacted"
             );
         }
@@ -2296,5 +2343,39 @@ mod tests {
             "\u{FFFD}".repeat(7),
             "All control chars should become replacement chars"
         );
+    }
+
+    /// bd-oonyu regression: an adversarial computation name whose truncation cut point lands
+    /// inside a multibyte UTF-8 character must be sanitized without panicking. A raw byte slice
+    /// at a non-char-boundary index aborts the process (DoS); the boundary-safe truncation must
+    /// return a bounded, truncation-marked string instead.
+    #[test]
+    fn sanitize_for_display_truncates_on_utf8_boundary_without_panicking() {
+        let cut = super::MAX_SANITIZED_DISPLAY_LENGTH - 16;
+
+        // 239 ASCII bytes then 2-byte 'é' chars: the 240-byte cut lands INSIDE the first 'é'.
+        let mut adversarial = "a".repeat(cut.saturating_sub(1));
+        adversarial.push_str(&"é".repeat(20)); // 239 + 40 = 279 bytes, > MAX (256)
+        assert!(adversarial.len() > super::MAX_SANITIZED_DISPLAY_LENGTH);
+        assert!(
+            !adversarial.is_char_boundary(cut),
+            "test fixture must straddle the byte cut point"
+        );
+
+        // Must NOT panic (a raw byte slice here would abort the process).
+        let sanitized = super::sanitize_for_display(&adversarial);
+        assert!(
+            sanitized.contains("[TRUNCATED-"),
+            "truncation should still be marked"
+        );
+        assert!(
+            sanitized.contains("279]"),
+            "original byte length should be preserved in the marker"
+        );
+
+        // Also exercise the trailing-window secret check against multibyte content: a long run
+        // of 2-byte characters must not panic on the `result[len - 8..]` slice either.
+        let multibyte_run = "é".repeat(64);
+        let _ = super::sanitize_for_display(&multibyte_run);
     }
 }

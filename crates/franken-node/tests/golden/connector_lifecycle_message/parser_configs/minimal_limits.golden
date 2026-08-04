@@ -1,0 +1,5 @@
+{
+  "max_frame_bytes": 1,
+  "max_nesting_depth": 1,
+  "max_decode_cpu_ms": 1
+}

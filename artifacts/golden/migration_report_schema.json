@@ -64,7 +64,7 @@
       "Verify rollback receipt signature against operator key"
     ]
   },
-  "signature": "562bc767f734e12224f9b10fb5939f0cf63c16e54d9596682872d94e282369a4",
-  "content_hash": "e60c8dfb6ac9ba02c307e1d74c05513e755c59d7c08b490aef70c6ef61320bf5",
+  "signature": "5ba8af13ed4d0810ac8723bf63e55cf33b26755464e36484af0f2e659681d2f5",
+  "content_hash": "d63b3f935f47394f078d263f9fa2eb56bd6f93cc8fe9695c4558e00a596eedb2",
   "created_at": "2026-02-21T00:00:00Z"
 }

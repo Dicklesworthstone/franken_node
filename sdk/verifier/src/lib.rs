@@ -26,6 +26,11 @@
 //! - CAPSULE_REPLAY_START: Capsule replay has started.
 //! - CAPSULE_VERDICT_REPRODUCED: Capsule verdict has been reproduced.
 //! - SDK_VERSION_CHECK: SDK version compatibility check performed.
+//! - FN_LTV_VERIFY_AS_OF_COMPLETED: LTV verify-as-of-T completed.
+//! - FN_LTV_WITNESS_ANTERIORITY_PROVEN: LTV witness anteriority accepted.
+//! - FN_LTV_BACKDATING_REJECTED: LTV anti-backdating check rejected evidence.
+//! - FN_LTV_HYBRID_SURVIVED_ALGO_DEATH: Hybrid suite remained valid after a
+//!   constituent algorithm compromise record.
 //!
 //! # Error Codes
 //!
@@ -44,21 +49,26 @@
 //! - INV-CAPSULE-VERDICT-REPRODUCIBLE: Same capsule always produces the same verdict.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use hex::FromHex;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use tree_sitter::{Language, Node, Parser as JsParser};
 
 pub mod bundle;
+pub mod calibration;
 pub mod capsule;
 pub mod counterfactual;
+pub mod honesty_manifest;
+pub mod resolution;
 
 /// SDK version string for compatibility checks.
 /// INV-CAPSULE-VERSIONED-API: every API surface carries a version identifier.
@@ -72,6 +82,44 @@ pub const CRYPTOGRAPHIC_SECURITY_POSTURE: &str = "cryptographic_ed25519_authenti
 
 /// Stable rule id for guardrails that must fence the workspace SDK surface.
 pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_VERIFIER_SDK";
+
+/// Bundle artifact path for the migration-equivalence capsule consumed by
+/// `VerifierSdk::verify_migration_artifact`.
+pub const MIGRATION_EQUIVALENCE_ARTIFACT_PATH: &str = "artifacts/migration_equivalence.json";
+
+/// Schema marker for trustless SDK-side migration equivalence capsules.
+pub const MIGRATION_EQUIVALENCE_SCHEMA_VERSION: &str = "vsdk-migration-equivalence-v1.0";
+
+/// Schema marker for SDK-side long-term verification evidence.
+pub const LONG_TERM_VERIFICATION_SCHEMA_VERSION: &str = "vsdk-ltv-evidence-v1.0";
+
+/// Stable statement emitted on successful LTV verification.
+pub const LONG_TERM_VERIFICATION_PASS_DETAIL: &str =
+    "valid and provably anterior to any key compromise on record";
+
+const MIGRATION_SOURCE_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:migration-source:v1:";
+const MIGRATION_AST_HASH_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:migration-js-ast:v1:";
+const MIGRATION_LOCKSTEP_VERDICT_HASH_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:migration-lockstep-verdict:v1:";
+const MIGRATION_EQUIVALENCE_BINDING_HASH_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:migration-equivalence-binding:v1:";
+const LONG_TERM_ARTIFACT_MARKER_HASH_DOMAIN: &[u8] =
+    b"frankenengine-verifier-sdk:ltv-artifact-marker:v1:";
+const MMR_ROOT_REATTESTATION_HASH_DOMAIN: &[u8] = b"mmr_root_reattestation_v1:";
+const MMR_ROOT_WITNESS_HASH_DOMAIN: &[u8] = b"mmr_root_witness_v1:";
+const MMR_LEAF_HASH_DOMAIN: &[u8] = b"mmr_proofs_leaf_v1:";
+const MMR_NODE_HASH_DOMAIN: &[u8] = b"mmr_proofs_node_v1:";
+const THRESHOLD_SIGNING_MESSAGE_DOMAIN: &[u8] = b"threshold_sig_verify_v2:";
+const MMR_ROOT_REATTESTATION_SCHEMA_VERSION: &str = "mmr-root-reattestation-v1";
+const MMR_ROOT_WITNESS_SCHEMA_VERSION: &str = "mmr-root-witness-v1";
+const MMR_ROOT_WITNESS_ARTIFACT_ID: &str = "mmr-root-witness";
+const MMR_ROOT_WITNESS_CONNECTOR_ID: &str = "franken-node-root-witness";
+const MAX_LONG_TERM_SUITE_RECORDS: usize = 128;
+const MAX_LONG_TERM_REATTESTATION_LINKS: usize = 64;
+const MAX_LONG_TERM_LEAF_HASHES: usize = 4096;
+const MAX_LONG_TERM_AUDIT_PATH_ENTRIES: usize = 128;
+const MAX_LONG_TERM_WITNESS_SIGNATURES: usize = 256;
+const MAX_LONG_TERM_SIGNER_KEYS: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Event codes (public-facing)
@@ -87,6 +135,14 @@ pub const CAPSULE_REPLAY_START: &str = "CAPSULE_REPLAY_START";
 pub const CAPSULE_VERDICT_REPRODUCED: &str = "CAPSULE_VERDICT_REPRODUCED";
 /// Event: SDK version compatibility check performed.
 pub const SDK_VERSION_CHECK: &str = "SDK_VERSION_CHECK";
+/// Event: long-term verify-as-of-T completed.
+pub const FN_LTV_VERIFY_AS_OF_COMPLETED: &str = "FN_LTV_VERIFY_AS_OF_COMPLETED";
+/// Event: witness anteriority was proven for an LTV result.
+pub const FN_LTV_WITNESS_ANTERIORITY_PROVEN: &str = "FN_LTV_WITNESS_ANTERIORITY_PROVEN";
+/// Event: LTV verification rejected late or post-compromise evidence.
+pub const FN_LTV_BACKDATING_REJECTED: &str = "FN_LTV_BACKDATING_REJECTED";
+/// Event: a hybrid LTV crypto suite survived a constituent algorithm death.
+pub const FN_LTV_HYBRID_SURVIVED_ALGO_DEATH: &str = "FN_LTV_HYBRID_SURVIVED_ALGO_DEATH";
 
 // ---------------------------------------------------------------------------
 // Error codes (public-facing)
@@ -176,6 +232,60 @@ impl SdkEvent {
     }
 }
 
+/// Build a deterministic public audit transcript for SDK-side LTV results.
+pub fn long_term_verification_audit_events(result: &VerificationResult) -> Vec<SdkEvent> {
+    if !matches!(result.operation, VerificationOperation::LongTermValidation) {
+        return Vec::new();
+    }
+
+    let mut events = vec![SdkEvent::new(
+        FN_LTV_VERIFY_AS_OF_COMPLETED,
+        format!(
+            "verdict={:?}; confidence_score={:.2}",
+            result.verdict, result.confidence_score
+        ),
+    )];
+
+    if result.checked_assertions.iter().any(|assertion| {
+        matches!(
+            assertion.assertion.as_str(),
+            "ltv_witness_precedes_key_compromise_records"
+        ) && assertion.passed
+    }) {
+        events.push(SdkEvent::new(
+            FN_LTV_WITNESS_ANTERIORITY_PROVEN,
+            LONG_TERM_VERIFICATION_PASS_DETAIL,
+        ));
+    }
+
+    if result.checked_assertions.iter().any(|assertion| {
+        matches!(
+            assertion.assertion.as_str(),
+            "ltv_witness_anterior_to_as_of" | "ltv_witness_precedes_key_compromise_records"
+        ) && !assertion.passed
+    }) {
+        events.push(SdkEvent::new(
+            FN_LTV_BACKDATING_REJECTED,
+            "late or post-compromise witness evidence rejected",
+        ));
+    }
+
+    if result.checked_assertions.iter().any(|assertion| {
+        matches!(
+            assertion.assertion.as_str(),
+            "ltv_crypto_suite_valid_at_claimed_time"
+        ) && assertion.passed
+            && assertion.detail.contains("hybrid")
+    }) {
+        events.push(SdkEvent::new(
+            FN_LTV_HYBRID_SURVIVED_ALGO_DEATH,
+            "hybrid crypto suite remained valid for the claimed artifact time",
+        ));
+    }
+
+    events
+}
+
 /// Result verdict exposed by the stable verifier facade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -202,6 +312,7 @@ pub enum VerificationOperation {
     Claim,
     MigrationArtifact,
     TrustState,
+    LongTermValidation,
     Workflow,
     WorkflowExecution,
 }
@@ -298,6 +409,157 @@ pub struct VerificationResult {
     result_origin_nonce: String,
 }
 
+/// Artifact metadata bound into an SDK long-term verification proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermArtifactEvidence {
+    pub artifact_id: String,
+    pub artifact_hash: String,
+    pub crypto_suite: String,
+    pub claimed_at_unix_seconds: u64,
+    pub marker_hash: String,
+}
+
+/// Validity interval and compromise marker for one cryptographic suite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermCryptoSuiteRecord {
+    pub crypto_suite: String,
+    pub valid_from_unix_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until_unix_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compromised_at_unix_seconds: Option<u64>,
+}
+
+/// Current Merkle/MMR root for SDK-side LTV verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermMmrRoot {
+    pub tree_size: u64,
+    pub root_hash: String,
+}
+
+/// Inclusion proof for the artifact marker leaf under a retained MMR root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermMmrInclusionProof {
+    pub leaf_index: u64,
+    pub tree_size: u64,
+    pub leaf_hash: String,
+    pub audit_path: Vec<String>,
+}
+
+/// Prefix proof showing one retained MMR root is included in a later root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermMmrPrefixProof {
+    pub prefix_size: u64,
+    pub super_tree_size: u64,
+    pub prefix_root_hash: String,
+    pub super_root_hash: String,
+    pub prefix_root_from_super: String,
+    pub super_leaf_hashes: Vec<String>,
+}
+
+/// Re-attestation link binding an older MMR root to a newer root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermMmrRootReattestation {
+    pub schema_version: String,
+    pub previous_root: LongTermMmrRoot,
+    pub attested_root: LongTermMmrRoot,
+    pub prefix_proof: LongTermMmrPrefixProof,
+    pub issued_at_unix_seconds: u64,
+    pub crypto_suite: String,
+    pub attestation_hash: String,
+}
+
+/// Ordered re-attestation chain from the artifact inclusion root to a witnessed root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermMmrRootReattestationChain {
+    pub origin_root: LongTermMmrRoot,
+    pub attestations: Vec<LongTermMmrRootReattestation>,
+}
+
+/// One threshold signer public key for root-witness verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermSignerKey {
+    pub key_id: String,
+    pub public_key_hex: String,
+}
+
+/// Threshold configuration carried by a root-witness receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermThresholdConfig {
+    pub threshold: u32,
+    pub total_signers: u32,
+    pub signer_keys: Vec<LongTermSignerKey>,
+}
+
+/// One witness partial signature over a publication artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermPartialSignature {
+    pub signer_id: String,
+    pub key_id: String,
+    pub signature_hex: String,
+}
+
+/// Publication artifact binding root-witness signatures to a content hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermPublicationArtifact {
+    pub artifact_id: String,
+    pub connector_id: String,
+    pub content_hash: String,
+    pub signatures: Vec<LongTermPartialSignature>,
+}
+
+/// Canonical statement cosigned by independent root witnesses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermMmrRootWitnessStatement {
+    pub schema_version: String,
+    pub root: LongTermMmrRoot,
+    pub observed_at_unix_seconds: u64,
+    pub witness_group_id: String,
+    pub witness_policy_id: String,
+    pub content_hash: String,
+}
+
+/// Operator-pinned trust anchor for LTV witness receipts.
+///
+/// bd-7fubt: verification must not read the witness signer set out of the
+/// artifact being verified. This anchor names the witness group and policy the
+/// verifier trusts and pins the quorum — and therefore the keys — that a receipt
+/// must satisfy. It is supplied out of band, exactly like the Ed25519 trust
+/// anchor `incident replay` and `verify release` already require; the SDK ships
+/// no built-in witness roots.
+///
+/// Pinning the group/policy alone would not be enough: `ThresholdConfig` carries
+/// `signer_keys`, so an attacker could keep the advertised group name and swap
+/// the key set. Both are bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermWitnessTrustAnchor {
+    pub witness_group_id: String,
+    pub witness_policy_id: String,
+    pub threshold_config: LongTermThresholdConfig,
+}
+
+/// Threshold-cosigned receipt proving a root was observed by independent witnesses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermMmrRootWitnessReceipt {
+    pub statement: LongTermMmrRootWitnessStatement,
+    pub threshold_config: LongTermThresholdConfig,
+    pub witness_artifact: LongTermPublicationArtifact,
+    pub trace_id: String,
+    pub timestamp: String,
+}
+
+/// Self-contained SDK evidence for verify-as-of-T / LTV mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LongTermVerificationEvidence {
+    pub schema_version: String,
+    pub as_of_unix_seconds: u64,
+    pub artifact: LongTermArtifactEvidence,
+    pub suite_records: Vec<LongTermCryptoSuiteRecord>,
+    pub inclusion_proof: LongTermMmrInclusionProof,
+    pub reattestation_chain: LongTermMmrRootReattestationChain,
+    pub witness_receipt: LongTermMmrRootWitnessReceipt,
+}
+
 /// Single append-only step in a verification session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStep {
@@ -331,6 +593,7 @@ pub enum VerifierSdkError {
     UnsupportedSdk(String),
     Capsule(capsule::CapsuleError),
     Bundle(bundle::BundleError),
+    CounterfactualCapability(counterfactual::CounterfactualCapabilityError),
     UnauthenticatedStructuralBundle {
         bundle_id: String,
         verifier_identity: String,
@@ -418,6 +681,12 @@ impl fmt::Display for VerifierSdkError {
             Self::UnsupportedSdk(message) => write!(formatter, "{message}"),
             Self::Capsule(source) => write!(formatter, "capsule verification failed: {source}"),
             Self::Bundle(source) => write!(formatter, "bundle verification failed: {source}"),
+            Self::CounterfactualCapability(source) => {
+                write!(
+                    formatter,
+                    "counterfactual capability validation failed: {source}"
+                )
+            }
             Self::UnauthenticatedStructuralBundle {
                 bundle_id,
                 verifier_identity,
@@ -530,6 +799,18 @@ impl From<capsule::CapsuleError> for VerifierSdkError {
 impl From<bundle::BundleError> for VerifierSdkError {
     fn from(source: bundle::BundleError) -> Self {
         Self::Bundle(source)
+    }
+}
+
+impl From<counterfactual::CounterfactualCapabilityError> for VerifierSdkError {
+    fn from(source: counterfactual::CounterfactualCapabilityError) -> Self {
+        Self::CounterfactualCapability(source)
+    }
+}
+
+impl From<resolution::ResolutionReceiptError> for VerifierSdkError {
+    fn from(source: resolution::ResolutionReceiptError) -> Self {
+        Self::Json(source.to_string())
     }
 }
 
@@ -684,19 +965,18 @@ impl VerifierSdk {
         self.validate_current_verifier_identity()?;
         let verified = bundle::verify(artifact)?;
         self.verify_bundle_belongs_to_current_verifier(&verified)?;
+        let equivalence = verify_migration_equivalence_capsule(&verified);
+        let verdict = if equivalence.all_passed() {
+            VerificationVerdict::Pass
+        } else {
+            VerificationVerdict::Fail
+        };
 
         self.build_result(
             VerificationOperation::MigrationArtifact,
-            VerificationVerdict::Pass,
-            vec![AssertionResult {
-                assertion: "migration_artifact_verified".to_string(),
-                passed: true,
-                detail: format!(
-                    "migration artifact cryptographically verified from bundle {}",
-                    verified.bundle_id
-                ),
-            }],
-            verified.integrity_hash,
+            verdict,
+            equivalence.checked_assertions,
+            equivalence.artifact_binding_hash,
         )
     }
 
@@ -747,6 +1027,41 @@ impl VerifierSdk {
                 ),
             }],
             verified.integrity_hash,
+        )
+    }
+
+    /// Verify a long-term-validity proof as of a claimed verification time.
+    ///
+    /// This SDK-native LTV mode does not trust the producing runtime. It
+    /// recomputes the artifact marker, checks the artifact's crypto suite at
+    /// the claimed time, verifies MMR inclusion under the origin root, verifies
+    /// the re-attestation prefix chain to the witnessed root, and verifies the
+    /// independent threshold witness receipt before accepting anteriority.
+    /// Re-verify long-term verification evidence offline.
+    ///
+    /// `witness_anchor` is the operator-supplied witness trust anchor and is
+    /// REQUIRED (bd-7fubt): without it the witness receipt would be checked
+    /// against the signer set it carries itself, which any forger can choose.
+    /// There is no built-in witness root, by design.
+    pub fn verify_as_of_ltv(
+        &self,
+        evidence: &LongTermVerificationEvidence,
+        witness_anchor: &LongTermWitnessTrustAnchor,
+    ) -> VerifierSdkResult<VerificationResult> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let verification = verify_long_term_evidence(evidence, witness_anchor);
+        let verdict = if verification.all_passed() {
+            VerificationVerdict::Pass
+        } else {
+            VerificationVerdict::Fail
+        };
+
+        self.build_result(
+            VerificationOperation::LongTermValidation,
+            verdict,
+            verification.checked_assertions,
+            verification.artifact_binding_hash,
         )
     }
 
@@ -1026,6 +1341,110 @@ impl VerifierSdk {
             });
         }
         Ok(report)
+    }
+
+    /// Re-derive and verify a bare effect-receipt chain offline from its entries
+    /// alone — e.g. the host-effect ledger surfaced in `franken-node run --json`.
+    ///
+    /// Unlike [`verify_effect_chain_bundle`], this needs no surrounding replay
+    /// bundle and no embedded verifier identity: it independently re-derives
+    /// each entry's index, prev/chain-hash linkage, and receipt hash and fails
+    /// closed on any mismatch. CAS byte-bindings are not checked (the bare
+    /// ledger carries only content hashes); export a replay bundle and use
+    /// [`verify_effect_chain_bundle`] when byte-binding proof is required.
+    pub fn verify_effect_chain_entries(
+        &self,
+        entries: &[bundle::EffectReceiptChainEntry],
+    ) -> VerifierSdkResult<bundle::EffectChainVerification> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let report = bundle::verify_effect_chain_entries(entries)?;
+        Ok(report)
+    }
+
+    /// Verify a selective-disclosure non-exfiltration claim over a replay bundle.
+    pub fn verify_non_exfiltration_claim_bundle(
+        &self,
+        bundle_bytes: &[u8],
+        claim: &bundle::NonExfiltrationClaim,
+    ) -> VerifierSdkResult<bundle::NonExfiltrationVerification> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let max_bytes = self.resolved_max_bundle_size_bytes();
+        if bundle_bytes.len() > max_bytes {
+            return Err(VerifierSdkError::BundleTooLarge {
+                actual_bytes: bundle_bytes.len(),
+                max_bytes,
+            });
+        }
+        let proof = bundle::verify_non_exfiltration_claim(bundle_bytes, claim)?;
+        if !constant_time_eq(&proof.verifier_identity, &self.verifier_identity) {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: self.verifier_identity.clone(),
+                actual: proof.verifier_identity,
+            });
+        }
+        Ok(proof)
+    }
+
+    /// Verify a proof-carrying capability grant offline.
+    pub fn verify_capability_proof(
+        &self,
+        proof: &bundle::CapabilityProof,
+    ) -> VerifierSdkResult<String> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let proof_hash = bundle::verify_capability_proof_schema(proof)?;
+        self.verify_capability_audience(&proof.audience)?;
+        Ok(proof_hash)
+    }
+
+    /// Verify a capability-use receipt against the supplied proof.
+    pub fn verify_capability_receipt(
+        &self,
+        proof: &bundle::CapabilityProof,
+        receipt: &bundle::CapabilityReceipt,
+    ) -> VerifierSdkResult<bundle::CapabilityReceiptVerification> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let report = bundle::verify_capability_receipt_schema(proof, receipt)?;
+        self.verify_capability_audience(&report.audience)?;
+        Ok(report)
+    }
+
+    /// Replay an allow/deny capability decision without producer-runtime access.
+    pub fn validate_counterfactual_capability_decision(
+        &self,
+        proof: &bundle::CapabilityProof,
+        request: &counterfactual::CounterfactualCapabilityRequest,
+        decision: counterfactual::CounterfactualCapabilityDecision,
+    ) -> VerifierSdkResult<counterfactual::CounterfactualCapabilityValidation> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        self.verify_capability_audience(&proof.audience)?;
+        let validation =
+            counterfactual::validate_counterfactual_capability_decision(proof, request, decision)?;
+        self.verify_capability_audience(&validation.audience)?;
+        Ok(validation)
+    }
+
+    /// Verify a signed trust-native module-resolution receipt offline.
+    pub fn verify_resolution_receipt(
+        &self,
+        verifying_key: &VerifyingKey,
+        receipt_bytes: &[u8],
+    ) -> VerifierSdkResult<resolution::VerifiedResolutionReceipt> {
+        check_sdk_version(&self.sdk_version).map_err(VerifierSdkError::UnsupportedSdk)?;
+        self.validate_current_verifier_identity()?;
+        let max_bytes = self.resolved_max_bundle_size_bytes();
+        if receipt_bytes.len() > max_bytes {
+            return Err(VerifierSdkError::BundleTooLarge {
+                actual_bytes: receipt_bytes.len(),
+                max_bytes,
+            });
+        }
+        resolution::verify_signed_resolution_receipt(verifying_key, receipt_bytes)
+            .map_err(VerifierSdkError::from)
     }
 
     /// Resolve the active bundle size cap for this SDK instance.
@@ -1405,6 +1824,17 @@ impl VerifierSdk {
         Ok(())
     }
 
+    fn verify_capability_audience(&self, audience: &str) -> Result<(), VerifierSdkError> {
+        self.validate_current_verifier_identity()?;
+        if !constant_time_eq(audience, &self.verifier_identity) {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: self.verifier_identity.clone(),
+                actual: audience.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn build_result(
         &self,
         operation: VerificationOperation,
@@ -1465,7 +1895,7 @@ impl VerificationSession {
 /// ```
 pub fn create_verifier_sdk(verifier_identity: impl Into<String>) -> VerifierSdk {
     // For testing: if counter is close to MAX, reset it to avoid test failures
-    let _ = SESSION_NONCE_COUNTER.fetch_update(
+    let _ = SESSION_NONCE_COUNTER.try_update(
         std::sync::atomic::Ordering::Relaxed,
         std::sync::atomic::Ordering::Relaxed,
         |counter| {
@@ -1547,7 +1977,7 @@ fn next_session_nonce_counter() -> Result<u64, VerifierSdkError> {
 
 fn next_session_nonce_counter_from(counter: &AtomicU64) -> Result<u64, VerifierSdkError> {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |counter| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |counter| {
             if counter == u64::MAX {
                 None // Prevent update - counter is exhausted
             } else {
@@ -1955,6 +2385,1728 @@ fn validate_session_provenance(session: &VerificationSession) -> Result<(), Veri
     Ok(())
 }
 
+#[derive(Debug)]
+struct LongTermEvidenceVerification {
+    checked_assertions: Vec<AssertionResult>,
+    artifact_binding_hash: String,
+}
+
+impl LongTermEvidenceVerification {
+    fn all_passed(&self) -> bool {
+        self.checked_assertions
+            .iter()
+            .all(|assertion| assertion.passed)
+    }
+}
+
+#[derive(Debug)]
+struct LongTermWitnessVerification {
+    root: LongTermMmrRoot,
+    observed_at_unix_seconds: u64,
+    valid_signatures: u32,
+    threshold: u32,
+}
+
+fn verify_long_term_evidence(
+    evidence: &LongTermVerificationEvidence,
+    witness_anchor: &LongTermWitnessTrustAnchor,
+) -> LongTermEvidenceVerification {
+    let mut assertions = Vec::new();
+    let artifact_binding_hash = long_term_artifact_marker_hash(&evidence.artifact);
+
+    push_long_term_assertion(
+        &mut assertions,
+        "ltv_schema_supported",
+        evidence.schema_version == LONG_TERM_VERIFICATION_SCHEMA_VERSION,
+        || {
+            format!(
+                "schema_version={} supported={}",
+                evidence.schema_version, LONG_TERM_VERIFICATION_SCHEMA_VERSION
+            )
+        },
+        || {
+            format!(
+                "unsupported schema_version={} expected={}",
+                evidence.schema_version, LONG_TERM_VERIFICATION_SCHEMA_VERSION
+            )
+        },
+    );
+    push_long_term_assertion(
+        &mut assertions,
+        "ltv_as_of_nonzero",
+        evidence.as_of_unix_seconds != 0,
+        || format!("as_of_unix_seconds={}", evidence.as_of_unix_seconds),
+        || "as_of_unix_seconds must be nonzero".to_string(),
+    );
+    let marker_ok = validate_long_term_artifact(&evidence.artifact)
+        .map(|()| constant_time_eq(&artifact_binding_hash, &evidence.artifact.marker_hash))
+        .unwrap_or(false);
+    push_long_term_assertion(
+        &mut assertions,
+        "ltv_artifact_marker_recomputed",
+        marker_ok,
+        || {
+            format!(
+                "artifact marker {} recomputed",
+                evidence.artifact.marker_hash
+            )
+        },
+        || {
+            format!(
+                "artifact marker mismatch: expected={} actual={}",
+                artifact_binding_hash, evidence.artifact.marker_hash
+            )
+        },
+    );
+
+    let suite_check = verify_long_term_suite_record(evidence);
+    push_long_term_assertion_detail(
+        &mut assertions,
+        "ltv_crypto_suite_valid_at_claimed_time",
+        suite_check.is_ok(),
+        result_detail(&suite_check),
+    );
+
+    let inclusion_check = verify_long_term_inclusion(
+        &evidence.inclusion_proof,
+        &evidence.reattestation_chain.origin_root,
+        &evidence.artifact.marker_hash,
+    );
+    push_long_term_assertion_detail(
+        &mut assertions,
+        "ltv_artifact_leaf_included_under_origin_root",
+        inclusion_check.is_ok(),
+        result_detail_with_ok(
+            &inclusion_check,
+            "artifact marker leaf included under re-attestation origin root",
+        ),
+    );
+
+    let chain_check = verify_long_term_reattestation_chain(&evidence.reattestation_chain);
+    push_long_term_assertion_detail(
+        &mut assertions,
+        "ltv_reattestation_chain_verified",
+        chain_check.is_ok(),
+        match &chain_check {
+            Ok(_) => "re-attestation prefix chain verified to witnessed root".to_string(),
+            Err(reason) => reason.clone(),
+        },
+    );
+
+    let witness_check =
+        verify_long_term_witness_receipt(&evidence.witness_receipt, witness_anchor);
+    let witness_root_matches = match (&chain_check, &witness_check) {
+        (Ok(reattested_root), Ok(witness)) => witness.root == *reattested_root,
+        _ => false,
+    };
+    push_long_term_assertion(
+        &mut assertions,
+        "ltv_witness_root_matches_reattested_root",
+        witness_root_matches,
+        || "witness receipt is bound to the newest re-attested root".to_string(),
+        || "witness receipt root does not match the newest re-attested root".to_string(),
+    );
+    push_long_term_assertion_detail(
+        &mut assertions,
+        "ltv_witness_threshold_verified",
+        witness_check.is_ok(),
+        match &witness_check {
+            Ok(witness) => {
+                format!(
+                    "valid_signatures={} threshold={}",
+                    witness.valid_signatures, witness.threshold
+                )
+            }
+            Err(reason) => reason.clone(),
+        },
+    );
+
+    let anterior_to_as_of = witness_check
+        .as_ref()
+        .is_ok_and(|witness| witness.observed_at_unix_seconds <= evidence.as_of_unix_seconds);
+    push_long_term_assertion_detail(
+        &mut assertions,
+        "ltv_witness_anterior_to_as_of",
+        anterior_to_as_of,
+        match &witness_check {
+            Ok(witness) if anterior_to_as_of => format!(
+                "observed_at_unix_seconds={} <= as_of_unix_seconds={}",
+                witness.observed_at_unix_seconds, evidence.as_of_unix_seconds
+            ),
+            Ok(witness) => format!(
+                "witness observed_at_unix_seconds={} is after as_of_unix_seconds={}",
+                witness.observed_at_unix_seconds, evidence.as_of_unix_seconds
+            ),
+            Err(reason) => reason.clone(),
+        },
+    );
+
+    let compromise_check = witness_check.as_ref().map_or_else(
+        |error| Err(error.clone()),
+        |witness| {
+            verify_long_term_compromise_anteriority(evidence, witness.observed_at_unix_seconds)
+        },
+    );
+    push_long_term_assertion_detail(
+        &mut assertions,
+        "ltv_witness_precedes_key_compromise_records",
+        compromise_check.is_ok(),
+        result_detail(&compromise_check),
+    );
+
+    LongTermEvidenceVerification {
+        checked_assertions: assertions,
+        artifact_binding_hash,
+    }
+}
+
+fn push_long_term_assertion(
+    assertions: &mut Vec<AssertionResult>,
+    assertion: impl Into<String>,
+    passed: bool,
+    passed_detail: impl FnOnce() -> String,
+    failed_detail: impl FnOnce() -> String,
+) {
+    assertions.push(AssertionResult {
+        assertion: assertion.into(),
+        passed,
+        detail: if passed {
+            passed_detail()
+        } else {
+            failed_detail()
+        },
+    });
+}
+
+fn push_long_term_assertion_detail(
+    assertions: &mut Vec<AssertionResult>,
+    assertion: impl Into<String>,
+    passed: bool,
+    detail: String,
+) {
+    assertions.push(AssertionResult {
+        assertion: assertion.into(),
+        passed,
+        detail,
+    });
+}
+
+fn result_detail(result: &Result<String, String>) -> String {
+    match result {
+        Ok(detail) | Err(detail) => detail.clone(),
+    }
+}
+
+fn result_detail_with_ok(result: &Result<(), String>, ok_detail: &str) -> String {
+    match result {
+        Ok(()) => ok_detail.to_string(),
+        Err(detail) => detail.clone(),
+    }
+}
+
+fn validate_long_term_artifact(artifact: &LongTermArtifactEvidence) -> Result<(), String> {
+    validate_long_term_identifier("artifact_id", &artifact.artifact_id)?;
+    validate_long_term_identifier("crypto_suite", &artifact.crypto_suite)?;
+    if artifact.claimed_at_unix_seconds == 0 {
+        return Err("artifact claimed_at_unix_seconds must be nonzero".to_string());
+    }
+    if !is_canonical_sha256_hex(&artifact.artifact_hash) {
+        return Err("artifact_hash must be a canonical lowercase sha256 digest".to_string());
+    }
+    if !is_canonical_sha256_hex(&artifact.marker_hash) {
+        return Err("marker_hash must be a canonical lowercase sha256 digest".to_string());
+    }
+    Ok(())
+}
+
+fn verify_long_term_suite_record(
+    evidence: &LongTermVerificationEvidence,
+) -> Result<String, String> {
+    validate_long_term_artifact(&evidence.artifact)?;
+    if evidence.suite_records.is_empty() {
+        return Err("suite_records must contain the artifact crypto suite".to_string());
+    }
+    if evidence.suite_records.len() > MAX_LONG_TERM_SUITE_RECORDS {
+        return Err(format!(
+            "suite_records len={} exceeds limit={MAX_LONG_TERM_SUITE_RECORDS}",
+            evidence.suite_records.len()
+        ));
+    }
+
+    let mut matching_records = 0usize;
+    for record in &evidence.suite_records {
+        validate_long_term_identifier("suite_record.crypto_suite", &record.crypto_suite)?;
+        if record
+            .valid_until_unix_seconds
+            .is_some_and(|valid_until| valid_until < record.valid_from_unix_seconds)
+        {
+            return Err(format!(
+                "suite {} valid_until precedes valid_from",
+                record.crypto_suite
+            ));
+        }
+
+        if !constant_time_eq(&record.crypto_suite, &evidence.artifact.crypto_suite) {
+            continue;
+        }
+        matching_records = matching_records.saturating_add(1);
+
+        let claimed_at = evidence.artifact.claimed_at_unix_seconds;
+        let starts_in_time = claimed_at >= record.valid_from_unix_seconds;
+        let before_valid_until = record
+            .valid_until_unix_seconds
+            .is_none_or(|valid_until| claimed_at <= valid_until);
+        let before_compromise = record
+            .compromised_at_unix_seconds
+            .is_none_or(|compromised_at| claimed_at < compromised_at);
+        if starts_in_time && before_valid_until && before_compromise {
+            return Ok(format!(
+                "crypto_suite={} was valid at claimed_at_unix_seconds={claimed_at}",
+                evidence.artifact.crypto_suite
+            ));
+        }
+    }
+
+    if matching_records == 0 {
+        return Err(format!(
+            "no suite record for crypto_suite={}",
+            evidence.artifact.crypto_suite
+        ));
+    }
+    Err(format!(
+        "crypto_suite={} was not valid at claimed_at_unix_seconds={}",
+        evidence.artifact.crypto_suite, evidence.artifact.claimed_at_unix_seconds
+    ))
+}
+
+fn verify_long_term_compromise_anteriority(
+    evidence: &LongTermVerificationEvidence,
+    observed_at_unix_seconds: u64,
+) -> Result<String, String> {
+    let mut saw_suite = false;
+    for record in &evidence.suite_records {
+        if !constant_time_eq(&record.crypto_suite, &evidence.artifact.crypto_suite) {
+            continue;
+        }
+        saw_suite = true;
+        if record
+            .compromised_at_unix_seconds
+            .is_some_and(|compromised_at| observed_at_unix_seconds >= compromised_at)
+        {
+            return Err(format!(
+                "witness observed_at_unix_seconds={} is not anterior to compromise for suite {}",
+                observed_at_unix_seconds, record.crypto_suite
+            ));
+        }
+    }
+    if saw_suite {
+        Ok(LONG_TERM_VERIFICATION_PASS_DETAIL.to_string())
+    } else {
+        Err(format!(
+            "no suite record for crypto_suite={}",
+            evidence.artifact.crypto_suite
+        ))
+    }
+}
+
+fn verify_long_term_inclusion(
+    proof: &LongTermMmrInclusionProof,
+    root: &LongTermMmrRoot,
+    marker_hash: &str,
+) -> Result<(), String> {
+    validate_long_term_root(root)?;
+    if proof.tree_size == 0 {
+        return Err("inclusion proof tree_size must be nonzero".to_string());
+    }
+    if proof.tree_size != root.tree_size {
+        return Err(format!(
+            "inclusion proof tree_size={} does not match root tree_size={}",
+            proof.tree_size, root.tree_size
+        ));
+    }
+    if proof.leaf_index >= proof.tree_size {
+        return Err(format!(
+            "inclusion leaf_index={} is outside tree_size={}",
+            proof.leaf_index, proof.tree_size
+        ));
+    }
+    if proof.audit_path.len() > MAX_LONG_TERM_AUDIT_PATH_ENTRIES {
+        return Err(format!(
+            "inclusion audit_path len={} exceeds limit={MAX_LONG_TERM_AUDIT_PATH_ENTRIES}",
+            proof.audit_path.len()
+        ));
+    }
+    if !is_canonical_sha256_hex(marker_hash) {
+        return Err("artifact marker_hash must be a canonical lowercase sha256 digest".to_string());
+    }
+    for sibling in &proof.audit_path {
+        if !is_canonical_sha256_hex(sibling) {
+            return Err("inclusion audit_path contains a non-canonical hash".to_string());
+        }
+    }
+    let expected_leaf = long_term_marker_leaf_hash(marker_hash);
+    if !constant_time_eq(&expected_leaf, &proof.leaf_hash) {
+        return Err("inclusion leaf hash does not bind the artifact marker".to_string());
+    }
+    let current = long_term_inclusion_root_from_proof(proof)?;
+    if !constant_time_eq(&current, &root.root_hash) {
+        return Err("inclusion proof root mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn verify_long_term_reattestation_chain(
+    chain: &LongTermMmrRootReattestationChain,
+) -> Result<LongTermMmrRoot, String> {
+    validate_long_term_root(&chain.origin_root)?;
+    if chain.attestations.is_empty() {
+        return Err("reattestation chain must contain at least one link".to_string());
+    }
+    if chain.attestations.len() > MAX_LONG_TERM_REATTESTATION_LINKS {
+        return Err(format!(
+            "reattestation chain len={} exceeds limit={MAX_LONG_TERM_REATTESTATION_LINKS}",
+            chain.attestations.len()
+        ));
+    }
+
+    let mut current_root = chain.origin_root.clone();
+    let mut previous_issued_at = 0u64;
+    for reattestation in &chain.attestations {
+        if reattestation.schema_version != MMR_ROOT_REATTESTATION_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported reattestation schema_version={}",
+                reattestation.schema_version
+            ));
+        }
+        if reattestation.previous_root != current_root {
+            return Err("reattestation chain root continuity mismatch".to_string());
+        }
+        if reattestation.issued_at_unix_seconds == 0 {
+            return Err("reattestation issued_at_unix_seconds must be nonzero".to_string());
+        }
+        if reattestation.issued_at_unix_seconds < previous_issued_at {
+            return Err("reattestation timestamps must be monotonic".to_string());
+        }
+        validate_long_term_identifier("reattestation.crypto_suite", &reattestation.crypto_suite)?;
+        verify_long_term_prefix(
+            &reattestation.prefix_proof,
+            &reattestation.previous_root,
+            &reattestation.attested_root,
+        )?;
+        let expected_hash = compute_long_term_reattestation_hash(reattestation);
+        if !constant_time_eq(&expected_hash, &reattestation.attestation_hash) {
+            return Err("reattestation hash mismatch".to_string());
+        }
+        previous_issued_at = reattestation.issued_at_unix_seconds;
+        current_root = reattestation.attested_root.clone();
+    }
+    Ok(current_root)
+}
+
+fn verify_long_term_prefix(
+    proof: &LongTermMmrPrefixProof,
+    root_a: &LongTermMmrRoot,
+    root_b: &LongTermMmrRoot,
+) -> Result<(), String> {
+    validate_long_term_root(root_a)?;
+    validate_long_term_root(root_b)?;
+    if proof.prefix_size == 0 || proof.super_tree_size == 0 {
+        return Err("prefix proof sizes must be nonzero".to_string());
+    }
+    if proof.prefix_size > proof.super_tree_size {
+        return Err(format!(
+            "prefix_size={} exceeds super_tree_size={}",
+            proof.prefix_size, proof.super_tree_size
+        ));
+    }
+    if proof.super_leaf_hashes.len() > MAX_LONG_TERM_LEAF_HASHES {
+        return Err(format!(
+            "super_leaf_hashes len={} exceeds limit={MAX_LONG_TERM_LEAF_HASHES}",
+            proof.super_leaf_hashes.len()
+        ));
+    }
+    let prefix_size = usize::try_from(proof.prefix_size).map_err(|_| {
+        format!(
+            "prefix_size={} cannot be represented locally",
+            proof.prefix_size
+        )
+    })?;
+    let super_tree_size = usize::try_from(proof.super_tree_size).map_err(|_| {
+        format!(
+            "super_tree_size={} cannot be represented locally",
+            proof.super_tree_size
+        )
+    })?;
+    if proof.super_leaf_hashes.len() != super_tree_size {
+        return Err(format!(
+            "super_leaf_hashes len={} does not match super_tree_size={}",
+            proof.super_leaf_hashes.len(),
+            proof.super_tree_size
+        ));
+    }
+    if root_a.tree_size != proof.prefix_size || root_b.tree_size != proof.super_tree_size {
+        return Err("prefix proof sizes do not match supplied roots".to_string());
+    }
+    if !constant_time_eq(&proof.prefix_root_hash, &root_a.root_hash)
+        || !constant_time_eq(&proof.prefix_root_from_super, &root_a.root_hash)
+        || !constant_time_eq(&proof.super_root_hash, &root_b.root_hash)
+    {
+        return Err("prefix proof root fields do not match supplied roots".to_string());
+    }
+    if prefix_size > proof.super_leaf_hashes.len() {
+        return Err(format!(
+            "prefix_size={} exceeds super_leaf_hashes len={}",
+            proof.prefix_size,
+            proof.super_leaf_hashes.len()
+        ));
+    }
+    for leaf_hash in &proof.super_leaf_hashes {
+        if !is_canonical_sha256_hex(leaf_hash) {
+            return Err("prefix proof contains a non-canonical leaf hash".to_string());
+        }
+    }
+
+    let recomputed_prefix =
+        long_term_merkle_root_from_leaf_hashes(&proof.super_leaf_hashes[..prefix_size])
+            .ok_or_else(|| "prefix proof cannot recompute empty prefix root".to_string())?;
+    if !constant_time_eq(&recomputed_prefix, &root_a.root_hash) {
+        return Err("prefix proof recomputed prefix root mismatch".to_string());
+    }
+    let recomputed_super = long_term_merkle_root_from_leaf_hashes(&proof.super_leaf_hashes)
+        .ok_or_else(|| "prefix proof cannot recompute empty super root".to_string())?;
+    if !constant_time_eq(&recomputed_super, &root_b.root_hash) {
+        return Err("prefix proof recomputed super root mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn verify_long_term_witness_receipt(
+    receipt: &LongTermMmrRootWitnessReceipt,
+    anchor: &LongTermWitnessTrustAnchor,
+) -> Result<LongTermWitnessVerification, String> {
+    // bd-7fubt: the receipt carries its own `threshold_config`, and that config
+    // carries the verifying KEYS. Handing it to `verify_long_term_threshold`
+    // meant a receipt supplied both the signatures and the key set they were
+    // checked against, so an attacker with one keypair could mint a witness
+    // receipt for any root at any claimed observation time and this SDK — the
+    // component whose entire purpose is verifying without trusting the producer —
+    // would return Pass. The anchor is the authority; the embedded config is an
+    // assertion to check against it.
+    if !constant_time_eq(
+        &receipt.statement.witness_group_id,
+        &anchor.witness_group_id,
+    ) {
+        return Err("root witness group does not match the pinned trust anchor".to_string());
+    }
+    if !constant_time_eq(
+        &receipt.statement.witness_policy_id,
+        &anchor.witness_policy_id,
+    ) {
+        return Err("root witness policy does not match the pinned trust anchor".to_string());
+    }
+    if receipt.threshold_config != anchor.threshold_config {
+        return Err(
+            "root witness threshold_config does not match the pinned trust anchor".to_string(),
+        );
+    }
+    validate_long_term_witness_statement(&receipt.statement)?;
+    validate_long_term_text("trace_id", &receipt.trace_id)?;
+    validate_long_term_text("timestamp", &receipt.timestamp)?;
+    if !constant_time_eq(
+        &receipt.witness_artifact.artifact_id,
+        MMR_ROOT_WITNESS_ARTIFACT_ID,
+    ) {
+        return Err("root witness artifact_id mismatch".to_string());
+    }
+    if !constant_time_eq(
+        &receipt.witness_artifact.connector_id,
+        MMR_ROOT_WITNESS_CONNECTOR_ID,
+    ) {
+        return Err("root witness connector_id mismatch".to_string());
+    }
+    if !constant_time_eq(
+        &receipt.witness_artifact.content_hash,
+        &receipt.statement.content_hash,
+    ) {
+        return Err("root witness artifact content_hash mismatch".to_string());
+    }
+    if receipt.witness_artifact.signatures.len() > MAX_LONG_TERM_WITNESS_SIGNATURES {
+        return Err(format!(
+            "root witness signatures len={} exceeds limit={MAX_LONG_TERM_WITNESS_SIGNATURES}",
+            receipt.witness_artifact.signatures.len()
+        ));
+    }
+    let (valid_signatures, threshold) =
+        // The ANCHOR's config, never the receipt's (bd-7fubt).
+        verify_long_term_threshold(&anchor.threshold_config, &receipt.witness_artifact)?;
+    Ok(LongTermWitnessVerification {
+        root: receipt.statement.root.clone(),
+        observed_at_unix_seconds: receipt.statement.observed_at_unix_seconds,
+        valid_signatures,
+        threshold,
+    })
+}
+
+fn verify_long_term_threshold(
+    config: &LongTermThresholdConfig,
+    artifact: &LongTermPublicationArtifact,
+) -> Result<(u32, u32), String> {
+    if config.threshold == 0 {
+        return Err("threshold must be > 0".to_string());
+    }
+    if config.threshold > config.total_signers {
+        return Err(format!(
+            "threshold {} exceeds total_signers {}",
+            config.threshold, config.total_signers
+        ));
+    }
+    if config.signer_keys.len() > MAX_LONG_TERM_SIGNER_KEYS {
+        return Err(format!(
+            "signer_keys len={} exceeds limit={MAX_LONG_TERM_SIGNER_KEYS}",
+            config.signer_keys.len()
+        ));
+    }
+    if u32::try_from(config.signer_keys.len()).unwrap_or(u32::MAX) != config.total_signers {
+        return Err(format!(
+            "signer_keys count {} != total_signers {}",
+            config.signer_keys.len(),
+            config.total_signers
+        ));
+    }
+
+    let mut keys = BTreeMap::new();
+    let mut public_keys = BTreeSet::new();
+    for signer in &config.signer_keys {
+        validate_long_term_identifier("signer key_id", &signer.key_id)?;
+        if !public_keys.insert(signer.public_key_hex.to_ascii_lowercase()) {
+            return Err("duplicate signer public_key_hex".to_string());
+        }
+        let public_key = parse_long_term_verifying_key(&signer.public_key_hex)
+            .ok_or_else(|| format!("invalid public_key_hex for {}", signer.key_id))?;
+        if keys.insert(signer.key_id.clone(), public_key).is_some() {
+            return Err(format!("duplicate signer key_id {}", signer.key_id));
+        }
+    }
+
+    let message = long_term_threshold_signing_message(
+        &artifact.artifact_id,
+        &artifact.connector_id,
+        &artifact.content_hash,
+    );
+    let mut seen_key_ids = BTreeSet::new();
+    let mut valid_signatures = 0u32;
+    let mut first_failure: Option<String> = None;
+    for partial in &artifact.signatures {
+        if let Err(reason) =
+            validate_long_term_identifier("signature signer_id", &partial.signer_id)
+        {
+            first_failure.get_or_insert(reason);
+            continue;
+        }
+        if let Err(reason) = validate_long_term_identifier("signature key_id", &partial.key_id) {
+            first_failure.get_or_insert(reason);
+            continue;
+        }
+        if !constant_time_eq(&partial.signer_id, &partial.key_id) {
+            first_failure.get_or_insert_with(|| "signer_id must match key_id".to_string());
+            continue;
+        }
+        let Some(verifying_key) = keys.get(&partial.key_id) else {
+            first_failure.get_or_insert_with(|| format!("unknown signer {}", partial.key_id));
+            continue;
+        };
+        let Some(signature) = parse_long_term_signature(&partial.signature_hex) else {
+            first_failure
+                .get_or_insert_with(|| format!("invalid signature for {}", partial.key_id));
+            continue;
+        };
+        if verifying_key.verify_strict(&message, &signature).is_err() {
+            first_failure
+                .get_or_insert_with(|| format!("invalid signature for {}", partial.key_id));
+            continue;
+        }
+        if !seen_key_ids.insert(partial.key_id.as_str()) {
+            first_failure.get_or_insert_with(|| format!("duplicate signer {}", partial.key_id));
+            continue;
+        }
+        valid_signatures = valid_signatures.saturating_add(1);
+    }
+
+    if valid_signatures >= config.threshold {
+        Ok((valid_signatures, config.threshold))
+    } else {
+        Err(first_failure.unwrap_or_else(|| {
+            format!(
+                "below threshold: valid_signatures={} threshold={}",
+                valid_signatures, config.threshold
+            )
+        }))
+    }
+}
+
+fn validate_long_term_witness_statement(
+    statement: &LongTermMmrRootWitnessStatement,
+) -> Result<(), String> {
+    if statement.schema_version != MMR_ROOT_WITNESS_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported root witness schema_version={}",
+            statement.schema_version
+        ));
+    }
+    validate_long_term_root(&statement.root)?;
+    if statement.observed_at_unix_seconds == 0 {
+        return Err("observed_at_unix_seconds must be nonzero".to_string());
+    }
+    validate_long_term_identifier("witness_group_id", &statement.witness_group_id)?;
+    validate_long_term_identifier("witness_policy_id", &statement.witness_policy_id)?;
+    let expected_hash = compute_long_term_witness_content_hash(statement);
+    if !constant_time_eq(&expected_hash, &statement.content_hash) {
+        return Err("root witness content_hash mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn validate_long_term_root(root: &LongTermMmrRoot) -> Result<(), String> {
+    if root.tree_size == 0 {
+        return Err("MMR root tree_size must be nonzero".to_string());
+    }
+    if !is_canonical_sha256_hex(&root.root_hash) {
+        return Err("MMR root_hash must be a canonical lowercase sha256 digest".to_string());
+    }
+    Ok(())
+}
+
+fn validate_long_term_identifier(field_name: &str, value: &str) -> Result<(), String> {
+    validate_long_term_text(field_name, value)?;
+    if value.len() > 128 {
+        return Err(format!("{field_name} exceeds maximum length of 128 bytes"));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(format!(
+            "{field_name} contains unsafe identifier characters"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_long_term_text(field_name: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.trim() != value {
+        return Err(format!("{field_name} must be nonempty and canonical"));
+    }
+    if value.contains('\0') {
+        return Err(format!("{field_name} must not contain null bytes"));
+    }
+    Ok(())
+}
+
+fn long_term_artifact_marker_hash(artifact: &LongTermArtifactEvidence) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(LONG_TERM_ARTIFACT_MARKER_HASH_DOMAIN);
+    update_long_term_hash_string(&mut hasher, &artifact.artifact_id);
+    update_long_term_hash_string(&mut hasher, &artifact.artifact_hash);
+    update_long_term_hash_string(&mut hasher, &artifact.crypto_suite);
+    hasher.update(artifact.claimed_at_unix_seconds.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn compute_long_term_reattestation_hash(reattestation: &LongTermMmrRootReattestation) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(MMR_ROOT_REATTESTATION_HASH_DOMAIN);
+    update_long_term_hash_string(&mut hasher, &reattestation.schema_version);
+    update_long_term_root_for_hash(&mut hasher, &reattestation.previous_root);
+    update_long_term_root_for_hash(&mut hasher, &reattestation.attested_root);
+    update_long_term_prefix_for_hash(&mut hasher, &reattestation.prefix_proof);
+    hasher.update(reattestation.issued_at_unix_seconds.to_le_bytes());
+    update_long_term_hash_string(&mut hasher, &reattestation.crypto_suite);
+    hex::encode(hasher.finalize())
+}
+
+fn compute_long_term_witness_content_hash(statement: &LongTermMmrRootWitnessStatement) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(MMR_ROOT_WITNESS_HASH_DOMAIN);
+    update_long_term_hash_string(&mut hasher, &statement.schema_version);
+    update_long_term_root_for_hash(&mut hasher, &statement.root);
+    hasher.update(statement.observed_at_unix_seconds.to_le_bytes());
+    update_long_term_hash_string(&mut hasher, &statement.witness_group_id);
+    update_long_term_hash_string(&mut hasher, &statement.witness_policy_id);
+    hex::encode(hasher.finalize())
+}
+
+fn update_long_term_root_for_hash(hasher: &mut Sha256, root: &LongTermMmrRoot) {
+    hasher.update(root.tree_size.to_le_bytes());
+    update_long_term_hash_string(hasher, &root.root_hash);
+}
+
+fn update_long_term_prefix_for_hash(hasher: &mut Sha256, proof: &LongTermMmrPrefixProof) {
+    hasher.update(proof.prefix_size.to_le_bytes());
+    hasher.update(proof.super_tree_size.to_le_bytes());
+    update_long_term_hash_string(hasher, &proof.prefix_root_hash);
+    update_long_term_hash_string(hasher, &proof.super_root_hash);
+    update_long_term_hash_string(hasher, &proof.prefix_root_from_super);
+    hasher.update(long_term_len_to_u64(proof.super_leaf_hashes.len()).to_le_bytes());
+    for leaf_hash in &proof.super_leaf_hashes {
+        update_long_term_hash_string(hasher, leaf_hash);
+    }
+}
+
+fn update_long_term_hash_string(hasher: &mut Sha256, value: &str) {
+    hasher.update(long_term_len_to_u64(value.len()).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn long_term_marker_leaf_hash(marker_hash: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(MMR_LEAF_HASH_DOMAIN);
+    hasher.update(long_term_len_to_u64(marker_hash.len()).to_le_bytes());
+    hasher.update(marker_hash.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn long_term_inclusion_root_from_proof(
+    proof: &LongTermMmrInclusionProof,
+) -> Result<String, String> {
+    if !is_canonical_sha256_hex(&proof.leaf_hash) {
+        return Err("inclusion leaf_hash must be canonical".to_string());
+    }
+    let mut current = proof.leaf_hash.clone();
+    let mut index = usize::try_from(proof.leaf_index).map_err(|_| {
+        format!(
+            "leaf_index={} cannot be represented locally",
+            proof.leaf_index
+        )
+    })?;
+    for sibling in &proof.audit_path {
+        current = if index % 2 == 0 {
+            long_term_hash_pair(&current, sibling)?
+        } else {
+            long_term_hash_pair(sibling, &current)?
+        };
+        index /= 2;
+    }
+    Ok(current)
+}
+
+fn long_term_merkle_root_from_leaf_hashes(leaf_hashes: &[String]) -> Option<String> {
+    if leaf_hashes.is_empty() || !leaf_hashes.iter().all(|hash| is_canonical_sha256_hex(hash)) {
+        return None;
+    }
+    let mut level = leaf_hashes.to_vec();
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            level.push(level.last()?.clone());
+        }
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for chunk in level.chunks(2) {
+            next.push(long_term_hash_pair(&chunk[0], &chunk[1]).ok()?);
+        }
+        level = next;
+    }
+    level.into_iter().next()
+}
+
+fn long_term_hash_pair(left: &str, right: &str) -> Result<String, String> {
+    if !is_canonical_sha256_hex(left) || !is_canonical_sha256_hex(right) {
+        return Err("MMR node children must be canonical lowercase sha256 digests".to_string());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(MMR_NODE_HASH_DOMAIN);
+    hasher.update(64_u64.to_le_bytes());
+    hasher.update(left.as_bytes());
+    hasher.update(64_u64.to_le_bytes());
+    hasher.update(right.as_bytes());
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn long_term_threshold_signing_message(
+    artifact_id: &str,
+    connector_id: &str,
+    content_hash: &str,
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(
+        THRESHOLD_SIGNING_MESSAGE_DOMAIN.len()
+            + 24
+            + artifact_id.len()
+            + connector_id.len()
+            + content_hash.len(),
+    );
+    message.extend_from_slice(THRESHOLD_SIGNING_MESSAGE_DOMAIN);
+    push_length_prefixed(&mut message, artifact_id.as_bytes());
+    push_length_prefixed(&mut message, connector_id.as_bytes());
+    push_length_prefixed(&mut message, content_hash.as_bytes());
+    message
+}
+
+fn parse_long_term_verifying_key(public_key_hex: &str) -> Option<VerifyingKey> {
+    if public_key_hex.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0_u8; 32];
+    hex::decode_to_slice(public_key_hex, &mut bytes).ok()?;
+    VerifyingKey::from_bytes(&bytes).ok()
+}
+
+fn parse_long_term_signature(signature_hex: &str) -> Option<ed25519_dalek::Signature> {
+    if signature_hex.len() != 128 {
+        return None;
+    }
+    let mut bytes = [0_u8; 64];
+    hex::decode_to_slice(signature_hex, &mut bytes).ok()?;
+    Some(ed25519_dalek::Signature::from_bytes(&bytes))
+}
+
+fn long_term_len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+// ---------------------------------------------------------------------------
+// Long-term verification evidence producer (public builder)
+// ---------------------------------------------------------------------------
+
+/// One producer-side witness signer used to threshold-cosign the root
+/// witness statement of a [`LongTermVerificationEvidence`].
+pub struct LongTermWitnessSigner {
+    pub key_id: String,
+    pub signing_key: SigningKey,
+}
+
+impl fmt::Debug for LongTermWitnessSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LongTermWitnessSigner")
+            .field("key_id", &self.key_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Producer-side request describing the artifact, log markers, timeline, and
+/// witness policy from which [`build_long_term_verification_evidence`]
+/// assembles self-contained LTV evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongTermEvidenceRequest {
+    /// Identifier of the artifact whose anteriority is being attested.
+    pub artifact_id: String,
+    /// Canonical lowercase sha256 digest of the artifact bytes.
+    pub artifact_hash: String,
+    /// Crypto suite discriminator under which the artifact was produced.
+    pub crypto_suite: String,
+    /// Unix time at which the artifact claims to have existed.
+    pub claimed_at_unix_seconds: u64,
+    /// Additional canonical sha256 marker hashes committed alongside the
+    /// artifact in the origin tree (for example, effect receipt chain
+    /// hashes); the artifact marker leaf always sits at leaf index 0.
+    pub co_marker_hashes: Vec<String>,
+    /// Marker hashes appended to the log between the origin root and the
+    /// re-attested root; empty re-attests the origin root unchanged.
+    pub reattestation_appended_marker_hashes: Vec<String>,
+    /// Unix time the re-attestation link is issued.
+    pub reattested_at_unix_seconds: u64,
+    /// Unix time the independent witnesses observed the re-attested root.
+    pub observed_at_unix_seconds: u64,
+    /// Verification target time; the witness observation must be anterior.
+    pub as_of_unix_seconds: u64,
+    /// Unix time from which the crypto suite is on record as valid.
+    pub suite_valid_from_unix_seconds: u64,
+    pub witness_group_id: String,
+    pub witness_policy_id: String,
+    /// Minimum number of valid witness signatures the receipt requires.
+    pub witness_threshold: u32,
+    pub trace_id: String,
+    /// RFC 3339 timestamp recorded on the witness receipt.
+    pub timestamp: String,
+}
+
+/// Assemble self-contained [`LongTermVerificationEvidence`] on the producer
+/// side, failing closed unless the exact assertion set behind
+/// [`VerifierSdk::verify_as_of_ltv`] accepts the result.
+///
+/// The origin tree commits the artifact marker leaf at index 0 followed by
+/// one leaf per `co_marker_hashes` entry; the single re-attestation link
+/// extends the origin tree with `reattestation_appended_marker_hashes` (or
+/// re-attests it unchanged) and every supplied signer cosigns the canonical
+/// witness statement over the newest root. All LTV hashing stays inside this
+/// crate so producers and verifiers can never drift.
+///
+/// # Errors
+///
+/// Returns a description of the first violated constraint: no signers, a
+/// zero or unsatisfiable threshold, a non-canonical marker hash, an invalid
+/// artifact field, or produced evidence that fails any of the verifier's own
+/// LTV assertions.
+pub fn build_long_term_verification_evidence(
+    request: &LongTermEvidenceRequest,
+    witness_signers: &[LongTermWitnessSigner],
+) -> Result<LongTermVerificationEvidence, String> {
+    if witness_signers.is_empty() {
+        return Err("at least one witness signer is required".to_string());
+    }
+    if request.witness_threshold == 0 {
+        return Err("witness_threshold must be > 0".to_string());
+    }
+    let total_signers =
+        u32::try_from(witness_signers.len()).map_err(|_| "too many witness signers".to_string())?;
+    if request.witness_threshold > total_signers {
+        return Err(format!(
+            "witness_threshold {} exceeds supplied signer count {}",
+            request.witness_threshold, total_signers
+        ));
+    }
+    for marker in request
+        .co_marker_hashes
+        .iter()
+        .chain(&request.reattestation_appended_marker_hashes)
+    {
+        if !is_canonical_sha256_hex(marker) {
+            return Err(format!(
+                "marker hash `{marker}` must be a canonical lowercase sha256 digest"
+            ));
+        }
+    }
+
+    let mut artifact = LongTermArtifactEvidence {
+        artifact_id: request.artifact_id.clone(),
+        artifact_hash: request.artifact_hash.clone(),
+        crypto_suite: request.crypto_suite.clone(),
+        claimed_at_unix_seconds: request.claimed_at_unix_seconds,
+        marker_hash: String::new(),
+    };
+    artifact.marker_hash = long_term_artifact_marker_hash(&artifact);
+    validate_long_term_artifact(&artifact)?;
+
+    let mut origin_leaf_hashes = Vec::with_capacity(1 + request.co_marker_hashes.len());
+    origin_leaf_hashes.push(long_term_marker_leaf_hash(&artifact.marker_hash));
+    origin_leaf_hashes.extend(
+        request
+            .co_marker_hashes
+            .iter()
+            .map(|marker| long_term_marker_leaf_hash(marker)),
+    );
+    let origin_root_hash = long_term_merkle_root_from_leaf_hashes(&origin_leaf_hashes)
+        .ok_or_else(|| "origin root computation failed".to_string())?;
+    let origin_root = LongTermMmrRoot {
+        tree_size: long_term_len_to_u64(origin_leaf_hashes.len()),
+        root_hash: origin_root_hash,
+    };
+    let inclusion_proof = LongTermMmrInclusionProof {
+        leaf_index: 0,
+        tree_size: origin_root.tree_size,
+        leaf_hash: origin_leaf_hashes[0].clone(),
+        audit_path: long_term_audit_path(&origin_leaf_hashes, 0)?,
+    };
+
+    let mut super_leaf_hashes = origin_leaf_hashes.clone();
+    super_leaf_hashes.extend(
+        request
+            .reattestation_appended_marker_hashes
+            .iter()
+            .map(|marker| long_term_marker_leaf_hash(marker)),
+    );
+    let attested_root_hash = long_term_merkle_root_from_leaf_hashes(&super_leaf_hashes)
+        .ok_or_else(|| "attested root computation failed".to_string())?;
+    let attested_root = LongTermMmrRoot {
+        tree_size: long_term_len_to_u64(super_leaf_hashes.len()),
+        root_hash: attested_root_hash,
+    };
+    let mut reattestation = LongTermMmrRootReattestation {
+        schema_version: MMR_ROOT_REATTESTATION_SCHEMA_VERSION.to_string(),
+        previous_root: origin_root.clone(),
+        attested_root: attested_root.clone(),
+        prefix_proof: LongTermMmrPrefixProof {
+            prefix_size: origin_root.tree_size,
+            super_tree_size: attested_root.tree_size,
+            prefix_root_hash: origin_root.root_hash.clone(),
+            super_root_hash: attested_root.root_hash.clone(),
+            prefix_root_from_super: origin_root.root_hash.clone(),
+            super_leaf_hashes,
+        },
+        issued_at_unix_seconds: request.reattested_at_unix_seconds,
+        crypto_suite: request.crypto_suite.clone(),
+        attestation_hash: String::new(),
+    };
+    reattestation.attestation_hash = compute_long_term_reattestation_hash(&reattestation);
+
+    let mut statement = LongTermMmrRootWitnessStatement {
+        schema_version: MMR_ROOT_WITNESS_SCHEMA_VERSION.to_string(),
+        root: attested_root,
+        observed_at_unix_seconds: request.observed_at_unix_seconds,
+        witness_group_id: request.witness_group_id.clone(),
+        witness_policy_id: request.witness_policy_id.clone(),
+        content_hash: String::new(),
+    };
+    statement.content_hash = compute_long_term_witness_content_hash(&statement);
+
+    let signer_keys = witness_signers
+        .iter()
+        .map(|signer| LongTermSignerKey {
+            key_id: signer.key_id.clone(),
+            public_key_hex: hex::encode(signer.signing_key.verifying_key().to_bytes()),
+        })
+        .collect();
+    let threshold_config = LongTermThresholdConfig {
+        threshold: request.witness_threshold,
+        total_signers,
+        signer_keys,
+    };
+    let message = long_term_threshold_signing_message(
+        MMR_ROOT_WITNESS_ARTIFACT_ID,
+        MMR_ROOT_WITNESS_CONNECTOR_ID,
+        &statement.content_hash,
+    );
+    let signatures = witness_signers
+        .iter()
+        .map(|signer| LongTermPartialSignature {
+            signer_id: signer.key_id.clone(),
+            key_id: signer.key_id.clone(),
+            signature_hex: hex::encode(signer.signing_key.sign(&message).to_bytes()),
+        })
+        .collect();
+    let witness_artifact = LongTermPublicationArtifact {
+        artifact_id: MMR_ROOT_WITNESS_ARTIFACT_ID.to_string(),
+        connector_id: MMR_ROOT_WITNESS_CONNECTOR_ID.to_string(),
+        content_hash: statement.content_hash.clone(),
+        signatures,
+    };
+
+    let evidence = LongTermVerificationEvidence {
+        schema_version: LONG_TERM_VERIFICATION_SCHEMA_VERSION.to_string(),
+        as_of_unix_seconds: request.as_of_unix_seconds,
+        artifact,
+        suite_records: vec![LongTermCryptoSuiteRecord {
+            crypto_suite: request.crypto_suite.clone(),
+            valid_from_unix_seconds: request.suite_valid_from_unix_seconds,
+            valid_until_unix_seconds: None,
+            compromised_at_unix_seconds: None,
+        }],
+        inclusion_proof,
+        reattestation_chain: LongTermMmrRootReattestationChain {
+            origin_root,
+            attestations: vec![reattestation],
+        },
+        witness_receipt: LongTermMmrRootWitnessReceipt {
+            statement,
+            threshold_config,
+            witness_artifact,
+            trace_id: request.trace_id.clone(),
+            timestamp: request.timestamp.clone(),
+        },
+    };
+
+    // The builder is the PRODUCER: it just constructed the witness set, so it can
+    // legitimately state the anchor for its own self-check. A verifier must
+    // supply one out of band instead (bd-7fubt).
+    let self_check_anchor = LongTermWitnessTrustAnchor {
+        witness_group_id: evidence.witness_receipt.statement.witness_group_id.clone(),
+        witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
+        threshold_config: evidence.witness_receipt.threshold_config.clone(),
+    };
+    let verification = verify_long_term_evidence(&evidence, &self_check_anchor);
+    if let Some(failed) = verification
+        .checked_assertions
+        .iter()
+        .find(|assertion| !assertion.passed)
+    {
+        return Err(format!(
+            "produced evidence fails its own verification: {}: {}",
+            failed.assertion, failed.detail
+        ));
+    }
+    Ok(evidence)
+}
+
+/// Audit path for `leaf_index` in the same duplicate-last-odd binary tree
+/// shape that inclusion verification recomputes.
+fn long_term_audit_path(leaf_hashes: &[String], leaf_index: usize) -> Result<Vec<String>, String> {
+    if leaf_index >= leaf_hashes.len() {
+        return Err(format!(
+            "leaf_index={leaf_index} is outside a tree of {} leaves",
+            leaf_hashes.len()
+        ));
+    }
+    let mut path = Vec::new();
+    let mut level = leaf_hashes.to_vec();
+    let mut index = leaf_index;
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            let last = level
+                .last()
+                .cloned()
+                .ok_or_else(|| "audit path level unexpectedly empty".to_string())?;
+            level.push(last);
+        }
+        let sibling_index = if index.is_multiple_of(2) {
+            index + 1
+        } else {
+            index - 1
+        };
+        let sibling = level
+            .get(sibling_index)
+            .cloned()
+            .ok_or_else(|| "audit path sibling out of bounds".to_string())?;
+        path.push(sibling);
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for pair in level.chunks(2) {
+            next.push(long_term_hash_pair(&pair[0], &pair[1])?);
+        }
+        level = next;
+        index /= 2;
+    }
+    Ok(path)
+}
+
+#[derive(Debug)]
+struct MigrationEquivalenceVerification {
+    checked_assertions: Vec<AssertionResult>,
+    artifact_binding_hash: String,
+}
+
+impl MigrationEquivalenceVerification {
+    fn all_passed(&self) -> bool {
+        self.checked_assertions
+            .iter()
+            .all(|assertion| assertion.passed)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationEquivalenceCapsule {
+    schema_version: String,
+    rule_id: String,
+    source: MigrationSourceSnapshot,
+    target: MigrationSourceSnapshot,
+    precondition: MigrationPreconditionProof,
+    lockstep_witness: MigrationLockstepWitness,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationSourceSnapshot {
+    path: String,
+    source_text: String,
+    source_hash: String,
+    ast_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationPreconditionProof {
+    rule_id: String,
+    #[serde(default)]
+    source_contains: Vec<String>,
+    #[serde(default)]
+    source_not_contains: Vec<String>,
+    #[serde(default)]
+    target_contains: Vec<String>,
+    #[serde(default)]
+    target_not_contains: Vec<String>,
+    passed: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MigrationLockstepWitness {
+    lockstep_oracle_id: String,
+    fixture_corpus_digest: String,
+    proptest_seed: String,
+    fixture_cases: u64,
+    proptest_cases: u64,
+    effect_receipt_equivalence_cases: u64,
+    #[serde(default)]
+    effect_receipt_ids: Vec<String>,
+    divergence_count: u64,
+    verdict: String,
+    lockstep_verdict_hash: String,
+}
+
+fn verify_migration_equivalence_capsule(
+    replay_bundle: &bundle::ReplayBundle,
+) -> MigrationEquivalenceVerification {
+    let mut assertions = vec![AssertionResult {
+        assertion: "migration_bundle_structural_verified".to_string(),
+        passed: true,
+        detail: format!(
+            "migration artifact bundle {} passed canonical bundle verification",
+            replay_bundle.bundle_id
+        ),
+    }];
+
+    let Some(capsule_artifact) = replay_bundle
+        .artifacts
+        .get(MIGRATION_EQUIVALENCE_ARTIFACT_PATH)
+    else {
+        assertions.push(AssertionResult {
+            assertion: "migration_equivalence_capsule_present".to_string(),
+            passed: false,
+            detail: format!("missing required artifact {MIGRATION_EQUIVALENCE_ARTIFACT_PATH}"),
+        });
+        return MigrationEquivalenceVerification {
+            artifact_binding_hash: migration_equivalence_binding_hash(
+                &replay_bundle.integrity_hash,
+                "",
+                "",
+                "",
+            ),
+            checked_assertions: assertions,
+        };
+    };
+
+    assertions.push(AssertionResult {
+        assertion: "migration_equivalence_capsule_present".to_string(),
+        passed: true,
+        detail: format!("found {MIGRATION_EQUIVALENCE_ARTIFACT_PATH}"),
+    });
+
+    let media_type_ok = capsule_artifact.media_type == "application/json"
+        || capsule_artifact.media_type == "application/vnd.franken-node.migration-equivalence+json";
+    assertions.push(AssertionResult {
+        assertion: "migration_equivalence_capsule_media_type".to_string(),
+        passed: media_type_ok,
+        detail: if media_type_ok {
+            capsule_artifact.media_type.clone()
+        } else {
+            format!("unsupported media type {}", capsule_artifact.media_type)
+        },
+    });
+
+    let capsule_bytes = match Vec::from_hex(&capsule_artifact.bytes_hex) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            assertions.push(AssertionResult {
+                assertion: "migration_equivalence_capsule_json".to_string(),
+                passed: false,
+                detail: format!("capsule bytes were not valid hex: {error}"),
+            });
+            return MigrationEquivalenceVerification {
+                artifact_binding_hash: migration_equivalence_binding_hash(
+                    &replay_bundle.integrity_hash,
+                    "",
+                    "",
+                    "",
+                ),
+                checked_assertions: assertions,
+            };
+        }
+    };
+
+    let capsule = match serde_json::from_slice::<MigrationEquivalenceCapsule>(&capsule_bytes) {
+        Ok(capsule) => {
+            assertions.push(AssertionResult {
+                assertion: "migration_equivalence_capsule_json".to_string(),
+                passed: true,
+                detail: "capsule JSON decoded".to_string(),
+            });
+            capsule
+        }
+        Err(error) => {
+            assertions.push(AssertionResult {
+                assertion: "migration_equivalence_capsule_json".to_string(),
+                passed: false,
+                detail: format!("capsule JSON rejected: {error}"),
+            });
+            return MigrationEquivalenceVerification {
+                artifact_binding_hash: migration_equivalence_binding_hash(
+                    &replay_bundle.integrity_hash,
+                    "",
+                    "",
+                    "",
+                ),
+                checked_assertions: assertions,
+            };
+        }
+    };
+
+    let schema_ok = capsule.schema_version == MIGRATION_EQUIVALENCE_SCHEMA_VERSION;
+    assertions.push(AssertionResult {
+        assertion: "migration_equivalence_schema_version".to_string(),
+        passed: schema_ok,
+        detail: if schema_ok {
+            capsule.schema_version.clone()
+        } else {
+            format!(
+                "expected {}, got {}",
+                MIGRATION_EQUIVALENCE_SCHEMA_VERSION, capsule.schema_version
+            )
+        },
+    });
+
+    let rule_ok =
+        !capsule.rule_id.trim().is_empty() && capsule.rule_id == capsule.precondition.rule_id;
+    assertions.push(AssertionResult {
+        assertion: "migration_equivalence_rule_bound".to_string(),
+        passed: rule_ok,
+        detail: if rule_ok {
+            format!("rule_id={}", capsule.rule_id)
+        } else {
+            "capsule rule_id is empty or not bound to precondition proof".to_string()
+        },
+    });
+
+    let source_hash = verify_migration_source_snapshot("source", &capsule.source, &mut assertions);
+    let target_hash = verify_migration_source_snapshot("target", &capsule.target, &mut assertions);
+    let source_ast_hash = verify_migration_ast_snapshot("source", &capsule.source, &mut assertions);
+    let target_ast_hash = verify_migration_ast_snapshot("target", &capsule.target, &mut assertions);
+    verify_migration_precondition(&capsule, &mut assertions);
+    verify_migration_effect_receipts(replay_bundle, &capsule, &mut assertions);
+    verify_migration_lockstep_witness(&capsule, &mut assertions);
+
+    let recomputed_lockstep_hash = compute_migration_lockstep_verdict_hash(
+        &capsule,
+        &source_hash,
+        &target_hash,
+        &source_ast_hash,
+        &target_ast_hash,
+    );
+    let lockstep_hash_ok = is_canonical_sha256_hex(&capsule.lockstep_witness.lockstep_verdict_hash)
+        && constant_time_eq(
+            &capsule.lockstep_witness.lockstep_verdict_hash,
+            &recomputed_lockstep_hash,
+        );
+    assertions.push(AssertionResult {
+        assertion: "migration_lockstep_verdict_hash_recomputed".to_string(),
+        passed: lockstep_hash_ok,
+        detail: if lockstep_hash_ok {
+            "lockstep verdict hash matched SDK recomputation".to_string()
+        } else {
+            "lockstep verdict hash did not match SDK recomputation".to_string()
+        },
+    });
+
+    MigrationEquivalenceVerification {
+        artifact_binding_hash: migration_equivalence_binding_hash(
+            &replay_bundle.integrity_hash,
+            &recomputed_lockstep_hash,
+            &source_ast_hash,
+            &target_ast_hash,
+        ),
+        checked_assertions: assertions,
+    }
+}
+
+fn verify_migration_source_snapshot(
+    label: &'static str,
+    snapshot: &MigrationSourceSnapshot,
+    assertions: &mut Vec<AssertionResult>,
+) -> String {
+    let path_ok = !snapshot.path.trim().is_empty() && snapshot.path == snapshot.path.trim();
+    assertions.push(AssertionResult {
+        assertion: format!("migration_{label}_path_canonical"),
+        passed: path_ok,
+        detail: if path_ok {
+            snapshot.path.clone()
+        } else {
+            "path must be non-empty without surrounding whitespace".to_string()
+        },
+    });
+
+    let source_nonempty = !snapshot.source_text.trim().is_empty();
+    assertions.push(AssertionResult {
+        assertion: format!("migration_{label}_source_present"),
+        passed: source_nonempty,
+        detail: if source_nonempty {
+            format!("{} bytes", snapshot.source_text.len())
+        } else {
+            "source text is empty".to_string()
+        },
+    });
+
+    let recomputed = compute_migration_source_hash(&snapshot.source_text);
+    let hash_ok = is_canonical_sha256_hex(&snapshot.source_hash)
+        && constant_time_eq(&snapshot.source_hash, &recomputed);
+    assertions.push(AssertionResult {
+        assertion: format!("migration_{label}_source_hash_recomputed"),
+        passed: hash_ok,
+        detail: if hash_ok {
+            "source hash matched SDK recomputation".to_string()
+        } else {
+            "source hash did not match SDK recomputation".to_string()
+        },
+    });
+    recomputed
+}
+
+fn verify_migration_ast_snapshot(
+    label: &'static str,
+    snapshot: &MigrationSourceSnapshot,
+    assertions: &mut Vec<AssertionResult>,
+) -> String {
+    match compute_js_ast_hash(&snapshot.source_text) {
+        Ok(recomputed) => {
+            let ast_ok = is_canonical_sha256_hex(&snapshot.ast_hash)
+                && constant_time_eq(&snapshot.ast_hash, &recomputed);
+            assertions.push(AssertionResult {
+                assertion: format!("migration_{label}_ast_reparsed"),
+                passed: ast_ok,
+                detail: if ast_ok {
+                    "JavaScript AST hash matched SDK parse".to_string()
+                } else {
+                    "JavaScript AST hash did not match SDK parse".to_string()
+                },
+            });
+            recomputed
+        }
+        Err(error) => {
+            assertions.push(AssertionResult {
+                assertion: format!("migration_{label}_ast_reparsed"),
+                passed: false,
+                detail: error,
+            });
+            String::new()
+        }
+    }
+}
+
+fn verify_migration_precondition(
+    capsule: &MigrationEquivalenceCapsule,
+    assertions: &mut Vec<AssertionResult>,
+) {
+    let proof = &capsule.precondition;
+    let clauses_present = !proof.source_contains.is_empty()
+        || !proof.source_not_contains.is_empty()
+        || !proof.target_contains.is_empty()
+        || !proof.target_not_contains.is_empty();
+    let fragments_nonempty = proof
+        .source_contains
+        .iter()
+        .chain(&proof.source_not_contains)
+        .chain(&proof.target_contains)
+        .chain(&proof.target_not_contains)
+        .all(|fragment| !fragment.is_empty());
+    assertions.push(AssertionResult {
+        assertion: "migration_precondition_machine_readable".to_string(),
+        passed: clauses_present && fragments_nonempty,
+        detail: if clauses_present && fragments_nonempty {
+            "precondition clauses are explicit".to_string()
+        } else {
+            "precondition proof must include non-empty machine-checkable clauses".to_string()
+        },
+    });
+
+    let recomputed = clauses_present
+        && fragments_nonempty
+        && proof
+            .source_contains
+            .iter()
+            .all(|fragment| capsule.source.source_text.contains(fragment))
+        && proof
+            .source_not_contains
+            .iter()
+            .all(|fragment| !capsule.source.source_text.contains(fragment))
+        && proof
+            .target_contains
+            .iter()
+            .all(|fragment| capsule.target.source_text.contains(fragment))
+        && proof
+            .target_not_contains
+            .iter()
+            .all(|fragment| !capsule.target.source_text.contains(fragment));
+    let precondition_ok = proof.passed && recomputed;
+    assertions.push(AssertionResult {
+        assertion: "migration_precondition_rechecked".to_string(),
+        passed: precondition_ok,
+        detail: if precondition_ok {
+            "precondition proof recomputed as pass".to_string()
+        } else {
+            format!(
+                "precondition proof failed SDK recomputation: claimed={}, recomputed={}",
+                proof.passed, recomputed
+            )
+        },
+    });
+}
+
+fn verify_migration_effect_receipts(
+    replay_bundle: &bundle::ReplayBundle,
+    capsule: &MigrationEquivalenceCapsule,
+    assertions: &mut Vec<AssertionResult>,
+) {
+    let referenced_ids = &capsule.lockstep_witness.effect_receipt_ids;
+    let ids_nonempty = !referenced_ids.is_empty();
+    assertions.push(AssertionResult {
+        assertion: "migration_effect_receipt_refs_present".to_string(),
+        passed: ids_nonempty,
+        detail: if ids_nonempty {
+            format!("{} effect receipt refs", referenced_ids.len())
+        } else {
+            "lockstep witness must reference at least one effect receipt event".to_string()
+        },
+    });
+
+    let effect_events: BTreeSet<&str> = replay_bundle
+        .timeline
+        .iter()
+        .filter(|event| event.event_type == bundle::EFFECT_RECEIPT_EVENT_TYPE)
+        .map(|event| event.event_id.as_str())
+        .collect();
+    let refs_resolve = ids_nonempty
+        && referenced_ids
+            .iter()
+            .all(|event_id| effect_events.contains(event_id.as_str()));
+    assertions.push(AssertionResult {
+        assertion: "migration_effect_receipt_refs_resolve".to_string(),
+        passed: refs_resolve,
+        detail: if refs_resolve {
+            "all lockstep witness effect receipt refs resolve in bundle timeline".to_string()
+        } else {
+            "one or more lockstep witness effect receipt refs were absent from bundle timeline"
+                .to_string()
+        },
+    });
+}
+
+fn verify_migration_lockstep_witness(
+    capsule: &MigrationEquivalenceCapsule,
+    assertions: &mut Vec<AssertionResult>,
+) {
+    let witness = &capsule.lockstep_witness;
+    let metadata_ok = !witness.lockstep_oracle_id.trim().is_empty()
+        && is_canonical_sha256_hex(&witness.fixture_corpus_digest)
+        && !witness.proptest_seed.trim().is_empty();
+    assertions.push(AssertionResult {
+        assertion: "migration_lockstep_witness_metadata".to_string(),
+        passed: metadata_ok,
+        detail: if metadata_ok {
+            format!("oracle_id={}", witness.lockstep_oracle_id)
+        } else {
+            "lockstep witness must name an oracle, corpus digest, and proptest seed".to_string()
+        },
+    });
+
+    let counts_ok = witness.fixture_cases > 0
+        && witness.proptest_cases > 0
+        && witness.effect_receipt_equivalence_cases > 0;
+    assertions.push(AssertionResult {
+        assertion: "migration_lockstep_witness_counts_nonzero".to_string(),
+        passed: counts_ok,
+        detail: if counts_ok {
+            format!(
+                "fixture={}, proptest={}, effect_receipt={}",
+                witness.fixture_cases,
+                witness.proptest_cases,
+                witness.effect_receipt_equivalence_cases
+            )
+        } else {
+            "fixture, proptest, and effect-receipt case counts must all be nonzero".to_string()
+        },
+    });
+
+    let zero_divergence = witness.verdict == "pass" && witness.divergence_count == 0;
+    assertions.push(AssertionResult {
+        assertion: "migration_lockstep_zero_divergence".to_string(),
+        passed: zero_divergence,
+        detail: if zero_divergence {
+            "lockstep witness is a zero-divergence pass".to_string()
+        } else {
+            "lockstep witness must be verdict=pass with divergence_count=0".to_string()
+        },
+    });
+}
+
+fn compute_migration_source_hash(source_text: &str) -> String {
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, MIGRATION_SOURCE_HASH_DOMAIN);
+    push_length_prefixed(&mut payload, source_text.as_bytes());
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn compute_js_ast_hash(source_text: &str) -> Result<String, String> {
+    let mut parser = JsParser::new();
+    let language: Language = tree_sitter_javascript::LANGUAGE.into();
+    parser
+        .set_language(&language)
+        .map_err(|error| format!("JavaScript parser unavailable: {error}"))?;
+    let tree = parser
+        .parse(source_text, None)
+        .ok_or_else(|| "JavaScript parser produced no syntax tree".to_string())?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Err("JavaScript parser rejected migration source".to_string());
+    }
+
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, MIGRATION_AST_HASH_DOMAIN);
+    push_js_ast_node(&mut payload, root);
+    Ok(hex::encode(Sha256::digest(&payload)))
+}
+
+fn push_js_ast_node(payload: &mut Vec<u8>, node: Node<'_>) {
+    push_length_prefixed(payload, node.kind().as_bytes());
+    payload.push(u8::from(node.is_named()));
+    payload.extend_from_slice(
+        &u64::try_from(node.start_byte())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.end_byte())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.child_count())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &u64::try_from(node.named_child_count())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for index in 0..node.child_count() {
+        let Ok(child_index) = u32::try_from(index) else {
+            continue;
+        };
+        if let Some(child) = node.child(child_index) {
+            push_js_ast_node(payload, child);
+        }
+    }
+}
+
+fn compute_migration_lockstep_verdict_hash(
+    capsule: &MigrationEquivalenceCapsule,
+    source_hash: &str,
+    target_hash: &str,
+    source_ast_hash: &str,
+    target_ast_hash: &str,
+) -> String {
+    let witness = &capsule.lockstep_witness;
+    let canonical = serde_json::json!({
+        "schema_version": &capsule.schema_version,
+        "rule_id": &capsule.rule_id,
+        "source_hash": source_hash,
+        "target_hash": target_hash,
+        "source_ast_hash": source_ast_hash,
+        "target_ast_hash": target_ast_hash,
+        "precondition_passed": capsule.precondition.passed,
+        "lockstep_oracle_id": &witness.lockstep_oracle_id,
+        "fixture_corpus_digest": &witness.fixture_corpus_digest,
+        "proptest_seed": &witness.proptest_seed,
+        "fixture_cases": witness.fixture_cases,
+        "proptest_cases": witness.proptest_cases,
+        "effect_receipt_equivalence_cases": witness.effect_receipt_equivalence_cases,
+        "effect_receipt_ids": &witness.effect_receipt_ids,
+        "divergence_count": witness.divergence_count,
+        "verdict": &witness.verdict,
+    });
+    let canonical_bytes = serde_json::to_vec(&canonical)
+        .unwrap_or_else(|error| format!("__serde:{error}").into_bytes());
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, MIGRATION_LOCKSTEP_VERDICT_HASH_DOMAIN);
+    push_length_prefixed(&mut payload, &canonical_bytes);
+    hex::encode(Sha256::digest(&payload))
+}
+
+fn migration_equivalence_binding_hash(
+    bundle_integrity_hash: &str,
+    lockstep_verdict_hash: &str,
+    source_ast_hash: &str,
+    target_ast_hash: &str,
+) -> String {
+    let mut payload = Vec::new();
+    push_length_prefixed(&mut payload, MIGRATION_EQUIVALENCE_BINDING_HASH_DOMAIN);
+    push_length_prefixed(&mut payload, bundle_integrity_hash.as_bytes());
+    push_length_prefixed(&mut payload, lockstep_verdict_hash.as_bytes());
+    push_length_prefixed(&mut payload, source_ast_hash.as_bytes());
+    push_length_prefixed(&mut payload, target_ast_hash.as_bytes());
+    hex::encode(Sha256::digest(&payload))
+}
+
 fn is_canonical_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -2024,6 +4176,327 @@ mod tests {
         };
         bundle::seal(&mut replay_bundle).expect("test replay bundle should seal");
         bundle::serialize(&replay_bundle).expect("test replay bundle should serialize")
+    }
+
+    fn reference_migration_equivalence_capsule() -> MigrationEquivalenceCapsule {
+        let source_text = "const value = require(\"dep\");\nmodule.exports = value;\n".to_string();
+        let target_text = "import value from \"dep\";\nexport default value;\n".to_string();
+        let mut capsule = MigrationEquivalenceCapsule {
+            schema_version: MIGRATION_EQUIVALENCE_SCHEMA_VERSION.to_string(),
+            rule_id: "rewrite:cjs-require-to-esm".to_string(),
+            source: MigrationSourceSnapshot {
+                path: "src/input.cjs".to_string(),
+                source_hash: compute_migration_source_hash(&source_text),
+                ast_hash: compute_js_ast_hash(&source_text)
+                    .expect("reference source should parse as JavaScript"),
+                source_text,
+            },
+            target: MigrationSourceSnapshot {
+                path: "src/output.mjs".to_string(),
+                source_hash: compute_migration_source_hash(&target_text),
+                ast_hash: compute_js_ast_hash(&target_text)
+                    .expect("reference target should parse as JavaScript"),
+                source_text: target_text,
+            },
+            precondition: MigrationPreconditionProof {
+                rule_id: "rewrite:cjs-require-to-esm".to_string(),
+                source_contains: vec!["require(\"dep\")".to_string()],
+                source_not_contains: vec!["import value".to_string()],
+                target_contains: vec!["import value".to_string(), "export default".to_string()],
+                target_not_contains: vec!["require(\"dep\")".to_string()],
+                passed: true,
+            },
+            lockstep_witness: MigrationLockstepWitness {
+                lockstep_oracle_id: "compat-lockstep-oracle-v1".to_string(),
+                fixture_corpus_digest: "aa".repeat(32),
+                proptest_seed: "proptest-seed:cjs-esm:0000000000000001".to_string(),
+                fixture_cases: 1,
+                proptest_cases: 1,
+                effect_receipt_equivalence_cases: 1,
+                effect_receipt_ids: vec!["evt-effect-1".to_string()],
+                divergence_count: 0,
+                verdict: "pass".to_string(),
+                lockstep_verdict_hash: String::new(),
+            },
+        };
+        capsule.lockstep_witness.lockstep_verdict_hash = compute_migration_lockstep_verdict_hash(
+            &capsule,
+            &capsule.source.source_hash,
+            &capsule.target.source_hash,
+            &capsule.source.ast_hash,
+            &capsule.target.ast_hash,
+        );
+        capsule
+    }
+
+    fn make_migration_equivalence_bundle_bytes(
+        verifier_identity: &str,
+        capsule: &MigrationEquivalenceCapsule,
+    ) -> Vec<u8> {
+        let replay_artifact_bytes = b"replay-bundle-artifact";
+        let replay_artifact_path = "artifacts/replay.json".to_string();
+        let capsule_artifact_bytes =
+            serde_json::to_vec(capsule).expect("migration equivalence capsule should serialize");
+        let capsule_payload_len = u64::try_from(capsule_artifact_bytes.len())
+            .expect("capsule artifact length should fit in u64");
+        let replay_payload_len = u64::try_from(replay_artifact_bytes.len())
+            .expect("replay artifact length should fit in u64");
+
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(
+            replay_artifact_path.clone(),
+            bundle::BundleArtifact {
+                media_type: "application/json".to_string(),
+                digest: bundle::hash(replay_artifact_bytes),
+                bytes_hex: hex::encode(replay_artifact_bytes),
+            },
+        );
+        artifacts.insert(
+            MIGRATION_EQUIVALENCE_ARTIFACT_PATH.to_string(),
+            bundle::BundleArtifact {
+                media_type: "application/vnd.franken-node.migration-equivalence+json".to_string(),
+                digest: bundle::hash(&capsule_artifact_bytes),
+                bytes_hex: hex::encode(&capsule_artifact_bytes),
+            },
+        );
+
+        let mut replay_bundle = bundle::ReplayBundle {
+            header: bundle::BundleHeader {
+                hash_algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+                payload_length_bytes: replay_payload_len.saturating_add(capsule_payload_len),
+                chunk_count: 2,
+            },
+            schema_version: bundle::REPLAY_BUNDLE_SCHEMA_VERSION.to_string(),
+            sdk_version: SDK_VERSION.to_string(),
+            bundle_id: "bundle-alpha".to_string(),
+            incident_id: "incident-alpha".to_string(),
+            created_at: "2026-02-21T00:00:00Z".to_string(),
+            policy_version: "policy.v1".to_string(),
+            verifier_identity: verifier_identity.to_string(),
+            timeline: vec![
+                bundle::TimelineEvent {
+                    sequence_number: 1,
+                    event_id: "evt-1".to_string(),
+                    timestamp: "2026-02-21T00:00:01Z".to_string(),
+                    event_type: "verification.started".to_string(),
+                    payload: json!({"phase": "migration_equivalence"}),
+                    state_snapshot: json!({"step": 1}),
+                    causal_parent: None,
+                    policy_version: "policy.v1".to_string(),
+                },
+                bundle::TimelineEvent {
+                    sequence_number: 2,
+                    event_id: "evt-effect-1".to_string(),
+                    timestamp: "2026-02-21T00:00:02Z".to_string(),
+                    event_type: bundle::EFFECT_RECEIPT_EVENT_TYPE.to_string(),
+                    payload: json!({"effect": "module_resolve", "result": "equivalent"}),
+                    state_snapshot: json!({"step": 2}),
+                    causal_parent: Some(1),
+                    policy_version: "policy.v1".to_string(),
+                },
+            ],
+            initial_state_snapshot: json!({"baseline": true}),
+            evidence_refs: vec!["evidence://capsule/alpha".to_string()],
+            artifacts,
+            chunks: vec![
+                bundle::BundleChunk {
+                    chunk_index: 0,
+                    total_chunks: 2,
+                    artifact_path: replay_artifact_path,
+                    payload_length_bytes: replay_payload_len,
+                    payload_digest: bundle::hash(replay_artifact_bytes),
+                },
+                bundle::BundleChunk {
+                    chunk_index: 1,
+                    total_chunks: 2,
+                    artifact_path: MIGRATION_EQUIVALENCE_ARTIFACT_PATH.to_string(),
+                    payload_length_bytes: capsule_payload_len,
+                    payload_digest: bundle::hash(&capsule_artifact_bytes),
+                },
+            ],
+            metadata: BTreeMap::from([(
+                "artifact_kind".to_string(),
+                "migration_equivalence".to_string(),
+            )]),
+            integrity_hash: String::new(),
+            signature: bundle::BundleSignature {
+                algorithm: bundle::REPLAY_BUNDLE_HASH_ALGORITHM.to_string(),
+                signature_hex: String::new(),
+            },
+        };
+        bundle::seal(&mut replay_bundle).expect("test migration bundle should seal");
+        bundle::serialize(&replay_bundle).expect("test migration bundle should serialize")
+    }
+
+    fn reference_long_term_verification_evidence() -> LongTermVerificationEvidence {
+        reference_long_term_verification_evidence_for_suite("ed25519-v1")
+    }
+
+    fn reference_long_term_verification_evidence_for_suite(
+        crypto_suite: &str,
+    ) -> LongTermVerificationEvidence {
+        let mut artifact = LongTermArtifactEvidence {
+            artifact_id: "artifact-alpha".to_string(),
+            artifact_hash: bundle::hash(b"artifact-alpha-bytes"),
+            crypto_suite: crypto_suite.to_string(),
+            claimed_at_unix_seconds: 1_000,
+            marker_hash: String::new(),
+        };
+        artifact.marker_hash = long_term_artifact_marker_hash(&artifact);
+
+        let artifact_leaf_hash = long_term_marker_leaf_hash(&artifact.marker_hash);
+        let second_leaf_hash = long_term_marker_leaf_hash(&bundle::hash(b"second-marker"));
+        let third_leaf_hash = long_term_marker_leaf_hash(&bundle::hash(b"third-marker"));
+        let origin_leaf_hashes = vec![artifact_leaf_hash.clone(), second_leaf_hash.clone()];
+        let origin_root = LongTermMmrRoot {
+            tree_size: 2,
+            root_hash: long_term_merkle_root_from_leaf_hashes(&origin_leaf_hashes)
+                .expect("origin root should compute"),
+        };
+        let super_leaf_hashes = vec![
+            artifact_leaf_hash.clone(),
+            second_leaf_hash,
+            third_leaf_hash,
+        ];
+        let attested_root = LongTermMmrRoot {
+            tree_size: 3,
+            root_hash: long_term_merkle_root_from_leaf_hashes(&super_leaf_hashes)
+                .expect("attested root should compute"),
+        };
+        let prefix_proof = LongTermMmrPrefixProof {
+            prefix_size: origin_root.tree_size,
+            super_tree_size: attested_root.tree_size,
+            prefix_root_hash: origin_root.root_hash.clone(),
+            super_root_hash: attested_root.root_hash.clone(),
+            prefix_root_from_super: origin_root.root_hash.clone(),
+            super_leaf_hashes,
+        };
+        let mut reattestation = LongTermMmrRootReattestation {
+            schema_version: MMR_ROOT_REATTESTATION_SCHEMA_VERSION.to_string(),
+            previous_root: origin_root.clone(),
+            attested_root: attested_root.clone(),
+            prefix_proof,
+            issued_at_unix_seconds: 1_500,
+            crypto_suite: crypto_suite.to_string(),
+            attestation_hash: String::new(),
+        };
+        reattestation.attestation_hash = compute_long_term_reattestation_hash(&reattestation);
+
+        let mut statement = LongTermMmrRootWitnessStatement {
+            schema_version: MMR_ROOT_WITNESS_SCHEMA_VERSION.to_string(),
+            root: attested_root,
+            observed_at_unix_seconds: 1_700,
+            witness_group_id: "witness-group-a".to_string(),
+            witness_policy_id: "policy-a".to_string(),
+            content_hash: String::new(),
+        };
+        statement.content_hash = compute_long_term_witness_content_hash(&statement);
+
+        let signing_key_a = SigningKey::from_bytes(&[7_u8; 32]);
+        let signing_key_b = SigningKey::from_bytes(&[8_u8; 32]);
+        let threshold_config = LongTermThresholdConfig {
+            threshold: 2,
+            total_signers: 2,
+            signer_keys: vec![
+                LongTermSignerKey {
+                    key_id: "witness-a".to_string(),
+                    public_key_hex: hex::encode(VerifyingKey::from(&signing_key_a).to_bytes()),
+                },
+                LongTermSignerKey {
+                    key_id: "witness-b".to_string(),
+                    public_key_hex: hex::encode(VerifyingKey::from(&signing_key_b).to_bytes()),
+                },
+            ],
+        };
+        let mut witness_artifact = LongTermPublicationArtifact {
+            artifact_id: MMR_ROOT_WITNESS_ARTIFACT_ID.to_string(),
+            connector_id: MMR_ROOT_WITNESS_CONNECTOR_ID.to_string(),
+            content_hash: statement.content_hash.clone(),
+            signatures: Vec::new(),
+        };
+        witness_artifact.signatures = vec![
+            sign_long_term_witness(&signing_key_a, "witness-a", &witness_artifact),
+            sign_long_term_witness(&signing_key_b, "witness-b", &witness_artifact),
+        ];
+
+        LongTermVerificationEvidence {
+            schema_version: LONG_TERM_VERIFICATION_SCHEMA_VERSION.to_string(),
+            as_of_unix_seconds: 1_900,
+            artifact,
+            suite_records: vec![LongTermCryptoSuiteRecord {
+                crypto_suite: crypto_suite.to_string(),
+                valid_from_unix_seconds: 900,
+                valid_until_unix_seconds: None,
+                compromised_at_unix_seconds: Some(2_100),
+            }],
+            inclusion_proof: LongTermMmrInclusionProof {
+                leaf_index: 0,
+                tree_size: origin_root.tree_size,
+                leaf_hash: artifact_leaf_hash,
+                audit_path: origin_leaf_hashes[1..].to_vec(),
+            },
+            reattestation_chain: LongTermMmrRootReattestationChain {
+                origin_root,
+                attestations: vec![reattestation],
+            },
+            witness_receipt: LongTermMmrRootWitnessReceipt {
+                statement,
+                threshold_config,
+                witness_artifact,
+                trace_id: "trace-ltv-alpha".to_string(),
+                timestamp: "2026-06-17T02:30:00Z".to_string(),
+            },
+        }
+    }
+
+    fn sign_long_term_witness(
+        signing_key: &SigningKey,
+        key_id: &str,
+        artifact: &LongTermPublicationArtifact,
+    ) -> LongTermPartialSignature {
+        let message = long_term_threshold_signing_message(
+            &artifact.artifact_id,
+            &artifact.connector_id,
+            &artifact.content_hash,
+        );
+        let signature = signing_key.sign(&message);
+        LongTermPartialSignature {
+            signer_id: key_id.to_string(),
+            key_id: key_id.to_string(),
+            signature_hex: hex::encode(signature.to_bytes()),
+        }
+    }
+
+    /// Build the anchor a verifier would hold for this evidence's witness set.
+    fn witness_anchor_for(
+        evidence: &LongTermVerificationEvidence,
+    ) -> LongTermWitnessTrustAnchor {
+        LongTermWitnessTrustAnchor {
+            witness_group_id: evidence.witness_receipt.statement.witness_group_id.clone(),
+            witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
+            threshold_config: evidence.witness_receipt.threshold_config.clone(),
+        }
+    }
+
+    fn verify_as_of_ltv_for_test(
+        sdk: &VerifierSdk,
+        evidence: &LongTermVerificationEvidence,
+        context: &str,
+    ) -> VerificationResult {
+        let result = sdk.verify_as_of_ltv(evidence, &witness_anchor_for(evidence));
+        assert!(result.is_ok(), "{context}: {result:?}");
+        result.unwrap_or_else(|_| VerificationResult {
+            operation: VerificationOperation::LongTermValidation,
+            verdict: VerificationVerdict::Inconclusive,
+            confidence_score: 0.0,
+            checked_assertions: Vec::new(),
+            execution_timestamp: String::new(),
+            verifier_identity: String::new(),
+            artifact_binding_hash: String::new(),
+            verifier_signature: String::new(),
+            sdk_version: SDK_VERSION.to_string(),
+            result_origin_nonce: String::new(),
+        })
     }
 
     #[test]
@@ -2793,23 +5266,54 @@ mod tests {
     }
 
     #[test]
-    fn verify_migration_artifact_accepts_structural_same_verifier_bundle() {
+    fn verify_migration_artifact_accepts_trustless_same_verifier_bundle() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let artifact = make_migration_equivalence_bundle_bytes(
+            "verifier://alpha",
+            &reference_migration_equivalence_capsule(),
+        );
+
+        let result = sdk
+            .verify_migration_artifact(&artifact)
+            .expect("trustless same-verifier migration bundle should verify");
+
+        assert_eq!(result.operation, VerificationOperation::MigrationArtifact);
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+        assert_eq!(result.verifier_identity, "verifier://alpha");
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_source_ast_reparsed" && assertion.passed
+        }));
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_precondition_rechecked" && assertion.passed
+        }));
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_lockstep_verdict_hash_recomputed" && assertion.passed
+        }));
+    }
+
+    #[test]
+    fn verify_migration_artifact_rejects_structural_only_bundle() {
         let sdk = create_verifier_sdk("verifier://alpha");
         let artifact = make_replay_bundle_bytes("verifier://alpha");
 
         let result = sdk
             .verify_migration_artifact(&artifact)
-            .expect("structural same-verifier bundle should verify");
+            .expect("structural-only bundle should produce a signed fail result");
 
         assert_eq!(result.operation, VerificationOperation::MigrationArtifact);
-        assert_eq!(result.verdict, VerificationVerdict::Pass);
-        assert_eq!(result.verifier_identity, "verifier://alpha");
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_equivalence_capsule_present" && !assertion.passed
+        }));
     }
 
     #[test]
     fn verify_migration_artifact_rejects_foreign_verifier_bundle() {
         let sdk = create_verifier_sdk("verifier://alpha");
-        let foreign_artifact = make_replay_bundle_bytes("verifier://beta");
+        let foreign_artifact = make_migration_equivalence_bundle_bytes(
+            "verifier://beta",
+            &reference_migration_equivalence_capsule(),
+        );
 
         let err = sdk
             .verify_migration_artifact(&foreign_artifact)
@@ -2819,6 +5323,438 @@ mod tests {
             err,
             VerifierSdkError::SessionVerifierMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn verify_migration_artifact_rechecks_precondition() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut capsule = reference_migration_equivalence_capsule();
+        capsule.precondition.source_contains = vec!["not-present-in-source".to_string()];
+        let artifact = make_migration_equivalence_bundle_bytes("verifier://alpha", &capsule);
+
+        let result = sdk
+            .verify_migration_artifact(&artifact)
+            .expect("precondition failure should produce a signed fail result");
+
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_precondition_rechecked" && !assertion.passed
+        }));
+    }
+
+    #[test]
+    fn verify_migration_artifact_reparses_asts_and_rejects_drift() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut capsule = reference_migration_equivalence_capsule();
+        capsule.source.source_text =
+            "const value = require(\"dep\");\nmodule.exports = value.extra;\n".to_string();
+        let artifact = make_migration_equivalence_bundle_bytes("verifier://alpha", &capsule);
+
+        let result = sdk
+            .verify_migration_artifact(&artifact)
+            .expect("AST drift should produce a signed fail result");
+
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_source_ast_reparsed" && !assertion.passed
+        }));
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_source_source_hash_recomputed" && !assertion.passed
+        }));
+    }
+
+    #[test]
+    fn verify_migration_artifact_recomputes_lockstep_hash() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut capsule = reference_migration_equivalence_capsule();
+        capsule.lockstep_witness.lockstep_verdict_hash = "bb".repeat(32);
+        let artifact = make_migration_equivalence_bundle_bytes("verifier://alpha", &capsule);
+
+        let result = sdk
+            .verify_migration_artifact(&artifact)
+            .expect("lockstep hash drift should produce a signed fail result");
+
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_lockstep_verdict_hash_recomputed" && !assertion.passed
+        }));
+    }
+
+    #[test]
+    fn verify_as_of_ltv_accepts_witnessed_reattested_root_anterior_to_compromise() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let evidence = reference_long_term_verification_evidence();
+
+        let result = verify_as_of_ltv_for_test(&sdk, &evidence, "valid LTV evidence should verify");
+
+        assert_eq!(result.operation, VerificationOperation::LongTermValidation);
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+        assert_eq!(result.artifact_binding_hash, evidence.artifact.marker_hash);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            matches!(
+                assertion.assertion.as_str(),
+                "ltv_witness_precedes_key_compromise_records"
+            ) && assertion.passed
+                && assertion.detail == LONG_TERM_VERIFICATION_PASS_DETAIL
+        }));
+    }
+
+    fn builder_witness_signers(count: u8) -> Vec<LongTermWitnessSigner> {
+        (0..count)
+            .map(|index| LongTermWitnessSigner {
+                key_id: format!("builder-witness-{index}"),
+                signing_key: SigningKey::from_bytes(&[0x21 + index; 32]),
+            })
+            .collect()
+    }
+
+    fn builder_reference_request() -> LongTermEvidenceRequest {
+        LongTermEvidenceRequest {
+            artifact_id: "builder-artifact-alpha".to_string(),
+            artifact_hash: bundle::hash(b"builder-artifact-bytes"),
+            crypto_suite: "ed25519-v1".to_string(),
+            claimed_at_unix_seconds: 1_000,
+            // Two co-markers make the origin tree three leaves wide, so the
+            // audit path has to walk a duplicated-odd level.
+            co_marker_hashes: vec![
+                bundle::hash(b"builder-chain-entry-0"),
+                bundle::hash(b"builder-chain-entry-1"),
+            ],
+            reattestation_appended_marker_hashes: vec![bundle::hash(b"builder-appended-marker")],
+            reattested_at_unix_seconds: 1_500,
+            observed_at_unix_seconds: 1_700,
+            as_of_unix_seconds: 1_900,
+            suite_valid_from_unix_seconds: 900,
+            witness_group_id: "builder-witnesses".to_string(),
+            witness_policy_id: "builder-policy-v1".to_string(),
+            witness_threshold: 2,
+            trace_id: "trace-builder-alpha".to_string(),
+            timestamp: "2026-07-11T19:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn public_builder_produces_evidence_verify_as_of_ltv_accepts() {
+        let request = builder_reference_request();
+        let signers = builder_witness_signers(3);
+        let evidence = build_long_term_verification_evidence(&request, &signers)
+            .expect("builder should assemble self-verifying evidence");
+
+        assert_eq!(
+            evidence.schema_version,
+            LONG_TERM_VERIFICATION_SCHEMA_VERSION
+        );
+        assert_eq!(evidence.reattestation_chain.origin_root.tree_size, 3);
+        assert_eq!(
+            evidence.witness_receipt.statement.root.tree_size, 4,
+            "appended marker must grow the re-attested tree"
+        );
+
+        let sdk = create_verifier_sdk("verifier://builder");
+        let result = verify_as_of_ltv_for_test(
+            &sdk,
+            &evidence,
+            "builder-produced LTV evidence should verify",
+        );
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+        assert_eq!(result.artifact_binding_hash, evidence.artifact.marker_hash);
+    }
+
+    #[test]
+    fn public_builder_equal_size_reattestation_verifies() {
+        let mut request = builder_reference_request();
+        request.reattestation_appended_marker_hashes.clear();
+        let signers = builder_witness_signers(2);
+        let evidence = build_long_term_verification_evidence(&request, &signers)
+            .expect("unchanged-root re-attestation should build");
+        assert_eq!(
+            evidence.reattestation_chain.origin_root,
+            evidence.witness_receipt.statement.root
+        );
+
+        let sdk = create_verifier_sdk("verifier://builder");
+        let result =
+            verify_as_of_ltv_for_test(&sdk, &evidence, "equal-size re-attestation should verify");
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+    }
+
+    #[test]
+    fn verify_as_of_ltv_rejects_a_witness_receipt_that_supplies_its_own_signer_set() {
+        // bd-7fubt: this SDK exists to verify claims WITHOUT trusting the party
+        // that produced them, and the witness receipt used to be checked against
+        // the `threshold_config` — i.e. the verifying keys — it carries itself.
+        // Anyone could therefore mint a receipt for any root at any claimed
+        // observation time and have an offline verifier return Pass.
+        //
+        // Here the evidence is genuine but the verifier holds an anchor naming a
+        // DIFFERENT witness group, which is the realistic shape of the attack:
+        // the receipt's own quorum says it is fine, the operator's anchor does
+        // not, and the anchor must win.
+        let request = builder_reference_request();
+        let signers = builder_witness_signers(3);
+        let evidence = build_long_term_verification_evidence(&request, &signers)
+            .expect("builder should assemble self-verifying evidence");
+
+        let mut foreign_anchor = witness_anchor_for(&evidence);
+        foreign_anchor.witness_group_id = "some-other-witness-group".to_string();
+
+        let sdk = create_verifier_sdk("verifier://builder");
+        let result = sdk
+            .verify_as_of_ltv(&evidence, &foreign_anchor)
+            .expect("a refused anchor still yields a signed result");
+        assert_eq!(
+            result.verdict,
+            VerificationVerdict::Fail,
+            "a receipt that does not match the operator's anchor must not verify"
+        );
+        assert!(
+            result.checked_assertions.iter().any(|assertion| {
+                assertion.assertion == "ltv_witness_threshold_verified" && !assertion.passed
+            }),
+            "the witness threshold assertion must be the one that fails"
+        );
+
+        // Swapping only the signer keys while keeping the advertised group name
+        // must fail too, otherwise pinning the name alone would be theatre.
+        let mut swapped_keys_anchor = witness_anchor_for(&evidence);
+        swapped_keys_anchor.threshold_config.signer_keys.clear();
+        swapped_keys_anchor.threshold_config.total_signers = 0;
+        let result = sdk
+            .verify_as_of_ltv(&evidence, &swapped_keys_anchor)
+            .expect("a refused anchor still yields a signed result");
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+    }
+
+    #[test]
+    fn public_builder_evidence_fails_closed_after_tamper() {
+        let request = builder_reference_request();
+        let signers = builder_witness_signers(3);
+        let mut evidence = build_long_term_verification_evidence(&request, &signers)
+            .expect("builder should assemble self-verifying evidence");
+        evidence.artifact.artifact_hash = bundle::hash(b"tampered-artifact-bytes");
+
+        let sdk = create_verifier_sdk("verifier://builder");
+        let result = sdk
+            .verify_as_of_ltv(&evidence, &witness_anchor_for(&evidence))
+            .expect("tampered evidence still yields a signed fail result");
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "ltv_artifact_marker_recomputed" && !assertion.passed
+        }));
+    }
+
+    #[test]
+    fn public_builder_rejects_invalid_producer_inputs() {
+        let request = builder_reference_request();
+        assert!(
+            build_long_term_verification_evidence(&request, &[])
+                .expect_err("no signers must be rejected")
+                .contains("witness signer")
+        );
+
+        let mut over_threshold = builder_reference_request();
+        over_threshold.witness_threshold = 4;
+        assert!(
+            build_long_term_verification_evidence(&over_threshold, &builder_witness_signers(3))
+                .expect_err("threshold above signer count must be rejected")
+                .contains("witness_threshold")
+        );
+
+        let mut bad_marker = builder_reference_request();
+        bad_marker.co_marker_hashes = vec!["not-a-digest".to_string()];
+        assert!(
+            build_long_term_verification_evidence(&bad_marker, &builder_witness_signers(2))
+                .expect_err("non-canonical marker must be rejected")
+                .contains("canonical lowercase sha256")
+        );
+
+        let mut anachronistic = builder_reference_request();
+        anachronistic.observed_at_unix_seconds = anachronistic.as_of_unix_seconds + 1;
+        assert!(
+            build_long_term_verification_evidence(&anachronistic, &builder_witness_signers(2))
+                .expect_err("witness after as-of must fail the self-check")
+                .contains("ltv_witness_anterior_to_as_of")
+        );
+    }
+
+    #[test]
+    fn verify_as_of_ltv_emits_stable_success_transcript() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let evidence = reference_long_term_verification_evidence();
+
+        let result = verify_as_of_ltv_for_test(&sdk, &evidence, "valid LTV evidence should verify");
+        let events = long_term_verification_audit_events(&result);
+        let transcript = events
+            .iter()
+            .map(|event| json!({"event_code": event.event_code, "detail": event.detail}))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            transcript,
+            vec![
+                json!({
+                    "event_code": FN_LTV_VERIFY_AS_OF_COMPLETED,
+                    "detail": "verdict=Pass; confidence_score=1.00"
+                }),
+                json!({
+                    "event_code": FN_LTV_WITNESS_ANTERIORITY_PROVEN,
+                    "detail": LONG_TERM_VERIFICATION_PASS_DETAIL
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn verify_as_of_ltv_hybrid_suite_survives_constituent_algorithm_death() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut evidence =
+            reference_long_term_verification_evidence_for_suite("ed25519-pq-hybrid-v1");
+        evidence.suite_records.push(LongTermCryptoSuiteRecord {
+            crypto_suite: "ed25519-v1".to_string(),
+            valid_from_unix_seconds: 1,
+            valid_until_unix_seconds: Some(1_200),
+            compromised_at_unix_seconds: Some(1_600),
+        });
+
+        let result =
+            verify_as_of_ltv_for_test(&sdk, &evidence, "hybrid LTV evidence should verify");
+        let events = long_term_verification_audit_events(&result);
+
+        assert_eq!(result.verdict, VerificationVerdict::Pass);
+        assert!(events.iter().any(|event| {
+            event.event_code == FN_LTV_HYBRID_SURVIVED_ALGO_DEATH
+                && event.detail.contains("hybrid crypto suite remained valid")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_code == FN_LTV_WITNESS_ANTERIORITY_PROVEN
+                && event.detail == LONG_TERM_VERIFICATION_PASS_DETAIL
+        }));
+    }
+
+    #[test]
+    fn verify_as_of_ltv_round_trips_receipt_flow_and_rejects_backdated_forgery_transcript() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let evidence = reference_long_term_verification_evidence();
+        let serialized_result = serde_json::to_vec(&evidence);
+        assert!(
+            serialized_result.is_ok(),
+            "LTV evidence should serialize as JSON: {serialized_result:?}"
+        );
+        let serialized = serialized_result.unwrap_or_default();
+        let restored_result: serde_json::Result<LongTermVerificationEvidence> =
+            serde_json::from_slice(&serialized);
+        assert!(
+            restored_result.is_ok(),
+            "LTV evidence should deserialize from JSON: {restored_result:?}"
+        );
+        let mut restored =
+            restored_result.unwrap_or_else(|_| reference_long_term_verification_evidence());
+
+        assert_eq!(restored.witness_receipt.threshold_config.threshold, 2);
+        assert_eq!(
+            restored.witness_receipt.witness_artifact.signatures.len(),
+            2
+        );
+
+        let accepted = verify_as_of_ltv_for_test(
+            &sdk,
+            &restored,
+            "round-tripped LTV receipt flow should verify",
+        );
+        let accepted_transcript = long_term_verification_audit_events(&accepted)
+            .iter()
+            .map(|event| json!({"event_code": event.event_code, "detail": event.detail}))
+            .collect::<Vec<_>>();
+
+        assert_eq!(accepted.verdict, VerificationVerdict::Pass);
+        assert_eq!(
+            accepted_transcript,
+            vec![
+                json!({
+                    "event_code": FN_LTV_VERIFY_AS_OF_COMPLETED,
+                    "detail": "verdict=Pass; confidence_score=1.00"
+                }),
+                json!({
+                    "event_code": FN_LTV_WITNESS_ANTERIORITY_PROVEN,
+                    "detail": LONG_TERM_VERIFICATION_PASS_DETAIL
+                })
+            ]
+        );
+
+        restored.suite_records[0].compromised_at_unix_seconds = Some(
+            restored
+                .witness_receipt
+                .statement
+                .observed_at_unix_seconds
+                .saturating_sub(1),
+        );
+        let rejected = verify_as_of_ltv_for_test(
+            &sdk,
+            &restored,
+            "post-compromise back-dated evidence should produce a signed fail result",
+        );
+        let rejected_transcript = long_term_verification_audit_events(&rejected);
+
+        assert_eq!(rejected.verdict, VerificationVerdict::Fail);
+        assert!(
+            rejected_transcript
+                .iter()
+                .any(|event| event.event_code == FN_LTV_BACKDATING_REJECTED)
+        );
+    }
+
+    #[test]
+    fn verify_as_of_ltv_rejects_root_witness_observed_after_as_of() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut evidence = reference_long_term_verification_evidence();
+        evidence.as_of_unix_seconds = evidence
+            .witness_receipt
+            .statement
+            .observed_at_unix_seconds
+            .saturating_sub(1);
+
+        let result =
+            verify_as_of_ltv_for_test(&sdk, &evidence, "late witness should produce fail result");
+
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            matches!(
+                assertion.assertion.as_str(),
+                "ltv_witness_anterior_to_as_of"
+            ) && !assertion.passed
+        }));
+        assert!(
+            long_term_verification_audit_events(&result)
+                .iter()
+                .any(|event| event.event_code == FN_LTV_BACKDATING_REJECTED)
+        );
+    }
+
+    #[test]
+    fn verify_as_of_ltv_rejects_witness_after_recorded_key_compromise() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut evidence = reference_long_term_verification_evidence();
+        evidence.suite_records[0].compromised_at_unix_seconds =
+            Some(evidence.witness_receipt.statement.observed_at_unix_seconds);
+
+        let result = verify_as_of_ltv_for_test(
+            &sdk,
+            &evidence,
+            "post-compromise witness should produce fail result",
+        );
+
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            matches!(
+                assertion.assertion.as_str(),
+                "ltv_witness_precedes_key_compromise_records"
+            ) && !assertion.passed
+        }));
+        assert!(
+            long_term_verification_audit_events(&result)
+                .iter()
+                .any(|event| event.event_code == FN_LTV_BACKDATING_REJECTED)
+        );
     }
 
     #[test]
@@ -3311,6 +6247,19 @@ mod tests {
         assert_eq!(CAPSULE_REPLAY_START, "CAPSULE_REPLAY_START");
         assert_eq!(CAPSULE_VERDICT_REPRODUCED, "CAPSULE_VERDICT_REPRODUCED");
         assert_eq!(SDK_VERSION_CHECK, "SDK_VERSION_CHECK");
+        assert_eq!(
+            FN_LTV_VERIFY_AS_OF_COMPLETED,
+            "FN_LTV_VERIFY_AS_OF_COMPLETED"
+        );
+        assert_eq!(
+            FN_LTV_WITNESS_ANTERIORITY_PROVEN,
+            "FN_LTV_WITNESS_ANTERIORITY_PROVEN"
+        );
+        assert_eq!(FN_LTV_BACKDATING_REJECTED, "FN_LTV_BACKDATING_REJECTED");
+        assert_eq!(
+            FN_LTV_HYBRID_SURVIVED_ALGO_DEATH,
+            "FN_LTV_HYBRID_SURVIVED_ALGO_DEATH"
+        );
     }
 
     #[test]
@@ -3564,6 +6513,10 @@ mod tests {
             CAPSULE_REPLAY_START,
             CAPSULE_VERDICT_REPRODUCED,
             SDK_VERSION_CHECK,
+            FN_LTV_VERIFY_AS_OF_COMPLETED,
+            FN_LTV_WITNESS_ANTERIORITY_PROVEN,
+            FN_LTV_BACKDATING_REJECTED,
+            FN_LTV_HYBRID_SURVIVED_ALGO_DEATH,
         ];
         for code in &event_codes {
             assert!(!code.is_empty());
@@ -4712,6 +7665,10 @@ mod tests {
                 CAPSULE_REPLAY_START,
                 CAPSULE_VERDICT_REPRODUCED,
                 SDK_VERSION_CHECK,
+                FN_LTV_VERIFY_AS_OF_COMPLETED,
+                FN_LTV_WITNESS_ANTERIORITY_PROVEN,
+                FN_LTV_BACKDATING_REJECTED,
+                FN_LTV_HYBRID_SURVIVED_ALGO_DEATH,
             ];
 
             // Test 1: All codes are unique
@@ -4755,6 +7712,10 @@ mod tests {
                 "CAPSULE_REPLAY_START",
                 "CAPSULE_VERDICT_REPRODUCED",
                 "SDK_VERSION_CHECK",
+                "FN_LTV_VERIFY_AS_OF_COMPLETED",
+                "FN_LTV_WITNESS_ANTERIORITY_PROVEN",
+                "FN_LTV_BACKDATING_REJECTED",
+                "FN_LTV_HYBRID_SURVIVED_ALGO_DEATH",
             ];
 
             for required in &required_events {

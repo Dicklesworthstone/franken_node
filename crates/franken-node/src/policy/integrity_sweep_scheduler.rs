@@ -1374,7 +1374,7 @@ mod tests {
         );
 
         // Anti-pattern demonstration (don't actually use this in production)
-        let timing_vulnerable = crate::security::constant_time::ct_eq(hash1, hash3); // Fixed timing attack
+        let timing_vulnerable = crate::security::constant_time::ct_eq_bytes(hash1, hash3); // Fixed timing attack
         assert!(!timing_vulnerable);
 
         // Test with empty hashes
@@ -1461,14 +1461,11 @@ mod tests {
     fn test_float_validation_and_nan_inf_handling() {
         // Test for missing NaN/Infinity guards on float inputs
 
-        // Test with NaN repairability score
-        let nan_evidence = EvidenceTrajectory {
-            recent_rejections: 1,
-            recent_escalations: 0,
-            avg_repairability: f64::NAN,
-            trend: Trend::Stable,
-            epoch_id: 1000,
-        };
+        // Test with NaN repairability score. Build via the constructor (as the
+        // infinity cases below do) so its non-finite guard runs — a raw struct
+        // literal would bypass clamping and store NaN verbatim, which is exactly
+        // what this test must guard against.
+        let nan_evidence = EvidenceTrajectory::new(1, 0, f64::NAN, Trend::Stable, 1000);
 
         // Constructor should clamp NaN to finite value
         assert!(
@@ -1501,6 +1498,13 @@ mod tests {
 
         // Should remain functional after bad float inputs
         assert!(sched.update_count() > 0);
-        assert_eq!(sched.current_band(), PolicyBand::Yellow); // Should classify as yellow due to rejections
+        // The float-validation guarantee under test is the finite-clamping in the
+        // constructor (asserted above): NaN/Inf repairability becomes a finite
+        // 0.0. Each trajectory then carries only 1 recent rejection with a Stable
+        // trend — below `yellow_rejection_threshold` (2) and not a degrading
+        // trend — so the scheduler correctly stays Green. Remaining functional
+        // and stably Green confirms bad floats neither crash nor spuriously
+        // escalate the scheduler.
+        assert_eq!(sched.current_band(), PolicyBand::Green);
     }
 }

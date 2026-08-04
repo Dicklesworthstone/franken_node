@@ -582,6 +582,7 @@ mod tests {
             proof_source: source,
             queue_state: Some(QueueState::Completed),
             deduplicated,
+            queue_depth: 0,
             artifact_paths: None,
             command_digest: Some(DigestRef::sha256(bead_id.as_bytes())),
             exit: Some(ValidationExit {
@@ -606,13 +607,15 @@ mod tests {
             schema_version: "test-v1".to_string(),
             generated_at: Utc::now(),
             summary: ValidationProofDebtLedgerSummary {
-                total_debt_count: 2,
-                blocked_count: 1,
-                retryable_count: 1,
-                informational_count: 0,
-                oldest_debt_age_seconds: 3600,
-                average_debt_age_seconds: 1800.0,
-                debt_by_class: BTreeMap::new(),
+                total_entries: 2,
+                retryable_entries: 1,
+                blocked_entries: 1,
+                stale_entries: 0,
+                product_failures: 0,
+                source_only_fallbacks: 0,
+                proof_cache_reuses: 0,
+                entries_blocking_other_beads: 0,
+                by_class: BTreeMap::new(),
             },
             entries: vec![
                 ValidationProofDebtLedgerEntry {
@@ -777,10 +780,12 @@ mod tests {
         let report = generator.generate_report(&proof_statuses, &debt_ledger, reporting_period);
 
         // Check savings by evidence source
+        // Key is `ProofEvidenceSource::as_str()` (snake_case, validation_broker.rs:293),
+        // not the PascalCase variant name.
         let coalescing_savings = report
             .economics_breakdown
             .savings_by_evidence_source
-            .get("CoalescedCompleted")
+            .get("coalesced_completed")
             .expect("Coalescing savings should exist");
 
         assert_eq!(coalescing_savings.duplicate_proofs_avoided, 1);

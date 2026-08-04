@@ -732,6 +732,7 @@ mod tests {
         ControlTaskClass, LaneBudget, SCHEMA_VERSION, default_control_lane_policy, error_codes,
         event_codes, select_next_lane, task_classes,
     };
+    use crate::push_bounded;
     use std::collections::BTreeMap;
 
     fn make_scheduler() -> ControlLaneScheduler {

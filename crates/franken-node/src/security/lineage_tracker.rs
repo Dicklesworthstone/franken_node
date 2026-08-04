@@ -43,6 +43,18 @@ pub const EVENT_DEPTH_LIMIT: &str = "FN-IFL-010";
 pub const EVENT_TAINT_MERGE: &str = "FN-IFL-011";
 pub const EVENT_HEALTH_CHECK: &str = "FN-IFL-012";
 pub const EVENT_SIGNED_LINEAGE_BUILT: &str = "FN-IFL-013";
+pub const EVENT_SENSITIVE_SOURCE_REGISTERED: &str = "FN-IFL-014";
+pub const EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED: &str = "FN-IFL-015";
+pub const EVENT_TRANSFORM_PROPAGATED: &str = "FN-IFL-016";
+pub const EVENT_DECLASSIFICATION_RECEIPT_REGISTERED: &str = "FN-IFL-017";
+pub const EVENT_SINK_ENFORCED: &str = "FN-IFL-018";
+
+// Product-level acceptance transcript events for the information-flow lane.
+pub const EVENT_FLOW_SOURCE_REGISTERED: &str = "FN-FLOW-001";
+pub const EVENT_FLOW_TRANSFORM_PROPAGATED: &str = "FN-FLOW-002";
+pub const EVENT_FLOW_SINK_BLOCKED: &str = "FN-FLOW-003";
+pub const EVENT_FLOW_DECLASSIFICATION_ACCEPTED: &str = "FN-FLOW-004";
+pub const EVENT_FLOW_NON_EXFILTRATION_PROOF_READY: &str = "FN-FLOW-005";
 
 // Canonical event codes required by bd-2iyk acceptance criteria.
 pub const LINEAGE_TAG_ATTACHED: &str = "LINEAGE_TAG_ATTACHED";
@@ -66,6 +78,10 @@ pub const ERR_IFL_CONFIG_REJECTED: &str = "ERR_IFL_CONFIG_REJECTED";
 pub const ERR_IFL_ALREADY_QUARANTINED: &str = "ERR_IFL_ALREADY_QUARANTINED";
 pub const ERR_IFL_TIMEOUT: &str = "ERR_IFL_TIMEOUT";
 pub const ERR_SIGNED_LINEAGE_INVALID: &str = "ERR_SIGNED_LINEAGE_INVALID";
+pub const ERR_IFL_SENSITIVE_SOURCE_INVALID: &str = "ERR_IFL_SENSITIVE_SOURCE_INVALID";
+pub const ERR_IFL_SENSITIVE_SOURCE_CONFLICT: &str = "ERR_IFL_SENSITIVE_SOURCE_CONFLICT";
+pub const ERR_IFL_DECLASSIFICATION_INVALID: &str = "ERR_IFL_DECLASSIFICATION_INVALID";
+pub const ERR_IFL_SINK_POLICY_INVALID: &str = "ERR_IFL_SINK_POLICY_INVALID";
 
 // Canonical error codes required by bd-2iyk acceptance criteria.
 pub const ERR_LINEAGE_TAG_MISSING: &str = "ERR_LINEAGE_TAG_MISSING";
@@ -80,6 +96,20 @@ const MAX_COVERT_CHANNEL_DETECTIONS: usize = 4096;
 
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+fn looks_like_digest(digest: &str) -> bool {
+    let digest = digest.trim();
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    hex.len() >= 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn prefix_for_display(value: &str) -> &str {
+    value.get(..16).unwrap_or(value)
+}
+
+fn severity_matches(left: u32, right: u32) -> bool {
+    left.cmp(&right).is_eq()
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +162,18 @@ pub const INV_SENTINEL_PRECISION_THRESHOLD: &str = "INV-SENTINEL-PRECISION-THRES
 /// INV-SENTINEL-AUTO-CONTAIN: When exfiltration is detected, the sentinel
 /// auto-contains the flow without requiring manual intervention.
 pub const INV_SENTINEL_AUTO_CONTAIN: &str = "INV-SENTINEL-AUTO-CONTAIN";
+
+/// INV-IFL-SENSITIVE-SOURCE-COMMITMENT: sensitive-source labels expose only a
+/// salted commitment over a canonical descriptor, never source bytes.
+pub const INV_SENSITIVE_SOURCE_COMMITMENT: &str = "INV-IFL-SENSITIVE-SOURCE-COMMITMENT";
+
+/// INV-IFL-FLOW-LEDGER-IMMUTABLE: once a sensitive-source commitment is
+/// inserted, the same label id cannot be rebound to different descriptor data.
+pub const INV_FLOW_LEDGER_IMMUTABLE: &str = "INV-IFL-FLOW-LEDGER-IMMUTABLE";
+
+/// INV-IFL-DECLASSIFICATION-SCOPED: Declassification receipts are bound to the
+/// exact sink, epoch, label set, actor, purpose, and revocation freshness window.
+pub const INV_DECLASSIFICATION_SCOPED: &str = "INV-IFL-DECLASSIFICATION-SCOPED";
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -274,6 +316,46 @@ pub struct FlowEdge {
     pub quarantined: bool,
 }
 
+/// Runtime transform classes that deterministically propagate lineage labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageTransformKind {
+    Parse,
+    Concat,
+    Encode,
+    Hash,
+    Serialize,
+    Compress,
+    Encrypt,
+    Split,
+    Join,
+    Template,
+    LogFormat,
+    ModuleExport,
+    FunctionReturn,
+}
+
+impl LineageTransformKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Parse => "parse",
+            Self::Concat => "concat",
+            Self::Encode => "encode",
+            Self::Hash => "hash",
+            Self::Serialize => "serialize",
+            Self::Compress => "compress",
+            Self::Encrypt => "encrypt",
+            Self::Split => "split",
+            Self::Join => "join",
+            Self::Template => "template",
+            Self::LogFormat => "log-format",
+            Self::ModuleExport => "module-export",
+            Self::FunctionReturn => "function-return",
+        }
+    }
+}
+
 /// Taint boundary: policy rule defining allowed/denied taint crossings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaintBoundary {
@@ -369,7 +451,7 @@ fn node_matches_zone(node: &str, zone: &str) -> bool {
 }
 
 /// Per-edge pass/quarantine/alert decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowVerdict {
     Pass,
@@ -384,6 +466,14 @@ impl fmt::Display for FlowVerdict {
             FlowVerdict::Quarantine => write!(f, "quarantine"),
             FlowVerdict::Alert => write!(f, "alert"),
         }
+    }
+}
+
+fn strongest_flow_verdict(left: FlowVerdict, right: FlowVerdict) -> FlowVerdict {
+    match (left, right) {
+        (FlowVerdict::Quarantine, _) | (_, FlowVerdict::Quarantine) => FlowVerdict::Quarantine,
+        (FlowVerdict::Alert, _) | (_, FlowVerdict::Alert) => FlowVerdict::Alert,
+        (FlowVerdict::Pass, FlowVerdict::Pass) => FlowVerdict::Pass,
     }
 }
 
@@ -408,6 +498,395 @@ pub struct ContainmentReceipt {
     pub quarantine_timestamp_ms: u64,
     pub containment_action: String,
     pub success: bool,
+}
+
+pub const DECLASSIFICATION_SCHEMA_VERSION: &str = "declassification-v1.0";
+
+/// Sensitive sink classes that require declassification for forbidden labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowSinkKind {
+    NetworkEgress,
+    ExternalFileWrite,
+    SubprocessArgs,
+    SubprocessStdin,
+    Log,
+    PackagePublish,
+    ReplayBundleExport,
+    VerifierExport,
+    FleetControlMessage,
+}
+
+impl FlowSinkKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NetworkEgress => "network_egress",
+            Self::ExternalFileWrite => "external_file_write",
+            Self::SubprocessArgs => "subprocess_args",
+            Self::SubprocessStdin => "subprocess_stdin",
+            Self::Log => "log",
+            Self::PackagePublish => "package_publish",
+            Self::ReplayBundleExport => "replay_bundle_export",
+            Self::VerifierExport => "verifier_export",
+            Self::FleetControlMessage => "fleet_control_message",
+        }
+    }
+}
+
+/// Fail-closed policy for a concrete sink.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowSinkPolicy {
+    pub policy_id: String,
+    pub sink_id: String,
+    pub sink_kind: FlowSinkKind,
+    pub epoch: u64,
+    pub actor: String,
+    pub purpose: String,
+    pub forbidden_labels: BTreeSet<String>,
+    pub deny_all: bool,
+    pub max_revocation_age_ms: u64,
+}
+
+impl FlowSinkPolicy {
+    pub fn validate(&self) -> Result<(), LineageError> {
+        validate_declassification_text("sink policy", "policy_id", &self.policy_id)?;
+        validate_declassification_text("sink policy", "sink_id", &self.sink_id)?;
+        validate_declassification_text("sink policy", "actor", &self.actor)?;
+        validate_declassification_text("sink policy", "purpose", &self.purpose)?;
+        if self.max_revocation_age_ms == 0 {
+            return Err(LineageError::SinkPolicyInvalid {
+                detail: format!(
+                    "{}: max_revocation_age_ms must be greater than zero",
+                    ERR_IFL_SINK_POLICY_INVALID
+                ),
+            });
+        }
+        if !self.deny_all && self.forbidden_labels.is_empty() {
+            return Err(LineageError::SinkPolicyInvalid {
+                detail: format!(
+                    "{}: sink policy must deny at least one label or set deny_all",
+                    ERR_IFL_SINK_POLICY_INVALID
+                ),
+            });
+        }
+        for label in &self.forbidden_labels {
+            validate_declassification_text("sink policy", "forbidden_label", label)?;
+        }
+        Ok(())
+    }
+
+    fn required_labels(&self, taint_set: &TaintSet) -> BTreeSet<String> {
+        if self.deny_all {
+            return taint_set.labels.clone();
+        }
+        taint_set
+            .labels
+            .intersection(&self.forbidden_labels)
+            .cloned()
+            .collect()
+    }
+}
+
+/// Signed declassification authority for one exact sink and forbidden label set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclassificationReceipt {
+    pub receipt_id: String,
+    pub sink_id: String,
+    pub sink_kind: FlowSinkKind,
+    pub epoch: u64,
+    pub labels: BTreeSet<String>,
+    pub label_set_commitment: String,
+    pub actor: String,
+    pub purpose: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub revocation_checked_at_ms: u64,
+    pub signer_id: String,
+    pub signature_ref: String,
+    pub schema_version: String,
+}
+
+#[derive(Serialize)]
+struct DeclassificationReceiptCanonicalPayload<'a> {
+    schema_version: &'static str,
+    sink_id: &'a str,
+    sink_kind: &'a str,
+    epoch: u64,
+    labels: &'a BTreeSet<String>,
+    label_set_commitment: &'a str,
+    actor: &'a str,
+    purpose: &'a str,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+    revocation_checked_at_ms: u64,
+    signer_id: &'a str,
+    signature_ref: &'a str,
+}
+
+#[derive(Serialize)]
+struct LabelSetCommitmentPayload<'a> {
+    schema_version: &'static str,
+    labels: &'a BTreeSet<String>,
+}
+
+impl DeclassificationReceipt {
+    pub fn scoped(
+        policy: &FlowSinkPolicy,
+        labels: BTreeSet<String>,
+        issued_at_ms: u64,
+        expires_at_ms: u64,
+        revocation_checked_at_ms: u64,
+        signer_id: &str,
+        signature_ref: &str,
+    ) -> Result<Self, LineageError> {
+        let _event = EVENT_DECLASSIFICATION_RECEIPT_REGISTERED;
+        policy.validate()?;
+        let label_set_commitment = label_set_commitment(&labels)?;
+        let mut receipt = Self {
+            receipt_id: String::new(),
+            sink_id: policy.sink_id.clone(),
+            sink_kind: policy.sink_kind,
+            epoch: policy.epoch,
+            labels,
+            label_set_commitment,
+            actor: policy.actor.clone(),
+            purpose: policy.purpose.clone(),
+            issued_at_ms,
+            expires_at_ms,
+            revocation_checked_at_ms,
+            signer_id: signer_id.to_string(),
+            signature_ref: signature_ref.to_string(),
+            schema_version: DECLASSIFICATION_SCHEMA_VERSION.to_string(),
+        };
+        receipt.validate()?;
+        receipt.receipt_id = receipt.expected_receipt_id()?;
+        Ok(receipt)
+    }
+
+    pub fn validate(&self) -> Result<(), LineageError> {
+        validate_declassification_text("declassification receipt", "sink_id", &self.sink_id)?;
+        validate_declassification_text("declassification receipt", "actor", &self.actor)?;
+        validate_declassification_text("declassification receipt", "purpose", &self.purpose)?;
+        validate_declassification_text("declassification receipt", "signer_id", &self.signer_id)?;
+        validate_declassification_text(
+            "declassification receipt",
+            "signature_ref",
+            &self.signature_ref,
+        )?;
+        if self.schema_version != DECLASSIFICATION_SCHEMA_VERSION {
+            return Err(declassification_invalid(
+                "unsupported declassification receipt schema version",
+            ));
+        }
+        if self.labels.is_empty() {
+            return Err(declassification_invalid(
+                "declassification receipt must bind at least one label",
+            ));
+        }
+        for label in &self.labels {
+            validate_declassification_text("declassification receipt", "label", label)?;
+        }
+        if self.issued_at_ms >= self.expires_at_ms {
+            return Err(declassification_invalid(
+                "issued_at_ms must be before expires_at_ms",
+            ));
+        }
+        let expected_commitment = label_set_commitment(&self.labels)?;
+        if !crate::security::constant_time::ct_eq(&self.label_set_commitment, &expected_commitment)
+        {
+            return Err(declassification_invalid(
+                "label_set_commitment does not match receipt labels",
+            ));
+        }
+        if !self.receipt_id.is_empty() {
+            let expected_receipt_id = self.expected_receipt_id()?;
+            if !crate::security::constant_time::ct_eq(&self.receipt_id, &expected_receipt_id) {
+                return Err(declassification_invalid(
+                    "receipt_id does not match canonical declassification payload",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn covers(
+        &self,
+        policy: &FlowSinkPolicy,
+        required_labels: &BTreeSet<String>,
+        timestamp_ms: u64,
+    ) -> bool {
+        let _inv = INV_DECLASSIFICATION_SCOPED;
+        if self.validate().is_err() || policy.validate().is_err() || required_labels.is_empty() {
+            return false;
+        }
+        let Ok(required_label_commitment) = label_set_commitment(required_labels) else {
+            return false;
+        };
+        let same_scope = crate::security::constant_time::ct_eq(&self.sink_id, &policy.sink_id)
+            && crate::security::constant_time::ct_eq(
+                self.sink_kind.as_str(),
+                policy.sink_kind.as_str(),
+            )
+            && crate::security::constant_time::ct_eq_bytes(
+                &self.epoch.to_be_bytes(),
+                &policy.epoch.to_be_bytes(),
+            )
+            && crate::security::constant_time::ct_eq(&self.actor, &policy.actor)
+            && crate::security::constant_time::ct_eq(&self.purpose, &policy.purpose)
+            && crate::security::constant_time::ct_eq(
+                &self.label_set_commitment,
+                &required_label_commitment,
+            );
+        if !same_scope {
+            return false;
+        }
+        if timestamp_ms < self.issued_at_ms || timestamp_ms >= self.expires_at_ms {
+            return false;
+        }
+        if self.revocation_checked_at_ms > timestamp_ms {
+            return false;
+        }
+        timestamp_ms.saturating_sub(self.revocation_checked_at_ms) < policy.max_revocation_age_ms
+    }
+
+    fn expected_receipt_id(&self) -> Result<String, LineageError> {
+        let canonical = DeclassificationReceiptCanonicalPayload {
+            schema_version: DECLASSIFICATION_SCHEMA_VERSION,
+            sink_id: &self.sink_id,
+            sink_kind: self.sink_kind.as_str(),
+            epoch: self.epoch,
+            labels: &self.labels,
+            label_set_commitment: &self.label_set_commitment,
+            actor: &self.actor,
+            purpose: &self.purpose,
+            issued_at_ms: self.issued_at_ms,
+            expires_at_ms: self.expires_at_ms,
+            revocation_checked_at_ms: self.revocation_checked_at_ms,
+            signer_id: &self.signer_id,
+            signature_ref: &self.signature_ref,
+        };
+        let canonical_bytes =
+            serde_json::to_vec(&canonical).map_err(|err| LineageError::SnapshotFailed {
+                detail: format!(
+                    "{}: failed serializing declassification receipt: {err}",
+                    ERR_IFL_SNAPSHOT_FAILED
+                ),
+            })?;
+        Ok(format!(
+            "ifl-declass:{}",
+            prefix_for_display(&sha256_hex(&canonical_bytes))
+        ))
+    }
+}
+
+/// Canonical commitment over a taint label set. Returns BARE lowercase hex
+/// (no `sha256:` prefix); callers that need the content-hash-prefixed form
+/// (e.g. an [`crate::runtime::effect_receipt::EffectReceipt`] lineage field)
+/// must prepend `sha256:` themselves. The scheme is schema-versioned and
+/// deterministic, so the declassification path and the run-flow path produce
+/// identical commitments for the same label set.
+pub fn label_set_commitment(labels: &BTreeSet<String>) -> Result<String, LineageError> {
+    if labels.is_empty() {
+        return Err(declassification_invalid(
+            "label set commitment requires at least one label",
+        ));
+    }
+    let canonical = LabelSetCommitmentPayload {
+        schema_version: DECLASSIFICATION_SCHEMA_VERSION,
+        labels,
+    };
+    let canonical_bytes =
+        serde_json::to_vec(&canonical).map_err(|err| LineageError::SnapshotFailed {
+            detail: format!(
+                "{}: failed serializing declassification label set: {err}",
+                ERR_IFL_SNAPSHOT_FAILED
+            ),
+        })?;
+    Ok(sha256_hex(&canonical_bytes))
+}
+
+/// Stable taint label attached to bytes read from a recognized secret-bearing
+/// file (see [`classify_sensitive_source_path`]). Kept coarse on purpose: the
+/// run-path flow lane over-approximates (any read of a secret file taints the
+/// run's later egress), which is safe for an exfiltration control — it never
+/// produces a false "clean" verdict.
+pub const SECRET_FILE_LABEL: &str = "ifl-src:secret-file";
+
+/// The `sha256:`-prefixed label-set commitment for the single-label secret
+/// set `{SECRET_FILE_LABEL}`. This is the exact value the run-path ledger
+/// writes into a secret-carrying effect's `label_set_commitment`, and the
+/// value an offline verifier discloses as a forbidden commitment in a
+/// [`NonExfiltrationClaim`]. Deterministic; both sides must agree byte-for-byte.
+#[must_use]
+pub fn secret_file_label_set_commitment() -> String {
+    let mut labels = BTreeSet::new();
+    labels.insert(SECRET_FILE_LABEL.to_string());
+    // A non-empty label set always commits; the constant set makes this total.
+    let bare = label_set_commitment(&labels)
+        .expect("secret-file label set is non-empty and always commits");
+    format!("sha256:{bare}")
+}
+
+/// Classify a host `fs.read` path as a sensitive information-flow source.
+///
+/// Returns the taint label to attach when the read targets a file that
+/// conventionally holds credentials or key material (`.env` family, PEM/key
+/// files, SSH keys, `.npmrc`/`.netrc`, PKCS#12 bundles, cloud credentials).
+/// Matching is on the path's final component, case-insensitively, so it is
+/// stable across absolute/relative forms. Returns `None` for ordinary files.
+#[must_use]
+pub fn classify_sensitive_source_path(path: &str) -> Option<&'static str> {
+    let basename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .trim()
+        .to_ascii_lowercase();
+    if basename.is_empty() {
+        return None;
+    }
+    let is_secret = basename == ".env"
+        || basename.starts_with(".env.")
+        || basename == ".npmrc"
+        || basename == ".netrc"
+        || basename == "credentials"
+        || basename == "id_rsa"
+        || basename == "id_ed25519"
+        || basename == "id_ecdsa"
+        || basename == "id_dsa"
+        || basename.ends_with(".pem")
+        || basename.ends_with(".key")
+        || basename.ends_with(".p12")
+        || basename.ends_with(".pfx")
+        || basename.ends_with(".pkcs12")
+        || basename.ends_with(".keystore");
+    is_secret.then_some(SECRET_FILE_LABEL)
+}
+
+fn validate_declassification_text(
+    scope: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), LineageError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed != value || value.contains('\0') {
+        return Err(declassification_invalid(&format!(
+            "{scope} {field} must be non-empty, trimmed, and null-free"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(declassification_invalid(&format!(
+            "{scope} {field} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn declassification_invalid(detail: &str) -> LineageError {
+    LineageError::DeclassificationInvalid {
+        detail: format!("{}: {detail}", ERR_IFL_DECLASSIFICATION_INVALID),
+    }
 }
 
 /// Tuning knobs for the sentinel.
@@ -525,6 +1004,365 @@ pub struct LineageSnapshot {
     pub edges: Vec<FlowEdge>,
     pub labels: BTreeMap<String, TaintLabel>,
     pub schema_version: String,
+}
+
+/// Schema version for sensitive-source FlowLedger commitments.
+pub const FLOW_LEDGER_SCHEMA_VERSION: &str = "flow-ledger-v1.0";
+
+/// Canonical sensitive-source class. The descriptor intentionally avoids raw
+/// source bytes; the class describes where the protected datum came from.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensitiveSourceClass {
+    EnvVar,
+    SecretStore,
+    TokenFile,
+    PrivatePath,
+    TrustRoot,
+    OperatorConfig,
+    SensitiveNetworkResponse,
+}
+
+impl SensitiveSourceClass {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::EnvVar => "env_var",
+            Self::SecretStore => "secret_store",
+            Self::TokenFile => "token_file",
+            Self::PrivatePath => "private_path",
+            Self::TrustRoot => "trust_root",
+            Self::OperatorConfig => "operator_config",
+            Self::SensitiveNetworkResponse => "sensitive_network_response",
+        }
+    }
+}
+
+/// Canonical descriptor for a sensitive source. `digest` is a caller-provided
+/// digest/commitment for the source value or source artifact; raw secret bytes do
+/// not enter this structure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensitiveSourceDescriptor {
+    pub source_class: SensitiveSourceClass,
+    pub policy_domain: String,
+    pub owner: String,
+    pub epoch: u64,
+    pub digest: String,
+    pub severity: u32,
+    pub disclosure: BTreeMap<String, String>,
+}
+
+impl SensitiveSourceDescriptor {
+    /// Validate descriptor fields before they are committed into the ledger.
+    pub fn validate(&self) -> Result<(), LineageError> {
+        if self.policy_domain.trim().is_empty()
+            || self.owner.trim().is_empty()
+            || self.digest.trim().is_empty()
+        {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: policy_domain, owner, and digest must be non-empty",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+        if !self.digest.is_ascii() || !looks_like_digest(&self.digest) {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: digest must be digest-shaped ASCII commitment material",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+        if self.severity == 0 {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: sensitive-source severity must be greater than zero",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+        for (key, value) in &self.disclosure {
+            if key.trim().is_empty() || value.trim().is_empty() {
+                return Err(LineageError::SensitiveSourceInvalid {
+                    detail: format!(
+                        "{}: disclosure keys and values must be non-empty",
+                        ERR_IFL_SENSITIVE_SOURCE_INVALID
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Public commitment record for a sensitive source registered in a [`FlowLedger`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensitiveSourceCommitment {
+    pub label_id: String,
+    pub descriptor: SensitiveSourceDescriptor,
+    pub descriptor_digest: String,
+    pub salt_commitment: String,
+    pub source_commitment: String,
+    pub schema_version: String,
+}
+
+/// Binding proving that a sensitive-source commitment label was attached to a
+/// concrete lineage datum. This records commitments and identifiers, never
+/// source bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensitiveSourceBinding {
+    pub datum_id: String,
+    pub label_id: String,
+    pub descriptor_digest: String,
+    pub source_commitment: String,
+    pub schema_version: String,
+}
+
+/// Serializable snapshot of FlowLedger sensitive-source commitments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowLedgerSnapshot {
+    pub snapshot_id: String,
+    pub source_count: usize,
+    pub binding_count: usize,
+    pub commitments: Vec<SensitiveSourceCommitment>,
+    pub bindings: Vec<SensitiveSourceBinding>,
+    pub schema_version: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SensitiveSourceCanonicalPayload<'a> {
+    schema_version: &'static str,
+    descriptor: &'a SensitiveSourceDescriptor,
+}
+
+/// Deterministic ledger that binds sensitive source descriptors to taint labels
+/// via salted commitments, then attaches those labels to the existing lineage
+/// graph.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FlowLedger {
+    sources: BTreeMap<String, SensitiveSourceCommitment>,
+    datum_bindings: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl FlowLedger {
+    /// Create an empty FlowLedger.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sources: BTreeMap::new(),
+            datum_bindings: BTreeMap::new(),
+        }
+    }
+
+    /// Number of sensitive source commitments currently registered.
+    #[must_use]
+    pub fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// Return a commitment by label id.
+    #[must_use]
+    pub fn commitment(&self, label_id: &str) -> Option<&SensitiveSourceCommitment> {
+        self.sources.get(label_id)
+    }
+
+    /// Return the sensitive-source labels attached to a datum by this ledger.
+    #[must_use]
+    pub fn labels_for_datum(&self, datum_id: &str) -> Option<&BTreeSet<String>> {
+        self.datum_bindings.get(datum_id)
+    }
+
+    /// Deterministically derive the commitment that would be inserted for a
+    /// descriptor and salt.
+    pub fn derive_commitment(
+        descriptor: SensitiveSourceDescriptor,
+        salt: impl AsRef<[u8]>,
+    ) -> Result<SensitiveSourceCommitment, LineageError> {
+        let salt = salt.as_ref();
+        descriptor.validate()?;
+        if salt.is_empty() {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: salt must be non-empty",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+
+        let canonical = SensitiveSourceCanonicalPayload {
+            schema_version: FLOW_LEDGER_SCHEMA_VERSION,
+            descriptor: &descriptor,
+        };
+        let canonical_bytes =
+            serde_json::to_vec(&canonical).map_err(|err| LineageError::SnapshotFailed {
+                detail: format!(
+                    "{}: failed serializing sensitive-source descriptor: {err}",
+                    ERR_IFL_SNAPSHOT_FAILED
+                ),
+            })?;
+        let descriptor_digest = sha256_hex(&canonical_bytes);
+
+        let mut commitment_preimage = Vec::new();
+        commitment_preimage.extend_from_slice(FLOW_LEDGER_SCHEMA_VERSION.as_bytes());
+        commitment_preimage.push(0);
+        commitment_preimage.extend_from_slice(descriptor_digest.as_bytes());
+        commitment_preimage.push(0);
+        commitment_preimage.extend_from_slice(salt);
+
+        let source_commitment = sha256_hex(&commitment_preimage);
+        let salt_commitment = sha256_hex(salt);
+        let label_id = format!(
+            "ifl-src:{}:{}:{}",
+            descriptor.source_class.as_str(),
+            descriptor.epoch,
+            &source_commitment[..16]
+        );
+
+        Ok(SensitiveSourceCommitment {
+            label_id,
+            descriptor,
+            descriptor_digest,
+            salt_commitment,
+            source_commitment,
+            schema_version: FLOW_LEDGER_SCHEMA_VERSION.to_string(),
+        })
+    }
+
+    /// Register a sensitive source and attach its immutable label to `datum_id`.
+    /// The graph receives a `TaintLabel` whose description contains only the
+    /// source class and commitment prefix, never raw source bytes.
+    pub fn register_sensitive_source(
+        &mut self,
+        graph: &mut LineageGraph,
+        datum_id: &str,
+        descriptor: SensitiveSourceDescriptor,
+        salt: impl AsRef<[u8]>,
+    ) -> Result<String, LineageError> {
+        let _event = EVENT_SENSITIVE_SOURCE_REGISTERED;
+        let _inv_commitment = INV_SENSITIVE_SOURCE_COMMITMENT;
+        let _inv_immutable = INV_FLOW_LEDGER_IMMUTABLE;
+
+        if datum_id.trim().is_empty() {
+            return Err(LineageError::SensitiveSourceInvalid {
+                detail: format!(
+                    "{}: datum_id must be non-empty",
+                    ERR_IFL_SENSITIVE_SOURCE_INVALID
+                ),
+            });
+        }
+
+        let commitment = Self::derive_commitment(descriptor, salt)?;
+        let label_id = commitment.label_id.clone();
+
+        if let Some(existing) = self.sources.get(&label_id) {
+            if existing != &commitment {
+                return Err(LineageError::SensitiveSourceConflict {
+                    detail: format!(
+                        "{}: label '{}' is already bound to different sensitive-source metadata",
+                        ERR_IFL_SENSITIVE_SOURCE_CONFLICT, label_id
+                    ),
+                });
+            }
+            if !graph.labels.contains_key(&label_id) {
+                graph.register_label(TaintLabel {
+                    id: label_id.clone(),
+                    description: Self::label_description(existing),
+                    severity: existing.descriptor.severity,
+                });
+            }
+            graph.assign_taint(datum_id, &label_id)?;
+            self.record_binding(datum_id, &label_id);
+            return Ok(label_id);
+        }
+
+        graph.register_label(TaintLabel {
+            id: label_id.clone(),
+            description: Self::label_description(&commitment),
+            severity: commitment.descriptor.severity,
+        });
+        graph.assign_taint(datum_id, &label_id)?;
+        self.record_binding(datum_id, &label_id);
+        self.sources.insert(label_id.clone(), commitment);
+        Ok(label_id)
+    }
+
+    /// Verify that a registered sensitive-source label is bound both in this
+    /// ledger and in the lineage graph.
+    #[must_use]
+    pub fn verify_graph_binding(
+        &self,
+        graph: &LineageGraph,
+        datum_id: &str,
+        label_id: &str,
+    ) -> bool {
+        let Some(commitment) = self.sources.get(label_id) else {
+            return false;
+        };
+        let Some(bound_labels) = self.datum_bindings.get(datum_id) else {
+            return false;
+        };
+        if !bound_labels.contains(label_id) {
+            return false;
+        }
+        let Some(taint_set) = graph.get_taint_set(datum_id) else {
+            return false;
+        };
+        let Some(label) = graph.labels.get(label_id) else {
+            return false;
+        };
+
+        taint_set.contains(label_id)
+            && severity_matches(label.severity, commitment.descriptor.severity)
+            && label.description == Self::label_description(commitment)
+    }
+
+    /// Export a deterministic FlowLedger snapshot.
+    #[must_use]
+    pub fn snapshot(&self, snapshot_id: &str) -> FlowLedgerSnapshot {
+        let _event = EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED;
+        let bindings = self.binding_records();
+        FlowLedgerSnapshot {
+            snapshot_id: snapshot_id.to_string(),
+            source_count: self.sources.len(),
+            binding_count: bindings.len(),
+            commitments: self.sources.values().cloned().collect(),
+            bindings,
+            schema_version: FLOW_LEDGER_SCHEMA_VERSION.to_string(),
+        }
+    }
+
+    fn record_binding(&mut self, datum_id: &str, label_id: &str) {
+        self.datum_bindings
+            .entry(datum_id.to_string())
+            .or_default()
+            .insert(label_id.to_string());
+    }
+
+    fn binding_records(&self) -> Vec<SensitiveSourceBinding> {
+        self.datum_bindings
+            .iter()
+            .flat_map(|(datum_id, labels)| {
+                labels.iter().filter_map(move |label_id| {
+                    let commitment = self.sources.get(label_id)?;
+                    Some(SensitiveSourceBinding {
+                        datum_id: datum_id.clone(),
+                        label_id: label_id.clone(),
+                        descriptor_digest: commitment.descriptor_digest.clone(),
+                        source_commitment: commitment.source_commitment.clone(),
+                        schema_version: FLOW_LEDGER_SCHEMA_VERSION.to_string(),
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn label_description(commitment: &SensitiveSourceCommitment) -> String {
+        format!(
+            "sensitive source {} commitment {}",
+            commitment.descriptor.source_class.as_str(),
+            prefix_for_display(&commitment.source_commitment)
+        )
+    }
 }
 
 /// Schema version for signed supply-chain lineage graphs.
@@ -939,6 +1777,10 @@ pub enum LineageError {
     ConfigRejected { detail: String },
     AlreadyQuarantined { detail: String },
     Timeout { detail: String },
+    SensitiveSourceInvalid { detail: String },
+    SensitiveSourceConflict { detail: String },
+    DeclassificationInvalid { detail: String },
+    SinkPolicyInvalid { detail: String },
 }
 
 impl fmt::Display for LineageError {
@@ -954,6 +1796,10 @@ impl fmt::Display for LineageError {
             Self::ConfigRejected { detail } => write!(f, "{}", detail),
             Self::AlreadyQuarantined { detail } => write!(f, "{}", detail),
             Self::Timeout { detail } => write!(f, "{}", detail),
+            Self::SensitiveSourceInvalid { detail } => write!(f, "{}", detail),
+            Self::SensitiveSourceConflict { detail } => write!(f, "{}", detail),
+            Self::DeclassificationInvalid { detail } => write!(f, "{}", detail),
+            Self::SinkPolicyInvalid { detail } => write!(f, "{}", detail),
         }
     }
 }
@@ -1200,6 +2046,103 @@ impl LineageGraph {
         };
 
         self.append_edge(edge)
+    }
+
+    /// Propagate labels through a deterministic runtime transform.
+    ///
+    /// Each unique input datum emits one append-only edge to the output datum.
+    /// Inputs are sorted before edge creation so replay observes a stable edge
+    /// order even when callers provide the same input set in different orders.
+    pub fn propagate_transform<I, S>(
+        &mut self,
+        input_datums: I,
+        output_datum: &str,
+        transform: LineageTransformKind,
+        timestamp_ms: u64,
+    ) -> Result<Vec<String>, LineageError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let _event_transform = EVENT_TRANSFORM_PROPAGATED;
+        let _event_prop = EVENT_TAINT_PROPAGATED;
+
+        if output_datum.trim().is_empty() {
+            return Err(LineageError::QueryInvalid {
+                detail: format!(
+                    "{}: transform output datum must be non-empty",
+                    ERR_IFL_QUERY_INVALID
+                ),
+            });
+        }
+
+        let mut inputs = BTreeSet::new();
+        for input in input_datums {
+            let input = input.as_ref();
+            if input.trim().is_empty() {
+                return Err(LineageError::QueryInvalid {
+                    detail: format!(
+                        "{}: transform input datums must be non-empty",
+                        ERR_IFL_QUERY_INVALID
+                    ),
+                });
+            }
+            inputs.insert(input.to_string());
+        }
+
+        if inputs.is_empty() {
+            return Err(LineageError::QueryInvalid {
+                detail: format!(
+                    "{}: transform requires at least one input datum",
+                    ERR_IFL_QUERY_INVALID
+                ),
+            });
+        }
+
+        let projected_edges = self.edges.len().saturating_add(inputs.len());
+        if projected_edges > self.config.max_graph_edges {
+            return Err(LineageError::GraphFull {
+                detail: format!(
+                    "{}: transform would create {} edges (max {})",
+                    ERR_IFL_GRAPH_FULL, projected_edges, self.config.max_graph_edges
+                ),
+            });
+        }
+
+        let mut merged_taint = TaintSet::new();
+        let mut source_taints = BTreeMap::new();
+        for input in &inputs {
+            let source_taint = self.datum_taints.get(input).cloned().unwrap_or_default();
+            merged_taint.merge(&source_taint);
+            source_taints.insert(input.clone(), source_taint);
+        }
+
+        let output_taint = self
+            .datum_taints
+            .entry(output_datum.to_string())
+            .or_default();
+        let had_labels = output_taint.len();
+        output_taint.merge(&merged_taint);
+        if output_taint.len() > had_labels {
+            let _event_merge = EVENT_TAINT_MERGE;
+        }
+
+        let operation = transform.as_str().to_string();
+        let mut edge_ids = Vec::with_capacity(source_taints.len());
+        for (input, source_taint) in source_taints {
+            let edge = FlowEdge {
+                edge_id: String::new(),
+                source: input,
+                sink: output_datum.to_string(),
+                operation: operation.clone(),
+                taint_set: source_taint,
+                timestamp_ms,
+                quarantined: false,
+            };
+            edge_ids.push(self.append_edge(edge)?);
+        }
+
+        Ok(edge_ids)
     }
 
     /// Query the lineage graph.
@@ -1595,6 +2538,104 @@ impl ExfiltrationSentinel {
         }
 
         Ok(worst_verdict)
+    }
+
+    /// Enforce a concrete sink policy against an existing flow edge.
+    ///
+    /// Forbidden labels fail closed unless a declassification receipt is signed,
+    /// scoped to the exact sink/epoch/actor/purpose, bound to the exact forbidden
+    /// label set, unexpired, and revocation-fresh at `timestamp_ms`.
+    pub fn evaluate_sink(
+        &mut self,
+        graph: &mut LineageGraph,
+        edge_id: &str,
+        policy: &FlowSinkPolicy,
+        declassification: Option<&DeclassificationReceipt>,
+        timestamp_ms: u64,
+    ) -> Result<FlowVerdict, LineageError> {
+        let _event = EVENT_SINK_ENFORCED;
+        let _inv = INV_DECLASSIFICATION_SCOPED;
+        policy.validate()?;
+
+        let edge =
+            graph
+                .get_edge(edge_id)
+                .cloned()
+                .ok_or_else(|| LineageError::ContainmentFailed {
+                    detail: format!(
+                        "{}: sink flow edge '{}' not found",
+                        ERR_IFL_CONTAINMENT_FAILED, edge_id
+                    ),
+                })?;
+
+        if !crate::security::constant_time::ct_eq(&edge.sink, &policy.sink_id) {
+            return Err(LineageError::SinkPolicyInvalid {
+                detail: format!(
+                    "{}: sink policy '{}' targets '{}' but edge '{}' targets '{}'",
+                    ERR_IFL_SINK_POLICY_INVALID,
+                    policy.policy_id,
+                    policy.sink_id,
+                    edge.edge_id,
+                    edge.sink
+                ),
+            });
+        }
+
+        if edge.quarantined {
+            return Err(LineageError::AlreadyQuarantined {
+                detail: format!(
+                    "{}: edge '{}' already quarantined",
+                    ERR_IFL_ALREADY_QUARANTINED, edge.edge_id
+                ),
+            });
+        }
+
+        let required_labels = policy.required_labels(&edge.taint_set);
+        if required_labels.is_empty() {
+            return Ok(FlowVerdict::Pass);
+        }
+
+        if declassification
+            .is_some_and(|receipt| receipt.covers(policy, &required_labels, timestamp_ms))
+        {
+            return Ok(FlowVerdict::Pass);
+        }
+
+        self.alert_counter = self.alert_counter.saturating_add(1);
+        let alert_id = format!("alert-{}", self.alert_counter);
+        let _event_alert = EVENT_EXFIL_ALERT;
+        let alert = ExfiltrationAlert {
+            alert_id: alert_id.clone(),
+            edge_id: edge.edge_id.clone(),
+            violated_boundary: policy.policy_id.clone(),
+            taint_labels: required_labels.clone(),
+            verdict: FlowVerdict::Quarantine,
+            timestamp_ms,
+            detail: format!(
+                "Forbidden labels {:?} reached sink '{}' ({}) without a valid scoped declassification receipt",
+                required_labels,
+                policy.sink_id,
+                policy.sink_kind.as_str()
+            ),
+        };
+        self.alerts.insert(alert_id.clone(), alert);
+
+        let _event_quarantine = EVENT_FLOW_QUARANTINED;
+        graph.quarantine_edge(&edge.edge_id)?;
+        self.receipt_counter = self.receipt_counter.saturating_add(1);
+        let receipt_id = format!("receipt-{}", self.receipt_counter);
+        let _event_receipt = EVENT_CONTAINMENT_RECEIPT;
+        let receipt = ContainmentReceipt {
+            receipt_id: receipt_id.clone(),
+            alert_id,
+            edge_id: edge.edge_id,
+            quarantine_timestamp_ms: timestamp_ms,
+            containment_action: "quarantine_sink_flow".to_string(),
+            success: true,
+        };
+        self.receipts.insert(receipt_id, receipt);
+
+        Ok(FlowVerdict::Quarantine)
     }
 
     /// Get all alerts.
@@ -2014,6 +3055,40 @@ impl ExfiltrationSentinel {
             }),
         }
     }
+
+    /// Track a deterministic runtime transform and evaluate every emitted edge.
+    pub fn track_transform<I, S>(
+        &mut self,
+        graph: &mut LineageGraph,
+        input_datums: I,
+        output_datum: &str,
+        transform: LineageTransformKind,
+        timestamp_ms: u64,
+    ) -> Result<FlowVerdict, LineageError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let _event = LINEAGE_FLOW_TRACKED;
+        let edge_ids =
+            graph.propagate_transform(input_datums, output_datum, transform, timestamp_ms)?;
+        let mut verdict = FlowVerdict::Pass;
+
+        for edge_id in edge_ids {
+            let edge = graph.get_edge(&edge_id).cloned();
+            let Some(edge) = edge else {
+                return Err(LineageError::ContainmentFailed {
+                    detail: format!(
+                        "{}: transform edge lost after propagation",
+                        ERR_LINEAGE_FLOW_BROKEN
+                    ),
+                });
+            };
+            verdict = strongest_flow_verdict(verdict, self.evaluate_edge(&edge, graph)?);
+        }
+
+        Ok(verdict)
+    }
 }
 
 /// Result of a sentinel graph scan.
@@ -2306,6 +3381,72 @@ pub mod invariants {
 mod tests {
     use super::*;
 
+    #[test]
+    fn classify_sensitive_source_path_matches_secret_files() {
+        // Recognized secret-bearing files, across absolute/relative forms.
+        for path in [
+            ".env",
+            "app/.env.production",
+            "/srv/app/.env",
+            "config/id_rsa",
+            "keys/service.pem",
+            "certs/server.KEY",
+            "/home/u/.npmrc",
+            ".netrc",
+            "secrets/credentials",
+            "store/app.p12",
+            "bundle.PFX",
+        ] {
+            assert_eq!(
+                classify_sensitive_source_path(path),
+                Some(SECRET_FILE_LABEL),
+                "expected {path} classified as a sensitive source"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_sensitive_source_path_ignores_ordinary_files() {
+        for path in [
+            "out.txt",
+            "src/main.rs",
+            "environment.md",
+            "readme.env.example.md",
+            "package.json",
+            "",
+            "/",
+        ] {
+            assert_eq!(
+                classify_sensitive_source_path(path),
+                None,
+                "expected {path} to be an ordinary (non-secret) source"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_file_label_set_commitment_is_deterministic_and_canonical() {
+        let a = secret_file_label_set_commitment();
+        let b = secret_file_label_set_commitment();
+        assert_eq!(a, b, "commitment must be deterministic");
+        let hex = a
+            .strip_prefix("sha256:")
+            .expect("commitment is sha256:-prefixed");
+        assert_eq!(hex.len(), 64, "commitment hex must be 64 chars");
+        assert!(
+            hex.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "commitment must be lowercase hex"
+        );
+        // It must equal the canonical commitment over exactly {SECRET_FILE_LABEL}.
+        let mut labels = BTreeSet::new();
+        labels.insert(SECRET_FILE_LABEL.to_string());
+        assert_eq!(
+            a,
+            format!("sha256:{}", label_set_commitment(&labels).unwrap())
+        );
+    }
+
     fn default_config() -> SentinelConfig {
         SentinelConfig::default()
     }
@@ -2325,6 +3466,33 @@ mod tests {
             to_zone: to.to_string(),
             denied_labels: denied.iter().map(|s| s.to_string()).collect(),
             deny_all: false,
+        }
+    }
+
+    fn make_sink_policy(denied: &[&str]) -> FlowSinkPolicy {
+        FlowSinkPolicy {
+            policy_id: "sink-policy-1".to_string(),
+            sink_id: "external:api".to_string(),
+            sink_kind: FlowSinkKind::NetworkEgress,
+            epoch: 7,
+            actor: "agent-alpha".to_string(),
+            purpose: "support-case-123".to_string(),
+            forbidden_labels: denied.iter().map(|label| (*label).to_string()).collect(),
+            deny_all: false,
+            max_revocation_age_ms: 10,
+        }
+    }
+
+    fn sensitive_descriptor(disclosure: BTreeMap<String, String>) -> SensitiveSourceDescriptor {
+        SensitiveSourceDescriptor {
+            source_class: SensitiveSourceClass::EnvVar,
+            policy_domain: "runtime:prod".to_string(),
+            owner: "platform-security".to_string(),
+            epoch: 42,
+            digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            severity: 90,
+            disclosure,
         }
     }
 
@@ -2505,6 +3673,233 @@ mod tests {
     }
 
     #[test]
+    fn flow_ledger_registers_sensitive_source_as_committed_label() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let descriptor = sensitive_descriptor(BTreeMap::from([(
+            "display_name".to_string(),
+            "operator API key".to_string(),
+        )]));
+
+        let label_id = ledger
+            .register_sensitive_source(&mut graph, "datum-secret", descriptor, b"salt-v1")
+            .unwrap();
+
+        let commitment = ledger.commitment(&label_id).unwrap();
+        let taint = graph.get_taint_set("datum-secret").unwrap();
+        let label = graph.labels.get(&label_id).unwrap();
+
+        assert_eq!(ledger.source_count(), 1);
+        assert!(label_id.starts_with("ifl-src:env_var:42:"));
+        assert!(taint.contains(&label_id));
+        assert_eq!(label.severity, 90);
+        assert!(label.description.contains("sensitive source env_var"));
+        assert!(!label.description.contains("operator-api-key"));
+        assert_eq!(commitment.schema_version, FLOW_LEDGER_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn flow_ledger_commitment_is_deterministic_for_ordered_metadata() {
+        let left = sensitive_descriptor(BTreeMap::from([
+            ("purpose".to_string(), "signing".to_string()),
+            ("region".to_string(), "iad".to_string()),
+        ]));
+        let right = sensitive_descriptor(BTreeMap::from([
+            ("region".to_string(), "iad".to_string()),
+            ("purpose".to_string(), "signing".to_string()),
+        ]));
+
+        let left_commitment = FlowLedger::derive_commitment(left, b"salt-v1").unwrap();
+        let right_commitment = FlowLedger::derive_commitment(right, b"salt-v1").unwrap();
+
+        assert_eq!(left_commitment, right_commitment);
+    }
+
+    #[test]
+    fn flow_ledger_idempotent_registration_can_label_multiple_datums() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let descriptor = sensitive_descriptor(BTreeMap::new());
+
+        let first = ledger
+            .register_sensitive_source(&mut graph, "datum-a", descriptor.clone(), b"salt-v1")
+            .unwrap();
+        let second = ledger
+            .register_sensitive_source(&mut graph, "datum-b", descriptor, b"salt-v1")
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(ledger.source_count(), 1);
+        assert!(graph.get_taint_set("datum-a").unwrap().contains(&first));
+        assert!(graph.get_taint_set("datum-b").unwrap().contains(&first));
+        assert!(ledger.labels_for_datum("datum-a").unwrap().contains(&first));
+        assert!(ledger.verify_graph_binding(&graph, "datum-a", &first));
+        assert!(ledger.verify_graph_binding(&graph, "datum-b", &first));
+    }
+
+    #[test]
+    fn flow_ledger_binding_verification_fails_when_graph_is_detached() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let label_id = ledger
+            .register_sensitive_source(
+                &mut graph,
+                "datum-secret",
+                sensitive_descriptor(BTreeMap::new()),
+                b"salt-v1",
+            )
+            .unwrap();
+        let detached_graph = LineageGraph::new(default_config());
+
+        assert!(!ledger.verify_graph_binding(&detached_graph, "datum-secret", &label_id));
+        assert!(!ledger.verify_graph_binding(&graph, "other-datum", &label_id));
+        assert!(!ledger.verify_graph_binding(&graph, "datum-secret", "missing-label"));
+    }
+
+    #[test]
+    fn flow_ledger_rejects_empty_salt_without_mutating_graph() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let descriptor = sensitive_descriptor(BTreeMap::new());
+
+        let err = ledger
+            .register_sensitive_source(&mut graph, "datum-secret", descriptor, b"")
+            .expect_err("empty salt must fail closed");
+
+        assert!(err.to_string().contains(ERR_IFL_SENSITIVE_SOURCE_INVALID));
+        assert_eq!(ledger.source_count(), 0);
+        assert_eq!(graph.label_count(), 0);
+        assert!(graph.get_taint_set("datum-secret").is_none());
+    }
+
+    #[test]
+    fn flow_ledger_rejects_malformed_descriptor() {
+        let mut descriptor = sensitive_descriptor(BTreeMap::new());
+        descriptor.owner.clear();
+
+        let err = FlowLedger::derive_commitment(descriptor, b"salt-v1")
+            .expect_err("empty descriptor owner must fail closed");
+
+        assert!(err.to_string().contains(ERR_IFL_SENSITIVE_SOURCE_INVALID));
+    }
+
+    #[test]
+    fn flow_ledger_snapshot_is_sorted_and_schema_versioned() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let mut second = sensitive_descriptor(BTreeMap::new());
+        second.epoch = 7;
+        second.digest =
+            "sha256:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef".to_string();
+
+        ledger
+            .register_sensitive_source(&mut graph, "datum-b", second, b"salt-b")
+            .unwrap();
+        ledger
+            .register_sensitive_source(
+                &mut graph,
+                "datum-a",
+                sensitive_descriptor(BTreeMap::new()),
+                b"salt-a",
+            )
+            .unwrap();
+
+        let snapshot = ledger.snapshot("flow-ledger-snap-1");
+        let ids: Vec<_> = snapshot
+            .commitments
+            .iter()
+            .map(|commitment| commitment.label_id.as_str())
+            .collect();
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+
+        assert_eq!(snapshot.snapshot_id, "flow-ledger-snap-1");
+        assert_eq!(snapshot.source_count, 2);
+        assert_eq!(snapshot.binding_count, 2);
+        assert_eq!(snapshot.schema_version, FLOW_LEDGER_SCHEMA_VERSION);
+        assert_eq!(ids, sorted_ids);
+        assert_eq!(snapshot.bindings.len(), 2);
+        assert_eq!(
+            snapshot.bindings[0].schema_version,
+            FLOW_LEDGER_SCHEMA_VERSION
+        );
+        assert_ne!(snapshot.bindings[0].datum_id, snapshot.bindings[1].datum_id);
+    }
+
+    #[test]
+    fn flow_ledger_snapshot_binds_commitments_to_lineage_datums() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let label_id = ledger
+            .register_sensitive_source(
+                &mut graph,
+                "datum-secret",
+                sensitive_descriptor(BTreeMap::from([(
+                    "display_name".to_string(),
+                    "operator credential".to_string(),
+                )])),
+                b"salt-v1",
+            )
+            .unwrap();
+
+        let snapshot = ledger.snapshot("flow-ledger-snap-bindings");
+        let binding = snapshot.bindings.first().unwrap();
+        let commitment = ledger.commitment(&label_id).unwrap();
+        let label = graph.labels.get(&label_id).unwrap();
+
+        assert_eq!(snapshot.binding_count, 1);
+        assert_eq!(binding.datum_id, "datum-secret");
+        assert_eq!(binding.label_id, label_id);
+        assert_eq!(binding.descriptor_digest, commitment.descriptor_digest);
+        assert_eq!(binding.source_commitment, commitment.source_commitment);
+        assert!(!label.description.contains("salt-v1"));
+        assert!(!label.description.contains(&commitment.descriptor.digest));
+        assert!(ledger.verify_graph_binding(&graph, "datum-secret", &label_id));
+    }
+
+    #[test]
+    fn flow_ledger_supports_all_sensitive_source_classes_as_committed_labels() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let classes = [
+            SensitiveSourceClass::EnvVar,
+            SensitiveSourceClass::SecretStore,
+            SensitiveSourceClass::TokenFile,
+            SensitiveSourceClass::PrivatePath,
+            SensitiveSourceClass::TrustRoot,
+            SensitiveSourceClass::OperatorConfig,
+            SensitiveSourceClass::SensitiveNetworkResponse,
+        ];
+
+        for (index, source_class) in classes.iter().cloned().enumerate() {
+            let mut descriptor = sensitive_descriptor(BTreeMap::from([(
+                "classification".to_string(),
+                "selective-disclosure-only".to_string(),
+            )]));
+            descriptor.source_class = source_class.clone();
+            descriptor.epoch = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
+            descriptor.digest = format!("sha256:{:064x}", index + 1);
+            let digest = descriptor.digest.clone();
+            let datum_id = format!("datum-{index}");
+            let salt = format!("salt-{index}");
+
+            let label_id = ledger
+                .register_sensitive_source(&mut graph, &datum_id, descriptor, salt.as_bytes())
+                .unwrap();
+            let label = graph.labels.get(&label_id).unwrap();
+
+            assert!(label_id.starts_with(&format!("ifl-src:{}:", source_class.as_str())));
+            assert!(ledger.verify_graph_binding(&graph, &datum_id, &label_id));
+            assert!(!label.description.contains(&digest));
+            assert!(!label.description.contains(&salt));
+        }
+
+        let snapshot = ledger.snapshot("flow-ledger-all-classes");
+        assert_eq!(snapshot.source_count, classes.len());
+        assert_eq!(snapshot.binding_count, classes.len());
+    }
+
+    #[test]
     fn test_taint_set_new_is_empty() {
         let ts = TaintSet::new();
         assert!(ts.is_empty());
@@ -2629,6 +4024,319 @@ mod tests {
         assert!(!edge_id.is_empty());
         let dst_taint = graph.get_taint_set("dst").unwrap();
         assert!(dst_taint.contains("PII"));
+    }
+
+    #[test]
+    fn lineage_transform_kind_operation_names_are_stable() {
+        let cases = [
+            (LineageTransformKind::Parse, "parse"),
+            (LineageTransformKind::Concat, "concat"),
+            (LineageTransformKind::Encode, "encode"),
+            (LineageTransformKind::Hash, "hash"),
+            (LineageTransformKind::Serialize, "serialize"),
+            (LineageTransformKind::Compress, "compress"),
+            (LineageTransformKind::Encrypt, "encrypt"),
+            (LineageTransformKind::Split, "split"),
+            (LineageTransformKind::Join, "join"),
+            (LineageTransformKind::Template, "template"),
+            (LineageTransformKind::LogFormat, "log-format"),
+            (LineageTransformKind::ModuleExport, "module-export"),
+            (LineageTransformKind::FunctionReturn, "function-return"),
+        ];
+
+        for (kind, operation) in cases {
+            assert_eq!(kind.as_str(), operation);
+        }
+    }
+
+    #[test]
+    fn propagate_transform_merges_labels_from_inputs_in_deterministic_order() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("PII", 10));
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("input-b", "PII").unwrap();
+        graph.assign_taint("input-a", "SECRET").unwrap();
+
+        let edge_ids = graph
+            .propagate_transform(
+                ["input-b", "input-a", "input-b"],
+                "output",
+                LineageTransformKind::Concat,
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(edge_ids, vec!["edge-1".to_string(), "edge-2".to_string()]);
+        let first = graph
+            .get_edge(edge_ids.first().expect("first transform edge"))
+            .unwrap();
+        let second = graph
+            .get_edge(edge_ids.get(1).expect("second transform edge"))
+            .unwrap();
+        let output_taint = graph.get_taint_set("output").unwrap();
+
+        assert_eq!(first.source, "input-a");
+        assert_eq!(second.source, "input-b");
+        assert_eq!(first.operation, "concat");
+        assert_eq!(second.operation, "concat");
+        assert!(first.taint_set.contains("SECRET"));
+        assert!(second.taint_set.contains("PII"));
+        assert!(output_taint.contains("SECRET"));
+        assert!(output_taint.contains("PII"));
+    }
+
+    #[test]
+    fn sensitive_source_label_propagates_through_runtime_transform() {
+        let mut graph = LineageGraph::new(default_config());
+        let mut ledger = FlowLedger::new();
+        let label_id = ledger
+            .register_sensitive_source(
+                &mut graph,
+                "internal:env",
+                sensitive_descriptor(BTreeMap::new()),
+                b"salt-v1",
+            )
+            .unwrap();
+
+        let edge_ids = graph
+            .propagate_transform(
+                ["internal:env"],
+                "internal:parsed-config",
+                LineageTransformKind::Parse,
+                55,
+            )
+            .unwrap();
+        let edge = graph
+            .get_edge(edge_ids.first().expect("sensitive source transform edge"))
+            .unwrap();
+        let output_taint = graph.get_taint_set("internal:parsed-config").unwrap();
+
+        assert_eq!(edge.operation, "parse");
+        assert!(edge.taint_set.contains(&label_id));
+        assert!(output_taint.contains(&label_id));
+        assert!(ledger.verify_graph_binding(&graph, "internal:env", &label_id));
+    }
+
+    #[test]
+    fn propagate_transform_rejects_empty_inputs_without_mutating_graph() {
+        let mut graph = LineageGraph::new(default_config());
+
+        let err = graph
+            .propagate_transform(
+                Vec::<&str>::new(),
+                "output",
+                LineageTransformKind::Encode,
+                1,
+            )
+            .expect_err("empty transform inputs must fail closed");
+
+        assert!(err.to_string().contains(ERR_IFL_QUERY_INVALID));
+        assert_eq!(graph.edge_count(), 0);
+        assert!(graph.get_taint_set("output").is_none());
+    }
+
+    #[test]
+    fn propagate_transform_rejects_graph_full_without_partial_edges() {
+        let mut config = default_config();
+        config.max_graph_edges = 1;
+        let mut graph = LineageGraph::new(config);
+        graph.register_label(make_label("PII", 10));
+        graph.assign_taint("input-a", "PII").unwrap();
+        graph.assign_taint("input-b", "PII").unwrap();
+
+        let err = graph
+            .propagate_transform(
+                ["input-a", "input-b"],
+                "output",
+                LineageTransformKind::Join,
+                1,
+            )
+            .expect_err("transform should fail before appending partial edges");
+
+        assert!(err.to_string().contains(ERR_IFL_GRAPH_FULL));
+        assert_eq!(graph.edge_count(), 0);
+        assert!(graph.get_taint_set("output").is_none());
+    }
+
+    #[test]
+    fn track_transform_quarantines_forbidden_runtime_output() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+        sentinel
+            .add_boundary(make_boundary("b1", "internal", "external", &["SECRET"]))
+            .unwrap();
+
+        let verdict = sentinel
+            .track_transform(
+                &mut graph,
+                ["internal:secret"],
+                "external:payload",
+                LineageTransformKind::Template,
+                10,
+            )
+            .unwrap();
+        let edges = graph.query(&LineageQuery::default()).unwrap();
+        let edge = edges.first().expect("tracked transform edge");
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert_eq!(edge.operation, "template");
+        assert!(edge.quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
+    }
+
+    #[test]
+    fn evaluate_sink_quarantines_forbidden_label_without_declassification() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["SECRET"]);
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, None, 20)
+            .unwrap();
+        let edge = graph.get_edge(&edge_id).unwrap();
+        let alert = sentinel.alerts().values().next().unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert!(edge.quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
+        assert_eq!(sentinel.receipt_count(), 1);
+        assert_eq!(alert.violated_boundary, "sink-policy-1");
+        assert!(alert.taint_labels.contains("SECRET"));
+    }
+
+    #[test]
+    fn evaluate_sink_allows_exact_scoped_declassification_receipt() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["SECRET"]);
+        let receipt = DeclassificationReceipt::scoped(
+            &policy,
+            BTreeSet::from(["SECRET".to_string()]),
+            10,
+            50,
+            19,
+            "ops-signer",
+            "signature:declass-1",
+        )
+        .unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, Some(&receipt), 20)
+            .unwrap();
+        let edge = graph.get_edge(&edge_id).unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Pass);
+        assert!(!edge.quarantined);
+        assert_eq!(sentinel.alert_count(), 0);
+        assert_eq!(sentinel.receipt_count(), 0);
+        assert!(receipt.receipt_id.starts_with("ifl-declass:"));
+        assert!(!receipt.label_set_commitment.is_empty());
+    }
+
+    #[test]
+    fn evaluate_sink_rejects_receipt_bound_to_wrong_sink() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["SECRET"]);
+        let mut wrong_policy = policy.clone();
+        wrong_policy.sink_id = "external:other-api".to_string();
+        let receipt = DeclassificationReceipt::scoped(
+            &wrong_policy,
+            BTreeSet::from(["SECRET".to_string()]),
+            10,
+            50,
+            19,
+            "ops-signer",
+            "signature:wrong-sink",
+        )
+        .unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, Some(&receipt), 20)
+            .unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert!(graph.get_edge(&edge_id).unwrap().quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
+    }
+
+    #[test]
+    fn evaluate_sink_rejects_stale_revocation_receipt() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["SECRET"]);
+        let receipt = DeclassificationReceipt::scoped(
+            &policy,
+            BTreeSet::from(["SECRET".to_string()]),
+            1,
+            50,
+            9,
+            "ops-signer",
+            "signature:stale-revocation",
+        )
+        .unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, Some(&receipt), 20)
+            .unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert!(graph.get_edge(&edge_id).unwrap().quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
+    }
+
+    #[test]
+    fn evaluate_sink_requires_receipt_for_exact_forbidden_label_set() {
+        let mut graph = LineageGraph::new(default_config());
+        graph.register_label(make_label("SECRET", 90));
+        graph.register_label(make_label("PII", 70));
+        graph.assign_taint("internal:secret", "SECRET").unwrap();
+        graph.assign_taint("internal:secret", "PII").unwrap();
+        let edge_id = graph
+            .propagate_taint("internal:secret", "external:api", "http-send", 20)
+            .unwrap();
+        let policy = make_sink_policy(&["PII", "SECRET"]);
+        let receipt = DeclassificationReceipt::scoped(
+            &policy,
+            BTreeSet::from(["SECRET".to_string()]),
+            10,
+            50,
+            19,
+            "ops-signer",
+            "signature:partial-labels",
+        )
+        .unwrap();
+        let mut sentinel = ExfiltrationSentinel::new(default_config());
+
+        let verdict = sentinel
+            .evaluate_sink(&mut graph, &edge_id, &policy, Some(&receipt), 20)
+            .unwrap();
+
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert!(graph.get_edge(&edge_id).unwrap().quarantined);
+        assert_eq!(sentinel.alert_count(), 1);
     }
 
     #[test]
@@ -3801,7 +5509,13 @@ mod tests {
 
     #[test]
     fn test_boundary_zone_prefix_requires_separator() {
-        let boundary = make_boundary("b-prefix", "internal", "external", &["PII"]);
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let mut sentinel = ExfiltrationSentinel::new(config);
+        sentinel
+            .add_boundary(make_boundary("b-prefix", "internal", "external", &["PII"]))
+            .unwrap();
+
         let mut taint = TaintSet::new();
         taint.insert("PII");
         let edge = FlowEdge {
@@ -3813,14 +5527,13 @@ mod tests {
             timestamp_ms: 1,
             quarantined: false,
         };
+        graph.append_edge(edge.clone()).unwrap();
 
-        assert_eq!(
-            invariants::evaluate_edge_pure(
-                &edge,
-                &BTreeMap::from([("b-prefix".to_string(), boundary)])
-            ),
-            FlowVerdict::Pass
-        );
+        // The boundary is defined for zone "internal" -> "external"; the edge source
+        // zone "internality-service" must NOT match "internal" (prefix requires a
+        // separator), so the flow is not a boundary crossing and passes.
+        let verdict = sentinel.evaluate_edge(&edge, &mut graph).unwrap();
+        assert_eq!(verdict, FlowVerdict::Pass);
     }
 
     #[test]
@@ -4017,6 +5730,7 @@ mod tests {
         assert!(!taint_set.is_empty());
 
         // Test with problematic label IDs
+        let long_label = "x".repeat(1_000);
         let problematic_ids = vec![
             "",                        // Empty
             "\0null_terminated",       // Null byte
@@ -4024,7 +5738,7 @@ mod tests {
             "🚀emoji_label",           // Unicode
             "\u{FFFF}",                // Max BMP
             "../../../sensitive/data", // Path traversal
-            "x".repeat(1_000),         // Very long label
+            long_label.as_str(),       // Very long label
         ];
 
         for id in problematic_ids {
@@ -4285,8 +5999,10 @@ mod tests {
             assert!(!display_output.contains("(null)"));
             assert!(!display_output.contains("Error"));
 
-            // Debug output should also be safe
-            assert!(debug_output.contains("LineageError"));
+            // Debug output should also be safe: the derived Debug emits the variant
+            // (e.g. `LabelNotFound { detail: "ERR_IFL_..." }`), not the enum name, so
+            // assert the structured error-code content is carried through intact.
+            assert!(debug_output.contains("ERR_IFL_"));
         }
     }
 
@@ -4306,6 +6022,16 @@ mod tests {
             EVENT_DEPTH_LIMIT,
             EVENT_TAINT_MERGE,
             EVENT_HEALTH_CHECK,
+            EVENT_SENSITIVE_SOURCE_REGISTERED,
+            EVENT_FLOW_LEDGER_SNAPSHOT_EXPORTED,
+            EVENT_TRANSFORM_PROPAGATED,
+            EVENT_DECLASSIFICATION_RECEIPT_REGISTERED,
+            EVENT_SINK_ENFORCED,
+            EVENT_FLOW_SOURCE_REGISTERED,
+            EVENT_FLOW_TRANSFORM_PROPAGATED,
+            EVENT_FLOW_SINK_BLOCKED,
+            EVENT_FLOW_DECLASSIFICATION_ACCEPTED,
+            EVENT_FLOW_NON_EXFILTRATION_PROOF_READY,
             LINEAGE_TAG_ATTACHED,
             LINEAGE_FLOW_TRACKED,
             SENTINEL_SCAN_START,
@@ -4326,6 +6052,11 @@ mod tests {
                     constant.len() >= 10,
                     "FN-IFL- constants should have sufficient length"
                 );
+            } else if constant.starts_with("FN-FLOW-") {
+                assert!(
+                    constant.len() >= 11,
+                    "FN-FLOW- constants should have sufficient length"
+                );
             }
         }
 
@@ -4341,6 +6072,10 @@ mod tests {
             ERR_IFL_CONFIG_REJECTED,
             ERR_IFL_ALREADY_QUARANTINED,
             ERR_IFL_TIMEOUT,
+            ERR_IFL_SENSITIVE_SOURCE_INVALID,
+            ERR_IFL_SENSITIVE_SOURCE_CONFLICT,
+            ERR_IFL_DECLASSIFICATION_INVALID,
+            ERR_IFL_SINK_POLICY_INVALID,
             ERR_LINEAGE_TAG_MISSING,
             ERR_LINEAGE_FLOW_BROKEN,
             ERR_SENTINEL_RECALL_BELOW_THRESHOLD,
@@ -4371,6 +6106,9 @@ mod tests {
             INV_BOUNDARY_ENFORCED,
             INV_DETERMINISTIC,
             INV_SNAPSHOT_FAITHFUL,
+            INV_SENSITIVE_SOURCE_COMMITMENT,
+            INV_FLOW_LEDGER_IMMUTABLE,
+            INV_DECLASSIFICATION_SCOPED,
         ];
 
         for constant in &invariant_constants {

@@ -244,7 +244,7 @@ mod additional_encoding_edge_tests {
         for &version in &versions {
             let config = ScheduleConfig::new(version);
             let seed = derive_seed(&DomainTag::Scheduling, &hash, &config);
-            deterministic_seed::push_bounded(&mut seeds, seed, 10);
+            push_bounded(&mut seeds, seed, 10);
         }
 
         // All versions should produce different seeds
@@ -284,7 +284,7 @@ mod additional_encoding_edge_tests {
 
         let mut seeds = Vec::new();
         for handle in handles {
-            deterministic_seed::push_bounded(
+            push_bounded(
                 &mut seeds,
                 handle.join().expect("Thread should complete successfully"),
                 10,

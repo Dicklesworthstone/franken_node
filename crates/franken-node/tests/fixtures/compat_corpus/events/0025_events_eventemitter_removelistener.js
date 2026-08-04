@@ -1,0 +1,10 @@
+const {EventEmitter} = require('events');
+const e = new EventEmitter();
+let n = 0;
+const fn = () => n++;
+e.on('d', fn);
+e.on('d', fn);
+e.removeListener('d', fn);
+console.log(e.listenerCount('d'));
+e.emit('d');
+console.log(n);

@@ -1,0 +1,16 @@
+{
+  "success": true,
+  "input": {
+    "raw_bytes_len": 0,
+    "nesting_depth": 0,
+    "decode_cpu_ms": 0
+  },
+  "resource_usage": {
+    "bytes_parsed": 0,
+    "nesting_depth": 0,
+    "cpu_ms": 0
+  },
+  "allowed": true,
+  "violation_count": 0,
+  "test_case": "min_values"
+}

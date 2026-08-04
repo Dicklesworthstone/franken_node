@@ -66,10 +66,16 @@ fn canonicalize_runtime_lane_json(mut value: Value) -> Value {
 
             // Scrub dynamic numeric values that change between runs
             if let Some(Value::Number(_)) = map.get_mut("memory_usage_bytes") {
-                map.insert("memory_usage_bytes".to_string(), Value::String("[MEMORY_USAGE]".to_string()));
+                map.insert(
+                    "memory_usage_bytes".to_string(),
+                    Value::String("[MEMORY_USAGE]".to_string()),
+                );
             }
             if let Some(Value::Number(_)) = map.get_mut("cpu_time_ns") {
-                map.insert("cpu_time_ns".to_string(), Value::String("[CPU_TIME]".to_string()));
+                map.insert(
+                    "cpu_time_ns".to_string(),
+                    Value::String("[CPU_TIME]".to_string()),
+                );
             }
 
             // Recursively canonicalize nested objects and arrays
@@ -94,7 +100,14 @@ fn runtime_lane_status_json_golden() -> Result<(), Box<dyn std::error::Error>> {
     let mut command = Command::cargo_bin("franken-node")?;
     let output = command
         .current_dir(&temp_dir)
-        .args(["runtime", "lane", "status", "--json"])
+        .args([
+            "runtime",
+            "lane",
+            "status",
+            "--json",
+            "--timestamp-ms",
+            "1698768000000",
+        ])
         .assert()
         .success()
         .get_output()
@@ -118,9 +131,13 @@ fn runtime_lane_assign_minimal_task_json_golden() -> Result<(), Box<dyn std::err
     let output = command
         .current_dir(&temp_dir)
         .args([
-            "runtime", "lane", "assign",
+            "runtime",
+            "lane",
+            "assign",
             "epoch_transition",
-            "--json"
+            "--json",
+            "--timestamp-ms",
+            "1698768000000",
         ])
         .assert()
         .success()
@@ -145,10 +162,13 @@ fn runtime_lane_assign_with_timestamp_json_golden() -> Result<(), Box<dyn std::e
     let output = command
         .current_dir(&temp_dir)
         .args([
-            "runtime", "lane", "assign",
+            "runtime",
+            "lane",
+            "assign",
             "log_rotation",
             "--json",
-            "--timestamp-ms", "1698768000000"
+            "--timestamp-ms",
+            "1698768000000",
         ])
         .assert()
         .success()
@@ -173,11 +193,15 @@ fn runtime_lane_assign_with_custom_trace_json_golden() -> Result<(), Box<dyn std
     let output = command
         .current_dir(&temp_dir)
         .args([
-            "runtime", "lane", "assign",
+            "runtime",
+            "lane",
+            "assign",
             "log_rotation",
             "--json",
-            "--trace-id", "test-custom-trace-123",
-            "--timestamp-ms", "1698768000000"
+            "--trace-id",
+            "test-custom-trace-123",
+            "--timestamp-ms",
+            "1698768000000",
         ])
         .assert()
         .success()

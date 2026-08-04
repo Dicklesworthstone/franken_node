@@ -1,0 +1,5 @@
+{
+  "code": "ERR-VEF-CHAIN-TAMPER",
+  "event_code": "VEF-CHAIN-ERR-001",
+  "message": "Hash mismatch detected in chain entry 42"
+}

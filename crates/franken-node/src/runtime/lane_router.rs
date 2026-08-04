@@ -2862,7 +2862,7 @@ mod tests {
         // Test p99 calculation with massive dataset
         let p99 = background_state.metrics.p99_queue_wait_ms();
         assert!(
-            p99.is_finite() as bool,
+            p99 < u64::MAX,
             "P99 calculation should not produce infinite values"
         );
         assert!(p99 > 0, "P99 should be positive with wait samples");
@@ -2979,7 +2979,7 @@ mod tests {
         // Test ActiveOperation debug redaction
         let active_op = ActiveOperation {
             operation_id: "sensitive-active-123".to_string(),
-            lane: ProductLane::Scoring,
+            lane: ProductLane::Realtime,
             permit_id: "sensitive-permit-456".to_string(),
             assigned_at_ms: 3000,
             cx_id: "sensitive-ctx-789".to_string(),
@@ -2993,6 +2993,6 @@ mod tests {
         assert!(!debug_output.contains("sensitive-ctx-789"));
         assert!(!debug_output.contains("sensitive-principal-abc"));
         assert!(debug_output.contains("3000")); // timestamp should remain
-        assert!(debug_output.contains("Scoring")); // lane should remain
+        assert!(debug_output.contains("Realtime")); // lane should remain
     }
 }

@@ -9,4 +9,4 @@ Total test cases: 10
 | bd-2yh/deterministic | 2/2 | 0/0 | 100.0% |
 | bd-2yh/schema | 3/3 | 0/0 | 100.0% |
 | bd-2yh/serialization | 1/1 | 0/0 | 100.0% |
-| bd-2yh/signature | 0/2 | 0/0 | 0.0% |
+| bd-2yh/signature | 2/2 | 0/0 | 100.0% |

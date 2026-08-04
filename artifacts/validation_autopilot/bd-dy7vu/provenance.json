@@ -1,0 +1,23 @@
+{
+  "schema_version": "franken-node/validation-autopilot/transcript-provenance/v1",
+  "bead_id": "bd-dy7vu",
+  "purpose": "Fixture-backed transcript and semantic golden coverage for validation-autopilot operator handoffs.",
+  "fixture_bundle": "tests/fixtures/validation_autopilot/transcript_cases.json",
+  "semantic_golden": "tests/golden/validation_autopilot/transcript_golden.json",
+  "fixed_now": "2026-06-18T15:45:00+00:00",
+  "live_style_inputs": [
+    "br ready --json issue arrays",
+    "br active/blocked issue records",
+    "bv --recipe actionable --robot-plan track records",
+    "normalized RCH evidence records",
+    "Agent Mail handoff context including active agents and reservation scope"
+  ],
+  "regeneration": {
+    "intentional_update_policy": "Update fixture inputs and semantic golden expectations together, preserving exact first_blocker strings and rch exec -- prefixes.",
+    "validation_commands": [
+      "python3 -m py_compile scripts/check_validation_autopilot.py tests/test_check_validation_autopilot.py",
+      "python3 -m unittest tests.test_check_validation_autopilot",
+      "git diff --check"
+    ]
+  }
+}

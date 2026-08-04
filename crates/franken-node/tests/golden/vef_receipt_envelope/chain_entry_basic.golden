@@ -1,0 +1,24 @@
+{
+  "index": 0,
+  "prev_chain_hash": "sha256:[HASH]",
+  "receipt_hash": "sha256:[HASH]",
+  "chain_hash": "sha256:[HASH]",
+  "receipt": {
+    "schema_version": "vef-receipt-chain-v1",
+    "action_type": "artifact_promotion",
+    "capability_context": {
+      "evidence_type": "signature"
+    },
+    "actor_identity": "chain-test-actor",
+    "artifact_identity": "chain-test-artifact",
+    "policy_snapshot_hash": "sha256:chaintest987654",
+    "timestamp_millis": [UNIX_TIMESTAMP],
+    "sequence_number": 5,
+    "witness_references": [
+      "chain-witness"
+    ],
+    "trace_id": "trace-chain-001"
+  },
+  "appended_at_millis": [UNIX_TIMESTAMP],
+  "trace_id": "trace-chain-append-001"
+}

@@ -1,0 +1,10 @@
+---
+source: crates/franken-node/tests/trust_card_cross_version_conformance.rs
+expression: "serde_json::json!({\n    \"legacy_card_correct_key\":\n    verify_card_signature(&legacy_card, key).is_ok(),\n    \"current_card_correct_key\":\n    verify_card_signature(&current_card, key).is_ok(),\n    \"legacy_card_wrong_key\":\n    verify_card_signature(&legacy_card, wrong_key).is_ok(),\n    \"current_card_wrong_key\":\n    verify_card_signature(&current_card, wrong_key).is_ok(),\n})"
+---
+{
+  "legacy_card_correct_key": true,
+  "current_card_correct_key": true,
+  "legacy_card_wrong_key": false,
+  "current_card_wrong_key": false
+}

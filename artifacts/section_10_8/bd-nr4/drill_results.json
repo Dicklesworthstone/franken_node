@@ -5,8 +5,8 @@
   "runbook_title": "Mass Revocation Event",
   "runbook_path": "fixtures/runbooks/rb_002_mass_revocation_event.json",
   "status": "PASS",
-  "started_at": "2026-05-01T05:41:44.763779+00:00",
-  "completed_at": "2026-05-01T05:41:44.763797+00:00",
+  "started_at": "2026-06-18T16:23:37.999813+00:00",
+  "completed_at": "2026-06-18T16:23:37.999819+00:00",
   "steps_executed": 24,
   "required_phases": [
     "containment",

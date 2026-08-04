@@ -10,19 +10,17 @@
 //! Addresses bd-1jybn: replace ad-hoc assertions with comprehensive
 //! fixture validation that catches structural changes.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use frankenengine_node::tools::replay_bundle::{
     EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
-    IncidentEvidencePackage, IncidentSeverity, ReplayBundle,
-    read_bundle_from_path_with_trusted_key, validate_bundle_integrity,
+    IncidentEvidencePackage, IncidentSeverity, read_bundle_from_path_with_trusted_key,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::golden::{assert_golden, assert_scrubbed_golden};
+use crate::golden::assert_scrubbed_golden;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

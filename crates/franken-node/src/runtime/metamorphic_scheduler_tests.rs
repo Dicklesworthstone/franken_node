@@ -148,8 +148,8 @@ mod mr_telemetry_accuracy {
 
         // INV-LANE-TELEMETRY-ACCURATE: Total event counts should be identical
         for event_type in &["ASSIGN", "COMPLETE"] {
-            let orig = original_counts.get(event_type).unwrap_or(&0);
-            let reord = reordered_counts.get(event_type).unwrap_or(&0);
+            let orig = original_counts.get(*event_type).unwrap_or(&0);
+            let reord = reordered_counts.get(*event_type).unwrap_or(&0);
             assert_eq!(
                 orig, reord,
                 "Event count mismatch for {}: original={}, reordered={}",

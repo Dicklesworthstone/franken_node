@@ -3,7 +3,27 @@
 //!
 //! Four tiers: strict, strict_plus, moderate, permissive. The policy
 //! compiler translates a profile into enforceable capability grants.
-//! Downgrades are blocked; profile selection is auditable.
+//! Profile selection is auditable.
+//!
+//! # Both directions of a profile change are gated (bd-4sh1w)
+//!
+//! `level()` runs 0 (Strict) .. 3 (Permissive), so "higher = more permissive".
+//! This module's historical vocabulary calls a move to a *lower* level a
+//! **downgrade** — i.e. a downgrade here means TIGHTENING containment — and
+//! [`ProfileTracker::change_profile`] guards it behind `allow_downgrade`. That
+//! guard is an availability control: tightening a live connector's sandbox can
+//! break it, so it should be deliberate.
+//!
+//! What was missing is the security half. Moving the *other* way had no gate at
+//! all, so a connector pinned to `Strict` could relax itself all the way to
+//! `Permissive` — under which `fs_write`, `process_exec` and `network_access`
+//! all compile to `AccessLevel::Allow` — with `allow_downgrade` still `false`.
+//! The module header used to claim "Downgrades are blocked" while the only
+//! genuinely unguarded transition was the one that grants ambient authority.
+//!
+//! Relaxation now has its own explicit entry point,
+//! [`ProfileTracker::relax_profile`], and `change_profile` refuses it. Neither
+//! direction is free; each states which kind of change is intended.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -63,9 +83,22 @@ impl SandboxProfile {
         }
     }
 
-    /// Check if transition from self to target is a downgrade (blocked).
+    /// True when moving to `target` TIGHTENS containment (a lower level).
+    ///
+    /// Named "downgrade" for the tier ordering, not for security posture: this
+    /// direction removes authority. It is gated because tightening a live
+    /// connector can break it, not because it is dangerous.
     pub fn is_downgrade_to(&self, target: &SandboxProfile) -> bool {
         target.level() < self.level()
+    }
+
+    /// True when moving to `target` RELAXES containment (a higher level).
+    ///
+    /// bd-4sh1w: this is the direction that grants authority — at `Permissive`
+    /// every capability compiles to `AccessLevel::Allow` — and it previously had
+    /// no gate whatsoever. See [`ProfileTracker::relax_profile`].
+    pub fn is_relaxation_to(&self, target: &SandboxProfile) -> bool {
+        target.level() > self.level()
     }
 }
 
@@ -240,7 +273,14 @@ impl ProfileTracker {
         }
     }
 
-    /// Change to a new profile. Downgrades are blocked unless overridden.
+    /// Change to a new profile without granting additional authority.
+    ///
+    /// Tightening (a "downgrade" in this module's tier vocabulary) is blocked
+    /// unless `allow_downgrade` is set. **Relaxation is refused outright** and
+    /// must go through [`Self::relax_profile`] (bd-4sh1w) — passing
+    /// `allow_downgrade: true` does not authorize it, because the two directions
+    /// are guarded for entirely different reasons and one flag cannot express
+    /// both intents.
     pub fn change_profile(
         &mut self,
         new_profile: SandboxProfile,
@@ -248,6 +288,47 @@ impl ProfileTracker {
         timestamp: String,
         allow_downgrade: bool,
     ) -> Result<ProfileAuditRecord, SandboxError> {
+        // Well-formedness first: a request with an empty reason or timestamp is
+        // malformed whichever direction it points, and reporting the direction
+        // gate for it would be misleading.
+        Self::validate_change_inputs(&reason, &timestamp)?;
+        if self.current_profile.is_relaxation_to(&new_profile) {
+            return Err(SandboxError::RelaxationBlocked {
+                current: self.current_profile,
+                requested: new_profile,
+            });
+        }
+        self.apply_profile_change(new_profile, reason, timestamp, allow_downgrade)
+    }
+
+    /// Relax a connector's sandbox to a more permissive profile.
+    ///
+    /// bd-4sh1w: the transition that *grants* authority now needs its own call
+    /// and an explicit operator justification, so it can never happen as an
+    /// unremarked side effect of a `change_profile` that forgot a flag. The
+    /// justification is recorded verbatim in the audit log.
+    ///
+    /// Refuses anything that is not actually a relaxation, so this entry point
+    /// cannot be used as a general-purpose bypass of the tightening guard.
+    pub fn relax_profile(
+        &mut self,
+        new_profile: SandboxProfile,
+        operator_justification: String,
+        timestamp: String,
+    ) -> Result<ProfileAuditRecord, SandboxError> {
+        Self::validate_change_inputs(&operator_justification, &timestamp)?;
+        if !self.current_profile.is_relaxation_to(&new_profile) {
+            return Err(SandboxError::CompileError {
+                reason: format!(
+                    "relax_profile requires a more permissive target; {} -> {} is not a relaxation",
+                    self.current_profile, new_profile
+                ),
+            });
+        }
+        self.apply_profile_change(new_profile, operator_justification, timestamp, false)
+    }
+
+    fn validate_change_inputs(reason: &str, timestamp: &str) -> Result<(), SandboxError> {
         if reason.trim().is_empty() {
             return Err(SandboxError::CompileError {
                 reason: "profile change reason must not be empty".to_string(),
@@ -258,6 +339,17 @@ impl ProfileTracker {
                 reason: "profile change timestamp must not be empty".to_string(),
             });
         }
+        Ok(())
+    }
+
+    fn apply_profile_change(
+        &mut self,
+        new_profile: SandboxProfile,
+        reason: String,
+        timestamp: String,
+        allow_downgrade: bool,
+    ) -> Result<ProfileAuditRecord, SandboxError> {
+        Self::validate_change_inputs(&reason, &timestamp)?;
 
         if self.current_profile.is_downgrade_to(&new_profile) && !allow_downgrade {
             return Err(SandboxError::DowngradeBlocked {
@@ -301,6 +393,15 @@ pub enum SandboxError {
         current: SandboxProfile,
         requested: SandboxProfile,
     },
+    /// A profile change would have GRANTED authority (bd-4sh1w).
+    ///
+    /// Relaxation is not expressible through `change_profile` at all; use
+    /// `ProfileTracker::relax_profile` with an operator justification.
+    #[serde(rename = "SANDBOX_RELAXATION_BLOCKED")]
+    RelaxationBlocked {
+        current: SandboxProfile,
+        requested: SandboxProfile,
+    },
     #[serde(rename = "SANDBOX_PROFILE_UNKNOWN")]
     ProfileUnknown { name: String },
     #[serde(rename = "SANDBOX_POLICY_CONFLICT")]
@@ -320,6 +421,12 @@ impl fmt::Display for SandboxError {
                 write!(
                     f,
                     "SANDBOX_DOWNGRADE_BLOCKED: cannot move from {current} to {requested}"
+                )
+            }
+            Self::RelaxationBlocked { current, requested } => {
+                write!(
+                    f,
+                    "SANDBOX_RELAXATION_BLOCKED: {current} -> {requested} grants authority; use relax_profile with an operator justification"
                 )
             }
             Self::ProfileUnknown { name } => {
@@ -467,6 +574,27 @@ mod tests {
 
     // === Profile tracker ===
 
+    /// Route a profile change to the entry point that matches its direction.
+    ///
+    /// bd-4sh1w split relaxation out of `change_profile`. Tests below whose
+    /// subject is something *other* than the direction gate (audit-log growth,
+    /// input handling, concurrency) just need the transition to happen, so they
+    /// go through this helper. Tests that assert the gates themselves call
+    /// `change_profile` / `relax_profile` directly, on purpose.
+    fn set_profile(
+        tracker: &mut ProfileTracker,
+        target: SandboxProfile,
+        reason: String,
+        timestamp: String,
+        allow_downgrade: bool,
+    ) -> Result<ProfileAuditRecord, SandboxError> {
+        if tracker.current_profile.is_relaxation_to(&target) {
+            tracker.relax_profile(target, reason, timestamp)
+        } else {
+            tracker.change_profile(target, reason, timestamp, allow_downgrade)
+        }
+    }
+
     #[test]
     fn tracker_initial_profile() {
         let t = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
@@ -475,15 +603,29 @@ mod tests {
     }
 
     #[test]
-    fn tracker_upgrade_allowed() {
+    fn tracker_relaxation_requires_its_own_entry_point() {
+        // bd-4sh1w: was `tracker_upgrade_allowed`, which asserted that
+        // Strict -> Moderate succeeded through `change_profile` with
+        // `allow_downgrade: false` — the unguarded authority-granting path.
         let mut t = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
-        let audit = t
+        let err = t
             .change_profile(
                 SandboxProfile::Moderate,
                 "needs network".into(),
                 "t".into(),
                 false,
             )
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::RelaxationBlocked { .. }));
+        assert_eq!(t.current_profile, SandboxProfile::Strict);
+        assert_eq!(
+            t.audit_log.len(),
+            1,
+            "a refused change records no audit entry"
+        );
+
+        let audit = t
+            .relax_profile(SandboxProfile::Moderate, "needs network".into(), "t".into())
             .unwrap();
         assert_eq!(audit.new_profile, SandboxProfile::Moderate);
         assert_eq!(t.current_profile, SandboxProfile::Moderate);
@@ -962,12 +1104,20 @@ mod tests {
                 capability: malicious_cap.to_string(),
                 access: AccessLevel::Deny,
             });
-            // Should not confuse capability matching
-            let result = validate_policy(&policy);
-            assert!(
-                result.is_ok(),
-                "Unicode in capability should not break validation"
-            );
+            // Validation must handle the injection safely without panicking, and must
+            // never silently alias a standard capability. Prod trims and rejects
+            // capability names padded with Unicode whitespace (e.g. U+2028 LINE
+            // SEPARATOR / U+2029), so a clean fail-closed CompileError is also valid.
+            match validate_policy(&policy) {
+                Ok(()) => assert!(
+                    !CAPABILITIES.contains(malicious_cap),
+                    "injected capability must not alias a standard capability"
+                ),
+                Err(SandboxError::CompileError { .. }) => {}
+                Err(other) => {
+                    panic!("Unicode in capability produced an unexpected error: {other}")
+                }
+            }
         }
     }
 
@@ -978,13 +1128,15 @@ mod tests {
         let mut tracker = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
 
         // Attempt memory exhaustion by rapidly changing profiles to fill audit log
-        for i in 0..MAX_AUDIT_LOG_ENTRIES.saturating_mul(3) {
+        let total_changes = MAX_AUDIT_LOG_ENTRIES.saturating_mul(3);
+        for i in 0..total_changes {
             let profile = if i % 2 == 0 {
                 SandboxProfile::Moderate
             } else {
                 SandboxProfile::Strict
             };
-            let result = tracker.change_profile(
+            let result = set_profile(
+                &mut tracker,
                 profile,
                 format!("change_{}", i),
                 format!("ts_{}", i),
@@ -996,23 +1148,19 @@ mod tests {
             );
         }
 
-        // Audit log should be bounded to MAX_AUDIT_LOG_ENTRIES
-        assert!(
-            tracker.audit_log.len() <= MAX_AUDIT_LOG_ENTRIES,
-            "Audit log exceeded maximum capacity: {} > {}",
+        // SECURITY (bd-2n0k4): the audit log is intentionally UNBOUNDED so that
+        // security audit events are NEVER silently dropped. Flooding it must not
+        // evict prior records, so every change is retained: the initial assignment
+        // plus one record per profile change.
+        assert_eq!(
             tracker.audit_log.len(),
-            MAX_AUDIT_LOG_ENTRIES
+            total_changes.saturating_add(1),
+            "Every audit event must be retained under flooding (no silent drop)"
         );
 
-        // Verify oldest entries were evicted (FIFO behavior)
-        if tracker.audit_log.len() == MAX_AUDIT_LOG_ENTRIES {
-            let oldest_reason = &tracker.audit_log[0].reason;
-            assert!(
-                !oldest_reason.contains("change_0"),
-                "Oldest entries should have been evicted, found: {}",
-                oldest_reason
-            );
-        }
+        // The oldest entries must survive the flood (no FIFO eviction of evidence).
+        assert_eq!(tracker.audit_log[0].reason, "initial assignment");
+        assert_eq!(tracker.audit_log[1].reason, "change_0");
     }
 
     #[test]
@@ -1028,14 +1176,20 @@ mod tests {
         );
         assert!(matches!(result, Err(SandboxError::DowngradeBlocked { .. })));
 
-        // Multi-step downgrade attempts through intermediate levels
+        // Multi-step downgrade attempts through intermediate levels are also blocked:
+        // from Permissive (most permissive, level 3) moving to the more-restrictive
+        // Moderate (level 2) is itself a downgrade and must not succeed without an
+        // explicit override.
         let result1 = tracker.change_profile(
             SandboxProfile::Moderate,
             "step1".into(),
             "ts1".into(),
             false,
         );
-        assert!(result1.is_ok(), "Upgrade should succeed");
+        assert!(
+            matches!(result1, Err(SandboxError::DowngradeBlocked { .. })),
+            "Intermediate downgrade step should be blocked"
+        );
 
         let result2 =
             tracker.change_profile(SandboxProfile::Strict, "step2".into(), "ts2".into(), false);
@@ -1044,9 +1198,9 @@ mod tests {
             "Subsequent downgrade should still be blocked"
         );
 
-        // Verify state consistency after blocked attempts
-        assert_eq!(tracker.current_profile, SandboxProfile::Moderate);
-        assert_eq!(tracker.compiled_policy.profile, SandboxProfile::Moderate);
+        // Verify state consistency after blocked attempts: profile is unchanged.
+        assert_eq!(tracker.current_profile, SandboxProfile::Permissive);
+        assert_eq!(tracker.compiled_policy.profile, SandboxProfile::Permissive);
 
         // Override flag should allow downgrade with explicit permission
         let result3 = tracker.change_profile(
@@ -1128,7 +1282,8 @@ mod tests {
         let mut tracker = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
 
         for malicious_reason in &malicious_reasons {
-            let result = tracker.change_profile(
+            let result = set_profile(
+                &mut tracker,
                 SandboxProfile::Moderate,
                 malicious_reason.to_string(),
                 "2026-04-17T00:00:00Z".into(),
@@ -1177,14 +1332,16 @@ mod tests {
                         _ => SandboxProfile::Permissive,
                     };
 
-                    let result = try_lock(&tracker_clone, "change sandbox profile concurrently")
-                        .expect("sandbox profile tracker mutex should not be poisoned")
-                        .change_profile(
-                            profile,
-                            format!("thread_{}_change_{}", thread_id, i),
-                            format!("ts_{}_{}", thread_id, i),
-                            true, // allow downgrades for test
-                        );
+                    let mut guard = try_lock(&tracker_clone, "change sandbox profile concurrently")
+                        .expect("sandbox profile tracker mutex should not be poisoned");
+                    let result = set_profile(
+                        &mut guard,
+                        profile,
+                        format!("thread_{}_change_{}", thread_id, i),
+                        format!("ts_{}_{}", thread_id, i),
+                        true, // allow downgrades for test
+                    );
+                    drop(guard);
 
                     // All changes should succeed or fail cleanly
                     assert!(result.is_ok(), "Concurrent profile change should succeed");
@@ -1332,7 +1489,8 @@ mod tests {
         ];
 
         for (connector_suffix, reason, timestamp) in &malicious_inputs {
-            let result = tracker.change_profile(
+            let result = set_profile(
+                &mut tracker,
                 SandboxProfile::Moderate,
                 reason.to_string(),
                 timestamp.to_string(),
@@ -1361,7 +1519,8 @@ mod tests {
 
         // Test audit log bounds under injection pressure
         let long_reason = "x".repeat(10_000); // Very long reason
-        let result = tracker.change_profile(
+        let result = set_profile(
+            &mut tracker,
             SandboxProfile::Moderate,
             long_reason.clone(),
             "ts".into(),
@@ -1378,9 +1537,12 @@ mod tests {
 
         let mut tracker = ProfileTracker::new("conn-initial".into(), SandboxProfile::Strict);
 
-        // Fill audit log exactly to capacity
+        // Record one transition per iteration. The audit log is intentionally
+        // UNBOUNDED (bd-2n0k4: security audit events must never be silently
+        // dropped), so it grows monotonically with no FIFO eviction.
         for i in 1..MAX_AUDIT_LOG_ENTRIES {
-            let result = tracker.change_profile(
+            let result = set_profile(
+                &mut tracker,
                 if i % 2 == 0 {
                     SandboxProfile::Moderate
                 } else {
@@ -1390,17 +1552,20 @@ mod tests {
                 format!("ts_{}", i),
                 true,
             );
-            assert!(result.is_ok(), "Should fill audit log without error");
+            assert!(result.is_ok(), "Should record audit entry without error");
         }
 
+        // 1 initial assignment + (MAX - 1) recorded transitions.
         assert_eq!(tracker.audit_log.len(), MAX_AUDIT_LOG_ENTRIES);
 
-        // Verify FIFO eviction behavior
+        // FIFO append order: the oldest entry stays at the head (never evicted).
         let first_entry_reason = tracker.audit_log[0].reason.clone();
         assert_eq!(first_entry_reason, "initial assignment");
 
-        // Add one more entry to trigger eviction
-        let overflow_result = tracker.change_profile(
+        // Add one more entry; because the log is unbounded it GROWS rather than
+        // evicting the oldest record.
+        let overflow_result = set_profile(
+            &mut tracker,
             SandboxProfile::Permissive,
             "overflow_trigger".into(),
             "overflow_ts".into(),
@@ -1408,14 +1573,18 @@ mod tests {
         );
 
         assert!(overflow_result.is_ok(), "Overflow entry should succeed");
-        assert_eq!(tracker.audit_log.len(), MAX_AUDIT_LOG_ENTRIES);
+        assert_eq!(
+            tracker.audit_log.len(),
+            MAX_AUDIT_LOG_ENTRIES + 1,
+            "Audit log is unbounded: the extra event is retained, not evicted"
+        );
 
-        // Initial entry should be evicted, first entry should now be "fill_entry_1"
+        // The oldest entry must NOT be evicted under append pressure.
         let new_first_entry = &tracker.audit_log[0];
-        assert_eq!(new_first_entry.reason, "fill_entry_1");
+        assert_eq!(new_first_entry.reason, "initial assignment");
 
-        // Last entry should be the overflow trigger
-        let last_entry = &tracker.audit_log[MAX_AUDIT_LOG_ENTRIES - 1];
+        // The newest entry, appended at the tail, is the overflow trigger.
+        let last_entry = tracker.audit_log.last().unwrap();
         assert_eq!(last_entry.reason, "overflow_trigger");
 
         // Test zero capacity edge case

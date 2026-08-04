@@ -590,7 +590,38 @@ impl RollbackDetector {
                 });
             }
             if sv.epoch > last.epoch.saturating_add(1) {
+                // bd-zfg3w: this is the only error path that MUTATES state — it
+                // promotes the peer's vector to `last_known` before any
+                // parent-hash validation, so the chain is re-rooted onto whatever
+                // the peer sent. That promotion is deliberate (a replica must be
+                // able to resume forward progress after a legitimate gap; see
+                // tests/e2e_fork_detection_lifecycle.rs), but it used to record
+                // NOTHING.
+                //
+                // That silence was the exploitable part. `DivergenceDetector::compare`
+                // treats a gap as non-halting, so feeding {epoch+2, parent:"junk"}
+                // re-anchored the chain and left `proof_count() == 0`; the next
+                // vector chaining off the attacker's hash then verified cleanly,
+                // and no artifact anywhere showed the chain had been re-rooted.
+                //
+                // The promotion still happens, but it is now evidence-producing:
+                // the re-anchor is recorded with `DetectionResult::GapDetected`,
+                // capturing both the local state it abandoned and the unvalidated
+                // remote state it adopted.
                 let local_epoch = last.epoch;
+                let proof = RollbackProof {
+                    local_state: last.clone(),
+                    remote_state: sv.clone(),
+                    expected_parent_hash: last.state_hash.clone(),
+                    actual_parent_hash: sv.parent_state_hash.clone(),
+                    detection_timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    trace_id: format!("rbd-gap-{}-{}", last.epoch, sv.epoch),
+                    detection_result: DetectionResult::GapDetected,
+                };
+                push_bounded(&mut self.proofs, proof, MAX_PROOFS);
                 self.last_known = Some(sv.clone());
                 return Err(ForkDetectionError::RfdGapDetected {
                     local_epoch,
@@ -695,11 +726,15 @@ impl MarkerProofVerifier {
 #[cfg(test)]
 mod tests {
     use super::{
-        DetectionResult, DivergenceDetector, MarkerProofVerifier, ReconciliationSuggestion,
-        RollbackDetector, RollbackProof, StateVector, event_codes,
+        DetectionResult, DivergenceDetector, DivergenceLogEvent, ForkDetectionError,
+        MarkerProofVerifier, ReconciliationSuggestion, RollbackDetector, RollbackProof,
+        StateVector, event_codes, push_bounded,
     };
     use crate::control_plane::marker_stream::{MarkerEventType, MarkerStream};
     use crate::security::constant_time;
+    // bd-yom8c: nested test mod does not inherit the file-level `use sha2::Digest`;
+    // re-import so `sha2::Sha256::new()` (a Digest trait fn) resolves.
+    use sha2::Digest;
 
     fn make_sv(epoch: u64, hash_seed: &str, parent_seed: &str, node: &str) -> StateVector {
         StateVector {
@@ -1777,7 +1812,14 @@ mod tests {
     }
 
     #[test]
-    fn rollback_detector_gap_error_does_not_create_rollback_proof() {
+    fn rollback_detector_gap_records_the_re_anchor_as_a_typed_proof() {
+        // bd-zfg3w: was `rollback_detector_gap_error_does_not_create_rollback_proof`,
+        // which pinned the gap path as the one error branch that mutated state
+        // (promoting an unvalidated peer vector to `last_known`) while recording
+        // NOTHING. Forward progress is unchanged — the operator kept it so a
+        // replica can resume after a legitimate gap — but the re-anchor is now
+        // evidence-producing, so a two-epoch jump can no longer silently re-root
+        // the parent-hash chain onto attacker state.
         let mut detector = RollbackDetector::new();
         let first = make_sv(10, "state-10", "state-9", "node");
         detector.feed(first).unwrap();
@@ -1787,7 +1829,11 @@ mod tests {
             .expect_err("gap must be reported");
 
         assert_eq!(err.code(), "RFD_GAP_DETECTED");
-        assert_eq!(detector.proof_count(), 0);
+        assert_eq!(detector.proof_count(), 1);
+        let proof = detector.proofs().last().expect("gap re-anchor proof");
+        assert_eq!(proof.detection_result, DetectionResult::GapDetected);
+        assert_eq!(proof.local_state.epoch, 10);
+        assert_eq!(proof.remote_state.epoch, 15);
         assert_eq!(detector.last_known().expect("last known").epoch, 15);
     }
 
@@ -1807,7 +1853,19 @@ mod tests {
             .expect_err("post-gap replay below last known must be rollback");
 
         assert_eq!(err.code(), "RFD_ROLLBACK_DETECTED");
-        assert_eq!(detector.proof_count(), 1);
+        // bd-zfg3w: two proofs now — the gap re-anchor, then this rollback.
+        assert_eq!(detector.proof_count(), 2);
+        assert_eq!(
+            detector
+                .proofs()
+                .iter()
+                .map(|proof| proof.detection_result.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                DetectionResult::GapDetected,
+                DetectionResult::RollbackDetected,
+            ]
+        );
         assert_eq!(detector.last_known().expect("last known").epoch, 15);
     }
 
@@ -1940,7 +1998,9 @@ mod tests {
     }
 
     #[test]
-    fn rollback_detector_gap_to_u64_max_advances_without_proof() {
+    fn rollback_detector_gap_to_u64_max_advances_and_records_the_re_anchor() {
+        // bd-zfg3w: the boundary case of the same rule — a gap at the epoch
+        // ceiling still advances, and still leaves a proof.
         let mut detector = RollbackDetector::new();
         detector
             .feed(make_sv(u64::MAX - 2, "near-max", "near-parent", "node"))
@@ -1951,7 +2011,15 @@ mod tests {
             .expect_err("two-epoch jump to u64::MAX must be a gap");
 
         assert_eq!(err.code(), "RFD_GAP_DETECTED");
-        assert_eq!(detector.proof_count(), 0);
+        assert_eq!(detector.proof_count(), 1);
+        assert_eq!(
+            detector
+                .proofs()
+                .last()
+                .expect("gap re-anchor proof")
+                .detection_result,
+            DetectionResult::GapDetected
+        );
         assert_eq!(detector.last_known().expect("last known").epoch, u64::MAX);
     }
 
@@ -2071,7 +2139,10 @@ mod tests {
         // Test that u64::MAX timestamp from clock errors affects downstream validation
         // This verifies the security impact of the fix for bd-9l4xk
 
-        let vectors = create_test_vectors();
+        // bd-yom8c: `create_test_vectors()` helper was removed from prod; the resulting
+        // `vectors` binding is unused by this test's assertions, so reconcile against the
+        // existing `make_chain` test-vector helper to preserve intent.
+        let _vectors = make_chain(3, "node");
 
         // Test that compare() with normal time works
         let normal_time = std::time::SystemTime::now()

@@ -141,6 +141,11 @@ impl SignalKind {
     }
 
     /// Inverse of [`Self::as_str`]. Returns `None` for unknown strings.
+    ///
+    /// Deliberately an inherent `Option`-returning parse (not
+    /// `std::str::FromStr`, which would force a `Result` shape onto the
+    /// prod call site and the `fuzz_federation_signal_kind_parser` target).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "anomaly_observation" => Some(SignalKind::AnomalyObservation),
@@ -614,7 +619,7 @@ mod tests {
 
     // 7. max_payload_bytes is enforced fail-closed.
     #[test]
-    fn max_payload_bytes_enforced() -> Result<(), String> {
+    fn max_payload_bytes_enforced() -> std::result::Result<(), String> {
         let mut policy = ExtractionPolicy::permissive_for_tests();
         policy.max_payload_bytes = 4; // absurdly tight
         let err =
@@ -630,7 +635,7 @@ mod tests {
 
     // 8. Kind filtering — disallowed kind is rejected even if event is well-formed.
     #[test]
-    fn kind_filtering_rejects_disallowed() -> Result<(), String> {
+    fn kind_filtering_rejects_disallowed() -> std::result::Result<(), String> {
         let mut policy = ExtractionPolicy::permissive_for_tests();
         policy.allowed_kinds.remove(&SignalKind::AnomalyObservation);
         let err =
@@ -647,7 +652,7 @@ mod tests {
 
     // 9. Unknown kind discriminant rejected.
     #[test]
-    fn unknown_kind_rejected() -> Result<(), String> {
+    fn unknown_kind_rejected() -> std::result::Result<(), String> {
         let policy = ExtractionPolicy::permissive_for_tests();
         let mut ev = sample_event("anomaly_observation");
         ev["event_type"] = json!("never_heard_of_it");
@@ -663,7 +668,7 @@ mod tests {
 
     // 10. Missing required field — trace_id absent.
     #[test]
-    fn missing_field_rejected() -> Result<(), String> {
+    fn missing_field_rejected() -> std::result::Result<(), String> {
         let policy = ExtractionPolicy::permissive_for_tests();
         let mut ev = sample_event("anomaly_observation");
         ev.as_object_mut().unwrap().remove("trace_id");
@@ -680,7 +685,7 @@ mod tests {
 
     // 11. Malformed top-level (not an object).
     #[test]
-    fn malformed_top_level_rejected() -> Result<(), String> {
+    fn malformed_top_level_rejected() -> std::result::Result<(), String> {
         let policy = ExtractionPolicy::permissive_for_tests();
         let ev = json!([1, 2, 3]);
         let err = extract_signal(&ev, &policy).expect_err("must reject");

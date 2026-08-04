@@ -65,6 +65,7 @@ fn restricted_to_normal_recovery_receipt_count(engine: &VefDegradedModeEngine) -
         .count()
 }
 
+#[test]
 fn recovery_window_nonrecovering_insertion_preserves_degraded_commit_metamorphic() {
     let restricted = restricted_metrics();
     let healthy = ProofLagMetrics::healthy();
@@ -92,6 +93,7 @@ fn recovery_window_nonrecovering_insertion_preserves_degraded_commit_metamorphic
     assert_eq!(restricted_to_normal_recovery_receipt_count(&mutated), 0);
 }
 
+#[test]
 fn action_policy_and_event_code_contract_metamorphic() {
     let restricted = restricted_metrics();
     let config = VefDegradedModeConfig::default();
@@ -130,7 +132,19 @@ fn action_policy_and_event_code_contract_metamorphic() {
     assert_eq!(health_check.mode, VefMode::Quarantine);
 }
 
-fn main() {
-    recovery_window_nonrecovering_insertion_preserves_degraded_commit_metamorphic();
-    action_policy_and_event_code_contract_metamorphic();
-}
+// bd-8m3oc: this file used to carry a hand-rolled `fn main()` that called the two
+// metamorphic checks directly, and Cargo.toml registered it BOTH as a
+// `[[bin]] vef-degraded-mode-metamorphic` (no required-features) and as a
+// `[[test]] vef_degraded_mode_metamorphic` (required-features =
+// ["advanced-features"]) over the same path — which cargo warned about on every
+// build of the workspace.
+//
+// The warning was the smaller half of the problem. Neither registration ran the
+// two METAMORPHIC checks this file exists for: they carried no `#[test]`
+// attribute, so under the `[[test]]` target libtest's generated main never
+// called them and `fn main` sat dead, and nothing ever executed the `[[bin]]`.
+// (The 65 inline tests inside the `#[path]`-included `vef_degraded_mode` module
+// below did run, which is why the gap was easy to miss — the target reported a
+// healthy test count that contained none of this file's own assertions.)
+// Marking both checks `#[test]` and dropping the duplicate `[[bin]]`
+// registration removes the warning and takes the target from 65 to 67.

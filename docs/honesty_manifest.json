@@ -1,0 +1,76 @@
+{
+  "claims": [
+    {
+      "claim_id": "integration_tests_run_by_cargo_test",
+      "evidence_digest": "sha256:c9bfe3d75c89c60e214c940659a1311d931719d7063303680b51108dbd17dc0e",
+      "kind": "count",
+      "readme_claim": "~3.8k e2e (badge + Testing section)",
+      "readme_value": 3750,
+      "recomputed_value": 3756,
+      "tolerance_bp": 3000
+    },
+    {
+      "claim_id": "inline_tests_behind_inline_lane",
+      "evidence_digest": "sha256:69e5e3e1c09aeef10613b2f4b556b0f937c7142623ff2cfad432b5f986499a1c",
+      "kind": "count",
+      "readme_claim": "~21k inline (badge + Testing section)",
+      "readme_value": 21610,
+      "recomputed_value": 21621,
+      "tolerance_bp": 3000
+    },
+    {
+      "claim_id": "fuzz_targets_registered",
+      "evidence_digest": "sha256:94470751141e9e1f5cd557623d35d0b91b5b63633defb52bd95f7aa553d0bfe2",
+      "kind": "count",
+      "readme_claim": "146 registered cargo-fuzz harnesses",
+      "readme_value": 146,
+      "recomputed_value": 146,
+      "tolerance_bp": 2000
+    },
+    {
+      "claim_id": "validators",
+      "evidence_digest": "sha256:7716103173dea522d76be15e4dde6132ae9ac0d62df76e748bf65f8b79f2330f",
+      "kind": "count",
+      "readme_claim": "430+ / ~436 scripts/check_*.py",
+      "readme_value": 437,
+      "recomputed_value": 437,
+      "tolerance_bp": 2000
+    },
+    {
+      "claim_id": "unsafe_blocks",
+      "evidence_digest": "sha256:52bc0763fc01de2da56db0ef08f7de99457cfb7e94f8bed63d4e3b68be7d58bd",
+      "kind": "exact",
+      "readme_claim": "0 (#![forbid(unsafe_code)])",
+      "readme_value": 0,
+      "recomputed_value": 0,
+      "tolerance_bp": 0
+    },
+    {
+      "claim_id": "license",
+      "evidence_digest": "sha256:bd124b5c83eddec170a0e30cf20192da93254879f60bea72f93f6c3b42d36d55",
+      "kind": "string",
+      "readme_claim": "MIT + OpenAI/Anthropic Rider",
+      "readme_value": "LicenseRef-MIT-OpenAI-Anthropic-Rider",
+      "recomputed_value": "LicenseRef-MIT-OpenAI-Anthropic-Rider",
+      "tolerance_bp": 0
+    },
+    {
+      "claim_id": "replay_verdict_load_bearing",
+      "evidence_digest": "sha256:c227c732bc1d2ec4d7dd4076159e53d9a7f336cd8ef843afdb2c44ad139a1f34",
+      "kind": "bool",
+      "readme_claim": "incident replay is integrity-verified / load-bearing (bd-5r99w.3)",
+      "readme_value": true,
+      "recomputed_value": true,
+      "tolerance_bp": 0
+    }
+  ],
+  "corpus_digest": "sha256:89ddb94f6fef61e42bc15a9948c1c32bc873ec181a01ca0321102ae0f1f1e837",
+  "generated_at": "1970-01-01T00:00:00Z",
+  "schema_version": "franken-node/honesty-manifest/v1",
+  "signature": {
+    "algorithm": "ed25519",
+    "signature_hex": "386e48b781a0a499628c2afb24d9b6c6ddff5a7425d113115cb5f794ddb0685805b7c03239afcc848cf3607031dc8e1fd66426b753aab0cdb14498cf6158ec01",
+    "signer_key_id": "franken-node-honesty-manifest-harness-v1",
+    "signer_public_key_hex": "4167956643ed517314715a1aaf53daafcc52baa05ef36cc4295a1a1a65f769fa"
+  }
+}

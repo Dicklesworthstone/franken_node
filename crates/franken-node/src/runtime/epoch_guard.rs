@@ -1210,20 +1210,13 @@ mod tests {
         ];
 
         for (byte_index, description) in corruption_tests {
-            let mut corrupted_artifact = valid_artifact.clone();
+            let corrupted_artifact = valid_artifact.clone();
 
             // Access signature bytes and corrupt one bit
-            let signature_bytes = corrupted_artifact.signature.as_bytes();
-            let mut new_signature_bytes = signature_bytes.to_vec();
-            if byte_index < new_signature_bytes.len() {
-                new_signature_bytes[byte_index] ^= 0x01; // Flip lowest bit
+            let mut corrupted_signature = corrupted_artifact.signature.clone();
+            if byte_index < corrupted_signature.bytes.len() {
+                corrupted_signature.bytes[byte_index] ^= 0x01; // Flip lowest bit
             }
-
-            // Create new signature from corrupted bytes
-            let corrupted_signature = match Signature::from_bytes(&new_signature_bytes) {
-                Ok(sig) => sig,
-                Err(_) => continue, // Skip if signature format is completely invalid
-            };
 
             // Create artifact with corrupted signature
             let test_artifact = EpochTaggedArtifact {
@@ -1367,16 +1360,17 @@ mod tests {
     /// Test saturating_add protection on epoch counters and sequence numbers
     #[test]
     fn hardening_saturating_add_epoch_counters() {
-        let guard = EpochGuard::new();
+        let guard = EpochGuard::new(1);
 
         // Test near-overflow epoch arithmetic
-        let near_max_epoch = ControlEpoch::new(u32::MAX - 10);
-        let max_epoch = ControlEpoch::new(u32::MAX);
+        let _near_max_epoch = ControlEpoch::new(u64::from(u32::MAX) - 10);
+        let _max_epoch = ControlEpoch::new(u64::from(u32::MAX));
 
         // Test epoch arithmetic that should use saturating_add
         let mut counter = u64::MAX - 5;
 
         // Simulate counter increment operations that should use saturating_add
+        let counter_source = StaticEpochSource::available(ControlEpoch::new(0));
         for i in 0..10 {
             let old_counter = counter;
             counter = counter.saturating_add(1); // This is the correct pattern
@@ -1386,7 +1380,12 @@ mod tests {
 
             // Test epoch validation with high counter values
             let artifact_id = format!("artifact-counter-{}", i);
-            let result = guard.validate_artifact_id(&artifact_id);
+            let result = guard.validate_artifact_epoch(
+                &artifact_id,
+                ControlEpoch::new(0),
+                &counter_source,
+                "trace-counter",
+            );
             assert!(
                 result.is_ok(),
                 "High counter values should be handled safely"
@@ -1404,7 +1403,7 @@ mod tests {
         let base_epoch = u32::MAX - 100;
         for increment in 0..200 {
             let epoch_value = base_epoch.saturating_add(increment);
-            let test_epoch = ControlEpoch::new(epoch_value);
+            let _test_epoch = ControlEpoch::new(u64::from(epoch_value));
 
             // Should handle near-overflow epoch values gracefully
             let guard_event = EpochGuardEvent {
@@ -1426,15 +1425,15 @@ mod tests {
     fn hardening_constant_time_hash_comparison() {
         use crate::security::constant_time;
 
-        let guard = EpochGuard::new();
-        let root_secret = RootSecret::generate_for_test();
+        let _guard = EpochGuard::new(1);
+        let root_secret = root_secret();
 
         // Test signature verification uses constant-time comparison
         let artifact_data = b"test-artifact-for-ct-comparison";
         let epoch = ControlEpoch::new(42);
 
         // Generate legitimate signature
-        let signature = sign_epoch_artifact(&root_secret, &epoch, artifact_data).unwrap();
+        let _signature = sign_epoch_artifact(artifact_data, epoch, "trust", &root_secret).unwrap();
 
         // Test byte-by-byte constant-time comparison directly
         let hash_a = b"hash-value-a-32-bytes-long-test!";
@@ -1473,7 +1472,7 @@ mod tests {
     /// Test fail-closed expiry checks using >= instead of >
     #[test]
     fn hardening_fail_closed_expiry_checks() {
-        let guard = EpochGuard::new();
+        let _guard = EpochGuard::new(1);
 
         // Test epoch expiry boundary conditions
         let current_time = 1000u64;
@@ -1517,7 +1516,7 @@ mod tests {
     /// Test safe length casting using u32::try_from instead of as u32
     #[test]
     fn hardening_safe_length_casting() {
-        let guard = EpochGuard::new();
+        let guard = EpochGuard::new(1);
 
         // Test artifact ID length validation with safe casting
         let test_artifacts = vec![
@@ -1528,6 +1527,7 @@ mod tests {
             "w".repeat(100000), // Very long artifact ID
         ];
 
+        let source = StaticEpochSource::available(ControlEpoch::new(0));
         for artifact in test_artifacts {
             let artifact_len = artifact.len();
 
@@ -1554,7 +1554,12 @@ mod tests {
             }
 
             // Test artifact validation with length-aware logic
-            let validation_result = guard.validate_artifact_id(&artifact);
+            let validation_result = guard.validate_artifact_epoch(
+                &artifact,
+                ControlEpoch::new(0),
+                &source,
+                "trace-length",
+            );
             match validation_result {
                 Ok(_) => {
                     // Artifact accepted despite length

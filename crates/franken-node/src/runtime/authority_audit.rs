@@ -1882,7 +1882,9 @@ mod authority_audit_comprehensive_negative_tests {
     fn negative_risk_level_and_capability_enum_serialization_tampering() {
         // Test RiskLevel with invalid serialization attempts
         let invalid_risk_levels = [
-            "\"Critical\"",   // Wrong case
+            // RiskLevel derives serde's default PascalCase representation ("Critical" is the
+            // VALID form), so the genuinely-invalid "wrong case" example is lowercase.
+            "\"critical\"",   // Wrong case (lowercase; enum is PascalCase)
             "\"CRITICAL\"",   // All caps
             "\"ultra_high\"", // Non-existent level
             "\"\"",           // Empty string
@@ -1904,7 +1906,9 @@ mod authority_audit_comprehensive_negative_tests {
 
         // Test Capability with invalid serialization attempts
         let invalid_capabilities = [
-            "\"KeyAccess\"",          // Wrong case
+            // Capability derives serde's default PascalCase representation ("KeyAccess" is the
+            // VALID form), so the genuinely-invalid "wrong case" example is lowercase.
+            "\"keyaccess\"",          // Wrong case (lowercase; enum is PascalCase)
             "\"KEY_ACCESS\"",         // Wrong format
             "\"unknown_capability\"", // Non-existent
             "\"network-egress\"",     // Wrong separator
@@ -2082,7 +2086,10 @@ mod authority_audit_comprehensive_negative_tests {
         // Verify final state consistency
         let guard = crate::lock_utils::try_lock(guard.as_ref(), "authority audit final guard")
             .expect("authority audit final guard lock should not be poisoned");
-        assert_eq!(guard.events().len(), MAX_EVENTS); // Should be bounded
+        // Should be bounded. Capacity migration raised MAX_EVENTS above the number of events
+        // this stress run produces (800 ops), so the log is bounded but not saturated; assert
+        // the bound (<=) rather than exact saturation, matching the violations check below.
+        assert!(guard.events().len() <= MAX_EVENTS);
         assert!(guard.violations().len() <= MAX_VIOLATIONS); // Should be bounded
         assert!(guard.inventory.module_count() >= 8); // Original modules + some added
     }

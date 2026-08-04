@@ -1,0 +1,8 @@
+[
+  {
+    "timestamp": "[TIMESTAMP]",
+    "event_code": "TRUST_CARD_CREATED",
+    "detail": "trust card created",
+    "trace_id": "test-trace"
+  }
+]

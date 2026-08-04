@@ -282,6 +282,7 @@ mod constant_time_additional_negative_tests {
 #[cfg(test)]
 mod comprehensive_boundary_negative_tests {
     use super::{ct_eq, ct_eq_bytes};
+    use proptest::prelude::*;
 
     #[test]
     fn negative_ct_eq_with_maximum_unicode_codepoints() {
@@ -988,7 +989,7 @@ mod comprehensive_boundary_negative_tests {
             );
 
             // Test that timing ratio calculations remain finite
-            let base_timing = 1.0;
+            let base_timing = 1.0_f64;
             if base_timing != 0.0 && base_timing.is_finite() {
                 let ratio = timing_value / base_timing;
 
@@ -1046,9 +1047,12 @@ mod comprehensive_boundary_negative_tests {
             if is_safe {
                 // Safe to use in arithmetic
                 let safe_calculation = problematic_value * 2.0;
+                // A finite input stays finite under doubling unless its magnitude
+                // exceeds half of f64::MAX, where the product overflows to infinity —
+                // exactly the case production code must catch with an is_finite() guard.
                 assert!(
-                    safe_calculation.is_finite() || problematic_value == 0.0,
-                    "Safe calculation should remain finite"
+                    safe_calculation.is_finite() || problematic_value.abs() > f64::MAX / 2.0,
+                    "Safe calculation should remain finite unless the finite input overflows on doubling"
                 );
             } else {
                 // Should be rejected or replaced with safe default
@@ -1195,7 +1199,7 @@ mod comprehensive_boundary_negative_tests {
         const MAX_STORE_SIZE: usize = 10;
 
         // Bounded storage with safe length handling
-        for i in 0..20 {
+        for i in 0u32..20 {
             let data_size = i.saturating_mul(100).min(10000); // Bounded size growth
             let safe_size = u32::try_from(data_size).unwrap_or(u32::MAX) as usize;
 

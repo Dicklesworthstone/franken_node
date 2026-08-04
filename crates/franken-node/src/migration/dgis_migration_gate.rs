@@ -1709,10 +1709,14 @@ mod dgis_migration_gate_hardening_negative_tests {
         };
 
         // Test cases: (threshold_name, projected_risk, thresholds, should_be_allowed)
+        // FIXME(bd-o776s): projected_risk 0.15 yields cascade delta 0.15 - 0.05 =
+        // 0.09999999999999999 in f64, which is just UNDER the 0.1 threshold, so the gate
+        // (correctly, with `>=`) admits it — contradicting the "exceeds bounds" intent. Use
+        // 0.2 (delta ~0.15) so the case unambiguously exceeds the threshold.
         let test_cases = vec![
             // Valid values should work normally
             ("valid_within_bounds", 0.08, valid_thresholds, true),
-            ("valid_exceeds_bounds", 0.15, valid_thresholds, false),
+            ("valid_exceeds_bounds", 0.2, valid_thresholds, false),
             // NaN threshold should fail-closed (always reject)
             ("nan_threshold_low_input", 0.01, nan_thresholds, false),
             ("nan_threshold_high_input", 0.15, nan_thresholds, false),

@@ -162,7 +162,11 @@ Each claim entry uses this structure:
 - **Status**: verified (CLI present; e2e test present); pending (signed
   cross-policy diff artifact)
 - **Notes**: Schema pinned to
-  `franken-node/incident-counterfactual-report/v1`.
+  `franken-node/incident-counterfactual-report/v2`. v2 adds an `executor`
+  discriminator (`synthetic` | `production`) — bound into the
+  `counterfactual_digest` preimage — so consumers can tell whether the diff came
+  from the sandboxed risk-score model or the runtime's real policy engine
+  (bd-5r99w.4).
 
 ### CLAIM-008: Compatibility lockstep oracle across Node, Bun, franken-engine
 

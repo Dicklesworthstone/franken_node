@@ -42,7 +42,12 @@ pub fn assert_golden(test_name: &str, actual: &str) {
     }
 }
 
-/// Assert golden for JSON with automatic pretty-printing
+/// Assert golden for JSON with automatic pretty-printing.
+///
+/// bd-6r7c4: shared helper module, `#[path]`-included by several golden test
+/// targets. Not every including target calls every helper, so `dead_code` fires
+/// per-target even though the function is live overall.
+#[allow(dead_code)]
 pub fn assert_json_golden(test_name: &str, value: &Value) {
     let actual = serde_json::to_string_pretty(value).unwrap();
     assert_golden(test_name, &actual);
@@ -74,8 +79,18 @@ pub fn scrub_dynamic_values(input: &str) -> String {
         Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?").unwrap();
     result = ts_re.replace_all(&result, "[TIMESTAMP]").to_string();
 
-    // Unix timestamps → [UNIX_TIMESTAMP]
-    let unix_ts_re = Regex::new(r"\b\d{10}(\.\d+)?\b").unwrap();
+    // Bare ISO dates (not part of a full timestamp — e.g. a date embedded in an
+    // identifier such as `frame-2026-04-20-001`) → [DATE]. Runs *after* the full
+    // timestamp pass so `...THH:MM:SSZ` values have already become [TIMESTAMP],
+    // and after the UUID pass so hyphenated hex groups are already [UUID].
+    let date_re = Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap();
+    result = date_re.replace_all(&result, "[DATE]").to_string();
+
+    // Unix timestamps → [UNIX_TIMESTAMP]. Accept 10-13 digit runs so both
+    // second- and millisecond-precision epoch values are normalized (a 14+ digit
+    // run has no word-boundary-delimited 10-13 window, so large fixed constants
+    // such as u64::MAX are left readable).
+    let unix_ts_re = Regex::new(r"\b\d{10,13}(\.\d+)?\b").unwrap();
     result = unix_ts_re
         .replace_all(&result, "[UNIX_TIMESTAMP]")
         .to_string();

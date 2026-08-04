@@ -1,0 +1,13 @@
+{
+  "valid": false,
+  "error": {
+    "code": "BPG_INVALID_CONFIG",
+    "message": "BPG_INVALID_CONFIG: max_decode_cpu_ms must be > 0"
+  },
+  "config": {
+    "max_frame_bytes": 1000000,
+    "max_nesting_depth": 32,
+    "max_decode_cpu_ms": 0
+  },
+  "test_case": "zero_cpu_limit"
+}

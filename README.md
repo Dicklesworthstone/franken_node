@@ -11,7 +11,7 @@
 ![Security](https://img.shields.io/badge/security-trust--native-1f6feb)
 ![Unsafe](https://img.shields.io/badge/unsafe-forbidden-success)
 ![Compatibility](https://img.shields.io/badge/compatibility-node%20%2B%20bun-5b3cc4)
-![Tests](https://img.shields.io/badge/tests-23k%2B-blue)
+![Tests](https://img.shields.io/badge/tests-3.8k%2B%20e2e%20%2B%2021k%20inline-blue)
 ![License](https://img.shields.io/badge/license-MIT%20%2B%20OpenAI%2FAnthropic%20Rider-lightgrey)
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
 
@@ -127,8 +127,8 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 |---|---|
 | Trust cards | Per-extension provenance, risk score, audit history, camouflage assessment, revocation state |
 | Revocation freshness gates | Risky and dangerous actions fail closed when trust state is stale |
-| Deterministic incident replay | Signed bundles with timeline, evidence, policy decisions; replay is exact |
-| Counterfactual simulator | Re-execute incidents under a different policy mode and inspect the diff |
+| Deterministic incident replay | Signed bundles with timeline, evidence, policy decisions; replay re-derives the recorded decision sequence and verifies it against the bundle's signed hash, fail-closed on mismatch |
+| Counterfactual simulator | Re-evaluate the recorded incident decision trace under a different policy mode and inspect the diff |
 | Migration autopilot | Audit, rewrite, validate, and rollout transforms with rollback bundles |
 | Compatibility oracle | Lockstep checks across Bun and franken-engine by default, with real Node.js as an explicit third leg when available |
 | Fleet quarantine plane | Quarantine, reconcile, release across zones; signed decision receipts |
@@ -164,7 +164,7 @@ franken-node verify lockstep ./my-app --runtimes bun,franken-node --emit-fixture
 franken-node trust scan ./my-app --deep --audit
 
 # 7) Run under policy-governed runtime controls
-franken-node run ./my-app --policy strict --lockstep-preflight
+franken-node run ./my-app --policy strict
 
 # 8) Diagnose environment and policy setup
 franken-node doctor --verbose --json
@@ -270,6 +270,26 @@ and **Windows x86_64**; on other platforms the bash installer falls back to a
 side-by-side source build. Pass `--help` (bash) / `-EasyMode` (PowerShell adds
 the dir to PATH) for options.
 
+Child-process spawning is not enabled by any runtime profile. Profile-governed
+`run` also rejects external Node/Bun runtimes because they cannot enforce the
+engine capability contract. Profile-governed execution requires a build with
+the embedded `engine` feature; an arbitrary external `--engine-bin` is never
+trusted by name alone. Use the explicit lockstep or compatibility-corpus tools
+for comparative execution. On Linux, an operator who intends to opt in may
+pass `--enable-process-spawn`; the installer
+then requires the installed binary's bounded Bubblewrap readiness probe to
+pass. The installer does not install or configure Bubblewrap. Install the
+distribution package first (for example, `sudo apt install bubblewrap`), then
+verify it explicitly:
+
+```bash
+franken-node doctor process-spawn-readiness --json
+```
+
+macOS and Windows fail closed for this opt-in because the current containment
+contract requires Linux PID and user namespaces. Normal installations do not
+probe Bubblewrap and are unaffected.
+
 > [!NOTE]
 > Homebrew is not currently published for `franken-node`; the public
 > `Dicklesworthstone/homebrew-tap` repository does not yet ship a
@@ -332,7 +352,7 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
    ```
 5. **Run in policy-governed mode:**
    ```bash
-   franken-node run ./my-app --policy strict --lockstep-preflight
+   franken-node run ./my-app --policy strict
    ```
 6. **Inspect trust and fleet state:**
    ```bash
@@ -422,12 +442,12 @@ re-run.
 ### Day 7 — Production rollout
 
 ```bash
-franken-node run ./app --policy balanced --lockstep-preflight
+franken-node run ./app --policy balanced
 ```
 
-The `--lockstep-preflight` flag runs one final lockstep comparison before
-the runtime boots the application. Divergence aborts the run with a
-signed receipt.
+Run `franken-node verify lockstep ./app --runtimes bun,franken-node` as a
+separate comparative verification step before profile-governed execution.
+The `run` command never launches an external reference runtime.
 
 ### Day 21 — Incident
 
@@ -511,6 +531,18 @@ profile**, not the packaging profile:
 | `strict` | High-assurance environments, regulated workloads, post-incident lockdowns | Maximum trust-card freshness requirements, revocation gates on all risky actions, all divergence emits receipts, lockstep validation required before rollout |
 | `balanced` | Default for most teams | Reasonable freshness windows, revocation gates on risky and dangerous classes, lockstep validation recommended |
 | `legacy-risky` | Constrained migration windows on legacy codebases | Permits insecure compatibility behaviors when explicitly enabled by policy. Not a long-term mode. |
+
+No profile—including `legacy-risky`—grants `process_spawn`. That capability is
+impossible by default and requires an expiring Ed25519-signed
+`ChildProcessSpawn` token bound to the complete resolved policy/config plus a
+validated Linux Bubblewrap backend. Missing, malformed, expired, or
+policy-mismatched grants fail before guest execution. Profile-governed `run`
+always rejects external Node/Bun paths because they cannot claim this
+containment contract. The signer is anchored outside project configuration at
+the fixed, root-owned `/etc/franken-node/process-spawn-trust-anchor.pub` as exactly 64
+lowercase hexadecimal Ed25519 public-key characters; the file and every path
+ancestor must be non-writable by group/other, so a project cannot declare its
+own trusted signer.
 
 Packaging profiles (`local`, `dev`, `enterprise`) live in
 [`packaging/profiles.toml`](packaging/profiles.toml) and govern installer
@@ -615,6 +647,14 @@ Mechanics:
 - **Report-only mode.** During migration, `mode = "report-only"` allows
   the call but records the would-be-decision so operators can review
   before flipping the gate to `enforced`.
+- **TLS for guest `https` egress.** A guest `https.*`/`fetch(https://…)`
+  call performs a real TLS handshake in the engine's network mechanism
+  (rustls; certificate verification against the built-in webpki roots).
+  `tls_extra_roots_pem_path` under `[security.network_policy]` ADDS
+  operator trust anchors (private CAs) to the webpki roots — it never
+  replaces them, and a missing or unparseable bundle fails closed
+  (certificate verification simply fails for hosts signed by those
+  anchors; verification is never weakened or skipped).
 
 Network allowlist parsing is fuzz-covered
 (`fuzz_targets/network_allowlist_entry_*`) and the rebind path is
@@ -632,7 +672,7 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node init` | Bootstrap config, policy profile, and `.franken-node/state/` workspace metadata. Flags: `--profile`, `--config`, `--out-dir`, `--overwrite`, `--backup-existing`, `--scan`, `--state-dir`, `--no-state`, `--json`. |
-| `franken-node run <app_path>` | Run app under policy-governed runtime controls. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--lockstep-preflight`, `--json`. |
+| `franken-node run <app_path>` | Run app under policy-governed runtime controls. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json`. External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
 | `franken-node doctor` | Diagnose environment and policy setup. Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json`, `--structured-logs-jsonl`. |
 
 ### Migration
@@ -700,6 +740,13 @@ every leaf command available in the current build.
 | `franken-node incident replay` | Replay incident timeline locally. **Fails closed without `--trusted-public-key` or `--key-dir`.** |
 | `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. Required: `--policy`. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. |
 | `franken-node incident list` | List recorded incidents. Filter: `--severity`. |
+
+### Long-term verifiability (LTV)
+
+| Command | Purpose |
+|---|---|
+| `franken-node ltv attest` | Build self-contained long-term verification evidence from a signature-verified incident bundle: the bundle (plus, with `--run-report`, its run's host-effect chain hashes) becomes Merkle leaves, the root is re-attested and threshold-cosigned by operator witness keys. **Required: `--bundle`, `--out`, at least one `--witness-key`, and a trust anchor (`--trusted-public-key` or `--key-dir`).** |
+| `franken-node ltv verify-as-of` | Re-verify LTV evidence offline through the verifier SDK (`verify_as_of_ltv`): inclusion, re-attestation chain, witness threshold, and anteriority against `--as-of`. Fails closed (non-zero exit) on any failed assertion. Required: `--evidence`. |
 
 ### Runtime, safe-mode, and proofs
 
@@ -822,6 +869,38 @@ idempotency_ttl_secs = 604800
 # Maximum degraded-mode duration before suspension
 max_degraded_duration_secs = 3600
 
+# Child-process spawning has no profile default. An operator-issued opt-in is
+# represented by [security.child_process_spawn] plus its nested .token table.
+# The token subject must equal the policy subject reported by trusted issuance
+# tooling after all non-recursive fields below are populated, and the signature
+# must cover the CapabilityToken content hash. The operator trust anchor is a
+# separate keyring file; it is never accepted from this project config.
+# backend = "bubblewrap"
+# binary_path = "/usr/bin/bwrap"
+#
+# Process execution authority is also explicit and token-bound: each command
+# alias resolves without PATH lookup to one exact canonical executable and
+# SHA-256 digest. The cwd jail, environment vocabulary, shell choice, and
+# resource ceilings below are all part of the signed policy subject.
+#
+# [security.child_process_spawn.execution_policy]
+# jailed_cwd_root = "/srv/franken-node/apps/example"
+# allow_shell = false
+# allowed_env_keys = ["LANG"]
+# fixed_env = { LANG = "C.UTF-8" }
+#
+# [security.child_process_spawn.execution_policy.allowed_executables.true]
+# path = "/usr/bin/true"
+# sha256 = "<64 lowercase hexadecimal characters>"
+#
+# [security.child_process_spawn.execution_policy.limits]
+# max_children = 4
+# max_argv_count = 128
+# max_argv_bytes = 65536
+# max_stdin_bytes = 1048576
+# max_output_bytes = 4194304
+# max_runtime_millis = 30000
+
 [security.network_policy]
 # Network egress policy enforcement mode: enforced | report-only
 mode = "enforced"
@@ -940,7 +1019,7 @@ flowchart TB
 | `sdk/verifier/src/lib.rs` | Public verifier-facing SDK (`frankenengine-verifier-sdk`) |
 | `docs/specs/**` | Product contracts (gates, schemas, runbooks) |
 | `tests/**`, `crates/franken-node/tests/**` | Integration, conformance, contract, e2e, golden, security, perf tests |
-| `scripts/check_*.py` | 460+ Python validators wired into CI gates |
+| `scripts/check_*.py` | 430+ Python validators wired into CI gates |
 | `.github/workflows/` | Gate-oriented CI: claim gates, conformance gates, closer-discipline, mutants, coverage, security-golden-artifacts, etc. |
 | `packaging/profiles.toml` | Packaging profile metadata (`local`, `dev`, `enterprise`) |
 
@@ -1635,6 +1714,12 @@ the defense:
 | Schema downgrade | Adversary submits an old-schema artifact to bypass a new check | Schema version pinning in `schema_versions.rs`; epoch barriers reject artifacts outside the validity window |
 | Verifier collusion | Producer signs its own claims and asks you to trust them | `frankenengine-verifier-sdk` runs outside the producing runtime; receipts are linked, signed, and independently verifiable |
 | Memory unsafety | Use-after-free, buffer overflow | `#![forbid(unsafe_code)]` lint forbidance + Rust borrow checker |
+| CAS poisoning / EffectReceipt splice | Adversary rewrites content-addressed bytes, back-dates an effect, or splices a forged receipt into a host-effect chain | CAS read-time hash verification plus domain-separated, length-prefixed `EffectReceipt` hashes and chain-link recomputation; regression anchors: `crates/franken-node/tests/cas_effect_receipt_conformance.rs` and `crates/franken-node/src/runtime/effect_receipt.rs` |
+| Declassification-authority abuse | Adversary forges, over-scopes, expires, or replays a declassification receipt at the wrong sink or epoch | Declassification receipts bind schema, sink policy, forbidden label set, actor, purpose, epoch, revocation freshness, and canonical receipt id; regression anchors: `crates/franken-node/src/security/lineage_tracker.rs` and `tests/security/exfiltration_sentinel_scenarios.rs` |
+| MCP mutation abuse | Agent or sub-agent escalates scope, delegates beyond the parent token, omits rollback evidence, or replays a stale mutation session | Mutating MCP tools require audience-bound capability chains, attenuated delegation, rollback commands, signed action receipts, and session digest verification; regression anchors: `crates/franken-node/src/api/mcp.rs` and `crates/franken-node/tests/mcp_control_surface_contract.rs` |
+| LTV witness collusion / crypto-suite downgrade | Witnesses collude to re-attest stale evidence or submit an artifact under a weaker `crypto_suite` discriminator | TNR release gates must require suite-discriminator binding, witness independence checks, and fail-closed re-attestation evidence before LTV claims ship; current related regression anchors: `crates/franken-node/tests/threshold_sig_quorum_metamorphic.rs` and `docs/specs/crypto_trait_abstraction.md` |
+| Conformal calibration and Sentinel signal poisoning | Adversary contaminates the Phase-0 corpus or correlated Sentinel signals to widen or narrow BPET coverage | Signed calibration artifacts, canonical corpus records, verifier recomputation, poisoning/Sybil policy thresholds, and Sentinel quarantine interplay; regression anchors: `tests/security/bpet_calibration_benchmark.rs`, `docs/policy/signal_poisoning_sybil_defense.md`, and `docs/policy/risk_signal_poisoning_sybil.md` |
+| Fleet-log equivocation / quorum replay | Partitioned validators race catch-up, replay quorum certificates, or double-count duplicate attestations | Canonical action hashing, distinct-validator quorum accounting, equivocation fault receipts, decision-receipt tamper rejection, and threshold-signature replay tests; regression anchors: `crates/franken-node/src/api/fleet_quarantine.rs`, `tests/security/threshold_signature_verification.rs`, and `crates/franken-node/tests/threshold_sig_quorum_metamorphic.rs` |
 
 **Out of scope**: explicit non-goals so operators know what to layer on
 top:
@@ -1730,6 +1815,22 @@ validation broker receipts, cleanup audit) as those subsystems are
 exercised; the bootstrap above is the minimum layout that `franken-node
 init` creates up-front.
 
+Native-runtime evidence authority is deliberately outside this project tree,
+because the project directory is also the guest filesystem sandbox root.
+`<user-state>` is `XDG_STATE_HOME` when set, otherwise
+`$HOME/.local/state` (`LOCALAPPDATA` is also recognized on Windows):
+
+| Path | Purpose |
+|---|---|
+| `<user-state>/franken-node/runtime-evidence/keys/product-root.key` | Owner-only persistent product root; never serialized into the execution child |
+| `<user-state>/franken-node/runtime-evidence/identity-captures/<verification-key>.json` | Product-root-signed public identity capture for one short-lived native-engine evidence key |
+
+These directories are created lazily with owner-only permissions. Native
+startup fails closed if the resolved user-state directory is inside the guest
+project root. A process-spawn-enabled Bubblewrap worker additionally masks the
+complete runtime-evidence directory with an empty `tmpfs`, so an allowed child
+utility cannot read the parent-owned root through the read-only host-root bind.
+
 Every durable write goes through an atomic-rename + directory-fsync
 TempFileGuard; readers take an `fs2` advisory lock when consistency
 across multiple writers is required (see `lib.rs::lock_utils`).
@@ -1756,6 +1857,7 @@ follow the `FRANKEN_NODE_<SECTION>_<KEY>` convention. The most common:
 | `FRANKEN_NODE_FLEET_NODE_ID` | `fleet.node_id` | Default `fleet agent` node ID |
 | `FRANKEN_NODE_FLEET_POLL_INTERVAL_SECONDS` | (none) | Default `fleet agent` poll interval |
 | `FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS` | `fleet.convergence_timeout_seconds` | Fleet release / reconcile timeout |
+| `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` | `doctor --policy-activation-input` | Fallback path to policy-activation input JSON; the CLI flag takes precedence |
 | `FRANKEN_NODE_REGISTRY_REQUIRE_SIGNATURES` | `registry.require_signatures` | Fail-closed if unset |
 | `FRANKEN_NODE_REGISTRY_REQUIRE_PROVENANCE` | `registry.require_provenance` | Fail-closed if unset |
 | `FRANKEN_NODE_REGISTRY_MINIMUM_ASSURANCE_LEVEL` | `registry.minimum_assurance_level` | 1-5 |
@@ -2099,6 +2201,12 @@ franken-node doctor workspace-pressure --json --conservative > pressure.json
 - `franken-node doctor --policy-activation-input <fixture>` exercises
   the policy activation contract against a checked-in fixture, useful
   for catching drift between the policy code and the spec.
+- `franken-node doctor process-spawn-readiness --json` securely resolves (or
+  accepts `--bubblewrap-path` for) a root-owned, non-setuid, non-writable
+  Bubblewrap binary and runs a bounded functional user/PID/cgroup/IPC/UTS
+  namespace probe. It returns non-zero with `unavailable` or `unsupported`;
+  readiness by itself does not grant `process_spawn` or replace the signed
+  opt-in.
 
 `doctor` is the single best command to run before opening a support
 ticket: its output (or `--json` artifact) is everything an investigator
@@ -2314,6 +2422,7 @@ implementation CI gate.
 |---|---|
 | Native runtime internals (VM, parser, AST, interpreter, GC) | Compatibility capture from Node/Bun ecosystems |
 | Policy semantics and trust primitives at the VM level | Migration and operator experience (audit, rewrite, validate, rollout) |
+| Typed runtime-evidence authority and verification-identity contracts | Persistent product-root custody, per-session authority provisioning, signed identity capture, and worker-response reconciliation |
 | Bayesian sentinel inference and containment actions | Extension ecosystem and trust distribution (registry, trust cards, reputation) |
 | Native Rust execution (no V8/QuickJS bindings) | Packaging, rollout, and enterprise control planes |
 | | Product-layer policy controls and verification surfaces |
@@ -2325,6 +2434,15 @@ product-layer claims (trust, migration, replay, fleet) without having to
 audit the engine internals, and vice versa. Engine revisions are pinned
 by `Cargo.toml` path dependency; bumping the engine revision is an
 explicit, reviewed change.
+
+For native runs, the product parent retains a persistent evidence root outside
+the execution child, provisions a fresh short-lived engine signing authority
+per session, and persists a root-signed public identity capture. The child
+receives only the session authority; the parent rejects any returned evidence
+identity that does not match its signed capture. Verifiers must obtain the
+product root independently—the root embedded in a capture is not a trust
+anchor. See the
+[runtime-evidence authority handoff](docs/ENGINE_SPLIT_CONTRACT.md#runtime-evidence-authority-handoff-bd-fzpkz).
 
 ---
 
@@ -2359,17 +2477,20 @@ and across the test surface:
   downgrade helpers for every serialized artifact.
 - **CI gates** at `.github/workflows/` enforce closer discipline, golden
   artifact integrity, no-contract-no-merge, claim gates (ATC, BPET, DGIS,
-  VEF), and execution-normalization; ~460 `scripts/check_*.py` validators
+  VEF), and execution-normalization; ~436 `scripts/check_*.py` validators
   back individual contracts.
 
 ---
 
 ## Testing and Verification
 
-- ~23,000 `#[test]` cases across inline `#[cfg(test)]` modules and the
-  workspace test trees (`tests/integration`, `tests/conformance`,
-  `tests/contract`, `tests/e2e`, `tests/golden`, `tests/security`,
-  `tests/perf`).
+- ~3,800 `#[test]` cases in the workspace test trees (`tests/integration`,
+  `tests/conformance`, `tests/contract`, `tests/e2e`, `tests/golden`,
+  `tests/security`, `tests/perf`) run by a default `cargo test
+  -p frankenengine-node`, plus ~21,000 inline `#[cfg(test)]` unit tests that
+  are **compiled out of a default `cargo test`** by the crate-level
+  `#![cfg(any(not(test), franken_node_inline_tests))]` gate and only run on
+  the dedicated inline lane (see below).
   The inline library-test portion is guarded by
   `.github/workflows/inline-lib-tests-gate.yml`. Pull requests run a
   cheap preflight that asserts the dedicated inline-test override remains
@@ -2402,7 +2523,7 @@ and across the test surface:
 Run focused suites:
 
 ```bash
-cargo test -p frankenengine-node                       # full suite
+cargo test -p frankenengine-node                       # ~3.8k integration tests (inline unit tests need the inline lane)
 cargo test -p frankenengine-node fleet_cli_e2e         # CLI/integration
 cargo test -p frankenengine-node verify_release_cli_e2e
 cargo test -p frankenengine-node doctor_policy_activation_e2e
@@ -2412,6 +2533,62 @@ For the verifier SDK in isolation:
 
 ```bash
 cargo test -p frankenengine-verifier-sdk
+```
+
+---
+
+## Honesty Manifest
+
+The headline claims in this README obey the same rule as decision receipts
+and benchmark reports: **claims require evidence, and the evidence is
+re-verifiable outside the producing runtime.** Two committed artifacts back
+them:
+
+- [`docs/honesty_manifest_evidence.json`](docs/honesty_manifest_evidence.json)
+  — the **census**: a per-source snapshot of the committed tree from which each
+  claim is derived (one `{source, count}` entry per `.rs` file that contributes
+  `#[test]` attributes, one per registered fuzz target, one per validator
+  script, etc.). This is the "committed tree snapshot" any third party can
+  regenerate from source.
+- [`docs/honesty_manifest.json`](docs/honesty_manifest.json) — the **signed
+  manifest**: for each claim it binds the recomputed value, the README's pinned
+  value, a drift tolerance, and a `sha256` `evidence_digest` over the matching
+  census entry, plus a single `corpus_digest` over all claims and a detached
+  Ed25519 signature over the canonical unsigned payload.
+
+The verifier SDK recomputes the whole chain with zero trust in the producer:
+
+```rust
+use frankenengine_verifier_sdk::honesty_manifest::{
+    verify_honesty_manifest, HonestyTrustAnchor,
+};
+
+let manifest = std::fs::read("docs/honesty_manifest.json")?;
+let evidence = std::fs::read("docs/honesty_manifest_evidence.json")?;
+let verified = verify_honesty_manifest(
+    &manifest, &evidence, &HonestyTrustAnchor::HarnessDefault,
+)?;
+println!("verified {} headline claims", verified.claim_count);
+```
+
+`verify_honesty_manifest` (1) verifies the Ed25519 signature against the pinned
+reproducible harness key — or an operator-supplied trust anchor for a
+re-signed production manifest; (2) recomputes every claim value from the
+census and checks each `evidence_digest`; (3) enforces the README-claim
+tolerance band; and (4) checks the `corpus_digest` commits to exactly the claim
+set presented. Flipping a single census count, recorded value, or signature
+byte makes it fail closed.
+
+Two CI layers keep the manifest honest. `scripts/check_claims_manifest.py
+--check-honesty` continuously checks the committed census against the *live*
+tree (no crypto required), so headline numbers cannot silently drift; the
+verifier-SDK conformance test
+(`sdk/verifier/tests/honesty_manifest_recompute.rs`) performs the load-bearing
+Ed25519 + recompute verification on every cargo test run. Regenerate after a
+deliberate change with:
+
+```bash
+python scripts/check_claims_manifest.py --update-honesty
 ```
 
 ---
@@ -2558,7 +2735,7 @@ into the corresponding section above.
 | Validate behavior | `franken-node verify lockstep . --runtimes bun,franken-node` |
 | Seed trust cards | `franken-node trust scan . --deep --audit` |
 | Refresh trust | `franken-node trust sync --force` |
-| Run in strict mode | `franken-node run ./app --policy strict --lockstep-preflight` |
+| Run in strict mode | `franken-node run ./app --policy strict` |
 | Inspect a card | `franken-node trust card npm:@example/plugin --json` |
 | List high-risk | `franken-node trust list --risk high --json` |
 | Quarantine an artifact | `franken-node trust quarantine --artifact sha256:…` |
@@ -2580,10 +2757,12 @@ into the corresponding section above.
 
 ## Fuzzing and Differential Testing
 
-`fuzz/fuzz_targets/` ships 43 cargo-fuzz harnesses targeting the
+`fuzz/fuzz_targets/` ships 146 registered cargo-fuzz harnesses targeting the
 adversarially-exposed surfaces: parsers, deserializers, signature
-verifiers, lifecycle inputs, canonical encoders, transcript readers.
-Representative harnesses:
+verifiers, lifecycle inputs, canonical encoders, transcript readers. A subset
+is undergoing API-drift remediation; the verification-target compile census
+(`.github/workflows/verification-target-compile-gate.yml`) builds them with
+`--keep-going` and tracks the compiling ratio. Representative harnesses:
 
 - `fuzz_canonical_serializer_roundtrip`: every canonical encoder must
   satisfy `decode(encode(x)) == x` for arbitrary inputs.
@@ -2608,7 +2787,33 @@ becomes a regression case forever. Coverage data lives in
 `fuzz/coverage/`; fuzz artifacts live in `fuzz/artifacts/`. The
 `mutants-gate.yml` workflow runs `cargo-mutants` against the test
 surface as a separate proof-of-effective-coverage signal: a mutant that
-survives indicates a gap in the test surface, not a bug per se.
+survives indicates a gap in the test surface, not a bug per se. The gate
+enforces a **registered mutation-adequacy floor** (`MUTATION_SCORE_FLOOR_BP`),
+so a change that guts the focused suites' detection power fails CI.
+
+### Effective coverage, not a raw count
+
+A raw test *count* is Goodhart-bait, so the honest "tests" signal is
+**effective coverage**, expressed as three recomputable parts rather than a
+single token count:
+
+1. **Tests actually run** by a default `cargo test -p frankenengine-node`
+   (~3,800; the ~21k inline unit tests run only on the dedicated inline lane).
+   This count is recomputed from the committed tree by the Honesty Manifest
+   ([Honesty Manifest](#honesty-manifest)).
+2. **Mutation adequacy** — the fraction of seeded mutants the suite catches,
+   measured live by `mutants-gate.yml` and held above the registered floor.
+   Mutation score measures whether the tests would *catch a regression*, which a
+   count cannot.
+3. **A pass-rate confidence interval** — the verifier SDK exposes the Wilson
+   score interval (`honesty_manifest::wilson_score_interval_bp`) so an auditor
+   can bound the executed-test pass rate from a measured `(passed, trials)`
+   pair (e.g. 95/100 → a 95% lower bound of ~88.8%), rather than trusting a bare
+   "all green."
+
+The mutation score is enforced live by the gate (it is not baked into the
+committed manifest, which would defeat the point); the run-count and the
+interval method are independently recomputable.
 
 ---
 
@@ -2833,6 +3038,13 @@ What it exposes:
   and side-effect declaration matching.
 - `counterfactual`: re-run an incident bundle under an alternative
   policy and emit a structured diff.
+- `honesty_manifest`: independently re-verify the README's headline
+  claims. `verify_honesty_manifest` recomputes every claim from the
+  committed per-source census, checks each `evidence_digest` and the
+  `corpus_digest`, and verifies the manifest's Ed25519 signature against
+  the pinned harness key (or an operator-supplied trust anchor) — failing
+  closed on any tampered count, value, or signature byte. See
+  [Honesty Manifest](#honesty-manifest).
 - A top-level `VerifierSdk` plus the `create_verifier_sdk(identity)`
   helper. `VerifierSdk` exposes `verify_claim`, `verify_migration_artifact`,
   `verify_trust_state`, `verify_signed_migration_artifact`,
@@ -2897,7 +3109,15 @@ one pass.
 ## Limitations
 
 - **Legacy profile permits insecure behaviors.** `legacy-risky` exists for
-  constrained migration windows. It is not a long-term mode.
+  constrained migration windows. It is not a long-term mode, and it does not
+  ambiently permit child-process spawning.
+- **Child-process spawning is Linux/Bubblewrap-only and impossible by
+  default.** A signed, expiring, resolved-policy-bound `ChildProcessSpawn`
+  opt-in and a successful functional backend probe are both mandatory.
+  Unsupported operating systems and missing or insecure Bubblewrap binaries
+  fail closed. Current runtime-of-record work still withholds the capability
+  until the authenticated native worker can prove it was launched inside that
+  namespace.
 - **Strict profile blocks weak-provenance extensions.** This is intentional
   but can surprise teams whose registries are not yet provenance-clean.
 - **Migration rewrites target high-value patterns first.** Niche framework
@@ -2909,7 +3129,23 @@ one pass.
   requires the asupersync transport or a configured external transport.
 - **Counterfactual simulations** depend on the completeness of the
   telemetry captured during the incident window. Sparse evidence produces
-  sparse counterfactuals.
+  sparse counterfactuals. The default counterfactual executor is a
+  policy-threshold model that re-evaluates the *recorded* decision trace; the
+  report labels which executor produced the diff so a synthetic re-evaluation
+  is never mistaken for a live re-run.
+- **`franken-node run` executes through the in-process franken-engine** and
+  surfaces the program's real console output (stdout/stderr) plus an exit code
+  derived from the runtime's containment verdict. The broader host-effect
+  "runtime-of-record" — the full Node/Bun host-API surface with
+  capability-metered effects — is still in active development under the
+  engine-split program; do not yet rely on it as a complete drop-in for
+  arbitrary host-effect workloads.
+- **`incident replay` is an integrity-verified replay of the recorded
+  incident**, not a live re-execution of the original program. It
+  deterministically re-derives the recorded decision sequence from the bundle
+  and verifies it against the bundle's signed hash, failing closed on any
+  mismatch. Live re-execution under the engine is part of the runtime-of-record
+  work above.
 - **Source builds require the sibling `franken_engine` repository** to be
   checked out next to this one (engine-split contract). The one-line
   installer side-steps this by shipping prebuilt binaries.

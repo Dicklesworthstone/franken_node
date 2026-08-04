@@ -800,7 +800,7 @@ mod tests {
         let test_request = b"test request data";
         let test_epoch = 1234567890;
 
-        let mut derived_keys = Vec::new();
+        let mut derived_keys: Vec<IdempotencyKey> = Vec::new();
 
         for malicious_name in malicious_computation_names {
             // Test key derivation with malicious computation name
@@ -876,29 +876,33 @@ mod tests {
 
     #[test]
     fn test_negative_request_bytes_with_malicious_collision_attempts() {
+        use crate::security::constant_time;
+
         let computation_name = "test.compute";
         let epoch = 1234567890;
 
         // Test various request patterns that might cause hash collisions
+        let zero_request_10mb = vec![0u8; 10_000_000];
+        let nonzero_request_10mb = b"A".repeat(10_000_000);
         let collision_attempts = [
             b"request1".as_slice(),
             b"request2".as_slice(),
-            b"request1\0".as_slice(),       // Null termination
-            b"request1\0\0\0\0".as_slice(), // Multiple nulls
-            b"\0request1".as_slice(),       // Leading null
-            b"request\01".as_slice(),       // Embedded null
-            b"req\0uest1".as_slice(),       // Split with null
-            b"".as_slice(),                 // Empty request
-            &[0u8; 1000],                   // Large zero buffer
-            &[0xFFu8; 1000],                // Large 0xFF buffer
-            b"request1\r\n\r\n",            // HTTP-style separators
-            b"request1||request2",          // Delimiter confusion
-            b"request1\x1f\x1e\x1d\x1c",    // ASCII separators
-            &vec![0u8; 10_000_000],         // 10MB zero request (memory stress)
-            &b"A".repeat(10_000_000),       // 10MB non-zero request
+            b"request1\0".as_slice(),        // Null termination
+            b"request1\0\0\0\0".as_slice(),  // Multiple nulls
+            b"\0request1".as_slice(),        // Leading null
+            b"request\01".as_slice(),        // Embedded null
+            b"req\0uest1".as_slice(),        // Split with null
+            b"".as_slice(),                  // Empty request
+            &[0u8; 1000],                    // Large zero buffer
+            &[0xFFu8; 1000],                 // Large 0xFF buffer
+            b"request1\r\n\r\n",             // HTTP-style separators
+            b"request1||request2",           // Delimiter confusion
+            b"request1\x1f\x1e\x1d\x1c",     // ASCII separators
+            zero_request_10mb.as_slice(),    // 10MB zero request (memory stress)
+            nonzero_request_10mb.as_slice(), // 10MB non-zero request
         ];
 
-        let mut derived_keys = Vec::new();
+        let mut derived_keys: Vec<IdempotencyKey> = Vec::new();
 
         for (i, request_bytes) in collision_attempts.iter().enumerate() {
             let key = derive_idempotency_key(computation_name, epoch, request_bytes);
@@ -955,6 +959,8 @@ mod tests {
 
     #[test]
     fn test_negative_epoch_manipulation_for_key_separation() {
+        use crate::security::constant_time;
+
         let computation_name = "test.compute";
         let request_bytes = b"test request";
 
@@ -972,7 +978,7 @@ mod tests {
             0x5555555555555555u64, // Inverse alternating pattern
         ];
 
-        let mut epoch_keys = Vec::new();
+        let mut epoch_keys: Vec<(u64, IdempotencyKey)> = Vec::new();
 
         for epoch in epoch_values {
             let key = derive_idempotency_key(computation_name, epoch, request_bytes);
@@ -1028,21 +1034,27 @@ mod tests {
 
     #[test]
     fn test_negative_hex_parsing_with_malicious_input() {
+        let all_z_64 = "Z".repeat(64);
+        let zero_63 = "0".repeat(63);
+        let zero_65 = "0".repeat(65);
+        let zero_128 = "0".repeat(128);
+        let all_x_64 = "x".repeat(64);
+        let all_null_64 = "\0".repeat(64);
         let malicious_hex_inputs = [
             "",                                                                                 // Empty string
-            "0",             // Too short (odd length)
-            "00",            // Too short (1 byte)
-            "g",             // Invalid hex character
-            "0g",            // Invalid hex character
-            "00gg00",        // Invalid hex in middle
-            "Z".repeat(64),  // All invalid hex chars
-            "0".repeat(63),  // One char short
-            "0".repeat(65),  // One char long
-            "0".repeat(128), // Double length
-            "x".repeat(64),  // Valid length, invalid chars
+            "0",               // Too short (odd length)
+            "00",              // Too short (1 byte)
+            "g",               // Invalid hex character
+            "0g",              // Invalid hex character
+            "00gg00",          // Invalid hex in middle
+            all_z_64.as_str(), // All invalid hex chars
+            zero_63.as_str(),  // One char short
+            zero_65.as_str(),  // One char long
+            zero_128.as_str(), // Double length
+            all_x_64.as_str(), // Valid length, invalid chars
             "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDE", // 63 chars
             "0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEG", // 64 chars with invalid last char
-            "\0".repeat(64),                                                    // Null bytes
+            all_null_64.as_str(),                                               // Null bytes
             "\u{202E}0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF\u{202C}", // BiDi override
             "\x1b[31m0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF\x1b[0m", // ANSI escape
         ];
@@ -1095,6 +1107,7 @@ mod tests {
     fn test_negative_trace_id_with_injection_patterns() {
         use crate::security::constant_time;
 
+        let long_trace_id = "x".repeat(10_000);
         let malicious_trace_ids = [
             "trace\u{202E}fake\u{202C}",          // BiDi override attack
             "trace\x1b[31mred\x1b[0m",            // ANSI escape injection
@@ -1106,7 +1119,7 @@ mod tests {
             "trace<script>alert(1)</script>",     // XSS attempt
             "trace'; SELECT * FROM keys; --",     // SQL injection attempt
             "trace||rm -rf /",                    // Shell injection attempt
-            "x".repeat(10_000),                   // Extremely long trace ID
+            long_trace_id.as_str(),               // Extremely long trace ID
         ];
 
         let key = derive_idempotency_key("test.compute", 123, b"test");
@@ -1208,7 +1221,8 @@ mod tests {
 
         for i in 0..10_000 {
             let computation_name = format!("compute.test.{}", i);
-            let request_bytes = format!("request_{}", i).as_bytes();
+            let request_string = format!("request_{}", i);
+            let request_bytes = request_string.as_bytes();
             let key = derive_idempotency_key(&computation_name, i as u64, request_bytes);
 
             keys.push(key);
@@ -1286,12 +1300,19 @@ mod tests {
 
     #[test]
     fn test_negative_domain_separation_bypass_attempts() {
+        use crate::security::constant_time;
+
         let request_bytes = b"shared request data";
         let epoch = 1234567890;
 
-        // Test domain separation with computation names that might bypass separation
-        let binary_suffix_a = String::from_utf8_lossy(b"suffix\xFF").into_owned();
-        let binary_suffix_b = String::from_utf8_lossy(b"suffix\xFE").into_owned();
+        // Test domain separation with computation names that might bypass separation.
+        // NOTE(bd-o776s): raw bytes 0xFF and 0xFE BOTH lossily decode to U+FFFD, which
+        // collapses the two suffixes into the same `&str` (derive_key takes &str, so the
+        // distinction is destroyed before it reaches the hasher). Use two distinct valid
+        // non-ASCII code points so the property is exercised against a real byte-level
+        // difference (U+00FF -> C3 BF, U+00FE -> C3 BE).
+        let binary_suffix_a = "suffix\u{00FF}".to_string();
+        let binary_suffix_b = "suffix\u{00FE}".to_string();
 
         let separation_tests = [
             // Basic separation
@@ -1362,10 +1383,16 @@ mod tests {
 
     #[test]
     fn test_negative_derivation_input_length_prefix_attack() {
+        use crate::security::constant_time;
+
         let epoch = 1234567890;
 
         // Test length prefix confusion attacks
         // The derivation uses length prefixes to prevent injection
+        let x_255 = "x".repeat(255);
+        let x_65535 = "x".repeat(65535);
+        let y_255 = vec![b'y'; 255];
+        let y_65535 = vec![b'y'; 65535];
         let length_confusion_tests = [
             // Domain prefix confusion
             ("a", b"bc".as_slice()),
@@ -1380,18 +1407,32 @@ mod tests {
                 "very_long_computation_name_that_might_confuse",
                 b"short".as_slice(),
             ),
-            // Zero-length field tests
-            ("", b"request".as_slice()),
+            // Zero-length field tests. NOTE(bd-o776s): prod now fail-closes on an empty
+            // (or whitespace-only) computation name (IdempotencyError::EmptyComputationName),
+            // so an empty name is no longer a derivable key input. The empty-name rows are
+            // covered by the explicit fail-closed assertion below; an empty *request* with a
+            // valid name is still supported and remains exercised here.
             ("compute", b"".as_slice()),
-            ("", b"".as_slice()),
             // Length boundary tests
             ("x", b"y".as_slice()),
-            ("x".repeat(255).as_str(), b"y".as_slice()),
-            ("x", &vec![b'y'; 255]),
-            (&"x".repeat(65535), &vec![b'y'; 65535]),
+            (x_255.as_str(), b"y".as_slice()),
+            ("x", y_255.as_slice()),
+            (x_65535.as_str(), y_65535.as_slice()),
         ];
 
-        let mut derived_keys = Vec::new();
+        // Empty / whitespace-only computation names must fail closed (no derivable key),
+        // preserving the length-prefix separation invariant at the zero-length boundary.
+        for empty_name in ["", " ", "\t"] {
+            assert!(
+                matches!(
+                    IdempotencyKeyDeriver::default().derive_key(empty_name, epoch, b"request"),
+                    Err(IdempotencyError::EmptyComputationName)
+                ),
+                "empty computation name {empty_name:?} must be rejected fail-closed"
+            );
+        }
+
+        let mut derived_keys: Vec<(&str, Vec<u8>, IdempotencyKey)> = Vec::new();
 
         for (computation_name, request_bytes) in length_confusion_tests {
             let key = derive_idempotency_key(computation_name, epoch, request_bytes);

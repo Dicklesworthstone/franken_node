@@ -13,6 +13,30 @@ struct TestReceiptData {
     metadata: Vec<String>,
 }
 
+/// Reconstruct the canonical (recursively key-sorted) preimage that
+/// `sign_structured` signs (bd-3eko7), matching prod `to_canonical_bytes`
+/// regardless of serde_json's object-ordering feature in this build (bd-o776s).
+fn canonical_preimage<T: serde::Serialize>(data: &T) -> Vec<u8> {
+    fn canonicalize(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                let mut out = serde_json::Map::new();
+                for k in keys {
+                    out.insert(k.clone(), canonicalize(&m[k]));
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(a) => {
+                serde_json::Value::Array(a.iter().map(canonicalize).collect())
+            }
+            _ => v.clone(),
+        }
+    }
+    serde_json::to_vec(&canonicalize(&serde_json::to_value(data).unwrap())).unwrap()
+}
+
 /// Test comprehensive signing and verification workflow.
 #[test]
 fn test_crypto_integration_workflow() {
@@ -31,8 +55,13 @@ fn test_crypto_integration_workflow() {
         .sign_structured(&secret_key, "decision_receipt", &test_data)
         .unwrap();
 
-    // Verify using low-level scheme interface
-    let serialized = serde_json::to_vec(&test_data).unwrap();
+    // Verify using low-level scheme interface. `sign_structured` signs the
+    // CANONICAL JSON encoding (object keys sorted recursively — bd-3eko7),
+    // so reconstruct the same canonical preimage here. Routing through
+    // `serde_json::Value` yields sorted keys (serde_json's default Map is
+    // BTreeMap-backed; no `preserve_order` feature in this workspace) and the
+    // test struct is flat, so this matches the canonical preimage exactly.
+    let serialized = canonical_preimage(&test_data);
     let domain = b"franken_node_decision_receipt:";
 
     assert!(Ed25519Scheme::verify_with_domain(
@@ -242,7 +271,7 @@ fn test_crypto_constant_time_properties() {
 /// Test scheme ID consistency and algorithm identification.
 #[test]
 fn test_crypto_scheme_identification() {
-    assert_eq!(Ed25519Scheme::scheme_id(), "ed25519_v1");
+    assert_eq!(Ed25519Scheme::scheme_id(), ED25519_SIGNATURE_SCHEME_ID);
 
     // Scheme ID should be consistent across instances
     let id1 = Ed25519Scheme::scheme_id();
@@ -252,6 +281,157 @@ fn test_crypto_scheme_identification() {
     // Should be a valid identifier format
     assert!(id1.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
     assert!(!id1.is_empty());
+}
+
+#[test]
+fn test_crypto_suite_registry_identifies_default_ed25519_suite() {
+    let suite = default_crypto_suite();
+
+    assert_eq!(suite.id, ED25519_V1_CRYPTO_SUITE);
+    assert_eq!(suite.id, DEFAULT_CRYPTO_SUITE);
+    assert_eq!(suite.registry_schema, CRYPTO_SUITE_REGISTRY_SCHEMA);
+    assert_eq!(suite.signature_scheme_id, Ed25519Scheme::scheme_id());
+    assert_eq!(suite.signature_algorithm, ED25519_V1_SIGNATURE_VERSION);
+    assert_eq!(suite.signature_version, ED25519_V1_SIGNATURE_VERSION);
+    assert!(registered_crypto_suites().contains(suite));
+}
+
+#[test]
+fn test_crypto_suite_registry_migration_helpers_roundtrip_legacy_signature_version() {
+    assert_eq!(
+        upgrade_signature_version_to_crypto_suite(ED25519_V1_SIGNATURE_VERSION).unwrap(),
+        ED25519_V1_CRYPTO_SUITE
+    );
+    assert_eq!(
+        downgrade_crypto_suite_to_signature_version(ED25519_V1_CRYPTO_SUITE).unwrap(),
+        ED25519_V1_SIGNATURE_VERSION
+    );
+    assert_eq!(
+        crypto_suite_for_signature_version(ED25519_V1_SIGNATURE_VERSION)
+            .unwrap()
+            .id,
+        ED25519_V1_CRYPTO_SUITE
+    );
+}
+
+#[test]
+fn test_crypto_suite_registry_includes_hash_ots_and_hybrid_anchor_suites() {
+    assert_eq!(registered_crypto_suites().len(), 3);
+
+    let hash_suite = validate_crypto_suite(HASH_OTS_V1_CRYPTO_SUITE).unwrap();
+    assert_eq!(hash_suite.signature_scheme_id, HashOtsV1Scheme::scheme_id());
+    assert_eq!(hash_suite.signature_version, HASH_OTS_V1_SIGNATURE_VERSION);
+    assert_eq!(
+        downgrade_crypto_suite_to_signature_version(HASH_OTS_V1_CRYPTO_SUITE).unwrap(),
+        HASH_OTS_V1_SIGNATURE_VERSION
+    );
+
+    let hybrid_suite = validate_crypto_suite(HYBRID_ED25519_HASH_OTS_V1_CRYPTO_SUITE).unwrap();
+    assert_eq!(
+        hybrid_suite.signature_scheme_id,
+        HYBRID_ED25519_HASH_OTS_V1_SIGNATURE_SCHEME_ID
+    );
+    assert_eq!(
+        hybrid_suite.signature_version,
+        HYBRID_ED25519_HASH_OTS_V1_SIGNATURE_VERSION
+    );
+    assert_eq!(
+        upgrade_signature_version_to_crypto_suite(HYBRID_ED25519_HASH_OTS_V1_SIGNATURE_VERSION)
+            .unwrap(),
+        HYBRID_ED25519_HASH_OTS_V1_CRYPTO_SUITE
+    );
+}
+
+#[test]
+fn test_crypto_suite_registry_rejects_unknown_suite_and_signature_version() {
+    assert!(matches!(
+        validate_crypto_suite("ed25519-v2"),
+        Err(CryptoSuiteError::UnknownSuite { suite_id }) if suite_id == "ed25519-v2"
+    ));
+    assert!(matches!(
+        crypto_suite_for_signature_version("ed25519-v2"),
+        Err(CryptoSuiteError::UnsupportedSignatureVersion { signature_version })
+            if signature_version == "ed25519-v2"
+    ));
+}
+
+#[test]
+fn test_hybrid_hash_ots_v1_signs_and_rejects_tampering() {
+    let secret_key = [17_u8; HASH_OTS_V1_SECRET_KEY_BYTES];
+    let public_key = HashOtsV1Scheme::public_key_from_secret_key(&secret_key);
+    let message = b"critical MMR root";
+
+    let signature = HashOtsV1Scheme::sign_raw(&secret_key, message).unwrap();
+
+    assert_eq!(public_key.len(), HASH_OTS_V1_PUBLIC_KEY_BYTES);
+    assert_eq!(signature.len(), HASH_OTS_V1_SIGNATURE_BYTES);
+    assert!(HashOtsV1Scheme::verify_raw(
+        &public_key,
+        message,
+        &signature
+    ));
+    assert!(!HashOtsV1Scheme::verify_raw(
+        &public_key,
+        b"different MMR root",
+        &signature
+    ));
+
+    let mut tampered_signature = signature.clone();
+    tampered_signature[0] ^= 0x80;
+    assert!(!HashOtsV1Scheme::verify_raw(
+        &public_key,
+        message,
+        &tampered_signature
+    ));
+}
+
+#[test]
+fn test_hybrid_critical_anchor_survives_single_algorithm_degradation() {
+    let (ed25519_public_key, ed25519_secret_key) = Ed25519Scheme::generate_keypair().unwrap();
+    let hash_ots_secret_key = [41_u8; HASH_OTS_V1_SECRET_KEY_BYTES];
+    let anchor = b"receipt-chain-root:9e1a";
+
+    let signature =
+        sign_hybrid_critical_anchor(anchor, &ed25519_secret_key, &hash_ots_secret_key).unwrap();
+    let verified = verify_hybrid_critical_anchor(anchor, &ed25519_public_key, &signature).unwrap();
+
+    assert!(verified.fully_verified());
+    assert!(verified.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+    assert!(verified.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+    assert!(verified.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+
+    let (wrong_ed25519_public_key, _) = Ed25519Scheme::generate_keypair().unwrap();
+    let ed25519_degraded =
+        verify_hybrid_critical_anchor(anchor, &wrong_ed25519_public_key, &signature).unwrap();
+    assert!(!ed25519_degraded.ed25519_valid);
+    assert!(ed25519_degraded.hash_based_valid);
+    assert!(!ed25519_degraded.fully_verified());
+    assert!(!ed25519_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+    assert!(!ed25519_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+    assert!(ed25519_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+
+    let mut hash_degraded_signature = signature.clone();
+    let mut hash_signature_bytes =
+        hex::decode(&hash_degraded_signature.hash_ots_signature_hex).unwrap();
+    hash_signature_bytes[0] ^= 0x80;
+    hash_degraded_signature.hash_ots_signature_hex = hex::encode(hash_signature_bytes);
+    let hash_degraded =
+        verify_hybrid_critical_anchor(anchor, &ed25519_public_key, &hash_degraded_signature)
+            .unwrap();
+    assert!(hash_degraded.ed25519_valid);
+    assert!(!hash_degraded.hash_based_valid);
+    assert!(!hash_degraded.fully_verified());
+    assert!(!hash_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+    assert!(hash_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+    assert!(!hash_degraded.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+
+    let fully_broken =
+        verify_hybrid_critical_anchor(anchor, &wrong_ed25519_public_key, &hash_degraded_signature)
+            .unwrap();
+    assert!(!fully_broken.fully_verified());
+    assert!(!fully_broken.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+    assert!(!fully_broken.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+    assert!(!fully_broken.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
 }
 
 /// Test length-prefixed domain separation prevents collision attacks.

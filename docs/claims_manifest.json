@@ -1,0 +1,45 @@
+{
+  "schema_version": "franken-node/claims-manifest/v1",
+  "description": "Machine-recomputable snapshot of README headline claims. Regenerate with `python scripts/check_claims_manifest.py --update` and reconcile the README when a rounded claim changes. Backs bd-5r99w.6 / bd-5r99w.9.",
+  "claims": {
+    "integration_tests_run_by_cargo_test": {
+      "value": 3750,
+      "kind": "count",
+      "tolerance_pct": 30,
+      "readme_claim": "~3.8k e2e (badge + Testing section)"
+    },
+    "inline_tests_behind_inline_lane": {
+      "value": 21610,
+      "kind": "count",
+      "tolerance_pct": 30,
+      "readme_claim": "~21k inline (badge + Testing section)"
+    },
+    "fuzz_targets_registered": {
+      "value": 146,
+      "kind": "count",
+      "tolerance_pct": 20,
+      "readme_claim": "146 registered cargo-fuzz harnesses"
+    },
+    "validators": {
+      "value": 437,
+      "kind": "count",
+      "tolerance_pct": 20,
+      "readme_claim": "430+ / ~436 scripts/check_*.py"
+    },
+    "unsafe_blocks": {
+      "value": 0,
+      "kind": "exact",
+      "readme_claim": "0 (#![forbid(unsafe_code)])"
+    },
+    "license": {
+      "value": "LicenseRef-MIT-OpenAI-Anthropic-Rider",
+      "kind": "string",
+      "readme_claim": "MIT + OpenAI/Anthropic Rider"
+    },
+    "replay_verdict_load_bearing": {
+      "value": true,
+      "kind": "bool",
+      "readme_claim": "incident replay is integrity-verified / load-bearing (bd-5r99w.3)"
+    }
+  }
+}

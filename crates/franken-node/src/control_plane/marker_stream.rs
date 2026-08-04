@@ -638,7 +638,16 @@ impl MarkerStream {
         );
 
         if !crate::security::constant_time::ct_eq(&last.marker_hash, &recomputed) {
-            self.markers.pop()
+            let discarded = self.markers.pop()?;
+            // `total_appended` is the next sequence to hand out, so discarding
+            // a marker has to give its number back. Leaving the counter
+            // advanced made the following append skip a sequence, which
+            // permanently breaks the dense-sequence invariant this recovery
+            // exists to preserve — `verify_integrity` then fails forever — and
+            // pushes every later marker past the inclusion window its proofs
+            // are checked against.
+            self.total_appended = discarded.sequence;
+            Some(discarded)
         } else {
             None
         }
@@ -675,6 +684,9 @@ mod tests {
         MarkerStreamError, find_divergence_point, len_to_u64,
     };
     use crate::security::constant_time;
+    // bd-yom8c: nested test mod does not inherit the file-level `use sha2::Digest`;
+    // re-import so `sha2::Sha256::new()` (a Digest trait fn) resolves.
+    use sha2::Digest;
 
     fn trace(n: u32) -> String {
         format!("trace-{n:04}")

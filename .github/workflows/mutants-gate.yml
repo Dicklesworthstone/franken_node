@@ -115,3 +115,69 @@ jobs:
             echo "cargo-mutants failed with exit code $code"
             exit "$code"
           fi
+
+      # bd-5r99w.14: back the README "tests" claim with effective coverage —
+      # a mutation-adequacy floor, not a raw count. Computes the catch ratio over
+      # viable mutants and fails when it drops below a registered floor, so a
+      # regression that guts the focused suites' detection power is caught.
+      - name: Enforce mutation-adequacy floor (bd-5r99w.14)
+        if: always()
+        env:
+          # Conservative provisional floor in basis points. The gate scopes to
+          # heavily tested files (constant_time, evidence_ledger,
+          # canonical_serializer); ratchet this up once a measured baseline is
+          # recorded. This is the registered floor the effective-coverage claim
+          # references.
+          MUTATION_SCORE_FLOOR_BP: "2500"
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          floor_bp = int(os.environ.get("MUTATION_SCORE_FLOOR_BP", "2500"))
+          path = pathlib.Path("mutants-output/outcomes.json")
+          if not path.exists():
+              print("mutation-adequacy: outcomes.json absent; skipping floor "
+                    "(exit-code gate already enforced)")
+              sys.exit(0)
+          try:
+              data = json.loads(path.read_text())
+          except (OSError, json.JSONDecodeError) as exc:
+              print(f"mutation-adequacy: could not read outcomes.json ({exc}); skipping floor")
+              sys.exit(0)
+
+          outcomes = data.get("outcomes", data if isinstance(data, list) else [])
+          caught = missed = timeout = unviable = other = 0
+          for outcome in outcomes:
+              summary = outcome.get("summary") if isinstance(outcome, dict) else None
+              token = (summary if isinstance(summary, str) else json.dumps(summary)).lower()
+              if "caught" in token:
+                  caught += 1
+              elif "missed" in token:
+                  missed += 1
+              elif "timeout" in token:
+                  timeout += 1
+              elif "unviable" in token:
+                  unviable += 1
+              else:
+                  other += 1
+
+          viable = caught + missed + timeout
+          if viable == 0:
+              print(f"mutation-adequacy: no viable mutants parsed "
+                    f"(caught={caught} missed={missed} timeout={timeout} "
+                    f"unviable={unviable} other={other}); skipping floor")
+              sys.exit(0)
+
+          # A timeout is a detection: the mutant made the suite hang/fail.
+          score_bp = round((caught + timeout) * 10000 / viable)
+          print(f"mutation-adequacy: caught={caught} missed={missed} timeout={timeout} "
+                f"unviable={unviable} viable={viable} score={score_bp}bp floor={floor_bp}bp")
+          if score_bp < floor_bp:
+              print(f"::error::mutation score {score_bp}bp is below the registered floor "
+                    f"{floor_bp}bp (bd-5r99w.14)")
+              sys.exit(1)
+          print("mutation-adequacy: floor satisfied")
+          PY

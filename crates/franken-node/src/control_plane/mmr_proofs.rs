@@ -14,10 +14,24 @@ use sha2::{Digest, Sha256};
 use crate::control_plane::marker_stream::MarkerStream;
 use crate::push_bounded;
 use crate::security::constant_time;
+use crate::security::threshold_sig::{
+    PartialSignature, PublicationArtifact, ThresholdConfig, verify_threshold,
+};
 
 /// Maximum leaf hashes before oldest-first eviction.
 const MAX_LEAF_HASHES: usize = 4096;
 const MAX_AUDIT_PATH_ENTRIES: usize = 64;
+const MAX_REATTESTATION_CHAIN_LINKS: usize = 128;
+const MAX_ROOT_WITNESS_SIGNATURES: usize = 256;
+const MAX_ROOT_WITNESS_IDENTIFIER_BYTES: usize = 128;
+pub const MMR_ROOT_REATTESTATION_SCHEMA_VERSION: &str = "mmr-root-reattestation-v1";
+pub const MMR_ROOT_WITNESS_SCHEMA_VERSION: &str = "mmr-root-witness-v1";
+pub const MMR_ROOT_WITNESS_ARTIFACT_ID: &str = "mmr-root-witness";
+pub const MMR_ROOT_WITNESS_CONNECTOR_ID: &str = "franken-node-root-witness";
+pub const FN_MMR_ROOT_WITNESS_START: &str = "FN-MMR-ROOT-WITNESS-START";
+pub const FN_MMR_ROOT_WITNESS_THRESHOLD_VERIFIED: &str = "FN-MMR-ROOT-WITNESS-THRESHOLD-VERIFIED";
+pub const FN_MMR_ROOT_WITNESS_ANTERIORITY_VERIFIED: &str =
+    "FN-MMR-ROOT-WITNESS-ANTERIORITY-VERIFIED";
 
 /// Safe conversion from usize to u64 with overflow protection.
 fn len_to_u64(len: usize) -> u64 {
@@ -72,6 +86,167 @@ pub struct PrefixProof {
     pub prefix_root_hash: Hash,
     pub super_root_hash: Hash,
     pub prefix_root_from_super: Hash,
+    pub super_leaf_hashes: Vec<Hash>,
+}
+
+/// Durable re-attestation that binds an older MMR root to a newer root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MmrRootReattestation {
+    pub schema_version: String,
+    pub previous_root: MmrRoot,
+    pub attested_root: MmrRoot,
+    pub prefix_proof: PrefixProof,
+    pub issued_at_unix_seconds: u64,
+    pub crypto_suite: String,
+    pub attestation_hash: Hash,
+}
+
+/// Ordered root re-attestations from one retained MMR root to a newer root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MmrRootReattestationChain {
+    pub origin_root: MmrRoot,
+    pub attestations: Vec<MmrRootReattestation>,
+}
+
+/// Canonical statement that independent witnesses cosign for one MMR root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MmrRootWitnessStatement {
+    pub schema_version: String,
+    pub root: MmrRoot,
+    pub observed_at_unix_seconds: u64,
+    pub witness_group_id: String,
+    pub witness_policy_id: String,
+    pub content_hash: Hash,
+}
+
+/// Threshold-cosigned witness receipt that can be embedded in evidence-ledger payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MmrRootWitnessReceipt {
+    pub statement: MmrRootWitnessStatement,
+    pub threshold_config: ThresholdConfig,
+    pub witness_artifact: PublicationArtifact,
+    pub trace_id: String,
+    pub timestamp: String,
+}
+
+/// Operator-pinned trust anchor for MMR root-witness receipts.
+///
+/// # Why verification cannot use the receipt's own `threshold_config` (bd-7fubt)
+///
+/// `MmrRootWitnessReceipt` carries a `threshold_config`, and `ThresholdConfig`
+/// carries the *verifying keys*. Verification used to hand that embedded config
+/// straight to `verify_threshold`, so a receipt supplied both the signatures and
+/// the key set they were checked against. Nothing else pinned the signers:
+/// `witness_group_id` and `witness_policy_id` were only charset-validated.
+///
+/// The forgery was a one-liner. Generate a single Ed25519 keypair; pick any
+/// `MmrRoot` and any `observed_at_unix_seconds`; build the statement; sign the
+/// artifact content hash with your key; set
+/// `threshold_config = { threshold: 1, total_signers: 1, signer_keys: [your key] }`.
+/// `verify_root_witness_receipt` returned `Ok`, `verify_root_witness_anteriority`
+/// returned `Ok` for any later cutoff, and `EvidenceLedger` recorded it as proof
+/// that the root had been observed by that time. Proof-of-anteriority was
+/// unforgeable in name only.
+///
+/// So verification now requires an anchor the *caller* supplies out of band. The
+/// anchor names the witness group and policy it speaks for and pins the quorum
+/// those witnesses must meet; the receipt's embedded `threshold_config` is
+/// treated as an assertion to check against the anchor, never as an authority.
+/// This mirrors the repository's standing rule that there are no built-in trust
+/// roots — the same reason `incident replay` and `verify release` refuse to run
+/// without an operator-supplied key.
+///
+/// The anchor does not, by itself, establish that the witnesses are mutually
+/// independent; choosing a quorum large enough to make collusion meaningful is
+/// an operator responsibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MmrRootWitnessTrustAnchor {
+    witness_group_id: String,
+    witness_policy_id: String,
+    threshold_config: ThresholdConfig,
+}
+
+impl MmrRootWitnessTrustAnchor {
+    /// Build a trust anchor, validating the identifiers and quorum shape up front
+    /// so a malformed anchor fails at configuration time rather than mid-verify.
+    pub fn new(
+        witness_group_id: &str,
+        witness_policy_id: &str,
+        threshold_config: ThresholdConfig,
+    ) -> Result<Self, ProofError> {
+        validate_root_witness_identifier("anchor witness_group_id", witness_group_id)?;
+        validate_root_witness_identifier("anchor witness_policy_id", witness_policy_id)?;
+
+        if threshold_config.threshold == 0 {
+            return Err(ProofError::InvalidProof {
+                reason: "anchor threshold must be greater than zero".to_string(),
+            });
+        }
+        if threshold_config.threshold > threshold_config.total_signers {
+            return Err(ProofError::InvalidProof {
+                reason: format!(
+                    "anchor threshold={} exceeds total_signers={}",
+                    threshold_config.threshold, threshold_config.total_signers
+                ),
+            });
+        }
+        if u32::try_from(threshold_config.signer_keys.len()).unwrap_or(u32::MAX)
+            != threshold_config.total_signers
+        {
+            return Err(ProofError::InvalidProof {
+                reason: format!(
+                    "anchor signer_keys len={} does not match total_signers={}",
+                    threshold_config.signer_keys.len(),
+                    threshold_config.total_signers
+                ),
+            });
+        }
+        if threshold_config.signer_keys.len() > MAX_ROOT_WITNESS_SIGNATURES {
+            return Err(ProofError::InvalidProof {
+                reason: format!(
+                    "anchor signer_keys len={} exceeds limit={MAX_ROOT_WITNESS_SIGNATURES}",
+                    threshold_config.signer_keys.len()
+                ),
+            });
+        }
+
+        Ok(Self {
+            witness_group_id: witness_group_id.to_string(),
+            witness_policy_id: witness_policy_id.to_string(),
+            threshold_config,
+        })
+    }
+
+    /// Witness group this anchor speaks for.
+    #[must_use]
+    pub fn witness_group_id(&self) -> &str {
+        &self.witness_group_id
+    }
+
+    /// Witness policy this anchor speaks for.
+    #[must_use]
+    pub fn witness_policy_id(&self) -> &str {
+        &self.witness_policy_id
+    }
+
+    /// The pinned quorum receipts must satisfy.
+    #[must_use]
+    pub fn threshold_config(&self) -> &ThresholdConfig {
+        &self.threshold_config
+    }
+}
+
+/// Verified proof-of-anteriority summary for one witnessed MMR root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MmrRootWitnessVerification {
+    pub root: MmrRoot,
+    pub observed_at_unix_seconds: u64,
+    pub witness_group_id: String,
+    pub witness_policy_id: String,
+    pub valid_signatures: u32,
+    pub threshold: u32,
+    pub content_hash: Hash,
+    pub event_codes: Vec<String>,
 }
 
 /// Errors for MMR checkpoint/proof operations.
@@ -430,6 +605,7 @@ pub fn mmr_prefix_proof(
         prefix_root_hash: root_a.root_hash.clone(),
         super_root_hash: root_b.root_hash.clone(),
         prefix_root_from_super,
+        super_leaf_hashes: checkpoint_b.leaf_hashes.clone(),
     })
 }
 
@@ -439,7 +615,51 @@ pub fn verify_prefix(
     root_a: &MmrRoot,
     root_b: &MmrRoot,
 ) -> Result<(), ProofError> {
+    if proof.prefix_size == 0 || proof.super_tree_size == 0 {
+        return Err(ProofError::EmptyCheckpoint);
+    }
+
     if proof.prefix_size > proof.super_tree_size {
+        return Err(ProofError::PrefixSizeInvalid {
+            prefix_size: proof.prefix_size,
+            super_tree_size: proof.super_tree_size,
+        });
+    }
+
+    let prefix_size = usize::try_from(proof.prefix_size).map_err(|_| ProofError::InvalidProof {
+        reason: format!(
+            "prefix_size={} cannot be represented locally",
+            proof.prefix_size
+        ),
+    })?;
+    let super_tree_size =
+        usize::try_from(proof.super_tree_size).map_err(|_| ProofError::InvalidProof {
+            reason: format!(
+                "super_tree_size={} cannot be represented locally",
+                proof.super_tree_size
+            ),
+        })?;
+
+    if proof.super_leaf_hashes.len() > MAX_LEAF_HASHES {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "super_leaf_hashes_len={} exceeds limit={MAX_LEAF_HASHES}",
+                proof.super_leaf_hashes.len()
+            ),
+        });
+    }
+
+    if proof.super_leaf_hashes.len() != super_tree_size {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "super_leaf_hashes_len={} does not match super_tree_size={}",
+                proof.super_leaf_hashes.len(),
+                proof.super_tree_size
+            ),
+        });
+    }
+
+    if prefix_size > proof.super_leaf_hashes.len() {
         return Err(ProofError::PrefixSizeInvalid {
             prefix_size: proof.prefix_size,
             super_tree_size: proof.super_tree_size,
@@ -473,12 +693,476 @@ pub fn verify_prefix(
         });
     }
 
+    let recomputed_prefix_root =
+        merkle_root_from_leaf_hashes(&proof.super_leaf_hashes[..prefix_size])
+            .ok_or(ProofError::EmptyCheckpoint)?;
+    if !constant_time::ct_eq(&recomputed_prefix_root, &root_a.root_hash) {
+        return Err(ProofError::RootMismatch {
+            expected: root_a.root_hash.clone(),
+            actual: recomputed_prefix_root,
+        });
+    }
+
+    let recomputed_super_root = merkle_root_from_leaf_hashes(&proof.super_leaf_hashes)
+        .ok_or(ProofError::EmptyCheckpoint)?;
+    if !constant_time::ct_eq(&recomputed_super_root, &root_b.root_hash) {
+        return Err(ProofError::RootMismatch {
+            expected: root_b.root_hash.clone(),
+            actual: recomputed_super_root,
+        });
+    }
+
     Ok(())
+}
+
+/// Re-attest an older checkpoint root under a current root and crypto suite.
+pub fn mmr_root_reattestation(
+    previous_checkpoint: &MmrCheckpoint,
+    current_checkpoint: &MmrCheckpoint,
+    issued_at_unix_seconds: u64,
+    crypto_suite: &str,
+) -> Result<MmrRootReattestation, ProofError> {
+    if issued_at_unix_seconds == 0 {
+        return Err(ProofError::InvalidProof {
+            reason: "issued_at_unix_seconds must be nonzero".to_string(),
+        });
+    }
+    validate_reattestation_crypto_suite(crypto_suite)?;
+
+    let prefix_proof = mmr_prefix_proof(previous_checkpoint, current_checkpoint)?;
+    let previous_root = checkpoint_root_or_err(previous_checkpoint)?.clone();
+    let attested_root = checkpoint_root_or_err(current_checkpoint)?.clone();
+    let mut reattestation = MmrRootReattestation {
+        schema_version: MMR_ROOT_REATTESTATION_SCHEMA_VERSION.to_string(),
+        previous_root,
+        attested_root,
+        prefix_proof,
+        issued_at_unix_seconds,
+        crypto_suite: crypto_suite.to_string(),
+        attestation_hash: String::new(),
+    };
+    reattestation.attestation_hash = compute_root_reattestation_hash(&reattestation);
+    Ok(reattestation)
+}
+
+/// Verify one re-attestation record without trusting the producing runtime.
+pub fn verify_root_reattestation(reattestation: &MmrRootReattestation) -> Result<(), ProofError> {
+    if reattestation.schema_version != MMR_ROOT_REATTESTATION_SCHEMA_VERSION {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "unsupported reattestation schema_version '{}'",
+                reattestation.schema_version
+            ),
+        });
+    }
+    if reattestation.issued_at_unix_seconds == 0 {
+        return Err(ProofError::InvalidProof {
+            reason: "issued_at_unix_seconds must be nonzero".to_string(),
+        });
+    }
+    validate_reattestation_crypto_suite(&reattestation.crypto_suite)?;
+    verify_prefix(
+        &reattestation.prefix_proof,
+        &reattestation.previous_root,
+        &reattestation.attested_root,
+    )?;
+
+    let expected_hash = compute_root_reattestation_hash(reattestation);
+    if !constant_time::ct_eq(&expected_hash, &reattestation.attestation_hash) {
+        return Err(ProofError::InvalidProof {
+            reason: "reattestation hash mismatch".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Verify an ordered re-attestation chain and return the newest attested root.
+pub fn verify_root_reattestation_chain(
+    chain: &MmrRootReattestationChain,
+) -> Result<MmrRoot, ProofError> {
+    if chain.attestations.is_empty() {
+        return Err(ProofError::InvalidProof {
+            reason: "reattestation chain must contain at least one link".to_string(),
+        });
+    }
+    if chain.attestations.len() > MAX_REATTESTATION_CHAIN_LINKS {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "reattestation_chain_len={} exceeds limit={MAX_REATTESTATION_CHAIN_LINKS}",
+                chain.attestations.len()
+            ),
+        });
+    }
+
+    let mut current_root = chain.origin_root.clone();
+    let mut previous_issued_at = 0;
+    for reattestation in &chain.attestations {
+        // Same eager-predicate discipline as the checkpoint-root comparison
+        // above. The derived `PartialEq` on `MmrRoot` compares `root_hash` with
+        // a short-circuiting string compare, which leaks the matching prefix
+        // length of the chain's linkage hash; computing both predicates first
+        // also keeps `||` from revealing whether the size or the hash diverged.
+        let size_matches = reattestation.previous_root.tree_size == current_root.tree_size;
+        let root_hash_matches = constant_time::ct_eq(
+            &reattestation.previous_root.root_hash,
+            &current_root.root_hash,
+        );
+        if !size_matches || !root_hash_matches {
+            return Err(ProofError::InvalidProof {
+                reason: "reattestation chain root continuity mismatch".to_string(),
+            });
+        }
+        if reattestation.issued_at_unix_seconds < previous_issued_at {
+            return Err(ProofError::InvalidProof {
+                reason: "reattestation chain timestamps must be monotonic".to_string(),
+            });
+        }
+
+        verify_root_reattestation(reattestation)?;
+        previous_issued_at = reattestation.issued_at_unix_seconds;
+        current_root = reattestation.attested_root.clone();
+    }
+
+    Ok(current_root)
+}
+
+/// Build the canonical root-witness statement that threshold signers cosign.
+pub fn mmr_root_witness_statement(
+    root: &MmrRoot,
+    observed_at_unix_seconds: u64,
+    witness_group_id: &str,
+    witness_policy_id: &str,
+) -> Result<MmrRootWitnessStatement, ProofError> {
+    validate_root_witness_root(root)?;
+    if observed_at_unix_seconds == 0 {
+        return Err(ProofError::InvalidProof {
+            reason: "observed_at_unix_seconds must be nonzero".to_string(),
+        });
+    }
+    validate_root_witness_identifier("witness_group_id", witness_group_id)?;
+    validate_root_witness_identifier("witness_policy_id", witness_policy_id)?;
+
+    let mut statement = MmrRootWitnessStatement {
+        schema_version: MMR_ROOT_WITNESS_SCHEMA_VERSION.to_string(),
+        root: root.clone(),
+        observed_at_unix_seconds,
+        witness_group_id: witness_group_id.to_string(),
+        witness_policy_id: witness_policy_id.to_string(),
+        content_hash: String::new(),
+    };
+    statement.content_hash = compute_root_witness_content_hash(&statement);
+    Ok(statement)
+}
+
+/// Build the publication artifact that binds witness signatures to a root statement.
+pub fn mmr_root_witness_artifact(
+    statement: &MmrRootWitnessStatement,
+    signatures: Vec<PartialSignature>,
+) -> Result<PublicationArtifact, ProofError> {
+    validate_root_witness_statement(statement)?;
+    if signatures.len() > MAX_ROOT_WITNESS_SIGNATURES {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness signatures len={} exceeds limit={MAX_ROOT_WITNESS_SIGNATURES}",
+                signatures.len()
+            ),
+        });
+    }
+
+    Ok(PublicationArtifact {
+        artifact_id: MMR_ROOT_WITNESS_ARTIFACT_ID.to_string(),
+        connector_id: MMR_ROOT_WITNESS_CONNECTOR_ID.to_string(),
+        content_hash: statement.content_hash.clone(),
+        signatures,
+    })
+}
+
+/// Verify the witness threshold receipt for an MMR root against a pinned anchor.
+///
+/// The `anchor` is the authority: it names the witness group/policy the receipt
+/// must claim and supplies the `ThresholdConfig` — and therefore the verifying
+/// keys — the signatures are checked against. See [`MmrRootWitnessTrustAnchor`]
+/// for why the receipt's own embedded config can never play that role.
+pub fn verify_root_witness_receipt(
+    receipt: &MmrRootWitnessReceipt,
+    anchor: &MmrRootWitnessTrustAnchor,
+) -> Result<MmrRootWitnessVerification, ProofError> {
+    validate_root_witness_statement(&receipt.statement)?;
+    validate_root_witness_text("trace_id", &receipt.trace_id)?;
+    validate_root_witness_text("timestamp", &receipt.timestamp)?;
+
+    // bd-7fubt: bind the receipt to the anchor before any signature work. A
+    // receipt that names a different witness group or policy is not evidence
+    // about the group this caller trusts, whatever it is signed with.
+    if !constant_time::ct_eq(
+        &receipt.statement.witness_group_id,
+        &anchor.witness_group_id,
+    ) {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness group mismatch: anchor={} receipt={}",
+                anchor.witness_group_id, receipt.statement.witness_group_id
+            ),
+        });
+    }
+    if !constant_time::ct_eq(
+        &receipt.statement.witness_policy_id,
+        &anchor.witness_policy_id,
+    ) {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness policy mismatch: anchor={} receipt={}",
+                anchor.witness_policy_id, receipt.statement.witness_policy_id
+            ),
+        });
+    }
+    // The embedded config is an assertion about the quorum, not an authority for
+    // it. Requiring it to equal the anchor's rejects a receipt that advertises a
+    // weaker quorum or a different signer set outright, rather than quietly
+    // verifying it under the anchor's terms.
+    if receipt.threshold_config != anchor.threshold_config {
+        return Err(ProofError::InvalidProof {
+            reason: "root witness threshold_config does not match the pinned trust anchor"
+                .to_string(),
+        });
+    }
+
+    if !constant_time::ct_eq(
+        &receipt.witness_artifact.artifact_id,
+        MMR_ROOT_WITNESS_ARTIFACT_ID,
+    ) {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness artifact_id mismatch: expected={MMR_ROOT_WITNESS_ARTIFACT_ID} actual={}",
+                receipt.witness_artifact.artifact_id
+            ),
+        });
+    }
+    if !constant_time::ct_eq(
+        &receipt.witness_artifact.connector_id,
+        MMR_ROOT_WITNESS_CONNECTOR_ID,
+    ) {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness connector_id mismatch: expected={MMR_ROOT_WITNESS_CONNECTOR_ID} actual={}",
+                receipt.witness_artifact.connector_id
+            ),
+        });
+    }
+    if !constant_time::ct_eq(
+        &receipt.witness_artifact.content_hash,
+        &receipt.statement.content_hash,
+    ) {
+        return Err(ProofError::InvalidProof {
+            reason: "root witness artifact content_hash mismatch".to_string(),
+        });
+    }
+    if receipt.witness_artifact.signatures.len() > MAX_ROOT_WITNESS_SIGNATURES {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness signatures len={} exceeds limit={MAX_ROOT_WITNESS_SIGNATURES}",
+                receipt.witness_artifact.signatures.len()
+            ),
+        });
+    }
+
+    let threshold_result = verify_threshold(
+        // The ANCHOR's config, never the receipt's (bd-7fubt).
+        &anchor.threshold_config,
+        &receipt.witness_artifact,
+        &receipt.trace_id,
+        &receipt.timestamp,
+    );
+    if !threshold_result.verified {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness threshold rejected: {:?}",
+                threshold_result.failure_reason
+            ),
+        });
+    }
+
+    Ok(MmrRootWitnessVerification {
+        root: receipt.statement.root.clone(),
+        observed_at_unix_seconds: receipt.statement.observed_at_unix_seconds,
+        witness_group_id: receipt.statement.witness_group_id.clone(),
+        witness_policy_id: receipt.statement.witness_policy_id.clone(),
+        valid_signatures: threshold_result.valid_signatures,
+        threshold: threshold_result.threshold,
+        content_hash: receipt.statement.content_hash.clone(),
+        event_codes: vec![
+            FN_MMR_ROOT_WITNESS_START.to_string(),
+            FN_MMR_ROOT_WITNESS_THRESHOLD_VERIFIED.to_string(),
+        ],
+    })
+}
+
+/// Verify a root witness and require it to have been observed no later than `as_of`.
+///
+/// Anteriority is only as strong as the witness set behind it, so this takes the
+/// same operator-pinned `anchor` as [`verify_root_witness_receipt`].
+pub fn verify_root_witness_anteriority(
+    receipt: &MmrRootWitnessReceipt,
+    anchor: &MmrRootWitnessTrustAnchor,
+    as_of_unix_seconds: u64,
+) -> Result<MmrRootWitnessVerification, ProofError> {
+    if as_of_unix_seconds == 0 {
+        return Err(ProofError::InvalidProof {
+            reason: "as_of_unix_seconds must be nonzero".to_string(),
+        });
+    }
+
+    let mut verification = verify_root_witness_receipt(receipt, anchor)?;
+    if verification.observed_at_unix_seconds > as_of_unix_seconds {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "root witness observed_at_unix_seconds={} is after as_of_unix_seconds={as_of_unix_seconds}",
+                verification.observed_at_unix_seconds
+            ),
+        });
+    }
+
+    verification
+        .event_codes
+        .push(FN_MMR_ROOT_WITNESS_ANTERIORITY_VERIFIED.to_string());
+    Ok(verification)
 }
 
 #[must_use]
 pub fn marker_leaf_hash(marker_hash: &str) -> Hash {
     raw_hash_to_hex(&marker_leaf_hash_raw(marker_hash))
+}
+
+fn validate_reattestation_crypto_suite(crypto_suite: &str) -> Result<(), ProofError> {
+    if crypto_suite.trim() != crypto_suite || crypto_suite.is_empty() {
+        return Err(ProofError::InvalidProof {
+            reason: "crypto_suite must be a nonempty canonical registry id".to_string(),
+        });
+    }
+    crate::crypto::validate_crypto_suite(crypto_suite).map_err(|source| {
+        ProofError::InvalidProof {
+            reason: format!("unsupported reattestation crypto_suite: {source}"),
+        }
+    })?;
+    Ok(())
+}
+
+fn compute_root_reattestation_hash(reattestation: &MmrRootReattestation) -> Hash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mmr_root_reattestation_v1:");
+    update_hash_string(&mut hasher, &reattestation.schema_version);
+    update_root_for_hash(&mut hasher, &reattestation.previous_root);
+    update_root_for_hash(&mut hasher, &reattestation.attested_root);
+    update_prefix_proof_for_hash(&mut hasher, &reattestation.prefix_proof);
+    hasher.update(reattestation.issued_at_unix_seconds.to_le_bytes());
+    update_hash_string(&mut hasher, &reattestation.crypto_suite);
+    hex::encode(hasher.finalize())
+}
+
+fn validate_root_witness_statement(statement: &MmrRootWitnessStatement) -> Result<(), ProofError> {
+    if statement.schema_version != MMR_ROOT_WITNESS_SCHEMA_VERSION {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "unsupported root witness schema_version '{}'",
+                statement.schema_version
+            ),
+        });
+    }
+    validate_root_witness_root(&statement.root)?;
+    if statement.observed_at_unix_seconds == 0 {
+        return Err(ProofError::InvalidProof {
+            reason: "observed_at_unix_seconds must be nonzero".to_string(),
+        });
+    }
+    validate_root_witness_identifier("witness_group_id", &statement.witness_group_id)?;
+    validate_root_witness_identifier("witness_policy_id", &statement.witness_policy_id)?;
+    let expected_hash = compute_root_witness_content_hash(statement);
+    if !constant_time::ct_eq(&expected_hash, &statement.content_hash) {
+        return Err(ProofError::InvalidProof {
+            reason: "root witness content_hash mismatch".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_root_witness_root(root: &MmrRoot) -> Result<(), ProofError> {
+    if root.tree_size == 0 {
+        return Err(ProofError::EmptyCheckpoint);
+    }
+    if raw_hash_from_lower_hex(&root.root_hash).is_none() {
+        return Err(ProofError::InvalidProof {
+            reason: "root witness root_hash must be canonical lowercase sha256 hex".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_root_witness_identifier(field_name: &str, value: &str) -> Result<(), ProofError> {
+    validate_root_witness_text(field_name, value)?;
+    if value.len() > MAX_ROOT_WITNESS_IDENTIFIER_BYTES {
+        return Err(ProofError::InvalidProof {
+            reason: format!(
+                "{field_name} exceeds maximum length of {MAX_ROOT_WITNESS_IDENTIFIER_BYTES} bytes"
+            ),
+        });
+    }
+    if !value
+        .bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.'))
+    {
+        return Err(ProofError::InvalidProof {
+            reason: format!("{field_name} contains unsafe identifier characters"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_root_witness_text(field_name: &str, value: &str) -> Result<(), ProofError> {
+    if value.trim() != value || value.is_empty() {
+        return Err(ProofError::InvalidProof {
+            reason: format!("{field_name} must be nonempty and canonical"),
+        });
+    }
+    if value.contains('\0') {
+        return Err(ProofError::InvalidProof {
+            reason: format!("{field_name} must not contain null bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn compute_root_witness_content_hash(statement: &MmrRootWitnessStatement) -> Hash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mmr_root_witness_v1:");
+    update_hash_string(&mut hasher, &statement.schema_version);
+    update_root_for_hash(&mut hasher, &statement.root);
+    hasher.update(statement.observed_at_unix_seconds.to_le_bytes());
+    update_hash_string(&mut hasher, &statement.witness_group_id);
+    update_hash_string(&mut hasher, &statement.witness_policy_id);
+    hex::encode(hasher.finalize())
+}
+
+fn update_root_for_hash(hasher: &mut Sha256, root: &MmrRoot) {
+    hasher.update(root.tree_size.to_le_bytes());
+    update_hash_string(hasher, &root.root_hash);
+}
+
+fn update_prefix_proof_for_hash(hasher: &mut Sha256, proof: &PrefixProof) {
+    hasher.update(proof.prefix_size.to_le_bytes());
+    hasher.update(proof.super_tree_size.to_le_bytes());
+    update_hash_string(hasher, &proof.prefix_root_hash);
+    update_hash_string(hasher, &proof.super_root_hash);
+    update_hash_string(hasher, &proof.prefix_root_from_super);
+    hasher.update(len_to_u64(proof.super_leaf_hashes.len()).to_le_bytes());
+    for leaf_hash in &proof.super_leaf_hashes {
+        update_hash_string(hasher, leaf_hash);
+    }
+}
+
+fn update_hash_string(hasher: &mut Sha256, value: &str) {
+    hasher.update(len_to_u64(value.len()).to_le_bytes());
+    hasher.update(value.as_bytes());
 }
 
 fn marker_leaf_hash_raw(marker_hash: &str) -> RawHash {
@@ -757,14 +1441,17 @@ fn sha256_hex(input: &[u8]) -> Hash {
 #[cfg(test)]
 mod tests {
     use super::{
-        InclusionProof, MAX_LEAF_HASHES, MmrCheckpoint, MmrRoot, PrefixProof, ProofError,
-        audit_path_len_limit, hash_pair_legacy, marker_leaf_hash, merkle_audit_path,
-        merkle_audit_path_legacy, merkle_root_from_leaf_hashes,
-        merkle_root_from_leaf_hashes_legacy, mmr_inclusion_proof, mmr_prefix_proof,
-        raw_hash_from_lower_hex, verify_inclusion, verify_prefix,
+        InclusionProof, MAX_LEAF_HASHES, MMR_ROOT_REATTESTATION_SCHEMA_VERSION, MmrCheckpoint,
+        MmrRoot, MmrRootReattestationChain, PrefixProof, ProofError, audit_path_len_limit,
+        hash_pair, hash_pair_legacy, marker_leaf_hash, merkle_audit_path, merkle_audit_path_legacy,
+        merkle_root_from_leaf_hashes, merkle_root_from_leaf_hashes_legacy, mmr_inclusion_proof,
+        mmr_prefix_proof, mmr_root_reattestation, raw_hash_from_lower_hex, retained_leaf_hashes,
+        sha256_hex, verify_inclusion, verify_prefix, verify_root_reattestation,
+        verify_root_reattestation_chain,
     };
     use crate::control_plane::marker_stream::MarkerEventType;
     use crate::control_plane::marker_stream::MarkerStream;
+    use crate::crypto::ED25519_V1_CRYPTO_SUITE;
 
     fn build_stream(count: u64) -> MarkerStream {
         let mut stream = MarkerStream::new();
@@ -1055,6 +1742,58 @@ mod tests {
     }
 
     #[test]
+    fn root_reattestation_verifies_prefix_chain_and_hash() {
+        let checkpoint_a = build_checkpoint(&build_stream(4));
+        let checkpoint_b = build_checkpoint(&build_stream(7));
+        let checkpoint_c = build_checkpoint(&build_stream(9));
+
+        let attestation_ab = mmr_root_reattestation(
+            &checkpoint_a,
+            &checkpoint_b,
+            1_700_000_100,
+            ED25519_V1_CRYPTO_SUITE,
+        )
+        .expect("ab reattestation");
+        let attestation_bc = mmr_root_reattestation(
+            &checkpoint_b,
+            &checkpoint_c,
+            1_700_000_200,
+            ED25519_V1_CRYPTO_SUITE,
+        )
+        .expect("bc reattestation");
+
+        verify_root_reattestation(&attestation_ab).expect("ab verifies");
+        assert_eq!(
+            attestation_ab.schema_version,
+            MMR_ROOT_REATTESTATION_SCHEMA_VERSION
+        );
+
+        let chain = MmrRootReattestationChain {
+            origin_root: checkpoint_a.root().expect("root a").clone(),
+            attestations: vec![attestation_ab, attestation_bc],
+        };
+        let terminal_root = verify_root_reattestation_chain(&chain).expect("chain verifies");
+        assert_eq!(terminal_root, checkpoint_c.root().expect("root c").clone());
+    }
+
+    #[test]
+    fn root_reattestation_rejects_tampered_hash() {
+        let checkpoint_a = build_checkpoint(&build_stream(3));
+        let checkpoint_b = build_checkpoint(&build_stream(6));
+        let mut attestation = mmr_root_reattestation(
+            &checkpoint_a,
+            &checkpoint_b,
+            1_700_000_100,
+            ED25519_V1_CRYPTO_SUITE,
+        )
+        .expect("reattestation");
+        attestation.attestation_hash = tamper_same_length(&attestation.attestation_hash);
+
+        let err = verify_root_reattestation(&attestation).expect_err("tampered hash");
+        assert_eq!(err.code(), "MMR_INVALID_PROOF");
+    }
+
+    #[test]
     fn disabled_append_marker_hash_preserves_empty_state() {
         let mut checkpoint = MmrCheckpoint::disabled();
 
@@ -1177,6 +1916,12 @@ mod tests {
             prefix_root_hash: "prefix".to_string(),
             super_root_hash: "super".to_string(),
             prefix_root_from_super: "prefix".to_string(),
+            super_leaf_hashes: vec![
+                marker_leaf_hash("a"),
+                marker_leaf_hash("b"),
+                marker_leaf_hash("c"),
+                marker_leaf_hash("d"),
+            ],
         };
         let root_a = MmrRoot {
             tree_size: 5,
@@ -1207,6 +1952,13 @@ mod tests {
             prefix_root_hash: "prefix".to_string(),
             super_root_hash: "super".to_string(),
             prefix_root_from_super: "prefix".to_string(),
+            super_leaf_hashes: vec![
+                marker_leaf_hash("a"),
+                marker_leaf_hash("b"),
+                marker_leaf_hash("c"),
+                marker_leaf_hash("d"),
+                marker_leaf_hash("e"),
+            ],
         };
         let root_a = MmrRoot {
             tree_size: 2,
@@ -1532,7 +2284,10 @@ mod tests {
                     // Single leaf should return that leaf as root
                     assert!(root_result.is_some(), "Single leaf should produce root");
                     if let Some(root) = root_result {
-                        assert!(!root.is_empty(), "Root should not be empty");
+                        // bd-o776s: a single-leaf merkle root is the leaf itself (no
+                        // hashing), so the root mirrors the leaf content — including the
+                        // degenerate empty-leaf case where the root is legitimately empty.
+                        assert_eq!(root, leaves[0], "Single-leaf root should equal the leaf");
                     }
                 }
                 _ => {
@@ -1611,11 +2366,12 @@ mod tests {
     #[test]
     fn negative_concurrent_hash_computation_consistency() {
         // Test hash consistency under various inputs that might cause issues
+        let very_long_input = "very-long-input-".repeat(100);
         let test_inputs = vec![
             "normal-input",
             "input-with-unicode-🔥",
             "input\0with\0nulls",
-            "very-long-input-".repeat(100).as_str(),
+            very_long_input.as_str(),
             "",
             " ",
             "\n\r\t",

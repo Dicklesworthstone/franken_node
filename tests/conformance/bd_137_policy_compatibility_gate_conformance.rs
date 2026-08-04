@@ -36,9 +36,12 @@ use std::collections::BTreeMap;
 // code — not imported, to keep clippy -D warnings clean.)
 use frankenengine_node::api::compat_gate::{
     CompatGateOperationError, CompatGateRegistrationError, CompatGateService, CompatMode,
-    GateCheckRequest, GateDecision, ModeTransitionRequest, PolicyPredicate, ShimMetadata,
-    error_codes, event_codes,
+    CompatOperationId, CompatPolicyHook, CompatSideEffectCategory, GateCheckRequest, GateDecision,
+    ModeTransitionRequest, PolicyPredicate, ShimMetadata, error_codes, event_codes,
+    first_tranche_contract_for, first_tranche_operation_contracts,
+    l1_proof_carrying_acceptance_subjects,
 };
+use frankenengine_node::schema_versions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequirementLevel {
@@ -59,7 +62,7 @@ pub enum TestResult {
 // API-DRIFT REMEDIATION (bd-rjc2m.4): fn-pointer fields cannot derive Serialize/Deserialize
 // (E0277); the case table is compile-time only and never serialized — the serializable
 // surface is ConformanceRecord/ConformanceReport below (assertions unchanged).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ConformanceCase {
     pub id: &'static str,
     pub section: &'static str,
@@ -1101,5 +1104,99 @@ mod tests {
         assert!(json.contains("compliance_score"));
         assert!(json.contains("must_pass"));
         assert!(json.contains("should_pass"));
+    }
+
+    #[test]
+    fn first_tranche_operation_contracts_have_registered_schema_versions() {
+        let versions = schema_versions::all_versions();
+        let registered_schemas: std::collections::BTreeSet<&'static str> =
+            versions.iter().map(|(_, version)| *version).collect();
+
+        for contract in first_tranche_operation_contracts() {
+            for schema in [
+                contract.args_schema,
+                contract.result_schema,
+                contract.error_schema,
+            ] {
+                assert!(
+                    registered_schemas.contains(schema),
+                    "schema version {schema} is missing from schema_versions"
+                );
+            }
+
+            assert!(
+                !contract.node_error_parity.is_empty(),
+                "{} must document Node/Bun error parity",
+                contract.operation_id.registry_id()
+            );
+            assert!(
+                !contract.policy_hooks.is_empty(),
+                "{} must declare policy hooks",
+                contract.operation_id.registry_id()
+            );
+            assert!(
+                contract.resource_budget.max_duration_ms > 0,
+                "{} must declare a nonzero duration budget",
+                contract.operation_id.registry_id()
+            );
+        }
+    }
+
+    #[test]
+    fn first_tranche_operation_contracts_match_policy_surface() {
+        let http = first_tranche_contract_for(CompatOperationId::HttpRequest)
+            .expect("http request contract must be registered");
+        assert_eq!(http.operation_id.registry_id(), "compat:http:request");
+        assert_eq!(
+            http.side_effect_category,
+            CompatSideEffectCategory::NetworkEgress
+        );
+        assert!(http.policy_hooks.contains(&CompatPolicyHook::Capability));
+        assert!(http.policy_hooks.contains(&CompatPolicyHook::Ssrf));
+        assert!(http.policy_hooks.contains(&CompatPolicyHook::Profile));
+
+        let process_env = first_tranche_contract_for(CompatOperationId::ProcessEnv)
+            .expect("process env contract must be registered");
+        assert_eq!(
+            process_env.side_effect_category,
+            CompatSideEffectCategory::EnvironmentRead
+        );
+        assert!(!process_env.policy_hooks.contains(&CompatPolicyHook::Ssrf));
+        assert!(
+            process_env
+                .node_error_parity
+                .iter()
+                .any(|entry| entry.node_code == "ERR_ACCESS_DENIED" && entry.bun_code.is_none())
+        );
+    }
+
+    /// INV-PCG-ACCEPTANCE (bd-f5b04.2.4): the acceptance-invariant subject
+    /// list the dual-oracle close-condition gate enforces fail-closed must be
+    /// exactly the list derived from the canonical first-tranche operation
+    /// contracts, so the contract layer and the release machinery cannot
+    /// drift apart. Host-effect operations carry a subject; parity-only
+    /// operations must not.
+    #[test]
+    fn acceptance_invariant_subjects_bind_contract_layer_to_close_condition_gate() {
+        assert_eq!(
+            l1_proof_carrying_acceptance_subjects(),
+            schema_versions::L1_PROOF_CARRYING_ACCEPTANCE_SUBJECTS,
+            "compat-gate contract layer and schema_versions acceptance list diverged"
+        );
+
+        for contract in first_tranche_operation_contracts() {
+            let expects_receipt = matches!(
+                contract.side_effect_category,
+                CompatSideEffectCategory::FilesystemRead
+                    | CompatSideEffectCategory::FilesystemWrite
+                    | CompatSideEffectCategory::NetworkEgress
+            );
+            assert_eq!(
+                contract.operation_id.l1_proof_carrying_subject().is_some(),
+                expects_receipt,
+                "{} proof-carrying subject presence must match its host-effect category",
+                contract.operation_id.registry_id()
+            );
+        }
     }
 }

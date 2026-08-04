@@ -1394,7 +1394,6 @@ mod tests {
             name: "test-endpoint".into(),
             url: "https://test.example.com".into(),
             supported_schemas: vec![SCHEMA_VERSION.into()],
-            auth_header: Some("Bearer test-token".into()),
         };
         registry.register(endpoint);
 

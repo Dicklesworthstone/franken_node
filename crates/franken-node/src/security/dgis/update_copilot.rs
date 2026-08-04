@@ -1644,7 +1644,7 @@ mod tests {
         fn assert_rejected(config: CopilotConfig, field: &str) {
             let err = UpdateCopilot::new(config).expect_err("invalid config must be rejected");
             assert!(
-                matches!(err, CopilotError::InvalidConfig(message) if message.contains(field)),
+                matches!(&err, CopilotError::InvalidConfig(message) if message.contains(field)),
                 "error should identify {field}, got {err:?}"
             );
         }

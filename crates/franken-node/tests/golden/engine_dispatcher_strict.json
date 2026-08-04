@@ -1,0 +1,93 @@
+{
+  "profile": "strict",
+  "runtime_config": {
+    "execution": {
+      "deterministic_budget": 50000,
+      "throughput_budget": 100000,
+      "deterministic_max_registers": 128,
+      "throughput_max_registers": 256,
+      "max_call_depth": 32,
+      "max_prototype_chain_depth": 8
+    },
+    "orchestrator": {
+      "adaptive_router_gamma_millionths": 100000,
+      "stopping_cusum_threshold_millionths": 5000000,
+      "stopping_cusum_reference_millionths": 500000,
+      "cell_close_budget_ms": 10000,
+      "drain_deadline_ticks": 10000,
+      "max_concurrent_sagas": 4
+    },
+    "guardplane": {
+      "priors": {
+        "benign_millionths": 850000,
+        "anomalous_millionths": 40000,
+        "malicious_millionths": 10000,
+        "unknown_millionths": 100000,
+        "floor_mass": 100
+      },
+      "thresholds": {
+        "tail_confidence_millionths": 950000,
+        "elevated_pvalue_millionths": 100000,
+        "critical_pvalue_millionths": 25000,
+        "elevated_regime_shift_millionths": 2500000,
+        "critical_regime_shift_millionths": 4000000,
+        "critical_cvar_ratio_millionths": 20000000,
+        "elevated_cvar_ratio_millionths": 8000000
+      },
+      "containment": {
+        "grace_period_ns": 1000000000,
+        "challenge_timeout_ns": 2000000000
+      }
+    },
+    "governance": {
+      "max_persistent_holes": 5,
+      "min_supremacy_coverage_millionths": 850000,
+      "min_parity_coverage_millionths": 800000,
+      "max_structural_holes": 0,
+      "ratchet_decay_millionths": 50000
+    },
+    "gates": {
+      "min_pass_rate_millionths": 1000000,
+      "max_regression_millionths": 50000,
+      "max_unresolved": 0,
+      "workload_min_pass_rate_millionths": 950000,
+      "max_mutation_violations": 0,
+      "escalation_cost_budget_millionths": 100000
+    },
+    "optimization": {
+      "max_rules_per_pack": 256,
+      "max_interference_entries": 1024,
+      "max_scalar_fields": 64,
+      "max_decomposition_depth": 4,
+      "max_transforms_per_scope": 128,
+      "min_confidence_millionths": 600000
+    },
+    "extension_host": {
+      "max_name_len": 128,
+      "max_version_len": 64,
+      "max_entrypoint_len": 1024,
+      "max_trust_chain_ref_len": 256,
+      "allow_development_trust": false,
+      "trusted_publisher_keys": {}
+    }
+  },
+  "orchestrator_config": {
+    "loss_matrix_preset": "Conservative",
+    "force_lane": null,
+    "drain_deadline_ticks": 1000,
+    "cell_close_budget_ms": 500,
+    "max_concurrent_sagas": 8,
+    "epoch": 3,
+    "parse_goal": "Script",
+    "parser_options": {
+      "mode": "scalar_reference",
+      "budget": {
+        "max_source_bytes": 256000,
+        "max_token_count": 32768,
+        "max_recursion_depth": 128
+      }
+    },
+    "trace_id_prefix": "franken_node",
+    "policy_id": "franken-node-strict-test"
+  }
+}

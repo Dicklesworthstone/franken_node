@@ -471,6 +471,9 @@ impl ParticipationWeightEngine {
         )
     }
 
+    // Test-only convenience over `compute_single_weight_with_attestation`;
+    // production callers go through `compute_single_weight_at`.
+    #[cfg(test)]
     fn compute_single_weight(&self, participant: &ParticipantIdentity) -> ParticipationWeight {
         self.compute_single_weight_with_attestation(
             participant,
@@ -648,7 +651,7 @@ impl ParticipationWeightEngine {
         }
         established_weights.sort_by(|a, b| a.total_cmp(b));
         let mid = established_weights.len() / 2;
-        if established_weights.len() % 2 == 0 {
+        if established_weights.len().is_multiple_of(2) {
             (established_weights[mid - 1] + established_weights[mid]) / 2.0
         } else {
             established_weights[mid]
@@ -1648,6 +1651,7 @@ mod tests {
 #[cfg(test)]
 mod atc_participation_weighting_negative_path_tests {
     use super::*;
+    use crate::lock_utils::try_lock;
     use std::collections::BTreeSet;
 
     #[test]
@@ -1698,13 +1702,22 @@ mod atc_participation_weighting_negative_path_tests {
             // Unicode should be preserved exactly
             assert_eq!(record.weights[0].participant_id, *pattern);
 
-            // JSON serialization should handle injection safely
+            // JSON serialization should handle injection safely. serde_json only
+            // escapes `"`, `\`, and control characters (U+0000..U+001F); printable
+            // non-ASCII (directional overrides, BOM, emoji, zero-width) is emitted
+            // verbatim inside the JSON string — safe, and round-trips exactly
+            // (asserted below). Only assert escaping for chars serde escapes.
             let json =
                 serde_json::to_string(&record).expect("unicode injection should serialize safely");
-            assert!(
-                !json.contains(&pattern.replace('\\', "")),
-                "Raw injection pattern should be escaped in JSON"
-            );
+            if pattern
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_control())
+            {
+                assert!(
+                    !json.contains(&pattern.replace('\\', "")),
+                    "Control/quote characters should be escaped in JSON"
+                );
+            }
 
             // Deserialization should preserve exact pattern
             let parsed: WeightAuditRecord =
@@ -1985,23 +1998,23 @@ mod atc_participation_weighting_negative_path_tests {
             "0123456789abcdef".repeat(4),          // Valid hex pattern
             format!("cluster:{}", "b".repeat(32)), // Prefixed hash
             // JSON injection attempts
-            "hint\",\"injected\":true,\"cluster\":\"",
-            "null}\"evil\":\"payload\",\"cluster\":\"normal",
+            "hint\",\"injected\":true,\"cluster\":\"".to_string(),
+            "null}\"evil\":\"payload\",\"cluster\":\"normal".to_string(),
             // Control character injection
-            "cluster\x00null\r\n",
-            "cluster\x1b[31mred\x1b[0m",
+            "cluster\x00null\r\n".to_string(),
+            "cluster\x1b[31mred\x1b[0m".to_string(),
             // Unicode injection
-            "cluster\u{202E}injection",
-            "cluster\u{FEFF}bom",
+            "cluster\u{202E}injection".to_string(),
+            "cluster\u{FEFF}bom".to_string(),
             // Path-like strings that could cause issues
-            "../../../etc/passwd",
-            "..\\..\\windows\\system32",
+            "../../../etc/passwd".to_string(),
+            "..\\..\\windows\\system32".to_string(),
             // Extremely long hint
             "long_cluster_hint_".repeat(10000),
             // Empty and whitespace
-            "",
-            "   ",
-            "\t\n\r",
+            "".to_string(),
+            "   ".to_string(),
+            "\t\n\r".to_string(),
         ];
 
         let mut participants = Vec::new();
@@ -2355,8 +2368,14 @@ mod atc_participation_weighting_negative_path_tests {
                             locked: operation % 2 == 0,
                         }),
                         reputation: Some(ReputationEvidence {
+                            // >= established_interaction_count (100) with tenure at
+                            // the established threshold makes these participants
+                            // "established", so prod's new-participant cap does not
+                            // flatten every final_weight to median*cap_fraction —
+                            // letting the per-stake variety assertion below remain
+                            // meaningful.
                             score: 0.8,
-                            interaction_count: (operation + 10) as u64,
+                            interaction_count: (operation + 100) as u64,
                             tenure_seconds: 86400 * 30,
                             contributions_accepted: (operation + 5) as u64,
                             contributions_rejected: (operation % 3) as u64,
@@ -2489,9 +2508,9 @@ mod atc_participation_weighting_negative_path_tests {
         };
 
         // Should handle deeply nested content without stack overflow
-        let result = std::panic::catch_unwind(|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             engine.compute_weights(&[participant], "deep_test", "2026-04-17T00:00:00Z")
-        });
+        }));
 
         assert!(
             result.is_ok(),
@@ -2643,14 +2662,14 @@ mod atc_participation_weighting_negative_path_tests {
             "a".repeat(32),
             "b".repeat(32),
             // Similar but different strings
-            "cluster_group_alpha",
-            "cluster_group_beta",
+            "cluster_group_alpha".to_string(),
+            "cluster_group_beta".to_string(),
             // Strings that could hash to similar values
-            "subnet_192_168_1",
-            "subnet_192_168_2",
+            "subnet_192_168_1".to_string(),
+            "subnet_192_168_2".to_string(),
             // Unicode variations that look similar
-            "café_network",
-            "cafe\u{0301}_network",
+            "café_network".to_string(),
+            "cafe\u{0301}_network".to_string(),
         ];
 
         let mut participants = Vec::new();

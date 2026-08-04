@@ -7,6 +7,7 @@ Usage: franken-node fleet <COMMAND>
 
 Commands:
   status     Show policy and quarantine state across nodes
+  describe   Describe one fleet node with zone context and incident state
   release    Lift quarantine[PATH] controls with receipts
   reconcile  Reconcile fleet state for convergence
   agent      Run as a fleet agent that polls for and applies fleet actions

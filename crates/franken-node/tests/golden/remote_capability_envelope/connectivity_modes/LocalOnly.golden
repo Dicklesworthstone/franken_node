@@ -1,0 +1,5 @@
+{
+  "connectivity_mode": "local_only",
+  "authorized": false,
+  "error": "REMOTECAP_CONNECTIVITY_MODE_DENIED: mode=local_only operation=network_egress endpoint=https://example.com/api"
+}

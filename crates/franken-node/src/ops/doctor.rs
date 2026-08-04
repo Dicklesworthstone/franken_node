@@ -81,6 +81,874 @@ pub struct ResourceSummary {
     pub active_reservations: u32,
     /// Agent Mail coordination health.
     pub coordination_healthy: bool,
+    /// Structured Agent Mail coordination diagnostics.
+    pub agent_mail_coordination: AgentMailCoordinationSummary,
+}
+
+/// Agent Mail coordination health state surfaced by workspace-pressure doctor output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMailHealthState {
+    /// Agent Mail health probes and coordination archives are consistent.
+    Healthy,
+    /// Agent Mail is in read-only/degraded mode.
+    DegradedReadOnly,
+    /// The archive contains durable state that is ahead of the SQLite index.
+    ArchiveAheadIndex,
+    /// A repair or mailbox lock owner is active.
+    LockOwnerActive,
+    /// Agent Mail reports an explicit repair recommendation.
+    RepairRecommended,
+    /// Agent Mail could not be probed.
+    Unavailable,
+    /// Agent Mail was reachable but did not expose enough structured state.
+    Unknown,
+}
+
+impl AgentMailHealthState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::DegradedReadOnly => "degraded_read_only",
+            Self::ArchiveAheadIndex => "archive_ahead_index",
+            Self::LockOwnerActive => "lock_owner_active",
+            Self::RepairRecommended => "repair_recommended",
+            Self::Unavailable => "unavailable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// File-reservation hygiene state surfaced by Agent Mail coordination diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationHygieneState {
+    /// Agent Mail reported no stale or expired active reservations.
+    Healthy,
+    /// Agent Mail reported unreleased reservations that are expired or stale.
+    StaleReservations,
+    /// Agent Mail is degraded, so normal release/contact flows may fail.
+    DegradedMail,
+    /// Reservation state was incomplete or not reported.
+    Unknown,
+}
+
+impl ReservationHygieneState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::StaleReservations => "stale_reservations",
+            Self::DegradedMail => "degraded_mail",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A single Agent Mail file reservation lease included in hygiene diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMailReservationLease {
+    /// Stable reservation identifier, when Agent Mail reports one.
+    pub reservation_id: String,
+    /// Agent or holder that owns the lease.
+    pub owner: String,
+    /// Affected file path or glob.
+    pub path_pattern: String,
+    /// Lease expiry timestamp as reported by Agent Mail.
+    pub expires_ts: Option<String>,
+    /// Whether the lease is expired at diagnostic-generation time.
+    pub expired: bool,
+    /// Whether Agent Mail explicitly marked the lease stale.
+    pub stale: bool,
+}
+
+/// Structured diagnostic for Agent Mail reservation leaks and degraded release paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReservationHygieneSummary {
+    /// Overall reservation hygiene state.
+    pub state: ReservationHygieneState,
+    /// Whether Agent Mail coordination is degraded while reservation action is needed.
+    pub backend_degraded: bool,
+    /// Count of active unreleased reservations known to the diagnostic.
+    pub active_count: u32,
+    /// Count of active reservations marked stale.
+    pub stale_count: u32,
+    /// Count of active reservations whose expiry timestamp is in the past.
+    pub expired_count: u32,
+    /// Active unreleased reservation details, capped for operator output.
+    pub reservations: Vec<AgentMailReservationLease>,
+    /// Whether force-release escalation requires explicit human approval.
+    pub force_release_requires_human: bool,
+    /// Safe next action for operators and agents.
+    pub safe_next_action: String,
+    /// Compact text suitable for a Beads comment.
+    pub beads_comment: String,
+    /// Markdown text suitable for an Agent Mail status message.
+    pub agent_mail_status_body: String,
+}
+
+impl ReservationHygieneSummary {
+    #[must_use]
+    pub fn not_reported(backend_degraded: bool) -> Self {
+        Self::from_parts(backend_degraded, None, Vec::new(), false)
+    }
+
+    #[must_use]
+    pub fn from_health_payload(payload: &serde_json::Value, backend_degraded: bool) -> Self {
+        let reservations = reservation_entries_from_payload(payload);
+        let reported = !reservations.is_empty()
+            || nested_u64(
+                payload,
+                &[
+                    &["file_reservations", "active_count"],
+                    &["file_reservations", "count"],
+                    &["active_reservation_count"],
+                    &["active_reservations_count"],
+                    &["active_reservations"],
+                ],
+            )
+            .is_some();
+        let active_count = nested_u64(
+            payload,
+            &[
+                &["file_reservations", "active_count"],
+                &["file_reservations", "count"],
+                &["active_reservation_count"],
+                &["active_reservations_count"],
+                &["active_reservations"],
+            ],
+        )
+        .map(saturating_u32_from_u64);
+
+        Self::from_parts(backend_degraded, active_count, reservations, reported)
+    }
+
+    #[must_use]
+    pub const fn is_healthy(&self) -> bool {
+        matches!(self.state, ReservationHygieneState::Healthy)
+    }
+
+    #[must_use]
+    pub fn has_reportable_details(&self) -> bool {
+        self.backend_degraded
+            || self.active_count > 0
+            || self.stale_count > 0
+            || self.expired_count > 0
+            || !self.reservations.is_empty()
+            || matches!(self.state, ReservationHygieneState::Unknown)
+    }
+
+    #[must_use]
+    pub fn diagnostic_reason(&self) -> String {
+        format!(
+            "reservation_hygiene={}; active_reservations={}; stale_reservations={}; expired_reservations={}; backend_degraded={}; force_release_requires_human={}",
+            self.state.as_str(),
+            self.active_count,
+            self.stale_count,
+            self.expired_count,
+            self.backend_degraded,
+            self.force_release_requires_human
+        )
+    }
+
+    fn from_parts(
+        backend_degraded: bool,
+        active_count: Option<u32>,
+        reservations: Vec<AgentMailReservationLease>,
+        reported: bool,
+    ) -> Self {
+        let computed_active_count =
+            active_count.unwrap_or_else(|| u32::try_from(reservations.len()).unwrap_or(u32::MAX));
+        let stale_count = saturating_u32_from_usize(
+            reservations
+                .iter()
+                .filter(|reservation| reservation.stale)
+                .count(),
+        );
+        let expired_count = saturating_u32_from_usize(
+            reservations
+                .iter()
+                .filter(|reservation| reservation.expired)
+                .count(),
+        );
+        let state = reservation_hygiene_state(
+            backend_degraded,
+            reported,
+            computed_active_count,
+            stale_count,
+            expired_count,
+        );
+        let force_release_requires_human = true;
+        let safe_next_action = reservation_hygiene_safe_next_action(
+            state,
+            backend_degraded,
+            computed_active_count,
+            stale_count,
+            expired_count,
+        );
+        let beads_comment = render_reservation_hygiene_beads_comment(
+            state,
+            backend_degraded,
+            computed_active_count,
+            stale_count,
+            expired_count,
+            &reservations,
+            &safe_next_action,
+        );
+        let agent_mail_status_body = render_reservation_hygiene_agent_mail_body(
+            state,
+            backend_degraded,
+            &reservations,
+            &safe_next_action,
+        );
+
+        Self {
+            state,
+            backend_degraded,
+            active_count: computed_active_count,
+            stale_count,
+            expired_count,
+            reservations,
+            force_release_requires_human,
+            safe_next_action,
+            beads_comment,
+            agent_mail_status_body,
+        }
+    }
+}
+
+/// Structured Agent Mail coordination diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMailCoordinationSummary {
+    /// Whether the coordination state is healthy enough for normal work.
+    pub healthy: bool,
+    /// Primary health state.
+    pub health_state: AgentMailHealthState,
+    /// Additional machine-readable signals observed during probing.
+    pub signals: Vec<String>,
+    /// Message count visible in the durable archive, when reported.
+    pub archive_message_count: Option<u64>,
+    /// Message count visible in the SQLite/indexed view, when reported.
+    pub index_message_count: Option<u64>,
+    /// Agent count visible in the durable archive, when reported.
+    pub archive_agent_count: Option<u64>,
+    /// Agent count visible in the SQLite/indexed view, when reported.
+    pub index_agent_count: Option<u64>,
+    /// PID holding a mailbox or repair lock, when reported.
+    pub lock_owner_pid: Option<u32>,
+    /// Command holding a mailbox or repair lock, when reported.
+    pub lock_owner_command: Option<String>,
+    /// Whether a repair flow is recommended by the health payload.
+    pub repair_recommended: bool,
+    /// Structured reservation leak and degraded-release diagnostics.
+    pub reservation_hygiene: ReservationHygieneSummary,
+    /// Safe next action for operators and agents.
+    pub safe_next_action: String,
+    /// Compact diagnostic detail for logs and Beads comments.
+    pub detail: String,
+}
+
+impl AgentMailCoordinationSummary {
+    #[must_use]
+    pub fn from_legacy_health(healthy: bool) -> Self {
+        if healthy {
+            Self::healthy()
+        } else {
+            Self::degraded(
+                AgentMailHealthState::Unknown,
+                "agent_mail_coordination_degraded",
+                "Inspect Agent Mail health and use Beads-visible handoff until coordination recovers.",
+            )
+        }
+    }
+
+    #[must_use]
+    pub fn healthy() -> Self {
+        let reservation_hygiene = ReservationHygieneSummary::not_reported(false);
+        Self {
+            healthy: true,
+            health_state: AgentMailHealthState::Healthy,
+            signals: vec!["agent_mail_health=healthy".to_string()],
+            archive_message_count: None,
+            index_message_count: None,
+            archive_agent_count: None,
+            index_agent_count: None,
+            lock_owner_pid: None,
+            lock_owner_command: None,
+            repair_recommended: false,
+            reservation_hygiene,
+            safe_next_action: "No Agent Mail coordination action required.".to_string(),
+            detail: "agent_mail_health=healthy".to_string(),
+        }
+    }
+
+    #[must_use]
+    pub fn degraded(
+        health_state: AgentMailHealthState,
+        detail: impl Into<String>,
+        safe_next_action: impl Into<String>,
+    ) -> Self {
+        let detail = detail.into();
+        let reservation_hygiene = ReservationHygieneSummary::not_reported(true);
+        Self {
+            healthy: false,
+            health_state,
+            signals: vec![health_state.as_str().to_string()],
+            archive_message_count: None,
+            index_message_count: None,
+            archive_agent_count: None,
+            index_agent_count: None,
+            lock_owner_pid: None,
+            lock_owner_command: None,
+            repair_recommended: matches!(health_state, AgentMailHealthState::RepairRecommended),
+            reservation_hygiene,
+            safe_next_action: safe_next_action.into(),
+            detail,
+        }
+    }
+
+    #[must_use]
+    pub fn unavailable(detail: impl Into<String>) -> Self {
+        Self::degraded(
+            AgentMailHealthState::Unavailable,
+            detail,
+            "Use Beads-visible coordination and retry Agent Mail health after the service is available.",
+        )
+    }
+
+    #[must_use]
+    pub fn from_health_payload(payload: &serde_json::Value) -> Self {
+        let archive_message_count = nested_u64(
+            payload,
+            &[
+                &["archive_inventory", "messages"],
+                &["archive_inventory", "message_count"],
+                &["archive", "messages"],
+                &["archive", "message_count"],
+            ],
+        );
+        let index_message_count = nested_u64(
+            payload,
+            &[
+                &["database_inventory", "messages"],
+                &["database_inventory", "message_count"],
+                &["index_inventory", "messages"],
+                &["index_inventory", "message_count"],
+                &["sqlite_inventory", "messages"],
+                &["sqlite_inventory", "message_count"],
+                &["database", "messages"],
+                &["database", "message_count"],
+            ],
+        );
+        let archive_agent_count = nested_u64(
+            payload,
+            &[
+                &["archive_inventory", "agents"],
+                &["archive_inventory", "agent_count"],
+                &["archive", "agents"],
+                &["archive", "agent_count"],
+            ],
+        );
+        let index_agent_count = nested_u64(
+            payload,
+            &[
+                &["database_inventory", "agents"],
+                &["database_inventory", "agent_count"],
+                &["index_inventory", "agents"],
+                &["index_inventory", "agent_count"],
+                &["sqlite_inventory", "agents"],
+                &["sqlite_inventory", "agent_count"],
+                &["database", "agents"],
+                &["database", "agent_count"],
+            ],
+        );
+
+        let status = first_nested_str(
+            payload,
+            &[
+                &["status"],
+                &["health_level"],
+                &["semantic_readiness", "status"],
+                &["readiness", "status"],
+            ],
+        );
+        let durability_state = first_nested_str(
+            payload,
+            &[
+                &["durability_state"],
+                &["recovery_mode"],
+                &["semantic_readiness", "recovery_mode"],
+                &["readiness", "recovery_mode"],
+            ],
+        );
+        let next_action = first_nested_str(
+            payload,
+            &[
+                &["next_action"],
+                &["semantic_readiness", "next_action"],
+                &["readiness", "next_action"],
+            ],
+        );
+        let lock_owner_pid = nested_u64(
+            payload,
+            &[
+                &["lock_owner", "pid"],
+                &["repair_lock_owner", "pid"],
+                &["mailbox_lock_owner", "pid"],
+                &["lock_owner_pid"],
+            ],
+        )
+        .and_then(|pid| u32::try_from(pid).ok());
+        let lock_owner_command = first_nested_str(
+            payload,
+            &[
+                &["lock_owner", "command"],
+                &["lock_owner", "cmd"],
+                &["repair_lock_owner", "command"],
+                &["mailbox_lock_owner", "command"],
+                &["lock_owner_command"],
+            ],
+        )
+        .map(ToString::to_string);
+
+        let mut signals = Vec::new();
+        if let Some(status) = status {
+            push_signal(&mut signals, format!("agent_mail_status={status}"));
+        }
+        if let Some(durability_state) = durability_state {
+            push_signal(
+                &mut signals,
+                format!("agent_mail_recovery_mode={durability_state}"),
+            );
+        }
+        if archive_is_ahead(archive_message_count, index_message_count)
+            || archive_is_ahead(archive_agent_count, index_agent_count)
+        {
+            push_signal(&mut signals, "archive_ahead_index".to_string());
+        }
+        if lock_owner_pid.is_some() || lock_owner_command.is_some() {
+            push_signal(&mut signals, "lock_owner_active".to_string());
+        }
+
+        let degraded_read_only = matches!(
+            durability_state.map(normalized_health_word).as_deref(),
+            Some("degraded_read_only" | "read_only")
+        );
+        let repair_recommended = next_action
+            .is_some_and(|value| value.to_ascii_lowercase().contains("repair"))
+            || degraded_read_only;
+        if repair_recommended {
+            push_signal(&mut signals, "repair_recommended".to_string());
+        }
+
+        let health_state = if lock_owner_pid.is_some() || lock_owner_command.is_some() {
+            AgentMailHealthState::LockOwnerActive
+        } else if archive_is_ahead(archive_message_count, index_message_count)
+            || archive_is_ahead(archive_agent_count, index_agent_count)
+        {
+            AgentMailHealthState::ArchiveAheadIndex
+        } else if degraded_read_only {
+            AgentMailHealthState::DegradedReadOnly
+        } else if repair_recommended {
+            AgentMailHealthState::RepairRecommended
+        } else if matches!(
+            status.map(normalized_health_word).as_deref(),
+            Some("ready" | "healthy" | "ok" | "pass" | "green")
+        ) {
+            AgentMailHealthState::Healthy
+        } else {
+            AgentMailHealthState::Unknown
+        };
+
+        if signals.is_empty() {
+            push_signal(&mut signals, health_state.as_str().to_string());
+        }
+
+        let healthy = matches!(health_state, AgentMailHealthState::Healthy);
+        let reservation_hygiene = ReservationHygieneSummary::from_health_payload(payload, !healthy);
+        if reservation_hygiene.has_reportable_details() {
+            push_signal(
+                &mut signals,
+                format!("reservation_hygiene={}", reservation_hygiene.state.as_str()),
+            );
+        }
+        let safe_next_action = safe_next_action_for_agent_mail(
+            health_state,
+            lock_owner_pid,
+            lock_owner_command.as_deref(),
+            next_action,
+        );
+        let detail = format_agent_mail_detail(
+            health_state,
+            &signals,
+            archive_message_count,
+            index_message_count,
+            archive_agent_count,
+            index_agent_count,
+            lock_owner_pid,
+            lock_owner_command.as_deref(),
+            &reservation_hygiene,
+        );
+
+        Self {
+            healthy,
+            health_state,
+            signals,
+            archive_message_count,
+            index_message_count,
+            archive_agent_count,
+            index_agent_count,
+            lock_owner_pid,
+            lock_owner_command,
+            repair_recommended,
+            reservation_hygiene,
+            safe_next_action,
+            detail,
+        }
+    }
+
+    #[must_use]
+    pub fn diagnostic_reason(&self) -> String {
+        if self.reservation_hygiene.has_reportable_details() {
+            format!(
+                "{}; {}",
+                self.detail,
+                self.reservation_hygiene.diagnostic_reason()
+            )
+        } else {
+            self.detail.clone()
+        }
+    }
+}
+
+fn nested_u64(payload: &serde_json::Value, paths: &[&[&str]]) -> Option<u64> {
+    paths
+        .iter()
+        .find_map(|path| nested_value(payload, path).and_then(serde_json::Value::as_u64))
+}
+
+fn first_nested_str<'a>(payload: &'a serde_json::Value, paths: &[&[&str]]) -> Option<&'a str> {
+    paths
+        .iter()
+        .find_map(|path| nested_value(payload, path).and_then(serde_json::Value::as_str))
+}
+
+fn nested_value<'a>(
+    payload: &'a serde_json::Value,
+    path: &[&str],
+) -> Option<&'a serde_json::Value> {
+    path.iter()
+        .try_fold(payload, |current, key| current.get(*key))
+}
+
+fn normalized_health_word(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn archive_is_ahead(archive_count: Option<u64>, index_count: Option<u64>) -> bool {
+    matches!((archive_count, index_count), (Some(archive), Some(index)) if archive > index)
+}
+
+fn first_nested_array<'a>(
+    payload: &'a serde_json::Value,
+    paths: &[&[&str]],
+) -> Option<&'a Vec<serde_json::Value>> {
+    paths
+        .iter()
+        .find_map(|path| nested_value(payload, path).and_then(serde_json::Value::as_array))
+}
+
+fn first_nested_owned_str(payload: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| {
+        nested_value(payload, path).and_then(|value| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .or_else(|| value.as_u64().map(|number| number.to_string()))
+        })
+    })
+}
+
+fn first_nested_bool(payload: &serde_json::Value, paths: &[&[&str]]) -> Option<bool> {
+    paths
+        .iter()
+        .find_map(|path| nested_value(payload, path).and_then(serde_json::Value::as_bool))
+}
+
+fn reservation_entries_from_payload(payload: &serde_json::Value) -> Vec<AgentMailReservationLease> {
+    let Some(entries) = first_nested_array(
+        payload,
+        &[
+            &["file_reservations", "active"],
+            &["file_reservations", "leases"],
+            &["file_reservations", "items"],
+            &["active_reservations"],
+            &["reservations"],
+        ],
+    ) else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(parse_reservation_entry)
+        .take(MAX_DOCTOR_DIAGNOSTICS)
+        .collect()
+}
+
+fn parse_reservation_entry(value: &serde_json::Value) -> Option<AgentMailReservationLease> {
+    if value
+        .get("released_ts")
+        .is_some_and(|released_ts| !released_ts.is_null())
+    {
+        return None;
+    }
+
+    let reservation_id = first_nested_owned_str(
+        value,
+        &[
+            &["reservation_id"],
+            &["file_reservation_id"],
+            &["id"],
+            &["lease_id"],
+        ],
+    )
+    .unwrap_or_else(|| "unknown".to_string());
+    let owner = first_nested_owned_str(
+        value,
+        &[
+            &["agent_name"],
+            &["owner"],
+            &["holder"],
+            &["holder", "agent_name"],
+            &["holder", "name"],
+        ],
+    )
+    .unwrap_or_else(|| "unknown".to_string());
+    let path_pattern = first_nested_owned_str(
+        value,
+        &[
+            &["path_pattern"],
+            &["path"],
+            &["pattern"],
+            &["affected_path"],
+        ],
+    )
+    .unwrap_or_else(|| "unknown".to_string());
+    let expires_ts = first_nested_owned_str(value, &[&["expires_ts"], &["expires_at"]]);
+    let expired = first_nested_bool(value, &[&["expired"], &["is_expired"]])
+        .unwrap_or_else(|| expires_ts.as_deref().is_some_and(reservation_is_expired));
+    let stale = first_nested_bool(value, &[&["stale"], &["is_stale"]]).unwrap_or(expired);
+
+    Some(AgentMailReservationLease {
+        reservation_id,
+        owner,
+        path_pattern,
+        expires_ts,
+        expired,
+        stale,
+    })
+}
+
+fn reservation_is_expired(expires_ts: &str) -> bool {
+    DateTime::parse_from_rfc3339(expires_ts)
+        .map(|expires_at| expires_at.with_timezone(&Utc) <= Utc::now())
+        .unwrap_or(false)
+}
+
+fn saturating_u32_from_u64(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn saturating_u32_from_usize(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn reservation_hygiene_state(
+    backend_degraded: bool,
+    reported: bool,
+    active_count: u32,
+    stale_count: u32,
+    expired_count: u32,
+) -> ReservationHygieneState {
+    if backend_degraded && (active_count > 0 || stale_count > 0 || expired_count > 0) {
+        ReservationHygieneState::DegradedMail
+    } else if stale_count > 0 || expired_count > 0 {
+        ReservationHygieneState::StaleReservations
+    } else if reported || active_count == 0 {
+        ReservationHygieneState::Healthy
+    } else {
+        ReservationHygieneState::Unknown
+    }
+}
+
+fn reservation_hygiene_safe_next_action(
+    state: ReservationHygieneState,
+    backend_degraded: bool,
+    active_count: u32,
+    stale_count: u32,
+    expired_count: u32,
+) -> String {
+    match state {
+        ReservationHygieneState::Healthy if active_count > 0 => {
+            "Respect active Agent Mail reservations; contact the owner and wait for ack or renewal before editing overlapping paths.".to_string()
+        }
+        ReservationHygieneState::Healthy => {
+            "No Agent Mail reservation hygiene action required.".to_string()
+        }
+        ReservationHygieneState::StaleReservations => format!(
+            "Contact reservation owners and request release or renewal for {stale_count} stale / {expired_count} expired leases; force-release only after explicit human approval."
+        ),
+        ReservationHygieneState::DegradedMail if backend_degraded => format!(
+            "Keep Beads-visible coordination, retry normal Agent Mail release after repair, and treat {active_count} active leases as protected; force-release only with explicit human approval."
+        ),
+        ReservationHygieneState::DegradedMail => {
+            "Retry Agent Mail reservation probe before changing lease state; force-release only with explicit human approval.".to_string()
+        }
+        ReservationHygieneState::Unknown => {
+            "Retry Agent Mail reservation probe and keep Beads-visible handoff until reservation ownership is known.".to_string()
+        }
+    }
+}
+
+fn render_reservation_hygiene_beads_comment(
+    state: ReservationHygieneState,
+    backend_degraded: bool,
+    active_count: u32,
+    stale_count: u32,
+    expired_count: u32,
+    reservations: &[AgentMailReservationLease],
+    safe_next_action: &str,
+) -> String {
+    let mut lines = vec![
+        format!("reservation_hygiene={}", state.as_str()),
+        format!("active_reservations={active_count}"),
+        format!("stale_reservations={stale_count}"),
+        format!("expired_reservations={expired_count}"),
+        format!("backend_degraded={backend_degraded}"),
+        "force_release_requires_human=true".to_string(),
+    ];
+    for reservation in reservations.iter().take(5) {
+        lines.push(format!(
+            "reservation id={} owner={} path={} expires={} stale={} expired={}",
+            reservation.reservation_id,
+            reservation.owner,
+            reservation.path_pattern,
+            reservation.expires_ts.as_deref().unwrap_or("unknown"),
+            reservation.stale,
+            reservation.expired
+        ));
+    }
+    lines.push(format!("safe_next_action={safe_next_action}"));
+    lines.join("; ")
+}
+
+fn render_reservation_hygiene_agent_mail_body(
+    state: ReservationHygieneState,
+    backend_degraded: bool,
+    reservations: &[AgentMailReservationLease],
+    safe_next_action: &str,
+) -> String {
+    let mut body = format!(
+        "Reservation hygiene: `{}`; backend_degraded={backend_degraded}; force_release_requires_human=true.\n\nSafe next action: {safe_next_action}",
+        state.as_str()
+    );
+    if !reservations.is_empty() {
+        body.push_str("\n\nActive reservations:");
+        for reservation in reservations.iter().take(5) {
+            body.push_str(&format!(
+                "\n- id `{}` owner `{}` path `{}` expires `{}` stale={} expired={}",
+                reservation.reservation_id,
+                reservation.owner,
+                reservation.path_pattern,
+                reservation.expires_ts.as_deref().unwrap_or("unknown"),
+                reservation.stale,
+                reservation.expired
+            ));
+        }
+    }
+    body
+}
+
+fn push_signal(signals: &mut Vec<String>, signal: String) {
+    if !signals.iter().any(|existing| existing == &signal) {
+        push_bounded(signals, signal, MAX_DOCTOR_DIAGNOSTICS);
+    }
+}
+
+fn safe_next_action_for_agent_mail(
+    health_state: AgentMailHealthState,
+    lock_owner_pid: Option<u32>,
+    lock_owner_command: Option<&str>,
+    next_action: Option<&str>,
+) -> String {
+    if let Some(pid) = lock_owner_pid {
+        let command = lock_owner_command.unwrap_or("unknown command");
+        return format!(
+            "Wait for Agent Mail lock owner pid {pid} ({command}) or ask the human before interrupting it; then run `am doctor repair --dry-run`."
+        );
+    }
+
+    match health_state {
+        AgentMailHealthState::Healthy => "No Agent Mail coordination action required.".to_string(),
+        AgentMailHealthState::LockOwnerActive => {
+            "Wait for the Agent Mail lock owner or ask the human before interrupting it; then run `am doctor repair --dry-run`.".to_string()
+        }
+        AgentMailHealthState::ArchiveAheadIndex
+        | AgentMailHealthState::DegradedReadOnly
+        | AgentMailHealthState::RepairRecommended => next_action
+            .map(|action| format!("Run `{action}` in dry-run/review mode first; keep Beads-visible handoff until Agent Mail is healthy."))
+            .unwrap_or_else(|| {
+                "Run `am doctor repair --dry-run` and keep Beads-visible handoff until Agent Mail is healthy.".to_string()
+            }),
+        AgentMailHealthState::Unavailable | AgentMailHealthState::Unknown => {
+            "Use Beads-visible coordination and retry Agent Mail health before relying on mailbox state.".to_string()
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "diagnostic detail intentionally lists every optional Agent Mail probe field"
+)]
+fn format_agent_mail_detail(
+    health_state: AgentMailHealthState,
+    signals: &[String],
+    archive_message_count: Option<u64>,
+    index_message_count: Option<u64>,
+    archive_agent_count: Option<u64>,
+    index_agent_count: Option<u64>,
+    lock_owner_pid: Option<u32>,
+    lock_owner_command: Option<&str>,
+    reservation_hygiene: &ReservationHygieneSummary,
+) -> String {
+    let mut parts = vec![format!("health_state={}", health_state.as_str())];
+    if !signals.is_empty() {
+        parts.push(format!("signals={}", signals.join(",")));
+    }
+    if let Some(count) = archive_message_count {
+        parts.push(format!("archive_messages={count}"));
+    }
+    if let Some(count) = index_message_count {
+        parts.push(format!("index_messages={count}"));
+    }
+    if let Some(count) = archive_agent_count {
+        parts.push(format!("archive_agents={count}"));
+    }
+    if let Some(count) = index_agent_count {
+        parts.push(format!("index_agents={count}"));
+    }
+    if let Some(pid) = lock_owner_pid {
+        parts.push(format!("lock_owner_pid={pid}"));
+    }
+    if let Some(command) = lock_owner_command {
+        parts.push(format!("lock_owner_command={command}"));
+    }
+    if reservation_hygiene.has_reportable_details() {
+        parts.push(reservation_hygiene.diagnostic_reason());
+    }
+    parts.join("; ")
 }
 
 /// RCH worker status summary.
@@ -175,6 +1043,18 @@ impl WorkspacePressureDoctor {
 
     /// Generate complete doctor report for current workspace state.
     pub fn generate_report(&self, inputs: &WorkspacePressureInputs) -> DoctorOutput {
+        self.generate_report_with_agent_mail_coordination(
+            inputs,
+            AgentMailCoordinationSummary::from_legacy_health(inputs.coordination_healthy),
+        )
+    }
+
+    /// Generate complete doctor report with structured Agent Mail coordination details.
+    pub fn generate_report_with_agent_mail_coordination(
+        &self,
+        inputs: &WorkspacePressureInputs,
+        agent_mail_coordination: AgentMailCoordinationSummary,
+    ) -> DoctorOutput {
         let timestamp = Utc::now();
         let mut diagnostics = Vec::new();
         let mut recommended_actions = Vec::new();
@@ -242,12 +1122,35 @@ impl WorkspacePressureDoctor {
         }
 
         // Generate resource summary
-        let resources = self.generate_resource_summary(inputs);
+        let resources = self.generate_resource_summary(inputs, agent_mail_coordination);
+        if resources
+            .agent_mail_coordination
+            .reservation_hygiene
+            .has_reportable_details()
+        {
+            push_bounded(
+                &mut diagnostics,
+                format!(
+                    "AgentMailReservations: {}",
+                    resources
+                        .agent_mail_coordination
+                        .reservation_hygiene
+                        .diagnostic_reason()
+                ),
+                MAX_DOCTOR_DIAGNOSTICS,
+            );
+        }
 
         // Determine overall status
+        let has_coordination_issues = !resources.agent_mail_coordination.healthy
+            || !resources
+                .agent_mail_coordination
+                .reservation_hygiene
+                .is_healthy();
         let status = if has_critical_decisions {
             DoctorStatus::Critical
-        } else if has_degraded_decisions || inputs.memory_pressure > 0.8 {
+        } else if has_degraded_decisions || inputs.memory_pressure > 0.8 || has_coordination_issues
+        {
             DoctorStatus::Degraded
         } else if inputs.memory_pressure > 0.6 || total_cleanup_candidates > 0 {
             DoctorStatus::Warning
@@ -260,6 +1163,10 @@ impl WorkspacePressureDoctor {
 
         // Add resource pressure recommendations
         self.add_resource_recommendations(inputs, &mut recommended_actions);
+        self.add_coordination_recommendations(
+            &resources.agent_mail_coordination,
+            &mut recommended_actions,
+        );
 
         // Populate metadata
         metadata.insert(
@@ -331,12 +1238,45 @@ impl WorkspacePressureDoctor {
             output.resources.active_reservations
         ));
         report.push_str(&format!(
-            "  • Coordination: {}\n\n",
+            "  • Coordination: {} ({})\n",
             if output.resources.coordination_healthy {
                 "Healthy"
             } else {
                 "Degraded"
-            }
+            },
+            output
+                .resources
+                .agent_mail_coordination
+                .health_state
+                .as_str()
+        ));
+        report.push_str(&format!(
+            "  • Coordination Action: {}\n\n",
+            output.resources.agent_mail_coordination.safe_next_action
+        ));
+        let reservation_hygiene = &output.resources.agent_mail_coordination.reservation_hygiene;
+        report.push_str(&format!(
+            "  • Reservation Hygiene: {} (active={}, stale={}, expired={}, mail_degraded={})\n",
+            reservation_hygiene.state.as_str(),
+            reservation_hygiene.active_count,
+            reservation_hygiene.stale_count,
+            reservation_hygiene.expired_count,
+            reservation_hygiene.backend_degraded
+        ));
+        for reservation in reservation_hygiene.reservations.iter().take(5) {
+            report.push_str(&format!(
+                "    └─ id={} owner={} path={} expires={} stale={} expired={}\n",
+                reservation.reservation_id,
+                reservation.owner,
+                reservation.path_pattern,
+                reservation.expires_ts.as_deref().unwrap_or("unknown"),
+                reservation.stale,
+                reservation.expired
+            ));
+        }
+        report.push_str(&format!(
+            "  • Reservation Action: {}\n\n",
+            reservation_hygiene.safe_next_action
         ));
 
         // Policy decisions
@@ -412,7 +1352,11 @@ impl WorkspacePressureDoctor {
         report
     }
 
-    fn generate_resource_summary(&self, inputs: &WorkspacePressureInputs) -> ResourceSummary {
+    fn generate_resource_summary(
+        &self,
+        inputs: &WorkspacePressureInputs,
+        agent_mail_coordination: AgentMailCoordinationSummary,
+    ) -> ResourceSummary {
         let rch_status = if let Some(slots) = inputs.rch_available_slots {
             RchStatus {
                 available: true,
@@ -441,6 +1385,7 @@ impl WorkspacePressureDoctor {
             rch_status,
             active_reservations: inputs.active_reservations,
             coordination_healthy: inputs.coordination_healthy,
+            agent_mail_coordination,
         }
     }
 
@@ -611,6 +1556,23 @@ impl WorkspacePressureDoctor {
                     .to_string(),
                 command: None,
                 impact: "Restore reliable inter-agent coordination".to_string(),
+            };
+            push_bounded(recommendations, action, MAX_RECOMMENDED_ACTIONS);
+        }
+    }
+
+    fn add_coordination_recommendations(
+        &self,
+        coordination: &AgentMailCoordinationSummary,
+        recommendations: &mut Vec<RecommendedAction>,
+    ) {
+        if !coordination.reservation_hygiene.is_healthy() {
+            let action = RecommendedAction {
+                priority: "medium".to_string(),
+                action: "Review Agent Mail reservations".to_string(),
+                explanation: coordination.reservation_hygiene.safe_next_action.clone(),
+                command: None,
+                impact: "Avoid conflicting edits while preserving human-approved escalation for stale leases.".to_string(),
             };
             push_bounded(recommendations, action, MAX_RECOMMENDED_ACTIONS);
         }
@@ -791,8 +1753,116 @@ mod tests {
         assert!(human_report.contains("Workspace Pressure Report"));
         assert!(human_report.contains("📊 Resource Summary"));
         assert!(human_report.contains("🎯 Policy Decisions"));
-        assert!(human_report.contains("2.0 GB")); // Free disk formatting
-        assert!(human_report.contains("3.0 GB")); // Target dir formatting
+        // `format_bytes` uses binary (1024) units, so the decimal byte inputs render
+        // as 2_000_000_000 B → "1.9 GB" and 3_000_000_000 B → "2.8 GB"
+        // (bd-o776s: reconcile expectation to current prod formatter).
+        assert!(human_report.contains("1.9 GB")); // Free disk formatting
+        assert!(human_report.contains("2.8 GB")); // Target dir formatting
         assert!(human_report.contains("60.0%")); // Memory pressure
+    }
+
+    #[test]
+    fn agent_mail_summary_detects_archive_ahead_index_and_lock_owner() {
+        let payload = serde_json::json!({
+            "status": "error",
+            "recovery_mode": "degraded_read_only",
+            "next_action": "am doctor repair",
+            "archive_inventory": {
+                "messages": 17_017_u64,
+                "agents": 1_760_u64
+            },
+            "database_inventory": {
+                "messages": 0_u64,
+                "agents": 0_u64
+            },
+            "lock_owner": {
+                "pid": 4_134_220_u64,
+                "command": "am"
+            }
+        });
+
+        let summary = AgentMailCoordinationSummary::from_health_payload(&payload);
+
+        assert!(!summary.healthy);
+        assert_eq!(summary.health_state, AgentMailHealthState::LockOwnerActive);
+        assert!(
+            summary
+                .signals
+                .iter()
+                .any(|signal| signal == "archive_ahead_index")
+        );
+        assert!(
+            summary
+                .signals
+                .iter()
+                .any(|signal| signal == "lock_owner_active")
+        );
+        assert!(
+            summary
+                .signals
+                .iter()
+                .any(|signal| signal == "repair_recommended")
+        );
+        assert_eq!(summary.archive_message_count, Some(17_017));
+        assert_eq!(summary.index_message_count, Some(0));
+        assert_eq!(summary.archive_agent_count, Some(1_760));
+        assert_eq!(summary.index_agent_count, Some(0));
+        assert_eq!(summary.lock_owner_pid, Some(4_134_220));
+        assert_eq!(summary.lock_owner_command.as_deref(), Some("am"));
+        assert!(summary.repair_recommended);
+        assert!(
+            summary
+                .safe_next_action
+                .contains("am doctor repair --dry-run")
+        );
+        assert!(summary.detail.contains("archive_messages=17017"));
+        assert!(summary.detail.contains("index_messages=0"));
+    }
+
+    #[test]
+    fn doctor_report_exposes_agent_mail_coordination_contract() {
+        let inputs = WorkspacePressureInputs {
+            free_disk_bytes: 2_000_000_000,
+            target_dir_bytes: 3_000_000_000,
+            active_build_count: 2,
+            rch_available_slots: Some(4),
+            memory_pressure: 0.4,
+            active_reservations: 2,
+            coordination_healthy: false,
+        };
+        let agent_mail_coordination =
+            AgentMailCoordinationSummary::from_health_payload(&serde_json::json!({
+                "status": "error",
+                "recovery_mode": "degraded_read_only",
+                "archive_inventory": {"messages": 9_u64, "agents": 3_u64},
+                "database_inventory": {"messages": 1_u64, "agents": 1_u64},
+                "next_action": "am doctor repair"
+            }));
+
+        let doctor = WorkspacePressureDoctor::new();
+        let output =
+            doctor.generate_report_with_agent_mail_coordination(&inputs, agent_mail_coordination);
+        let json = serde_json::to_value(&output).expect("doctor report serializes");
+        let human = doctor.format_human_report(&output);
+
+        assert_eq!(
+            json["resources"]["agent_mail_coordination"]["health_state"],
+            "archive_ahead_index"
+        );
+        assert_eq!(
+            json["resources"]["agent_mail_coordination"]["archive_message_count"],
+            9
+        );
+        assert_eq!(
+            json["resources"]["agent_mail_coordination"]["index_message_count"],
+            1
+        );
+        assert!(
+            json["resources"]["agent_mail_coordination"]["safe_next_action"]
+                .as_str()
+                .is_some_and(|action| action.contains("am doctor repair"))
+        );
+        assert!(human.contains("Coordination: Degraded (archive_ahead_index)"));
+        assert!(human.contains("Coordination Action:"));
     }
 }

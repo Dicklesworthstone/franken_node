@@ -21,7 +21,11 @@ use chrono::{DateTime, Utc};
 // through the crate crypto trait surface below.
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
-use frankenengine_node::crypto::{Ed25519Scheme, SignatureScheme};
+use frankenengine_node::crypto::{
+    ED25519_V1_CRYPTO_SUITE, ED25519_V1_SIGNATURE_VERSION, Ed25519Scheme,
+    HybridCriticalAnchorSignature, HybridCriticalAnchorVerification, SignatureScheme,
+    sign_hybrid_critical_anchor, validate_crypto_suite, verify_hybrid_critical_anchor,
+};
 use frankenengine_node::runtime::clock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,7 +95,9 @@ mod canonical_f64 {
 pub type Ed25519PrivateKey = SigningKey;
 pub type Ed25519PublicKey = VerifyingKey;
 /// Canonical signature algorithm/version bound into every decision receipt payload.
-pub const DECISION_RECEIPT_SIGNATURE_VERSION: &str = "ed25519-v1";
+pub const DECISION_RECEIPT_SIGNATURE_VERSION: &str = ED25519_V1_SIGNATURE_VERSION;
+/// Canonical crypto-suite discriminator bound into every decision receipt payload.
+pub const DECISION_RECEIPT_CRYPTO_SUITE: &str = ED25519_V1_CRYPTO_SUITE;
 /// CBOR export envelope schema for decision receipt bundles.
 pub const DECISION_RECEIPT_CBOR_EXPORT_SCHEMA_VERSION: &str = "decision-receipt-cbor-v2";
 /// Maximum age in seconds for receipt freshness validation (fail-closed).
@@ -120,6 +126,8 @@ pub struct Receipt {
     pub timestamp: String,
     /// Signature algorithm/version committed into the canonical payload.
     pub signature_version: String,
+    /// Versioned crypto-suite discriminator committed into the canonical payload.
+    pub crypto_suite: String,
     /// Unique nonce for replay protection (prevents receipt reuse attacks).
     pub nonce: String,
     /// Audience binding to prevent cross-context receipt abuse.
@@ -236,6 +244,8 @@ pub struct HighImpactActionRegistry {
 pub enum ReceiptError {
     #[error("failed to serialize canonical JSON: {0}")]
     CanonicalJson(serde_json::Error),
+    #[error("canonical JSON nesting depth exceeds the maximum of {limit}")]
+    CanonicalJsonTooDeep { limit: usize },
     #[error("failed to encode receipts as JSON: {0}")]
     JsonEncode(serde_json::Error),
     #[error("failed to encode receipts as CBOR: {0}")]
@@ -263,6 +273,16 @@ pub enum ReceiptError {
     InvalidConfidence { value: f64 },
     #[error("unsupported decision receipt signature_version '{found}', expected '{expected}'")]
     UnsupportedSignatureVersion {
+        expected: &'static str,
+        found: String,
+    },
+    #[error("unsupported decision receipt crypto_suite '{found}'")]
+    UnsupportedCryptoSuite { found: String },
+    #[error(
+        "decision receipt crypto_suite '{crypto_suite}' expects signature_version '{expected}', got '{found}'"
+    )]
+    CryptoSuiteSignatureVersionMismatch {
+        crypto_suite: String,
         expected: &'static str,
         found: String,
     },
@@ -336,6 +356,7 @@ impl Receipt {
             actor_identity: actor_identity.to_string(),
             timestamp: clock::wall_now().to_rfc3339(),
             signature_version: DECISION_RECEIPT_SIGNATURE_VERSION.to_string(),
+            crypto_suite: DECISION_RECEIPT_CRYPTO_SUITE.to_string(),
             nonce: Uuid::now_v7().simple().to_string(),
             audience: audience.to_string(),
             input_hash: hash_canonical_json(input)?,
@@ -505,6 +526,7 @@ pub fn sign_receipt(
     validate_receipt_payload_fields(receipt)?;
     validate_confidence(receipt.confidence)?;
     validate_signature_version(&receipt.signature_version)?;
+    validate_crypto_suite_binding(&receipt.signature_version, &receipt.crypto_suite)?;
     let payload = canonical_json(receipt)?;
 
     // Use the raw trait path because the receipt's canonical JSON is already
@@ -524,6 +546,39 @@ pub fn sign_receipt(
         chain_hash,
         signature: signature_b64,
     })
+}
+
+/// Dual-sign the receipt chain hash as a critical durability anchor.
+///
+/// This leaves the canonical receipt payload and legacy Ed25519 receipt
+/// signature untouched; the hybrid envelope is an additional anchor over the
+/// hash-chain commitment that can remain durable if one algorithm family is
+/// later distrusted.
+pub fn sign_receipt_critical_anchor(
+    signed: &SignedReceipt,
+    signing_key: &Ed25519PrivateKey,
+    hash_ots_secret_key: &[u8; 32],
+) -> Result<HybridCriticalAnchorSignature, ReceiptError> {
+    sign_hybrid_critical_anchor(
+        signed.chain_hash.as_bytes(),
+        &signing_key.to_bytes(),
+        hash_ots_secret_key,
+    )
+    .map_err(|source| ReceiptError::Internal(format!("failed to sign receipt anchor: {source}")))
+}
+
+/// Verify a dual-signed critical anchor over the receipt chain hash.
+pub fn verify_receipt_critical_anchor(
+    signed: &SignedReceipt,
+    public_key: &Ed25519PublicKey,
+    anchor_signature: &HybridCriticalAnchorSignature,
+) -> Result<HybridCriticalAnchorVerification, ReceiptError> {
+    verify_hybrid_critical_anchor(
+        signed.chain_hash.as_bytes(),
+        public_key.as_bytes(),
+        anchor_signature,
+    )
+    .map_err(|source| ReceiptError::Internal(format!("failed to verify receipt anchor: {source}")))
 }
 
 /// Verify signature and hash-chain material for a signed receipt.
@@ -553,6 +608,10 @@ pub fn verify_receipt_with_audience(
     validate_receipt_payload_fields(&signed.receipt)?;
     validate_confidence(signed.receipt.confidence)?;
     validate_signature_version(&signed.receipt.signature_version)?;
+    validate_crypto_suite_binding(
+        &signed.receipt.signature_version,
+        &signed.receipt.crypto_suite,
+    )?;
 
     // Check timestamp freshness to prevent replay via clock skew (fail-closed)
     validate_timestamp_freshness(&signed.receipt.timestamp)?;
@@ -633,6 +692,10 @@ pub fn verify_hash_chain(receipts: &[SignedReceipt]) -> Result<(), ReceiptError>
     for (idx, signed) in receipts.iter().enumerate() {
         validate_receipt_payload_fields(&signed.receipt)?;
         validate_signature_version(&signed.receipt.signature_version)?;
+        validate_crypto_suite_binding(
+            &signed.receipt.signature_version,
+            &signed.receipt.crypto_suite,
+        )?;
         let expected_previous = if idx == 0 {
             None
         } else {
@@ -986,6 +1049,7 @@ fn validate_receipt_payload_fields(receipt: &Receipt) -> Result<(), ReceiptError
         ("actor_identity", receipt.actor_identity.as_str()),
         ("timestamp", receipt.timestamp.as_str()),
         ("signature_version", receipt.signature_version.as_str()),
+        ("crypto_suite", receipt.crypto_suite.as_str()),
         ("nonce", receipt.nonce.as_str()),
         ("audience", receipt.audience.as_str()),
         ("input_hash", receipt.input_hash.as_str()),
@@ -1074,6 +1138,25 @@ fn validate_signature_version(signature_version: &str) -> Result<(), ReceiptErro
     })
 }
 
+fn validate_crypto_suite_binding(
+    signature_version: &str,
+    crypto_suite: &str,
+) -> Result<(), ReceiptError> {
+    let suite =
+        validate_crypto_suite(crypto_suite).map_err(|_| ReceiptError::UnsupportedCryptoSuite {
+            found: crypto_suite.to_string(),
+        })?;
+    if crate::security::constant_time::ct_eq(signature_version, suite.signature_version) {
+        return Ok(());
+    }
+
+    Err(ReceiptError::CryptoSuiteSignatureVersionMismatch {
+        crypto_suite: crypto_suite.to_string(),
+        expected: suite.signature_version,
+        found: signature_version.to_string(),
+    })
+}
+
 fn validate_timestamp_freshness(timestamp: &str) -> Result<(), ReceiptError> {
     let receipt_time = parse_timestamp(timestamp)?;
     let now = clock::wall_now();
@@ -1107,9 +1190,96 @@ fn hash_canonical_json(value: &impl Serialize) -> Result<String, ReceiptError> {
 }
 
 fn canonical_json(value: &impl Serialize) -> Result<String, ReceiptError> {
+    // bd-0u14n: bound nesting depth FAIL-CLOSED before the recursive serialization runs.
+    // `serde_json::to_value` and `canonicalize_value` both descend once per nesting level with
+    // no depth bound, so an adversarial deeply-nested (or self-referential-shaped) payload
+    // would overflow the stack and abort the whole process (SIGABRT). The guard rejects such
+    // input with a clean error first; once it passes, the payload is <= MAX_CANONICAL_JSON_DEPTH
+    // deep and the bounded recursion below cannot overflow.
+    ensure_canonical_json_depth(value)?;
     let serialized = serde_json::to_value(value).map_err(ReceiptError::CanonicalJson)?;
     let canonicalized = canonicalize_value(serialized);
     serde_json::to_string(&canonicalized).map_err(ReceiptError::CanonicalJson)
+}
+
+/// Maximum nesting depth permitted in canonical-JSON receipt payloads.
+///
+/// Receipt input/output payloads are shallow decision records; `128` mirrors serde_json's own
+/// default deserialization recursion limit and sits far above any legitimate payload. Inputs
+/// deeper than this are rejected fail-closed (bd-0u14n) rather than serialized, since the
+/// recursive `to_value`/canonicalization would otherwise overflow the stack on adversarial
+/// deeply-nested JSON.
+const MAX_CANONICAL_JSON_DEPTH: usize = 128;
+
+/// `serde_json` formatter that aborts serialization once nesting exceeds
+/// [`MAX_CANONICAL_JSON_DEPTH`]. Because it returns an error at the limit, the driving
+/// serialization recursion only descends `limit`-deep before unwinding — it cannot overflow
+/// the stack the way an unbounded `to_value` over a 10k-deep input does.
+struct DepthGuardFormatter {
+    depth: usize,
+    limit: usize,
+}
+
+impl DepthGuardFormatter {
+    fn new(limit: usize) -> Self {
+        Self { depth: 0, limit }
+    }
+
+    fn enter(&mut self) -> std::io::Result<()> {
+        self.depth = self.depth.saturating_add(1);
+        if self.depth > self.limit {
+            return Err(std::io::Error::other(
+                "canonical JSON nesting depth exceeded",
+            ));
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+}
+
+impl serde_json::ser::Formatter for DepthGuardFormatter {
+    fn begin_array<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.enter()?;
+        writer.write_all(b"[")
+    }
+
+    fn end_array<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.leave();
+        writer.write_all(b"]")
+    }
+
+    fn begin_object<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.enter()?;
+        writer.write_all(b"{")
+    }
+
+    fn end_object<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.leave();
+        writer.write_all(b"}")
+    }
+}
+
+/// Reject input whose nesting depth exceeds [`MAX_CANONICAL_JSON_DEPTH`] before the recursive
+/// canonicalization runs (bd-0u14n). Serializes through [`DepthGuardFormatter`] to a sink, so
+/// the only error this pass can raise is the depth abort (mapped to a clean typed error);
+/// genuine serialization failures are propagated faithfully.
+fn ensure_canonical_json_depth(value: &impl Serialize) -> Result<(), ReceiptError> {
+    let mut serializer = serde_json::Serializer::with_formatter(
+        std::io::sink(),
+        DepthGuardFormatter::new(MAX_CANONICAL_JSON_DEPTH),
+    );
+    value.serialize(&mut serializer).map_err(|err| {
+        if err.is_io() {
+            ReceiptError::CanonicalJsonTooDeep {
+                limit: MAX_CANONICAL_JSON_DEPTH,
+            }
+        } else {
+            ReceiptError::CanonicalJson(err)
+        }
+    })
 }
 
 fn canonicalize_value(value: Value) -> Value {
@@ -1219,6 +1389,7 @@ fn ensure_parent_dir(path: &Path) -> Result<(), ReceiptError> {
 mod tests {
     use super::*;
     use crate::security::constant_time;
+    use frankenengine_node::crypto::HybridCriticalAnchorTrustPolicy;
     use serde_json::json;
     use std::sync::{Mutex, OnceLock};
 
@@ -1268,6 +1439,12 @@ mod tests {
             receipt.signature_version,
             DECISION_RECEIPT_SIGNATURE_VERSION
         );
+    }
+
+    #[test]
+    fn receipt_new_sets_crypto_suite() {
+        let receipt = make_receipt("quarantine", Decision::Approved);
+        assert_eq!(receipt.crypto_suite, DECISION_RECEIPT_CRYPTO_SUITE);
     }
 
     #[test]
@@ -1366,6 +1543,48 @@ mod tests {
     }
 
     #[test]
+    fn receipt_critical_anchor_hybrid_signature_roundtrips() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let hash_ots_secret_key = [53_u8; 32];
+        let receipt = make_receipt("quarantine", Decision::Approved);
+        let signed = sign_receipt(&receipt, &key).expect("sign");
+
+        let anchor_signature =
+            sign_receipt_critical_anchor(&signed, &key, &hash_ots_secret_key).expect("anchor sign");
+        let verification = verify_receipt_critical_anchor(&signed, &public_key, &anchor_signature)
+            .expect("anchor verify");
+
+        assert!(verification.fully_verified());
+        assert!(verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+        assert!(verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+        assert!(verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+    }
+
+    #[test]
+    fn receipt_critical_anchor_hybrid_rejects_different_chain_hash() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let hash_ots_secret_key = [59_u8; 32];
+        let receipt = make_receipt("quarantine", Decision::Approved);
+        let signed = sign_receipt(&receipt, &key).expect("sign");
+        let anchor_signature =
+            sign_receipt_critical_anchor(&signed, &key, &hash_ots_secret_key).expect("anchor sign");
+        let mut different_anchor = signed.clone();
+        different_anchor.chain_hash = format!("{}00", signed.chain_hash);
+
+        let verification =
+            verify_receipt_critical_anchor(&different_anchor, &public_key, &anchor_signature)
+                .expect("anchor verify");
+
+        assert!(!verification.ed25519_valid);
+        assert!(!verification.hash_based_valid);
+        assert!(!verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireBoth));
+        assert!(!verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireEd25519));
+        assert!(!verification.valid_under(HybridCriticalAnchorTrustPolicy::RequireHashBased));
+    }
+
+    #[test]
     fn verify_receipt_rejects_non_finite_confidence() {
         let key = demo_signing_key();
         let public_key = key.verifying_key();
@@ -1396,6 +1615,23 @@ mod tests {
     }
 
     #[test]
+    fn verify_receipt_rejects_unknown_crypto_suite() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.receipt.crypto_suite = "ed25519-v2".to_string();
+
+        let err = verify_receipt(&signed, &public_key)
+            .expect_err("unknown crypto suite must fail verification");
+
+        assert!(matches!(
+            err,
+            ReceiptError::UnsupportedCryptoSuite { ref found } if found == "ed25519-v2"
+        ));
+    }
+
+    #[test]
     fn unversioned_signed_receipt_json_fails_before_verification() {
         let key = demo_signing_key();
         let signed =
@@ -1410,6 +1646,23 @@ mod tests {
             .expect_err("missing signature_version must fail deserialization");
 
         assert!(err.to_string().contains("signature_version"));
+    }
+
+    #[test]
+    fn unsigned_crypto_suite_signed_receipt_json_fails_before_verification() {
+        let key = demo_signing_key();
+        let signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        let mut legacy_json = serde_json::to_value(&signed).expect("signed receipt to JSON");
+        legacy_json
+            .as_object_mut()
+            .expect("signed receipt JSON object")
+            .remove("crypto_suite");
+
+        let err = serde_json::from_value::<SignedReceipt>(legacy_json)
+            .expect_err("missing crypto_suite must fail deserialization");
+
+        assert!(err.to_string().contains("crypto_suite"));
     }
 
     #[test]
@@ -1940,7 +2193,7 @@ mod tests {
         // Correct audience should pass
         let result = verify_receipt_with_audience(
             &signed,
-            &demo_verifying_key(),
+            &demo_public_key(),
             None,
             Some("franken-node-control-plane"),
         );
@@ -1949,7 +2202,7 @@ mod tests {
         // Wrong audience should fail with AudienceMismatch error
         let err = verify_receipt_with_audience(
             &signed,
-            &demo_verifying_key(),
+            &demo_public_key(),
             None,
             Some("different-context"),
         )
@@ -1962,7 +2215,7 @@ mod tests {
         ));
 
         // No expected audience (legacy mode) should pass
-        let result = verify_receipt_with_audience(&signed, &demo_verifying_key(), None, None);
+        let result = verify_receipt_with_audience(&signed, &demo_public_key(), None, None);
         assert!(result.is_ok() && result.unwrap());
     }
 
@@ -1979,29 +2232,51 @@ mod tests {
 
     #[test]
     fn export_receipts_to_path_creates_missing_parent_directories() {
+        // Prod rejects absolute export paths (path-traversal hardening), so exercise
+        // parent-dir creation with a relative nested path under a tempdir CWD.
+        let _guard = cwd_test_lock().lock().expect("cwd lock");
         let key = demo_signing_key();
         let signed =
             sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
         let dir = tempfile::tempdir().expect("tempdir");
-        let output_path = dir.path().join("nested/receipts.json");
+        let previous_cwd = std::env::current_dir().expect("cwd");
 
-        export_receipts_to_path(&[signed], &ReceiptQuery::default(), &output_path).expect("export");
+        std::env::set_current_dir(dir.path()).expect("set cwd");
+        let export_result = export_receipts_to_path(
+            &[signed],
+            &ReceiptQuery::default(),
+            Path::new("nested/receipts.json"),
+        );
+        let restore_result = std::env::set_current_dir(&previous_cwd);
 
-        let exported = std::fs::read_to_string(&output_path).expect("read");
+        export_result.expect("export");
+        restore_result.expect("restore cwd");
+
+        let exported =
+            std::fs::read_to_string(dir.path().join("nested/receipts.json")).expect("read");
         assert!(exported.contains("quarantine"));
     }
 
     #[test]
     fn write_receipts_markdown_creates_missing_parent_directories() {
+        // Prod rejects absolute output paths (path-traversal hardening), so exercise
+        // parent-dir creation with a relative nested path under a tempdir CWD.
+        let _guard = cwd_test_lock().lock().expect("cwd lock");
         let key = demo_signing_key();
         let signed =
             sign_receipt(&make_receipt("revocation", Decision::Denied), &key).expect("sign");
         let dir = tempfile::tempdir().expect("tempdir");
-        let output_path = dir.path().join("nested/receipts.md");
+        let previous_cwd = std::env::current_dir().expect("cwd");
 
-        write_receipts_markdown(&[signed], &output_path).expect("write markdown");
+        std::env::set_current_dir(dir.path()).expect("set cwd");
+        let write_result = write_receipts_markdown(&[signed], Path::new("nested/receipts.md"));
+        let restore_result = std::env::set_current_dir(&previous_cwd);
 
-        let markdown = std::fs::read_to_string(&output_path).expect("read");
+        write_result.expect("write markdown");
+        restore_result.expect("restore cwd");
+
+        let markdown =
+            std::fs::read_to_string(dir.path().join("nested/receipts.md")).expect("read");
         assert!(markdown.contains("Signed Decision Receipts"));
         assert!(markdown.contains("revocation"));
     }
@@ -2316,40 +2591,60 @@ mod tests {
         assert!(matches!(err, ReceiptError::InvalidConfidence { .. }));
     }
 
-    /// Negative path: circular reference in input/output serialization
+    /// Negative path: pathologically deep JSON must be rejected fail-closed, not overflow the
+    /// stack and abort the process.
+    ///
+    /// bd-0u14n (fixed): canonical-JSON hashing now bounds nesting depth via
+    /// `ensure_canonical_json_depth` (`MAX_CANONICAL_JSON_DEPTH`) BEFORE the recursive
+    /// `serde_json::to_value` / `canonicalize_value` run, so adversarial deeply-nested input
+    /// returns a clean `CanonicalJsonTooDeep` error instead of a SIGABRT stack overflow. The
+    /// over-limit fixture is kept modestly deep on purpose: `serde_json::Value`'s own `Drop` is
+    /// recursive, so a 10k-deep value would overflow merely on drop — 256 exceeds the 128-deep
+    /// limit while staying safe to construct and drop.
     #[test]
-    fn receipt_creation_with_self_referential_json_value_handled_gracefully() {
-        // Create a JSON value that would cause issues in naive serialization
-        let problematic_input = json!({
+    fn receipt_creation_with_pathologically_nested_json_is_rejected_not_aborted() {
+        let shallow = json!({
             "data": "test",
-            "nested": {
-                "recursive": null  // Not actually recursive, but simulating the pattern
-            }
+            "nested": { "ok": true }
         });
 
-        // Self-referential structures can't be created directly in serde_json::Value,
-        // but we can test with deeply nested structures that might cause stack overflow
-        let deeply_nested =
-            (0..10000).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
-
+        // A within-limit nesting hashes cleanly.
+        let within_limit = (0..64).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
         let receipt = Receipt::new(
             "test_action",
             "test_actor",
             "franken-node-control-plane",
-            &deeply_nested,
-            &problematic_input,
+            &within_limit,
+            &shallow,
             Decision::Approved,
-            "Testing deeply nested structure handling during hash computation",
+            "within-limit nested input must hash without error",
             vec!["test-evidence".to_string()],
             vec!["test-rule".to_string()],
             0.95,
             "test rollback command",
         )
-        .expect("deeply nested input should be handled without stack overflow");
-
+        .expect("within-limit nested input should hash without error");
         assert!(!receipt.input_hash.is_empty());
         assert!(!receipt.output_hash.is_empty());
         assert_ne!(receipt.input_hash, receipt.output_hash);
+
+        // A nesting deeper than MAX_CANONICAL_JSON_DEPTH is rejected fail-closed — no abort.
+        let too_deep = (0..256).fold(json!({}), |acc, i| json!({ format!("level_{}", i): acc }));
+        let err = Receipt::new(
+            "test_action",
+            "test_actor",
+            "franken-node-control-plane",
+            &too_deep,
+            &shallow,
+            Decision::Approved,
+            "deeply nested input must be rejected, not crash the process",
+            vec!["test-evidence".to_string()],
+            vec!["test-rule".to_string()],
+            0.95,
+            "test rollback command",
+        )
+        .expect_err("over-limit nested input must be rejected fail-closed");
+        assert!(matches!(err, ReceiptError::CanonicalJsonTooDeep { .. }));
     }
 
     /// Negative path: timestamp parsing edge cases with malformed formats
@@ -2357,17 +2652,19 @@ mod tests {
     fn export_filter_handles_malformed_timestamps_in_various_formats_gracefully() {
         let key = demo_signing_key();
 
-        let malformed_timestamps = vec![
+        // Malformed-but-safe timestamps (wrong format, but no control characters):
+        // these still sign, and the export filter excludes them because they cannot
+        // be parsed as RFC3339 timestamps.
+        let malformed_but_safe = vec![
             "",                          // Empty string
             "2026",                      // Year only
             "2026-13-45T25:70:90Z",      // Invalid date/time components
             "not-a-date-at-all",         // Non-date string
             "2026-02-20T10:00:00",       // Missing timezone
             "2026-02-20T10:00:00+25:00", // Invalid timezone offset
-            "\x00\x01\x02",              // Binary data
         ];
 
-        for malformed_ts in malformed_timestamps {
+        for malformed_ts in malformed_but_safe {
             let mut receipt = make_receipt("test", Decision::Approved);
             receipt.timestamp = malformed_ts.to_string();
             let signed =
@@ -2381,6 +2678,25 @@ mod tests {
                 malformed_ts
             );
         }
+
+        // Control characters / null bytes in the timestamp are rejected at signing
+        // time by receipt field validation (fail-closed against control-character
+        // injection), so such a receipt never reaches the export filter.
+        let mut control_char_receipt = make_receipt("test", Decision::Approved);
+        control_char_receipt.timestamp = "\x00\x01\x02".to_string();
+        let err = sign_receipt(&control_char_receipt, &key)
+            .expect_err("control-character timestamp must be rejected at signing");
+        assert!(
+            matches!(
+                err,
+                ReceiptError::UnsafeReceiptField {
+                    field: "timestamp",
+                    ..
+                }
+            ),
+            "control-character timestamp should fail field validation, got: {:?}",
+            err
+        );
     }
 
     /// Security test: timestamp freshness validation prevents stale receipt replay
@@ -2455,13 +2771,13 @@ mod tests {
         assert!(tracker.check_and_mark("nonce_a").is_ok());
         assert!(tracker.check_and_mark("nonce_m").is_ok());
 
-        // Adding 4th nonce should evict the first one ("nonce_z"), not the lexicographically first ("nonce_a")
+        // Adding 4th nonce evicts the chronologically-oldest ("nonce_z"), not the
+        // lexicographically-first ("nonce_a"). Tracked set is now {nonce_a, nonce_m, nonce_new}.
         assert!(tracker.check_and_mark("nonce_new").is_ok());
 
-        // "nonce_z" (oldest) should now be evicted and can be reused
-        assert!(tracker.check_and_mark("nonce_z").is_ok());
-
-        // "nonce_a" and "nonce_m" (newer) should still be tracked and cause replay errors
+        // "nonce_a" and "nonce_m" (newer than the evicted "nonce_z") are still tracked
+        // and cause replay errors. Replay checks fail closed without mutating the tracked
+        // set, so they do not themselves perturb FIFO eviction order.
         assert!(matches!(
             tracker.check_and_mark("nonce_a"),
             Err(ReceiptError::ReplayAttack { .. })
@@ -2470,6 +2786,10 @@ mod tests {
             tracker.check_and_mark("nonce_m"),
             Err(ReceiptError::ReplayAttack { .. })
         ));
+
+        // "nonce_z" (chronologically oldest) was evicted, so it can be reused. This
+        // re-add then evicts the next-oldest tracked nonce ("nonce_a") under FIFO.
+        assert!(tracker.check_and_mark("nonce_z").is_ok());
     }
 
     /// Test ReplayTracker handles concurrent access without panicking

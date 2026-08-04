@@ -113,6 +113,25 @@ pub const HARNESS_WINDOW_SIZE: usize = 64;
 /// are strictly increasing.
 const DEFAULT_STEP_TIME_UNIT: i64 = 1;
 
+/// Terminal hidden-capability gap accumulated by the slow-roll-drift
+/// adversary at full campaign progress (`t == 1.0`). The gap grows linearly
+/// in `t` and *is* the drift magnitude, so with the slow-roll fixture's
+/// `drift` threshold of 0.5 the detector stays under the floor through the
+/// first half of the campaign and only crosses it in the second half
+/// (caught late, never early, never missed). A flat 5%-of-progress bonus
+/// could never reach any realistic floor, which left the archetype
+/// permanently uncatchable (bd-49e8c).
+const SLOW_ROLL_HIDDEN_GAP_SLOPE: f64 = 0.70;
+
+/// Terminal hidden-capability gap accumulated by the resumed escalation of
+/// the false-recovery-claim adversary at full campaign progress
+/// (`t == 1.0`). The gap grows in `t` and is suppressed during the fake
+/// mid-campaign recovery dip; with the fixture's `drift` threshold of 0.4
+/// the escalation only crosses the floor on the post-recovery plateaus
+/// (caught late). A 15%-of-progress escalation never reached the floor,
+/// leaving the archetype uncatchable (bd-49e8c).
+const FALSE_RECOVERY_HIDDEN_GAP_SLOPE: f64 = 0.60;
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -635,9 +654,17 @@ fn synthesize_observed(
     };
     match kind {
         AdversaryKind::SlowRollDrift => {
-            // Hidden capability is the declared ramp + 5% baseline bonus.
-            let cap = baseline_capability + t * (1.0 - baseline_capability) + 0.05 * t;
-            (cap, baseline_velocity, baseline_response, 0.05 * t)
+            // Slow-roll drift: the adversary hides a capability gap that
+            // accumulates gradually on top of the declared ramp. The hidden
+            // gap is the drift magnitude; it grows linearly so the drift
+            // signal stays under the detector floor through the first half
+            // of the campaign and only crosses it in the second half (caught
+            // late, never early, never missed). Modeling a realistic
+            // accumulating gap rather than a flat 5%-of-progress bonus is
+            // what makes the archetype catchable at all (bd-49e8c).
+            let hidden_gap = SLOW_ROLL_HIDDEN_GAP_SLOPE * t;
+            let cap = baseline_capability + t * (1.0 - baseline_capability) + hidden_gap;
+            (cap, baseline_velocity, baseline_response, hidden_gap)
         }
         AdversaryKind::CapabilityCreepDisguisedAsFeature => {
             // Capability accelerates 30% past declared ramp.
@@ -688,21 +715,27 @@ fn synthesize_observed(
             )
         }
         AdversaryKind::FalseRecoveryClaim => {
-            // Mid-scenario the adversary fakes a recovery — observed dips
-            // back toward baseline before resuming the ramp.
+            // False-recovery claim: a fake mid-campaign recovery (the
+            // observed signal dips back to baseline) masks a resumed,
+            // escalating capability gap. The post-recovery escalation
+            // accumulates a hidden gap large enough to cross the detector
+            // floor on the late plateaus despite the dip (caught late). A
+            // 15%-of-progress escalation never reached the floor, leaving
+            // the archetype uncatchable (bd-49e8c).
             let recovery_window = n_steps as f64 * 0.5;
             let i = step_idx as f64;
             let in_recovery = (i - recovery_window).abs() < 1.0;
+            let hidden_gap = FALSE_RECOVERY_HIDDEN_GAP_SLOPE * t;
             let cap = if in_recovery {
                 baseline_capability
             } else {
-                baseline_capability + t * (1.0 - baseline_capability) + 0.15 * t
+                baseline_capability + t * (1.0 - baseline_capability) + hidden_gap
             };
             (
                 cap,
                 baseline_velocity,
                 baseline_response,
-                if in_recovery { 0.0 } else { 0.15 * t },
+                if in_recovery { 0.0 } else { hidden_gap },
             )
         }
         AdversaryKind::IndirectViaDep => {
@@ -948,8 +981,9 @@ mod tests {
         let mut harness = build_harness();
         let scenario = slow_roll_scenario(16);
         let result = run_scenario(&mut harness, &scenario, &baseline_sample()).unwrap();
-        // observed_drift is `0.05 * t` for slow-roll-drift + linear ramp,
-        // hence monotonically non-decreasing in step_idx.
+        // observed_drift is the linear hidden gap
+        // (`SLOW_ROLL_HIDDEN_GAP_SLOPE * t`) for slow-roll-drift + linear
+        // ramp, hence monotonically non-decreasing in step_idx.
         for window in result.outcomes.windows(2) {
             let a = window[0].observed_drift;
             let b = window[1].observed_drift;

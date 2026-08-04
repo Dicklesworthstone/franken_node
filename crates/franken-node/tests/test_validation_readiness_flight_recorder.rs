@@ -125,6 +125,7 @@ fn test_flight_recorder_refs_count() {
         rch_workers: vec![],
         proof_lane_readiness: vec![],
         swarm_scheduler_decisions: vec![],
+        swarm_admission_decisions: vec![],
         resource_governor: None,
         max_receipt_age_secs: 3600,
     };
@@ -263,6 +264,7 @@ fn test_flight_recorder_refs_from_receipts() {
         rch_workers: vec![],
         proof_lane_readiness: vec![],
         swarm_scheduler_decisions: vec![],
+        swarm_admission_decisions: vec![],
         resource_governor: None,
         max_receipt_age_secs: 3600,
     };
@@ -317,6 +319,7 @@ fn test_no_flight_recorder_refs() {
         rch_workers: vec![],
         proof_lane_readiness: vec![],
         swarm_scheduler_decisions: vec![],
+        swarm_admission_decisions: vec![],
         resource_governor: None,
         max_receipt_age_secs: 3600,
     };

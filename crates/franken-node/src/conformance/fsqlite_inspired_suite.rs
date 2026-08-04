@@ -281,7 +281,9 @@ impl fmt::Display for ConformanceError {
     }
 }
 
-/// Maximum fixtures before oldest-first eviction.
+/// Maximum fixtures; fixture registration fails closed (`CapacityExceeded`) once
+/// reached rather than silently evicting test coverage (see commit
+/// "fix(capacity): fail closed on capacity overflow instead of silently evicting").
 const MAX_CONFORMANCE_FIXTURES: usize = 4096;
 /// Maximum test results before oldest-first eviction.
 const MAX_CONFORMANCE_RESULTS: usize = 4096;

@@ -1,0 +1,25 @@
+{
+  "success": true,
+  "verdict": {
+    "frame_id": "valid-frame",
+    "allowed": true,
+    "violations": [],
+    "resource_usage": {
+      "bytes_parsed": 500000,
+      "nesting_depth": 16,
+      "cpu_ms": 50
+    }
+  },
+  "audit": {
+    "frame_id": "valid-frame",
+    "size": 500000,
+    "depth": 16,
+    "cpu_used": 50,
+    "size_limit": 1000000,
+    "depth_limit": 32,
+    "cpu_limit": 100,
+    "verdict": "ALLOW",
+    "timestamp": "[TIMESTAMP]"
+  },
+  "test_case": "within_all_limits"
+}

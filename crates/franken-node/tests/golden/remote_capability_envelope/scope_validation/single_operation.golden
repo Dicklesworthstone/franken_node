@@ -1,0 +1,8 @@
+{
+  "operations": [
+    "telemetry_export"
+  ],
+  "endpoint_prefixes": [
+    "https://telemetry.example.com/"
+  ]
+}

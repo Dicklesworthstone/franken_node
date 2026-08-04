@@ -66,6 +66,50 @@ pub enum IsolationLevel {
     Custom,
 }
 
+/// Leading verbs that mark a cross-zone action descriptor as read-only.
+///
+/// Kept deliberately short: every entry widens what `IsolationLevel::Permissive`
+/// lets cross a zone boundary without a bridge, so a verb belongs here only if it
+/// cannot mutate the target zone under any reading.
+const READ_ONLY_ACTION_VERBS: &[&str] = &[
+    "count", "describe", "exists", "get", "head", "inspect", "list", "query", "read", "select",
+    "stat", "watch",
+];
+
+/// Classify a cross-zone action descriptor as read-only.
+///
+/// **Fail-closed by construction (bd-djpur).** An action counts as a read only
+/// when its leading verb is one this module positively recognizes; everything
+/// else — unknown verbs, misspellings, empty strings, non-ASCII lookalikes — is
+/// treated as mutating and therefore subject to the bridge requirement. A new
+/// action verb thus tightens the gate by default instead of opening it.
+///
+/// The descriptor may be a bare verb (`"read"`) or a verb with a qualifier
+/// separated by `:`, `/`, `.` or whitespace (`"read:config"`, `"write/blob"`);
+/// only the leading verb is considered, so `"write:delete_all"` classifies as
+/// mutating rather than matching on an embedded substring.
+///
+/// `connector::trust_zone` previously inlined a weaker form of this check
+/// (`action == "write" || action == "delete"`), which classified every other
+/// verb — `update`, `put`, `truncate`, `write:delete_all` — as a read. Both
+/// modules route through this function so the two cannot drift apart again.
+#[must_use]
+pub fn is_read_only_action(action: &str) -> bool {
+    let verb = action
+        .trim()
+        .split(|c: char| matches!(c, ':' | '/' | '.') || c.is_whitespace())
+        .next()
+        .unwrap_or_default();
+
+    if verb.is_empty() {
+        return false;
+    }
+
+    READ_ONLY_ACTION_VERBS
+        .iter()
+        .any(|candidate| verb.eq_ignore_ascii_case(candidate))
+}
+
 impl IsolationLevel {
     pub fn label(&self) -> &'static str {
         match self {
@@ -535,8 +579,36 @@ impl ZoneSegmentationEngine {
                 }
             }
             IsolationLevel::Permissive => {
-                // Permissive: reads are allowed, writes need bridge.
-                // Since we have a proof, we allow it.
+                // bd-djpur: this arm used to be empty, with a comment that
+                // described the rule but then waived it ("Since we have a proof,
+                // we allow it"). `req.action` was never inspected and
+                // `allowed_cross_zone_targets` was never consulted, so a zone
+                // registered Permissive with an EMPTY allowed-target list would
+                // authorize `write:delete_all` into any other zone — including a
+                // Strict one — and still report `INV_ZTS_ISOLATE: true`. Both
+                // Strict and Custom enforce the allowlist; Permissive was the
+                // outlier, and the presence check on `authorization_proof` above
+                // is not a substitute because it runs for every level.
+                //
+                // `IsolationLevel::Permissive`'s own doc comment ("Cross-zone
+                // reads allowed, writes require bridge authorization") and the
+                // sibling `connector::trust_zone` implementation both specify the
+                // rule below, so this restores the documented contract rather
+                // than inventing one: reads cross without an allowlist entry,
+                // writes need the bridge exactly as Strict does.
+                if !is_read_only_action(&req.action)
+                    && !source.allowed_cross_zone_targets.contains(&req.target_zone)
+                {
+                    self.emit_event(
+                        ZTS_004_ISOLATION_VIOLATION,
+                        &req.source_zone,
+                        &format!(
+                            "permissive isolation: mutating action '{}' from '{}' requires '{}' in allowed targets",
+                            req.action, req.source_zone, req.target_zone
+                        ),
+                    );
+                    return Err(SegmentationError::IsolationViolation);
+                }
             }
             IsolationLevel::Custom => {
                 // Custom: check allowed targets.
@@ -1333,7 +1405,9 @@ mod tests {
     }
 
     #[test]
-    fn cross_zone_permissive_allows_with_proof() {
+    fn cross_zone_permissive_allows_reads_without_a_bridge() {
+        // The read half of `IsolationLevel::Permissive`: a read crosses without
+        // the target appearing in `allowed_cross_zone_targets`.
         let mut engine = ZoneSegmentationEngine::new();
         engine
             .register_zone(make_zone("prod", 90, 5, IsolationLevel::Permissive))
@@ -1342,8 +1416,96 @@ mod tests {
             .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
             .unwrap();
 
+        let req = CrossZoneRequest::new("prod", "staging", "read:config", "requester-1", "proof");
+        assert!(engine.authorize_cross_zone(&req).is_ok());
+    }
+
+    #[test]
+    fn cross_zone_permissive_allows_writes_to_a_bridged_target() {
+        // The write half: with the bridge in place, a mutating action crosses.
+        let mut engine = ZoneSegmentationEngine::new();
+        let mut prod = make_zone("prod", 90, 5, IsolationLevel::Permissive);
+        prod.allowed_cross_zone_targets.push("staging".to_string());
+        engine.register_zone(prod).unwrap();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
+            .unwrap();
+
+        // `make_cross_zone_req` uses the mutating action "migrate".
         let req = make_cross_zone_req("prod", "staging", "proof");
         assert!(engine.authorize_cross_zone(&req).is_ok());
+    }
+
+    #[test]
+    fn cross_zone_permissive_rejects_unbridged_writes() {
+        // bd-djpur: this is the case the empty Permissive arm used to authorize.
+        // A zone registered Permissive with NO allowed targets could push a
+        // mutating action into any other zone — including a Strict one — while
+        // `to_report()` still claimed `INV_ZTS_ISOLATE: true`.
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("attacker", 90, 5, IsolationLevel::Permissive))
+            .unwrap();
+        engine
+            .register_zone(make_zone("victim", 70, 3, IsolationLevel::Strict))
+            .unwrap();
+
+        let req = CrossZoneRequest::new(
+            "attacker",
+            "victim",
+            "write:delete_all",
+            "attacker",
+            "non-empty-proof",
+        );
+
+        assert_eq!(
+            engine.authorize_cross_zone(&req),
+            Err(SegmentationError::IsolationViolation),
+            "a non-empty proof is not a bridge; Permissive writes still need an allowed target"
+        );
+        assert_eq!(engine.event_count(ZTS_003_CROSS_ZONE_AUTHORIZED), 0);
+        assert_eq!(engine.event_count(ZTS_004_ISOLATION_VIOLATION), 1);
+    }
+
+    #[test]
+    fn read_only_action_classification_fails_closed() {
+        // Positively recognized reads, in the shapes the descriptor allows.
+        for action in [
+            "read",
+            "READ",
+            "get:blob",
+            "list/zones",
+            "query.plan",
+            "stat",
+        ] {
+            assert!(
+                is_read_only_action(action),
+                "'{action}' should classify as a read"
+            );
+        }
+
+        // Everything else is mutating — including the substring trap that the
+        // connector module's old `action == \"write\"` check let through, the
+        // empty/blank descriptor, and a non-ASCII lookalike.
+        for action in [
+            "write",
+            "delete",
+            "write:delete_all",
+            "update",
+            "put",
+            "truncate",
+            "migrate",
+            "readable-nonsense",
+            "",
+            "   ",
+            ":read",
+            "rea\u{0501}",
+        ] {
+            assert!(
+                !is_read_only_action(action),
+                "'{action}' must classify as mutating"
+            );
+        }
     }
 
     #[test]
@@ -1985,7 +2147,11 @@ mod tests {
             .register_zone(make_zone("staging", 70, 3, IsolationLevel::Strict))
             .unwrap();
 
-        // Test various whitespace-only authorization proofs that try to bypass validation
+        // Test various whitespace-only authorization proofs that try to bypass validation.
+        // Every entry below has the Unicode White_Space property, so `str::trim()`
+        // strips it to empty and the dual-owner presence check must reject it.
+        // (Zero-width FORMAT characters such as U+200B/U+2060/U+FEFF are Unicode
+        // category Cf, NOT White_Space, so they are handled separately below.)
         let whitespace_proofs = vec![
             "   ",      // Spaces
             "\t\t\t",   // Tabs
@@ -2004,12 +2170,9 @@ mod tests {
             "\u{2008}", // Punctuation space
             "\u{2009}", // Thin space
             "\u{200A}", // Hair space
-            "\u{200B}", // Zero-width space
-            "\u{2060}", // Word joiner
-            "\u{FEFF}", // Zero-width non-breaking space (BOM)
         ];
 
-        for proof in whitespace_proofs {
+        for &proof in &whitespace_proofs {
             let req = CrossZoneRequest::new("prod", "staging", "test-action", "test-user", proof);
 
             let result = engine.authorize_cross_zone(&req);
@@ -2025,6 +2188,41 @@ mod tests {
         // Should have generated isolation violation events for each failed attempt
         assert!(engine.event_count(ZTS_004_ISOLATION_VIOLATION) >= whitespace_proofs.len());
         assert_eq!(engine.event_count(ZTS_003_CROSS_ZONE_AUTHORIZED), 0);
+
+        // Zero-width FORMAT characters (Unicode category Cf) are NOT Unicode
+        // White_Space, so `str::trim()` does not strip them: the dual-owner
+        // presence check treats them as a present (non-empty) proof token, just
+        // like any other non-empty string. Critically, the real cross-zone
+        // security boundary is the isolation / allowed-targets gate -- NOT proof
+        // content -- so these invisible characters cannot be used to cross into a
+        // zone that the source is not authorized to reach.
+        let zero_width_format_proofs = vec![
+            "\u{200B}", // Zero-width space
+            "\u{2060}", // Word joiner
+            "\u{FEFF}", // Zero-width non-breaking space (BOM)
+        ];
+        for &proof in &zero_width_format_proofs {
+            // To an allowed target, the presence check accepts a non-empty proof.
+            let allowed =
+                CrossZoneRequest::new("prod", "staging", "test-action", "test-user", proof);
+            assert_eq!(
+                engine.authorize_cross_zone(&allowed),
+                Ok(()),
+                "Zero-width format char U+{:04X} is not Unicode whitespace; presence check accepts it",
+                proof.chars().next().unwrap_or('\0') as u32
+            );
+
+            // To a NON-allowed strict target the isolation gate still rejects it,
+            // proving invisible proof content cannot bypass cross-zone enforcement.
+            let blocked =
+                CrossZoneRequest::new("staging", "prod", "test-action", "test-user", proof);
+            assert_eq!(
+                engine.authorize_cross_zone(&blocked),
+                Err(SegmentationError::IsolationViolation),
+                "Zero-width format char U+{:04X} must not bypass the isolation/allowed-targets gate",
+                proof.chars().next().unwrap_or('\0') as u32
+            );
+        }
     }
 
     #[test]
@@ -2391,17 +2589,24 @@ mod tests {
         let auth_scenarios = vec![
             ("zone-a", "zone-b", "valid-proof-ab", true), // Should succeed
             ("zone-b", "zone-c", "valid-proof-bc", true), // Should succeed
-            ("zone-c", "zone-a", "valid-proof-ca", true), // Permissive allows any with proof
+            ("zone-c", "zone-a", "valid-proof-ca", true), // Permissive allows reads without a bridge
             ("zone-a", "zone-c", "invalid-proof-ac", false), // A doesn't allow C directly
             ("zone-b", "zone-a", "invalid-proof-ba", false), // B doesn't allow A
         ];
 
         // Rapidly execute authorization attempts
         for (i, (source, target, proof, should_succeed)) in auth_scenarios.iter().enumerate() {
+            // bd-djpur: read actions. This test's subject is authorization
+            // SEQUENCE consistency under rapid requests, not the read/write rule,
+            // and the previous `action-{i}` descriptor is (correctly) classified
+            // as mutating now that `IsolationLevel::Permissive` enforces the
+            // bridge on writes. Using reads keeps all five expectations — Strict
+            // and Custom enforce their allowlists for reads too, so only the
+            // Permissive row depends on the distinction.
             let req = CrossZoneRequest::new(
                 *source,
                 *target,
-                format!("action-{}", i),
+                format!("read:probe-{}", i),
                 format!("user-{}", i),
                 *proof,
             );
@@ -2499,7 +2704,10 @@ mod tests {
         assert_eq!(drained_events.len(), 100);
         assert!(engine.events().is_empty());
 
-        // Next event should continue trace ID sequence
+        // Trace IDs are positional within the current event buffer
+        // (`format!("trace-{}", self.events.len())`), not a globally monotonic
+        // counter. Because `take_events()` empties the buffer, the next emitted
+        // event's index resets to 0, so its trace ID is "trace-0".
         engine
             .register_zone(ZonePolicy::new(
                 "continuation-zone",
@@ -2510,7 +2718,7 @@ mod tests {
             .unwrap();
         let new_events = engine.events();
         assert_eq!(new_events.len(), 1);
-        assert_eq!(new_events[0].trace_id, "trace-100"); // Continues sequence
+        assert_eq!(new_events[0].trace_id, "trace-0"); // Index resets after drain
     }
 
     #[test]
@@ -2542,12 +2750,25 @@ mod tests {
                 IsolationLevel::Strict,
             ))
             .unwrap();
+        // A second, EXISTING zone that "violation-zone" is not authorized to reach.
+        // Targeting a nonexistent zone would short-circuit with ZoneNotFound before
+        // any audit event is emitted; to exercise genuine ZTS-004 isolation
+        // violations the target must exist but be outside the source's allowed
+        // cross-zone targets (Strict isolation, never granted via allow_cross_zone).
+        violation_engine
+            .register_zone(ZonePolicy::new(
+                "blocked-zone",
+                80,
+                5,
+                IsolationLevel::Strict,
+            ))
+            .unwrap();
 
         // Generate many isolation violations
         for i in 0..50 {
             let req = CrossZoneRequest::new(
                 "violation-zone",
-                "nonexistent-zone",
+                "blocked-zone",
                 format!("bad-action-{}", i),
                 "attacker",
                 "fake-proof",
@@ -2719,19 +2940,21 @@ mod tests {
             .unwrap();
 
         // Test different proof lengths/patterns that could reveal timing differences
+        let long_a = "a".repeat(1024);
+        let long_b = "b".repeat(1024);
         let timing_test_proofs = vec![
             "",                                // Empty - should fail fast
             " ",                               // Whitespace - should fail after trim
             "a",                               // Single char
             "short-proof",                     // Short proof
-            "a".repeat(1024),                  // Long proof - same first char as "a"
-            "b".repeat(1024),                  // Long proof - different first char
+            long_a.as_str(),                   // Long proof - same first char as "a"
+            long_b.as_str(),                   // Long proof - different first char
             "valid-authorization-proof-12345", // Realistic proof
             "\x00invalid-proof-with-null",     // Proof with null bytes
             "proof\nwith\nnewlines",           // Multi-line proof
         ];
 
-        for (i, proof) in timing_test_proofs.iter().enumerate() {
+        for (i, &proof) in timing_test_proofs.iter().enumerate() {
             let req = CrossZoneRequest::new(
                 "source",
                 "target",
@@ -2786,7 +3009,7 @@ mod tests {
         // Test with various zone ID lengths that could cause issues in length calculations
         let test_zone_ids = vec![
             // Normal length
-            "normal-zone",
+            "normal-zone".to_string(),
             // Very long zone ID
             "z".repeat(4096),
             // Unicode zone ID with multi-byte characters
@@ -2798,7 +3021,7 @@ mod tests {
         ];
 
         for (i, zone_id) in test_zone_ids.iter().enumerate() {
-            let policy = ZonePolicy::new(zone_id, 80, 5, IsolationLevel::Strict);
+            let policy = ZonePolicy::new(zone_id.as_str(), 80, 5, IsolationLevel::Strict);
             let register_result = engine.register_zone(policy);
 
             // Very long or problematic zone IDs should register successfully
@@ -2814,7 +3037,7 @@ mod tests {
                 assert!(engine.get_zone(zone_id).is_some());
 
                 // Test operations that might involve length calculations
-                engine.bind_key_to_zone("test-key", zone_id);
+                engine.bind_key_to_zone("test-key", zone_id.as_str());
                 assert!(engine.is_key_bound_to_zone("test-key", zone_id));
 
                 // Clean up for next iteration

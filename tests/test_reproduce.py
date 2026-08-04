@@ -66,6 +66,9 @@ def _copy_reproduce_script(root: Path) -> Path:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     target = scripts_dir / "reproduce.py"
     shutil.copy2(Path(reproduce.__file__), target)
+    lib_src = Path(reproduce.__file__).parent / "lib"
+    if lib_src.is_dir():
+        shutil.copytree(lib_src, scripts_dir / "lib")
     return target
 
 
@@ -79,6 +82,7 @@ def _run_reproduce_cli(root: Path, *args: str) -> subprocess.CompletedProcess[st
         text=True,
         check=False,
         env=env,
+        timeout=60,
     )
 
 
@@ -165,6 +169,39 @@ class TestReproductionRunner(unittest.TestCase):
                 for event in report["execution_log"]
             )
         )
+
+    def test_executed_run_writes_transcript_and_metrics_artifacts(self) -> None:
+        _write_python_procedure(self.procedure_path, {"verdict": "PASS"})
+        _write_claims(self.claims_path, self.procedure_path.name)
+        with self._patch_paths(), patch.object(
+            reproduce,
+            "environment_fingerprint",
+            return_value={"os": "test", "python_version": "3.11.0"},
+        ):
+            report = reproduce.run_reproduction()
+
+        artifact_paths = report["artifact_paths"]
+        transcript_path = self.root / artifact_paths["transcript_jsonl"]
+        metrics_path = self.root / artifact_paths["metrics_json"]
+        self.assertTrue(transcript_path.is_file())
+        self.assertTrue(metrics_path.is_file())
+
+        transcript_rows = [
+            json.loads(line)
+            for line in transcript_path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(transcript_rows), len(report["execution_log"]))
+        self.assertEqual(
+            transcript_rows[0]["schema_version"],
+            "tnr-reproduction-transcript-event.v1",
+        )
+        self.assertEqual(transcript_rows[0]["event"], report["execution_log"][0])
+
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        self.assertEqual(metrics["schema_version"], "tnr-reproduction-metrics.v1")
+        self.assertEqual(metrics["verdict"], "PASS")
+        self.assertEqual(metrics["claim_count"], 1)
+        self.assertEqual(metrics["report_digest_sha256"], reproduce._report_digest(report))
 
     def test_executed_claim_fails_when_procedure_reports_fail(self) -> None:
         _write_python_procedure(self.procedure_path, {"verdict": "FAIL"}, exit_code=1)

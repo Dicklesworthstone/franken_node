@@ -161,6 +161,10 @@ pub enum Command {
     #[command(subcommand)]
     Incident(IncidentCommand),
 
+    /// Long-term verifiability attestation and offline verification.
+    #[command(subcommand)]
+    Ltv(LtvCommand),
+
     /// Runtime operations and health inspection.
     #[command(subcommand)]
     Ops(OpsCommand),
@@ -269,6 +273,15 @@ pub struct RunArgs {
     #[arg(long)]
     pub json: bool,
 
+    /// Emit only the guest program's console output (stdout/stderr) and its
+    /// exit code, suppressing the appended run-receipt summary and
+    /// host-effect-ledger lines. For output-sensitive consumers such as the
+    /// lockstep harness, where appended runtime metadata would register as
+    /// behavioral divergence against reference runtimes (bd-zi9hj). Policy
+    /// gates, receipts, and quarantine behavior are unchanged.
+    #[arg(long, conflicts_with = "json")]
+    pub console_only: bool,
+
     /// Emit structured diagnostic log events as JSONL to stderr.
     #[arg(long)]
     pub structured_logs_jsonl: bool,
@@ -281,7 +294,8 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub config: Option<PathBuf>,
 
-    /// Runtime selection: auto, node, bun, or franken-engine.
+    /// Runtime selection. Profile-governed run accepts auto or franken-engine;
+    /// node and bun fail closed because they cannot enforce engine capabilities.
     #[arg(long)]
     pub runtime: Option<String>,
 
@@ -289,11 +303,9 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_safe_binary_pathbuf)]
     pub engine_bin: Option<PathBuf>,
 
-    /// Run lockstep comparison across runtimes before execution.
-    /// When enabled, the app is run in both node and bun (if available)
-    /// and results are compared. Divergence blocks execution.
+    /// Run the canonical first-tranche compat-op oracle before execution.
     #[arg(long)]
-    pub lockstep_preflight: bool,
+    pub compat_preflight: bool,
 }
 
 impl RunArgs {
@@ -340,6 +352,10 @@ pub enum RuntimeLaneCommand {
 
 #[derive(Debug, Parser)]
 pub struct RuntimeLaneStatusArgs {
+    /// Deterministic timestamp override in milliseconds.
+    #[arg(long)]
+    pub timestamp_ms: Option<u64>,
+
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,
@@ -720,6 +736,13 @@ pub struct MigrateValidateArgs {
     /// Output format: json or text.
     #[arg(long, default_value = "text")]
     pub format: String,
+
+    /// Run only the deterministic static checks and skip the transformed-runtime
+    /// smoke test. Use this in CI/golden contexts where no JavaScript runtime is
+    /// guaranteed (the smoke test executes the project and its result depends on
+    /// which runtime is installed).
+    #[arg(long)]
+    pub static_only: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -945,8 +968,30 @@ pub enum TrustCommand {
     /// Quarantine a suspicious artifact fleet-wide.
     Quarantine(TrustQuarantineArgs),
 
+    /// Release a Runtime Sentinel run-subject quarantine after remediation.
+    Release(TrustReleaseArgs),
+
     /// Sync trust state from upstream sources.
     Sync(TrustSyncArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustReleaseArgs {
+    /// Path to the previously quarantined run target (entry file).
+    #[arg(long)]
+    pub app: PathBuf,
+
+    /// Operator identity recorded on the release.
+    #[arg(long)]
+    pub operator_id: String,
+
+    /// Remediation rationale recorded on the release.
+    #[arg(long)]
+    pub reason: String,
+
+    /// Emit the release report as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1357,6 +1402,14 @@ pub enum OpsCommand {
     ConfigAudit(OpsConfigAuditArgs),
     /// Emit operator metrics in a scrape-friendly text format.
     Metrics(OpsMetricsArgs),
+    /// Produce L1 proof-carrying host-effect evidence (v2) from a real native-engine run.
+    #[command(name = "proof-carrying-evidence")]
+    ProofCarryingEvidence(OpsProofCarryingEvidenceArgs),
+    /// Run the committed compatibility corpus across bun and the native
+    /// engine, adjudicating every case through the lockstep oracle, and emit
+    /// genuine per-test results with digest-bound provenance (bd-kfseq).
+    #[command(name = "compat-corpus-run")]
+    CompatCorpusRun(OpsCompatCorpusRunArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1507,6 +1560,52 @@ pub struct OpsConfigAuditArgs {
     pub trace_id: String,
 }
 
+#[derive(Debug, Parser)]
+pub struct OpsProofCarryingEvidenceArgs {
+    /// Emit the produced evidence block as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Write the produced evidence block JSON to this path.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub out: Option<PathBuf>,
+
+    /// Merge the produced evidence into this compatibility-corpus results
+    /// JSON artifact (replaces its `proof_carrying_effects` block in place).
+    #[arg(long = "merge-corpus", value_parser = parse_safe_content_pathbuf)]
+    pub merge_corpus: Option<PathBuf>,
+
+    /// Also run a REAL dual-runtime lockstep-oracle pass (bun reference leg
+    /// vs native franken_engine leg) and merge both evidence blocks into
+    /// this L1 product verdict artifact (bd-ry7d1). Fails closed on any
+    /// divergence rather than writing a weaker verdict.
+    #[arg(long = "merge-l1-verdict", value_parser = parse_safe_content_pathbuf)]
+    pub merge_l1_verdict: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsCompatCorpusRunArgs {
+    /// Emit the run summary as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Corpus root containing one compat-corpus-fixture-v1 directory per
+    /// Node API family.
+    #[arg(long = "corpus-root", value_parser = parse_safe_content_pathbuf)]
+    pub corpus_root: PathBuf,
+
+    /// Write the compatibility-corpus results artifact to this path. When
+    /// the file already exists its identity, thresholds, event-code, and
+    /// proof-carrying-effects blocks are carried forward.
+    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    pub out: PathBuf,
+
+    /// Per-case, per-runtime-leg timeout in seconds. A leg that exceeds it
+    /// is killed and the case recorded as a genuine `fail` (timeout).
+    #[arg(long = "case-timeout-secs", default_value_t = 10)]
+    pub case_timeout_secs: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OpsMetricsFormat {
     Prometheus,
@@ -1581,6 +1680,25 @@ pub struct IncidentReplayArgs {
     /// Directory containing trusted Ed25519 public keys for replay bundle verification.
     #[arg(long = "key-dir", alias = "trusted-key-dir")]
     pub trusted_key_dir: Option<PathBuf>,
+
+    /// Emit the structured replay result as JSON on stdout. Required for
+    /// compatibility with the README's "All commands accept `--json`" contract.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Emit additional replay diagnostics on stderr (bundle id, policy version,
+    /// timeline event count).
+    #[arg(long)]
+    pub verbose: bool,
+
+    /// Emit structured diagnostic log events as JSONL to stderr
+    /// (FN-TTR-001 bundle loaded, FN-TTR-002 verdict emitted).
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
+    /// Stable trace ID for correlating replay events across commands.
+    #[arg(long, default_value = "incident-replay")]
+    pub trace_id: String,
 }
 
 #[derive(Debug, Parser)]
@@ -1600,6 +1718,14 @@ pub struct IncidentCounterfactualArgs {
     /// Policy to simulate.
     #[arg(long)]
     pub policy: String,
+
+    /// Decision model used to evaluate the recorded timeline: `synthetic` (a
+    /// sandboxed risk-score stand-in, the current default) or `production` (the
+    /// runtime's real policy decision engine). The chosen model is labeled in the
+    /// report and bound into the counterfactual digest. `production` is gated on
+    /// the engine-split runtime decision kernel and is not yet available.
+    #[arg(long, default_value = "synthetic")]
+    pub model: String,
 
     /// Emit the structured counterfactual report as canonical JSON on stdout.
     #[arg(long)]
@@ -1627,6 +1753,119 @@ pub struct IncidentListArgs {
     /// Emit machine-readable JSON output (one object per incident).
     #[arg(long)]
     pub json: bool,
+}
+
+// -- ltv --
+
+#[derive(Debug, Subcommand)]
+pub enum LtvCommand {
+    /// Produce self-contained long-term verification evidence from a
+    /// signature-verified incident bundle.
+    Attest(LtvAttestArgs),
+
+    /// Verify long-term evidence as of a claimed time through the offline
+    /// verifier SDK.
+    #[command(name = "verify-as-of")]
+    VerifyAsOf(LtvVerifyAsOfArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct LtvAttestArgs {
+    /// Path to the incident bundle whose long-term anteriority is attested.
+    #[arg(long)]
+    pub bundle: PathBuf,
+
+    /// Trusted Ed25519 public key file for bundle signature verification.
+    #[arg(long = "trusted-public-key", alias = "trust-anchor")]
+    pub trusted_public_key: Option<PathBuf>,
+
+    /// Directory containing trusted Ed25519 public keys for bundle verification.
+    #[arg(long = "key-dir", alias = "trusted-key-dir")]
+    pub trusted_key_dir: Option<PathBuf>,
+
+    /// Optional `run --json` report whose host-effect ledger chain hashes are
+    /// committed as co-markers next to the bundle in the origin tree.
+    #[arg(long = "run-report")]
+    pub run_report: Option<PathBuf>,
+
+    /// Witness signing key file (raw Ed25519 32-byte key; hex, base64, or
+    /// supported JSON wrapper). Repeat once per independent witness.
+    #[arg(long = "witness-key", required = true)]
+    pub witness_keys: Vec<PathBuf>,
+
+    /// Minimum number of valid witness signatures the receipt requires
+    /// (defaults to every supplied witness key).
+    #[arg(long)]
+    pub witness_threshold: Option<u32>,
+
+    /// Witness group identifier recorded on the cosigned statement.
+    #[arg(long, default_value = "operator-witnesses")]
+    pub witness_group_id: String,
+
+    /// Witness policy identifier recorded on the cosigned statement.
+    #[arg(long, default_value = "ltv-policy-v1")]
+    pub witness_policy_id: String,
+
+    /// Verification target time as unix seconds (defaults to now).
+    #[arg(long)]
+    pub as_of: Option<u64>,
+
+    /// Output path for the produced evidence JSON.
+    #[arg(long)]
+    pub out: PathBuf,
+
+    /// Emit the attestation summary as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Emit structured diagnostic log events as JSONL to stderr
+    /// (FN-LTV-002 root re-attested, FN-LTV-001 anchor cosigned).
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
+    /// Stable trace ID for correlating attestation events across commands.
+    #[arg(long, default_value = "ltv-attest")]
+    pub trace_id: String,
+}
+
+#[derive(Debug, Parser)]
+pub struct LtvVerifyAsOfArgs {
+    /// Path to the evidence JSON produced by `ltv attest`.
+    #[arg(long)]
+    pub evidence: PathBuf,
+
+    /// Path to the operator's witness trust anchor JSON.
+    ///
+    /// REQUIRED and fail-closed (bd-7fubt). The file pins
+    /// `{witness_group_id, witness_policy_id, threshold_config}` — including the
+    /// witness signer keys — that a receipt must satisfy. Without it the witness
+    /// receipt would be verified against the signer set it carries itself, which
+    /// any forger can choose, so proof-of-anteriority would be unforgeable in
+    /// name only. There are no built-in witness roots, exactly as `verify
+    /// release` and `incident replay` have no built-in trust roots.
+    #[arg(long)]
+    pub witness_anchor: PathBuf,
+
+    /// Override the evidence's verification target time (unix seconds).
+    #[arg(long)]
+    pub as_of: Option<u64>,
+
+    /// Verifier identity recorded on the SDK verification result.
+    #[arg(long, default_value = "verifier://franken-node-ltv-cli")]
+    pub verifier_identity: String,
+
+    /// Emit the verification result as JSON on stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Emit structured diagnostic log events as JSONL to stderr
+    /// (FN-LTV-003 verify completed, FN-LTV-ERR-001 anteriority unproven).
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
+    /// Stable trace ID for correlating verification events across commands.
+    #[arg(long, default_value = "ltv-verify-as-of")]
+    pub trace_id: String,
 }
 
 // -- registry --
@@ -1801,6 +2040,10 @@ pub enum DoctorCommand {
     /// Analyze workspace pressure and resource usage.
     #[command(name = "workspace-pressure")]
     WorkspacePressure(DoctorWorkspacePressureArgs),
+
+    /// Validate the Linux Bubblewrap backend required for process spawning.
+    #[command(name = "process-spawn-readiness")]
+    ProcessSpawnReadiness(DoctorProcessSpawnReadinessArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1849,6 +2092,17 @@ pub struct DoctorWorkspacePressureArgs {
 }
 
 #[derive(Debug, Parser)]
+pub struct DoctorProcessSpawnReadinessArgs {
+    /// Absolute Bubblewrap path. When omitted, resolve bwrap from the secure PATH.
+    #[arg(long)]
+    pub bubblewrap_path: Option<PathBuf>,
+
+    /// Emit the readiness report as machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
 pub struct DoctorArgs {
     #[command(subcommand)]
     pub command: Option<DoctorCommand>,
@@ -1863,7 +2117,9 @@ pub struct DoctorArgs {
     pub profile: Option<String>,
 
     /// Path to policy activation input JSON for live guardrail diagnostics.
-    #[arg(long)]
+    /// Falls back to `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` when the
+    /// flag is omitted; the CLI flag takes precedence (bd-lmbt0).
+    #[arg(long, env = "FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT")]
     pub policy_activation_input: Option<PathBuf>,
 
     /// Emit machine-readable JSON report.
@@ -2202,7 +2458,7 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
-    fn run_parses_lockstep_and_runtime_options() -> Result<(), String> {
+    fn run_parses_runtime_options() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
             "run",
@@ -2211,7 +2467,6 @@ mod parser_contract_extra_tests {
             "node",
             "--policy",
             "strict",
-            "--lockstep-preflight",
             "--json",
         ])
         .map_err(|err| err.to_string())?;
@@ -2223,9 +2478,16 @@ mod parser_contract_extra_tests {
         assert_eq!(args.app_path, PathBuf::from("app.js"));
         assert_eq!(args.runtime.as_deref(), Some("node"));
         assert_eq!(args.policy, "strict");
-        assert!(args.lockstep_preflight);
         assert!(args.json);
         Ok(())
+    }
+
+    #[test]
+    fn bd_ztr5v_process_spawn_run_rejects_external_lockstep_preflight_flag() {
+        let error = parse(&["franken-node", "run", "app.js", "--lockstep-preflight"])
+            .expect_err("profile-governed run must not launch an external lockstep leg");
+
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 
     #[test]
@@ -2435,6 +2697,44 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn ops_proof_carrying_evidence_parses_out_merge_corpus_and_json() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "ops",
+            "proof-carrying-evidence",
+            "--out",
+            "artifacts/oracle/proof_carrying_effects.v2.json",
+            "--merge-corpus",
+            "artifacts/13/compatibility_corpus_results.json",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Ops(OpsCommand::ProofCarryingEvidence(args)) => args,
+            other => {
+                return Err(format!(
+                    "expected ops proof-carrying-evidence command, got {other:?}"
+                ));
+            }
+        };
+        assert!(args.json);
+        assert_eq!(
+            args.out,
+            Some(PathBuf::from(
+                "artifacts/oracle/proof_carrying_effects.v2.json"
+            ))
+        );
+        assert_eq!(
+            args.merge_corpus,
+            Some(PathBuf::from(
+                "artifacts/13/compatibility_corpus_results.json"
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ops_resource_governor_parses_snapshot_hints_and_json() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
@@ -2634,6 +2934,9 @@ mod parser_contract_extra_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // FIXME(bd-yom8c): `Cli::command()` is the clap `CommandFactory` trait method; bring the
+    // trait into scope (nested test mods do not inherit it via `use super::*`).
+    use clap::CommandFactory;
 
     fn parse_error_kind(args: &[&str]) -> clap::error::ErrorKind {
         let mut argv = Vec::with_capacity(args.len().saturating_add(1));
@@ -2647,9 +2950,13 @@ mod tests {
 
     #[test]
     fn missing_top_level_subcommand_is_rejected() {
+        // An empty invocation is still rejected (never parses to a `Cli`). With a
+        // required derived subcommand and no other required top-level args, current
+        // clap surfaces this as `DisplayHelpOnMissingArgumentOrSubcommand` (it renders
+        // help) rather than `MissingSubcommand`; both encode "no subcommand provided".
         assert_eq!(
             parse_error_kind(&[]),
-            clap::error::ErrorKind::MissingSubcommand
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
     }
 
@@ -2828,7 +3135,7 @@ mod tests {
                         // If parsed successfully, verify Unicode is handled safely
                         match cli.command {
                             Command::Init(init_args) => {
-                                if let Some(output_dir) = init_args.output_dir {
+                                if let Some(output_dir) = init_args.out_dir {
                                     // Should handle Unicode paths consistently
                                     assert!(
                                         !output_dir.to_string_lossy().is_empty()
@@ -2838,7 +3145,7 @@ mod tests {
                                     );
                                 }
                                 assert!(
-                                    !init_args.profile.is_empty() || init_args.profile.is_empty(),
+                                    init_args.profile.is_some() || init_args.profile.is_none(),
                                     "Profile should be handled deterministically: {}",
                                     attack_name
                                 );
@@ -2869,8 +3176,8 @@ mod tests {
                             Command::Run(run_args) => {
                                 // Should handle script paths safely
                                 assert!(
-                                    !run_args.script.to_string_lossy().is_empty()
-                                        || run_args.script.to_string_lossy().is_empty(),
+                                    !run_args.app_path.to_string_lossy().is_empty()
+                                        || run_args.app_path.to_string_lossy().is_empty(),
                                     "Script path should be handled safely: {}",
                                     attack_name
                                 );
@@ -2902,7 +3209,7 @@ mod tests {
                     }
                 }
 
-                Ok(())
+                Ok::<(), ()>(())
             });
 
             assert!(
@@ -2935,7 +3242,7 @@ mod tests {
                     // If parsed, should handle large arguments reasonably
                     match cli.command {
                         Command::Init(init_args) => {
-                            if let Some(output_dir) = init_args.output_dir {
+                            if let Some(output_dir) = init_args.out_dir {
                                 // Path should be handled without memory exhaustion
                                 assert!(
                                     output_dir.to_string_lossy().len() <= 2_000_000,
@@ -2952,10 +3259,13 @@ mod tests {
             }
 
             // Test many small arguments
+            let env_args: Vec<String> = (0..10000)
+                .map(|i| format!("KEY_{}=VALUE_{}", i, i))
+                .collect();
             let mut many_args = vec!["franken-node", "run", "script.js"];
-            for i in 0..10000 {
+            for env_arg in &env_args {
                 many_args.push("--env");
-                many_args.push(&format!("KEY_{}=VALUE_{}", i, i));
+                many_args.push(env_arg.as_str());
             }
 
             let many_args_result = Cli::try_parse_from(&many_args);
@@ -2979,7 +3289,7 @@ mod tests {
                         Command::Run(run_args) => {
                             // Should handle deep paths without overflow
                             assert!(
-                                run_args.script.to_string_lossy().len() < 100_000,
+                                run_args.app_path.to_string_lossy().len() < 100_000,
                                 "Script path should be reasonably bounded"
                             );
                         }
@@ -2991,7 +3301,7 @@ mod tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -3051,14 +3361,14 @@ mod tests {
                         match &cli.command {
                             Command::Init(init_args) => {
                                 assert!(
-                                    !init_args.profile.is_empty(),
+                                    init_args.profile.as_deref().map_or(true, |p| !p.is_empty()),
                                     "Profile should not be empty: case {}",
                                     i
                                 );
                             }
                             Command::Run(run_args) => {
                                 assert!(
-                                    !run_args.script.to_string_lossy().is_empty(),
+                                    !run_args.app_path.to_string_lossy().is_empty(),
                                     "Script should not be empty: case {}",
                                     i
                                 );
@@ -3103,7 +3413,7 @@ mod tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -3148,29 +3458,44 @@ mod tests {
                     Ok(cli) => {
                         match cli.command {
                             Command::Run(run_args) => {
-                                let script_path = run_args.script.to_string_lossy();
+                                let script_path = run_args.app_path.to_string_lossy();
 
-                                // Verify no command injection in parsed path
-                                assert!(
-                                    !script_path.contains(';'),
-                                    "Script path should not contain semicolon: {}",
-                                    attack_name
-                                );
-                                assert!(
-                                    !script_path.contains('|'),
-                                    "Script path should not contain pipe: {}",
-                                    attack_name
-                                );
-                                assert!(
-                                    !script_path.contains('&'),
-                                    "Script path should not contain ampersand: {}",
-                                    attack_name
-                                );
-                                assert!(
-                                    !script_path.contains('`'),
-                                    "Script path should not contain backticks: {}",
-                                    attack_name
-                                );
+                                // franken-node never hands CLI arguments to a shell;
+                                // clap captures `app_path` as an opaque literal value
+                                // (`parse_safe_content_pathbuf` rejects NUL, absolute
+                                // paths, backslashes, and `..` segments but treats shell
+                                // metacharacters as ordinary filename bytes). Injection
+                                // safety therefore means each metacharacter is preserved
+                                // verbatim — never shell-interpreted, and never stripped
+                                // (stripping would corrupt legitimate filenames).
+                                if malicious_input.contains(';') {
+                                    assert!(
+                                        script_path.contains(';'),
+                                        "Semicolon must survive as a literal path byte, never shell-interpreted: {}",
+                                        attack_name
+                                    );
+                                }
+                                if malicious_input.contains('|') {
+                                    assert!(
+                                        script_path.contains('|'),
+                                        "Pipe must survive as a literal path byte, never shell-interpreted: {}",
+                                        attack_name
+                                    );
+                                }
+                                if malicious_input.contains('&') {
+                                    assert!(
+                                        script_path.contains('&'),
+                                        "Ampersand must survive as a literal path byte, never shell-interpreted: {}",
+                                        attack_name
+                                    );
+                                }
+                                if malicious_input.contains('`') {
+                                    assert!(
+                                        script_path.contains('`'),
+                                        "Backtick must survive as a literal path byte, never shell-interpreted: {}",
+                                        attack_name
+                                    );
+                                }
 
                                 // The path itself may contain these characters but should be treated as literal
                                 assert_eq!(
@@ -3187,29 +3512,35 @@ mod tests {
                     }
                 }
 
-                // Test environment variable injection
-                let env_inject_args =
-                    vec!["franken-node", "run", "script.js", "--env", malicious_input];
-                let env_result = Cli::try_parse_from(&env_inject_args);
+                // FIXME(bd-yom8c): `RunArgs::env` and the `--env` flag were removed from the
+                // current CLI; this env-injection sub-block targets a removed API. Gated until
+                // rewritten against whatever replaces env passthrough.
+                #[cfg(any())]
+                {
+                    // Test environment variable injection
+                    let env_inject_args =
+                        vec!["franken-node", "run", "script.js", "--env", malicious_input];
+                    let env_result = Cli::try_parse_from(&env_inject_args);
 
-                match env_result {
-                    Ok(cli) => {
-                        match cli.command {
-                            Command::Run(run_args) => {
-                                // Verify environment variables are parsed safely
-                                for env_var in &run_args.env {
-                                    assert_eq!(
-                                        env_var, malicious_input,
-                                        "Env var should be preserved literally: {}",
-                                        attack_name
-                                    );
+                    match env_result {
+                        Ok(cli) => {
+                            match cli.command {
+                                Command::Run(run_args) => {
+                                    // Verify environment variables are parsed safely
+                                    for env_var in &run_args.env {
+                                        assert_eq!(
+                                            env_var, malicious_input,
+                                            "Env var should be preserved literally: {}",
+                                            attack_name
+                                        );
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
-                    }
-                    Err(_) => {
-                        // May reject malicious environment variables - acceptable
+                        Err(_) => {
+                            // May reject malicious environment variables - acceptable
+                        }
                     }
                 }
 
@@ -3222,7 +3553,7 @@ mod tests {
                     Ok(cli) => {
                         match cli.command {
                             Command::Init(init_args) => {
-                                if let Some(output_dir) = init_args.output_dir {
+                                if let Some(output_dir) = init_args.out_dir {
                                     let output_path = output_dir.to_string_lossy();
 
                                     // Verify output directory is treated as literal path
@@ -3242,7 +3573,7 @@ mod tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -3286,11 +3617,19 @@ mod tests {
                     Ok(cli) => {
                         // Test debug display formatting safety
                         let debug_display = format!("{:?}", cli);
-                        assert!(
-                            !debug_display.contains("%s"),
-                            "Debug should not contain format specifiers: {}",
-                            attack_name
-                        );
+                        // Rust's formatting machinery never interprets C-style format
+                        // specifiers (`%s`, `%x`, …) the way printf does — they are
+                        // emitted verbatim as inert text. "Display injection safety"
+                        // here means the specifier is preserved literally (not
+                        // interpreted), so verify it round-trips rather than asserting
+                        // its absence (which would wrongly require mangling the value).
+                        if malicious_content.contains("%s") {
+                            assert!(
+                                debug_display.contains("%s"),
+                                "Rust Debug must emit format specifiers verbatim, never interpret them: {}",
+                                attack_name
+                            );
+                        }
                         assert!(
                             !debug_display.contains("\x1b["),
                             "Debug should escape ANSI sequences: {}",
@@ -3305,11 +3644,15 @@ mod tests {
                         match cli.command {
                             Command::Init(init_args) => {
                                 let profile_display = format!("{:?}", init_args.profile);
-                                assert!(
-                                    !profile_display.contains("%s"),
-                                    "Profile display should be safe: {}",
-                                    attack_name
-                                );
+                                // Same Rust-vs-printf reasoning as above: a `%s` in the
+                                // profile is preserved verbatim, never interpreted.
+                                if malicious_content.contains("%s") {
+                                    assert!(
+                                        profile_display.contains("%s"),
+                                        "Profile Debug must emit format specifiers verbatim: {}",
+                                        attack_name
+                                    );
+                                }
                                 assert!(
                                     !profile_display.contains("\x1b["),
                                     "Profile display should escape ANSI: {}",
@@ -3356,12 +3699,10 @@ mod tests {
                 );
 
                 // Test subcommand help safety
+                let mut init_cmd = Cli::command();
                 let init_help = format!(
                     "{}",
-                    Cli::command()
-                        .find_subcommand("init")
-                        .unwrap()
-                        .render_help()
+                    init_cmd.find_subcommand_mut("init").unwrap().render_help()
                 );
                 assert!(
                     !init_help.contains("%s"),
@@ -3375,7 +3716,7 @@ mod tests {
                 );
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(
@@ -3423,9 +3764,11 @@ mod tests {
             }
 
             // Test path length boundaries
+            // FIXME(bd-yom8c): the `.repeat()` rows make this a `Vec<(String, _)>`; the literal
+            // rows must be owned `String`s too, else the array pins to `&str` (E0308).
             let path_lengths = vec![
-                ("", "empty_path"),
-                ("a", "single_char"),
+                ("".to_string(), "empty_path"),
+                ("a".to_string(), "single_char"),
                 ("a".repeat(100), "medium_path"),
                 ("a".repeat(4096), "long_path"),
                 ("/".repeat(1000), "deep_path"),
@@ -3436,13 +3779,13 @@ mod tests {
                     continue; // Skip empty paths which are invalid
                 }
 
-                let args = vec!["franken-node", "run", &path_str];
+                let args = vec!["franken-node", "run", path_str.as_str()];
                 let parse_result = Cli::try_parse_from(&args);
 
                 match parse_result {
                     Ok(cli) => match cli.command {
                         Command::Run(run_args) => {
-                            let parsed_path = run_args.script.to_string_lossy();
+                            let parsed_path = run_args.app_path.to_string_lossy();
                             assert_eq!(
                                 parsed_path, path_str,
                                 "Path should be preserved: {}",
@@ -3457,38 +3800,49 @@ mod tests {
                 }
             }
 
-            // Test environment variable boundaries
-            let env_var_cases = vec![
-                ("KEY=VALUE", "basic_env"),
-                ("KEY=", "empty_value"),
-                ("LONG_KEY_NAME=LONG_VALUE", "descriptive_env"),
-                ("KEY=" + &"x".repeat(10000), "large_value"),
-                (&"x".repeat(100) + "=value", "large_key"),
-            ];
+            // FIXME(bd-yom8c): `RunArgs::env` and the `--env` flag were removed from the current
+            // CLI; this env-boundary block targets a removed API. Gated until rewritten.
+            #[cfg(any())]
+            {
+                // Test environment variable boundaries
+                let env_var_cases = vec![
+                    ("KEY=VALUE".to_string(), "basic_env"),
+                    ("KEY=".to_string(), "empty_value"),
+                    ("LONG_KEY_NAME=LONG_VALUE".to_string(), "descriptive_env"),
+                    ("KEY=".to_string() + &"x".repeat(10000), "large_value"),
+                    ("x".repeat(100) + "=value", "large_key"),
+                ];
 
-            for (env_var, test_name) in env_var_cases {
-                let args = vec!["franken-node", "run", "script.js", "--env", env_var];
-                let parse_result = Cli::try_parse_from(&args);
+                for (env_var, test_name) in env_var_cases {
+                    let args = vec![
+                        "franken-node",
+                        "run",
+                        "script.js",
+                        "--env",
+                        env_var.as_str(),
+                    ];
+                    let parse_result = Cli::try_parse_from(&args);
 
-                match parse_result {
-                    Ok(cli) => match cli.command {
-                        Command::Run(run_args) => {
-                            assert_eq!(
-                                run_args.env.len(),
-                                1,
-                                "Should have one env var: {}",
-                                test_name
-                            );
-                            assert_eq!(
-                                run_args.env[0], env_var,
-                                "Env var should be preserved: {}",
-                                test_name
-                            );
+                    match parse_result {
+                        Ok(cli) => match cli.command {
+                            Command::Run(run_args) => {
+                                assert_eq!(
+                                    run_args.env.len(),
+                                    1,
+                                    "Should have one env var: {}",
+                                    test_name
+                                );
+                                assert_eq!(
+                                    run_args.env[0], env_var,
+                                    "Env var should be preserved: {}",
+                                    test_name
+                                );
+                            }
+                            _ => {}
+                        },
+                        Err(_) => {
+                            // May reject malformed or oversized env vars - acceptable
                         }
-                        _ => {}
-                    },
-                    Err(_) => {
-                        // May reject malformed or oversized env vars - acceptable
                     }
                 }
             }
@@ -3527,7 +3881,14 @@ mod tests {
             }
 
             // Test option value boundaries
-            let option_value_cases = vec!["", "short", &"x".repeat(1000), &"x".repeat(100000)];
+            let long_value_1k = "x".repeat(1000);
+            let long_value_100k = "x".repeat(100000);
+            let option_value_cases = vec![
+                "",
+                "short",
+                long_value_1k.as_str(),
+                long_value_100k.as_str(),
+            ];
 
             for value in option_value_cases {
                 if value.is_empty() {
@@ -3541,7 +3902,8 @@ mod tests {
                     Ok(cli) => match cli.command {
                         Command::Init(init_args) => {
                             assert_eq!(
-                                init_args.profile, value,
+                                init_args.profile.as_deref(),
+                                Some(value),
                                 "Profile value should be preserved"
                             );
                         }
@@ -3553,7 +3915,7 @@ mod tests {
                 }
             }
 
-            Ok(())
+            Ok::<(), ()>(())
         });
 
         assert!(

@@ -2613,7 +2613,17 @@ mod tests {
 
         // Verify the adapter received the data
         let mut db = adapter_ref.lock().expect("adapter lock");
-        let result = db.read(PersistenceClass::AuditLog, "telemetry_00000000000000000001");
+        let caller = CallerContext::service(
+            "observability::telemetry_bridge_test",
+            "telemetry_00000000000000000001",
+        );
+        let result = db
+            .read(
+                &caller,
+                PersistenceClass::AuditLog,
+                "telemetry_00000000000000000001",
+            )
+            .expect("adapter read should succeed");
         assert!(result.found, "event should be persisted in adapter store");
         let payload = result.value.expect("payload");
         assert!(
@@ -3196,7 +3206,10 @@ mod tests {
         let mut db = adapter_ref.lock().expect("adapter lock");
         for seq in 1..=3u64 {
             let key = format!("telemetry_{seq:020}");
-            let result = db.read(PersistenceClass::AuditLog, &key);
+            let caller = CallerContext::service("observability::telemetry_bridge_test", &key);
+            let result = db
+                .read(&caller, PersistenceClass::AuditLog, &key)
+                .expect("adapter read should succeed");
             assert!(result.found, "missing key: {key}");
         }
     }
@@ -3742,16 +3755,16 @@ mod tests {
         let mut locked_state = try_lock(&state, "store massive telemetry detail in test state")
             .expect("telemetry bridge test state mutex should not be poisoned");
         push_bounded(
-            &mut locked_state.runtime_events,
+            &mut locked_state.recent_events,
             malicious_event.clone(),
             MAX_RUNTIME_EVENTS,
         );
 
         // Even with massive detail, storage should be bounded
-        assert_eq!(locked_state.runtime_events.len(), 1);
+        assert_eq!(locked_state.recent_events.len(), 1);
 
         // Verify serialization doesn't cause memory explosion
-        let json = serde_json::to_string(&locked_state.runtime_events[0]).unwrap_or_default();
+        let json = serde_json::to_string(&locked_state.recent_events[0]).unwrap_or_default();
         assert!(
             json.len() >= massive_detail.len(),
             "serialization preserves large detail"
@@ -3759,12 +3772,8 @@ mod tests {
 
         // Verify this doesn't crash the snapshot functionality
         drop(locked_state);
-        let bridge = TelemetryBridge::with_state(
-            "/tmp/test-massive.sock",
-            Arc::new(Mutex::new(FrankensqliteAdapter::default())),
-            state.clone(),
-        );
-        let snapshot = bridge.snapshot();
+        let snapshot = TelemetryBridge::with_state(&state, |metrics| metrics.snapshot())
+            .expect("telemetry bridge state lock should not be poisoned");
         assert!(
             !snapshot.recent_events.is_empty(),
             "snapshot should include massive event"
@@ -3848,13 +3857,13 @@ mod tests {
         let mut locked_state = try_lock(&state, "store max-value telemetry event in test state")
             .expect("telemetry bridge test state mutex should not be poisoned");
         push_bounded(
-            &mut locked_state.runtime_events,
+            &mut locked_state.recent_events,
             near_max_event,
             MAX_RUNTIME_EVENTS,
         );
 
         // Verify arithmetic operations use saturating semantics
-        let event = &locked_state.runtime_events[0];
+        let event = &locked_state.recent_events[0];
 
         // Simulate counter increments that should use saturating_add
         let new_accepted = event.accepted_total.saturating_add(1);
@@ -4206,7 +4215,12 @@ mod tests {
         let result2 = SocketLockGuard::acquire(socket_path_str);
         assert!(result2.is_err(), "second lock on same path should fail");
 
-        let err_msg = result2.unwrap_err().to_string();
+        // SocketLockGuard intentionally does not derive Debug, so use `.err()`
+        // (no `T: Debug` bound) instead of `unwrap_err()` to extract the error.
+        let err_msg = result2
+            .err()
+            .expect("second lock on same path should fail")
+            .to_string();
         assert!(
             err_msg.contains("another process is active"),
             "error should indicate another process is active: {}",

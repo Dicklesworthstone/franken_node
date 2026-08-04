@@ -1095,7 +1095,7 @@ mod tests {
 
         // Verify that HKDF info includes proper length prefixes
         let key_short = derive_epoch_key(&secret, ControlEpoch::new(1), "a");
-        let key_long = derive_epoch_key(&secret, ControlEpoch::new(1), "a".repeat(100));
+        let key_long = derive_epoch_key(&secret, ControlEpoch::new(1), &"a".repeat(100));
         assert_ne!(
             key_short, key_long,
             "Length prefixing should prevent collision"
@@ -1134,13 +1134,20 @@ mod tests {
         );
 
         let serialized = serde_json::to_string(&event).unwrap();
-        assert!(
-            !serialized.contains("<script>"),
-            "Script injection should be escaped"
+        // serde_json is a codec, not a sanitizer: `<`/`>`/`'`/`;`/`-`/space are not
+        // JSON-special, so the script and SQL payloads are preserved verbatim
+        // inside properly-escaped JSON strings — never stripped or executed. The
+        // injection-safety property is lossless containment plus escaped control
+        // chars so a value can never break out of its string context.
+        let roundtrip: EpochAuthEvent =
+            serde_json::from_str(&serialized).expect("event should round-trip");
+        assert_eq!(
+            roundtrip, event,
+            "Injection payloads must be losslessly contained, not stripped"
         );
         assert!(
-            !serialized.contains("DROP TABLE"),
-            "SQL injection should be escaped"
+            !serialized.contains('\n') && !serialized.contains('\r'),
+            "Control chars (newline/CR) must be escaped, not left raw"
         );
 
         // Test trace_id with control characters
@@ -1296,6 +1303,7 @@ mod tests {
         let secret = root_secret();
 
         // Test idempotence across multiple parameter combinations
+        let large_domain = "x".repeat(1000);
         let test_cases = vec![
             (ControlEpoch::new(1), "marker"),
             (ControlEpoch::new(42), "test-domain"),
@@ -1303,7 +1311,7 @@ mod tests {
             (ControlEpoch::new(u64::MAX), "boundary-epoch"),
             (ControlEpoch::new(1), "special-chars-!@#$%^&*()"),
             (ControlEpoch::new(100), "unicode-域名"),
-            (ControlEpoch::new(1), &"x".repeat(1000)), // Large domain
+            (ControlEpoch::new(1), large_domain.as_str()), // Large domain
         ];
 
         for (epoch, domain) in test_cases {
@@ -1341,15 +1349,16 @@ mod tests {
         let secret = root_secret();
         let epoch = ControlEpoch::new(1);
 
+        let long_domain = "x".repeat(100);
         let domain_pairs = vec![
             ("marker", "manifest"),
-            ("", "x"),                   // Empty vs single char
-            ("domain", "domain2"),       // Similar domains
-            ("a", "A"),                  // Case sensitivity
-            ("test", "test "),           // Trailing space
-            ("domain", "domain\0"),      // Null byte
-            ("unicode", "unicode域"),    // Unicode difference
-            ("short", &"x".repeat(100)), // Length difference
+            ("", "x"),                       // Empty vs single char
+            ("domain", "domain2"),           // Similar domains
+            ("a", "A"),                      // Case sensitivity
+            ("test", "test "),               // Trailing space
+            ("domain", "domain\0"),          // Null byte
+            ("unicode", "unicode域"),        // Unicode difference
+            ("short", long_domain.as_str()), // Length difference
         ];
 
         for (domain_a, domain_b) in domain_pairs {
@@ -1407,13 +1416,14 @@ mod tests {
     fn mr_epoch_key_sign_verify_roundtrip() {
         let secret = root_secret();
 
+        let large_artifact = b"large-artifact".repeat(1000);
         let test_cases = vec![
             (ControlEpoch::new(1), "marker", b"test-artifact".as_slice()),
             (ControlEpoch::new(42), "domain", b"".as_slice()), // Empty artifact
             (
                 ControlEpoch::new(0),
                 "zero-epoch",
-                b"large-artifact".repeat(1000).as_slice(),
+                large_artifact.as_slice(),
             ),
             (
                 ControlEpoch::new(u64::MAX),
@@ -1456,7 +1466,10 @@ mod tests {
         let test_params = vec![
             (ControlEpoch::new(1), "marker"),
             (ControlEpoch::new(100), "test-domain"),
-            (ControlEpoch::new(0), ""),
+            // Prod's signing path now requires a non-empty, trimmed domain
+            // (`validate_domain` → `AuthError::DomainEmpty`); use a valid domain so
+            // the epoch=0 consistency case still exercises the full sign path.
+            (ControlEpoch::new(0), "zero-epoch-domain"),
         ];
 
         for (epoch, domain) in test_params {

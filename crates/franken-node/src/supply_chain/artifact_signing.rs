@@ -871,12 +871,20 @@ pub fn demo_signing_key_3() -> SigningKey {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ArtifactSigningError, ArtifactVerificationResult, AuditLogEntry, ChecksumManifest, KeyId,
-        KeyRing, KeyTransitionRecord, ManifestEntry, PartialSignature, VerificationReport,
-        demo_signing_key, demo_signing_key_2, sha256_hex, sign_manifest, verify_checksums,
-    };
+    use std::collections::BTreeMap;
+
     use ed25519_dalek::{SigningKey, VerifyingKey};
+    use sha2::{Digest, Sha256};
+
+    use super::{
+        ASV_001_ARTIFACT_SIGNED, ArtifactSigningError, AuditLogEntry, ChecksumManifest, KeyId,
+        KeyRing, ManifestEntry, PartialSignature, build_and_sign_manifest,
+        collect_threshold_signatures, constant_time, create_key_transition, demo_signing_key,
+        demo_signing_key_2, demo_signing_key_3, generate_artifact_signing_key, len_to_u64,
+        push_bounded, sha256_hex, sign_artifact, sign_bytes, signing_key_from_seed_bytes,
+        signing_key_from_seed_hex, verify_key_transition, verify_release, verify_signature,
+        verify_threshold,
+    };
 
     fn setup_keys() -> (SigningKey, VerifyingKey, KeyRing) {
         let sk = demo_signing_key();
@@ -1103,8 +1111,13 @@ mod tests {
         let manifest = build_and_sign_manifest(&[(name, content as &[u8])], &sk);
         let sig = sign_artifact(&sk, content);
 
+        // Use a tamper payload that is the SAME length as the original so the
+        // size pre-check passes and the checksum comparison is exercised. The
+        // dedicated `verify_release_rejects_signed_size_metadata_mismatch` test
+        // covers the size-mismatch path; this test asserts content tampering is
+        // caught by the checksum.
         let mut arts = BTreeMap::new();
-        arts.insert(name.to_string(), b"tampered binary!!!".to_vec());
+        arts.insert(name.to_string(), b"tampered binary!!!!".to_vec());
         let mut sigs = BTreeMap::new();
         sigs.insert(name.to_string(), sig);
 
@@ -1652,7 +1665,10 @@ mod tests {
             .get_mut(name)
             .expect("manifest entry should exist")
             .size_bytes = len_to_u64(content.len()).saturating_add(1);
-        manifest.signature = sign_bytes(&sk, &manifest.canonical_bytes());
+        // Re-sign over the domain-separated payload that `verify_release`
+        // actually verifies (matches `build_and_sign_manifest`), not the raw
+        // canonical bytes, so the manifest signature stays valid.
+        manifest.signature = sign_bytes(&sk, &manifest.canonical_signature_payload());
 
         let mut arts = BTreeMap::new();
         arts.insert(name.to_string(), content.to_vec());
@@ -2087,8 +2103,14 @@ mod tests {
 
 #[cfg(test)]
 mod artifact_signing_boundary_negative_tests {
-    use super::{KeyId, constant_time, demo_signing_key, demo_signing_key_2};
+    use super::{
+        ArtifactSigningError, KeyId, KeyRing, MAX_THRESHOLD_PARTIAL_SIGNATURES, PartialSignature,
+        collect_threshold_signatures, constant_time, create_key_transition, demo_signing_key,
+        demo_signing_key_2, len_to_u64, push_bounded, sha256_hex, sign_bytes, verify_signature,
+        verify_threshold,
+    };
     use ed25519_dalek::{SigningKey, VerifyingKey};
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn hardening_keyid_derivation_preserves_timing_safety() {

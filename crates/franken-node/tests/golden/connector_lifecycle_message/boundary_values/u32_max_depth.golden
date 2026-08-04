@@ -1,0 +1,16 @@
+{
+  "success": true,
+  "input": {
+    "raw_bytes_len": 1000,
+    "nesting_depth": [UNIX_TIMESTAMP],
+    "decode_cpu_ms": 10
+  },
+  "resource_usage": {
+    "bytes_parsed": 1000,
+    "nesting_depth": [UNIX_TIMESTAMP],
+    "cpu_ms": 10
+  },
+  "allowed": false,
+  "violation_count": 1,
+  "test_case": "u32_max_depth"
+}

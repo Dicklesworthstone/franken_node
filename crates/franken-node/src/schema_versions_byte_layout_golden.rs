@@ -101,7 +101,7 @@ mod frozen_canonical_byte_layout_golden_tests {
         );
 
         // Pin expected count - this will fail first time, showing the actual count
-        let expected_count = 110; // Update this when adding schemas
+        let expected_count = 137; // Update this when adding schemas
         if entry_count != expected_count {
             panic!(
                 "Schema registry has {} entries, expected {}. \
@@ -121,20 +121,12 @@ mod frozen_canonical_byte_layout_golden_tests {
             "SHA-256 hash should be 71 chars (sha256: + 64 hex chars)"
         );
 
-        // TODO: Replace this placeholder with actual golden hash baseline
-        // Run this test once to get the real hash value, then replace the placeholder below
-        if count_hash == "sha256:0000000000000000000000000000000000000000000000000000000000000000" {
-            panic!(
-                "Golden hash not yet established. Run test to get actual hash:\n\
-                   Actual hash: {}\n\
-                   Replace the placeholder in the code with this value.",
-                count_hash
-            );
-        }
-
         // Golden hash baseline - any change indicates schema registry modification
+        // (re-blessed for bd-bg2hy: +run_sentinel_report AND folding in three
+        // prior unblessed registry additions — the pinned 133 had silently
+        // drifted from the real 136 before this bead; now 137)
         let expected_hash =
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+            "sha256:ce056c7a2aaa12e682ddf7c81dcca4ae1e52c5521b04ed06722209d7565e58c7";
         assert_eq!(
             count_hash, expected_hash,
             "Schema registry entry count hash changed - this indicates API surface modification.\
@@ -207,22 +199,9 @@ mod frozen_canonical_byte_layout_golden_tests {
             "Should test multiple critical constants"
         );
 
-        // TODO: Replace this placeholder with actual golden hash baseline
-        // Run this test once to get the real hash value, then replace the placeholder below
-        if constants_hash
-            == "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-        {
-            panic!(
-                "Golden hash not yet established. Run test to get actual hash:\n\
-                   Actual hash: {}\n\
-                   Replace the placeholder in the code with this value.",
-                constants_hash
-            );
-        }
-
         // Golden hash baseline - any change indicates critical constants modification
         let expected_hash =
-            "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+            "sha256:dc2000d100005761856f863673826b1eedc3ed1254c03030b3be6c899acf531e";
         assert_eq!(
             constants_hash, expected_hash,
             "Critical constants hash changed - this indicates protocol-critical version drift.\
@@ -295,22 +274,11 @@ mod frozen_canonical_byte_layout_golden_tests {
             "Schema registry should have no duplicate names"
         );
 
-        // TODO: Replace this placeholder with actual golden hash baseline
-        // Run this test once to get the real hash value, then replace the placeholder below
-        if structure_hash
-            == "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-        {
-            panic!(
-                "Golden hash not yet established. Run test to get actual hash:\n\
-                   Actual hash: {}\n\
-                   Replace the placeholder in the code with this value.",
-                structure_hash
-            );
-        }
-
         // Golden hash baseline - any change indicates schema registry structure modification
+        // (re-blessed for bd-bg2hy: +run_sentinel_report + three prior
+        // unblessed additions; see the entry-count golden above)
         let expected_hash =
-            "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+            "sha256:502de87979e6cddb61cf400cead6b9bb55a15aeee915c0876bfabf62620dac98";
         assert_eq!(
             structure_hash, expected_hash,
             "Schema registry structure hash changed - this indicates schema modification (add/remove/rename).\

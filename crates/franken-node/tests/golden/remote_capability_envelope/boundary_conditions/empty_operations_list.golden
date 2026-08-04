@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "capability": {
+    "token_id": "[HASH]",
+    "issuer_identity": "issuer",
+    "issued_at_epoch_secs": [UNIX_TIMESTAMP],
+    "expires_at_epoch_secs": [UNIX_TIMESTAMP],
+    "scope": {
+      "operations": [],
+      "endpoint_prefixes": [
+        "https://example.com/"
+      ]
+    },
+    "signature": "[HASH]",
+    "single_use": false
+  },
+  "test_case": "empty_operations_list"
+}

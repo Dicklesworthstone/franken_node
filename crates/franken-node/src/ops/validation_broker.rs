@@ -1502,6 +1502,7 @@ mod input_set_tests {
                 path: "a:b".to_string(),
                 algorithm: "sha256".to_string(),
                 hex: "deadbeef".to_string(),
+                source: "test".to_string(),
             }],
             feature_flags: vec![],
         };
@@ -1514,6 +1515,7 @@ mod input_set_tests {
                 path: "a".to_string(),
                 algorithm: "b:sha256".to_string(),
                 hex: "deadbeef".to_string(),
+                source: "test".to_string(),
             }],
             feature_flags: vec![],
         };
@@ -4031,6 +4033,7 @@ mod tests {
                 doctor_readiness: "ready".to_string(),
                 ci_consumable: true,
             },
+            flight_recorder_ref: None,
         }
     }
 
@@ -4713,6 +4716,8 @@ mod tests {
             queue.proof_status_for("bd-6efmv", "bd-6efmv", ts(3)).status,
             ProofStatusKind::Failed
         );
+
+        Ok(())
     }
 
     #[test]
@@ -4900,10 +4905,16 @@ mod tests {
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let mut attempt = flight_attempt(FlightRecorderAdapterOutcomeClass::Success);
+        let mut attempt = flight_attempt(FlightRecorderAdapterOutcomeClass::Passed);
 
-        // Set target path to our temp directory
-        attempt.target_dir.path = Some(temp_dir.path().to_string_lossy().to_string());
+        // Point at a not-yet-created target dir beneath the temp root. Prod
+        // classifies a missing target as Clean *and* records a
+        // "does not exist - clean state" diagnostic detail, which is what now
+        // drives the appended "Target hygiene:" summary asserted below. (An
+        // existing empty dir is also Clean but yields no diagnostic_details, so
+        // prod gates out the hygiene summary for it.)
+        let target_dir = temp_dir.path().join("validation-target");
+        attempt.target_dir.path = Some(target_dir.to_string_lossy().to_string());
 
         hygiene_detector::populate_flight_recorder_hygiene(&mut attempt);
 

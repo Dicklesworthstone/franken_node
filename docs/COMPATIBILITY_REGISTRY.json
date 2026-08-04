@@ -7,10 +7,23 @@
       "api_name": "readFile",
       "band": "core",
       "shim_type": "stub",
-      "spec_ref": "Node.js docs: fs.readFile",
+      "spec_ref": "Node.js fs.readFile; Bun node:fs compatibility",
       "fixture_ref": null,
       "oracle_status": "pending",
-      "notes": "Placeholder — implementation pending spec extraction."
+      "args_schema": "compat-fs-read-file-args-v1",
+      "result_schema": "compat-fs-read-file-result-v1",
+      "error_schema": "compat-fs-read-file-error-v1",
+      "node_error_codes": ["ENOENT", "EISDIR", "EACCES", "ERR_INVALID_ARG_TYPE", "ABORT_ERR"],
+      "bun_error_codes": ["ENOENT", "EISDIR", "EACCES", "ERR_INVALID_ARG_TYPE", "ABORT_ERR"],
+      "side_effect_category": "filesystem_read",
+      "resource_budget": {
+        "max_input_bytes": 4096,
+        "max_output_bytes": 16777216,
+        "max_duration_ms": 5000,
+        "max_side_effects": 0
+      },
+      "policy_hooks": ["capability", "profile"],
+      "notes": "First-tranche read operation. Bun parity target follows its node:fs compatibility surface."
     },
     {
       "id": "compat:fs:writeFile",
@@ -18,10 +31,23 @@
       "api_name": "writeFile",
       "band": "core",
       "shim_type": "stub",
-      "spec_ref": "Node.js docs: fs.writeFile",
+      "spec_ref": "Node.js fs.writeFile; Bun node:fs compatibility",
       "fixture_ref": null,
       "oracle_status": "pending",
-      "notes": "Placeholder — implementation pending spec extraction."
+      "args_schema": "compat-fs-write-file-args-v1",
+      "result_schema": "compat-fs-write-file-result-v1",
+      "error_schema": "compat-fs-write-file-error-v1",
+      "node_error_codes": ["ENOENT", "EISDIR", "EACCES", "ENOTDIR", "ERR_INVALID_ARG_TYPE", "ABORT_ERR"],
+      "bun_error_codes": ["ENOENT", "EISDIR", "EACCES", "ENOTDIR", "ERR_INVALID_ARG_TYPE", "ABORT_ERR"],
+      "side_effect_category": "filesystem_write",
+      "resource_budget": {
+        "max_input_bytes": 16777216,
+        "max_output_bytes": 1024,
+        "max_duration_ms": 5000,
+        "max_side_effects": 1
+      },
+      "policy_hooks": ["capability", "profile"],
+      "notes": "First-tranche write operation. Bun parity target follows its node:fs compatibility surface."
     },
     {
       "id": "compat:path:join",
@@ -29,10 +55,23 @@
       "api_name": "join",
       "band": "core",
       "shim_type": "stub",
-      "spec_ref": "Node.js docs: path.join",
+      "spec_ref": "Node.js path.join; Bun node:path compatibility",
       "fixture_ref": null,
       "oracle_status": "pending",
-      "notes": "Placeholder — implementation pending spec extraction."
+      "args_schema": "compat-path-join-args-v1",
+      "result_schema": "compat-path-join-result-v1",
+      "error_schema": "compat-path-join-error-v1",
+      "node_error_codes": ["ERR_INVALID_ARG_TYPE"],
+      "bun_error_codes": ["ERR_INVALID_ARG_TYPE"],
+      "side_effect_category": "pure",
+      "resource_budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 65536,
+        "max_duration_ms": 100,
+        "max_side_effects": 0
+      },
+      "policy_hooks": ["profile"],
+      "notes": "Existing core registry entry retained outside the first tranche."
     },
     {
       "id": "compat:process:env",
@@ -40,10 +79,47 @@
       "api_name": "env",
       "band": "core",
       "shim_type": "stub",
-      "spec_ref": "Node.js docs: process.env",
+      "spec_ref": "Node.js process.env; Bun import.meta.env/process.env compatibility",
       "fixture_ref": null,
       "oracle_status": "pending",
-      "notes": "Placeholder — implementation pending spec extraction."
+      "args_schema": "compat-process-env-args-v1",
+      "result_schema": "compat-process-env-result-v1",
+      "error_schema": "compat-process-env-error-v1",
+      "node_error_codes": ["ERR_INVALID_ARG_TYPE", "ERR_ACCESS_DENIED"],
+      "bun_error_codes": ["ERR_INVALID_ARG_TYPE"],
+      "side_effect_category": "environment_read",
+      "resource_budget": {
+        "max_input_bytes": 2048,
+        "max_output_bytes": 262144,
+        "max_duration_ms": 100,
+        "max_side_effects": 0
+      },
+      "policy_hooks": ["capability", "profile"],
+      "notes": "First-tranche environment read. ERR_ACCESS_DENIED is a profile-denial mapping in franken_node, not a Bun parity claim."
+    },
+    {
+      "id": "compat:http:request",
+      "api_family": "http",
+      "api_name": "request",
+      "band": "high-value",
+      "shim_type": "stub",
+      "spec_ref": "Node.js http.request; Bun node:http compatibility",
+      "fixture_ref": null,
+      "oracle_status": "pending",
+      "args_schema": "compat-http-request-args-v1",
+      "result_schema": "compat-http-request-result-v1",
+      "error_schema": "compat-http-request-error-v1",
+      "node_error_codes": ["ERR_INVALID_URL", "ECONNREFUSED", "ECONNRESET", "ABORT_ERR"],
+      "bun_error_codes": ["ERR_INVALID_URL", "ECONNREFUSED", "ECONNRESET", "ABORT_ERR"],
+      "side_effect_category": "network_egress",
+      "resource_budget": {
+        "max_input_bytes": 1048576,
+        "max_output_bytes": 16777216,
+        "max_duration_ms": 30000,
+        "max_side_effects": 1
+      },
+      "policy_hooks": ["capability", "ssrf", "profile"],
+      "notes": "First-tranche outbound HTTP operation; SSRF policy is mandatory before network egress."
     },
     {
       "id": "compat:http:createServer",
@@ -51,10 +127,47 @@
       "api_name": "createServer",
       "band": "high-value",
       "shim_type": "stub",
-      "spec_ref": "Node.js docs: http.createServer",
+      "spec_ref": "Node.js http.createServer; Bun node:http compatibility",
       "fixture_ref": null,
       "oracle_status": "pending",
-      "notes": "Placeholder — implementation pending spec extraction."
+      "args_schema": "compat-http-create-server-args-v1",
+      "result_schema": "compat-http-create-server-result-v1",
+      "error_schema": "compat-http-create-server-error-v1",
+      "node_error_codes": ["EADDRINUSE", "EACCES", "ERR_INVALID_ARG_TYPE"],
+      "bun_error_codes": ["EADDRINUSE", "EACCES", "ERR_INVALID_ARG_TYPE"],
+      "side_effect_category": "network_listener",
+      "resource_budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 65536,
+        "max_duration_ms": 1000,
+        "max_side_effects": 1
+      },
+      "policy_hooks": ["capability", "profile"],
+      "notes": "Existing high-value registry entry retained outside the first tranche."
+    },
+    {
+      "id": "compat:module:resolve",
+      "api_family": "module",
+      "api_name": "resolve",
+      "band": "core",
+      "shim_type": "stub",
+      "spec_ref": "Node.js CommonJS/module resolution; Bun module resolution",
+      "fixture_ref": null,
+      "oracle_status": "pending",
+      "args_schema": "compat-module-resolve-args-v1",
+      "result_schema": "compat-module-resolve-result-v1",
+      "error_schema": "compat-module-resolve-error-v1",
+      "node_error_codes": ["MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_INVALID_MODULE_SPECIFIER"],
+      "bun_error_codes": ["MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_INVALID_MODULE_SPECIFIER"],
+      "side_effect_category": "module_graph_read",
+      "resource_budget": {
+        "max_input_bytes": 65536,
+        "max_output_bytes": 1048576,
+        "max_duration_ms": 1000,
+        "max_side_effects": 0
+      },
+      "policy_hooks": ["capability", "profile"],
+      "notes": "First-tranche module lookup operation. It records resolution side effects as graph reads, not filesystem mutation."
     }
   ]
 }

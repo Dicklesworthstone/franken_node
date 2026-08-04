@@ -3,6 +3,7 @@ pub mod adversary_graph;
 pub mod blake3_adapter;
 pub mod bpet;
 pub mod challenge_flow;
+pub mod conformal;
 pub mod constant_time;
 pub mod copilot_engine;
 pub mod crypto;
@@ -79,7 +80,8 @@ mod tests {
 
     #[test]
     fn negative_remote_cap_issue_requires_operator_authorization() {
-        let provider = CapabilityProvider::new("negative-secret");
+        let provider =
+            CapabilityProvider::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("provider should construct");
 
         let err = provider
             .issue(
@@ -99,7 +101,8 @@ mod tests {
 
     #[test]
     fn negative_remote_cap_issue_rejects_zero_ttl() {
-        let provider = CapabilityProvider::new("negative-secret");
+        let provider =
+            CapabilityProvider::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("provider should construct");
 
         let err = provider
             .issue(
@@ -119,7 +122,7 @@ mod tests {
 
     #[test]
     fn negative_remote_cap_gate_denies_missing_capability() {
-        let mut gate = CapabilityGate::new("negative-secret");
+        let mut gate = CapabilityGate::new("Zq7!Kp3m-Xv9Rw#Lt2Bn").expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -243,7 +246,8 @@ mod security_root_additional_negative_tests {
     }
 
     fn issued_cap(scope: RemoteScope, ttl_secs: u64, single_use: bool) -> RemoteCap {
-        let provider = CapabilityProvider::new("additional-secret");
+        let provider =
+            CapabilityProvider::new("additional-secret").expect("provider should construct");
         provider
             .issue(
                 "operator-additional",
@@ -286,7 +290,7 @@ mod security_root_additional_negative_tests {
             60,
             false,
         );
-        let mut gate = CapabilityGate::new("additional-secret");
+        let mut gate = CapabilityGate::new("additional-secret").expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -317,7 +321,7 @@ mod security_root_additional_negative_tests {
             10,
             false,
         );
-        let mut gate = CapabilityGate::new("additional-secret");
+        let mut gate = CapabilityGate::new("additional-secret").expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -348,7 +352,7 @@ mod security_root_additional_negative_tests {
             60,
             true,
         );
-        let mut gate = CapabilityGate::new("additional-secret");
+        let mut gate = CapabilityGate::new("additional-secret").expect("gate should construct");
 
         gate.authorize_network(
             Some(&cap),
@@ -381,7 +385,8 @@ mod security_root_additional_negative_tests {
             60,
             false,
         );
-        let mut gate = CapabilityGate::with_mode("additional-secret", ConnectivityMode::LocalOnly);
+        let mut gate = CapabilityGate::with_mode("additional-secret", ConnectivityMode::LocalOnly)
+            .expect("gate should construct");
 
         let err = gate
             .authorize_network(
@@ -529,7 +534,8 @@ mod security_extreme_adversarial_negative_tests {
 
     #[test]
     fn extreme_adversarial_remote_capability_memory_exhaustion_attack() {
-        let provider = CapabilityProvider::new("memory-attack-secret");
+        let provider =
+            CapabilityProvider::new("memory-attack-secret").expect("provider should construct");
 
         // Massive endpoint list in scope (potential memory exhaustion)
         let mut massive_endpoints = Vec::new();
@@ -575,7 +581,8 @@ mod security_extreme_adversarial_negative_tests {
 
     #[test]
     fn extreme_adversarial_remote_capability_endpoint_confusion_attack() {
-        let provider = CapabilityProvider::new("confusion-secret");
+        let provider = CapabilityProvider::new("V4ult!8x-Hsm#Torus9@Cipher")
+            .expect("provider should construct");
 
         // Crafted endpoints designed to confuse URL parsing
         let confusing_endpoints = vec![
@@ -601,7 +608,8 @@ mod security_extreme_adversarial_negative_tests {
         );
 
         if let Ok((cap, _)) = cap_result {
-            let mut gate = CapabilityGate::new("confusion-secret");
+            let mut gate =
+                CapabilityGate::new("V4ult!8x-Hsm#Torus9@Cipher").expect("gate should construct");
 
             // Test various malformed endpoint access attempts
             let malicious_attempts = vec![
@@ -701,12 +709,20 @@ mod security_extreme_adversarial_negative_tests {
 
             let result = evaluate_freshness(&policy, &check, None);
 
-            // Should reject due to staleness, not crash on Unicode
+            // Should fail closed, not crash on Unicode. Prod validates identifier
+            // fields (null bytes / control characters / surrounding whitespace) and
+            // rejects them with PolicyInvalid BEFORE the staleness check; inputs that
+            // survive that validation are still denied as StaleFrontier. Both are
+            // fail-closed rejections of the injection attempt.
             assert!(result.is_err());
-            if let Err(FreshnessError::StaleFrontier { .. }) = result {
-                // Expected stale error, Unicode handled gracefully
-            } else {
-                panic!("unexpected error type for Unicode injection test {i}");
+            match result {
+                Err(FreshnessError::StaleFrontier { .. })
+                | Err(FreshnessError::PolicyInvalid { .. }) => {
+                    // Expected fail-closed rejection, Unicode handled gracefully
+                }
+                other => {
+                    panic!("unexpected error type for Unicode injection test {i}: {other:?}");
+                }
             }
         }
     }
@@ -730,7 +746,7 @@ mod security_extreme_adversarial_negative_tests {
             let result = template.check_ssrf(
                 malicious_host,
                 443,
-                Protocol::Https,
+                Protocol::Http,
                 &format!("trace-injection-{i}"),
                 "2026-01-01T00:00:00Z",
             );
@@ -767,8 +783,7 @@ mod security_extreme_adversarial_negative_tests {
         let boundary_ports = vec![
             0,        // Invalid port
             65535,    // Maximum valid port
-            65536,    // Overflow attempt
-            u16::MAX, // Maximum u16
+            u16::MAX, // Maximum u16 (ports above 65535 are unrepresentable in u16)
         ];
 
         for port in boundary_ports {
@@ -785,10 +800,6 @@ mod security_extreme_adversarial_negative_tests {
                     // Port 0 should be denied
                     assert!(result.is_err());
                 }
-                65536.. => {
-                    // Ports above 65535 should be handled gracefully
-                    // (Note: Rust's type system prevents this at compile time with u16)
-                }
                 _ => {
                     // Other ports may be allowed or denied based on policy
                     // We're testing that it doesn't panic
@@ -799,7 +810,8 @@ mod security_extreme_adversarial_negative_tests {
 
     #[test]
     fn extreme_adversarial_capability_concurrent_single_use_race_condition() {
-        let provider = CapabilityProvider::new("race-condition-secret");
+        let provider =
+            CapabilityProvider::new("race-condition-secret").expect("provider should construct");
         let scope = RemoteScope::new(
             vec![RemoteOperation::NetworkEgress],
             vec!["https://api.example.com".to_string()],
@@ -818,12 +830,15 @@ mod security_extreme_adversarial_negative_tests {
             .expect("capability should issue")
             .0;
 
-        // Simulate concurrent access attempts to single-use capability
-        let mut gates = vec![
-            CapabilityGate::new("race-condition-secret"),
-            CapabilityGate::new("race-condition-secret"),
-            CapabilityGate::new("race-condition-secret"),
-        ];
+        // Simulate concurrent access attempts to single-use capability. The three
+        // gates must share one replay store, otherwise each independent in-memory
+        // store would let the same single-use token be consumed three times.
+        // Cloning a gate shares its `consumed_tokens` replay state (Arc-backed), so
+        // single-use enforcement applies across all attempts — the same sharing
+        // model used by the in-process memory replay-store concurrency tests.
+        let base_gate =
+            CapabilityGate::new("race-condition-secret").expect("gate should construct");
+        let mut gates = vec![base_gate.clone(), base_gate.clone(), base_gate];
 
         let mut results = Vec::new();
         for gate in &mut gates {
@@ -888,7 +903,7 @@ mod security_extreme_adversarial_negative_tests {
                 action_id: format!("timing-action-{i}"),
                 actor: "operator".to_string(),
                 reason: "emergency override".to_string(),
-                timestamp: malicious_timestamp.clone(),
+                timestamp: (*malicious_timestamp).to_string(),
                 trace_id: format!("trace-override-timing-{i}"),
             };
 

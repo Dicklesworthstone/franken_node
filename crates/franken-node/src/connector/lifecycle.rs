@@ -9,7 +9,12 @@ use std::fmt;
 
 /// The nine mutually exclusive lifecycle states for a connector instance.
 /// Includes `Cancelling` for the three-phase cancellation protocol (bd-1cs7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `PartialOrd`/`Ord` derive declaration order so the state can key a
+/// `BTreeMap`/`BTreeSet` for deterministic transition-matrix iteration
+/// (consumed by `connector_lifecycle_conformance_matrix`); it carries no
+/// semantic "greater-than" meaning between states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorState {
     Discovered,

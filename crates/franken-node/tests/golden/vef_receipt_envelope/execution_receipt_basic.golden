@@ -1,0 +1,18 @@
+{
+  "schema_version": "vef-receipt-chain-v1",
+  "action_type": "network_access",
+  "capability_context": {
+    "capability_type": "network_egress",
+    "endpoint": "https://api.example.com"
+  },
+  "actor_identity": "verifier-001",
+  "artifact_identity": "artifact-12345",
+  "policy_snapshot_hash": "sha256:[KEY_ID]",
+  "timestamp_millis": [UNIX_TIMESTAMP],
+  "sequence_number": 42,
+  "witness_references": [
+    "witness-001",
+    "witness-002"
+  ],
+  "trace_id": "trace-vef-001"
+}

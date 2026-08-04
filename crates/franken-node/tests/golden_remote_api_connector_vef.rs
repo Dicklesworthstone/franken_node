@@ -120,7 +120,7 @@ fn test_golden_infrastructure_integration() {
             "schema_version": "vef-receipt-chain-v1",
             "receipt_hash": "sha256:fedcba0987654321fedcba0987654321fedcba09",
             "chain_hash": "sha256:abcd1234567890efabcd1234567890efabcd1234",
-            "timestamp_millis": 1713628800000,
+            "timestamp_millis": 1_713_628_800_000_i64,
             "sequence_number": 42,
             "trace_id": "trace-vef-receipt-001",
             "witness_references": [
@@ -254,7 +254,7 @@ fn test_cross_domain_data_flow() {
                     "action_type": "capability_grant",
                     "actor_identity": "computation-service",
                     "artifact_identity": "cross-domain-computation",
-                    "timestamp_millis": 1713628801000,
+                    "timestamp_millis": 1_713_628_801_000_i64,
                     "sequence_number": 1,
                     "trace_id": "trace-cross-domain-001",
                     "capability_context": {
@@ -277,7 +277,6 @@ fn test_cross_domain_data_flow() {
     );
 }
 
-// Re-export the domain-specific tests so they run with this suite
-pub use connector_lifecycle_message_golden_tests::*;
-pub use remote_capability_envelope_golden_tests::*;
-pub use vef_receipt_envelope_golden_tests::*;
+// The domain-specific `#[test]` functions are collected automatically from the
+// `mod` declarations above — no glob re-export is needed for them to run as part
+// of this suite (a `pub use ::*` here would just be an unused import).

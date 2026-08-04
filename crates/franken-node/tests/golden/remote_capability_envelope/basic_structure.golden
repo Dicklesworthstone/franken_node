@@ -1,0 +1,18 @@
+{
+  "token_id": "[HASH]",
+  "issuer_identity": "test-issuer",
+  "issued_at_epoch_secs": [UNIX_TIMESTAMP],
+  "expires_at_epoch_secs": [UNIX_TIMESTAMP],
+  "scope": {
+    "operations": [
+      "network_egress",
+      "federation_sync"
+    ],
+    "endpoint_prefixes": [
+      "https://api.example.com/",
+      "https://sync.example.com/"
+    ]
+  },
+  "signature": "[HASH]",
+  "single_use": false
+}

@@ -90,6 +90,13 @@ fn replay_bundle_canonical_json_golden() {
         to_canonical_json(&bundle).expect("canonical JSON serialization should succeed");
     let scrubbed_json = scrub_replay_bundle_golden(&canonical_json);
 
+    if std::env::var_os("UPDATE_GOLDENS").is_some() {
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden/replay_bundle/canonical_small_fixture.golden");
+        std::fs::write(&golden_path, &scrubbed_json).expect("write replay-bundle golden");
+        return;
+    }
+
     assert_eq!(
         scrubbed_json, CANONICAL_SMALL_FIXTURE_GOLDEN,
         "replay bundle canonical JSON must match the reviewed golden artifact"

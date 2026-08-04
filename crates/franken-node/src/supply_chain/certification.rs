@@ -1257,7 +1257,7 @@ mod tests {
         assert!(
             result
                 .unsatisfied_criteria
-                .contains(&"third_party_audit_attestation".to_owned())
+                .contains(&"third_party_audit_verified".to_owned())
         );
     }
 
@@ -1288,7 +1288,7 @@ mod tests {
         assert!(
             result
                 .unsatisfied_criteria
-                .contains(&"third_party_audit_attestation".to_owned())
+                .contains(&"third_party_audit_verified".to_owned())
         );
     }
 
@@ -2303,7 +2303,7 @@ mod tests {
         assert!(
             result
                 .unsatisfied_criteria
-                .contains(&"third_party_audit_attestation".to_owned())
+                .contains(&"third_party_audit_verified".to_owned())
         );
     }
 

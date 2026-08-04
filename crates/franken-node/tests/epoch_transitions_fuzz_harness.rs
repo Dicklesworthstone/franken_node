@@ -10,18 +10,43 @@
 //! epoch state generation and invariant validation.
 
 use frankenengine_node::control_plane::control_epoch::{
-    ControlEpoch, EpochArtifactEvent, EpochError, EpochRejection, EpochRejectionReason, EpochStore,
-    EpochTransition, ValidityWindowPolicy, check_artifact_epoch, event_codes,
+    ControlEpoch, EpochError, EpochSigningKey, EpochStore, EpochTransition, ValidityWindowPolicy,
+    check_artifact_epoch,
 };
-use serde_json::Value;
-use std::collections::BTreeMap;
+
+/// bd-kpjrz: `EpochStore` now signs transition events with an HMAC key, so the
+/// event MAC is an authenticity check rather than a hash anyone can recompute.
+/// One fixed key across this file keeps every transition cross-verifiable here.
+fn epoch_test_key() -> EpochSigningKey {
+    EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+}
+
+fn epoch_test_store() -> EpochStore {
+    EpochStore::new(epoch_test_key())
+}
+
+fn epoch_test_store_at(committed_epoch: u64) -> EpochStore {
+    EpochStore::recover(committed_epoch, epoch_test_key())
+}
 
 const MAX_EPOCH_VALUE: u64 = 1_000_000; // Reasonable upper bound for testing
-const MAX_MANIFEST_HASH_LEN: usize = 256;
-const MAX_TRACE_ID_LEN: usize = 128;
-const MAX_ARTIFACT_ID_LEN: usize = 512;
+
+// bd-6n2xv: these three were 256 / 128 / 512 — limits this harness invented and
+// the product never declared. `control_epoch` bounds every one of these fields
+// with a single `MAX_EPOCH_TEXT_BYTES = 4096`, so the harness was calling a
+// 257-byte manifest hash "invalid" and then failing because the product quite
+// correctly accepted it. The harness had no Cargo registration, so nobody ever
+// saw the disagreement. They must track the product constant; if `control_epoch`
+// ever splits its limit per field, split these the same way.
+const MAX_MANIFEST_HASH_LEN: usize = 4096;
+const MAX_TRACE_ID_LEN: usize = 4096;
+const MAX_ARTIFACT_ID_LEN: usize = 4096;
 const MAX_LOOKBACK_WINDOW: u64 = 1000;
 
+// bd-6r7c4: `Serialization` and `ArtifactValidation` are part of this harness's
+// error vocabulary but are not reachable from the currently-seeded corpus. They
+// are kept so a future seed does not have to reintroduce them.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HarnessEpochError {
     EpochOperation(String),
@@ -106,7 +131,12 @@ fn seed_artifact_ids() -> Vec<String> {
     ]
 }
 
-/// Generate seed timestamp values
+/// Generate seed timestamp values.
+///
+/// bd-6r7c4: retained for the same reason as the unused error variants — this is
+/// a seed-corpus harness and the timestamp corpus is part of it, even though no
+/// currently-registered test draws from it yet.
+#[allow(dead_code)]
 fn seed_timestamps() -> Vec<u64> {
     vec![
         0,            // Unix epoch start
@@ -144,7 +174,7 @@ fn seed_transition_vectors() -> Vec<(u64, String, u64, String)> {
 /// Validate epoch transition MAC consistency
 fn validate_transition_mac_consistency(
     old_epoch: ControlEpoch,
-    new_epoch: ControlEpoch,
+    _new_epoch: ControlEpoch,
     timestamp: u64,
     manifest_hash: &str,
     trace_id: &str,
@@ -153,18 +183,18 @@ fn validate_transition_mac_consistency(
         return Err(HarnessEpochError::InvalidTransition);
     }
 
-    let mut store = EpochStore::recover(old_epoch.value());
+    let mut store = epoch_test_store_at(old_epoch.value());
 
     // Attempt to advance to new epoch
     match store.epoch_advance(manifest_hash, timestamp, trace_id) {
         Ok(transition) => {
             // MAC should verify
-            if !transition.verify() {
+            if !transition.verify(&epoch_test_key()) {
                 return Err(HarnessEpochError::MacVerification);
             }
 
             // Create second transition with same parameters
-            let mut store2 = EpochStore::recover(old_epoch.value());
+            let mut store2 = epoch_test_store_at(old_epoch.value());
             match store2.epoch_advance(manifest_hash, timestamp, trace_id) {
                 Ok(transition2) => {
                     // MACs should be identical for identical inputs
@@ -215,8 +245,8 @@ fn validate_epoch_store_recovery_consistency(epoch_value: u64) -> Result<(), Har
         return Err(HarnessEpochError::InvalidTransition);
     }
 
-    let store1 = EpochStore::recover(epoch_value);
-    let store2 = EpochStore::recover(epoch_value);
+    let store1 = epoch_test_store_at(epoch_value);
+    let store2 = epoch_test_store_at(epoch_value);
 
     // Recovery should be deterministic
     if store1.epoch_read() != store2.epoch_read() {
@@ -274,7 +304,7 @@ fn fuzz_epoch_progression_invariant_enforcement() {
     ];
 
     for (current, attempted) in regression_attempts {
-        let mut store = EpochStore::recover(current);
+        let mut store = epoch_test_store_at(current);
 
         let result = store.epoch_set(
             attempted,
@@ -398,9 +428,9 @@ fn fuzz_epoch_store_recovery_determinism() {
 
 #[test]
 fn fuzz_transition_serialization_round_trip() {
-    let mut store = EpochStore::new();
+    let mut store = epoch_test_store();
 
-    for (i, (epoch_val, manifest_hash, timestamp, trace_id)) in
+    for (i, (_epoch_val, manifest_hash, timestamp, trace_id)) in
         seed_transition_vectors().iter().enumerate().take(5)
     {
         if !manifest_hash.trim().is_empty() && !trace_id.trim().is_empty() {
@@ -421,7 +451,7 @@ fn fuzz_transition_serialization_round_trip() {
 
                     // Verify MAC still validates after round-trip
                     assert!(
-                        deserialized.verify(),
+                        deserialized.verify(&epoch_test_key()),
                         "Deserialized transition MAC should still validate"
                     );
                 }
@@ -435,7 +465,7 @@ fn fuzz_transition_serialization_round_trip() {
 
 #[test]
 fn fuzz_manifest_hash_boundary_validation() {
-    let mut store = EpochStore::new();
+    let mut store = epoch_test_store();
 
     for manifest_hash in seed_manifest_hashes() {
         let result = store.epoch_advance(&manifest_hash, 1000000000, "trace-manifest-test");
@@ -465,7 +495,7 @@ fn fuzz_manifest_hash_boundary_validation() {
 #[test]
 fn fuzz_trace_id_boundary_validation() {
     for trace_id in seed_trace_ids() {
-        let mut store = EpochStore::new();
+        let mut store = epoch_test_store();
         let result = store.epoch_advance("manifest-hash-test", 1000000000, &trace_id);
 
         let should_succeed = !trace_id.trim().is_empty()
@@ -493,7 +523,7 @@ fn fuzz_trace_id_boundary_validation() {
 
 #[test]
 fn fuzz_epoch_overflow_protection() {
-    let mut store = EpochStore::recover(u64::MAX);
+    let mut store = epoch_test_store_at(u64::MAX);
 
     // Attempting to advance from maximum epoch should fail
     let result = store.epoch_advance("manifest-overflow-test", 1000000000, "trace-overflow");

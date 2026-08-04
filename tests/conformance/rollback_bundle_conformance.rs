@@ -28,13 +28,11 @@ use std::collections::BTreeMap;
 
 use frankenengine_node::connector::rollback_bundle::{
     BundleComponent, CompatibilityProof, HealthCheckKind, HealthCheckResult, ManifestComponent,
-    RestoreManifest, RollbackAuditEntry, RollbackBundle, RollbackBundleError, RollbackMode,
-    StateSnapshot,
+    RestoreManifest, StateSnapshot,
     event_codes::{
         RRB_001_BUNDLE_CREATED, RRB_002_ROLLBACK_INITIATED, RRB_003_ROLLBACK_COMPLETED,
         RRB_004_ROLLBACK_FAILED,
     },
-    invariants::{INV_RRB_DETERM, INV_RRB_HEALTH, INV_RRB_IDEMPOT, INV_RRB_MANIFEST},
     sha256_hex,
 };
 
@@ -253,7 +251,7 @@ fn test_must_r_rrb_002() -> TestResult {
     let rollback_data = b"rollback-state-data".to_vec();
 
     // Create state snapshots representing before and after rollback
-    let initial_state = StateSnapshot {
+    let _initial_state = StateSnapshot {
         config_checksums: BTreeMap::from([("config.toml".to_string(), sha256_hex(&original_data))]),
         schema_version: "1.0.0".to_string(),
         policy_set: "default".to_string(),

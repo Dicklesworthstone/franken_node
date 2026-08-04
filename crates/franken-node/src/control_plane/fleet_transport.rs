@@ -1931,12 +1931,14 @@ mod tests {
     use super::{
         ACTION_LOG_RETENTION_DAYS, FLEET_NODE_DIR, FLEET_SHARED_STATE_SCHEMA, FileFleetTransport,
         FleetAction, FleetActionRecord, FleetSharedState, FleetTargetKind, FleetTransport,
-        FleetTransportError, FleetTransportLayout, MAX_ACTION_LOG_ENTRIES, MAX_ACTION_RECORD_BYTES,
-        MAX_ACTION_RECORD_LINE_BYTES, MAX_NODE_ID_LEN, MAX_NODES_CAP, NodeHealth, NodeStatus,
-        TempFileGuard, canonical_fleet_convergence_receipt_payload,
+        FleetTransportError, FleetTransportLayout, LOCK_RETRY_BACKOFF_MILLIS,
+        MAX_ACTION_LOG_ENTRIES, MAX_ACTION_RECORD_BYTES, MAX_ACTION_RECORD_LINE_BYTES,
+        MAX_NODE_ID_LEN, MAX_NODES_CAP, NodeHealth, NodeStatus, RevocationScope,
+        RevocationSeverity, TempFileGuard, canonical_fleet_convergence_receipt_payload, clock,
         fleet_action_compaction_root_key, fleet_convergence_receipt_verdict,
-        lock_fleet_action_compaction_process, lock_retry_base_backoffs, parse_jsonl_records,
-        push_bounded, sign_fleet_convergence_receipt_payload, validate_node_id, validate_zone_id,
+        lock_file_with_backoff, lock_fleet_action_compaction_process, lock_retry_backoffs,
+        lock_retry_base_backoffs, parse_jsonl_records, push_bounded,
+        sign_fleet_convergence_receipt_payload, validate_node_id, validate_zone_id,
         wait_until_fleet_converged_or_timeout,
     };
     use chrono::{DateTime, Utc};
@@ -3398,9 +3400,15 @@ mod tests {
             .iter()
             .map(|action| action.action_id.clone())
             .collect();
-        let expected_ids: Vec<_> = (0..RETAINED_ACTIONS)
+        // bd-o776s: actual_ids was sorted lexicographically by action_id above, so
+        // the expected list must use the same ordering — otherwise the numeric index
+        // order places "fleet-action-new-10"/"-11" after "-9" while the lexicographic
+        // actual order places them right after "-1", failing equality even though the
+        // retained SET is correct.
+        let mut expected_ids: Vec<_> = (0..RETAINED_ACTIONS)
             .map(|index| format!("fleet-action-new-{index}"))
             .collect();
+        expected_ids.sort();
         assert_eq!(actual_ids, expected_ids);
 
         let log = fs::read_to_string(transport.layout().actions_path()).expect("read action log");
@@ -3521,9 +3529,10 @@ mod tests {
     #[cfg(test)]
     mod fleet_transport_comprehensive_negative_tests {
         use super::{
-            DateTime, FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind,
-            FleetTransport, FleetTransportError, NodeHealth, NodeStatus, Utc, fs, node_status,
-            release_action_record, tempdir,
+            ACTION_LOG_RETENTION_DAYS, DateTime, Duration, FileFleetTransport, FleetAction,
+            FleetActionRecord, FleetTargetKind, FleetTransport, FleetTransportError,
+            FleetTransportLayout, MAX_ACTION_RECORD_BYTES, MAX_NODE_ID_LEN, NodeHealth, NodeStatus,
+            Utc, clock, fs, node_status, release_action_record, tempdir,
         };
 
         #[test]
@@ -3565,8 +3574,8 @@ mod tests {
                     for malicious_action in &malicious_action_ids {
                         // Test node status validation
                         let node_result = transport.upsert_node_status(&NodeStatus {
-                            zone_id: malicious_zone.clone(),
-                            node_id: malicious_node.clone(),
+                            zone_id: malicious_zone.to_string(),
+                            node_id: malicious_node.to_string(),
                             last_seen: clock::wall_now(),
                             quarantine_version: 1,
                             health: NodeHealth::Healthy,
@@ -3582,10 +3591,10 @@ mod tests {
 
                         // Test action validation
                         let action_result = transport.publish_action(&FleetActionRecord {
-                            action_id: malicious_action.clone(),
+                            action_id: malicious_action.to_string(),
                             emitted_at: clock::wall_now(),
                             action: FleetAction::Release {
-                                zone_id: malicious_zone.clone(),
+                                zone_id: malicious_zone.to_string(),
                                 incident_id: "inc-test".to_string(),
                                 reason: None,
                             },
@@ -4147,9 +4156,10 @@ mod tests {
             let layout = FleetTransportLayout::new(tempdir.path());
             layout.initialize().expect("initialize layout");
 
+            let max_len_node_id = "b".repeat(MAX_NODE_ID_LEN);
             let boundary_node_ids = vec![
                 "a",                             // Minimum length
-                &"b".repeat(MAX_NODE_ID_LEN),    // Maximum length
+                max_len_node_id.as_str(),        // Maximum length
                 "node-with-all.valid_chars-123", // All valid characters
             ];
 
@@ -4178,16 +4188,17 @@ mod tests {
     fn compact_action_log_if_needed_releases_lock_on_error() {
         let tmp = tempdir().expect("temp dir");
         let layout = FleetTransportLayout::new(tmp.path());
-        let transport = FleetTransport::new(layout.clone()).expect("transport");
+        let transport = FileFleetTransport::new(tmp.path());
 
         // Initialize with a large action log that will trigger compaction
         let large_action = FleetActionRecord {
             action_id: "large-action".to_string(),
-            node_id: "node-1".to_string(),
-            action_type: FleetActionType::Start,
-            requested_at: clock::wall_now(),
             emitted_at: clock::wall_now(),
-            timeout_secs: 30,
+            action: FleetAction::Release {
+                zone_id: "prod".to_string(),
+                incident_id: "inc-1".to_string(),
+                reason: None,
+            },
         };
 
         // Write enough actions to exceed the threshold
@@ -4198,7 +4209,7 @@ mod tests {
 
         // Create a read-only compaction lock file to simulate a file system error
         // that would occur during compaction but before the lock is released
-        let compaction_lock_path = layout.compaction_lock_path();
+        let compaction_lock_path = transport.action_compaction_lock_path();
         fs::create_dir_all(compaction_lock_path.parent().unwrap()).expect("create dir");
 
         // First, make the actions file inaccessible to force an error during compaction
@@ -4208,7 +4219,7 @@ mod tests {
         fs::set_permissions(layout.actions_path(), permissions).expect("set readonly");
 
         // Attempt compaction - this should fail but not leave locks hanging
-        let result = transport.compact_action_log_if_needed(100, 1); // Small size to force compaction
+        let result = transport.compact_action_log_if_needed(100, 1, clock::wall_now()); // Small size to force compaction
 
         // The compaction should fail due to permissions
         assert!(
@@ -4224,7 +4235,7 @@ mod tests {
 
         // Now verify that we can immediately run another compaction without deadlocking
         // If the lock was leaked, this would hang or fail
-        let second_result = transport.compact_action_log_if_needed(100, 1);
+        let second_result = transport.compact_action_log_if_needed(100, 1, clock::wall_now());
 
         // The second attempt should also handle the error gracefully and not deadlock
         // The key assertion is that this doesn't hang - the Result is less important
@@ -4303,7 +4314,11 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let attempt_counter = Arc::new(AtomicU32::new(0));
-        let timeout = Duration::from_millis(100);
+        // bd-o776s: the convergence loop sleeps one FLEET_CONVERGENCE_POLL_INTERVAL
+        // (100ms) between polls, so reaching the 3rd attempt needs ~2 intervals. A
+        // 100ms timeout only admits a single sleep and deterministically times out at
+        // attempt 2; size the budget to comfortably fit 3 attempts.
+        let timeout = super::FLEET_CONVERGENCE_POLL_INTERVAL * 5;
 
         let result = wait_until_fleet_converged_or_timeout(timeout, {
             let counter = attempt_counter.clone();
@@ -4471,8 +4486,8 @@ mod tests {
         // is the sorted order from canonicalize_json_value.
         let mut keys: Vec<&String> = canonical_map.keys().collect();
         keys.sort();
-        assert_eq!(keys.first().map(String::as_str), Some("k_0000"));
-        assert_eq!(keys.last().map(String::as_str), Some("k_0499"));
+        assert_eq!(keys.first().map(|s| s.as_str()), Some("k_0000"));
+        assert_eq!(keys.last().map(|s| s.as_str()), Some("k_0499"));
     }
 
     // ── bd-98xo5.7.3: property tests ──

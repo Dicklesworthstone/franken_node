@@ -1,0 +1,198 @@
+{
+  "schema_version": "franken-node/no-ready-recovery-fixtures/v1",
+  "generated_for": "bd-z1q8l",
+  "now": "2026-06-18T15:00:00Z",
+  "scenarios": [
+    {
+      "id": "no-ready-blocked-graph",
+      "expected": {
+        "actionability": {
+          "bd-f5b04.2": "parent_epic",
+          "bd-f5b04.2.6": "external_blocker",
+          "bd-famte": "external_blocker"
+        },
+        "final_decision": "create-new-bead",
+        "rch": {
+          "rch-ssh-timeout": {
+            "classification": "ssh_timeout",
+            "first_blocker": "[RCH-E104] SSH command timed out (no local fallback)"
+          },
+          "rch-stale-progress": {
+            "classification": "stale_progress",
+            "first_blocker": "fresh heartbeat but no output for 900s; progress stale before wall timeout"
+          }
+        }
+      },
+      "ready": [],
+      "bv_plan": {
+        "plan": {
+          "tracks": [
+            {
+              "track_id": "track-A",
+              "items": [
+                {
+                  "id": "bd-f5b04.2",
+                  "title": "Phase 1 parent",
+                  "status": "open"
+                },
+                {
+                  "id": "bd-f5b04.2.6",
+                  "title": "Engine boundary real effect producer",
+                  "status": "blocked"
+                },
+                {
+                  "id": "bd-famte",
+                  "title": "RCH validation proof cache timeout",
+                  "status": "blocked"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "issues": [
+        {
+          "id": "bd-f5b04.2",
+          "title": "Phase 1 parent",
+          "status": "open",
+          "issue_type": "epic"
+        },
+        {
+          "id": "bd-f5b04.2.6",
+          "title": "Engine boundary real effect producer",
+          "status": "blocked",
+          "issue_type": "task",
+          "notes": "Blocked on sibling /data/projects/franken_engine revision. FullCapsHandler::dispatches_real_hostcalls() returns false; first blocker remains missing real fs/http producer."
+        },
+        {
+          "id": "bd-famte",
+          "title": "RCH validation proof cache timeout",
+          "status": "blocked",
+          "issue_type": "bug",
+          "notes": "Exact command: rch exec -- cargo clippy -p frankenengine-node --test validation_proof_cache -- -D warnings. Current first blocker: [RCH-E104] SSH command timed out on remote worker vmi1156319."
+        }
+      ],
+      "blocked_items": [
+        {
+          "id": "bd-f5b04.2.6",
+          "title": "Engine boundary real effect producer",
+          "status": "blocked",
+          "updated_at": "2026-06-18T14:20:00Z",
+          "comments": [
+            {
+              "created_at": "2026-06-18T14:20:00Z",
+              "text": "Blocked on sibling /data/projects/franken_engine revision. FullCapsHandler::dispatches_real_hostcalls() returns false; first blocker remains missing real fs/http producer."
+            }
+          ]
+        },
+        {
+          "id": "bd-famte",
+          "title": "RCH validation proof cache timeout",
+          "status": "blocked",
+          "updated_at": "2026-06-18T14:25:00Z",
+          "notes": "Exact command: rch exec -- cargo clippy -p frankenengine-node --test validation_proof_cache -- -D warnings. Current first blocker: [RCH-E104] SSH command timed out on remote worker vmi1156319."
+        }
+      ],
+      "rch_snippets": [
+        {
+          "sample_id": "rch-ssh-timeout",
+          "text": "Exact command: rch exec -- cargo clippy -p frankenengine-node --test validation_proof_cache -- -D warnings\nbuild 29750734287276250 selected worker vmi1156319\n[RCH-E104] SSH command timed out (no local fallback)\n[RCH] remote vmi1156319 (1800.0s)\n"
+        },
+        {
+          "sample_id": "rch-stale-progress",
+          "text": "Exact command: rch exec -- cargo test -p frankenengine-node validation_proof_cache\njob_id=29750734287276251 worker=vmi1167313 last_phase=remote_exec_start\nfresh heartbeat but no output for 900s; progress stale before wall timeout\ncancelled locally after stale detector marked progress stale\n"
+        }
+      ],
+      "runbook_handoff": {
+        "ready_count": 0,
+        "active_agents": [
+          "NavyTurtle",
+          "SilentGrove",
+          "SunnyIvy"
+        ],
+        "exact_blockers": [
+          {
+            "bead_id": "bd-f5b04.2.6",
+            "command": "FullCapsHandler::dispatches_real_hostcalls()",
+            "first_blocker": "returns false; missing real fs/http producer"
+          },
+          {
+            "bead_id": "bd-famte",
+            "command": "rch exec -- cargo clippy -p frankenengine-node --test validation_proof_cache -- -D warnings",
+            "first_blocker": "[RCH-E104] SSH command timed out on remote worker vmi1156319"
+          }
+        ],
+        "next_action": "create-new-bead"
+      }
+    },
+    {
+      "id": "ready-item-claim",
+      "expected": {
+        "actionability": {
+          "bd-ready": "claimable"
+        },
+        "final_decision": "claim",
+        "rch": {
+          "rch-success": {
+            "classification": "success",
+            "first_blocker": null
+          }
+        }
+      },
+      "ready": [
+        {
+          "id": "bd-ready",
+          "title": "Ready implementation task",
+          "status": "open"
+        }
+      ],
+      "bv_plan": {
+        "plan": {
+          "tracks": [
+            {
+              "track_id": "track-A",
+              "items": [
+                {
+                  "id": "bd-ready",
+                  "title": "Ready implementation task",
+                  "status": "open"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "issues": [
+        {
+          "id": "bd-ready",
+          "title": "Ready implementation task",
+          "status": "open",
+          "issue_type": "task"
+        }
+      ],
+      "blocked_items": [
+        {
+          "id": "bd-fresh-blocker",
+          "title": "Fresh unrelated blocker",
+          "status": "blocked",
+          "updated_at": "2026-06-18T14:30:00Z",
+          "notes": "Exact command: rch exec -- cargo check --all-targets. Current first blocker: [RCH-E104] SSH command timed out on remote worker vmi1156319."
+        }
+      ],
+      "rch_snippets": [
+        {
+          "sample_id": "rch-success",
+          "text": "Exact command: rch exec -- cargo test -p frankenengine-node doctor_policy_activation_e2e\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        }
+      ],
+      "runbook_handoff": {
+        "ready_count": 1,
+        "active_agents": [
+          "NavyTurtle"
+        ],
+        "exact_blockers": [],
+        "next_action": "claim"
+      }
+    }
+  ]
+}

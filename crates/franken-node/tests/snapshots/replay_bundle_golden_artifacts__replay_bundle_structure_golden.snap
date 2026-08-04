@@ -1,0 +1,151 @@
+---
+source: crates/franken-node/tests/replay_bundle_golden_artifacts.rs
+expression: bundle
+---
+{
+  "bundle_id": "[BUNDLE_ID]",
+  "incident_id": "INC-STRUCTURE-TEST",
+  "created_at": "[CREATED_AT]",
+  "timeline": [
+    {
+      "sequence_number": 1,
+      "timestamp": "[TIMESTAMP]",
+      "event_type": "external_signal",
+      "payload": {
+        "severity": "critical",
+        "signal": "anomaly",
+        "source": "detector_7"
+      },
+      "causal_parent": null
+    },
+    {
+      "sequence_number": 2,
+      "timestamp": "[TIMESTAMP]",
+      "event_type": "policy_eval",
+      "payload": {
+        "confidence": 95,
+        "decision": "isolate",
+        "rule_id": "R-2847"
+      },
+      "causal_parent": 1
+    },
+    {
+      "sequence_number": 3,
+      "timestamp": "[TIMESTAMP]",
+      "event_type": "operator_action",
+      "payload": {
+        "action": "override",
+        "operator": "alice",
+        "reason": "false_positive"
+      },
+      "causal_parent": 2
+    },
+    {
+      "sequence_number": 4,
+      "timestamp": "[TIMESTAMP]",
+      "event_type": "policy_eval",
+      "payload": {
+        "confidence": 88,
+        "decision": "allow",
+        "override_applied": true
+      },
+      "causal_parent": 3
+    },
+    {
+      "sequence_number": 5,
+      "timestamp": "[TIMESTAMP]",
+      "event_type": "operator_action",
+      "payload": {
+        "action": "log",
+        "case_id": "INC-2026-0115-001",
+        "message": "incident resolved"
+      },
+      "causal_parent": 4
+    }
+  ],
+  "initial_state_snapshot": {
+    "active_policies": 3,
+    "epoch": 42,
+    "mode": "strict"
+  },
+  "policy_version": "2.1.0",
+  "manifest": {
+    "event_count": 5,
+    "first_timestamp": "2026-01-15T14:30:00.000100Z",
+    "last_timestamp": "2026-01-15T14:30:00.000500Z",
+    "time_span_micros": 400,
+    "compressed_size_bytes": 939,
+    "chunk_count": 1,
+    "decision_sequence_hash": "7c79fa0a2f501f40a3af608a69e344db3930b435e7f9c6ff658be87f3a8ee70f"
+  },
+  "chunks": [
+    {
+      "bundle_id": "019bc210-3240-7e30-be14-a0a97de74052",
+      "chunk_index": 0,
+      "total_chunks": 1,
+      "event_count": 5,
+      "first_sequence_number": 1,
+      "last_sequence_number": 5,
+      "compressed_size_bytes": 939,
+      "chunk_hash": "bb774f542bc5c675683b264c9db3ec3034868817e4e33d530192c51dc6868d93",
+      "events": [
+        {
+          "sequence_number": 1,
+          "timestamp": "2026-01-15T14:30:00.000100Z",
+          "event_type": "external_signal",
+          "payload": {
+            "severity": "critical",
+            "signal": "anomaly",
+            "source": "detector_7"
+          },
+          "causal_parent": null
+        },
+        {
+          "sequence_number": 2,
+          "timestamp": "2026-01-15T14:30:00.000200Z",
+          "event_type": "policy_eval",
+          "payload": {
+            "confidence": 95,
+            "decision": "isolate",
+            "rule_id": "R-2847"
+          },
+          "causal_parent": 1
+        },
+        {
+          "sequence_number": 3,
+          "timestamp": "2026-01-15T14:30:00.000300Z",
+          "event_type": "operator_action",
+          "payload": {
+            "action": "override",
+            "operator": "alice",
+            "reason": "false_positive"
+          },
+          "causal_parent": 2
+        },
+        {
+          "sequence_number": 4,
+          "timestamp": "2026-01-15T14:30:00.000400Z",
+          "event_type": "policy_eval",
+          "payload": {
+            "confidence": 88,
+            "decision": "allow",
+            "override_applied": true
+          },
+          "causal_parent": 3
+        },
+        {
+          "sequence_number": 5,
+          "timestamp": "2026-01-15T14:30:00.000500Z",
+          "event_type": "operator_action",
+          "payload": {
+            "action": "log",
+            "case_id": "INC-2026-0115-001",
+            "message": "incident resolved"
+          },
+          "causal_parent": 4
+        }
+      ]
+    }
+  ],
+  "integrity_hash": "[INTEGRITY_HASH]"
+}

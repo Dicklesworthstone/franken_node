@@ -99,7 +99,14 @@ fn compatibility_scenarios() -> Vec<CompatibilityScenario> {
                 api_version: CURRENT_API_VERSION.to_string(),
                 session_version: CURRENT_SESSION_VERSION.to_string(),
             },
-            expected_compatibility: CompatibilityExpectation::FullCompatibility,
+            // A legacy connector legitimately lacks the Cancelling state added in
+            // bd-1cs7, so its connector-completeness score (8/9 states, 17/19
+            // transitions) is ~0.9459 — below the FullCompatibility bar by design.
+            // Talking to a newer host it negotiates down to its own (lower)
+            // lifecycle protocol, which is exactly NegotiatedCompatibility.
+            expected_compatibility: CompatibilityExpectation::NegotiatedCompatibility {
+                fallback_version: LEGACY_LIFECYCLE_PROTOCOL.to_string(),
+            },
         },
         // Current version compatibility (baseline)
         CompatibilityScenario {
@@ -573,23 +580,54 @@ pub fn test_scenario_compatibility(scenario: &CompatibilityScenario) -> Conforma
     // Collect limitations based on compatibility threshold failures
     let mut discovered_limitations = Vec::new();
     if state_compatibility < 0.8 {
-        discovered_limitations.push(format!("State management compatibility below threshold: {:.2}", state_compatibility));
+        discovered_limitations.push(format!(
+            "State management compatibility below threshold: {:.2}",
+            state_compatibility
+        ));
     }
     if transition_compatibility < 0.8 {
-        discovered_limitations.push(format!("State transition compatibility below threshold: {:.2}", transition_compatibility));
+        discovered_limitations.push(format!(
+            "State transition compatibility below threshold: {:.2}",
+            transition_compatibility
+        ));
     }
     if endpoint_compatibility < 0.8 {
-        discovered_limitations.push(format!("API endpoint compatibility below threshold: {:.2}", endpoint_compatibility));
+        discovered_limitations.push(format!(
+            "API endpoint compatibility below threshold: {:.2}",
+            endpoint_compatibility
+        ));
     }
     if frame_compatibility < 0.8 {
-        discovered_limitations.push(format!("Frame parser compatibility below threshold: {:.2}", frame_compatibility));
+        discovered_limitations.push(format!(
+            "Frame parser compatibility below threshold: {:.2}",
+            frame_compatibility
+        ));
     }
 
-    // Add protocol negotiation limitations if applicable
-    if let Some(ref protocol_result) = protocol_negotiation {
-        if !protocol_result.success {
-            discovered_limitations.push(format!("Protocol negotiation failed: {}", protocol_result.error));
-        }
+    // Add protocol negotiation limitations under the intersection-based model.
+    // The redesigned `ProtocolNegotiationResult` no longer carries a
+    // `success`/`error` pair; a failed negotiation is now signalled by an
+    // `INCOMPATIBLE` negotiated version (no common version within a family) or by
+    // an empty endpoint intersection (no shared connector endpoints).
+    let mut incompatible_families = Vec::new();
+    if protocol_negotiation.negotiated_lifecycle_version == "INCOMPATIBLE" {
+        incompatible_families.push("lifecycle");
+    }
+    if protocol_negotiation.negotiated_api_version == "INCOMPATIBLE" {
+        incompatible_families.push("api");
+    }
+    if protocol_negotiation.negotiated_session_version == "INCOMPATIBLE" {
+        incompatible_families.push("session");
+    }
+    if !incompatible_families.is_empty() {
+        discovered_limitations.push(format!(
+            "Protocol negotiation failed: no common version for {}",
+            incompatible_families.join(", ")
+        ));
+    }
+    if protocol_negotiation.endpoint_intersection.is_empty() {
+        discovered_limitations
+            .push("Protocol negotiation failed: no shared connector endpoints".to_string());
     }
 
     let actual_result = if compatibility_score >= 0.95 {
@@ -702,7 +740,7 @@ fn test_frame_parser_compatibility(
 
     let mut successful = 0;
     for frame in &test_frames {
-        if let Ok(_) = check_frame(frame, config, "2026-04-20T12:00:00Z") {
+        if check_frame(frame, config, "2026-04-20T12:00:00Z").is_ok() {
             successful += 1;
         }
     }
@@ -900,9 +938,14 @@ fn test_protocol_negotiation_uses_lower_compatible_versions() {
         negotiate_version(FUTURE_API_VERSION, CURRENT_API_VERSION),
         CURRENT_API_VERSION
     );
+    // Session family, compatible pair (same major): a future session version
+    // negotiates down to the current one. (LEGACY_SESSION_VERSION is
+    // session-auth-v0.9.0, which straddles a MAJOR boundary vs the current
+    // v1.0.0 and is therefore INCOMPATIBLE — covered by the major-mismatch test
+    // below, not here.)
     assert_eq!(
-        negotiate_version(LEGACY_SESSION_VERSION, CURRENT_SESSION_VERSION),
-        LEGACY_SESSION_VERSION
+        negotiate_version(FUTURE_SESSION_VERSION, CURRENT_SESSION_VERSION),
+        CURRENT_SESSION_VERSION
     );
 }
 
@@ -914,6 +957,12 @@ fn test_protocol_negotiation_rejects_major_version_mismatch() {
     );
     assert_eq!(
         negotiate_version("api-v3.0.0", CURRENT_API_VERSION),
+        "INCOMPATIBLE"
+    );
+    // session-auth-v0.9.0 vs the current v1.0.0 is a major-version jump (0 -> 1),
+    // so it is incompatible despite being the "legacy" session version.
+    assert_eq!(
+        negotiate_version(LEGACY_SESSION_VERSION, CURRENT_SESSION_VERSION),
         "INCOMPATIBLE"
     );
 }

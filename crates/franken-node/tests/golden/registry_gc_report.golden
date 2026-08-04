@@ -1,0 +1,10 @@
+{
+  "operation": "garbage_collect",
+  "keep_count": 1,
+  "archived": 2,
+  "deleted": 0,
+  "active_artifacts": 1,
+  "archived_artifacts": 3,
+  "total_artifacts": 4,
+  "completed_at": "[TIMESTAMP]"
+}

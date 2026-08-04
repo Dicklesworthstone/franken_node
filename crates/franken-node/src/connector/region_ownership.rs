@@ -30,6 +30,13 @@ use std::time::{Duration, Instant};
 const MAX_CHILD_REGION_IDS: usize = 4096;
 const MAX_TASKS: usize = 4096;
 
+// Test-only ring-buffer push helper. Production region bookkeeping bounds its
+// vectors with fail-closed `RegionError::CapacityExceeded` checks (see
+// `open_child`/`register_task`), which is the correct posture for region
+// ownership: silently dropping the oldest child region or task would lose
+// tracking. This helper exists only to exercise the drain-oldest bound in the
+// unit test below, so it is gated to the test build.
+#[cfg(test)]
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
         return;

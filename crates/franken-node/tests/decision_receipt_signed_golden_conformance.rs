@@ -20,17 +20,17 @@ use sha2::{Digest, Sha256};
 const EXPECTED_GOLDEN_VECTORS_JSON: &str = r#"[
   {
     "name": "quarantine_release_genesis",
-    "canonical_receipt_json": "{\"action_name\":\"fleet_quarantine_release\",\"actor_identity\":\"operator://control-plane\",\"audience\":\"fleet://prod-us-east\",\"confidence\":4606056518893174784,\"decision\":\"approved\",\"evidence_refs\":[\"evidence://incidents/INC-2026-0042/review.md\",\"receipt://fleet/reconcile/2026-04-26T23:40:00Z\"],\"input_hash\":\"fd4ca1cd64bdec77ef764e9f329cadfbe2fd6c512d9272a07088f766fcfbb037\",\"nonce\":\"nonce-golden-genesis-0001\",\"output_hash\":\"01e104c6a62d52a5c91f09775db4232c1302950e79c7835447659aa0131a1337\",\"policy_rule_chain\":[\"policy://fleet/quarantine/release\",\"policy://trust/freshness\"],\"previous_receipt_hash\":null,\"rationale\":\"Independent review cleared the quarantine after containment verification.\",\"receipt_id\":\"11111111-2222-7333-8444-555555555555\",\"rollback_command\":\"franken-node fleet release --incident INC-2026-0042 --zone prod-us-east\",\"signature_version\":\"ed25519-v1\",\"timestamp\":\"2026-04-26T23:40:00Z\"}",
+    "canonical_receipt_json": "{\"action_name\":\"fleet_quarantine_release\",\"actor_identity\":\"operator://control-plane\",\"audience\":\"fleet://prod-us-east\",\"confidence\":4606056518893174784,\"crypto_suite\":\"ed25519-v1\",\"decision\":\"approved\",\"evidence_refs\":[\"evidence://incidents/INC-2026-0042/review.md\",\"receipt://fleet/reconcile/2026-04-26T23:40:00Z\"],\"input_hash\":\"fd4ca1cd64bdec77ef764e9f329cadfbe2fd6c512d9272a07088f766fcfbb037\",\"nonce\":\"nonce-golden-genesis-0001\",\"output_hash\":\"01e104c6a62d52a5c91f09775db4232c1302950e79c7835447659aa0131a1337\",\"policy_rule_chain\":[\"policy://fleet/quarantine/release\",\"policy://trust/freshness\"],\"previous_receipt_hash\":null,\"rationale\":\"Independent review cleared the quarantine after containment verification.\",\"receipt_id\":\"11111111-2222-7333-8444-555555555555\",\"rollback_command\":\"franken-node fleet release --incident INC-2026-0042 --zone prod-us-east\",\"signature_version\":\"ed25519-v1\",\"timestamp\":\"2026-04-26T23:40:00Z\"}",
     "signer_key_id": "fa3d2da5de1cf42b",
-    "chain_hash": "ab8a64fce7fbccd24bf29b362d883026d10b5f92fdaf7d35012d524db8dfd54a",
-    "signature": "NZqU/Jfl+mZXxdrwBks8L4yabWe+phX3oZ0R8ixu6pApitpYgp6SpMj9v2Fc6/humZI3qtEt5unnudy4doj+DQ=="
+    "chain_hash": "0c69c8a54f3fb0077f1c62a6a1ebfd2b4f8a1cc7ffaee3f580f60dd3da81a09e",
+    "signature": "00Dn9aOmRbx7XEN08u/yZsXRw/JFRIov8mowtIouMCO0pNyWmjNsNJYwLigBtz4FYtkOtxRkuj9syox0uY7FBg=="
   },
   {
     "name": "quarantine_release_followup",
-    "canonical_receipt_json": "{\"action_name\":\"fleet_quarantine_release\",\"actor_identity\":\"operator://control-plane\",\"audience\":\"fleet://prod-us-east\",\"confidence\":4603804719079489536,\"decision\":\"approved\",\"evidence_refs\":[\"evidence://incidents/INC-2026-0042/followup.md\",\"receipt://fleet/reconcile/2026-04-26T23:45:00Z\"],\"input_hash\":\"e9c9b5a96e56187fbfe1d6699143e7e99e7f4e43e1fab04d9dd240898ba1b6fd\",\"nonce\":\"nonce-golden-followup-0002\",\"output_hash\":\"f7a61ced5c27b7489ec62b162eed958aa0c2b921b1e4454df88602dffd727dd4\",\"policy_rule_chain\":[\"policy://fleet/quarantine/release\",\"policy://fleet/drift-check\"],\"previous_receipt_hash\":\"ab8a64fce7fbccd24bf29b362d883026d10b5f92fdaf7d35012d524db8dfd54a\",\"rationale\":\"Follow-up release completed after the final drift checks passed.\",\"receipt_id\":\"66666666-7777-7888-8999-aaaaaaaaaaaa\",\"rollback_command\":\"franken-node fleet status --zone prod-us-east --json\",\"signature_version\":\"ed25519-v1\",\"timestamp\":\"2026-04-26T23:45:00Z\"}",
+    "canonical_receipt_json": "{\"action_name\":\"fleet_quarantine_release\",\"actor_identity\":\"operator://control-plane\",\"audience\":\"fleet://prod-us-east\",\"confidence\":4603804719079489536,\"crypto_suite\":\"ed25519-v1\",\"decision\":\"approved\",\"evidence_refs\":[\"evidence://incidents/INC-2026-0042/followup.md\",\"receipt://fleet/reconcile/2026-04-26T23:45:00Z\"],\"input_hash\":\"e9c9b5a96e56187fbfe1d6699143e7e99e7f4e43e1fab04d9dd240898ba1b6fd\",\"nonce\":\"nonce-golden-followup-0002\",\"output_hash\":\"f7a61ced5c27b7489ec62b162eed958aa0c2b921b1e4454df88602dffd727dd4\",\"policy_rule_chain\":[\"policy://fleet/quarantine/release\",\"policy://fleet/drift-check\"],\"previous_receipt_hash\":\"0c69c8a54f3fb0077f1c62a6a1ebfd2b4f8a1cc7ffaee3f580f60dd3da81a09e\",\"rationale\":\"Follow-up release completed after the final drift checks passed.\",\"receipt_id\":\"66666666-7777-7888-8999-aaaaaaaaaaaa\",\"rollback_command\":\"franken-node fleet status --zone prod-us-east --json\",\"signature_version\":\"ed25519-v1\",\"timestamp\":\"2026-04-26T23:45:00Z\"}",
     "signer_key_id": "fa3d2da5de1cf42b",
-    "chain_hash": "0d627311a4b22285abd0f2b5910f88cba644ed35470ed182f21f74182c1c3695",
-    "signature": "4Ic1tIXemZoP8I8ihGSexKb+bLtEIZYm7iJnWm3uz2B2D9/CgZwu5RBYhZsB1jS2LjIO60zl3OanuLXBwyW8DQ=="
+    "chain_hash": "ca25e9822a22d0df3e1dd3fa6d99bf2c6c4569b94b575260ba8f6f539fe38376",
+    "signature": "gWKYGkEt+1w4BAOxKqo7tP0T/8KtMTzQwCzwkWXJik0y7ZGJWK5SJdE8PXLKjR25LhaaY26GRvSzRaiBtLXKBg=="
   }
 ]"#;
 
@@ -181,7 +181,8 @@ fn canonicalize_value(value: Value) -> Value {
 }
 
 fn canonical_json(value: &impl Serialize) -> Result<String, String> {
-    let value = serde_json::to_value(value).map_err(|err| format!("serialize canonical value: {err}"))?;
+    let value =
+        serde_json::to_value(value).map_err(|err| format!("serialize canonical value: {err}"))?;
     serde_json::to_string(&canonicalize_value(value))
         .map_err(|err| format!("encode canonical json: {err}"))
 }
@@ -190,9 +191,17 @@ fn compute_chain_hash(previous_hash: Option<&str>, payload: &str) -> String {
     let previous = previous_hash.unwrap_or("GENESIS");
     let mut hasher = Sha256::new();
     hasher.update(b"decision_receipt_chain_v1:");
-    hasher.update(u64::try_from(previous.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(previous.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(previous.as_bytes());
-    hasher.update(u64::try_from(payload.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(
+        u64::try_from(payload.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(payload.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -200,7 +209,7 @@ fn compute_chain_hash(previous_hash: Option<&str>, payload: &str) -> String {
 fn materialize_signed_vectors() -> Result<Vec<(GoldenVector, SignedReceipt)>, String> {
     let signing_key = conformance_signing_key();
     let mut vectors = live_vectors();
-    let mut signed = Vec::with_capacity(vectors.len());
+    let mut signed: Vec<SignedReceipt> = Vec::with_capacity(vectors.len());
 
     for index in 0..vectors.len() {
         if index > 0 {
@@ -242,7 +251,10 @@ fn expected_golden_vectors() -> Result<Vec<GoldenVector>, String> {
 #[test]
 fn decision_receipt_signed_golden_vectors_conformance() -> Result<(), String> {
     let actual_pairs = materialize_signed_vectors()?;
-    let actual_vectors: Vec<GoldenVector> = actual_pairs.iter().map(|(golden, _)| golden.clone()).collect();
+    let actual_vectors: Vec<GoldenVector> = actual_pairs
+        .iter()
+        .map(|(golden, _)| golden.clone())
+        .collect();
 
     if std::env::var_os("UPDATE_GOLDENS").is_some() {
         let rendered = serde_json::to_string_pretty(&actual_vectors)
@@ -276,7 +288,8 @@ fn decision_receipt_signed_golden_vectors_conformance() -> Result<(), String> {
         .map(|(_, signed)| signed.clone())
         .collect();
 
-    verify_hash_chain(&signed_receipts).map_err(|err| format!("verify receipt hash chain: {err}"))?;
+    verify_hash_chain(&signed_receipts)
+        .map_err(|err| format!("verify receipt hash chain: {err}"))?;
 
     for (golden, signed) in &actual_pairs {
         if signed.receipt.signature_version != DECISION_RECEIPT_SIGNATURE_VERSION {
@@ -294,10 +307,7 @@ fn decision_receipt_signed_golden_vectors_conformance() -> Result<(), String> {
 
         let payload = canonical_json(&signed.receipt)?;
         if payload != golden.canonical_receipt_json {
-            return Err(format!(
-                "{} canonical receipt payload drifted",
-                golden.name
-            ));
+            return Err(format!("{} canonical receipt payload drifted", golden.name));
         }
 
         let expected_chain_hash =

@@ -1953,38 +1953,35 @@ mod tests {
     #[test]
     fn test_bounded_evidence_refs_per_request() {
         let mut gate = default_gate();
-        let tt = TransitionType::ResourceAllocation;
+        let tt = TransitionType::CapabilityGrant;
+        let ctx = default_trust_ctx();
 
         // Test: normal request within bounds should work normally
-        let normal_request = TransitionRequest {
-            request_id: "norm-req".to_string(),
-            transition_type: tt,
-            evidence_refs: vec![
+        let normal_request = make_request(
+            "norm-req",
+            tt,
+            vec![
                 valid_evidence("ev1", vec![tt]),
                 valid_evidence("ev2", vec![tt]),
                 valid_evidence("ev3", vec![tt]),
             ],
-            trace_id: "trace-normal".to_string(),
-        };
+        );
 
-        let result = gate.authorize_transition(&normal_request);
-        assert!(matches!(result, AuthorizationResult::Authorized { .. }));
+        let result = gate.evaluate(&normal_request, &ctx);
+        // All three evidence refs are Verified, so the decision is Authorized (not
+        // PendingVerification) — i.e. no evidence is left pending verification.
+        assert!(matches!(result, AuthorizationDecision::Authorized { .. }));
 
-        if let AuthorizationResult::Authorized {
-            valid_evidence_ids,
-            pending_evidence_ids,
-            ..
-        } = result
-        {
-            assert_eq!(valid_evidence_ids.len(), 3);
-            assert_eq!(pending_evidence_ids.len(), 0);
+        if let AuthorizationDecision::Authorized { evidence_ids, .. } = result {
+            assert_eq!(evidence_ids.len(), 3);
         }
     }
 
     #[test]
     fn test_large_request_evidence_bounded() {
         let mut gate = default_gate();
-        let tt = TransitionType::ResourceAllocation;
+        let tt = TransitionType::CapabilityGrant;
+        let ctx = default_trust_ctx();
 
         // Test: request exceeding MAX_EVIDENCE_REFS_PER_REQUEST should be bounded
         let large_count = MAX_EVIDENCE_REFS_PER_REQUEST + 100; // 356 evidence refs
@@ -2004,44 +2001,26 @@ mod tests {
                 state,
                 created_at_millis: NOW - 1000,
                 expires_at_millis: NOW + 3_600_000,
+                trace_id: "trace-large".to_string(),
             });
         }
 
-        let large_request = TransitionRequest {
-            request_id: "large-req".to_string(),
-            transition_type: tt,
-            evidence_refs,
-            trace_id: "trace-large".to_string(),
-        };
+        let large_request = make_request("large-req", tt, evidence_refs);
 
-        let result = gate.authorize_transition(&large_request);
-        assert!(matches!(result, AuthorizationResult::Authorized { .. }));
+        let result = gate.evaluate(&large_request, &ctx);
+        // The verified half is sufficient to authorize; the Authorized decision
+        // carries the (push_bounded-capped) verified evidence ids.
+        assert!(matches!(result, AuthorizationDecision::Authorized { .. }));
 
-        if let AuthorizationResult::Authorized {
-            valid_evidence_ids,
-            pending_evidence_ids,
-            ..
-        } = result
-        {
-            // Verify collections are bounded to MAX_EVIDENCE_REFS_PER_REQUEST
+        if let AuthorizationDecision::Authorized { evidence_ids, .. } = result {
+            // Verify the result collection is bounded to MAX_EVIDENCE_REFS_PER_REQUEST.
+            // push_bounded enforces the same cap on every evidence-id result vector,
+            // so the total can never exceed the capacity limit.
             assert!(
-                valid_evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
-                "valid_evidence_ids should be bounded to {}, got {}",
+                evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
+                "evidence_ids should be bounded to {}, got {}",
                 MAX_EVIDENCE_REFS_PER_REQUEST,
-                valid_evidence_ids.len()
-            );
-            assert!(
-                pending_evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
-                "pending_evidence_ids should be bounded to {}, got {}",
-                MAX_EVIDENCE_REFS_PER_REQUEST,
-                pending_evidence_ids.len()
-            );
-
-            // Verify total doesn't exceed capacity limit due to truncation
-            let total_evidence = valid_evidence_ids.len() + pending_evidence_ids.len();
-            assert!(
-                total_evidence <= MAX_EVIDENCE_REFS_PER_REQUEST,
-                "Total evidence IDs should not exceed capacity limit"
+                evidence_ids.len()
             );
         }
     }
@@ -2049,7 +2028,8 @@ mod tests {
     #[test]
     fn test_large_request_memory_safety() {
         let mut gate = default_gate();
-        let tt = TransitionType::ResourceAllocation;
+        let tt = TransitionType::CapabilityGrant;
+        let ctx = default_trust_ctx();
 
         // Test: very large request should not cause memory exhaustion
         let very_large_count = 10_000; // Much larger than MAX_EVIDENCE_REFS_PER_REQUEST
@@ -2059,24 +2039,16 @@ mod tests {
             evidence_refs.push(valid_evidence(&format!("bulk-ev-{}", i), vec![tt]));
         }
 
-        let bulk_request = TransitionRequest {
-            request_id: "bulk-req".to_string(),
-            transition_type: tt,
-            evidence_refs,
-            trace_id: "trace-bulk".to_string(),
-        };
+        let bulk_request = make_request("bulk-req", tt, evidence_refs);
 
         // This should complete without memory issues due to bounded collections
-        let result = gate.authorize_transition(&bulk_request);
-        assert!(matches!(result, AuthorizationResult::Authorized { .. }));
+        let result = gate.evaluate(&bulk_request, &ctx);
+        assert!(matches!(result, AuthorizationDecision::Authorized { .. }));
 
-        if let AuthorizationResult::Authorized {
-            valid_evidence_ids, ..
-        } = result
-        {
+        if let AuthorizationDecision::Authorized { evidence_ids, .. } = result {
             // Result should be bounded regardless of input size
             assert!(
-                valid_evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
+                evidence_ids.len() <= MAX_EVIDENCE_REFS_PER_REQUEST,
                 "Memory safety: collections must remain bounded even with huge input"
             );
         }
@@ -2085,7 +2057,8 @@ mod tests {
     #[test]
     fn test_evidence_truncation_semantics() {
         let mut gate = default_gate();
-        let tt = TransitionType::ResourceAllocation;
+        let tt = TransitionType::CapabilityGrant;
+        let ctx = default_trust_ctx();
 
         // Test: verify truncation behavior is consistent
         let over_limit = MAX_EVIDENCE_REFS_PER_REQUEST + 50;
@@ -2096,23 +2069,15 @@ mod tests {
             evidence_refs.push(valid_evidence(&format!("trunc-ev-{}", i), vec![tt]));
         }
 
-        let truncation_request = TransitionRequest {
-            request_id: "trunc-req".to_string(),
-            transition_type: tt,
-            evidence_refs,
-            trace_id: "trace-trunc".to_string(),
-        };
+        let truncation_request = make_request("trunc-req", tt, evidence_refs);
 
-        let result = gate.authorize_transition(&truncation_request);
-        assert!(matches!(result, AuthorizationResult::Authorized { .. }));
+        let result = gate.evaluate(&truncation_request, &ctx);
+        assert!(matches!(result, AuthorizationDecision::Authorized { .. }));
 
-        if let AuthorizationResult::Authorized {
-            valid_evidence_ids, ..
-        } = result
-        {
+        if let AuthorizationDecision::Authorized { evidence_ids, .. } = result {
             // Should contain exactly the capacity limit worth of evidence
             assert_eq!(
-                valid_evidence_ids.len(),
+                evidence_ids.len(),
                 MAX_EVIDENCE_REFS_PER_REQUEST,
                 "Truncation should result in exactly the capacity limit"
             );
@@ -2120,7 +2085,7 @@ mod tests {
             // Should contain the LAST MAX_EVIDENCE_REFS_PER_REQUEST items (FIFO eviction)
             // The push_bounded implementation keeps the newest items
             let expected_start = over_limit - MAX_EVIDENCE_REFS_PER_REQUEST;
-            for (idx, evidence_id) in valid_evidence_ids.iter().enumerate() {
+            for (idx, evidence_id) in evidence_ids.iter().enumerate() {
                 let expected_id = format!("trunc-ev-{}", expected_start + idx);
                 assert_eq!(
                     *evidence_id, expected_id,

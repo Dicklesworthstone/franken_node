@@ -55,7 +55,7 @@
           "algorithm": "SHA256",
           "canonicalization": "JSON-deterministic-ordering",
           "hash_scope": "receipt-core-excluding-signature",
-          "sha256": "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+          "sha256": "sha256:09c493ac02e4cbe6efb1704688a343602ae7017df2aec05b9e98d50dfa64e33b",
           "signature": {
             "algorithm": "Ed25519",
             "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
@@ -63,12 +63,12 @@
             "key_source": "test-fixture",
             "signing_identity": "test-oracle",
             "trust_scope": "test-environment",
-            "signed_payload_sha256": "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "signed_payload_sha256": "sha256:09c493ac02e4cbe6efb1704688a343602ae7017df2aec05b9e98d50dfa64e33b",
             "signature_hex": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
           }
         }
       },
-      "expected_hash": "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      "expected_hash": "sha256:09c493ac02e4cbe6efb1704688a343602ae7017df2aec05b9e98d50dfa64e33b",
       "expected_composite_verdict": "Green",
       "expected_failing_dimensions": []
     },
@@ -123,7 +123,7 @@
           "algorithm": "SHA256",
           "canonicalization": "JSON-deterministic-ordering",
           "hash_scope": "receipt-core-excluding-signature",
-          "sha256": "sha256:cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+          "sha256": "sha256:89f6ac9617014f3aac147a4eae95a043ed2acd0b45f7fd40b0686a4739b0b82d",
           "signature": {
             "algorithm": "Ed25519",
             "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
@@ -131,12 +131,12 @@
             "key_source": "test-fixture",
             "signing_identity": "test-oracle",
             "trust_scope": "test-environment",
-            "signed_payload_sha256": "sha256:cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+            "signed_payload_sha256": "sha256:89f6ac9617014f3aac147a4eae95a043ed2acd0b45f7fd40b0686a4739b0b82d",
             "signature_hex": "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
           }
         }
       },
-      "expected_hash": "sha256:cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+      "expected_hash": "sha256:89f6ac9617014f3aac147a4eae95a043ed2acd0b45f7fd40b0686a4739b0b82d",
       "expected_composite_verdict": "Red",
       "expected_failing_dimensions": ["L1_product_oracle"]
     }

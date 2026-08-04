@@ -1,0 +1,33 @@
+---
+source: crates/franken-node/tests/lane_scheduler_golden_artifacts.rs
+assertion_line: 149
+expression: policy
+---
+{
+  "lane_configs": {
+    "background": {
+      "lane": "Background",
+      "priority_weight": 10,
+      "concurrency_cap": 8,
+      "starvation_window_ms": 5000
+    },
+    "control_critical": {
+      "lane": "ControlCritical",
+      "priority_weight": 100,
+      "concurrency_cap": 1,
+      "starvation_window_ms": 5000
+    },
+    "remote_effect": {
+      "lane": "RemoteEffect",
+      "priority_weight": 50,
+      "concurrency_cap": 4,
+      "starvation_window_ms": 5000
+    }
+  },
+  "mapping_rules": {
+    "epoch_transition": "ControlCritical",
+    "garbage_collection": "Background",
+    "log_rotation": "Background",
+    "remote_computation": "RemoteEffect"
+  }
+}
