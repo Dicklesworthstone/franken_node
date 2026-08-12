@@ -12,3 +12,4 @@ beads.db.rebuild_*
 last-touched
 *.tmp
 recovery_*/
+.write.lock
