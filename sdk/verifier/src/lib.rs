@@ -2493,8 +2493,7 @@ fn verify_long_term_evidence(
         },
     );
 
-    let witness_check =
-        verify_long_term_witness_receipt(&evidence.witness_receipt, witness_anchor);
+    let witness_check = verify_long_term_witness_receipt(&evidence.witness_receipt, witness_anchor);
     let witness_root_matches = match (&chain_check, &witness_check) {
         (Ok(reattested_root), Ok(witness)) => witness.root == *reattested_root,
         _ => false,
@@ -4468,9 +4467,7 @@ mod tests {
     }
 
     /// Build the anchor a verifier would hold for this evidence's witness set.
-    fn witness_anchor_for(
-        evidence: &LongTermVerificationEvidence,
-    ) -> LongTermWitnessTrustAnchor {
+    fn witness_anchor_for(evidence: &LongTermVerificationEvidence) -> LongTermWitnessTrustAnchor {
         LongTermWitnessTrustAnchor {
             witness_group_id: evidence.witness_receipt.statement.witness_group_id.clone(),
             witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
