@@ -336,11 +336,11 @@ impl ProcessSpawnProvider for AdmissionBoundProcessSpawn {
         self.inner.perform(request, granted)
     }
 
-    fn cleanup_handle(&self, handle: &str) {
+    fn cleanup_handle(&self, handle: &str) -> ProcessSpawnOutcome {
         // Cleanup is compensating containment, not a new guest effect. It must
         // remain available after expiry so an already-created child cannot
         // outlive its authority window.
-        self.inner.cleanup_handle(handle);
+        self.inner.cleanup_handle(handle)
     }
 }
 
@@ -2951,6 +2951,14 @@ impl EngineDispatcher {
         } else {
             current_dir.join(app_path)
         }
+    }
+
+    /// Declare the operator-selected working directory as the containment root
+    /// only when it was also used to anchor a relative entrypoint. Absolute
+    /// entrypoints retain the engine's fail-closed parent-directory default.
+    #[cfg(feature = "engine")]
+    fn explicit_module_root(app_path: &Path, current_dir: &Path) -> Option<PathBuf> {
+        (!app_path.is_absolute()).then(|| current_dir.to_path_buf())
     }
 
     #[cfg(feature = "engine")]
@@ -5872,8 +5880,8 @@ impl EngineDispatcher {
         // imports fail before resolution can enforce its module-root boundary.
         // Do not canonicalize here; a symlinked entrypoint must keep the
         // operator-selected directory as both its module and host-I/O root.
-        let execution_app_path = if app_path.is_absolute() {
-            app_path.to_path_buf()
+        let (execution_app_path, module_root) = if app_path.is_absolute() {
+            (app_path.to_path_buf(), None)
         } else {
             let current_dir = std::env::current_dir().map_err(|error| {
                 native_engine_spawn_error_with_telemetry_cleanup(
@@ -5881,7 +5889,21 @@ impl EngineDispatcher {
                     &mut telemetry_guard,
                 )
             })?;
-            Self::lexical_execution_app_path(app_path, &current_dir)
+            let module_root = Self::explicit_module_root(app_path, &current_dir)
+                .and_then(|root| root.to_str().map(str::to_owned))
+                .ok_or_else(|| {
+                    native_engine_spawn_error_with_telemetry_cleanup(
+                        format!(
+                            "Application working directory is not valid UTF-8: {}",
+                            current_dir.display()
+                        ),
+                        &mut telemetry_guard,
+                    )
+                })?;
+            (
+                Self::lexical_execution_app_path(app_path, &current_dir),
+                Some(module_root),
+            )
         };
 
         // Read the application source code
@@ -5907,6 +5929,7 @@ impl EngineDispatcher {
             ),
             source: source_code,
             source_file: Some(execution_app_path.to_string_lossy().to_string()),
+            module_root,
             capabilities: {
                 Self::resolve_capabilities_for_execution(config, process_spawn_admission.as_ref())
                     .map_err(|error| {
@@ -6353,7 +6376,8 @@ impl EngineDispatcher {
                 }
                 ProcessSpawnRequest::CloseStdin { handle }
                 | ProcessSpawnRequest::Wait { handle, .. }
-                | ProcessSpawnRequest::Kill { handle, .. } => {
+                | ProcessSpawnRequest::Kill { handle, .. }
+                | ProcessSpawnRequest::Cleanup { handle } => {
                     field_carries_secret(handle.as_bytes(), samples)
                 }
             }
@@ -6375,9 +6399,9 @@ impl EngineDispatcher {
                     field_carries_secret(stdout) || field_carries_secret(stderr)
                 }
                 ProcessSpawnResponse::Spawned { handle } => field_carries_secret(handle.as_bytes()),
-                ProcessSpawnResponse::StdinWritten { .. } | ProcessSpawnResponse::StdinClosed => {
-                    false
-                }
+                ProcessSpawnResponse::StdinWritten { .. }
+                | ProcessSpawnResponse::StdinClosed
+                | ProcessSpawnResponse::Cleaned { .. } => false,
             }
         }
 
@@ -7139,7 +7163,8 @@ mod tests {
     #[test]
     fn bd_91tpy_process_provider_rechecks_expiry_and_redacts_inner_policy() {
         use frankenengine_extension_host::process_spawn::{
-            ProcessLaunch, ProcessSpawnCapability, ProcessSpawnRequest, ProcessStdio,
+            ProcessLaunch, ProcessSpawnCapability, ProcessSpawnRequest, ProcessSpawnResponse,
+            ProcessStdio,
         };
 
         let jail = TempDir::new().expect("create process-policy jail");
@@ -7169,6 +7194,10 @@ mod tests {
             provider.perform(&request, &[ProcessSpawnCapability::Spawn]),
             Err(ProcessSpawnError::Denied { reason })
                 if reason.starts_with("PROCESS_SPAWN_TOKEN_EXPIRED")
+        ));
+        assert!(matches!(
+            provider.cleanup_handle("unknown-expired-handle"),
+            Ok(ProcessSpawnResponse::Cleaned { was_present: false })
         ));
         let debug = format!("{provider:?}");
         assert!(debug.contains("AdmissionBoundProcessSpawn"));
@@ -7797,6 +7826,24 @@ mod tests {
                 Path::new("ignored"),
             ),
             absolute_entrypoint
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_mnz7p_relative_entrypoint_uses_invocation_directory_as_module_root() {
+        let current_dir = std::env::temp_dir().join("franken-node-bd-mnz7p-sandbox");
+
+        assert_eq!(
+            EngineDispatcher::explicit_module_root(
+                Path::new("nested/relative_support_import.mjs"),
+                &current_dir,
+            ),
+            Some(current_dir.clone())
+        );
+        assert_eq!(
+            EngineDispatcher::explicit_module_root(&current_dir.join("absolute.mjs"), &current_dir),
+            None
         );
     }
 
