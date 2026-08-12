@@ -289,25 +289,23 @@ impl std::fmt::Debug for AdmissionBoundProcessSpawn {
 
 #[cfg(feature = "engine")]
 impl AdmissionBoundProcessSpawn {
-    fn ensure_current(&self) -> std::result::Result<(), ProcessSpawnError> {
+    fn ensure_current(&self) -> std::result::Result<(), String> {
         let elapsed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| ProcessSpawnError::Denied {
-                reason: format!(
+            .map_err(|error| {
+                format!(
                     "PROCESS_SPAWN_CLOCK_INVALID: system clock is before the Unix epoch: {error}"
-                ),
+                )
             })?;
-        let current_time_ms =
-            u64::try_from(elapsed.as_millis()).map_err(|_| ProcessSpawnError::Denied {
-                reason:
-                    "PROCESS_SPAWN_CLOCK_INVALID: system time exceeds the supported millisecond range"
-                        .to_string(),
-            })?;
+        let current_time_ms = u64::try_from(elapsed.as_millis()).map_err(|_| {
+            "PROCESS_SPAWN_CLOCK_INVALID: system time exceeds the supported millisecond range"
+                .to_string()
+        })?;
         if current_time_ms >= self.expires_at_ms {
-            return Err(ProcessSpawnError::Denied {
-                reason: "PROCESS_SPAWN_TOKEN_EXPIRED: signed authority expired before this effect"
+            return Err(
+                "PROCESS_SPAWN_TOKEN_EXPIRED: signed authority expired before this effect"
                     .to_string(),
-            });
+            );
         }
         Ok(())
     }
@@ -323,7 +321,8 @@ impl ProcessSpawnProvider for AdmissionBoundProcessSpawn {
         &self,
         request: &ProcessSpawnRequest,
     ) -> std::result::Result<ProcessSpawnRequest, ProcessSpawnError> {
-        self.ensure_current()?;
+        self.ensure_current()
+            .map_err(|reason| ProcessSpawnError::Denied { reason })?;
         self.inner.prepare_request(request)
     }
 
@@ -332,7 +331,8 @@ impl ProcessSpawnProvider for AdmissionBoundProcessSpawn {
         request: &ProcessSpawnRequest,
         granted: &[ProcessSpawnCapability],
     ) -> ProcessSpawnOutcome {
-        self.ensure_current()?;
+        self.ensure_current()
+            .map_err(|reason| ProcessSpawnError::Denied { reason })?;
         self.inner.perform(request, granted)
     }
 
