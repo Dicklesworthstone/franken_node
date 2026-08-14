@@ -183,3 +183,27 @@ target_*/
 .swarm_tick_prompt.md
 # br doctor per-run artifacts
 .doctor/
+
+# Timestamped category-shift benchmark dumps. The blessed summary is
+# artifacts/category_shift/latest_benchmark_summary.json and stays tracked.
+**/benchmark_report_*.json
+
+# Golden mismatch sidecars next to blessed goldens (UPDATE_GOLDENS=1 to bless).
+# Some historical *.actual files under crates/franken-node/tests/golden/ are
+# already tracked; this only keeps new mismatch output untracked.
+**/*.actual.json
+crates/franken-node/tests/golden/**/*.actual
+artifacts/golden/*.actual
+artifacts/golden/*.actual.*
+
+# MMR harness output (timestamped reports + test_log)
+crates/franken-node/tests/conformance/mmr_artifacts/output/
+
+# Crate-local artifact dumps (canonical blessed set lives under /artifacts/)
+crates/franken-node/artifacts/
+
+# Runtime state written by fixture corpus runs
+**/.franken-node/
+
+# Zero-epoch / generated orphan-census scratch
+artifacts/verification/orphan_census_*.jsonl
