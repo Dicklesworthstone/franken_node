@@ -2452,9 +2452,13 @@ mod tests {
     use tempfile::TempDir;
 
     fn sample_ts(second: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, second)
+        // Add seconds as a duration so callers may pass >= 60 (several tests
+        // index well past a single minute); identical to the old literal
+        // seconds field for sub-minute values.
+        Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0)
             .single()
             .expect("valid timestamp")
+            + chrono::Duration::seconds(i64::from(second))
     }
 
     fn target_entry(path: &str) -> ResourceArtifactInventoryEntry {
