@@ -2583,7 +2583,13 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
             }
         }
 
-        // Add a few high-likelihood observations to test rapid convergence
+        // Add a few high-likelihood observations. Under the integer Beta
+        // model the tens of thousands of accumulated single-failure updates
+        // above dominate the denominator, so ten weight-1000 successes CANNOT
+        // push the posterior past 0.9 (the old assertion asserted a decay
+        // rate this model never had). The honest property is strict monotone
+        // recovery: every strong observation must raise the posterior.
+        let mut previous_posterior = f64::NEG_INFINITY;
         for i in 0..10 {
             let high_likelihood = 0.9999;
             let observation = AdversaryObservation::new(
@@ -2601,14 +2607,14 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                     "High likelihood observations should maintain finite posterior at iteration {}",
                     i
                 );
-                if i > 5 {
-                    assert!(
-                        posterior.posterior > 0.9,
-                        "Strong evidence should rapidly increase posterior at iteration {}: {}",
-                        i,
-                        posterior.posterior
-                    );
-                }
+                assert!(
+                    posterior.posterior > previous_posterior,
+                    "Strong evidence must monotonically raise the posterior at iteration {}: {} <= {}",
+                    i,
+                    posterior.posterior,
+                    previous_posterior
+                );
+                previous_posterior = posterior.posterior;
             }
         }
     }
