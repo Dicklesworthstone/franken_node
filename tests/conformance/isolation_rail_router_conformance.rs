@@ -26,17 +26,11 @@
 //!
 //! Uses Pattern 4: Spec-Derived Test Matrix with structured conformance cases.
 
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-
 use frankenengine_node::security::isolation_rail_router::{
-    AuditEntry, ERR_ISO_DOWNGRADE_REJECTED, ERR_ISO_DUPLICATE_WORKLOAD,
-    ERR_ISO_HOT_ELEVATION_DISABLED, ERR_ISO_INVALID_RISK_SCORE, ERR_ISO_SAME_RAIL_ELEVATION,
-    ERR_ISO_UNCLASSIFIED, ERR_ISO_WORKLOAD_NOT_FOUND, ElevationEvent, ElevationPolicy,
-    INV_ISO_ATOMIC_TRANSITION, INV_ISO_AUDIT_COMPLETE, INV_ISO_DETERMINISTIC_ROUTING,
-    INV_ISO_MONOTONIC_ELEVATION, INV_ISO_NO_UNCLASSIFIED, ISO_001, ISO_002, ISO_003, ISO_004,
-    ISO_005, ISO_006, IsolationRail, RailRouter, RailRouterError, WorkloadClassification,
+    ElevationPolicy, ISO_001, ISO_002, ISO_003, ISO_004, ISO_005, ISO_006, IsolationRail,
+    RailRouter, RailRouterError,
 };
+use serde::{Deserialize, Serialize};
 
 /// Test requirement levels from the isolation rail router specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

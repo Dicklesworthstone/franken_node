@@ -547,10 +547,10 @@ fn calculate_endpoint_compatibility(client: &ApiContractSpec, server: &ApiContra
 
     let mut compatible_endpoints = 0;
     for (endpoint_name, client_endpoint) in &client.endpoints {
-        if let Some(server_endpoint) = server.endpoints.get(endpoint_name) {
-            if endpoints_compatible(client_endpoint, server_endpoint) {
-                compatible_endpoints += 1;
-            }
+        if let Some(server_endpoint) = server.endpoints.get(endpoint_name)
+            && endpoints_compatible(client_endpoint, server_endpoint)
+        {
+            compatible_endpoints += 1;
         }
     }
 

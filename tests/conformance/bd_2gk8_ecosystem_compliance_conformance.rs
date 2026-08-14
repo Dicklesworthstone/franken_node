@@ -19,11 +19,8 @@
 //! **MUST-ECE-009**: Content addressing MUST use domain-separated SHA-256
 
 use frankenengine_node::connector::ecosystem_compliance::{
-    ComplianceError, ComplianceEvidenceStore, ENE_005_COMPLIANCE_EVIDENCE_STORED,
-    ENE_006_COMPLIANCE_EVIDENCE_RETRIEVED, ENE_007_COMPLIANCE_TAMPER_CHECK_PASS,
-    ENE_008_COMPLIANCE_TAMPER_CHECK_FAIL, EvidenceSource,
+    ComplianceError, ComplianceEvidenceStore, EvidenceSource,
 };
-use serde_json::Value;
 use std::collections::HashMap;
 
 // Test fixture constants
@@ -689,7 +686,7 @@ fn test_verify_tamper_detection(store: &mut ComplianceEvidenceStore) -> Conforma
     }
 }
 
-fn test_content_addressing_format(store: &mut ComplianceEvidenceStore) -> ConformanceTestResult {
+fn test_content_addressing_format(_store: &mut ComplianceEvidenceStore) -> ConformanceTestResult {
     let content = r#"{"format": "test-content"}"#;
     let hash = ComplianceEvidenceStore::compute_content_hash(content);
 

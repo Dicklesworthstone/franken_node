@@ -27,14 +27,10 @@
 //! Uses Pattern 4: Spec-Derived Test Matrix with structured conformance cases.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 use frankenengine_node::tools::vef_perf_budget_gate::{
-    BUDGET_SCHEMA_VERSION, BudgetCheckResult, BudgetMode, GateVerdict, INV_VEF_PBG_BASELINE,
-    INV_VEF_PBG_BUDGET, INV_VEF_PBG_EVIDENCE, INV_VEF_PBG_GATE, INV_VEF_PBG_MODE,
-    INV_VEF_PBG_NOISE, LatencyBudget, MeasuredLatency, OperationVerdict, VEF_PERF_001,
-    VEF_PERF_002, VEF_PERF_003, VEF_PERF_004, VEF_PERF_005, VEF_PERF_ERR_001, VefOperation,
-    VefPerfBudgetConfig, VefPerfBudgetError, VefPerfEvent,
+    BudgetMode, LatencyBudget, MeasuredLatency, VEF_PERF_001, VEF_PERF_002, VEF_PERF_003,
+    VEF_PERF_004, VEF_PERF_005, VefOperation, VefPerfBudgetConfig,
 };
 
 // API-DRIFT REMEDIATION (bd-rjc2m.6): MeasuredLatency::new(p95_us, p99_us, sample_count) (gone) ->

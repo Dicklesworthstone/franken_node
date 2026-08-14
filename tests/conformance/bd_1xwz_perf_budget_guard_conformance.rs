@@ -10,12 +10,9 @@ use std::collections::BTreeMap;
 
 // Import the module under test
 use frankenengine_node::policy::perf_budget_guard::{
-    BenchmarkMeasurement, BudgetPolicy, ERR_BUDGET_EXCEEDED, ERR_COLD_START_EXCEEDED,
-    ERR_FLAMEGRAPH_CAPTURE_FAILED, ERR_NO_MEASUREMENTS, GateResult, HotPath,
-    PRF_001_BENCHMARK_STARTED, PRF_002_WITHIN_BUDGET, PRF_003_OVER_BUDGET,
-    PRF_004_FLAMEGRAPH_CAPTURED, PRF_005_COLD_START, PRF_006_TIMING_SAMPLE,
-    PRF_007_PERCENTILE_COMPUTED, PRF_008_COLD_START_TIMING, PathBudget, PercentileStats,
-    PerfBudgetError, PerformanceBudgetGuard, TimingCollector,
+    BenchmarkMeasurement, BudgetPolicy, ERR_NO_MEASUREMENTS, HotPath, PRF_001_BENCHMARK_STARTED,
+    PRF_002_WITHIN_BUDGET, PRF_003_OVER_BUDGET, PRF_004_FLAMEGRAPH_CAPTURED, PRF_005_COLD_START,
+    PRF_006_TIMING_SAMPLE, PerformanceBudgetGuard, TimingCollector,
 };
 
 /// Requirement levels from the bd-1xwz specification

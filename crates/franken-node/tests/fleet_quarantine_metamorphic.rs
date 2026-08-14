@@ -35,12 +35,12 @@ impl FleetState {
             "default-zone",
             "zone-metamorphic",
         ] {
-            if let Ok(status) = mgr.status(zone_id) {
-                if status.activated {
-                    total_quarantines = total_quarantines.saturating_add(status.active_quarantines);
-                    total_revocations = total_revocations.saturating_add(status.active_revocations);
-                    zone_status.insert(zone_id.to_string(), status);
-                }
+            if let Ok(status) = mgr.status(zone_id)
+                && status.activated
+            {
+                total_quarantines = total_quarantines.saturating_add(status.active_quarantines);
+                total_revocations = total_revocations.saturating_add(status.active_revocations);
+                zone_status.insert(zone_id.to_string(), status);
             }
         }
 

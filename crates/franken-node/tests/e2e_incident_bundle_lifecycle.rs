@@ -22,9 +22,9 @@
 //!   - INV-IBR-COMPLETE   missing required field is rejected
 //!   - INV-IBR-INTEGRITY  tampered integrity_hash is rejected on store + export
 //!   - INV-IBR-RETENTION  Hot→Cold→Archive transitions follow the configured
-//!                        horizons; Archive is never auto-deleted
+//!     horizons; Archive is never auto-deleted
 //!   - INV-IBR-EXPORT     every format includes the integrity hash; an
-//!                        in-flight tampered store rejects export
+//!     in-flight tampered store rejects export
 
 use std::sync::Once;
 use std::time::Instant;

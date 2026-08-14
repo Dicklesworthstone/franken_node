@@ -122,7 +122,7 @@ impl ConformanceReport {
 
         // Detailed results
         md.push_str("\n## Test Results\n\n");
-        for (_, record) in &self.results {
+        for record in self.results.values() {
             let status = match &record.result {
                 TestResult::Pass => "✅ PASS",
                 TestResult::Fail { .. } => "❌ FAIL",

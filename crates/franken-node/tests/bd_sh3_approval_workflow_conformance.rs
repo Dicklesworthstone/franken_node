@@ -21,12 +21,9 @@
 //! - Total: 13/13 (100%) ✓
 
 use frankenengine_node::policy::approval_workflow::{
-    AUDIT_CHAIN_BROKEN, AUDIT_CHAIN_VERIFIED, ApprovalSignature, ChangeEvidencePackage,
-    ERR_AUDIT_CHAIN_BROKEN, ERR_INVALID_SIGNATURE, ERR_INVALID_STATE_TRANSITION,
-    ERR_JUSTIFICATION_TOO_SHORT, ERR_PROPOSAL_NOT_FOUND, ERR_QUORUM_NOT_MET, ERR_SOLE_APPROVER,
-    POLICY_CHANGE_ACTIVATED, POLICY_CHANGE_APPROVED, POLICY_CHANGE_PROPOSED,
-    POLICY_CHANGE_REJECTED, POLICY_CHANGE_REVIEWED, POLICY_CHANGE_ROLLED_BACK, PolicyChangeEngine,
-    PolicyChangeProposal, PolicyDiffEntry, ProposalRecord, ProposalState, RiskAssessment,
+    ApprovalSignature, ERR_INVALID_STATE_TRANSITION, ERR_JUSTIFICATION_TOO_SHORT,
+    ERR_PROPOSAL_NOT_FOUND, ERR_QUORUM_NOT_MET, ERR_SOLE_APPROVER, PolicyChangeEngine,
+    PolicyChangeProposal, PolicyDiffEntry, ProposalState, RiskAssessment,
 };
 
 /// Test case with structured result tracking for bd-sh3 compliance.
@@ -42,6 +39,9 @@ struct ConformanceCase {
 enum RequirementLevel {
     Must,
     Should,
+    // Spec vocabulary is deliberately complete even though no MAY-level
+    // requirement is currently exercised by this harness.
+    #[allow(dead_code)]
     May,
 }
 
@@ -673,6 +673,8 @@ impl ConformanceStats {
 
 #[derive(Debug)]
 struct ConformanceReport {
+    // Recorded for report provenance; only surfaced via Debug output.
+    #[allow(dead_code)]
     spec_id: String,
     stats: ConformanceStats,
     results: Vec<(String, RequirementLevel, ConformanceResult)>,

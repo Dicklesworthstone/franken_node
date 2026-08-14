@@ -18,13 +18,12 @@
 //! - EVD-BOUNDARY-004: Checker initialization events
 
 use frankenengine_node::policy::controller_boundary_checks::{
-    BoundaryViolation, ControllerBoundaryChecker, ErrorClass, RejectedMutationRecord,
+    BoundaryViolation, ControllerBoundaryChecker, ErrorClass,
 };
 use frankenengine_node::policy::correctness_envelope::{
     CorrectnessEnvelope, InvariantId, PolicyChange, PolicyProposal,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use serde::Serialize;
 
 // ── Conformance Case Framework ─────────────────────────────────────────
 
@@ -753,15 +752,10 @@ fn conformance_full_suite_must_requirements_100_percent_coverage() {
 
 #[test]
 fn conformance_event_code_coverage_verification() {
-    let expected_codes = BTreeSet::from([
-        "EVD-BOUNDARY-001",
-        "EVD-BOUNDARY-002",
-        "EVD-BOUNDARY-003",
-        "EVD-BOUNDARY-004",
-    ]);
-
-    // Verify event codes exist in the implementation
-    // EVD-BOUNDARY-002 is verified via BoundaryViolation display
+    // Verify event codes exist in the implementation.
+    // Only EVD-BOUNDARY-002 is observable from this harness (via the
+    // BoundaryViolation display); the other codes are emitted on paths this
+    // test cannot reach, so no dead "expected" set is kept here.
     let violation = BoundaryViolation {
         violated_invariant: InvariantId::new("TEST"),
         proposal_summary: "test".to_string(),

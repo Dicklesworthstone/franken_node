@@ -273,7 +273,7 @@ fn test_inv_proof_complete() -> TestResult {
 
     // Register a test algorithm
     let algorithm = AlgorithmId::new("test_algorithm");
-    if let Err(_) = decoder.register_algorithm(algorithm.clone()) {
+    if decoder.register_algorithm(algorithm.clone()).is_err() {
         return TestResult::Fail {
             reason: "Failed to register test algorithm".to_string(),
         };
@@ -320,7 +320,7 @@ fn test_inv_proof_binding() -> TestResult {
     let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test-signer", "test-secret");
 
     let algorithm = AlgorithmId::new("simple_concat");
-    if let Err(_) = decoder.register_algorithm(algorithm.clone()) {
+    if decoder.register_algorithm(algorithm.clone()).is_err() {
         return TestResult::Fail {
             reason: "Failed to register algorithm".to_string(),
         };
@@ -472,7 +472,7 @@ fn test_mode_advisory_warnings() -> TestResult {
 
     // Register a valid algorithm
     let algorithm = AlgorithmId::new("simple_concat");
-    if let Err(_) = decoder.register_algorithm(algorithm.clone()) {
+    if decoder.register_algorithm(algorithm.clone()).is_err() {
         return TestResult::Fail {
             reason: "Failed to register algorithm".to_string(),
         };
@@ -524,7 +524,7 @@ fn test_event_repair_proof_emitted() -> TestResult {
     let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test-signer", "test-secret");
 
     let algorithm = AlgorithmId::new("simple_concat");
-    if let Err(_) = decoder.register_algorithm(algorithm.clone()) {
+    if decoder.register_algorithm(algorithm.clone()).is_err() {
         return TestResult::Fail {
             reason: "Failed to register algorithm".to_string(),
         };
@@ -834,7 +834,7 @@ fn test_crypto_signature_binding() -> TestResult {
     let mut decoder = ProofCarryingDecoder::new(ProofMode::Mandatory, "test-signer", "test-secret");
 
     let algorithm = AlgorithmId::new("simple_concat");
-    if let Err(_) = decoder.register_algorithm(algorithm.clone()) {
+    if decoder.register_algorithm(algorithm.clone()).is_err() {
         return TestResult::Fail {
             reason: "Failed to register algorithm".to_string(),
         };
@@ -1062,7 +1062,7 @@ impl ConformanceReport {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
 
-        md.push_str(&format!("# bd-20uo Conformance Test Report\n\n"));
+        md.push_str("# bd-20uo Conformance Test Report\n\n");
         md.push_str(&format!("**Specification**: {}\n", self.specification));
         md.push_str(&format!("**Version**: {}\n", self.version));
         md.push_str(&format!("**Timestamp**: {}\n\n", self.timestamp));
@@ -1142,7 +1142,7 @@ impl ConformanceReport {
                     record.id, record.description, record.level, result_str
                 ));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         md.push_str("## Compliance Status\n\n");
@@ -1160,7 +1160,7 @@ impl ConformanceReport {
                     md.push_str(&format!("- **{}**: {}\n", record.id, reason));
                 }
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         md

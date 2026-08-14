@@ -26,9 +26,8 @@
 use frankenengine_node::policy::{
     hardening_state_machine::HardeningLevel,
     retroactive_hardening::{
-        CanonicalObject, EVD_RETROHARDEN_001, EVD_RETROHARDEN_002, EVD_RETROHARDEN_003,
-        EVD_RETROHARDEN_004, HardeningProgressRecord, HardeningResult, ObjectId,
-        ProtectionArtifact, ProtectionType, RepairabilityScore, RetroactiveHardeningPipeline,
+        CanonicalObject, ObjectId, ProtectionArtifact, ProtectionType, RepairabilityScore,
+        RetroactiveHardeningPipeline,
     },
 };
 
@@ -45,6 +44,9 @@ struct ConformanceCase {
 enum RequirementLevel {
     Must,
     Should,
+    // Spec vocabulary is deliberately complete even though no MAY-level
+    // requirement is currently exercised by this harness.
+    #[allow(dead_code)]
     May,
 }
 
@@ -720,7 +722,7 @@ fn object_id_display_formatting() -> ConformanceResult {
 
     if obj_id.to_string() != "test-format-001" {
         return ConformanceResult::Fail {
-            reason: format!("ObjectId to_string() wrong: {}", obj_id.to_string()),
+            reason: format!("ObjectId to_string() wrong: {}", obj_id),
         };
     }
 
@@ -938,6 +940,8 @@ impl ConformanceStats {
 
 #[derive(Debug)]
 struct ConformanceReport {
+    // Recorded for report provenance; only surfaced via Debug output.
+    #[allow(dead_code)]
     spec_id: String,
     stats: ConformanceStats,
     results: Vec<(String, RequirementLevel, ConformanceResult)>,

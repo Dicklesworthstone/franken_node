@@ -25,8 +25,7 @@
 use serde_json::json;
 
 use frankenengine_node::policy::correctness_envelope::{
-    CorrectnessEnvelope, EnforcementMode, EnvelopeViolation, Invariant, InvariantId, PolicyChange,
-    PolicyProposal, SectionId,
+    CorrectnessEnvelope, EnforcementMode, InvariantId, PolicyChange, PolicyProposal, SectionId,
 };
 
 /// Test case with structured result tracking for bd-sddz compliance.
@@ -42,6 +41,9 @@ struct ConformanceCase {
 enum RequirementLevel {
     Must,
     Should,
+    // Spec vocabulary is deliberately complete even though no MAY-level
+    // requirement is currently exercised by this harness.
+    #[allow(dead_code)]
     May,
 }
 
@@ -558,13 +560,17 @@ fn envelope_lookup_functionality() -> ConformanceResult {
         };
     }
 
-    // Test is_empty() and len() consistency
+    // Test is_empty() and len() consistency: this deliberately compares the
+    // two accessors against each other, so the len()-vs-zero comparisons that
+    // clippy::len_zero would normally rewrite are the point of the check.
+    #[allow(clippy::len_zero)]
     if envelope.is_empty() && envelope.len() > 0 {
         return ConformanceResult::Fail {
             reason: "is_empty() and len() are inconsistent".to_string(),
         };
     }
 
+    #[allow(clippy::len_zero)]
     if !envelope.is_empty() && envelope.len() == 0 {
         return ConformanceResult::Fail {
             reason: "is_empty() should return true when len() is 0".to_string(),
@@ -674,7 +680,7 @@ fn id_formatting_and_display() -> ConformanceResult {
     }
     if inv_id.to_string() != "INV-TEST-001" {
         return ConformanceResult::Fail {
-            reason: format!("InvariantId to_string() wrong: {}", inv_id.to_string()),
+            reason: format!("InvariantId to_string() wrong: {}", inv_id),
         };
     }
 
@@ -687,7 +693,7 @@ fn id_formatting_and_display() -> ConformanceResult {
     }
     if section_id.to_string() != "10.14" {
         return ConformanceResult::Fail {
-            reason: format!("SectionId to_string() wrong: {}", section_id.to_string()),
+            reason: format!("SectionId to_string() wrong: {}", section_id),
         };
     }
 
@@ -903,6 +909,8 @@ impl ConformanceStats {
 
 #[derive(Debug)]
 struct ConformanceReport {
+    // Recorded for report provenance; only surfaced via Debug output.
+    #[allow(dead_code)]
     spec_id: String,
     stats: ConformanceStats,
     results: Vec<(String, RequirementLevel, ConformanceResult)>,

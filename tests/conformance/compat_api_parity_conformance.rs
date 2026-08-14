@@ -327,10 +327,7 @@ fn node_command(node: &Path) -> ProcessCommand {
         "node" => ProcessCommand::new("node"),
         "/usr/bin/node" => ProcessCommand::new("/usr/bin/node"),
         "/usr/local/bin/node" => ProcessCommand::new("/usr/local/bin/node"),
-        other => {
-            assert!(false, "unexpected Node.js binary path: {other}");
-            ProcessCommand::new("node")
-        }
+        other => panic!("unexpected Node.js binary path: {other}"),
     }
 }
 

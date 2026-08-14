@@ -6,12 +6,11 @@
 //! - INV-SWEEP-BOUNDED: overhead stays within budget (bounded decision log)
 //! - INV-SWEEP-DETERMINISTIC: same inputs produce same outputs
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use frankenengine_node::policy::integrity_sweep_scheduler::{
-    EvidenceTrajectory, IntegritySweepScheduler, PolicyBand, SweepDepth, SweepScheduleDecision,
-    SweepSchedulerConfig, Trend,
+    EvidenceTrajectory, IntegritySweepScheduler, PolicyBand, SweepDepth, SweepSchedulerConfig,
+    Trend,
 };
 
 #[derive(Debug, Clone)]
@@ -309,10 +308,25 @@ fn test_sweep_depth_correlates_with_severity() -> TestResult {
 
     let red_depth = scheduler.current_sweep_depth();
 
-    // Verify that higher severity bands don't have "lighter" sweeps
-    // (The exact mapping would depend on implementation details)
+    // Verify that higher severity bands don't have "lighter" sweeps.
+    // SweepDepth has no Ord impl; rank locally by thoroughness.
+    fn depth_rank(depth: SweepDepth) -> u8 {
+        match depth {
+            SweepDepth::Quick => 0,
+            SweepDepth::Standard => 1,
+            SweepDepth::Deep => 2,
+            SweepDepth::Full => 3,
+        }
+    }
+    if depth_rank(red_depth) < depth_rank(green_depth) {
+        return TestResult::Fail {
+            reason: format!(
+                "Red band sweep depth {red_depth:?} is lighter than green band {green_depth:?}"
+            ),
+        };
+    }
 
-    TestResult::Pass // This test validates the concept; specific mappings would need implementation details
+    TestResult::Pass
 }
 
 fn test_deescalation_requires_hysteresis() -> TestResult {

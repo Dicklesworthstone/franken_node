@@ -10,8 +10,7 @@
 //! - **MAY-CMV-007**: Optional methods MAY be skipped without affecting verdict
 
 use frankenengine_node::conformance::connector_method_validator::{
-    ContractReport, MethodDeclaration, MethodErrorCode, MethodValidationError,
-    MethodValidationResult, ReportSummary, STANDARD_METHODS, validate_contract,
+    MethodDeclaration, MethodErrorCode, STANDARD_METHODS, validate_contract,
 };
 
 /// **MUST-CMV-001**: All required methods MUST be validated as present
@@ -588,7 +587,7 @@ fn conformance_should_cmv_006_report_summaries_accurately_count_methods() {
     let expected_required = STANDARD_METHODS.iter().filter(|s| s.required).count();
     let expected_passing = 3; // handshake, describe, simulate
     let expected_failing = 6; // introspect (version error) + 5 missing required methods
-    let expected_skipped = 0; // No optional methods are missing in this test
+    let _expected_skipped = 0; // No optional methods are missing in this test
 
     // Verify summary accuracy
     assert_eq!(

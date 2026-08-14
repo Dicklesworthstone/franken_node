@@ -8,8 +8,7 @@
 
 use frankenengine_node::api::session_auth::{
     MessageDirection, SessionConfig, SessionError, SessionLifecycleMessage,
-    SessionLifecycleScenario, demo_session_lifecycle, demo_windowed_replay, event_codes,
-    session_lifecycle_events,
+    SessionLifecycleScenario, demo_windowed_replay, event_codes, session_lifecycle_events,
 };
 use frankenengine_node::control_plane::control_epoch::ControlEpoch;
 use frankenengine_node::security::epoch_scoped_keys::RootSecret;
@@ -17,7 +16,7 @@ use serde_json::json;
 use std::sync::Once;
 use std::time::Instant;
 use tempfile::TempDir;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 static TEST_TRACING_INIT: Once = Once::new();
 
@@ -34,6 +33,9 @@ struct SessionTestLog {
 }
 
 struct SessionTestHarness {
+    // Held for its Drop: keeps the temp workspace alive for the test's
+    // duration even though no assertion reads it back.
+    #[allow(dead_code)]
     workspace: TempDir,
     test_start: Instant,
     test_name: String,

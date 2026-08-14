@@ -43,6 +43,9 @@ struct ConformanceCase {
 enum RequirementLevel {
     Must,
     Should,
+    // Spec vocabulary is deliberately complete even though no MAY-level
+    // requirement is currently exercised by this harness.
+    #[allow(dead_code)]
     May,
 }
 
@@ -80,7 +83,7 @@ fn inv_autotrig_latency_synchronous() -> ConformanceResult {
 
     // Synchronous escalation should have 0 latency
     match result {
-        TriggerResult::Escalated { latency_ms, .. } if latency_ms == 0 => ConformanceResult::Pass,
+        TriggerResult::Escalated { latency_ms: 0, .. } => ConformanceResult::Pass,
         TriggerResult::Escalated { latency_ms, .. } => ConformanceResult::Fail {
             reason: format!("expected 0ms latency for synchronous escalation, got {latency_ms}ms"),
         },
@@ -686,6 +689,8 @@ impl ConformanceStats {
 
 #[derive(Debug)]
 struct ConformanceReport {
+    // Recorded for report provenance; only surfaced via Debug output.
+    #[allow(dead_code)]
     spec_id: String,
     stats: ConformanceStats,
     results: Vec<(String, RequirementLevel, ConformanceResult)>,

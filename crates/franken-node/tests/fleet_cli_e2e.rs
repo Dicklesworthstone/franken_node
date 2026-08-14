@@ -561,12 +561,11 @@ fn canonicalize_fleet_reconcile_snapshot(
                             *nested = serde_json::Value::from(0);
                         }
                         "action_id" => {
-                            if let Some(action_id) = nested.as_str() {
-                                if action_id.starts_with("fleet-op-release-")
-                                    || action_id.starts_with("fleet-op-reconcile-republish-")
-                                {
-                                    *nested = serde_json::Value::String("[action-id]".to_string());
-                                }
+                            if let Some(action_id) = nested.as_str()
+                                && (action_id.starts_with("fleet-op-release-")
+                                    || action_id.starts_with("fleet-op-reconcile-republish-"))
+                            {
+                                *nested = serde_json::Value::String("[action-id]".to_string());
                             }
                         }
                         "timestamp" | "signed_at" | "emitted_at" | "recorded_at" | "issued_at"
@@ -631,11 +630,10 @@ fn json_stdout(output: &Output, label: &str) -> serde_json::Value {
     match serde_json::from_slice(&output.stdout) {
         Ok(value) => value,
         Err(err) => {
-            let message = format!(
+            panic!(
                 "{label} stdout must be JSON: {err}\n{}",
                 String::from_utf8_lossy(&output.stdout)
             );
-            Err::<serde_json::Value, _>(err).expect(&message)
         }
     }
 }
@@ -648,8 +646,7 @@ fn jsonl_stdout(output: &Output, label: &str) -> serde_json::Value {
         .map(|(index, line)| match serde_json::from_str(line) {
             Ok(value) => value,
             Err(err) => {
-                let message = format!("{label} line {index} must be JSON: {err}\n{line}");
-                Err::<serde_json::Value, _>(err).expect(&message)
+                panic!("{label} line {index} must be JSON: {err}\n{line}");
             }
         })
         .collect::<Vec<serde_json::Value>>();
@@ -2634,7 +2631,7 @@ fn fleet_reconcile_bootstrap_signing_key_on_first_run() {
     // Run fleet reconcile WITHOUT setting FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH
     // This should trigger the bootstrap path
     let output = run_cli_in_dir_with_fleet_state(
-        &fleet_state.path(),
+        fleet_state.path(),
         &["fleet", "reconcile"],
         &fleet_state_dir,
     );

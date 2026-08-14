@@ -160,7 +160,7 @@ impl ConformanceReport {
 
         // Detailed results
         md.push_str("\n## Test Results\n\n");
-        for (_, record) in &self.results {
+        for record in self.results.values() {
             let status = match &record.result {
                 TestResult::Pass => "✅ PASS",
                 TestResult::Fail { .. } => "❌ FAIL",
@@ -231,9 +231,29 @@ fn test_case_tg2_inv_1() -> ConformanceRecord {
             "Status query must preserve/echo zone ID"
         );
 
-        // Test that zone IDs are validated.
-        assert!(!zone_id.is_empty(), "Zone ID must not be empty");
-        assert!(!extension_id.is_empty(), "Extension ID must not be empty");
+        // Zone IDs are validated by the product (INV-FLEET-ZONE-SCOPE): a write
+        // operation against an empty zone id must be rejected. The prior form
+        // asserted emptiness of hardcoded literals, which is a constant
+        // expression and exercised nothing.
+        let mut validating_mgr = signing_manager();
+        validating_mgr.activate();
+        let empty_zone_scope = QuarantineScope {
+            zone_id: "   ".to_string(),
+            tenant_id: None,
+            affected_nodes: 1,
+            reason: "empty zone must be rejected".to_string(),
+        };
+        assert!(
+            validating_mgr
+                .quarantine(
+                    extension_id,
+                    &empty_zone_scope,
+                    &admin_identity(),
+                    &trace("trace-inv-1-empty-zone"),
+                )
+                .is_err(),
+            "Quarantine must reject an empty zone ID"
+        );
     }) {
         Ok(()) => {}
         Err(_) => {
@@ -381,14 +401,14 @@ fn test_case_tg2_inv_3() -> ConformanceRecord {
         );
 
         // Verify that recent events are preserved (FIFO eviction of oldest).
-        if events.len() == max_events {
-            if let Some(last_i) = last_accepted {
-                let last_event = events.last().expect("Should have events");
-                assert!(
-                    last_event.trace_id.contains(&format!("{}", last_i)),
-                    "Most recent events should be preserved during eviction"
-                );
-            }
+        if events.len() == max_events
+            && let Some(last_i) = last_accepted
+        {
+            let last_event = events.last().expect("Should have events");
+            assert!(
+                last_event.trace_id.contains(&format!("{}", last_i)),
+                "Most recent events should be preserved during eviction"
+            );
         }
     }) {
         Ok(()) => {}

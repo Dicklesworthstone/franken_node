@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 
 use frankenengine_node::perf::optimization_governor::{
     GovernorDecision, GovernorGate, OptimizationProposal, PredictedMetrics, RejectionReason,
-    RuntimeKnob, SCHEMA_VERSION, error_codes, event_codes, invariants,
+    RuntimeKnob, error_codes, event_codes,
 };
 
 /// Test requirement levels from the bd-21fo specification.
@@ -290,12 +290,12 @@ fn test_ac_1_shadow_evaluation_required() -> TestResult {
         .iter()
         .position(|entry| entry.event_code == event_codes::GOVERNOR_POLICY_APPLIED);
 
-    if let (Some(shadow_idx), Some(applied_idx)) = (shadow_index, applied_index) {
-        if shadow_idx >= applied_idx {
-            return TestResult::Fail {
-                reason: "Shadow evaluation must occur before policy application".to_string(),
-            };
-        }
+    if let (Some(shadow_idx), Some(applied_idx)) = (shadow_index, applied_index)
+        && shadow_idx >= applied_idx
+    {
+        return TestResult::Fail {
+            reason: "Shadow evaluation must occur before policy application".to_string(),
+        };
     }
 
     TestResult::Pass
@@ -328,7 +328,7 @@ fn test_ac_2_auto_reject_with_evidence() -> TestResult {
 
     // Check for rejection with evidence in audit trail
     match decision {
-        GovernorDecision::Rejected(reason) => {
+        GovernorDecision::Rejected(_reason) => {
             let error_events: Vec<_> = gate.audit_trail()[initial_audit_count..]
                 .iter()
                 .filter(|entry| entry.event_code.starts_with("ERR_"))
@@ -1088,7 +1088,7 @@ impl ConformanceReport {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
 
-        md.push_str(&format!("# bd-21fo Conformance Test Report\n\n"));
+        md.push_str("# bd-21fo Conformance Test Report\n\n");
         md.push_str(&format!("**Specification**: {}\n", self.specification));
         md.push_str(&format!("**Version**: {}\n", self.version));
         md.push_str(&format!("**Timestamp**: {}\n\n", self.timestamp));
@@ -1168,7 +1168,7 @@ impl ConformanceReport {
                     record.id, record.description, record.level, result_str
                 ));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         md.push_str("## Compliance Status\n\n");
@@ -1186,7 +1186,7 @@ impl ConformanceReport {
                     md.push_str(&format!("- **{}**: {}\n", record.id, reason));
                 }
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         md

@@ -194,7 +194,7 @@ fn conformance_must_rg_002_deterministic_process_classification() {
 #[test]
 fn conformance_must_rg_003_fail_closed_pressure_tier_calculation() {
     // Test cases that should result in Unknown pressure tier (fail-closed)
-    let fail_closed_cases = vec![
+    let fail_closed_cases = [
         // Missing total bytes
         ResourceDiskPressureRoot {
             path: "/tmp".to_string(),
@@ -1080,7 +1080,7 @@ fn conformance_must_rg_010_decisions_serializable_to_json() {
     // the ResourceGovernorReport / structured log. Serializability MUST unchanged.
 
     // Test all decision kinds for JSON serialization
-    let decision_samples = vec![
+    let decision_samples = [
         ResourceGovernorDecision {
             kind: ResourceGovernorDecisionKind::Allow,
             reason_code: reason_codes::ALLOW_IDLE.to_string(),

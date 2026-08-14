@@ -13,8 +13,7 @@
 //! - Domain leakage vulnerabilities
 
 use frankenengine_node::encoding::deterministic_seed::{
-    ContentHash, DeterministicSeed, DeterministicSeedDeriver, DomainTag, ScheduleConfig, SeedError,
-    derive_seed,
+    ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig, derive_seed,
 };
 use std::collections::HashSet;
 
@@ -24,9 +23,9 @@ const PROPERTY_TEST_ITERATIONS: usize = 100;
 fn random_content_bytes(seed: u64) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     let mut state = seed;
-    for i in 0..32 {
+    for byte in &mut bytes {
         state = state.wrapping_mul(1103515245).wrapping_add(12345); // Linear congruential generator
-        bytes[i] = (state >> 16) as u8;
+        *byte = (state >> 16) as u8;
     }
     bytes
 }
@@ -520,7 +519,7 @@ fn mr_comprehensive_composite() {
     let seed_d2_c1_cfg1 = derive_seed(domain2, &content1, &config1);
 
     // Composite MR: All seeds should be different when any input differs
-    let all_seeds = vec![
+    let all_seeds = [
         &seed_d1_c1_cfg1,
         &seed_d1_c1_cfg2,
         &seed_d1_c2_cfg1,

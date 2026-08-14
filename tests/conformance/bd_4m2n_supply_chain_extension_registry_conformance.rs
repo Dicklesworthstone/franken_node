@@ -56,7 +56,6 @@ const TRACE_A: &str = "trace-abc123";
 const TRACE_B: &str = "trace-def456";
 const NOW_EPOCH: u64 = 1716422700; // 2026-05-22T22:45:00Z
 const VERSION_1_0_0: &str = "1.0.0";
-const VERSION_1_0_1: &str = "1.0.1";
 const VERSION_2_0_0: &str = "2.0.0";
 
 #[derive(Debug, Clone)]
@@ -878,17 +877,17 @@ fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
     // now lands a successfully-admitted extension directly in Active (extension_registry.rs:1308),
     // so the "initial status" assertion is remapped Submitted -> Active to match current lifecycle.
     let extension = registry.query(&extension_id);
-    if let Some(ext) = extension {
-        if ext.status != ExtensionStatus::Active {
-            return ConformanceTestResult {
-                id: "MUST-SER-012".to_string(),
-                title: "Valid lifecycle transitions".to_string(),
-                level: RequirementLevel::Must,
-                result: TestResult::Fail {
-                    reason: format!("Initial status should be Active, got {:?}", ext.status),
-                },
-            };
-        }
+    if let Some(ext) = extension
+        && ext.status != ExtensionStatus::Active
+    {
+        return ConformanceTestResult {
+            id: "MUST-SER-012".to_string(),
+            title: "Valid lifecycle transitions".to_string(),
+            level: RequirementLevel::Must,
+            result: TestResult::Fail {
+                reason: format!("Initial status should be Active, got {:?}", ext.status),
+            },
+        };
     }
 
     // Test transition to Revoked (valid from any status)
@@ -913,17 +912,17 @@ fn test_valid_lifecycle_transitions() -> ConformanceTestResult {
     // Verify final status
     // API-DRIFT REMEDIATION (bd-rjc2m.5): get_extension(id) -> query(id).
     let extension = registry.query(&extension_id);
-    if let Some(ext) = extension {
-        if ext.status != ExtensionStatus::Revoked {
-            return ConformanceTestResult {
-                id: "MUST-SER-012".to_string(),
-                title: "Valid lifecycle transitions".to_string(),
-                level: RequirementLevel::Must,
-                result: TestResult::Fail {
-                    reason: format!("Final status should be Revoked, got {:?}", ext.status),
-                },
-            };
-        }
+    if let Some(ext) = extension
+        && ext.status != ExtensionStatus::Revoked
+    {
+        return ConformanceTestResult {
+            id: "MUST-SER-012".to_string(),
+            title: "Valid lifecycle transitions".to_string(),
+            level: RequirementLevel::Must,
+            result: TestResult::Fail {
+                reason: format!("Final status should be Revoked, got {:?}", ext.status),
+            },
+        };
     }
 
     ConformanceTestResult {

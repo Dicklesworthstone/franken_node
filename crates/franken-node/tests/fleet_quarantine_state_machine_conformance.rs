@@ -97,7 +97,9 @@ struct StateSnapshot {
 }
 
 enum TransitionOutcome {
-    Success(FleetActionResult),
+    // Boxed: FleetActionResult is much larger than FleetControlError and
+    // clippy::large_enum_variant flags the size gap.
+    Success(Box<FleetActionResult>),
     Failure(FleetControlError),
 }
 
@@ -476,7 +478,7 @@ fn apply_event(
     };
 
     Ok(match outcome {
-        Ok(result) => TransitionOutcome::Success(result),
+        Ok(result) => TransitionOutcome::Success(Box::new(result)),
         Err(err) => TransitionOutcome::Failure(err),
     })
 }

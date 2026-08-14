@@ -23,7 +23,11 @@ use serde_json::Value;
 // DE-MOCKED: Removed FRANKEN_ENGINE_BIN="" and FRANKEN_NODE_ENGINE_BINARY_PATH="" environment
 // variable overrides from 5 test functions to use real engine binary detection instead of stubs
 
+// Deserializing into this struct is itself the schema assertion: every field
+// must be present with the right type for the JSONL line to parse, even
+// though only event_code/message are read back by name.
 #[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
 struct StructuredLogEvent {
     timestamp: String,
     level: String,
@@ -526,24 +530,6 @@ fn write_run_package_manifest(workspace: &Path, dependencies: &[(&str, &str)]) {
     fs::write(workspace.join("index.js"), "console.log('hello');\n").expect("write index.js");
 }
 
-#[cfg(unix)]
-fn write_fake_runtime(runtime_dir: &Path, name: &str, marker: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::create_dir_all(runtime_dir).expect("create runtime dir");
-    let script_path = runtime_dir.join(name);
-    fs::write(
-        &script_path,
-        format!(
-            "#!/bin/sh\nprintf 'runtime={marker} target=%s policy=%s\\n' \"$1\" \"$FRANKEN_NODE_REQUESTED_POLICY_MODE\"\n"
-        ),
-    )
-    .expect("write fake runtime");
-    let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script_path, permissions).expect("chmod fake runtime");
-}
-
 fn parse_json_stdout(output: &Output, context: &str) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
@@ -973,12 +959,12 @@ fn find_real_node_binary() -> Option<std::path::PathBuf> {
     for candidate in &candidates {
         let path = std::path::PathBuf::from(candidate);
         // Test that it's actually a working Node.js binary
-        if let Ok(output) = std::process::Command::new(&path).arg("--version").output() {
-            if output.status.success() {
-                let version = String::from_utf8_lossy(&output.stdout);
-                tracing::info!(node_path = ?path, version = %version.trim(), "found real Node.js binary");
-                return Some(path);
-            }
+        if let Ok(output) = std::process::Command::new(&path).arg("--version").output()
+            && output.status.success()
+        {
+            let version = String::from_utf8_lossy(&output.stdout);
+            tracing::info!(node_path = ?path, version = %version.trim(), "found real Node.js binary");
+            return Some(path);
         }
     }
     None

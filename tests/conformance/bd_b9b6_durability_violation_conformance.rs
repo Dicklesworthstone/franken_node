@@ -17,10 +17,10 @@
 //! - EVD-VIOLATION-004: Operation rejection events
 
 use frankenengine_node::observability::durability_violation::{
-    CausalEvent, CausalEventType, DurabilityHaltedError, DurabilityViolationDetector,
-    FailedArtifact, HaltPolicy, ProofContext, ViolationContext, event_codes, generate_bundle,
+    CausalEvent, CausalEventType, DurabilityViolationDetector, FailedArtifact, HaltPolicy,
+    ProofContext, ViolationContext, event_codes, generate_bundle,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::BTreeSet;
 
 // ── Conformance Case Framework ─────────────────────────────────────────
@@ -174,7 +174,7 @@ fn test_must_r_dvb_001_deterministic_bundle_generation() -> TestResult {
 
 fn test_must_r_dvb_002_causal_chain_preservation() -> TestResult {
     // INV-VIOLATION-CAUSAL: complete causal chain preserved in order
-    let mut context = ViolationContext {
+    let context = ViolationContext {
         events: vec![
             CausalEvent {
                 event_type: CausalEventType::GuardrailRejection,

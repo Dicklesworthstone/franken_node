@@ -19,13 +19,12 @@
 //! - **EVD-SPS-004**: SPS_004_ADVERSARIAL_GATE_PASS event emission
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 // Import the module under test
 use frankenengine_node::security::sybil_defense::{
-    AggregationMethod, INV_SPS_ADVERSARIAL, INV_SPS_AGGREGATION, INV_SPS_STAKE, INV_SPS_SYBIL,
-    SPS_001_ROBUST_AGGREGATION, SPS_002_STAKE_WEIGHTED, SPS_003_SYBIL_DETECTED,
-    SPS_004_ADVERSARIAL_GATE_PASS, StakeWeighter, SybilDefenseError, SybilDetector,
+    AggregationMethod, INV_SPS_ADVERSARIAL, SPS_001_ROBUST_AGGREGATION, SPS_002_STAKE_WEIGHTED,
+    SPS_003_SYBIL_DETECTED, SPS_004_ADVERSARIAL_GATE_PASS, StakeWeighter, SybilDetector,
     TrustAggregator, TrustNode, TrustSignal,
 };
 
@@ -371,7 +370,7 @@ fn test_stake_weight_boundaries() -> TestResult {
 
 fn test_sybil_influence_containment() -> TestResult {
     let weighter = StakeWeighter::default();
-    let mut detector = SybilDetector::default();
+    let detector = SybilDetector::default();
 
     // Create 5 honest established nodes
     let mut honest_nodes = BTreeMap::new();
