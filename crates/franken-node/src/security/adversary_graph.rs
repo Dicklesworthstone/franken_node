@@ -2564,11 +2564,20 @@ mod adversary_graph_comprehensive_attack_resistance_and_boundary_tests {
                         "Precision should not degrade to non-finite at iteration {}",
                         i
                     );
+                    // Integer Beta model: a 1e-12 likelihood at weight 1
+                    // rounds to (0 successes, 1 failure), so alpha stays at
+                    // the weak prior's 1 while beta grows — the posterior
+                    // after i+1 observations is exactly 1/(11 + i). The old
+                    // `< 1e-6` bound was unreachable in 100k iterations and
+                    // asserted a model this code never had.
+                    let expected = 1.0 / (11.0 + i as f64);
                     assert!(
-                        posterior.posterior < 1e-6,
-                        "Many tiny likelihoods should keep posterior very low at iteration {}: {}",
+                        (posterior.posterior - expected).abs() < 1e-9,
+                        "Tiny likelihoods must decay the posterior as 1/(11+i); \
+                         iteration {}: got {}, expected {}",
                         i,
-                        posterior.posterior
+                        posterior.posterior,
+                        expected
                     );
                 }
             }
