@@ -64,4 +64,5 @@ jobs:
           # snapshots; drift must be re-blessed deliberately via
           # `cargo insta review` after verifying the surface change intent.
           cargo test -p frankenengine-node --features test-support \
-            --test cli_subcommand_goldens
+            --test cli_subcommand_goldens \
+            --test cli_error_goldens
