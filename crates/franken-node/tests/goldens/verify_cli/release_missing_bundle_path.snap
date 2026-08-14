@@ -1,0 +1,10 @@
+---
+source: crates/franken-node/tests/cli_error_goldens.rs
+---
+error: the following required arguments were not provided:
+  --key-dir <KEY_DIR>
+  <RELEASE_PATH>
+
+Usage: franken-node verify release --key-dir <KEY_DIR> <RELEASE_PATH>
+
+For more information, try '--help'.

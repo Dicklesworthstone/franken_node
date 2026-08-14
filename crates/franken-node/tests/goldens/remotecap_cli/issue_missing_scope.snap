@@ -1,0 +1,10 @@
+---
+source: crates/franken-node/tests/cli_error_goldens.rs
+---
+error: the following required arguments were not provided:
+  --scope <SCOPE>
+  --endpoint <ENDPOINT_PREFIXES>
+
+Usage: franken-node remotecap issue --scope <SCOPE> --endpoint <ENDPOINT_PREFIXES>
+
+For more information, try '--help'.

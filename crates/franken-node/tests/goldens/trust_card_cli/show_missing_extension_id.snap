@@ -1,0 +1,9 @@
+---
+source: crates/franken-node/tests/cli_error_goldens.rs
+---
+error: the following required arguments were not provided:
+  <EXTENSION_ID>
+
+Usage: franken-node trust-card show <EXTENSION_ID>
+
+For more information, try '--help'.

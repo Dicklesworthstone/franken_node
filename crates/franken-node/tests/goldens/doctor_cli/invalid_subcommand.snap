@@ -1,0 +1,8 @@
+---
+source: crates/franken-node/tests/cli_error_goldens.rs
+---
+error: unrecognized subcommand 'invalid'
+
+Usage: franken-node doctor [OPTIONS] [COMMAND]
+
+For more information, try '--help'.

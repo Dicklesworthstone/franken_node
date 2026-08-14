@@ -1,0 +1,10 @@
+---
+source: crates/franken-node/tests/cli_error_goldens.rs
+---
+error: unexpected argument '--limit' found
+
+  tip: to pass '--limit' as a value, use '-- --limit'
+
+Usage: franken-node registry search [OPTIONS] <QUERY>
+
+For more information, try '--help'.

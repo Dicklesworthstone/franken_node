@@ -1,0 +1,8 @@
+---
+source: crates/franken-node/tests/cli_error_goldens.rs
+---
+error: unexpected argument '--format' found
+
+Usage: franken-node fleet status [OPTIONS]
+
+For more information, try '--help'.
