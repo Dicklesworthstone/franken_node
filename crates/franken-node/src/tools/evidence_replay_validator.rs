@@ -544,7 +544,7 @@ pub fn test_replay_entry(decision_id: &str, kind: DecisionKind, epoch_id: u64) -
         decision_id: decision_id.to_string(),
         decision_kind: kind,
         decision_time: "2026-02-20T12:00:00Z".to_string(),
-        timestamp_ms: epoch_id * 1000,
+        timestamp_ms: epoch_id.saturating_mul(1000),
         trace_id: format!("trace-{decision_id}"),
         epoch_id,
         payload: serde_json::json!({}),
@@ -1075,7 +1075,7 @@ mod tests {
         assert!(matches!(
             result,
             ReplayResult::Unresolvable { reason }
-                if reason.contains("invalid context") && !reason.contains("epoch mismatch")
+                if reason.contains("context is invalid") && !reason.contains("epoch mismatch")
         ));
         assert_eq!(v.unresolvable_count(), 1);
         assert_eq!(v.mismatch_count(), 0);

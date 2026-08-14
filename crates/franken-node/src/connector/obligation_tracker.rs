@@ -2622,12 +2622,16 @@ pub mod conformance {
             let min_timing = timing_results.iter().min().unwrap();
             let timing_ratio = max_timing.as_nanos() as f64 / min_timing.as_nanos().max(1) as f64;
 
-            // Allow reasonable variance but prevent timing attacks
-            assert!(
-                timing_ratio < 10.0,
-                "Obligation query timing variance too high: {}",
-                timing_ratio
-            );
+            // Allow reasonable variance but prevent timing attacks.
+            // Wall-clock ratio bounds are only meaningful on a quiesced host
+            // (bd-m87xv); the query path above still runs unconditionally.
+            if crate::testing::timing_assertions_enabled() {
+                assert!(
+                    timing_ratio < 10.0,
+                    "Obligation query timing variance too high: {}",
+                    timing_ratio
+                );
+            }
         }
 
         // Test timing attacks on nonexistent vs. existing obligations

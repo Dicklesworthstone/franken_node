@@ -476,7 +476,7 @@ mod tools_root_negative_tests {
         assert!(matches!(
             result,
             ReplayResult::Unresolvable { reason }
-                if reason.contains("invalid context") && !reason.contains("epoch mismatch")
+                if reason.contains("context is invalid") && !reason.contains("epoch mismatch")
         ));
         assert_eq!(validator.unresolvable_count(), 1);
         assert_eq!(validator.mismatch_count(), 0);

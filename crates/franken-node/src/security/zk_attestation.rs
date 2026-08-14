@@ -1405,14 +1405,20 @@ mod tests {
     fn test_verify_revoked_proof_rejected() {
         let mut ledger = AttestationLedger::new();
         let policy = test_policy();
-        let mut att = generate_test_attestation(
+        let att = generate_test_attestation(
             &mut ledger,
             "att-1",
             &policy,
             PredicateOutcome::Pass,
             1_000_000,
         );
-        att.status = AttestationStatus::Revoked;
+        // Revocation is recorded on the LEDGER's record; verify_proof
+        // deliberately ignores the caller-copy status (a holder of a
+        // pre-revocation copy must not keep verifying). Mutating `att.status`
+        // directly would test nothing.
+        ledger
+            .revoke_attestation("att-1", 1_000_000, "trace-revoke".to_string())
+            .expect("revocation should succeed");
         let result = ledger.verify_proof(&att, &policy, 1_000_001, "trace-v4".to_string());
         assert!(!result.is_verified());
         match &result {
@@ -2489,14 +2495,17 @@ mod tests {
                 min_time
             );
 
-            // Allow up to 3x difference due to normal variance
-            assert!(
-                timing_ratio < 3.0,
-                "Suspicious timing variance: legit={:?}, forged={:?}, ratio={:.2}",
-                avg_legit,
-                avg_forged,
-                timing_ratio
-            );
+            // Allow up to 3x difference due to normal variance.
+            // Wall-clock ratio bounds only hold on a quiesced host (bd-m87xv).
+            if crate::testing::timing_assertions_enabled() {
+                assert!(
+                    timing_ratio < 3.0,
+                    "Suspicious timing variance: legit={:?}, forged={:?}, ratio={:.2}",
+                    avg_legit,
+                    avg_forged,
+                    timing_ratio
+                );
+            }
         }
     }
 

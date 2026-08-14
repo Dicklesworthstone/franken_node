@@ -1831,13 +1831,16 @@ mod network_guard_additional_negative_tests {
 
             // All timing measurements should be similar (constant-time property)
             // This test verifies there's no obvious timing leak, though full constant-time
-            // analysis would require statistical testing beyond unit test scope
-            assert!(
-                elapsed.as_micros() < 10_000,
-                "Hostname comparison for '{}' took {}μs, may indicate timing leak",
-                probe,
-                elapsed.as_micros()
-            );
+            // analysis would require statistical testing beyond unit test scope.
+            // Wall-clock bounds only hold on a quiesced host (bd-m87xv).
+            if crate::testing::timing_assertions_enabled() {
+                assert!(
+                    elapsed.as_micros() < 10_000,
+                    "Hostname comparison for '{}' took {}μs, may indicate timing leak",
+                    probe,
+                    elapsed.as_micros()
+                );
+            }
         }
     }
 

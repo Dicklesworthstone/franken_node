@@ -2121,7 +2121,9 @@ mod tests {
         let medium_payload = "b".repeat(1000);
         let large_payload = "c".repeat(MAX_EVIDENCE_PAYLOAD_BYTES);
         let zeros_payload = "\x00".repeat(50_000);
-        let ones_payload = String::from_utf8_lossy(&vec![0xFF; 50_000]).into_owned();
+        // 0xFF bytes lossy-convert to U+FFFD (3 bytes each), so 20k input
+        // bytes stay under the 64 KiB evidence-payload byte cap.
+        let ones_payload = String::from_utf8_lossy(&vec![0xFF; 20_000]).into_owned();
         let pattern_payload = (0..10_000)
             .map(|i| (i % 256) as u8)
             .map(|b| format!("{:02x}", b))
@@ -3734,7 +3736,12 @@ mod staking_governance_boundary_negative_tests {
                 "payload",
                 "reporter",
             ),
-            ("evidence_payload", "desc", over_payload.as_str(), "reporter"),
+            (
+                "evidence_payload",
+                "desc",
+                over_payload.as_str(),
+                "reporter",
+            ),
             (
                 "collector_identity",
                 "desc",

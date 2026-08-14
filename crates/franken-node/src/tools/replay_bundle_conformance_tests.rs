@@ -424,10 +424,15 @@ fn test_integrity_validation_edge_cases() {
     bundle.integrity_hash = "tampered".to_string();
     assert!(!validate_bundle_integrity(&bundle).unwrap());
 
-    // Reset and tamper with timeline
+    // Reset and tamper with timeline. The bundle id is derived from the
+    // canonical timeline (self-anchoring evidence), so timeline tamper
+    // surfaces as a typed BundleIdMismatch error, not a false verdict.
     bundle = generate_replay_bundle("INC-INTEGRITY-002", &events).unwrap();
     bundle.timeline[0].payload = serde_json::json!({"tampered": true});
-    assert!(!validate_bundle_integrity(&bundle).unwrap());
+    assert!(matches!(
+        validate_bundle_integrity(&bundle),
+        Err(ReplayBundleError::BundleIdMismatch)
+    ));
 
     // Reset and tamper with manifest
     bundle = generate_replay_bundle("INC-INTEGRITY-003", &events).unwrap();

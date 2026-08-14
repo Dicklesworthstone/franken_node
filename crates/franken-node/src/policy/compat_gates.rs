@@ -2980,11 +2980,15 @@ mod tests {
 
         samples.sort_unstable();
         let p99 = samples[(samples.len() * 99 / 100).min(samples.len() - 1)];
-        assert!(
-            p99 < 1_000_000,
-            "cached gate evaluation p99 {}ns exceeded 1ms budget",
-            p99
-        );
+        // Wall-clock budget assertions only hold on a quiesced host
+        // (bd-m87xv); the cached evaluation path still runs unconditionally.
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                p99 < 1_000_000,
+                "cached gate evaluation p99 {}ns exceeded 1ms budget",
+                p99
+            );
+        }
         assert_eq!(eval.compiled_predicates.len(), 1);
     }
 

@@ -1041,6 +1041,11 @@ mod tests {
     fn content_hash_changes_with_gate_results() {
         let mut sec = make_passing_security_measurements();
         sec[0].score = 0.75;
+        // Keep the confidence interval containing the score: is_valid()
+        // rejects a measurement whose score sits outside its own CI, which
+        // would fail the gate for BOTH configs and defeat this test.
+        sec[0].confidence_interval.lower = 0.70;
+        sec[0].confidence_interval.upper = 0.80;
         let score = sec[0].score;
         sec[0].raw_data.insert("mean".to_string(), score);
         let trust = make_passing_trust_measurements();

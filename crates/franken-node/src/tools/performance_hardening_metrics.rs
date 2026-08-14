@@ -233,18 +233,9 @@ impl PerformanceHardeningMetrics {
         trace_id: &str,
     ) -> Result<String, String> {
         // Validate percentile ordering
-        if !metric.baseline.is_ordered() || !metric.hardened.is_ordered() {
-            self.log(
-                event_codes::PHM_ERR_INVALID_METRIC,
-                trace_id,
-                serde_json::json!({
-                    "metric_id": &metric.metric_id,
-                    "reason": "percentiles not ordered (p50 <= p95 <= p99)",
-                }),
-            );
-            return Err("Percentiles must be ordered: p50 <= p95 <= p99".to_string());
-        }
-
+        // Finite-ness is checked before ordering: NaN makes every ordering
+        // comparison false, which would misreport a non-finite metric as
+        // "not ordered" instead of naming the actual defect.
         if !metric.cold_start_ms.is_finite()
             || !metric.warm_start_ms.is_finite()
             || !metric.baseline.p50_ms.is_finite()
@@ -283,6 +274,18 @@ impl PerformanceHardeningMetrics {
                 }),
             );
             return Err("All metric fields must be non-negative".to_string());
+        }
+
+        if !metric.baseline.is_ordered() || !metric.hardened.is_ordered() {
+            self.log(
+                event_codes::PHM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({
+                    "metric_id": &metric.metric_id,
+                    "reason": "percentiles not ordered (p50 <= p95 <= p99)",
+                }),
+            );
+            return Err("Percentiles must be ordered: p50 <= p95 <= p99".to_string());
         }
 
         if metric.sample_count == 0 {

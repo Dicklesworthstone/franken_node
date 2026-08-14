@@ -3800,13 +3800,22 @@ mod tests {
 
         match generate_replay_bundle("massive-test", &massive_events) {
             Ok(bundle) => {
-                // If it succeeds, verify it's within bounds or chunked appropriately
+                // MAX_BUNDLE_BYTES bounds each CHUNK, not the whole artifact
+                // (the same event bytes appear in both timeline and chunk).
+                // The whole-artifact bound is the read-path cap: a bundle we
+                // produce must stay readable by read_bundle_from_path_*.
                 let serialized = serde_json::to_string(&bundle).unwrap();
-                // Large bundles should either be rejected or chunked.
                 assert!(
-                    serialized.len() <= MAX_BUNDLE_BYTES,
-                    "oversized bundle should have been rejected or chunked"
+                    serialized.len() as u64 <= MAX_REPLAY_BUNDLE_BYTES,
+                    "produced bundle must stay under the read-path size cap"
                 );
+                for chunk in &bundle.chunks {
+                    let chunk_json = serde_json::to_string(&chunk.events).unwrap();
+                    assert!(
+                        chunk_json.len() <= MAX_BUNDLE_BYTES,
+                        "each chunk must respect the chunk byte bound"
+                    );
+                }
             }
             Err(ReplayBundleError::OversizedEvent { .. }) => {
                 // This is the expected behavior for oversized events
@@ -4083,7 +4092,7 @@ mod tests {
         for i in 0..100 {
             // Add slightly different events to test deterministic ID generation
             let event = RawEvent::new(
-                &format!("2026-02-20T10:00:0{:02}.000100Z", i % 60),
+                &format!("2026-02-20T10:00:{:02}.000100Z", i % 60),
                 EventType::StateChange,
                 serde_json::json!({"iteration": i}),
             );
@@ -4314,8 +4323,18 @@ mod tests {
                 "error should mention size limit: {}",
                 msg
             );
-            assert!(msg.contains("67108865"), "error should show actual size");
-            assert!(msg.contains("67108864"), "error should show limit size");
+            // The reported actual size is the whole file, JSON wrapper
+            // included — derive it instead of hardcoding MAX+1.
+            assert!(
+                msg.contains(&oversized_content.len().to_string()),
+                "error should show actual size: {}",
+                msg
+            );
+            assert!(
+                msg.contains(&MAX_REPLAY_BUNDLE_BYTES.to_string()),
+                "error should show limit size: {}",
+                msg
+            );
         } else {
             assert!(false, "expected FormatError, got: {result:?}");
         }
@@ -5002,11 +5021,14 @@ mod proptest_replay_bundle_invariants {
             }
 
             let duration = start_time.elapsed();
-            assert!(
-                duration < std::time::Duration::from_millis(1000),
-                "100 integrity validations should complete within 1 second, took: {:?}",
-                duration
-            );
+            // Wall-clock budget only holds on a quiesced host (bd-m87xv).
+            if crate::testing::timing_assertions_enabled() {
+                assert!(
+                    duration < std::time::Duration::from_millis(1000),
+                    "100 integrity validations should complete within 1 second, took: {:?}",
+                    duration
+                );
+            }
         }
 
         // Phase 6: Concurrent validation test

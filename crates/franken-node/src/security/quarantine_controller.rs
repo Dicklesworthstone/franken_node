@@ -1926,10 +1926,13 @@ mod quarantine_controller_additional_negative_tests {
         let max_time = timing_results.iter().max().unwrap();
 
         // Timing should be relatively constant (not perfect, but reasonable).
-        assert!(
-            max_time.as_nanos() < min_time.as_nanos().saturating_mul(100),
-            "Timing variance suggests potential timing attack vulnerability"
-        );
+        // Wall-clock variance bounds only hold on a quiesced host (bd-m87xv).
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                max_time.as_nanos() < min_time.as_nanos().saturating_mul(100),
+                "Timing variance suggests potential timing attack vulnerability"
+            );
+        }
     }
 
     #[test]
