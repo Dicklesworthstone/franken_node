@@ -387,7 +387,8 @@ fn test_selective_reporting_triggers_slashing() {
         "attestation-id=att-001;dims=1;min=3",
         "integration-test",
         1_700_000_500,
-    );
+    )
+    .unwrap();
     let event = ledger
         .slash(stake_id, evidence, 1_700_000_600)
         .expect("slash ok");
@@ -426,7 +427,8 @@ fn test_slashed_stake_redistributed() {
         "details",
         "integration",
         1_700_000_500,
-    );
+    )
+    .unwrap();
     let event = ledger.slash(stake, evidence, 1_700_000_600).unwrap();
     let post = ledger.get_account("publisher-redist").unwrap().balance;
     debug!(pre, post, slashed = event.slash_amount, "slash bookkeeping");
@@ -465,7 +467,8 @@ fn test_total_stake_conserved_across_ops() {
         "payload-x",
         "integration",
         1_700_000_020,
-    );
+    )
+    .unwrap();
     let _event = ledger.slash(s1, evidence, 1_700_000_030).unwrap();
     assert_stake_conservation(&ledger, publisher, "after_slash");
 
@@ -521,7 +524,8 @@ fn test_withdrawal_lock_after_slash() {
         "payload",
         "integration",
         1_700_000_500,
-    );
+    )
+    .unwrap();
     ledger.slash(stake, evidence, 1_700_000_600).unwrap();
 
     let err = ledger
@@ -579,7 +583,8 @@ fn test_appeal_window_extends_slashing_deadline() {
         "evidence",
         "integration",
         1_700_000_500,
-    );
+    )
+    .unwrap();
     let event = ledger.slash(stake, evidence, 1_700_000_600).unwrap();
     let appeal = ledger
         .file_appeal(
@@ -660,7 +665,8 @@ fn test_full_pipeline_with_tracing() {
         "evidence-pipeline",
         "integration",
         1_700_000_900,
-    );
+    )
+    .unwrap();
     let _ev = ledger.slash(stake, evidence, 1_700_001_000).unwrap();
     assert_stake_conservation(&ledger, publisher, "pipeline_after_slash");
 

@@ -4,9 +4,9 @@ pub mod staking_governance;
 mod tests {
     use super::staking_governance::{
         CapabilityStakeGate, ERR_STAKE_ALREADY_SLASHED, ERR_STAKE_INSUFFICIENT,
-        ERR_STAKE_INVALID_TRANSITION, ERR_STAKE_NOT_FOUND, ERR_STAKE_WITHDRAWAL_BLOCKED, RiskTier,
-        SlashEvidence, StakeId, StakePolicy, StakeState, StakingError, StakingLedger, TierPolicy,
-        ViolationType,
+        ERR_STAKE_INVALID_EVIDENCE, ERR_STAKE_INVALID_TRANSITION, ERR_STAKE_NOT_FOUND,
+        ERR_STAKE_WITHDRAWAL_BLOCKED, MAX_COLLECTOR_IDENTITY_BYTES, RiskTier, SlashEvidence,
+        StakeId, StakePolicy, StakeState, StakingError, StakingLedger, TierPolicy, ViolationType,
     };
     use std::collections::BTreeMap;
 
@@ -18,6 +18,7 @@ mod tests {
             "collector-A",
             100,
         )
+        .expect("test evidence should be valid")
     }
 
     fn low_stake_ledger() -> (StakingLedger, StakeId) {
@@ -613,7 +614,8 @@ mod tests {
                 payload,
                 &format!("collector-{}", idx),
                 100 + idx as u64,
-            );
+            )
+            .expect("all payloads here are under the evidence caps");
 
             let result = ledger.slash(stake_id, malicious_evidence, 100 + idx as u64);
 
@@ -833,7 +835,8 @@ mod tests {
                 payload,
                 &format!("collector-{}", idx),
                 100 + idx as u64,
-            );
+            )
+            .expect("hash-collision payloads are under the evidence caps");
 
             match ledger.slash(stakes[idx], evidence, 100 + idx as u64) {
                 Ok(_) => {
@@ -1000,7 +1003,8 @@ mod tests {
                 "test payload",
                 "test-collector",
                 1000,
-            );
+            )
+            .unwrap();
 
             // Should be able to debug format without issues
             let debug_str = format!("{:?}", evidence);
@@ -1025,7 +1029,8 @@ mod tests {
                 "test payload",
                 "variant-collector",
                 2000,
-            );
+            )
+            .unwrap();
 
             let result = ledger.slash(stake_id, evidence, 2001);
             match result {
@@ -1321,28 +1326,46 @@ mod tests {
         let mut slash_attempts = 0;
 
         for collector_id in malicious_collector_ids {
-            let malicious_evidence = SlashEvidence::new(
+            // Empty/whitespace, control-character, and over-cap collector
+            // identities are rejected fail-closed at evidence construction
+            // (bd-slash-evidence-field-caps-f7d3v). Anything else must round-
+            // trip verbatim into the slash event.
+            let construction_rejected = collector_id.trim().is_empty()
+                || collector_id.chars().any(char::is_control)
+                || collector_id.len() > MAX_COLLECTOR_IDENTITY_BYTES;
+            let malicious_evidence = match SlashEvidence::new(
                 ViolationType::MaliciousCode,
                 "collector bypass test",
                 &format!("payload_{}", slash_attempts),
                 collector_id,
                 300 + slash_attempts,
-            );
+            ) {
+                Ok(evidence) => {
+                    assert!(
+                        !construction_rejected,
+                        "collector {collector_id:?} should have been rejected"
+                    );
+                    evidence
+                }
+                Err(StakingError::InvalidEvidenceField { field, code, .. }) => {
+                    assert!(
+                        construction_rejected,
+                        "collector {collector_id:?} was rejected unexpectedly"
+                    );
+                    assert_eq!(field, "collector_identity");
+                    assert_eq!(code, ERR_STAKE_INVALID_EVIDENCE);
+                    continue;
+                }
+                Err(other) => panic!("unexpected error for {collector_id:?}: {other:?}"),
+            };
 
             match ledger.slash(stake_id, malicious_evidence, 300 + slash_attempts) {
                 Ok(slash_event) => {
-                    // If accepted, collector ID should be stored safely
-                    assert!(
-                        !slash_event.evidence.collector_identity.is_empty()
-                            || collector_id.trim().is_empty(),
-                        "Non-empty collector ID should not become empty"
-                    );
-
-                    // Should not contain dangerous patterns in serialized form
-                    let serialized = format!("{:?}", slash_event.evidence);
-                    assert!(
-                        !serialized.contains("rm -rf"),
-                        "Should not contain shell commands"
+                    // Accepted collector identities are stored verbatim: no
+                    // silent truncation or mutation.
+                    assert_eq!(
+                        slash_event.evidence.collector_identity, collector_id,
+                        "Accepted collector ID must round-trip unmodified"
                     );
 
                     slash_attempts += 1;
@@ -1454,7 +1477,8 @@ mod tests {
                         "boundary payload",
                         "boundary-collector",
                         600,
-                    );
+                    )
+                    .unwrap();
 
                     match ledger.slash(stake_id, test_evidence, 601) {
                         Ok(slash_event) => {

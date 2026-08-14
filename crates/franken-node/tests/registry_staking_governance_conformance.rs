@@ -581,6 +581,7 @@ fn evidence(violation_type: ViolationType, payload: &str) -> SlashEvidence {
         "collector-conformance",
         1000,
     )
+    .expect("conformance evidence should be valid")
 }
 
 fn audit_entry<'a>(
@@ -636,7 +637,8 @@ fn staking_error_code(error: &StakingError) -> &'static str {
         | StakingError::WithdrawalBlocked { code, .. }
         | StakingError::AppealExpired { code, .. }
         | StakingError::InvalidTransition { code, .. }
-        | StakingError::DuplicateAppeal { code, .. } => code,
+        | StakingError::DuplicateAppeal { code, .. }
+        | StakingError::InvalidEvidenceField { code, .. } => code,
     }
 }
 

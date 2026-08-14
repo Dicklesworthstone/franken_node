@@ -10,7 +10,7 @@
 //   - Capability gate integration for stake-gated operations
 //
 // Event codes: STAKE-001 .. STAKE-007
-// Error codes: ERR_STAKE_INSUFFICIENT .. ERR_STAKE_DUPLICATE_APPEAL
+// Error codes: ERR_STAKE_INSUFFICIENT .. ERR_STAKE_INVALID_EVIDENCE
 // Invariants:  INV-STAKE-MINIMUM, INV-STAKE-SLASH-DETERMINISTIC,
 //              INV-STAKE-APPEAL-WINDOW, INV-STAKE-AUDIT-COMPLETE,
 //              INV-STAKE-NO-DOUBLE-SLASH, INV-STAKE-WITHDRAWAL-SAFE
@@ -42,6 +42,14 @@ const MAX_APPEAL_RECORDS: usize = 4096;
 const MAX_SLASH_HISTORY_PER_ACCOUNT: usize = 1024;
 /// Maximum stake records before terminal-state (Withdrawn/Expired) entries are evicted.
 const MAX_STAKE_RECORDS: usize = 8192;
+/// Maximum byte length of a slash-evidence description.
+pub const MAX_EVIDENCE_DESCRIPTION_BYTES: usize = 4096;
+/// Maximum byte length of a slash-evidence payload.
+pub const MAX_EVIDENCE_PAYLOAD_BYTES: usize = 65536;
+/// Maximum byte length of a slash-evidence collector identity.
+pub const MAX_COLLECTOR_IDENTITY_BYTES: usize = 512;
+/// Maximum byte length of an appeal reason.
+pub const MAX_APPEAL_REASON_BYTES: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -79,6 +87,7 @@ pub const ERR_STAKE_WITHDRAWAL_BLOCKED: &str = "ERR_STAKE_WITHDRAWAL_BLOCKED";
 pub const ERR_STAKE_APPEAL_EXPIRED: &str = "ERR_STAKE_APPEAL_EXPIRED";
 pub const ERR_STAKE_INVALID_TRANSITION: &str = "ERR_STAKE_INVALID_TRANSITION";
 pub const ERR_STAKE_DUPLICATE_APPEAL: &str = "ERR_STAKE_DUPLICATE_APPEAL";
+pub const ERR_STAKE_INVALID_EVIDENCE: &str = "ERR_STAKE_INVALID_EVIDENCE";
 
 // ---------------------------------------------------------------------------
 // Invariant tags
@@ -243,22 +252,61 @@ pub struct SlashEvidence {
 
 impl SlashEvidence {
     /// Create new evidence with a deterministic content hash.
+    ///
+    /// Field byte lengths are capped so a single evidence submission cannot
+    /// carry a multi-megabyte payload into the bounded ledger/audit log
+    /// (`push_bounded` caps record *count*, not per-record size).
     pub fn new(
         violation_type: ViolationType,
         description: &str,
         evidence_payload: &str,
         collector_identity: &str,
         collected_at: u64,
-    ) -> Self {
+    ) -> Result<Self, StakingError> {
+        if description.len() > MAX_EVIDENCE_DESCRIPTION_BYTES {
+            return Err(StakingError::InvalidEvidenceField {
+                field: "description",
+                reason: "exceeds maximum length",
+                code: ERR_STAKE_INVALID_EVIDENCE,
+            });
+        }
+        if evidence_payload.len() > MAX_EVIDENCE_PAYLOAD_BYTES {
+            return Err(StakingError::InvalidEvidenceField {
+                field: "evidence_payload",
+                reason: "exceeds maximum length",
+                code: ERR_STAKE_INVALID_EVIDENCE,
+            });
+        }
+        if collector_identity.len() > MAX_COLLECTOR_IDENTITY_BYTES {
+            return Err(StakingError::InvalidEvidenceField {
+                field: "collector_identity",
+                reason: "exceeds maximum length",
+                code: ERR_STAKE_INVALID_EVIDENCE,
+            });
+        }
+        if collector_identity.trim().is_empty() {
+            return Err(StakingError::InvalidEvidenceField {
+                field: "collector_identity",
+                reason: "must not be empty",
+                code: ERR_STAKE_INVALID_EVIDENCE,
+            });
+        }
+        if collector_identity.chars().any(char::is_control) {
+            return Err(StakingError::InvalidEvidenceField {
+                field: "collector_identity",
+                reason: "must not contain control characters",
+                code: ERR_STAKE_INVALID_EVIDENCE,
+            });
+        }
         let evidence_hash = compute_evidence_hash(evidence_payload);
-        Self {
+        Ok(Self {
             violation_type,
             description: description.to_string(),
             evidence_payload: evidence_payload.to_string(),
             evidence_hash,
             collector_identity: collector_identity.to_string(),
             collected_at,
-        }
+        })
     }
 }
 
@@ -472,6 +520,11 @@ pub enum StakingError {
         slash_id: u64,
         code: &'static str,
     },
+    InvalidEvidenceField {
+        field: &'static str,
+        reason: &'static str,
+        code: &'static str,
+    },
 }
 
 impl fmt::Display for StakingError {
@@ -510,6 +563,11 @@ impl fmt::Display for StakingError {
                 f,
                 "[{code}] duplicate appeal for {stake_id}, slash {slash_id}"
             ),
+            Self::InvalidEvidenceField {
+                field,
+                reason,
+                code,
+            } => write!(f, "[{code}] invalid evidence field {field}: {reason}"),
         }
     }
 }
@@ -986,6 +1044,13 @@ impl StakingLedger {
         reason: &str,
         current_time: u64,
     ) -> Result<AppealRecord, StakingError> {
+        if reason.len() > MAX_APPEAL_REASON_BYTES {
+            return Err(StakingError::InvalidEvidenceField {
+                field: "appeal_reason",
+                reason: "exceeds maximum length",
+                code: ERR_STAKE_INVALID_EVIDENCE,
+            });
+        }
         let record = self
             .state
             .stakes
@@ -1527,10 +1592,12 @@ mod tests {
             "test-collector",
             1000,
         )
+        .expect("test evidence should be valid")
     }
 
     fn test_evidence_unique(violation: ViolationType, payload: &str) -> SlashEvidence {
         SlashEvidence::new(violation, "test violation", payload, "test-collector", 1000)
+            .expect("test evidence should be valid")
     }
 
     #[test]
@@ -2938,7 +3005,8 @@ mod tests {
             .deposit("alice", 1000, RiskTier::Critical, 0)
             .unwrap();
 
-        let ev = SlashEvidence::new(ViolationType::PolicyViolation, "desc", "payload", "col", 1);
+        let ev = SlashEvidence::new(ViolationType::PolicyViolation, "desc", "payload", "col", 1)
+            .unwrap();
         let slash_event = ledger.slash(stake_id, ev, 2).unwrap();
         let slash_id = slash_event.slash_id;
 
@@ -3219,7 +3287,8 @@ mod security_verifier_economy_integration_tests {
             "evidence-payload-fraud",
             "collector-bot",
             2000,
-        );
+        )
+        .unwrap();
         let slash_event = ledger.slash(stake_id, evidence, 2000).unwrap();
         assert!(slash_event.slash_amount > 0);
 
@@ -3401,7 +3470,8 @@ mod security_verifier_economy_integration_tests {
             "payload-malicious",
             "security-bot",
             2000,
-        );
+        )
+        .unwrap();
         ledger.slash(stake_id, evidence, 2000).unwrap();
 
         // Gate now blocks (state=Slashed)
@@ -3540,7 +3610,8 @@ mod security_verifier_economy_integration_tests {
             "audit-evidence-payload",
             "audit-bot",
             2000,
-        );
+        )
+        .unwrap();
         ledger.slash(stake_id, evidence, 2000).unwrap();
         assert!(
             ledger
@@ -3627,7 +3698,8 @@ mod staking_governance_boundary_negative_tests {
             "evidence-payload",
             "test-reporter",
             1000,
-        );
+        )
+        .unwrap();
 
         let result = ledger.slash(StakeId(999_999), evidence, 1000);
 
@@ -3635,39 +3707,74 @@ mod staking_governance_boundary_negative_tests {
     }
 
     #[test]
-    fn negative_slash_evidence_rejects_empty_description() {
-        let evidence_result = SlashEvidence::new(
+    fn negative_slash_evidence_rejects_oversized_fields() {
+        // Each capped field, one byte over its cap, must be rejected with the
+        // stable ERR_STAKE_INVALID_EVIDENCE code.
+        let over_description = "d".repeat(MAX_EVIDENCE_DESCRIPTION_BYTES + 1);
+        let over_payload = "p".repeat(MAX_EVIDENCE_PAYLOAD_BYTES + 1);
+        let over_collector = "c".repeat(MAX_COLLECTOR_IDENTITY_BYTES + 1);
+        let cases = [
+            (
+                "description",
+                over_description.as_str(),
+                "payload",
+                "reporter",
+            ),
+            ("evidence_payload", "desc", over_payload.as_str(), "reporter"),
+            (
+                "collector_identity",
+                "desc",
+                "payload",
+                over_collector.as_str(),
+            ),
+        ];
+        for (expected_field, description, payload, collector) in cases {
+            let result = SlashEvidence::new(
+                ViolationType::FalseAttestation,
+                description,
+                payload,
+                collector,
+                1000,
+            );
+            match result {
+                Err(StakingError::InvalidEvidenceField { field, code, .. }) => {
+                    assert_eq!(field, expected_field);
+                    assert_eq!(code, ERR_STAKE_INVALID_EVIDENCE);
+                }
+                other => panic!("expected InvalidEvidenceField for {expected_field}: {other:?}"),
+            }
+        }
+        // At-cap values are accepted: the boundary is strictly greater-than.
+        SlashEvidence::new(
             ViolationType::FalseAttestation,
-            "", // Empty description
-            "evidence-payload",
-            "test-reporter",
+            &"d".repeat(MAX_EVIDENCE_DESCRIPTION_BYTES),
+            &"p".repeat(MAX_EVIDENCE_PAYLOAD_BYTES),
+            &"c".repeat(MAX_COLLECTOR_IDENTITY_BYTES),
             1000,
-        );
-
-        // FIXME(bd-yom8c): `SlashEvidence::validate()` was removed from the prod
-        // API with no equivalent — `SlashEvidence::new` no longer validates its
-        // fields, so an empty description is accepted. Original test asserted a
-        // validation failure containing "description". Needs rewrite once
-        // evidence validation is reintroduced.
-        let _ = &evidence_result;
+        )
+        .expect("at-cap fields must be accepted");
     }
 
     #[test]
     fn negative_slash_evidence_rejects_empty_reporter_id() {
-        let evidence_result = SlashEvidence::new(
-            ViolationType::FalseAttestation,
-            "Test description",
-            "evidence-payload",
-            "", // Empty reporter ID
-            1000,
-        );
-
-        // FIXME(bd-yom8c): `SlashEvidence::validate()` was removed from the prod
-        // API with no equivalent — `SlashEvidence::new` no longer validates its
-        // fields, so an empty collector/reporter identity is accepted. Original
-        // test asserted a validation failure containing "reporter". Needs
-        // rewrite once evidence validation is reintroduced.
-        let _ = &evidence_result;
+        for bad_collector in ["", "  ", "line\nbreak", "tab\tchar"] {
+            let result = SlashEvidence::new(
+                ViolationType::FalseAttestation,
+                "Test description",
+                "evidence-payload",
+                bad_collector,
+                1000,
+            );
+            match result {
+                Err(StakingError::InvalidEvidenceField { field, code, .. }) => {
+                    assert_eq!(field, "collector_identity");
+                    assert_eq!(code, ERR_STAKE_INVALID_EVIDENCE);
+                }
+                other => panic!(
+                    "expected InvalidEvidenceField for collector {bad_collector:?}: {other:?}"
+                ),
+            }
+        }
     }
 
     #[test]
@@ -3732,18 +3839,34 @@ mod staking_governance_boundary_negative_tests {
             "evidence-payload",
             "test-reporter",
             1500,
-        );
+        )
+        .unwrap();
         let slash_event = ledger
             .slash(stake_id, evidence, 1500)
             .expect("slash should succeed");
 
-        // FIXME(bd-yom8c): `file_appeal` does not validate the justification
-        // text — `StakingError::InvalidAppealJustification` has no equivalent in
-        // the current prod API, so an empty justification is accepted. Original
-        // test asserted an empty justification was rejected. Needs rewrite once
-        // justification validation is added.
-        let result = ledger.file_appeal(stake_id, slash_event.slash_id, "", 2000);
-        let _ = result;
+        // An empty justification is still accepted (no minimum-length rule),
+        // but an over-cap justification is rejected fail-closed with
+        // ERR_STAKE_INVALID_EVIDENCE (bd-slash-evidence-field-caps-f7d3v).
+        let over_cap = "j".repeat(MAX_APPEAL_REASON_BYTES + 1);
+        let result = ledger.file_appeal(stake_id, slash_event.slash_id, &over_cap, 2000);
+        assert!(
+            matches!(
+                result,
+                Err(StakingError::InvalidEvidenceField {
+                    field: "appeal_reason",
+                    code: ERR_STAKE_INVALID_EVIDENCE,
+                    ..
+                })
+            ),
+            "over-cap appeal reason must be rejected: {result:?}"
+        );
+
+        // At-cap justification passes the length gate and files the appeal.
+        let at_cap = "j".repeat(MAX_APPEAL_REASON_BYTES);
+        ledger
+            .file_appeal(stake_id, slash_event.slash_id, &at_cap, 2000)
+            .expect("at-cap appeal reason must be accepted");
     }
 
     #[test]
@@ -3764,7 +3887,8 @@ mod staking_governance_boundary_negative_tests {
             "evidence-payload",
             "test-reporter",
             1500,
-        );
+        )
+        .unwrap();
         let slash_event = ledger
             .slash(stake_id, evidence, 1500)
             .expect("slash should succeed");
@@ -3893,7 +4017,8 @@ mod staking_governance_boundary_negative_tests {
             "unauthorized file system access outside sandbox",
             "security-monitor-alpha",
             1735689600,
-        );
+        )
+        .unwrap();
 
         let slash_event = SlashEvent {
             slash_id: 9876,
@@ -4004,7 +4129,8 @@ mod staking_governance_boundary_negative_tests {
                 "eval() call with user input",
                 "static-analyzer",
                 1735689600,
-            ),
+            )
+            .unwrap(),
             slash_amount: 750,
             pre_balance: 2000,
             post_balance: 1250,
@@ -4034,7 +4160,8 @@ mod staking_governance_boundary_negative_tests {
             "Test payload for complete lifecycle",
             "test-collector",
             1100,
-        );
+        )
+        .unwrap();
 
         let slash_event = ledger
             .slash(stake_id, evidence, 1200)
@@ -4267,7 +4394,8 @@ mod staking_governance_boundary_negative_tests {
             "uptime_metrics: {failures: 12, threshold: 5}",
             "monitoring-system",
             2000,
-        );
+        )
+        .unwrap();
         let alice_slash = ledger
             .slash(alice_stake, alice_evidence, 2001)
             .expect("alice slash should succeed");
@@ -4279,7 +4407,8 @@ mod staking_governance_boundary_negative_tests {
             "signature_verification: {invalid_count: 3, threshold: 1}",
             "security-auditor",
             2100,
-        );
+        )
+        .unwrap();
         let bob_slash = ledger
             .slash(bob_stake, bob_evidence, 2101)
             .expect("bob slash should succeed");
@@ -4483,7 +4612,8 @@ mod staking_governance_boundary_negative_tests {
             "test payload for determinism",
             "collector-test",
             100,
-        );
+        )
+        .unwrap();
 
         // Test deterministic slashing across risk tiers
         let tiers = [
@@ -4685,7 +4815,8 @@ mod staking_governance_boundary_negative_tests {
                 &format!("evidence payload {}", i),
                 &format!("collector-{}", i),
                 1000 + i as u64,
-            );
+            )
+            .unwrap();
 
             // Only slash if stake has sufficient balance. Read the balance into
             // a copy first so the immutable borrow from `get_stake` is released
@@ -4761,7 +4892,8 @@ mod staking_governance_boundary_negative_tests {
                 "test payload",
                 "test-collector",
                 1000,
-            );
+            )
+            .unwrap();
 
             let penalty = engine
                 .compute_penalty(
@@ -4808,21 +4940,41 @@ mod staking_governance_boundary_negative_tests {
         }
 
         // Test evidence payload boundary cases. All entries are `String`.
+        // Payloads over MAX_EVIDENCE_PAYLOAD_BYTES are rejected at
+        // construction (bd-slash-evidence-field-caps-f7d3v); everything under
+        // the cap flows through penalty computation.
         let boundary_payloads = [
             "".to_string(),             // Empty payload
-            "a".repeat(100000),         // Very large payload
+            "a".repeat(100000),         // Over the 64 KiB cap: must be rejected
             "\x00\x01\x02".to_string(), // Binary data
             "🚀💻🔒".to_string(),       // Emoji payload
         ];
 
         for (i, payload) in boundary_payloads.iter().enumerate() {
-            let evidence = SlashEvidence::new(
+            let result = SlashEvidence::new(
                 ViolationType::PolicyViolation,
                 "boundary test",
                 payload,
                 "boundary-collector",
                 1000 + i as u64,
             );
+            let evidence = if payload.len() > MAX_EVIDENCE_PAYLOAD_BYTES {
+                assert!(
+                    matches!(
+                        result,
+                        Err(StakingError::InvalidEvidenceField {
+                            field: "evidence_payload",
+                            code: ERR_STAKE_INVALID_EVIDENCE,
+                            ..
+                        })
+                    ),
+                    "over-cap payload {} must be rejected",
+                    i
+                );
+                continue;
+            } else {
+                result.expect("under-cap payload should be accepted")
+            };
 
             let penalty = engine
                 .compute_penalty(&RiskTier::Medium, 1000, &evidence.evidence_hash)
