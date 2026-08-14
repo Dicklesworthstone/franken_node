@@ -1,0 +1,18 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+{
+  "entry_id": 12345,
+  "event_code": "STAKE-001",
+  "timestamp": [EPOCH],
+  "publisher_id": "acme-corp",
+  "stake_id": 67890,
+  "operation": "deposit",
+  "evidence_hash": null,
+  "outcome": "deposited 1000 for tier high",
+  "invariants_checked": [
+    "INV-STAKE-MINIMUM",
+    "INV-STAKE-AUDIT-COMPLETE"
+  ]
+}

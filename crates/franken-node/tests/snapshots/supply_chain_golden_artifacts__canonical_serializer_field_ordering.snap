@@ -1,0 +1,9 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+Field Ordering Canonicalization:
+Unordered Input Hex: [SIG]494d455354414d505d227d2c22637265617465645f6174223a225b54494d455354414d505d227d
+Ordered Input Hex: [SIG]3a227665726966696564222c2274696d657374616d70223a225b54494d455354414d505d227d7d
+Outputs Identical: false
+Canonical Length: 167

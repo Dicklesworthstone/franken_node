@@ -1,0 +1,5 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+{"bundle_id":"VB-6b3a088c4d8695a0","event_count":2,"artifact_count":2,"hardening_level":"test-hardening-level","epoch_id":1000,"timestamp_ms":2000,"causal_events":[{"type":"guardrail_rejection","timestamp_ms":1500,"description":"Test guardrail rejection event","evidence_ref":"EVD-TEST-001"},{"type":"integrity_check_failed","timestamp_ms":1800,"description":"Test integrity check failure","evidence_ref":null}],"failed_artifacts":[{"path":"objects/test-artifact-001","expected_hash":"deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678","actual_hash":"cafebabe1234567890abcdef1234567890abcdef1234567890abcdef12345678","reason":"Test hash mismatch"},{"path":"signatures/test-signature.sig","expected_hash":"facefeed1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12345678","actual_hash":"","reason":"Test missing artifact"}],"proof_context":{"failed_proofs":["proof-test-002"],"missing_proofs":["proof-test-001"],"passed_proofs":[]}}

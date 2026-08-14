@@ -1,0 +1,5 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+{"bundle_id":"VB-2b1611cd19a60561","event_count":1,"artifact_count":1,"hardening_level":"level with quotes and newlines","epoch_id":999,"timestamp_ms":7000,"causal_events":[{"type":"repair_failed","timestamp_ms":6500,"description":"Event with quotes and tabs and backslashes","evidence_ref":"EVD-escape-test"}],"failed_artifacts":[{"path":"path/with spaces/and quotes.bin","expected_hash":"1111111111111111111111111111111111111111111111111111111111111111","actual_hash":"2222222222222222222222222222222222222222222222222222222222222222","reason":"Reason with quotes and newlines and tabs"}],"proof_context":{"failed_proofs":[],"missing_proofs":[],"passed_proofs":[]}}

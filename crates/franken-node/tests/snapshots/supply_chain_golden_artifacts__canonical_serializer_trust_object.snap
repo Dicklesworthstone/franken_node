@@ -1,0 +1,11 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+Canonical Serialization Result:
+Object Type: trust_card
+Byte Length: 589
+Canonical Hex: [SIG][SIG][SIG][SIG][SIG]
+Schema Version: 1
+Domain Prefix: trust_object_v1
+Deterministic: true

@@ -1,0 +1,5 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+{"bundle_id":"VB-616359dc4b302f91","event_count":1,"artifact_count":0,"hardening_level":"critical","epoch_id":42,"timestamp_ms":5000,"causal_events":[{"type":"artifact_unverifiable","timestamp_ms":4500,"description":"Single test event","evidence_ref":null}],"failed_artifacts":[],"proof_context":{"failed_proofs":[],"missing_proofs":[],"passed_proofs":[]}}

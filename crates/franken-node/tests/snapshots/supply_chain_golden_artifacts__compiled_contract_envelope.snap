@@ -1,0 +1,18 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+{
+  "claim_id": "claim-12345",
+  "claim_text": "Comprehensive security audit passed with minor recommendations",
+  "evidence_uris": [
+    "urn:artifact:audit-report-2026-Q1",
+    "urn:artifact:penetration-test-results",
+    "urn:artifact:static-analysis-sarif"
+  ],
+  "source_id": "security-auditor-corp",
+  "compiled_at_epoch_ms": 60,
+  "contract_digest": "0ba1917f46e1549f725b277b2ea39973f79035e467cf5b427c01ac645a82f593",
+  "signer_id": "test-signer",
+  "signature": "530d82efe3b6351b25d0029208e137a8d3f0fd6e40891f47e57350dab9dd92cc"
+}

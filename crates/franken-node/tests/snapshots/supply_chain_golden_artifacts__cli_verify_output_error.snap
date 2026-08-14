@@ -1,0 +1,14 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+{
+  "command": "verify corpus",
+  "contract_version": "v1.0",
+  "schema_version": "verify-contract/v1",
+  "compat_version": null,
+  "verdict": "ERROR",
+  "status": "error",
+  "exit_code": 2,
+  "reason": "Corpus verification failed due to missing dependencies: libssl.so.1.1 not found"
+}

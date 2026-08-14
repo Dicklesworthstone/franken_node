@@ -194,10 +194,13 @@ fn canonical_external_claim() -> ExternalClaim {
     ExternalClaim {
         claim_id: "claim-12345".to_string(),
         claim_text: "Comprehensive security audit passed with minor recommendations".to_string(),
+        // `urn:` is one of the schemes normalize_evidence_uri accepts; the
+        // original `artifact://` scheme was never supported by the compiler's
+        // hardened allowlist (2c28f8552).
         evidence_uris: vec![
-            "artifact://audit-report-2026-Q1".to_string(),
-            "artifact://penetration-test-results".to_string(),
-            "artifact://static-analysis-sarif".to_string(),
+            "urn:artifact:audit-report-2026-Q1".to_string(),
+            "urn:artifact:penetration-test-results".to_string(),
+            "urn:artifact:static-analysis-sarif".to_string(),
         ],
         source_id: "security-auditor-corp".to_string(),
     }
@@ -353,7 +356,8 @@ fn golden_slash_event_receipt() {
         "unauthorized file system access outside sandbox",
         "security-monitor-alpha",
         1735689600,
-    );
+    )
+    .unwrap();
 
     let slash_event = SlashEvent {
         slash_id: 9876,
@@ -398,7 +402,8 @@ fn golden_registry_complete_lifecycle_receipt() {
         "Test payload for complete lifecycle",
         "test-collector",
         1100,
-    );
+    )
+    .unwrap();
 
     let slash_event = ledger
         .slash(stake_id, evidence, 1200)

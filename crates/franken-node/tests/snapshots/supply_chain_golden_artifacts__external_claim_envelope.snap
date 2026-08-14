@@ -1,0 +1,14 @@
+---
+source: crates/franken-node/tests/supply_chain_golden_artifacts.rs
+expression: scrubbed
+---
+{
+  "claim_id": "claim-12345",
+  "claim_text": "Comprehensive security audit passed with minor recommendations",
+  "evidence_uris": [
+    "urn:artifact:audit-report-2026-Q1",
+    "urn:artifact:penetration-test-results",
+    "urn:artifact:static-analysis-sarif"
+  ],
+  "source_id": "security-auditor-corp"
+}
