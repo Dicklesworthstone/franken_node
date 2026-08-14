@@ -2115,9 +2115,11 @@ mod tests {
             .deposit("timing-test-pub", 1000, RiskTier::Critical, 100)
             .unwrap();
 
-        // Create evidence with different hash characteristics to test timing
+        // Create evidence with different hash characteristics to test timing.
+        // The large payload sits exactly at the evidence cap: anything above
+        // MAX_EVIDENCE_PAYLOAD_BYTES is rejected at construction now.
         let medium_payload = "b".repeat(1000);
-        let large_payload = "c".repeat(100_000);
+        let large_payload = "c".repeat(MAX_EVIDENCE_PAYLOAD_BYTES);
         let zeros_payload = "\x00".repeat(50_000);
         let ones_payload = String::from_utf8_lossy(&vec![0xFF; 50_000]).into_owned();
         let pattern_payload = (0..10_000)
@@ -2461,11 +2463,9 @@ mod tests {
     fn negative_length_cast_overflow_boundary_protection() {
         // Test that any .len() conversions handle overflow gracefully
 
-        // Create evidence with extremely long payload to test length handling
+        // The raw hash helpers must handle arbitrarily large inputs even
+        // though SlashEvidence construction rejects payloads over the cap.
         let massive_payload = "X".repeat(1_000_000); // 1MB payload
-        let evidence = test_evidence_unique(ViolationType::MaliciousCode, &massive_payload);
-
-        // Verify evidence hash computation handles large inputs
         let hash1 = compute_evidence_hash(&massive_payload);
         let hash2 = compute_evidence_hash("small");
         assert_ne!(hash1, hash2);
@@ -2475,17 +2475,31 @@ mod tests {
         let penalty_hash = compute_penalty_hash(&hash1, 5000, 1000);
         assert!(!penalty_hash.is_empty());
 
-        // Verify the system can handle evidence with massive payloads
+        // A 1MB payload is over MAX_EVIDENCE_PAYLOAD_BYTES: construction is
+        // the boundary, so it must be rejected there rather than reaching the
+        // ledger (bd-slash-evidence-field-caps-f7d3v).
+        assert!(matches!(
+            SlashEvidence::new(
+                ViolationType::MaliciousCode,
+                "test violation",
+                &massive_payload,
+                "test-collector",
+                1000,
+            ),
+            Err(StakingError::InvalidEvidenceField { .. })
+        ));
+
+        // The largest admissible payload flows through slash end-to-end.
         let mut ledger = StakingLedger::new();
         let id = ledger
             .deposit("massive-evidence-test", 1000, RiskTier::Critical, 100)
             .unwrap();
-
-        // Should handle large evidence gracefully
+        let at_cap_payload = "X".repeat(MAX_EVIDENCE_PAYLOAD_BYTES);
+        let evidence = test_evidence_unique(ViolationType::MaliciousCode, &at_cap_payload);
         let result = ledger.slash(id, evidence, 200);
         assert!(
             result.is_ok(),
-            "System should handle large evidence payloads"
+            "System should handle at-cap evidence payloads"
         );
 
         // Test boundary conditions for string length handling
