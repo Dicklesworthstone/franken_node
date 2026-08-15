@@ -3563,21 +3563,27 @@ mod tests {
             vec![],
         );
 
-        // Verify receipt properties are preserved securely
+        // Verify receipt properties are preserved securely. Plain
+        // inconsistencies (without a trust-hash or evidence-integrity
+        // anomaly) map to WidenUncertainty by design; FailClosed is reserved
+        // for the integrity-anomaly classifications.
         assert!(!receipt.pass, "Receipt with inconsistencies should fail");
-        assert_eq!(receipt.disposition, DegradedDisposition::FailClosed);
+        assert_eq!(receipt.disposition, DegradedDisposition::WidenUncertainty);
 
         // JSON serialization should be safe
         let json_result = receipt.to_json();
         assert!(json_result.is_ok(), "JSON serialization should not fail");
 
         if let Ok(json) = json_result {
-            // Verify no injection vulnerabilities in JSON
+            // Field content is opaque and preserved verbatim; the JSON-level
+            // guarantee is that control characters are escaped so the
+            // injected bytes cannot corrupt the document structure.
             assert!(
-                !json.contains("FORGED"),
-                "Timestamp injection should not appear in JSON"
+                json.contains("\\u0000"),
+                "NUL must be escaped inside the string literal"
             );
-            assert!(!json.contains("\n"), "Newline injection should be escaped");
+            assert!(!json.contains('\0'), "raw NUL must never appear");
+            assert!(!json.contains('\n'), "raw newline must be escaped");
         }
 
         // Constant-time comparison of trust hashes should be used
@@ -3642,13 +3648,20 @@ mod tests {
             active_flags: Vec::new(),
         };
 
-        // JSON serialization should escape injection attempts
+        // JSON serialization escapes what RFC 8259 requires: the embedded
+        // double quote must be escaped so the payload cannot break out of
+        // its string literal. JSON does NOT HTML-escape content — neutering
+        // `alert('xss')` is the rendering consumer's contract, and the
+        // payload must survive verbatim inside the (escaped) string.
         let json = status.to_json().expect("serialization should succeed");
         assert!(
-            !json.contains("alert('xss')"),
-            "JavaScript injection should be escaped"
+            json.contains("\\\";alert('xss');//"),
+            "quote must be escaped so the payload stays inside its string literal"
         );
-        assert!(!json.contains("\";"), "Quote escape should be handled");
+        assert!(
+            !json.contains("Z\";alert"),
+            "raw unescaped quote must never appear"
+        );
 
         // Roundtrip should preserve structure but escape content
         let parsed: SafeModeStatus =
@@ -3779,13 +3792,14 @@ mod tests {
             malicious_inconsistencies.len()
         );
 
-        // Verify JSON serialization is secure
+        // Verify JSON serialization is well-formed under adversarial content.
+        // RFC 8259 does not require escaping BiDi formatting characters (they
+        // are legal unescaped JSON string content) — the guarantee is that
+        // control characters like NUL are escaped and the document parses.
         let json = receipt.to_json().expect("JSON should serialize");
-        assert!(
-            !json.contains("\u{202E}"),
-            "BiDi characters should be escaped"
-        );
-        assert!(!json.contains("\0"), "Null bytes should be handled");
+        assert!(!json.contains('\0'), "raw NUL bytes must be escaped");
+        serde_json::from_str::<serde_json::Value>(&json)
+            .expect("adversarial receipt must still serialize to valid JSON");
 
         // Trust state hash should use constant-time comparison
         assert!(
