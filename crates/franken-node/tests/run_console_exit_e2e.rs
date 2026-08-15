@@ -56,7 +56,7 @@ struct RunOutcome {
 #[test]
 fn private_native_session_worker_refuses_direct_cli_invocation() {
     let missing_nonce = Command::new(franken_node_bin())
-        .arg("__franken-native-session-worker-v4")
+        .arg("__franken-native-session-worker-v5")
         .stdin(Stdio::null())
         .output()
         .expect("invoke private worker marker directly");
@@ -75,7 +75,7 @@ fn private_native_session_worker_refuses_direct_cli_invocation() {
     {
         let forged_nonce = Command::new(franken_node_bin())
             .args([
-                "__franken-native-session-worker-v4",
+                "__franken-native-session-worker-v5",
                 "00000000-0000-4000-8000-000000000001",
             ])
             .stdin(Stdio::null())
@@ -315,7 +315,7 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
             "franken-engine",
             "--engine-bin",
             franken_node_bin(),
-            "--console-only",
+            "--json",
         ])
         .current_dir(dir.path())
         .env(
@@ -323,7 +323,7 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
             ENGINE_TIMEOUT.as_secs().to_string(),
         )
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
     let started = Instant::now();
@@ -383,6 +383,13 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
         .expect("timeout stderr pipe")
         .read_to_string(&mut stderr)
         .expect("read timeout diagnostic");
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("timeout stdout pipe")
+        .read_to_string(&mut stdout)
+        .expect("read timeout effect evidence");
     let elapsed = started.elapsed();
     let entered_before_timeout = dir.path().join("entered.marker").is_file();
     let callback_absent_before_release = !dir.path().join("after.marker").exists();
@@ -401,6 +408,68 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
     assert!(
         stderr.to_ascii_lowercase().contains("timed out"),
         "timeout must be typed and actionable: {stderr}"
+    );
+    let evidence: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "timeout must surface structured interrupted-effect evidence: {error}; stdout={stdout}; stderr={stderr}"
+        )
+    });
+    assert_eq!(
+        evidence.get("schema_version").and_then(Value::as_str),
+        Some("franken-node/native-effect-interruption-evidence/v1")
+    );
+    assert_eq!(
+        evidence.get("terminal_state").and_then(Value::as_str),
+        Some("timeout_indeterminate")
+    );
+    assert_eq!(
+        evidence.get("replay_certified").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        evidence.get("journal_complete").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        evidence
+            .get("interrupted_effect_count")
+            .and_then(Value::as_u64),
+        Some(1)
+    );
+    assert!(
+        evidence
+            .get("completed_effect_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            >= 1,
+        "the pre-timeout filesystem marker must have a returned-provider WAL pair: {evidence:#}"
+    );
+    let interrupted = evidence
+        .get("entries")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.get("effect_kind").and_then(Value::as_str) == Some("network_request")
+                    && entry.get("state").and_then(Value::as_str)
+                        == Some("interrupted_indeterminate")
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the admitted HTTP effect must remain explicitly indeterminate, never allowed/denied: {evidence:#}"
+            )
+        });
+    assert!(
+        interrupted
+            .get("request_hash")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| hash.starts_with("sha256:") && hash.len() == 71)
+    );
+    assert!(
+        interrupted.get("policy_outcome").is_none()
+            && interrupted.get("allowed").is_none()
+            && interrupted.get("denied").is_none(),
+        "interrupted WAL evidence must not masquerade as finalized ledger semantics"
     );
     assert!(
         elapsed >= ENGINE_TIMEOUT && elapsed < OUTER_DEADLINE,

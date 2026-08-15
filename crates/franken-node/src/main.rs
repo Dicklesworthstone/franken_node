@@ -9872,6 +9872,66 @@ fn emit_failed_run_effect_evidence(
     Ok(())
 }
 
+/// Surface the parent-owned WAL prefix for a native session killed at its
+/// deadline. This sibling artifact is deliberately not a HostEffectLedger:
+/// replay remains uncertified and every unmatched admission is explicitly
+/// `interrupted_indeterminate`.
+#[cfg(feature = "engine")]
+fn emit_interrupted_run_effect_evidence(
+    evidence: &ops::engine_dispatcher::NativeEffectInterruptionEvidence,
+    json: bool,
+    console_only: bool,
+) -> Result<()> {
+    if console_only {
+        return Ok(());
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(evidence)
+                .context("failed serializing interrupted-run host-effect evidence")?
+        );
+        return Ok(());
+    }
+    if evidence.terminal_state == "timeout_cleanup_unproven" {
+        println!(
+            "run timed out, but worker termination and quiescence were not proven; replay certification refused (terminal-state={}, provider-returned={}, interrupted={}, journal-complete={})",
+            evidence.terminal_state,
+            evidence.completed_effect_count,
+            evidence.interrupted_effect_count,
+            evidence.journal_complete
+        );
+    } else {
+        println!(
+            "run terminated with indeterminate host-effect state; replay certification refused (terminal-state={}, provider-returned={}, interrupted={}, journal-complete={})",
+            evidence.terminal_state,
+            evidence.completed_effect_count,
+            evidence.interrupted_effect_count,
+            evidence.journal_complete
+        );
+    }
+    for entry in &evidence.entries {
+        println!(
+            "  effect[{}] kind={} request_hash={} state={}",
+            entry.sequence,
+            entry.effect_kind,
+            entry.request_hash,
+            match entry.state {
+                ops::engine_dispatcher::NativeEffectWalState::ProviderReturned => {
+                    "provider_returned"
+                }
+                ops::engine_dispatcher::NativeEffectWalState::InterruptedIndeterminate => {
+                    "interrupted_indeterminate"
+                }
+            }
+        );
+    }
+    if let Some(error) = evidence.protocol_error.as_deref() {
+        println!("  journal_protocol_error={error}");
+    }
+    Ok(())
+}
+
 fn emit_run_completion_output(
     preflight: &RunPreFlightReport,
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
@@ -28318,6 +28378,16 @@ fn main() -> Result<()> {
                     {
                         emit_failed_run_effect_evidence(
                             failure.host_effect_ledger(),
+                            json,
+                            console_only,
+                        )?;
+                    }
+                    #[cfg(feature = "engine")]
+                    if let Some(interruption) =
+                        err.downcast_ref::<ops::engine_dispatcher::NativeRunInterruption>()
+                    {
+                        emit_interrupted_run_effect_evidence(
+                            interruption.effect_evidence(),
                             json,
                             console_only,
                         )?;

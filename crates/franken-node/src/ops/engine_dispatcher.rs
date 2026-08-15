@@ -95,13 +95,13 @@ const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
 /// before Clap so the worker can never recursively enter the public `run`
 /// command.
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v4";
+const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v5";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v4";
+const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v5";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V4\0";
+const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V5\0";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 4;
+const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 5;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
 #[cfg(feature = "engine")]
@@ -109,11 +109,28 @@ const NATIVE_SESSION_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 #[cfg(feature = "engine")]
+const NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES: usize = 1024;
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS: usize = 2048;
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_MAX_OUTPUT_STREAM_BYTES: usize = NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES
+    + NATIVE_SESSION_FRAME_HEADER_BYTES
+    + NATIVE_SESSION_MAX_RESPONSE_BYTES;
+#[cfg(feature = "engine")]
 const NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2);
+#[cfg(feature = "engine")]
+const NATIVE_EFFECT_WAL_SCHEMA: &str = "franken-node/native-effect-wal/v1";
+#[cfg(feature = "engine")]
+const NATIVE_EFFECT_INTERRUPTION_EVIDENCE_SCHEMA: &str =
+    "franken-node/native-effect-interruption-evidence/v1";
+#[cfg(feature = "engine")]
+const NATIVE_EFFECT_WAL_REQUEST_HASH_DOMAIN: &[u8] = b"franken-node.native-effect-wal.request.v1";
 #[cfg(all(feature = "engine", target_os = "linux"))]
 const NATIVE_SESSION_CONTAINMENT_STARTUP_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(2);
@@ -380,6 +397,32 @@ enum NativeSessionResponse {
         nonce: String,
         panic_message: String,
         cleanup_successful: bool,
+    },
+}
+
+/// Ordered worker-to-parent messages carried on the native-session response
+/// pipe. Host-effect admission is flushed before the provider call; completion
+/// is flushed only after that call returns. The final response remains a
+/// separate terminal message so a killed worker can leave a valid WAL prefix
+/// without manufacturing a normal completion response.
+#[cfg(feature = "engine")]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "message_type", rename_all = "snake_case")]
+enum NativeSessionOutputFrame {
+    HostEffectAdmitted {
+        schema_version: String,
+        nonce: String,
+        sequence: u64,
+        effect_kind: String,
+        request_hash: String,
+    },
+    HostEffectCompleted {
+        schema_version: String,
+        nonce: String,
+        sequence: u64,
+    },
+    Final {
+        response: Box<NativeSessionResponse>,
     },
 }
 
@@ -1093,6 +1136,405 @@ fn decode_native_session_frame<T: serde::de::DeserializeOwned>(
 }
 
 #[cfg(feature = "engine")]
+fn native_session_frame_extent(
+    frame: &[u8],
+    payload_cap: usize,
+) -> std::result::Result<(usize, usize), String> {
+    const VERSION_BYTES: usize = 4;
+    const LENGTH_BYTES: usize = 8;
+    let header_len = NATIVE_SESSION_FRAME_HEADER_BYTES;
+    if frame.len() < header_len {
+        return Err("native-session frame header was truncated".to_string());
+    }
+    if &frame[..NATIVE_SESSION_FRAME_MAGIC.len()] != NATIVE_SESSION_FRAME_MAGIC {
+        return Err("native-session frame magic mismatch".to_string());
+    }
+    let version_start = NATIVE_SESSION_FRAME_MAGIC.len();
+    let version_end = version_start + VERSION_BYTES;
+    let version = u32::from_be_bytes(
+        frame[version_start..version_end]
+            .try_into()
+            .map_err(|_| "native-session frame version was truncated".to_string())?,
+    );
+    if version != NATIVE_SESSION_PROTOCOL_VERSION {
+        return Err(format!(
+            "unsupported native-session protocol version {version}"
+        ));
+    }
+    let length_end = version_end + LENGTH_BYTES;
+    let payload_len = u64::from_be_bytes(
+        frame[version_end..length_end]
+            .try_into()
+            .map_err(|_| "native-session frame length was truncated".to_string())?,
+    );
+    let payload_len = usize::try_from(payload_len)
+        .map_err(|_| "native-session frame length does not fit usize".to_string())?;
+    if payload_len > payload_cap {
+        return Err(format!(
+            "native-session frame payload exceeded {payload_cap} bytes"
+        ));
+    }
+    let frame_len = header_len
+        .checked_add(payload_len)
+        .ok_or_else(|| "native-session frame length overflowed".to_string())?;
+    if frame.len() < frame_len {
+        return Err("native-session frame payload was truncated".to_string());
+    }
+    Ok((frame_len, payload_len))
+}
+
+#[cfg(feature = "engine")]
+struct ParsedNativeSessionOutput {
+    frames: Vec<NativeSessionOutputFrame>,
+    protocol_error: Option<String>,
+}
+
+#[cfg(feature = "engine")]
+fn parse_native_session_output(
+    output: &[u8],
+    allow_test_harness_noise: bool,
+) -> ParsedNativeSessionOutput {
+    let mut parsed = ParsedNativeSessionOutput {
+        frames: Vec::new(),
+        protocol_error: None,
+    };
+    let mut offset = if allow_test_harness_noise {
+        match output
+            .windows(NATIVE_SESSION_FRAME_MAGIC.len())
+            .position(|window| window == NATIVE_SESSION_FRAME_MAGIC)
+        {
+            Some(offset) => offset,
+            None => {
+                parsed.protocol_error =
+                    Some("native-session output frame magic was not found".to_string());
+                return parsed;
+            }
+        }
+    } else {
+        0
+    };
+
+    while offset < output.len() {
+        let remaining = &output[offset..];
+        if !remaining.starts_with(NATIVE_SESSION_FRAME_MAGIC) {
+            if !allow_test_harness_noise {
+                parsed.protocol_error =
+                    Some("native-session output stream had trailing bytes".to_string());
+            }
+            break;
+        }
+        let (frame_len, payload_len) =
+            match native_session_frame_extent(remaining, NATIVE_SESSION_MAX_RESPONSE_BYTES) {
+                Ok(extent) => extent,
+                Err(error) => {
+                    parsed.protocol_error = Some(error);
+                    break;
+                }
+            };
+        let frame = match decode_native_session_frame::<NativeSessionOutputFrame>(
+            &remaining[..frame_len],
+            NATIVE_SESSION_MAX_RESPONSE_BYTES,
+            false,
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                parsed.protocol_error = Some(error);
+                break;
+            }
+        };
+        let is_wal_event = matches!(
+            frame,
+            NativeSessionOutputFrame::HostEffectAdmitted { .. }
+                | NativeSessionOutputFrame::HostEffectCompleted { .. }
+        );
+        if is_wal_event && payload_len > NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES {
+            parsed.protocol_error = Some(format!(
+                "native-session effect WAL event exceeded {} bytes",
+                NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES
+            ));
+            break;
+        }
+        if is_wal_event
+            && parsed
+                .frames
+                .iter()
+                .filter(|frame| {
+                    matches!(
+                        frame,
+                        NativeSessionOutputFrame::HostEffectAdmitted { .. }
+                            | NativeSessionOutputFrame::HostEffectCompleted { .. }
+                    )
+                })
+                .count()
+                >= NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS
+        {
+            parsed.protocol_error = Some(format!(
+                "native-session effect WAL exceeded {} events",
+                NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS
+            ));
+            break;
+        }
+        parsed.frames.push(frame);
+        offset = match offset.checked_add(frame_len) {
+            Some(offset) => offset,
+            None => {
+                parsed.protocol_error =
+                    Some("native-session output stream offset overflowed".to_string());
+                break;
+            }
+        };
+    }
+
+    parsed
+}
+
+#[cfg(feature = "engine")]
+struct ReconciledNativeSessionOutput {
+    entries: Vec<NativeEffectWalEntry>,
+    response: Option<NativeSessionResponse>,
+    protocol_error: Option<String>,
+}
+
+#[cfg(feature = "engine")]
+fn reconcile_native_session_output(
+    parsed: ParsedNativeSessionOutput,
+    expected_nonce: &str,
+) -> ReconciledNativeSessionOutput {
+    let mut entries = Vec::<NativeEffectWalEntry>::new();
+    let mut response = None;
+    let parse_error = parsed.protocol_error;
+    let mut protocol_error = None;
+
+    fn set_error(slot: &mut Option<String>, message: String) {
+        if slot.is_none() {
+            *slot = Some(message);
+        }
+    }
+
+    for frame in parsed.frames {
+        if protocol_error.is_some() {
+            break;
+        }
+        if response.is_some() {
+            set_error(
+                &mut protocol_error,
+                "native-session output frame followed the final response".to_string(),
+            );
+            break;
+        }
+        match frame {
+            NativeSessionOutputFrame::HostEffectAdmitted {
+                schema_version,
+                nonce,
+                sequence,
+                effect_kind,
+                request_hash,
+            } => {
+                if schema_version != NATIVE_EFFECT_WAL_SCHEMA {
+                    set_error(
+                        &mut protocol_error,
+                        "native-session effect WAL schema mismatch".to_string(),
+                    );
+                    continue;
+                }
+                if !crate::security::constant_time::ct_eq(&nonce, expected_nonce) {
+                    set_error(
+                        &mut protocol_error,
+                        "native-session effect WAL nonce mismatch".to_string(),
+                    );
+                    continue;
+                }
+                let expected_sequence = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+                if sequence != expected_sequence {
+                    set_error(
+                        &mut protocol_error,
+                        format!(
+                            "native-session effect WAL admission sequence {sequence} did not match {expected_sequence}"
+                        ),
+                    );
+                    continue;
+                }
+                if entries.last().is_some_and(|entry| {
+                    entry.state == NativeEffectWalState::InterruptedIndeterminate
+                }) {
+                    set_error(
+                        &mut protocol_error,
+                        "native-session effect WAL admitted a second provider call before completion"
+                            .to_string(),
+                    );
+                    continue;
+                }
+                let valid_request_hash = request_hash.len() == 71
+                    && request_hash.starts_with("sha256:")
+                    && request_hash[7..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+                if effect_kind.trim().is_empty() || !valid_request_hash {
+                    set_error(
+                        &mut protocol_error,
+                        "native-session effect WAL admission metadata was invalid".to_string(),
+                    );
+                    continue;
+                }
+                entries.push(NativeEffectWalEntry {
+                    sequence,
+                    effect_kind,
+                    request_hash,
+                    state: NativeEffectWalState::InterruptedIndeterminate,
+                });
+            }
+            NativeSessionOutputFrame::HostEffectCompleted {
+                schema_version,
+                nonce,
+                sequence,
+            } => {
+                if schema_version != NATIVE_EFFECT_WAL_SCHEMA {
+                    set_error(
+                        &mut protocol_error,
+                        "native-session effect WAL schema mismatch".to_string(),
+                    );
+                    continue;
+                }
+                if !crate::security::constant_time::ct_eq(&nonce, expected_nonce) {
+                    set_error(
+                        &mut protocol_error,
+                        "native-session effect WAL nonce mismatch".to_string(),
+                    );
+                    continue;
+                }
+                let Some(entry) = usize::try_from(sequence)
+                    .ok()
+                    .and_then(|index| entries.get_mut(index))
+                else {
+                    set_error(
+                        &mut protocol_error,
+                        format!(
+                            "native-session effect WAL completion referenced unknown sequence {sequence}"
+                        ),
+                    );
+                    continue;
+                };
+                if entry.state != NativeEffectWalState::InterruptedIndeterminate {
+                    set_error(
+                        &mut protocol_error,
+                        format!(
+                            "native-session effect WAL sequence {sequence} completed more than once"
+                        ),
+                    );
+                    continue;
+                }
+                entry.state = NativeEffectWalState::ProviderReturned;
+            }
+            NativeSessionOutputFrame::Final {
+                response: final_response,
+            } => response = Some(*final_response),
+        }
+    }
+    if protocol_error.is_none() {
+        protocol_error = parse_error;
+    }
+
+    ReconciledNativeSessionOutput {
+        entries,
+        response,
+        protocol_error,
+    }
+}
+
+#[cfg(feature = "engine")]
+fn native_effect_interruption_evidence(
+    output: &[u8],
+    output_cap_exceeded: bool,
+    expected_nonce: &str,
+    allow_test_harness_noise: bool,
+) -> NativeEffectInterruptionEvidence {
+    let parsed = parse_native_session_output(output, allow_test_harness_noise);
+    let mut reconciled = reconcile_native_session_output(parsed, expected_nonce);
+    if output_cap_exceeded && reconciled.protocol_error.is_none() {
+        reconciled.protocol_error = Some(format!(
+            "native-session output exceeded the {}-byte cap",
+            NATIVE_SESSION_MAX_OUTPUT_STREAM_BYTES
+        ));
+    }
+    if reconciled.response.is_some() && reconciled.protocol_error.is_none() {
+        reconciled.protocol_error = Some(
+            "native-session final response was observed before timeout termination".to_string(),
+        );
+    }
+    let completed_effect_count = reconciled
+        .entries
+        .iter()
+        .filter(|entry| entry.state == NativeEffectWalState::ProviderReturned)
+        .count();
+    let interrupted_effect_count = reconciled
+        .entries
+        .iter()
+        .filter(|entry| entry.state == NativeEffectWalState::InterruptedIndeterminate)
+        .count();
+    NativeEffectInterruptionEvidence {
+        schema_version: NATIVE_EFFECT_INTERRUPTION_EVIDENCE_SCHEMA.to_string(),
+        session_nonce: expected_nonce.to_string(),
+        terminal_state: "timeout_indeterminate".to_string(),
+        replay_certified: false,
+        journal_complete: reconciled.protocol_error.is_none(),
+        journal_event_cap: NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS,
+        completed_effect_count,
+        interrupted_effect_count,
+        entries: reconciled.entries,
+        protocol_error: reconciled.protocol_error,
+    }
+}
+
+#[cfg(feature = "engine")]
+fn native_timeout_effect_evidence(
+    response_output: std::result::Result<(&[u8], bool), &str>,
+    cleanup_failure: Option<&str>,
+    expected_nonce: &str,
+    allow_test_harness_noise: bool,
+) -> NativeEffectInterruptionEvidence {
+    let (output, output_cap_exceeded, response_failure) = match response_output {
+        Ok((output, output_cap_exceeded)) => (output, output_cap_exceeded, None),
+        Err(error) => (&[][..], false, Some(error)),
+    };
+    let mut evidence = native_effect_interruption_evidence(
+        output,
+        output_cap_exceeded,
+        expected_nonce,
+        allow_test_harness_noise,
+    );
+    let parent_failure = cleanup_failure.or(response_failure);
+    if let Some(error) = parent_failure {
+        let previous = evidence.protocol_error.take();
+        evidence.protocol_error = Some(previous.map_or_else(
+            || format!("native-session timeout cleanup could not prove quiescence: {error}"),
+            |protocol_error| {
+                format!(
+                    "{protocol_error}; native-session timeout cleanup could not prove quiescence: {error}"
+                )
+            },
+        ));
+        evidence.terminal_state = "timeout_cleanup_unproven".to_string();
+        evidence.journal_complete = false;
+    }
+    evidence
+}
+
+#[cfg(feature = "engine")]
+fn native_effect_wal_request_hash(request: &HostIoRequest) -> std::result::Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let serialized = serde_json::to_vec(request)
+        .map_err(|error| format!("failed serializing native effect admission: {error}"))?;
+    let length = u64::try_from(serialized.len())
+        .map_err(|_| "native effect admission length does not fit u64".to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(NATIVE_EFFECT_WAL_REQUEST_HASH_DOMAIN);
+    hasher.update(length.to_be_bytes());
+    hasher.update(&serialized);
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+#[cfg(feature = "engine")]
 fn read_native_session_frame(
     reader: &mut impl Read,
     payload_cap: usize,
@@ -1581,6 +2023,229 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
     }
 }
 
+/// Worker-side writer for the parent-observed host-effect write-ahead stream.
+/// The cap reserves room for the completion marker before admitting an effect,
+/// so capacity exhaustion always refuses the provider call before execution.
+#[cfg(feature = "engine")]
+struct NativeEffectWalWriter {
+    sink: Box<dyn Write + Send>,
+    nonce: String,
+    next_sequence: u64,
+    emitted_events: usize,
+    emitted_bytes: usize,
+    failed: Option<String>,
+}
+
+#[cfg(feature = "engine")]
+impl std::fmt::Debug for NativeEffectWalWriter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeEffectWalWriter")
+            .field("nonce", &self.nonce)
+            .field("next_sequence", &self.next_sequence)
+            .field("emitted_events", &self.emitted_events)
+            .field("emitted_bytes", &self.emitted_bytes)
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "engine")]
+impl NativeEffectWalWriter {
+    fn new(nonce: String, sink: Box<dyn Write + Send>) -> Self {
+        Self {
+            sink,
+            nonce,
+            next_sequence: 0,
+            emitted_events: 0,
+            emitted_bytes: 0,
+            failed: None,
+        }
+    }
+
+    fn fail(&mut self, message: String) -> String {
+        if self.failed.is_none() {
+            self.failed = Some(message);
+        }
+        self.failed
+            .clone()
+            .unwrap_or_else(|| "native effect WAL failed".to_string())
+    }
+
+    fn write_frame(&mut self, frame: &NativeSessionOutputFrame) -> std::result::Result<(), String> {
+        if let Some(error) = self.failed.as_ref() {
+            return Err(error.clone());
+        }
+        if self.emitted_events >= NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS {
+            return Err(self.fail(format!(
+                "native effect WAL reached the {}-event cap",
+                NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS
+            )));
+        }
+        let encoded =
+            match encode_native_session_frame(frame, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES) {
+                Ok(encoded) => encoded,
+                Err(error) => return Err(self.fail(error)),
+            };
+        let new_total = self
+            .emitted_bytes
+            .checked_add(encoded.len())
+            .ok_or_else(|| "native effect WAL byte count overflowed".to_string())?;
+        if new_total > NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES {
+            return Err(self.fail(format!(
+                "native effect WAL reached the {}-byte cap",
+                NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES
+            )));
+        }
+        if let Err(error) = self
+            .sink
+            .write_all(&encoded)
+            .and_then(|()| self.sink.flush())
+        {
+            return Err(self.fail(format!(
+                "failed flushing native effect WAL to the parent: {error}"
+            )));
+        }
+        self.emitted_events = self.emitted_events.saturating_add(1);
+        self.emitted_bytes = new_total;
+        Ok(())
+    }
+
+    fn admit(&mut self, request: &HostIoRequest) -> std::result::Result<u64, String> {
+        if self.emitted_events.saturating_add(2) > NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS {
+            return Err(self.fail(format!(
+                "native effect WAL cannot reserve admission plus completion within the {}-event cap",
+                NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS
+            )));
+        }
+        let completion_reserve =
+            NATIVE_SESSION_FRAME_HEADER_BYTES + NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES;
+        if self
+            .emitted_bytes
+            .saturating_add(completion_reserve.saturating_mul(2))
+            > NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES
+        {
+            return Err(self.fail(format!(
+                "native effect WAL cannot reserve admission plus completion within the {}-byte cap",
+                NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES
+            )));
+        }
+        let sequence = self.next_sequence;
+        let frame = NativeSessionOutputFrame::HostEffectAdmitted {
+            schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+            nonce: self.nonce.clone(),
+            sequence,
+            effect_kind: request.kind().to_string(),
+            request_hash: native_effect_wal_request_hash(request)?,
+        };
+        self.write_frame(&frame)?;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(|| self.fail("native effect WAL sequence overflowed".to_string()))?;
+        Ok(sequence)
+    }
+
+    fn complete(&mut self, sequence: u64) -> std::result::Result<(), String> {
+        let expected = self.next_sequence.saturating_sub(1);
+        if sequence != expected || self.emitted_events.is_multiple_of(2) {
+            return Err(self.fail(format!(
+                "native effect WAL completion sequence {sequence} did not match pending sequence {expected}"
+            )));
+        }
+        let frame = NativeSessionOutputFrame::HostEffectCompleted {
+            schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+            nonce: self.nonce.clone(),
+            sequence,
+        };
+        self.write_frame(&frame)
+    }
+}
+
+#[cfg(feature = "engine")]
+#[derive(Clone, Debug)]
+struct NativeEffectWalEmitter {
+    writer: Arc<Mutex<NativeEffectWalWriter>>,
+}
+
+#[cfg(feature = "engine")]
+impl NativeEffectWalEmitter {
+    fn new(nonce: String, sink: Box<dyn Write + Send>) -> Self {
+        Self {
+            writer: Arc::new(Mutex::new(NativeEffectWalWriter::new(nonce, sink))),
+        }
+    }
+
+    fn admit(&self, request: &HostIoRequest) -> std::result::Result<u64, String> {
+        self.writer
+            .lock()
+            .map_err(|_| "native effect WAL mutex was poisoned".to_string())?
+            .admit(request)
+    }
+
+    fn complete(&self, sequence: u64) -> std::result::Result<(), String> {
+        self.writer
+            .lock()
+            .map_err(|_| "native effect WAL mutex was poisoned".to_string())?
+            .complete(sequence)
+    }
+}
+
+/// Provider decorator placed inside the product policy gates and immediately
+/// outside the real filesystem/network mechanism. Only effects that have
+/// passed policy reach this boundary. Admission is flushed before I/O; a
+/// completion marker is attempted after the provider returns.
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+struct WriteAheadHostIo<P: HostIoProvider> {
+    inner: P,
+    emitter: Option<NativeEffectWalEmitter>,
+}
+
+#[cfg(feature = "engine")]
+impl<P: HostIoProvider> WriteAheadHostIo<P> {
+    fn new(inner: P, emitter: Option<NativeEffectWalEmitter>) -> Self {
+        Self { inner, emitter }
+    }
+}
+
+#[cfg(feature = "engine")]
+impl<P: HostIoProvider> HostIoProvider for WriteAheadHostIo<P> {
+    fn name(&self) -> &str {
+        "native-write-ahead-host-io"
+    }
+
+    fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+        let Some(emitter) = self.emitter.as_ref() else {
+            return self.inner.perform(request, granted);
+        };
+        let sequence = match emitter.admit(request) {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                return Err(HostIoError::Denied {
+                    reason: format!(
+                        "native host effect refused before execution because write-ahead admission failed: {error}"
+                    ),
+                });
+            }
+        };
+        let outcome = self.inner.perform(request, granted);
+        if let Err(error) = emitter.complete(sequence) {
+            // The provider may already have changed external state. Preserve its
+            // real outcome for the finalized ledger; if the session is killed
+            // before finalization, the unmatched admission remains explicitly
+            // indeterminate instead of being laundered into a denial.
+            tracing::error!(
+                effect_sequence = sequence,
+                effect_kind = request.kind(),
+                error = %error,
+                "Native host effect returned but its WAL completion marker failed"
+            );
+        }
+        outcome
+    }
+}
+
 /// One worker's cooperative cancellation signal plus its host-effect admission
 /// barrier. Process isolation is the hard timeout boundary; this remains
 /// defense-in-depth for engine-internal cancellation and focused regressions.
@@ -1589,6 +2254,17 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
 struct NativeEngineCancellation {
     token: CancellationToken,
     effect_gate: Arc<Mutex<()>>,
+}
+
+/// Owned, session-scoped authority and cleanup state consumed by one native
+/// engine invocation.
+#[cfg(feature = "engine")]
+struct NativeEngineRunContext {
+    telemetry_guard: NativeTelemetryGuard,
+    cancellation: NativeEngineCancellation,
+    process_spawn_admission: Option<ChildProcessSpawnAdmission>,
+    evidence_authority: RuntimeEvidenceAuthority,
+    effect_wal: Option<NativeEffectWalEmitter>,
 }
 
 #[cfg(feature = "engine")]
@@ -1823,6 +2499,80 @@ pub struct HostEffectLedger {
     /// directly from this list.
     pub entries: Vec<crate::runtime::effect_receipt::EffectReceiptChainEntry>,
 }
+
+/// Parent-observed state of one provider call in a native-session write-ahead
+/// journal. These states deliberately do not reuse the finalized ledger's
+/// `allowed`/`denied` vocabulary: a provider return marker is not a canonical
+/// effect receipt, while an unmatched admission has an unknown external commit
+/// state.
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeEffectWalState {
+    ProviderReturned,
+    InterruptedIndeterminate,
+}
+
+/// One bounded, nonce-bound write-ahead record observed by the parent process.
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeEffectWalEntry {
+    pub sequence: u64,
+    pub effect_kind: String,
+    pub request_hash: String,
+    pub state: NativeEffectWalState,
+}
+
+/// Sibling evidence artifact for a native session terminated before it could
+/// produce a finalized [`HostEffectLedger`]. It is intentionally never replay
+/// certification: even completed provider-call markers carry no canonical
+/// allowed/denied outcome, and an unmatched admission is explicitly
+/// indeterminate.
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeEffectInterruptionEvidence {
+    pub schema_version: String,
+    pub session_nonce: String,
+    pub terminal_state: String,
+    pub replay_certified: bool,
+    pub journal_complete: bool,
+    pub journal_event_cap: usize,
+    pub completed_effect_count: usize,
+    pub interrupted_effect_count: usize,
+    pub entries: Vec<NativeEffectWalEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_error: Option<String>,
+}
+
+/// A timed-out native run with parent-owned interrupted-effect evidence.
+///
+/// The display text remains the same actionable timeout error. Downcasting
+/// preserves the sibling WAL artifact without ever presenting it as a
+/// finalized host-effect ledger.
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+pub struct NativeRunInterruption {
+    actionable: ActionableError,
+    effect_evidence: Box<NativeEffectInterruptionEvidence>,
+}
+
+#[cfg(feature = "engine")]
+impl NativeRunInterruption {
+    #[must_use]
+    pub fn effect_evidence(&self) -> &NativeEffectInterruptionEvidence {
+        &self.effect_evidence
+    }
+}
+
+#[cfg(feature = "engine")]
+impl std::fmt::Display for NativeRunInterruption {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.actionable, formatter)
+    }
+}
+
+#[cfg(feature = "engine")]
+impl std::error::Error for NativeRunInterruption {}
 
 /// A native run that aborted after the engine had already performed or been
 /// denied host effects (bd-muy9u).
@@ -3664,8 +4414,11 @@ impl EngineDispatcher {
     fn run_internal_native_session_worker(expected_nonce: &str) -> Result<()> {
         use base64::Engine as _;
 
-        fn write_response(response: &NativeSessionResponse) -> Result<()> {
-            let frame = encode_native_session_frame(response, NATIVE_SESSION_MAX_RESPONSE_BYTES)
+        fn write_response(response: NativeSessionResponse) -> Result<()> {
+            let output = NativeSessionOutputFrame::Final {
+                response: Box::new(response),
+            };
+            let frame = encode_native_session_frame(&output, NATIVE_SESSION_MAX_RESPONSE_BYTES)
                 .map_err(anyhow::Error::msg)?;
             let stdout = io::stdout();
             let mut locked = stdout.lock();
@@ -3859,7 +4612,7 @@ impl EngineDispatcher {
         {
             Ok(handle) => handle,
             Err(error) => {
-                return write_response(&NativeSessionResponse::TelemetryFailed {
+                return write_response(NativeSessionResponse::TelemetryFailed {
                     schema_version: NATIVE_SESSION_SCHEMA.to_string(),
                     nonce: request.nonce,
                     message: format!("failed starting native telemetry bridge: {error}"),
@@ -3874,21 +4627,25 @@ impl EngineDispatcher {
         let policy_mode = request.policy_mode;
         let nonce = request.nonce;
         let cancellation = NativeEngineCancellation::new();
+        let effect_wal = NativeEffectWalEmitter::new(nonce.clone(), Box::new(io::stdout()));
         let spawned = spawn_caught_native_engine_worker(cleanup_for_worker, move || {
             Self::run_engine_native_guarded(
                 &app_path,
                 &config,
                 &policy_mode,
-                telemetry_guard,
-                cancellation,
-                process_spawn_admission,
-                evidence_authority,
+                NativeEngineRunContext {
+                    telemetry_guard,
+                    cancellation,
+                    process_spawn_admission,
+                    evidence_authority,
+                    effect_wal: Some(effect_wal),
+                },
             )
         });
         let (worker, outcome_rx) = match spawned {
             Ok(spawned) => spawned,
             Err(error) => {
-                return write_response(&NativeSessionResponse::ExecutionFailed {
+                return write_response(NativeSessionResponse::ExecutionFailed {
                     schema_version: NATIVE_SESSION_SCHEMA.to_string(),
                     nonce,
                     message: format!(
@@ -3923,7 +4680,7 @@ impl EngineDispatcher {
                             evidence_verification_identity,
                         )) => {
                             let Some(exit_code) = output.status.code() else {
-                                return write_response(&NativeSessionResponse::ExecutionFailed {
+                                return write_response(NativeSessionResponse::ExecutionFailed {
                                     schema_version: NATIVE_SESSION_SCHEMA.to_string(),
                                     nonce,
                                     message: "native engine returned a signal-only status"
@@ -3995,7 +4752,7 @@ impl EngineDispatcher {
                 }
             }
         };
-        write_response(&response)
+        write_response(response)
     }
 
     /// Execute code using native franken_engine API with enhanced error handling.
@@ -4064,13 +4821,19 @@ impl EngineDispatcher {
         use base64::Engine as _;
         use std::sync::mpsc;
 
+        #[derive(Clone)]
+        struct BoundedPipeRead {
+            bytes: Vec<u8>,
+            cap_exceeded: bool,
+        }
+
         fn spawn_bounded_reader(
             mut stream: impl Read + Send + 'static,
             cap: usize,
             label: &'static str,
         ) -> io::Result<(
             thread::JoinHandle<()>,
-            mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+            mpsc::Receiver<std::result::Result<BoundedPipeRead, String>>,
         )> {
             let (sender, receiver) = mpsc::channel();
             let worker = thread::Builder::new()
@@ -4098,14 +4861,10 @@ impl EngineDispatcher {
                             }
                         }
                     }
-                    let result = if exceeded {
-                        Err(format!(
-                            "native-session {label} exceeded the {cap}-byte cap"
-                        ))
-                    } else {
-                        Ok(output)
-                    };
-                    let _ = sender.send(result);
+                    let _ = sender.send(Ok(BoundedPipeRead {
+                        bytes: output,
+                        cap_exceeded: exceeded,
+                    }));
                 })?;
             Ok((worker, receiver))
         }
@@ -4113,10 +4872,10 @@ impl EngineDispatcher {
         fn receive_reader(
             reader: (
                 thread::JoinHandle<()>,
-                mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+                mpsc::Receiver<std::result::Result<BoundedPipeRead, String>>,
             ),
             label: &'static str,
-        ) -> std::result::Result<Vec<u8>, String> {
+        ) -> std::result::Result<BoundedPipeRead, String> {
             let (worker, receiver) = reader;
             match receiver
                 .recv_timeout(crate::config::timeouts::ENGINE_DISPATCH_PIPE_READER_TIMEOUT)
@@ -4454,8 +5213,8 @@ impl EngineDispatcher {
         fn native_session_cleanup_failure(
             process_cleanup: io::Result<()>,
             request_writer_cleanup: Option<std::result::Result<(), String>>,
-            response_drain: Option<std::result::Result<Vec<u8>, String>>,
-            diagnostic_drain: Option<std::result::Result<Vec<u8>, String>>,
+            response_drain: Option<std::result::Result<BoundedPipeRead, String>>,
+            diagnostic_drain: Option<std::result::Result<BoundedPipeRead, String>>,
         ) -> Option<String> {
             let mut failures = Vec::new();
             if let Err(error) = process_cleanup {
@@ -4821,7 +5580,7 @@ impl EngineDispatcher {
         }
         let stdout_reader = match spawn_bounded_reader(
             stdout,
-            NATIVE_SESSION_MAX_RESPONSE_BYTES + NATIVE_SESSION_FRAME_HEADER_BYTES,
+            NATIVE_SESSION_MAX_OUTPUT_STREAM_BYTES,
             "response",
         ) {
             Ok(reader) => reader,
@@ -4935,28 +5694,46 @@ impl EngineDispatcher {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) if started.elapsed() >= timeout => {
+                    let process_cleanup = kill_and_reap_native_session(&mut child, &containment);
+                    let request_writer_cleanup = receive_request_writer(request_writer, true);
+                    let response_drain = receive_reader(stdout_reader, "response");
+                    let diagnostic_drain = receive_reader(stderr_reader, "diagnostics");
                     let cleanup_failure = native_session_cleanup_failure(
-                        kill_and_reap_native_session(&mut child, &containment),
-                        Some(receive_request_writer(request_writer, true)),
-                        Some(receive_reader(stdout_reader, "response")),
-                        Some(receive_reader(stderr_reader, "diagnostics")),
+                        process_cleanup,
+                        Some(request_writer_cleanup),
+                        Some(response_drain.clone()),
+                        Some(diagnostic_drain),
                     );
-                    if let Some(error) = cleanup_failure {
-                        let dispatch_error = EngineDispatchError::EngineExecutionError {
+                    let effect_evidence = native_timeout_effect_evidence(
+                        response_drain
+                            .as_ref()
+                            .map(|response| (response.bytes.as_slice(), response.cap_exceeded))
+                            .map_err(String::as_str),
+                        cleanup_failure.as_deref(),
+                        &nonce,
+                        cfg!(test),
+                    );
+                    let actionable = if let Some(error) = cleanup_failure {
+                        EngineDispatchError::EngineExecutionError {
                             app_path: app_path_buf,
                             error_message: format!(
                                 "native-session timeout cleanup could not prove quiescence: {error}"
                             ),
                             phase: "worker cleanup".to_string(),
-                        };
-                        return Err(dispatch_error.to_actionable().into());
-                    }
-                    let dispatch_error = EngineDispatchError::EngineTimeout {
-                        app_path: app_path_buf,
-                        timeout_duration: timeout,
-                        phase: "whole native session".to_string(),
+                        }
+                        .to_actionable()
+                    } else {
+                        EngineDispatchError::EngineTimeout {
+                            app_path: app_path_buf,
+                            timeout_duration: timeout,
+                            phase: "whole native session".to_string(),
+                        }
+                        .to_actionable()
                     };
-                    return Err(dispatch_error.to_actionable().into());
+                    return Err(anyhow::Error::new(NativeRunInterruption {
+                        actionable,
+                        effect_evidence: Box::new(effect_evidence),
+                    }));
                 }
                 Ok(None) => thread::sleep(NATIVE_SESSION_POLL_INTERVAL),
                 Err(error) => {
@@ -4992,7 +5769,7 @@ impl EngineDispatcher {
             }
             .to_actionable()
         })?;
-        let response_bytes = response_result.map_err(|message| {
+        let response_read = response_result.map_err(|message| {
             EngineDispatchError::EngineExecutionError {
                 app_path: app_path_buf.clone(),
                 error_message: message,
@@ -5000,7 +5777,7 @@ impl EngineDispatcher {
             }
             .to_actionable()
         })?;
-        let diagnostic_bytes = diagnostic_result.map_err(|message| {
+        let diagnostic_read = diagnostic_result.map_err(|message| {
             EngineDispatchError::EngineExecutionError {
                 app_path: app_path_buf.clone(),
                 error_message: message,
@@ -5008,6 +5785,30 @@ impl EngineDispatcher {
             }
             .to_actionable()
         })?;
+        if response_read.cap_exceeded {
+            let dispatch_error = EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf,
+                error_message: format!(
+                    "native-session response stream exceeded {} bytes",
+                    NATIVE_SESSION_MAX_OUTPUT_STREAM_BYTES
+                ),
+                phase: "worker protocol".to_string(),
+            };
+            return Err(dispatch_error.to_actionable().into());
+        }
+        if diagnostic_read.cap_exceeded {
+            let dispatch_error = EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf,
+                error_message: format!(
+                    "native-session diagnostics exceeded {} bytes",
+                    NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES
+                ),
+                phase: "worker protocol".to_string(),
+            };
+            return Err(dispatch_error.to_actionable().into());
+        }
+        let response_bytes = response_read.bytes;
+        let diagnostic_bytes = diagnostic_read.bytes;
         #[cfg(target_os = "linux")]
         if let NativeSessionContainment::Bubblewrap(unit) = &containment {
             wait_for_containment_unit_empty(unit).map_err(|error| {
@@ -5037,19 +5838,35 @@ impl EngineDispatcher {
             return Err(dispatch_error.to_actionable().into());
         }
 
-        let response: NativeSessionResponse = decode_native_session_frame(
-            &response_bytes,
-            NATIVE_SESSION_MAX_RESPONSE_BYTES,
-            cfg!(test),
-        )
-        .map_err(|message| {
-            EngineDispatchError::EngineExecutionError {
+        let parsed = parse_native_session_output(&response_bytes, cfg!(test));
+        let mut reconciled = reconcile_native_session_output(parsed, &nonce);
+        if reconciled
+            .entries
+            .iter()
+            .any(|entry| entry.state == NativeEffectWalState::InterruptedIndeterminate)
+            && reconciled.protocol_error.is_none()
+        {
+            reconciled.protocol_error = Some(
+                "native-session final response left an admitted host effect without completion"
+                    .to_string(),
+            );
+        }
+        if let Some(message) = reconciled.protocol_error {
+            let dispatch_error = EngineDispatchError::EngineExecutionError {
                 app_path: app_path_buf.clone(),
                 error_message: if diagnostics.is_empty() {
                     message
                 } else {
                     format!("{message}; worker diagnostics: {diagnostics}")
                 },
+                phase: "worker protocol".to_string(),
+            };
+            return Err(dispatch_error.to_actionable().into());
+        }
+        let response = reconciled.response.ok_or_else(|| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: "native-session output stream had no final response".to_string(),
                 phase: "worker protocol".to_string(),
             }
             .to_actionable()
@@ -5838,10 +6655,13 @@ impl EngineDispatcher {
             app_path,
             config,
             policy_mode,
-            NativeTelemetryGuard::new(telemetry_handle),
-            NativeEngineCancellation::new(),
-            None,
-            evidence_authority,
+            NativeEngineRunContext {
+                telemetry_guard: NativeTelemetryGuard::new(telemetry_handle),
+                cancellation: NativeEngineCancellation::new(),
+                process_spawn_admission: None,
+                evidence_authority,
+                effect_wal: None,
+            },
         )
     }
 
@@ -5851,10 +6671,7 @@ impl EngineDispatcher {
         app_path: &Path,
         config: &Config,
         policy_mode: &str,
-        telemetry_guard: NativeTelemetryGuard,
-        cancellation: NativeEngineCancellation,
-        process_spawn_admission: Option<ChildProcessSpawnAdmission>,
-        evidence_authority: RuntimeEvidenceAuthority,
+        run_context: NativeEngineRunContext,
     ) -> std::result::Result<NativeEngineSuccess, EngineProcessError> {
         use crate::ops::ssrf_gated_host_io::SsrfGatedHostIo;
         use frankenengine_extension_host::host_io::{
@@ -5862,6 +6679,13 @@ impl EngineDispatcher {
         };
         use std::fs;
 
+        let NativeEngineRunContext {
+            telemetry_guard,
+            cancellation,
+            process_spawn_admission,
+            evidence_authority,
+            effect_wal,
+        } = run_context;
         let mut telemetry_guard = Some(telemetry_guard);
 
         let _span = tracing::info_span!(
@@ -6043,6 +6867,12 @@ impl EngineDispatcher {
                     }
                     None => provider,
                 };
+                // bd-bxryo: place the WAL immediately outside the real I/O
+                // mechanism but inside the product policy gates. A denied SSRF
+                // or flow-policy request never becomes an admitted external
+                // effect; an allowed request is flushed to the parent before
+                // the sandboxed provider can touch the filesystem or network.
+                let provider = WriteAheadHostIo::new(provider, effect_wal.clone());
                 let recorder: Arc<dyn HostIoRecorder> =
                     Arc::new(InMemoryHostIoTranscript::recording());
                 // bd-656a2: wrap the engine's network MECHANISM with the product-
@@ -12470,6 +13300,17 @@ mod tests {
         .expect_err("payload corruption must fail closed");
         assert!(digest_error.contains("digest mismatch"));
 
+        let mut obsolete = frame.clone();
+        let version_start = NATIVE_SESSION_FRAME_MAGIC.len();
+        obsolete[version_start..version_start + 4].copy_from_slice(&4_u32.to_be_bytes());
+        let version_error = decode_native_session_frame::<NativeSessionRequest>(
+            &obsolete,
+            NATIVE_SESSION_MAX_REQUEST_BYTES,
+            false,
+        )
+        .expect_err("a v4 frame must not enter the v5 worker");
+        assert!(version_error.contains("unsupported native-session protocol version 4"));
+
         let mut trailing = frame;
         trailing.push(0);
         let trailing_error = decode_native_session_frame::<NativeSessionRequest>(
@@ -12479,6 +13320,303 @@ mod tests {
         )
         .expect_err("trailing bytes must fail closed");
         assert!(trailing_error.contains("trailing bytes"));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_bxryo_timeout_wal_keeps_unmatched_admission_indeterminate() {
+        let nonce = "00000000-0000-4000-8000-000000000123";
+        let request = HostIoRequest::NetworkRecv {
+            endpoint: "example.invalid:443".to_string(),
+            max_len: 1024,
+        };
+        let admission = NativeSessionOutputFrame::HostEffectAdmitted {
+            schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+            nonce: nonce.to_string(),
+            sequence: 0,
+            effect_kind: request.kind().to_string(),
+            request_hash: native_effect_wal_request_hash(&request).expect("hash timeout admission"),
+        };
+        let output =
+            encode_native_session_frame(&admission, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                .expect("encode timeout admission");
+
+        let evidence = native_effect_interruption_evidence(&output, false, nonce, false);
+        assert!(evidence.journal_complete);
+        assert!(!evidence.replay_certified);
+        assert_eq!(evidence.terminal_state, "timeout_indeterminate");
+        assert_eq!(evidence.completed_effect_count, 0);
+        assert_eq!(evidence.interrupted_effect_count, 1);
+        assert_eq!(
+            evidence.entries[0].state,
+            NativeEffectWalState::InterruptedIndeterminate
+        );
+        assert_eq!(evidence.entries[0].effect_kind, "network_recv");
+
+        let ledger_decode = serde_json::from_value::<HostEffectLedger>(
+            serde_json::to_value(&evidence).expect("serialize interruption evidence"),
+        );
+        assert!(
+            ledger_decode.is_err(),
+            "interruption evidence must not deserialize as a finalized host-effect ledger"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_bxryo_cleanup_failure_preserves_the_verified_wal_prefix() {
+        let nonce = "00000000-0000-4000-8000-000000000125";
+        let request = HostIoRequest::FsWrite {
+            path: "marker".to_string(),
+            data: b"entered".to_vec(),
+        };
+        let admission = NativeSessionOutputFrame::HostEffectAdmitted {
+            schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+            nonce: nonce.to_string(),
+            sequence: 0,
+            effect_kind: request.kind().to_string(),
+            request_hash: native_effect_wal_request_hash(&request)
+                .expect("hash cleanup-failure admission"),
+        };
+        let output =
+            encode_native_session_frame(&admission, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                .expect("encode cleanup-failure admission");
+
+        let evidence = native_timeout_effect_evidence(
+            Ok((&output, false)),
+            Some("process-group kill failed"),
+            nonce,
+            false,
+        );
+
+        assert_eq!(evidence.terminal_state, "timeout_cleanup_unproven");
+        assert!(!evidence.journal_complete);
+        assert!(!evidence.replay_certified);
+        assert_eq!(evidence.interrupted_effect_count, 1);
+        assert_eq!(evidence.entries.len(), 1);
+        assert_eq!(
+            evidence.entries[0].state,
+            NativeEffectWalState::InterruptedIndeterminate
+        );
+        assert!(
+            evidence
+                .protocol_error
+                .as_deref()
+                .is_some_and(|error| error.contains("process-group kill failed"))
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_bxryo_admission_flushes_before_io_and_failures_refuse_the_provider() {
+        use frankenengine_extension_host::host_io::HostIoResponse;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct SharedFlushSink {
+            bytes: Arc<Mutex<Vec<u8>>>,
+            flushed: Arc<AtomicBool>,
+        }
+
+        impl Write for SharedFlushSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes
+                    .lock()
+                    .expect("shared sink remains available")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushed.store(true, Ordering::Release);
+                Ok(())
+            }
+        }
+
+        #[derive(Debug)]
+        struct FlushObservingHostIo {
+            flushed: Arc<AtomicBool>,
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl HostIoProvider for FlushObservingHostIo {
+            fn name(&self) -> &str {
+                "flush-observing-host-io"
+            }
+
+            fn perform(
+                &self,
+                _request: &HostIoRequest,
+                _granted: &[HostIoCapability],
+            ) -> HostIoOutcome {
+                assert!(
+                    self.flushed.load(Ordering::Acquire),
+                    "the admission must be flushed before provider entry"
+                );
+                self.calls.fetch_add(1, Ordering::AcqRel);
+                Ok(HostIoResponse::FsRead { bytes: Vec::new() })
+            }
+        }
+
+        #[derive(Debug)]
+        struct CountingHostIo(Arc<AtomicUsize>);
+
+        impl HostIoProvider for CountingHostIo {
+            fn name(&self) -> &str {
+                "counting-host-io"
+            }
+
+            fn perform(
+                &self,
+                _request: &HostIoRequest,
+                _granted: &[HostIoCapability],
+            ) -> HostIoOutcome {
+                self.0.fetch_add(1, Ordering::AcqRel);
+                Ok(HostIoResponse::FsRead { bytes: Vec::new() })
+            }
+        }
+
+        #[derive(Debug)]
+        struct FailingSink;
+
+        impl Write for FailingSink {
+            fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed WAL sink"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let nonce = "00000000-0000-4000-8000-000000000126";
+        let request = HostIoRequest::FsRead {
+            path: "fixture.txt".to_string(),
+        };
+        let granted = [HostIoCapability::FsRead];
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let flushed = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let emitter = NativeEffectWalEmitter::new(
+            nonce.to_string(),
+            Box::new(SharedFlushSink {
+                bytes: Arc::clone(&bytes),
+                flushed: Arc::clone(&flushed),
+            }),
+        );
+        let provider = WriteAheadHostIo::new(
+            FlushObservingHostIo {
+                flushed,
+                calls: Arc::clone(&calls),
+            },
+            Some(emitter),
+        );
+
+        provider
+            .perform(&request, &granted)
+            .expect("a flushed admission permits provider I/O");
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        let captured = bytes.lock().expect("captured WAL remains available");
+        let reconciled =
+            reconcile_native_session_output(parse_native_session_output(&captured, false), nonce);
+        assert!(reconciled.protocol_error.is_none());
+        assert_eq!(reconciled.entries.len(), 1);
+        assert_eq!(
+            reconciled.entries[0].state,
+            NativeEffectWalState::ProviderReturned
+        );
+        drop(captured);
+
+        let refused_calls = Arc::new(AtomicUsize::new(0));
+        let failing_provider = WriteAheadHostIo::new(
+            CountingHostIo(Arc::clone(&refused_calls)),
+            Some(NativeEffectWalEmitter::new(
+                nonce.to_string(),
+                Box::new(FailingSink),
+            )),
+        );
+        let sink_error = failing_provider
+            .perform(&request, &granted)
+            .expect_err("a failed admission flush must refuse provider I/O");
+        assert!(matches!(
+            sink_error,
+            HostIoError::Denied { ref reason } if reason.contains("write-ahead admission failed")
+        ));
+        assert_eq!(refused_calls.load(Ordering::Acquire), 0);
+
+        let capped_emitter = NativeEffectWalEmitter::new(nonce.to_string(), Box::new(io::sink()));
+        capped_emitter
+            .writer
+            .lock()
+            .expect("capped writer remains available")
+            .emitted_events = NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS - 1;
+        let capped_provider = WriteAheadHostIo::new(
+            CountingHostIo(Arc::clone(&refused_calls)),
+            Some(capped_emitter),
+        );
+        let cap_error = capped_provider
+            .perform(&request, &granted)
+            .expect_err("event-cap exhaustion must refuse provider I/O");
+        assert!(matches!(
+            cap_error,
+            HostIoError::Denied { ref reason } if reason.contains("event cap")
+        ));
+        assert_eq!(refused_calls.load(Ordering::Acquire), 0);
+        assert_eq!(
+            NATIVE_SESSION_MAX_OUTPUT_STREAM_BYTES,
+            NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES
+                + NATIVE_SESSION_FRAME_HEADER_BYTES
+                + NATIVE_SESSION_MAX_RESPONSE_BYTES
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn bd_bxryo_corrupt_completion_never_upgrades_an_admission() {
+        let nonce = "00000000-0000-4000-8000-000000000124";
+        let request = HostIoRequest::FsWrite {
+            path: "marker".to_string(),
+            data: b"entered".to_vec(),
+        };
+        let admission = NativeSessionOutputFrame::HostEffectAdmitted {
+            schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+            nonce: nonce.to_string(),
+            sequence: 0,
+            effect_kind: request.kind().to_string(),
+            request_hash: native_effect_wal_request_hash(&request)
+                .expect("hash corrupt-completion admission"),
+        };
+        let completion = NativeSessionOutputFrame::HostEffectCompleted {
+            schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+            nonce: nonce.to_string(),
+            sequence: 0,
+        };
+        let mut output =
+            encode_native_session_frame(&admission, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                .expect("encode admission");
+        let mut corrupt_completion =
+            encode_native_session_frame(&completion, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                .expect("encode completion");
+        *corrupt_completion
+            .last_mut()
+            .expect("completion frame has payload") ^= 1;
+        output.extend_from_slice(&corrupt_completion);
+
+        let evidence = native_effect_interruption_evidence(&output, false, nonce, false);
+        assert!(!evidence.journal_complete);
+        assert!(!evidence.replay_certified);
+        assert_eq!(evidence.completed_effect_count, 0);
+        assert_eq!(evidence.interrupted_effect_count, 1);
+        assert_eq!(
+            evidence.entries[0].state,
+            NativeEffectWalState::InterruptedIndeterminate
+        );
+        assert!(
+            evidence
+                .protocol_error
+                .as_deref()
+                .is_some_and(|error| error.contains("digest mismatch"))
+        );
     }
 
     #[cfg(feature = "engine")]
