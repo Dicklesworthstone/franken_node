@@ -2397,9 +2397,12 @@ mod tests {
                 "reason'; UPDATE crashes SET",
             ];
 
-            for malicious_reason in &malicious_reasons {
+            for (reason_idx, malicious_reason) in malicious_reasons.iter().enumerate() {
+                // Distinct connector per probe so counts don't accumulate
+                // across iterations.
+                let connector = format!("reason_inject_{reason_idx}");
                 let malicious_event = CrashEvent {
-                    connector_id: "reason_inject".to_string(),
+                    connector_id: connector.clone(),
                     timestamp: "2024-01-01T00:00:00Z\x00time_injection".to_string(),
                     reason: malicious_reason.to_string(),
                 };
@@ -2408,10 +2411,16 @@ mod tests {
                 let count = det.record_crash(&malicious_event, 3000);
                 assert_eq!(count, 1);
 
+                // Drive to threshold so the no-pin evaluation actually reaches
+                // the rollback path (below threshold it returns Ok).
+                for extra in 1..5 {
+                    det.record_crash(&malicious_event, 3000 + extra);
+                }
+
                 // Fields should be preserved as opaque strings
                 let events = vec![malicious_event];
-                let result = det.evaluate("reason_inject", &events, None, 3000, "tr", "ts");
-                assert!(result.is_err()); // Will fail due to no pin, but should not crash
+                let result = det.evaluate(&connector, &events, None, 3005, "tr", "ts");
+                assert!(result.is_err()); // No known-good pin: must refuse, not crash
             }
 
             // Test incident capacity manipulation
@@ -2488,10 +2497,12 @@ mod tests {
                 "Mass evaluation should complete in reasonable time"
             );
 
-            // Test selective connector queries remain efficient
-            for test_idx in [0, 50_000, 99_999] {
+            // Test selective connector queries remain efficient; query each
+            // connector at its own recorded epoch so its crash is in-window
+            // (the window is relative to `now`).
+            for test_idx in [0_u64, 50_000, 99_999] {
                 let test_connector = format!("pollution_{:06x}", test_idx);
-                let count = det.crashes_in_window_for(&test_connector, u64::MAX);
+                let count = det.crashes_in_window_for(&test_connector, 1000 + test_idx);
                 assert_eq!(count, 1);
             }
 
@@ -2731,13 +2742,11 @@ mod tests {
             // Verify incident trail consistency
             assert_eq!(det.incidents.len() as u64, rapid_evaluations);
 
-            // Verify final state consistency
-            assert!(det.in_cooldown_for(race_connector, 2000));
-            let final_crash_count = det.crashes_in_window_for(race_connector, 2000);
-            assert!(
-                final_crash_count >= 3,
-                "Should have accumulated crashes from race conditions"
-            );
+            // Verify final state consistency: t=2000 is far past the last
+            // evaluation (1101) — every cooldown has lapsed and the sliding
+            // window is empty. Quiescence, not lingering state.
+            assert!(!det.in_cooldown_for(race_connector, 2000));
+            assert_eq!(det.crashes_in_window_for(race_connector, 2000), 0);
         }
     }
 
@@ -2873,13 +2882,21 @@ mod tests {
                     // attack input itself — which was unsatisfiable for the
                     // null-byte and oversized-field attacks.
 
-                    // Test crash count accuracy despite injection
+                    // Test crash count accuracy despite injection. Some
+                    // corpus entries deliberately reuse a connector id
+                    // ("victim_connector" appears three times), so the
+                    // accurate count is the running occurrence count within
+                    // the window, all epochs being 1000..1008 (window 300).
+                    let expected_count = malicious_crash_events[..=attack_idx]
+                        .iter()
+                        .filter(|event| event.connector_id == malicious_event.connector_id)
+                        .count();
                     let crash_count = detector.crashes_in_window_for(
                         &malicious_event.connector_id,
                         1100 + attack_idx as u64,
                     );
-                    assert!(
-                        crash_count <= 1,
+                    assert_eq!(
+                        crash_count as usize, expected_count,
                         "Attack {}: Crash count should be accurate despite injection",
                         attack_idx
                     );

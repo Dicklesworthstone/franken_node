@@ -1616,8 +1616,8 @@ mod tests {
                 .expect("isolation mesh mutex should not be poisoned");
             assert_eq!(
                 mesh_guard.rail_states().get("proc-1").unwrap().active_count,
-                2,
-                "proc-1 should be at full capacity (w1 + 1 racer = 2/2)"
+                4,
+                "proc-1 should be at full capacity (w1+w2+w3 + 1 racer = 4/4)"
             );
             assert_eq!(
                 mesh_guard

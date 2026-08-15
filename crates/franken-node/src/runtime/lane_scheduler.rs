@@ -3658,13 +3658,18 @@ mod tests {
             "Dropping an occupied lane must be refused: {under_load_result:?}"
         );
 
-        // A reload that RETAINS the occupied lane is accepted under load.
+        // A reload that RETAINS every occupied lane is accepted under load.
+        // ControlCritical holds the epoch_transition task(s) and Background
+        // still holds the malicious-class task assigned earlier in this test.
         let mut retaining_policy = LaneMappingPolicy::new();
         retaining_policy
             .add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 8))
             .unwrap();
         retaining_policy
             .add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 10))
+            .unwrap();
+        retaining_policy
+            .add_lane(LaneConfig::new(SchedulerLane::Background, 10, 4))
             .unwrap();
         retaining_policy.add_rule(
             &task_classes::epoch_transition(),

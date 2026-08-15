@@ -3583,7 +3583,13 @@ mod tests {
                 "NUL must be escaped inside the string literal"
             );
             assert!(!json.contains('\0'), "raw NUL must never appear");
-            assert!(!json.contains('\n'), "raw newline must be escaped");
+            // Pretty-printed JSON legitimately contains STRUCTURAL newlines;
+            // the injected newline inside the hash payload must appear in
+            // escaped form so it cannot split the string value.
+            assert!(
+                json.contains("sha256:fake\\nsha256:real"),
+                "the injected newline must be escaped inside the hash string"
+            );
         }
 
         // Constant-time comparison of trust hashes should be used

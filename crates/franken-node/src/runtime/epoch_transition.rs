@@ -1570,9 +1570,11 @@ mod tests {
             .validate_replica_lag("svc-lag", 0, "trace-extreme-lag")
             .expect_err("extreme lag should be rejected");
 
-        // Lag calculation should use saturating arithmetic
+        // Lag calculation should use saturating arithmetic. The gate is
+        // fail-closed at lag >= max (exactly max is rejected), so a clearly
+        // in-bounds lag of 50 exercises the accept path.
         coord_lag
-            .validate_replica_lag("svc-lag", u64::MAX - 200, "trace-normal-lag")
+            .validate_replica_lag("svc-lag", u64::MAX - 150, "trace-normal-lag")
             .expect("reasonable lag should work");
 
         // Edge case: exactly at max lag boundary
