@@ -798,8 +798,10 @@ mod checkpoint_guard_comprehensive_negative_tests {
         // Test with maliciously large event storage to check memory handling
         let mut guard = CheckpointGuard::new("massive-events", "massive-trace", malicious_config());
 
-        // Generate massive number of events with large strings
-        for i in 0..10000 {
+        // Generate more events than the bound so eviction actually engages
+        // (MAX_EVENTS is 16384; a fixed 10k flood never reached it).
+        let flood = MAX_EVENTS + 100;
+        for i in 0..flood {
             let massive_orch_id = format!("orch-{}-{}", i, "x".repeat(1000));
             let massive_trace_id = format!("trace-{}-{}", i, "y".repeat(1000));
 
@@ -820,7 +822,10 @@ mod checkpoint_guard_comprehensive_negative_tests {
 
         // Should contain only latest events
         let last_event = guard.events().last().unwrap();
-        assert!(last_event.event_code.starts_with("MASSIVE-EVENT-999"));
+        assert_eq!(
+            last_event.event_code,
+            format!("MASSIVE-EVENT-{}", flood - 1)
+        );
     }
 
     #[test]
@@ -958,11 +963,13 @@ mod checkpoint_guard_comprehensive_negative_tests {
         }
 
         // Test invalid mode deserialization
+        // NOTE: "Strict" (exact variant case) is the CANONICAL encoding —
+        // the round-trip loop above already proves it parses — so only
+        // genuinely wrong casings/types belong here.
         let invalid_modes = [
             "\"Invalid\"",
             "\"warn\"",   // lowercase
             "\"STRICT\"", // uppercase
-            "\"Strict\"", // different case
             "null",
             "42",
             "true",
