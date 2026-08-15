@@ -2856,8 +2856,13 @@ mod tests {
             );
         }
 
-        // Verify samples are properly bounded without panic
-        assert!(background_state.metrics.queue_wait_samples_ms.len() > MAX_QUEUE_WAIT_SAMPLES);
+        // Verify samples are properly bounded without panic: push_bounded
+        // caps the buffer at MAX_QUEUE_WAIT_SAMPLES no matter how many
+        // samples were offered.
+        assert_eq!(
+            background_state.metrics.queue_wait_samples_ms.len(),
+            MAX_QUEUE_WAIT_SAMPLES
+        );
 
         // Test p99 calculation with massive dataset
         let p99 = background_state.metrics.p99_queue_wait_ms();
