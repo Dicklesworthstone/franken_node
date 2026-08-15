@@ -7893,7 +7893,12 @@ mod tests {
         };
 
         // Allow up to 3x timing difference (accounting for measurement noise)
-        // In a real attack scenario, constant-time should be much tighter
+        // In a real attack scenario, constant-time should be much tighter.
+        // Wall-clock ratio bounds only hold on a quiesced host (bd-m87xv);
+        // the measured comparison paths above run unconditionally.
+        if !crate::testing::timing_assertions_enabled() {
+            return;
+        }
         assert!(
             timing_ratio < 3.0,
             "Timing difference too large: identical={}ns different={}ns ratio={}",

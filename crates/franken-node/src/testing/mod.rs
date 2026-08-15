@@ -2218,10 +2218,13 @@ mod testing_module_negative_tests {
                                     let link_id = "message_source->message_target";
                                     // `within_ticks` can be u64::MAX (edge-case vector),
                                     // so saturate to avoid overflow in the loop bound.
-                                    for tick in
-                                        1..=std::cmp::min(within_ticks.saturating_add(100), 1000)
+                                    // advance_tick advances BY its argument — passing the
+                                    // loop index accumulated triangularly and blew past
+                                    // the delivery-bound assertion below.
+                                    for _tick in
+                                        1..=std::cmp::min(within_ticks.saturating_add(200), 1000)
                                     {
-                                        transport.advance_tick(tick);
+                                        transport.advance_tick(1);
 
                                         // Check if message delivered
                                         if let Ok(Some(delivered)) = transport.deliver_next(link_id)
