@@ -883,6 +883,13 @@ impl CancellationRuntime {
         parent_id: &str,
         child_id: &str,
     ) -> Result<(), CancellableTaskError> {
+        // A task must never become its own child: the cancellation cascade
+        // walks child edges and a self-edge would make it re-visit forever.
+        if parent_id == child_id {
+            return Err(CancellableTaskError::DuplicateTask {
+                task_id: parent_id.to_string(),
+            });
+        }
         if !self.tasks.contains_key(parent_id) {
             return Err(CancellableTaskError::TaskNotFound {
                 task_id: parent_id.to_string(),
@@ -1012,7 +1019,7 @@ mod register_child_negative_tests {
         rt.register_task("task-1", 1000, "t1").unwrap();
 
         let err = rt.register_child("task-1", "task-1").unwrap_err();
-        assert_eq!(err.code(), error_codes::ERR_CXT_TASK_NOT_FOUND);
+        assert_eq!(err.code(), error_codes::ERR_CXT_DUPLICATE_TASK);
 
         // Parent should not have itself as child
         let task = rt.get_task("task-1").expect("task should exist");
