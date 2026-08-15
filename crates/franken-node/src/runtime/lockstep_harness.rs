@@ -600,11 +600,17 @@ impl LockstepHarness {
             )
         })?;
 
-        // Lock hierarchy: fixture-specific locks before global persist_lock() to prevent ABBA deadlock
-        let _fixture_lock = Self::acquire_divergence_fixture_persist_lock(&output_dir)?;
+        // Lock hierarchy (matches the persist_lock() doc): process-local
+        // mutex FIRST so same-process writers serialize with an unbounded
+        // wait, then the per-directory flock (bounded retries) which only
+        // ever contends with OTHER processes. Taking the flock first let a
+        // thread herd exhaust the 700ms retry budget against its own
+        // siblings. This is the only site taking both locks, so no ABBA
+        // partner exists.
         let _persist_guard = persist_lock()
             .lock()
             .map_err(|_| anyhow::anyhow!("lockstep divergence fixture persist lock poisoned"))?;
+        let _fixture_lock = Self::acquire_divergence_fixture_persist_lock(&output_dir)?;
 
         let mut written = Vec::new();
         for divergence in &report.divergences {
