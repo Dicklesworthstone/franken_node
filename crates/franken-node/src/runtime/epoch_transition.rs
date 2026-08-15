@@ -1397,11 +1397,24 @@ mod tests {
             .validate_operation_epoch(malicious_service, 1, malicious_trace)
             .expect("unicode service validation should work");
 
-        // Events should contain the Unicode safely
+        // Events should contain the Unicode safely. Event ordering and which
+        // event carries which field are not the property under test — only
+        // that the unicode-laden identifiers survive into SOME event intact.
         assert!(!coordinator.events().is_empty());
-        let event = &coordinator.events()[0];
-        assert!(event.service_id.as_ref().unwrap().contains("svc"));
-        assert!(event.transition_reason.as_ref().unwrap().contains("reason"));
+        assert!(
+            coordinator
+                .events()
+                .iter()
+                .any(|e| e.service_id.as_deref().is_some_and(|s| s.contains("svc"))),
+            "some event must carry the unicode service id"
+        );
+        assert!(
+            coordinator.events().iter().any(|e| e
+                .transition_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("reason"))),
+            "some event must carry the unicode reason"
+        );
     }
 
     #[test]
@@ -1542,10 +1555,12 @@ mod tests {
         assert_eq!(proposal.pre_epoch, 0);
         assert_eq!(proposal.target_epoch, 1);
 
-        // Test near-max epoch lag calculations
+        // Test near-max epoch lag calculations. The second argument is the
+        // maximum permitted replica lag — with u64::MAX every lag is
+        // permitted and nothing can be "extreme", so use a finite bound.
         let mut coord_lag = ProductEpochCoordinator::new(
             u64::MAX - 100,
-            u64::MAX,
+            100,
             BarrierConfig::default(),
             epoch_test_key(),
         );
@@ -1670,6 +1685,10 @@ mod tests {
         let mut coordinator =
             ProductEpochCoordinator::new(5, 1, BarrierConfig::default(), epoch_test_key());
         coordinator.register_service("svc-error");
+        // A second registered service that never acks keeps the barrier
+        // genuinely partial — with a single service, its ack completes the
+        // barrier and a late commit legitimately succeeds.
+        coordinator.register_service("svc-error-straggler");
 
         // Test commit failure propagation
         coordinator
