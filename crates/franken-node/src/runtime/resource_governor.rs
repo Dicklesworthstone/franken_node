@@ -2827,7 +2827,10 @@ mod tests {
                     pressure_process("cargo test"),
                     pressure_process("rustc crate-a"),
                     pressure_process("rch exec -- cargo check"),
-                    pressure_process("not validation"),
+                    // A command that matches NO classifier keyword ("not
+                    // validation" contained the literal keyword and was
+                    // counted as OtherValidation).
+                    pressure_process("vim notes.txt"),
                 ],
                 ..ResourcePressureSampleInput::default()
             },
