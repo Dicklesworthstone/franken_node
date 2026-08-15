@@ -744,7 +744,7 @@ impl IncidentLab {
             );
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
-                message: "Signer not in accepted signers".to_string(),
+                message: format!("Signer '{}' not in accepted signers", plan.signer_id),
             });
         }
         Ok(())
