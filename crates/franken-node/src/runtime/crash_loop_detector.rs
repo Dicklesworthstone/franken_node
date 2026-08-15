@@ -214,13 +214,18 @@ impl CrashLoopDetector {
     }
 
     /// Count crashes for a single connector within the sliding window ending at `now`.
+    ///
+    /// The window is `[now - window_secs, now]` inclusive on both ends: a
+    /// crash recorded with a FUTURE epoch (clock skew, adversarial input)
+    /// must not inflate a past window's count and spuriously trigger a
+    /// rollback.
     pub fn crashes_in_window_for(&self, connector_id: &str, now: u64) -> u32 {
         let cutoff = now.saturating_sub(self.config.window_secs);
         let count = self
             .crash_times_by_connector
             .get(connector_id)
             .map_or(0_usize, |times| {
-                times.iter().filter(|&&t| t >= cutoff).count()
+                times.iter().filter(|&&t| t >= cutoff && t <= now).count()
             });
         u32::try_from(count).unwrap_or(u32::MAX)
     }
@@ -503,6 +508,18 @@ mod tests {
             version: "1.0.0".into(),
             pin_hash: "abc123".into(),
             trusted: true,
+        }
+    }
+
+    /// Untrusted pin bound to the right connector, so tests exercise the
+    /// trust-policy gate rather than tripping the earlier connector-mismatch
+    /// gate.
+    fn untrusted_pin_for(id: &str) -> KnownGoodPin {
+        KnownGoodPin {
+            connector_id: id.into(),
+            version: "0.9.0".into(),
+            pin_hash: "bad000".into(),
+            trusted: false,
         }
     }
 
@@ -1205,7 +1222,7 @@ mod tests {
             .evaluate(
                 "conn-a",
                 &mixed_events,
-                Some(&untrusted_pin()),
+                Some(&untrusted_pin_for("conn-a")),
                 102,
                 "tr-filter-denied",
                 "ts-filter-denied",
@@ -1844,15 +1861,17 @@ mod tests {
             };
             let mut det = CrashLoopDetector::new(extreme_config.clone());
 
-            // Test near u64::MAX boundaries
+            // Test near u64::MAX boundaries. The three edge times all fall
+            // inside one 60s window, so the recorded count accumulates
+            // across iterations rather than resetting.
             let edge_times = vec![u64::MAX - 10, u64::MAX - 1, u64::MAX];
 
-            for &edge_time in &edge_times {
+            for (idx, &edge_time) in edge_times.iter().enumerate() {
                 let event = crash("overflow_conn", "ts", "edge_time_test");
 
                 // Should use saturating arithmetic internally
                 let count = det.record_crash(&event, edge_time);
-                assert_eq!(count, 1);
+                assert_eq!(count, u32::try_from(idx).unwrap_or(u32::MAX) + 1);
 
                 // Window calculations should not overflow
                 let cutoff = edge_time.saturating_sub(extreme_config.window_secs);
@@ -1889,14 +1908,22 @@ mod tests {
                 }
             }
 
-            // Verify bounded memory usage via sliding window
-            let total_crashes = det.crashes_in_window(u64::MAX);
+            // Verify bounded memory usage via sliding window. Querying at
+            // u64::MAX would put every recorded epoch outside the 60s window
+            // (correct behavior: the window is relative to `now`), so query
+            // at the most recent recorded epoch instead.
+            let last_recorded =
+                1000 + (massive_connector_count - 1) * 1000 + (crashes_per_connector - 1);
+            let total_crashes = det.crashes_in_window(last_recorded);
             assert!(total_crashes > 0);
             assert!(total_crashes < u32::MAX); // Should not overflow
 
-            // Individual connector queries should remain efficient
+            // Individual connector queries should remain efficient; query at
+            // that connector's own last recorded epoch so the window is live.
             let sample_connector = "flood_conn_00500";
-            let sample_crashes = det.crashes_in_window_for(sample_connector, u64::MAX);
+            let sample_last = 1000 + 500 * 1000 + (crashes_per_connector - 1);
+            let sample_crashes = det.crashes_in_window_for(sample_connector, sample_last);
+            assert!(sample_crashes > 0);
             assert!(sample_crashes <= crashes_per_connector as u32);
         }
 
@@ -2152,7 +2179,11 @@ mod tests {
                 "Trust flag should be respected regardless of other fields"
             );
 
-            // Test connector ID injection in pins
+            // Test connector ID injection in pins. Threshold and cooldown
+            // checks run BEFORE pin validation, and the earlier triggered
+            // rollback consumed this detector's crash window — so each
+            // injection probes a fresh detector with recorded crashes to
+            // actually reach the pin-mismatch gate.
             let injection_ids = [
                 "target_conn\0injection",
                 "target_conn\ninjection",
@@ -2161,8 +2192,10 @@ mod tests {
             ];
 
             for malicious_id in &injection_ids {
-                let mut injected_pin = trusted_pin_for(malicious_id);
-                let err = det
+                let injected_pin = trusted_pin_for(malicious_id);
+                let mut fresh_det = CrashLoopDetector::new(config());
+                record_threshold_crashes(&mut fresh_det, "target_conn", 1000);
+                let err = fresh_det
                     .evaluate(
                         "target_conn",
                         &events,
@@ -2332,10 +2365,14 @@ mod tests {
 
             for malicious_timestamp in &timestamp_injections {
                 let connector_id = "timestamp_inject";
-                record_threshold_crashes(&mut det, connector_id, 2000);
+                // Fresh detector per probe: a triggered rollback starts a
+                // cooldown that would otherwise turn later iterations into
+                // CooldownActive errors unrelated to the injected timestamp.
+                let mut fresh_det = CrashLoopDetector::new(config());
+                record_threshold_crashes(&mut fresh_det, connector_id, 2000);
                 let events = threshold_events(connector_id);
 
-                let result = det.evaluate(
+                let result = fresh_det.evaluate(
                     connector_id,
                     &events,
                     Some(&trusted_pin_for(connector_id)),
@@ -2430,12 +2467,20 @@ mod tests {
                 namespace_pollution_size
             );
 
-            // Test mass evaluation performance
+            // Test mass evaluation performance. The window is relative to
+            // `now`, so query at the last recorded epoch: with one crash per
+            // second across connectors, only the final window_secs' worth of
+            // connectors can be in-window — never all 100k at once.
+            let last_epoch = 1000 + namespace_pollution_size - 1;
             let start_time = std::time::Instant::now();
-            let total_crashes = det.crashes_in_window(u64::MAX);
+            let total_crashes = det.crashes_in_window(last_epoch);
             let elapsed = start_time.elapsed();
 
-            assert_eq!(total_crashes as u64, namespace_pollution_size);
+            assert!(total_crashes > 0, "recent crashes must be counted");
+            assert!(
+                u64::from(total_crashes) <= config().window_secs + 1,
+                "windowed count is bounded by one crash per second: {total_crashes}"
+            );
             assert!(
                 elapsed.as_millis() < 1000,
                 "Mass evaluation should complete in reasonable time"
@@ -2489,12 +2534,15 @@ mod tests {
                 .unwrap();
             assert!(initial_result.rollback_allowed);
 
-            // Test cooldown bypass through time manipulation
+            // Test cooldown bypass through time manipulation. The evaluate
+            // below runs at bypass_time + 2, and the cooldown from the
+            // rollback at 1002 covers now <= 1122 (inclusive boundary,
+            // fail-closed), so the probe values account for the +2 offset.
             let cooldown_bypass_attempts = [
-                1003, // Immediately after rollback
-                1050, // Mid-cooldown
-                1121, // Just before cooldown end
-                1122, // Exactly at cooldown boundary
+                1003, // Immediately after rollback (evaluates at 1005)
+                1050, // Mid-cooldown (evaluates at 1052)
+                1119, // Just before cooldown end (evaluates at 1121)
+                1120, // Exactly at the inclusive boundary (evaluates at 1122)
             ];
 
             for bypass_time in cooldown_bypass_attempts {
@@ -2660,10 +2708,16 @@ mod tests {
                 }
             }
 
-            // Should have consistent behavior patterns
-            assert_eq!(
-                successful_rollbacks, 1,
-                "Should have exactly one successful rollback"
+            // Should have consistent behavior patterns. A successful rollback
+            // clears the connector's crash window and starts a cooldown, but
+            // the crashes injected every 10th evaluation legitimately rebuild
+            // to threshold after cooldown expiry — so multiple rollbacks are
+            // correct behavior, not a race artifact. The invariants are that
+            // rollbacks happen at all, cooldown actually blocks, and every
+            // evaluation lands in a recognized class.
+            assert!(
+                successful_rollbacks >= 1,
+                "Should have at least one successful rollback"
             );
             assert!(
                 cooldown_blocks > 0,
@@ -2806,70 +2860,16 @@ mod tests {
 
             match injection_result {
                 Ok(()) => {
-                    // If injection succeeds, verify it's handled safely.
-                    // The detector now retains only crash timestamps (not event
-                    // bodies), so `crashes_for` has no equivalent; the count
-                    // assertion below confirms a single crash per connector, so
-                    // the recorded event for this connector is `malicious_event`.
-                    let crashes = std::slice::from_ref(malicious_event);
-
-                    // Verify crash event sanitization
-                    for crash in crashes {
-                        assert!(
-                            !crash.connector_id.contains('\0'),
-                            "Attack {}: Connector ID should not contain null bytes",
-                            attack_idx
-                        );
-                        assert!(
-                            !crash.connector_id.contains("rm -rf"),
-                            "Attack {}: Connector ID should not contain command injection",
-                            attack_idx
-                        );
-                        assert!(
-                            !crash.connector_id.contains("DROP TABLE"),
-                            "Attack {}: Connector ID should not contain SQL injection",
-                            attack_idx
-                        );
-
-                        assert!(
-                            !crash.reason.contains('\0'),
-                            "Attack {}: Crash reason should not contain null bytes",
-                            attack_idx
-                        );
-                        assert!(
-                            !crash.reason.contains("rm -rf"),
-                            "Attack {}: Crash reason should not contain command injection",
-                            attack_idx
-                        );
-                        assert!(
-                            !crash.reason.contains("$("),
-                            "Attack {}: Crash reason should not contain command substitution",
-                            attack_idx
-                        );
-
-                        assert!(
-                            !crash.timestamp.contains('\0'),
-                            "Attack {}: Timestamp should not contain null bytes",
-                            attack_idx
-                        );
-                        assert!(
-                            !crash.timestamp.contains("\"injected\":"),
-                            "Attack {}: Timestamp should not contain JSON injection",
-                            attack_idx
-                        );
-
-                        // Verify length limits
-                        assert!(
-                            crash.connector_id.len() <= 10000,
-                            "Attack {}: Connector ID should have reasonable length limit",
-                            attack_idx
-                        );
-                        assert!(
-                            crash.reason.len() <= 10000,
-                            "Attack {}: Crash reason should have reasonable length limit",
-                            attack_idx
-                        );
-                    }
+                    // Injection is ACCEPTED by design: the detector treats
+                    // connector ids, reasons, and timestamps as opaque bytes —
+                    // it never parses, renders, or executes them, and it
+                    // retains only crash epochs keyed by the id. The safety
+                    // contract under adversarial input is therefore the
+                    // behavior below (accurate windowed counts and strict
+                    // per-connector isolation), not sanitization of fields
+                    // the previous version of this test asserted on the raw
+                    // attack input itself — which was unsatisfiable for the
+                    // null-byte and oversized-field attacks.
 
                     // Test crash count accuracy despite injection
                     let crash_count = detector.crashes_in_window_for(
@@ -3237,7 +3237,23 @@ mod tests {
             );
         }
 
-        // Test system integrity after corruption attacks
+        // Test system integrity after corruption attacks. Any corrupted-pin
+        // evaluation that triggered a rollback above cleared this connector's
+        // crash window, and epoch 3000 is far outside the original window
+        // anyway — rebuild a live crash window so the recovery evaluation
+        // actually reaches the rollback path.
+        for i in 0..10 {
+            record_crash_traced(
+                &mut detector,
+                CrashEvent {
+                    connector_id: target_connector.to_string(),
+                    timestamp: format!("2024-01-01T13:{:02}:00Z", i),
+                    reason: format!("recovery_crash_{}", i),
+                },
+                2990 + i,
+            );
+        }
+
         let clean_pin = KnownGoodPin {
             connector_id: target_connector.to_string(),
             version: "1.0.1".to_string(),
@@ -3633,10 +3649,14 @@ mod tests {
                     if decision.triggered && decision.rollback_allowed {
                         // Check if this is a legitimate bypass due to different connector
                         if bypass_connector_id != &bypass_connector {
-                            // Different connector should be allowed
+                            // A different connector is legitimately allowed to
+                            // roll back (the Ok itself proves the original
+                            // connector's cooldown did not leak onto it), and
+                            // that successful rollback starts the bypass
+                            // connector's OWN cooldown.
                             assert!(
-                                !detector.in_cooldown_for(bypass_connector_id, bypass_timestamp),
-                                "Attack {}: Different connector should not be in cooldown",
+                                detector.in_cooldown_for(bypass_connector_id, bypass_timestamp),
+                                "Attack {}: Bypass connector should now be in its own cooldown",
                                 attack_idx
                             );
                         } else {
