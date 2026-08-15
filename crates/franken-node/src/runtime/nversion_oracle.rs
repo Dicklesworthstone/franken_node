@@ -1868,7 +1868,9 @@ mod tests {
             .expect("register should succeed");
         // Manually insert a "disabled" check flag
         oracle.active_checks.insert("chk-1".to_string(), false);
-        let outputs = BTreeMap::new();
+        // Supply the registered runtime's output so the quorum precondition
+        // holds; the property under test is only the active-check flag.
+        let outputs = BTreeMap::from([("a".to_string(), b"out".to_vec())]);
         let result = oracle.run_cross_check("chk-1", BoundaryScope::IO, b"in", &outputs);
         assert!(
             result.is_ok(),
@@ -2289,10 +2291,11 @@ mod tests {
         // Test the push_bounded utility function with edge cases
         let mut items = vec![1, 2, 3, 4, 5];
 
-        // Test with zero capacity (should drain all but keep new item)
-        let original_len = items.len();
+        // Zero capacity means the bound is zero: everything is dropped and
+        // the new item is NOT stored (a cap-0 buffer holding one item would
+        // violate its own bound).
         push_bounded(&mut items, 99, 0);
-        assert_eq!(items, vec![99], "Zero capacity should keep only new item");
+        assert!(items.is_empty(), "Zero capacity stores nothing");
 
         // Test with capacity 1
         push_bounded(&mut items, 100, 1);
@@ -2574,10 +2577,17 @@ mod tests {
 
                 for i in 0..25 {
                     let check_id = format!("thread-{}-check-{}", thread_id, i);
-                    let runtime_id = format!("runtime-{}", thread_id);
 
+                    // Outputs must satisfy the 66% quorum across the four
+                    // registered runtimes or run_cross_check refuses before
+                    // recording anything.
                     let mut outputs = BTreeMap::new();
-                    outputs.insert(runtime_id, vec![thread_id as u8, i as u8]);
+                    for runtime_idx in 0..4 {
+                        outputs.insert(
+                            format!("runtime-{}", runtime_idx),
+                            vec![thread_id as u8, i as u8, runtime_idx as u8],
+                        );
+                    }
 
                     let mut oracle_guard =
                         try_lock(&oracle, "n-version oracle concurrent cross-check recording")
