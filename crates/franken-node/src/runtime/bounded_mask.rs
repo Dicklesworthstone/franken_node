@@ -2210,7 +2210,12 @@ mod bounded_mask_comprehensive_negative_tests {
         let timeout_policy = MaskPolicy::new(Duration::from_nanos(1), "trace-nesting-timeout");
         let ok_policy = MaskPolicy::new(Duration::from_millis(10), "trace-nesting-ok");
 
-        // Test nesting after timeout failure
+        // Test nesting inside a timing-out outer mask. The timeout is only
+        // evaluated when the closure RETURNS, so while the closure runs the
+        // outer mask is still active and a nested bounded_mask trips the
+        // nesting guard (panic under cfg(test), abort in production) — it is
+        // never politely rejected. Catch that panic, then confirm the outer
+        // mask still reports its own timeout.
         let timeout_result = bounded_mask_with_report(
             &cx,
             &mut cancellation,
@@ -2219,13 +2224,19 @@ mod bounded_mask_comprehensive_negative_tests {
             |inner_cx, inner_cancel| {
                 spin_for(Duration::from_micros(10)); // Exceed timeout
 
-                // This inner mask should not execute due to timeout
-                bounded_mask(
-                    inner_cx,
-                    inner_cancel,
-                    "inner_after_timeout",
-                    |_cx, _cancel| 999u32,
-                )
+                let nested = catch_unwind(AssertUnwindSafe(|| {
+                    bounded_mask(
+                        inner_cx,
+                        inner_cancel,
+                        "inner_after_timeout",
+                        |_cx, _cancel| 999u32,
+                    )
+                }));
+                assert!(
+                    nested.is_err(),
+                    "nested mask inside an active mask must trip the nesting guard"
+                );
+                0u32
             },
         );
 
