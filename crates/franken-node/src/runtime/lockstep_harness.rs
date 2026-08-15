@@ -861,8 +861,16 @@ impl LockstepHarness {
 
         let mut cmd = Command::new("strace");
 
+        // The runtime label may be an arbitrary path (custom runtime
+        // binaries); a raw label would inject '/' into the tempfile name and
+        // fail with ENOENT, so keep only a bounded alphanumeric slug.
+        let runtime_slug: String = runtime
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .take(48)
+            .collect();
         let strace_output_file = tempfile::Builder::new()
-            .prefix(&format!("strace_{}_", runtime.replace('-', "_")))
+            .prefix(&format!("strace_{runtime_slug}_"))
             .suffix(".log")
             .tempfile()
             .context("Failed to create secure temporary file for strace")?;
