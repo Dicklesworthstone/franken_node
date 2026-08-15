@@ -1534,14 +1534,21 @@ mod tests {
                 IsolationMesh::new(test_topology()).expect("mesh"),
             ));
 
-            // Set up: fill proc-1 rail to capacity-1 (1 slot remaining)
-            // proc-1 has capacity=2, so 1 slot remaining after placing w1
+            // Set up: fill proc-1 rail to capacity-1 (1 slot remaining).
+            // proc-1 has capacity=4 in the shared fixture, so occupy three
+            // slots to leave exactly one for the racers.
             {
                 let mut mesh_guard = try_lock(&mesh, "isolation mesh available-slot setup")
                     .expect("isolation mesh mutex should not be poisoned");
                 mesh_guard
                     .place_workload("w1", "proc-1", permissive_policy(), 1)
-                    .expect("place w1 to occupy 1/2 proc-1 slots");
+                    .expect("place w1 to occupy 1/4 proc-1 slots");
+                mesh_guard
+                    .place_workload("w2", "proc-1", permissive_policy(), 1)
+                    .expect("place w2 to occupy 2/4 proc-1 slots");
+                mesh_guard
+                    .place_workload("w3", "proc-1", permissive_policy(), 1)
+                    .expect("place w3 to occupy 3/4 proc-1 slots");
             }
 
             // Create 2 workloads to race for the remaining 1 slot
