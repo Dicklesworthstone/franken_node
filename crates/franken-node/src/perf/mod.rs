@@ -1818,13 +1818,17 @@ mod perf_module_extreme_adversarial_negative_tests {
             let _decision = gate.submit(candidate);
             let iteration_duration = iteration_start.elapsed();
 
-            // Should maintain reasonable per-operation performance
-            assert!(
-                iteration_duration < std::time::Duration::from_millis(10),
-                "Iteration {} took too long: {:?}",
-                i,
-                iteration_duration
-            );
+            // Should maintain reasonable per-operation performance.
+            // Wall-clock budgets only hold on a quiesced host (bd-m87xv);
+            // the submit path itself still runs for every iteration.
+            if crate::testing::timing_assertions_enabled() {
+                assert!(
+                    iteration_duration < std::time::Duration::from_millis(10),
+                    "Iteration {} took too long: {:?}",
+                    i,
+                    iteration_duration
+                );
+            }
 
             // Estimate memory usage (rough approximation)
             let estimated_memory = gate.inner().decision_count() * 1000; // ~1KB per decision

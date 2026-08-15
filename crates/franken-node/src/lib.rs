@@ -759,10 +759,14 @@ mod tests {
                 description
             );
 
-            // Verify no script execution or template processing
+            // Verify no script execution or template processing: the payload
+            // is opaque bytes and must be echoed VERBATIM (braces, tags and
+            // quotes intact), never expanded or interpreted. Asserting the
+            // absence of substrings the payload itself carries (like the
+            // literal word "malicious") contradicted the verbatim contract.
             assert!(
-                !rendered_msg.contains("malicious"),
-                "Should not execute malicious content in message: {}",
+                rendered_msg.contains(injection_payload),
+                "Message must echo the payload untransformed: {}",
                 description
             );
             assert!(

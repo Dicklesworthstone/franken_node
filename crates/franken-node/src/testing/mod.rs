@@ -2229,10 +2229,17 @@ mod testing_module_negative_tests {
                                             let delivery_tick =
                                                 delivered.tick_delivered.unwrap_or(0);
 
-                                            // Verify timing constraint behavior
+                                            // Verify timing constraint behavior.
+                                            // Delivery lands on the first tick
+                                            // at/after the configured delay, so
+                                            // the bound carries one tick of
+                                            // advance_tick granularity.
                                             if within_ticks != u64::MAX {
                                                 assert!(
-                                                    delivery_tick <= within_ticks + delay_ticks,
+                                                    delivery_tick
+                                                        <= within_ticks
+                                                            .saturating_add(delay_ticks)
+                                                            .saturating_add(1),
                                                     "Delivery should respect timing bounds: {}",
                                                     test_name
                                                 );

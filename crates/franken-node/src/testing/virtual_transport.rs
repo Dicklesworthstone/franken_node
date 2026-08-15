@@ -1553,13 +1553,22 @@ mod tests {
         assert!(vt_corrupt.corrupted_messages > 0);
 
         let corrupted_msg = vt_corrupt.deliver_next("a->b").unwrap().unwrap();
-        // Should have exactly 8192 bits flipped (all bits in 1KB)
+        // apply_corruption samples bit positions WITH replacement, so a
+        // position flipped twice cancels out — 8192 toggles on an all-zero
+        // payload yields an EVEN number of set bits in (0, 8192], not
+        // exactly 8192.
         let total_ones = corrupted_msg
             .payload
             .iter()
             .map(|&b| b.count_ones())
             .sum::<u32>();
-        assert_eq!(total_ones, 8192);
+        assert!(total_ones > 0, "capped corruption must actually flip bits");
+        assert!(total_ones <= 8192);
+        assert_eq!(
+            total_ones % 2,
+            0,
+            "an even number of toggles preserves even parity"
+        );
     }
 
     /// Test link operations with extreme node names and link IDs

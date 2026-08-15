@@ -4212,6 +4212,21 @@ mod tests {
         let compaction_lock_path = transport.action_compaction_lock_path();
         fs::create_dir_all(compaction_lock_path.parent().unwrap()).expect("create dir");
 
+        // Root bypasses permission bits entirely, so the readonly fixture
+        // cannot produce the compaction failure this test exists to observe.
+        {
+            use std::os::unix::fs::MetadataExt;
+            if fs::metadata("/proc/self")
+                .map(|m| m.uid() == 0)
+                .unwrap_or(false)
+            {
+                eprintln!(
+                    "SKIP: running as root; permission-driven compaction failure asserted on unprivileged hosts"
+                );
+                return;
+            }
+        }
+
         // First, make the actions file inaccessible to force an error during compaction
         let metadata = fs::metadata(layout.actions_path()).expect("get metadata");
         let mut permissions = metadata.permissions();

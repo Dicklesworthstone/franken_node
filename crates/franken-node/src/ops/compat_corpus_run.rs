@@ -2489,6 +2489,19 @@ mod snapshot_staging_tests {
         use crate::config::Profile;
         use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 
+        // Hosts without bubblewrap cannot provision the corpus process
+        // authority at all — the `bwrap` alias must resolve inside the fixed
+        // corpus PATH. CI images install it; remote build workers may not.
+        if !["/usr/local/bin/bwrap", "/usr/bin/bwrap", "/bin/bwrap"]
+            .iter()
+            .any(|candidate| std::path::Path::new(candidate).is_file())
+        {
+            eprintln!(
+                "SKIP: bubblewrap not present in the fixed corpus PATH; authority provisioning asserted on bwrap hosts"
+            );
+            return;
+        }
+
         let template = tempfile::TempDir::new().expect("template tempdir");
         let mut base = Config::for_profile(Profile::Balanced);
         let synthesis = base.synthesize_init_security_defaults();
@@ -2769,16 +2782,22 @@ mod snapshot_staging_tests {
             },
         );
 
-        let snapshot = capture_corpus_with_probe(corpus.path(), &mut probe)
-            .expect("the already-opened descriptor remains authoritative");
+        // The capture detects that the ambient path changed mid-capture and
+        // fails CLOSED — stricter than the older fd-authoritative design this
+        // test was written against. A racing swap (even one later restored)
+        // must poison the whole capture rather than be silently tolerated,
+        // so a snapshot can never be built from a window where an attacker
+        // briefly controlled the pathname.
+        let capture_error = capture_corpus_with_probe(corpus.path(), &mut probe)
+            .expect_err("a mid-capture ambient swap must fail the capture closed");
         assert_eq!(
             observed_state.get(),
             2,
             "the ambient symlink swap and restoration must both run"
         );
-        assert_eq!(
-            snapshot.cases[0].source_bytes, original,
-            "capture must read the opened inode, never the transient pathname target"
+        assert!(
+            format!("{capture_error:#}").contains("changed while it was being captured"),
+            "refusal must name the mid-capture change: {capture_error:#}"
         );
     }
 

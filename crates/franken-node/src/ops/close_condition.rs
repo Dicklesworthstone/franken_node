@@ -1649,8 +1649,36 @@ mod tests {
     use tempfile::TempDir;
 
     fn corpus_totals_json(passed: u64, failed: u64, pass_rate_pct: f64) -> Value {
+        // Honest fixture per the bd-ihusm gate: genuine-run provenance plus
+        // per-test rows whose digest is recomputed through the PRODUCTION
+        // digest function, so the declared totals re-derive and bind.
+        let per_test_results: Vec<Value> = (0..passed)
+            .map(|i| {
+                serde_json::json!({
+                    "test_id": format!("tc-pass-{i}"),
+                    "api_family": "fs",
+                    "band": "core",
+                    "risk_band": "low",
+                    "status": "pass",
+                })
+            })
+            .chain((0..failed).map(|i| {
+                serde_json::json!({
+                    "test_id": format!("tc-fail-{i}"),
+                    "api_family": "fs",
+                    "band": "core",
+                    "risk_band": "low",
+                    "status": "fail",
+                })
+            }))
+            .collect();
+        let result_digest = compute_compatibility_corpus_result_digest(&per_test_results);
         serde_json::json!({
-            "corpus": { "corpus_version": "compat-corpus-test" },
+            "corpus": {
+                "corpus_version": "compat-corpus-test",
+                "provenance": COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
+                "result_digest": result_digest,
+            },
             "thresholds": { "overall_pass_rate_min_pct": 95.0 },
             "totals": {
                 "total_test_cases": passed + failed,
@@ -1660,6 +1688,7 @@ mod tests {
                 "skipped_test_cases": 0,
                 "overall_pass_rate_pct": pass_rate_pct,
             },
+            "per_test_results": per_test_results,
         })
     }
 

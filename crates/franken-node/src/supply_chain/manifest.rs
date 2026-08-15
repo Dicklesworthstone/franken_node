@@ -1249,7 +1249,11 @@ mod tests {
         let mut manifest = valid_manifest();
         manifest.signature.signature = "A=AA".to_string();
 
-        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+        // Plain validation uses the STRUCTURAL projection, which omits the
+        // publisher signature entirely — only the full (trust-admission)
+        // projection decodes it, so that is the surface this negative case
+        // must exercise.
+        let error = manifest.to_engine_manifest().expect_err("should fail");
 
         assert_eq!(error.code(), "EMS_ENGINE_PROJECTION");
         assert!(error.to_string().contains("signature base64 decode failed"));

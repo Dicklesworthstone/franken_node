@@ -4888,8 +4888,21 @@ mod tests {
     fn test_sync_root_hygiene_detection() {
         use tempfile::TempDir;
 
-        // Test non-git directory
+        // Test non-git directory. Discovery deliberately walks UP to the
+        // filesystem root, so a tempdir that happens to live inside a git
+        // checkout (TMPDIR under the synced repo on build workers) is NOT a
+        // non-git directory and cannot exercise this branch.
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        if temp_dir
+            .path()
+            .ancestors()
+            .any(|ancestor| ancestor.join(".git").exists())
+        {
+            eprintln!(
+                "SKIP: tempdir sits inside a git checkout; the no-repository branch needs a repo-free TMPDIR"
+            );
+            return;
+        }
         let hygiene = hygiene_detector::detect_sync_root_hygiene(temp_dir.path());
         assert_eq!(hygiene.status, FlightRecorderSyncRootHygieneStatus::Unknown);
         assert!(

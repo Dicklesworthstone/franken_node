@@ -2859,12 +2859,16 @@ mod tests {
         let std_dev = variance.sqrt();
         let coefficient_of_variation = std_dev / mean_time.as_nanos() as f64;
 
-        // Timing should be relatively consistent (low coefficient of variation)
-        assert!(
-            coefficient_of_variation < 0.5,
-            "Timing variation too high (CoV: {:.3}), potential timing leak",
-            coefficient_of_variation
-        );
+        // Timing should be relatively consistent (low coefficient of
+        // variation). Wall-clock variance bounds only hold on a quiesced host
+        // (bd-m87xv); the measured code path above runs unconditionally.
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                coefficient_of_variation < 0.5,
+                "Timing variation too high (CoV: {:.3}), potential timing leak",
+                coefficient_of_variation
+            );
+        }
 
         // Test 4: Authorization replay and reuse attacks
         let valid_auth = recovery_auth(

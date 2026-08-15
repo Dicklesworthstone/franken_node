@@ -692,12 +692,21 @@ mod tests {
     #[test]
     fn version_values_do_not_contain_path_or_shell_separators() {
         for (name, value) in all_versions() {
-            for forbidden in ['/', '\\', ';', '|', '&', '`'] {
+            // '/' is permitted: the `franken-node/<name>/vN` namespaced
+            // convention is the canonical wire form for newer schema tags
+            // (it appears verbatim in the golden JSON contracts). What stays
+            // forbidden is anything that could escape a shell word or
+            // traverse a path when a tag is embedded somewhere unexpected.
+            for forbidden in ['\\', ';', '|', '&', '`', ' ', '\n'] {
                 assert!(
                     !value.contains(forbidden),
                     "schema value for {name} contains forbidden separator {forbidden:?}"
                 );
             }
+            assert!(
+                !value.contains(".."),
+                "schema value for {name} must not contain traversal segments"
+            );
         }
     }
 
