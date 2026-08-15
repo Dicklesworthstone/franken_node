@@ -2254,25 +2254,46 @@ mod tests {
         let _active = s
             .assign_task(&task_classes::log_rotation(), 1000, "active")
             .unwrap();
-        {
-            let counters = s
-                .counters
-                .get_mut(SchedulerLane::Background.as_str())
-                .unwrap();
-            counters.queued_count = usize::MAX;
-            counters.rejected_total = u64::MAX;
-            counters.first_queued_at_ms = Some(1001);
+
+        // Queue counters are DERIVED from the real per-lane deque now, so
+        // forging usize::MAX into them is silently corrected on the next
+        // refresh. The saturation property under the queue model: once the
+        // real queue reaches max_queued_tasks_per_lane, further rejections
+        // stop enqueueing (queued_task_id = None) and the queue depth stays
+        // pinned at the bound while rejected_total keeps counting.
+        for i in 0..DEFAULT_MAX_QUEUED_TASKS_PER_LANE {
+            let err = s
+                .assign_task(
+                    &task_classes::log_rotation(),
+                    1001 + i as u64,
+                    &format!("fill-{i}"),
+                )
+                .unwrap_err();
+            assert_eq!(err.code(), error_codes::ERR_LANE_CAP_EXCEEDED);
         }
-
-        let err = s
-            .assign_task(&task_classes::log_rotation(), 1002, "overflow")
-            .unwrap_err();
-
-        assert_eq!(err.code(), error_codes::ERR_LANE_CAP_EXCEEDED);
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
-        assert_eq!(counters.queued_count, usize::MAX);
-        assert_eq!(counters.rejected_total, u64::MAX);
+        assert_eq!(counters.queued_count, DEFAULT_MAX_QUEUED_TASKS_PER_LANE);
         assert_eq!(counters.first_queued_at_ms, Some(1001));
+
+        let overflow_err = s
+            .assign_task(&task_classes::log_rotation(), 900_000, "overflow")
+            .unwrap_err();
+        assert_eq!(overflow_err.code(), error_codes::ERR_LANE_CAP_EXCEEDED);
+        match overflow_err {
+            LaneSchedulerError::CapExceeded { queued_task_id, .. } => {
+                assert!(
+                    queued_task_id.is_none(),
+                    "a full lane queue must refuse further parking"
+                );
+            }
+            other => panic!("expected CapExceeded, got {other:?}"),
+        }
+        let counters = s.lane_counter(SchedulerLane::Background).unwrap();
+        assert_eq!(counters.queued_count, DEFAULT_MAX_QUEUED_TASKS_PER_LANE);
+        assert_eq!(
+            counters.rejected_total,
+            (DEFAULT_MAX_QUEUED_TASKS_PER_LANE as u64) + 1
+        );
         assert_eq!(s.total_active(), 1);
     }
 
@@ -2294,8 +2315,12 @@ mod tests {
         assert_eq!(s.total_active(), 1);
         assert_eq!(s.active_tasks.len(), 1);
         assert!(s.active_tasks.contains_key(&active.task_id));
-        assert_eq!(s.audit_log().len(), 1);
+        // Cap-exceeded no longer vanishes silently: the rejected task is
+        // parked on the lane queue and that transition IS audited
+        // (LANE_TASK_QUEUED). No second ACTIVE assignment may appear.
+        assert_eq!(s.audit_log().len(), 2);
         assert_eq!(s.audit_log()[0].event_code, event_codes::LANE_ASSIGN);
+        assert_eq!(s.audit_log()[1].event_code, event_codes::LANE_TASK_QUEUED);
     }
 
     // ---- Task completion ----
@@ -2456,14 +2481,18 @@ mod tests {
         let _ = s.assign_task(&task_classes::log_rotation(), 1001, "t2");
         let _ = s.assign_task(&task_classes::log_rotation(), 1002, "t3");
 
+        // Completing the active task PROMOTES the queue head (t2) into the
+        // freed slot, leaving t3 queued since 1002. The baseline property
+        // under the promotion model: the surviving queued task's wait clock
+        // is not reset by the completion/promotion event.
         s.complete_task(&active.task_id, 1100, "t4").unwrap();
 
-        let starved = s.check_starvation(1151, "t5");
+        let starved = s.check_starvation(1152, "t5");
         assert_eq!(
             starved,
             vec![LaneSchedulerError::Starvation {
                 lane: SchedulerLane::Background,
-                queue_depth: 2,
+                queue_depth: 1,
                 elapsed_ms: 150,
             }]
         );
@@ -2535,11 +2564,17 @@ mod tests {
             1
         );
 
+        // Completing the active task PROMOTES the queued t2 into the freed
+        // slot — the queue drains (which is the recovery condition for the
+        // starvation latch) while the lane itself stays at its cap, so a
+        // brand-new assignment would simply queue again rather than admit.
         s.complete_task(&active.task_id, 1301, "t5").unwrap();
-        let admitted = s
-            .assign_task(&task_classes::log_rotation(), 1302, "t6")
-            .unwrap();
-        assert_eq!(admitted.lane, SchedulerLane::Background);
+        assert_eq!(
+            s.lane_counter(SchedulerLane::Background)
+                .unwrap()
+                .queued_count,
+            0
+        );
 
         let recovered = s.check_starvation(1303, "t7");
         assert!(recovered.is_empty());
@@ -2995,9 +3030,14 @@ mod tests {
                     timestamp
                 );
 
-                // Complete the task to clean up
-                let _complete_result =
-                    scheduler.complete_task(&assignment.task_id, timestamp + 1, "trace_complete");
+                // Complete the task to clean up (saturating: the boundary
+                // corpus includes u64::MAX itself, where `+ 1` would overflow
+                // in the test, not the scheduler).
+                let _complete_result = scheduler.complete_task(
+                    &assignment.task_id,
+                    timestamp.saturating_add(1),
+                    "trace_complete",
+                );
             }
         }
 
@@ -3134,12 +3174,16 @@ mod tests {
                 malicious_class.as_str()
             );
 
-            // Error handling should not crash or leak information
+            // Error handling should not crash or leak information. The
+            // message echoes the class name verbatim (asserted below), so
+            // the length bound is fixed OVERHEAD on top of the input length —
+            // an absolute bound is unsatisfiable for the oversized-name
+            // attacks in this corpus.
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.len() < 1000,
-                    "Error message should not be excessively long"
+                    error_msg.len() < malicious_class.as_str().len() + 1000,
+                    "Error message overhead should be bounded"
                 );
 
                 // Should preserve the malicious class name exactly (no sanitization)
@@ -3601,11 +3645,38 @@ mod tests {
             }
         }
 
-        // Hot reload policy while tasks are active
+        // Hot reload while tasks are active. The candidate policy drops the
+        // ControlCritical lane the three active epoch_transition tasks live
+        // on — reload_policy deliberately REFUSES to remove an occupied lane
+        // (fail-closed hot reload), so this attack must be rejected.
         let under_load_result = scheduler.reload_policy(load_policy);
         assert!(
-            under_load_result.is_ok(),
-            "Should handle hot reload under load"
+            matches!(
+                under_load_result,
+                Err(LaneSchedulerError::InvalidPolicy { .. })
+            ),
+            "Dropping an occupied lane must be refused: {under_load_result:?}"
+        );
+
+        // A reload that RETAINS the occupied lane is accepted under load.
+        let mut retaining_policy = LaneMappingPolicy::new();
+        retaining_policy
+            .add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 8))
+            .unwrap();
+        retaining_policy
+            .add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 10))
+            .unwrap();
+        retaining_policy.add_rule(
+            &task_classes::epoch_transition(),
+            SchedulerLane::ControlCritical,
+        );
+        retaining_policy.add_rule(
+            &task_classes::remote_computation(),
+            SchedulerLane::RemoteEffect,
+        );
+        assert!(
+            scheduler.reload_policy(retaining_policy).is_ok(),
+            "Should handle hot reload under load when occupied lanes are retained"
         );
 
         // Active tasks should still be completable
