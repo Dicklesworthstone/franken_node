@@ -1137,7 +1137,7 @@ mod tests {
             let test_epochs = vec![
                 0,                                          // Minimum epoch
                 current_epoch.saturating_sub(lookback),     // Exactly at lookback boundary
-                current_epoch.saturating_sub(lookback + 1), // One past lookback (should fail)
+                current_epoch.saturating_sub(lookback.saturating_add(1)), // One past lookback (should fail)
                 current_epoch,                              // Current epoch (should pass)
                 current_epoch + 1,                          // Future epoch (should fail)
                 u64::MAX,                                   // Maximum epoch (should fail)
