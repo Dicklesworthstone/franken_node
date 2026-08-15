@@ -3626,7 +3626,12 @@ mod tests {
         let expected = total.saturating_sub(available.min(total)) as f64 / total as f64;
         let observed = get_disk_usage(dir.path()).expect("disk usage should be readable");
 
-        assert_eq!(observed, expected);
+        // The filesystem is live: concurrent writers move `available` between
+        // the two reads, so exact equality only holds on an idle disk.
+        assert!(
+            (observed - expected).abs() < 0.01,
+            "disk usage should track the space provider: observed={observed} expected={expected}"
+        );
         assert!((0.0..=1.0).contains(&observed));
     }
 
