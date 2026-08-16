@@ -969,6 +969,11 @@ required-features = ["test-support"]
 name = "vef_receipt_schema_conformance"
 path = "tests/vef_receipt_schema_conformance.rs"
 
+# bd-rjc2m.33: restore one fixture-presence and three public-API vector tests
+[[test]]
+name = "vef_receipt_chain_integrity"
+path = "tests/vef_receipt_chain_integrity.rs"
+
 [[test]]
 name = "vef_policy_constraint_compiler"
 path = "../../tests/conformance/vef_policy_constraint_compiler.rs"
