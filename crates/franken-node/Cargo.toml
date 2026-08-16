@@ -1116,6 +1116,13 @@ path = "tests/canonical_serializer_metamorphic.rs"
 name = "control_epoch_metamorphic"
 path = "tests/control_epoch_metamorphic.rs"
 
+# bd-rjc2m.27: this wrapper reaches the five bd-181w security tests for
+# current/past epoch acceptance, future/stale fail-closed rejection, and EPV
+# scope logging. With autotests=false, the file was otherwise never executed.
+[[test]]
+name = "control_epoch_validity"
+path = "tests/control_epoch_validity.rs"
+
 [[test]]
 name = "control_epoch_barrier"
 path = "../../tests/integration/control_epoch_barrier.rs"
