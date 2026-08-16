@@ -883,6 +883,11 @@ path = "tests/supply_chain_trust_card_golden_bytes.rs"
 name = "supply_chain_manifest_replay_conformance"
 path = "tests/supply_chain_manifest_replay_conformance.rs"
 
+# bd-rjc2m.32: restore the seven public-API attestation-gate assertions
+[[test]]
+name = "attestation_gate"
+path = "tests/attestation_gate.rs"
+
 # bd-rjc2m.30: restore the six public-API provenance-chain assertions
 [[test]]
 name = "provenance_verification_chain"
