@@ -2,10 +2,7 @@
 //!
 //! Verifies migration admission constraints and automated fallback behavior.
 
-#[path = "../../crates/franken-node/src/migration/bpet_migration_gate.rs"]
-mod gate_impl;
-
-use gate_impl::{
+use frankenengine_node::migration::bpet_migration_gate::{
     GateVerdict, RolloutHealthSnapshot, RolloutPhase, StabilityThresholds, TrajectorySnapshot,
     build_migration_report, evaluate_admission, evaluate_rollout_health,
 };

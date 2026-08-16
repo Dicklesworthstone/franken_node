@@ -1366,6 +1366,12 @@ required-features = ["policy-engine"]
 name = "evolution_risk_scorer_integration"
 path = "tests/evolution_risk_scorer_integration.rs"
 
+# bd-rjc2m.29: restore BPET migration stability gate coverage
+[[test]]
+name = "bpet_migration_stability_gate"
+path = "tests/bpet_migration_stability_gate.rs"
+required-features = ["admin-tools"]
+
 # bd-2xgs.1 (section 10.21): deterministic phenotype feature extraction
 [[test]]
 name = "bpet_feature_extraction"
