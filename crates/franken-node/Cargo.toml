@@ -919,6 +919,11 @@ required-features = ["extended-surfaces"]
 name = "frankensqlite_adapter_conformance"
 path = "tests/frankensqlite_adapter_conformance.rs"
 
+# bd-rjc2m.34: restore the canonical-evidence fsqlite reopen assertion
+[[test]]
+name = "frankensqlite_persistence_integration"
+path = "tests/frankensqlite_persistence_integration.rs"
+
 [[test]]
 name = "trust_cli_e2e"
 path = "tests/trust_cli_e2e.rs"

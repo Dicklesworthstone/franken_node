@@ -1,4 +1,4 @@
-use frankenengine_node::connector::canonical_serializer::{CanonicalSerializer, TrustObjectType};
+use frankenengine_node::connector::canonical_serializer::canonical_bytes;
 use frankenengine_node::observability::evidence_ledger::{EvidenceEntry, test_entry};
 use fsqlite::{Connection, Row, SqliteValue};
 use serde::{Deserialize, Serialize};
@@ -27,15 +27,8 @@ fn canonical_evidence_entry() -> EvidenceEntry {
 
 fn canonical_evidence_row() -> FrankensqliteEvidenceRow {
     let entry = canonical_evidence_entry();
-    let payload = serde_json::to_vec(&entry).expect("evidence entry should serialize");
-    let mut serializer = CanonicalSerializer::with_all_schemas();
-    let canonical_payload = serializer
-        .round_trip_canonical(
-            TrustObjectType::OperatorReceipt,
-            &payload,
-            "bd-19unt-frankensqlite-persistence",
-        )
-        .expect("evidence payload should round-trip canonically");
+    let payload = serde_json::to_value(&entry).expect("evidence entry should serialize");
+    let canonical_payload = canonical_bytes(&payload);
 
     FrankensqliteEvidenceRow {
         evidence_id: entry.decision_id.clone(),
@@ -148,24 +141,10 @@ fn frankensqlite_persistence_integration_writes_and_reopens_canonical_evidence_r
         serde_json::to_vec(&persisted_row).expect("persisted row should serialize");
     assert_eq!(persisted_row_bytes, expected_row_bytes);
 
-    let serializer = CanonicalSerializer::with_all_schemas();
-    let decoded_payload = serializer
-        .deserialize(
-            TrustObjectType::OperatorReceipt,
-            &persisted_row.canonical_payload,
-        )
+    let decoded_entry: EvidenceEntry = serde_json::from_slice(&persisted_row.canonical_payload)
         .expect("canonical payload should decode");
-    let decoded_entry: EvidenceEntry =
-        serde_json::from_slice(&decoded_payload).expect("decoded payload should parse");
     let reserialized_payload =
-        serde_json::to_vec(&decoded_entry).expect("decoded entry should reserialize");
-    let mut repeat_serializer = CanonicalSerializer::with_all_schemas();
-    let recanonical_payload = repeat_serializer
-        .round_trip_canonical(
-            TrustObjectType::OperatorReceipt,
-            &reserialized_payload,
-            "bd-19unt-frankensqlite-persistence-repeat",
-        )
-        .expect("reencoded payload should round-trip canonically");
+        serde_json::to_value(&decoded_entry).expect("decoded entry should reserialize");
+    let recanonical_payload = canonical_bytes(&reserialized_payload);
     assert_eq!(recanonical_payload, persisted_row.canonical_payload);
 }
