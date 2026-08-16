@@ -331,6 +331,10 @@ name = "validation_readiness"
 path = "tests/validation_readiness.rs"
 
 [[test]]
+name = "test_validation_readiness_flight_recorder"
+path = "tests/test_validation_readiness_flight_recorder.rs"
+
+[[test]]
 name = "signed_lineage_graph_builder"
 path = "../../tests/security/signed_lineage_graph_builder.rs"
 
