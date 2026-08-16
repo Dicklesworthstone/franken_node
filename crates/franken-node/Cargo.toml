@@ -821,6 +821,13 @@ path = "tests/canonical_serializer_conformance.rs"
 name = "encoding_proptest"
 path = "tests/encoding_proptest.rs"
 
+# bd-rjc2m.28: autotests=false otherwise leaves the bd-1iyx standard-lane
+# replica determinism contract unreachable. This target intentionally includes
+# the harness's 19 conformance tests plus 101 deterministic-seed inline tests.
+[[test]]
+name = "replica_artifact_determinism"
+path = "tests/replica_artifact_determinism.rs"
+
 [[test]]
 name = "claims_proptest"
 path = "tests/claims_proptest.rs"

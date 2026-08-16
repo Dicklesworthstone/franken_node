@@ -101,7 +101,7 @@ fn compare_artifacts(name: &str, a: &[u8], b: &[u8]) -> Option<Divergence> {
 /// Heuristic root-cause guesser for common divergence patterns.
 fn guess_root_cause(_name: &str, offset: usize, a: &[u8], b: &[u8]) -> String {
     // Check if the divergence looks like a timestamp (8 bytes at aligned offset)
-    if offset % 8 == 0 && offset + 8 <= a.len() && offset + 8 <= b.len() {
+    if offset.is_multiple_of(8) && offset + 8 <= a.len() && offset + 8 <= b.len() {
         let va = u64::from_le_bytes(a[offset..offset + 8].try_into().unwrap());
         let vb = u64::from_le_bytes(b[offset..offset + 8].try_into().unwrap());
         let diff = va.abs_diff(vb);
