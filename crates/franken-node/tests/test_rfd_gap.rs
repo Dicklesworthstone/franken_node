@@ -39,9 +39,8 @@ mod tests {
             node_id: "node".into(),
         };
 
-        // This will fail because last_known is still 1!
+        // The gap evidence reanchors last_known at epoch 3.
         let result = detector.feed(sv4);
-        println!("{:?}", result);
-        assert!(result.is_ok(), "Expected OK, got {:?}", result);
+        assert!(result.is_ok(), "Expected OK, got {result:?}");
     }
 }

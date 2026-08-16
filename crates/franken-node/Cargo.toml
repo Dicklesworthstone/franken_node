@@ -1312,6 +1312,11 @@ path = "tests/e2e_evidence_ledger_lifecycle.rs"
 name = "e2e_fork_detection_lifecycle"
 path = "tests/e2e_fork_detection_lifecycle.rs"
 
+# bd-rjc2m.36: restore post-gap rollback-detector recovery coverage
+[[test]]
+name = "test_rfd_gap"
+path = "tests/test_rfd_gap.rs"
+
 [[test]]
 name = "e2e_marker_stream_lifecycle"
 path = "tests/e2e_marker_stream_lifecycle.rs"
