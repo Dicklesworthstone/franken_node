@@ -460,6 +460,11 @@ required-features = ["control-plane"]
 name = "connector_lifecycle_transitions"
 path = "../../tests/conformance/connector_lifecycle_transitions.rs"
 
+# bd-rjc2m.35: restore deterministic supervisor temporal assertions
+[[test]]
+name = "supervision_temporal_kernel"
+path = "tests/supervision_temporal_kernel.rs"
+
 [[test]]
 name = "lease_coordinator_selection"
 path = "../../tests/conformance/lease_coordinator_selection.rs"
