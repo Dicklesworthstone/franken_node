@@ -988,6 +988,11 @@ path = "tests/vef_receipt_jcq1z_real_service.rs"
 name = "observability_evidence_ledger_regressions"
 path = "tests/observability_evidence_ledger_regressions.rs"
 
+# bd-rjc2m.31: restore the six public-API trace-correlation assertions
+[[test]]
+name = "trace_correlation_end_to_end"
+path = "tests/trace_correlation_end_to_end.rs"
+
 [[test]]
 name = "evidence_ledger_chain_order_metamorphic"
 path = "tests/evidence_ledger_chain_order_metamorphic.rs"
