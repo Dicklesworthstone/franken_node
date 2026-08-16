@@ -54,12 +54,14 @@ fn legacy_compatibility_pipeline_round_trips_signed_receipts() {
     let mut engine = GateEngine::new(b"integration-key".to_vec());
     engine.set_scope_mode("tenant-legacy", CompatMode::Balanced);
 
-    let gate = engine.gate_check(&GateCheckRequest {
-        package_id: "shim-edge".to_string(),
-        requested_mode: CompatMode::Strict,
-        scope: "tenant-legacy".to_string(),
-        policy_context: BTreeMap::new(),
-    });
+    let gate = engine
+        .gate_check(&GateCheckRequest {
+            package_id: "shim-edge".to_string(),
+            requested_mode: CompatMode::Strict,
+            scope: "tenant-legacy".to_string(),
+            policy_context: BTreeMap::new(),
+        })
+        .expect("legacy compatibility gate evaluation should succeed");
     assert_eq!(gate.decision, Verdict::Allow);
 
     let transition = engine
@@ -73,11 +75,13 @@ fn legacy_compatibility_pipeline_round_trips_signed_receipts() {
         .unwrap();
     assert!(engine.verify_transition_signature(&transition));
 
-    let divergence = engine.issue_divergence_receipt(
-        "tenant-legacy",
-        "shim-edge",
-        "integration divergence coverage",
-        "minor",
-    );
+    let divergence = engine
+        .issue_divergence_receipt(
+            "tenant-legacy",
+            "shim-edge",
+            "integration divergence coverage",
+            "minor",
+        )
+        .expect("legacy divergence receipt issuance should succeed");
     assert!(engine.verify_receipt_signature(&divergence));
 }

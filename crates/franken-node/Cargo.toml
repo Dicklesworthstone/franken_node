@@ -1405,6 +1405,12 @@ name = "policy_observability_integration"
 path = "../../tests/integration/policy_observability_integration.rs"
 required-features = ["policy-engine"]
 
+# bd-rjc2m.39: restore the compatibility-policy integration pipeline
+[[test]]
+name = "compatibility_policy_pipeline"
+path = "tests/compatibility_policy_pipeline.rs"
+required-features = ["extended-surfaces"]
+
 # bd-1jpc (section 10.21): unified evolution-risk scorer
 [[test]]
 name = "evolution_risk_scorer_integration"
