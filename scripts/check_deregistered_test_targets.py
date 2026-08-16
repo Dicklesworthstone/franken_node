@@ -15,10 +15,9 @@ This gate is PURE STATIC (no cargo/rch builds):
      registered target roots (so genuine helper files pulled in by a registered
      wrapper are NOT flagged),
   3. list top-level `tests/*.rs` files NOT in that closure (= orphaned),
-  4. classify each orphan and FLAG default-lane test categories
-     (conformance / golden / metamorphic / contract / vectors / e2e) while
-     ALLOWLISTING intentionally-separate ones (fuzz / loom / bench /
-     real-service / no-mocks / *_helpers),
+  4. classify each orphan, ALLOWLIST intentionally-separate categories
+     (fuzz / loom / bench / real-service / no-mocks / *_helpers), and FLAG
+     every other orphan instead of failing open on an unfamiliar filename,
   5. emit a JSONL report + human summary and EXIT NON-ZERO on any FLAGGED orphan.
 
 Modes:
@@ -132,7 +131,7 @@ _ALLOWLIST_RULES: List[Tuple[str, str]] = [
     ("real_crypto", "real-service"),
     ("no_mocks", "real-service"),
 ]
-# Default-lane categories that SHOULD be a registered/reachable target.
+# Known default-lane categories that SHOULD be a registered/reachable target.
 _FLAG_RULES: List[Tuple[str, str]] = [
     ("conformance", "conformance"),
     ("metamorphic", "metamorphic"),
@@ -147,7 +146,9 @@ def classify(name: str) -> Tuple[str, bool]:
     """Pure. Return (category, flagged).
 
     flagged=True means this orphan is a probable coverage hole that should be
-    (re-)registered or wired into a registered target. Helper modules
+    (re-)registered or wired into a registered target. Unknown names fail closed
+    as `review` rather than escaping merely because they lack a category keyword.
+    Helper modules
     (`*_helpers`/`*_helper`) and support shims are allowlisted (they are meant to
     be #[path]-included, so if they surface as orphans it is only because their
     sole includer is itself orphaned — reported as non-flagged 'helper').
@@ -161,7 +162,7 @@ def classify(name: str) -> Tuple[str, bool]:
     for needle, category in _FLAG_RULES:
         if needle in lname:
             return (category, True)
-    return ("review", False)
+    return ("review", True)
 
 
 # --- reachability + orphan detection (I/O) ----------------------------------
@@ -246,21 +247,21 @@ def find_orphans(repo_root: str, crate_dir: str) -> List[dict]:
 
 def render_summary(orphans: List[dict]) -> str:
     flagged = [o for o in orphans if o["flagged"]]
-    allow = [o for o in orphans if not o["flagged"]]
+    excluded = [o for o in orphans if not o["flagged"]]
     by_cat: Dict[str, int] = {}
     for o in orphans:
         by_cat[o["category"]] = by_cat.get(o["category"], 0) + 1
     lines = ["# Orphaned test-file census (.G2)\n"]
     lines.append(f"- top-level orphans: {len(orphans)} "
-                 f"(flagged coverage holes: {len(flagged)}, allowlisted/review: {len(allow)})")
+                 f"(flagged coverage holes: {len(flagged)}, explicitly excluded: {len(excluded)})")
     lines.append(f"- by category: " + ", ".join(f"{k}={v}" for k, v in sorted(by_cat.items())))
     if flagged:
         lines.append("\n## FLAGGED (should be registered or #[path]-wired):")
         for o in flagged:
             lines.append(f"  - [{o['category']}] {o['target']}  ({o['path']})")
-    if allow:
-        lines.append("\n## allowlisted / review (informational):")
-        for o in allow:
+    if excluded:
+        lines.append("\n## explicitly excluded (informational):")
+        for o in excluded:
             lines.append(f"  - [{o['category']}] {o['target']}")
     return "\n".join(lines) + "\n"
 

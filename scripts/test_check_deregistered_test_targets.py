@@ -73,8 +73,9 @@ def test_classify_allowlist_and_flags():
     assert g.classify("trust_card_field_reorder_metamorphic") == ("metamorphic", True)
     assert g.classify("migrate_audit_goldens") == ("golden", True)
     assert g.classify("doctor_policy_activation_e2e") == ("e2e", True)
-    # unknown -> review, not flagged
-    assert g.classify("supervision_temporal_kernel") == ("review", False)
+    # Unknown names fail closed: a new naming convention must not silently
+    # bypass coverage merely because it lacks a known category keyword.
+    assert g.classify("supervision_temporal_kernel") == ("review", True)
 
 
 def test_resolve_reference_variants():
@@ -118,6 +119,10 @@ def test_find_orphans_end_to_end():
         _write(os.path.join(tests, "wrapper.rs"), '#[path = "wired_conf.rs"]\nmod wired;\n')
         _write(os.path.join(tests, "wired_conf.rs"), "#[test] fn t() {}\n")          # reached -> not orphan
         _write(os.path.join(tests, "orphan_conformance.rs"), "#[test] fn t() {}\n")  # flagged
+        _write(os.path.join(tests, "temporal_kernel.rs"),
+               'include!("nested/temporal_kernel_tests.rs");\n')
+        _write(os.path.join(tests, "nested", "temporal_kernel_tests.rs"),
+               "#[test] fn transitive_test() {}\n")
         _write(os.path.join(tests, "some_fuzz_harness.rs"), "fn main() {}\n")        # allowlisted
         _write(os.path.join(tests, "shared_helpers.rs"), "pub fn h() {}\n")          # helper (not flagged)
 
@@ -125,6 +130,8 @@ def test_find_orphans_end_to_end():
         names = {o["target"]: o for o in orphans}
         assert "wired_conf" not in names, "reached-via-#[path] file must not be an orphan"
         assert names["orphan_conformance"]["flagged"] is True
+        assert names["temporal_kernel"]["category"] == "review"
+        assert names["temporal_kernel"]["flagged"] is True
         assert names["some_fuzz_harness"]["flagged"] is False
         assert names["shared_helpers"]["flagged"] is False
         assert "wrapper" not in names, "the registered target itself is not an orphan"
