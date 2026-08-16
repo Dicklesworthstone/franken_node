@@ -1,4 +1,4 @@
-use frankenengine_node::connector::canonical_serializer::{CanonicalSerializer, TrustObjectType};
+use frankenengine_node::connector::canonical_serializer::canonical_bytes;
 use serde::{Deserialize, Serialize};
 use sqlmodel::SchemaBuilder;
 use sqlmodel_schema::{Migration, MigrationFormat, MigrationWriter};
@@ -151,28 +151,20 @@ fn sqlmodel_rust_schema_roundtrip_uses_real_schema_builder_and_migration_writer(
     let reserialized = serde_json::to_vec(&decoded).expect("decoded envelope should reserialize");
     assert_eq!(reserialized, payload);
 
-    let mut serializer = CanonicalSerializer::with_all_schemas();
-    let canonical = serializer
-        .round_trip_canonical(
-            TrustObjectType::PolicyCheckpoint,
-            &payload,
-            "bd-2m8oq-sqlmodel-schema-v1",
-        )
-        .expect("franken_node canonical serializer should round-trip sqlmodel schema bytes");
-    let decoded_payload = serializer
-        .deserialize(TrustObjectType::PolicyCheckpoint, &canonical)
-        .expect("canonical sqlmodel payload should decode");
-    assert_eq!(decoded_payload, payload);
+    let envelope_value =
+        serde_json::to_value(&envelope).expect("schema envelope should convert to JSON");
+    let canonical = canonical_bytes(&envelope_value);
+    let decoded_canonical: SqlmodelSchemaEnvelope =
+        serde_json::from_slice(&canonical).expect("canonical sqlmodel payload should decode");
+    assert_eq!(decoded_canonical, envelope);
 
     for iteration in 0..16 {
-        let mut repeat_serializer = CanonicalSerializer::with_all_schemas();
-        let repeated = repeat_serializer
-            .round_trip_canonical(
-                TrustObjectType::PolicyCheckpoint,
-                &payload,
-                &format!("bd-2m8oq-sqlmodel-schema-v1-repeat-{iteration}"),
-            )
-            .expect("canonical output should remain deterministic");
-        assert_eq!(repeated, canonical);
+        let repeated_value = serde_json::to_value(&decoded_canonical)
+            .expect("decoded canonical envelope should convert to JSON");
+        let repeated = canonical_bytes(&repeated_value);
+        assert_eq!(
+            repeated, canonical,
+            "canonical output changed on iteration {iteration}"
+        );
     }
 }

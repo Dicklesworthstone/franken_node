@@ -929,6 +929,11 @@ path = "tests/frankensqlite_adapter_conformance.rs"
 name = "frankensqlite_persistence_integration"
 path = "tests/frankensqlite_persistence_integration.rs"
 
+# bd-rjc2m.37: restore the SQLModel typed-schema migration contract
+[[test]]
+name = "sqlmodel_rust_schema_integration"
+path = "tests/sqlmodel_rust_schema_integration.rs"
+
 [[test]]
 name = "trust_cli_e2e"
 path = "tests/trust_cli_e2e.rs"
