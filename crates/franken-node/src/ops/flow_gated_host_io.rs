@@ -34,7 +34,8 @@ use std::sync::Mutex;
 
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
-    HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
+    HostIoCapability, HostIoError, HostIoExceptionProvenance, HostIoOutcome, HostIoProvider,
+    HostIoRequest, HostIoResponse,
 };
 
 #[cfg(feature = "engine")]
@@ -133,6 +134,10 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
 impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
     fn name(&self) -> &str {
         "flow-gated-host-io"
+    }
+
+    fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+        self.inner.filesystem_exception_provenance()
     }
 
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {

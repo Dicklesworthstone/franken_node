@@ -30,7 +30,8 @@ use std::sync::Mutex;
 
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
-    HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest,
+    HostIoCapability, HostIoError, HostIoExceptionProvenance, HostIoOutcome, HostIoProvider,
+    HostIoRequest,
 };
 
 #[cfg(feature = "engine")]
@@ -214,6 +215,10 @@ impl<P: HostIoProvider> SsrfGatedHostIo<P> {
 impl<P: HostIoProvider> HostIoProvider for SsrfGatedHostIo<P> {
     fn name(&self) -> &str {
         "ssrf-gated-host-io"
+    }
+
+    fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+        self.inner.filesystem_exception_provenance()
     }
 
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {

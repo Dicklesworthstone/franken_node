@@ -42,7 +42,8 @@ use frankenengine_extension_host::host_effect_journal::{
 };
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
-    HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest,
+    HostIoCapability, HostIoError, HostIoExceptionProvenance, HostIoOutcome, HostIoProvider,
+    HostIoRequest,
 };
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::process_spawn::{
@@ -2215,6 +2216,10 @@ impl<P: HostIoProvider> HostIoProvider for WriteAheadHostIo<P> {
         "native-write-ahead-host-io"
     }
 
+    fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+        self.inner.filesystem_exception_provenance()
+    }
+
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
         let Some(emitter) = self.emitter.as_ref() else {
             return self.inner.perform(request, granted);
@@ -2316,6 +2321,10 @@ impl CancellationGatedHostIo {
 impl HostIoProvider for CancellationGatedHostIo {
     fn name(&self) -> &str {
         "native-cancellation-gate"
+    }
+
+    fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+        self.inner.filesystem_exception_provenance()
     }
 
     fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
