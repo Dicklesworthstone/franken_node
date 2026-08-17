@@ -16,8 +16,8 @@ pub struct SourceRevision {
 
 impl SourceRevision {
     pub fn try_new(franken_node_commit: &str, franken_engine_commit: &str) -> Result<Self> {
-        validate_full_git_sha("FRANKEN_NODE_GIT_SHA", franken_node_commit)?;
-        validate_full_git_sha("FRANKEN_ENGINE_GIT_SHA", franken_engine_commit)?;
+        validate_full_git_sha("FRANKEN_NODE_SOURCE_GIT_SHA", franken_node_commit)?;
+        validate_full_git_sha("FRANKEN_ENGINE_SOURCE_GIT_SHA", franken_engine_commit)?;
         Ok(Self {
             schema_version: SOURCE_REVISION_SCHEMA.to_string(),
             franken_node_commit: franken_node_commit.to_string(),
@@ -43,18 +43,18 @@ fn validate_full_git_sha(label: &str, value: &str) -> Result<()> {
 /// build fails instead of producing an ambiguous single-repository claim.
 pub fn embedded_source_revision() -> Result<Option<SourceRevision>> {
     match (
-        option_env!("FRANKEN_NODE_GIT_SHA"),
-        option_env!("FRANKEN_ENGINE_GIT_SHA"),
+        option_env!("FRANKEN_NODE_SOURCE_GIT_SHA"),
+        option_env!("FRANKEN_ENGINE_SOURCE_GIT_SHA"),
     ) {
         (Some(franken_node), Some(franken_engine)) => {
             SourceRevision::try_new(franken_node, franken_engine).map(Some)
         }
         (None, None) => Ok(None),
         (Some(_), None) => bail!(
-            "FRANKEN_NODE_GIT_SHA was embedded without FRANKEN_ENGINE_GIT_SHA; refusing partial source binding"
+            "FRANKEN_NODE_SOURCE_GIT_SHA was embedded without FRANKEN_ENGINE_SOURCE_GIT_SHA; refusing partial source binding"
         ),
         (None, Some(_)) => bail!(
-            "FRANKEN_ENGINE_GIT_SHA was embedded without FRANKEN_NODE_GIT_SHA; refusing partial source binding"
+            "FRANKEN_ENGINE_SOURCE_GIT_SHA was embedded without FRANKEN_NODE_SOURCE_GIT_SHA; refusing partial source binding"
         ),
     }
 }

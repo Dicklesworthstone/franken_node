@@ -361,7 +361,7 @@ pub fn fixture() -> bool { true }
         }
 
         #[test]
-        fn exact_github_actions_attempt_is_bound_to_the_release_receipt() {
+        fn exact_github_actions_attempt_is_bound_to_the_release_receipt() -> anyhow::Result<()> {
             let root = fixture_root_with_engine_paths(
                 "../../../franken_engine/crates/franken-engine",
                 "../../../franken_engine/crates/franken-extension-host",
@@ -369,8 +369,21 @@ pub fn fixture() -> bool { true }
             let run_url =
                 "https://github.com/Dicklesworthstone/franken_node/actions/runs/123/attempts/2";
 
-            let receipt = generate_fixture_receipt_result(root.path(), Some(run_url))
-                .expect("exact release run attempt should be accepted");
+            let receipt = generate_fixture_receipt_result(root.path(), Some(run_url))?;
+            match (
+                option_env!("FRANKEN_NODE_SOURCE_GIT_SHA"),
+                option_env!("FRANKEN_ENGINE_SOURCE_GIT_SHA"),
+                receipt.core.source_revision.as_ref(),
+            ) {
+                (Some(node), Some(engine), Some(source_revision)) => {
+                    assert_eq!(source_revision.franken_node_commit, node);
+                    assert_eq!(source_revision.franken_engine_commit, engine);
+                }
+                (None, None, None) => {}
+                unexpected => {
+                    anyhow::bail!("inconsistent release source binding: {unexpected:?}")
+                }
+            }
             let linkage = receipt.core.release_policy_linkage;
 
             assert_eq!(linkage.verdict, OracleColor::Green);
@@ -384,6 +397,7 @@ pub fn fixture() -> bool { true }
                 linkage.consumed_oracles,
                 ["L1_product_oracle", "L2_engine_boundary_oracle"]
             );
+            Ok(())
         }
 
         #[test]

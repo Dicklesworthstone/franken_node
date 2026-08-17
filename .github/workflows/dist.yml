@@ -69,15 +69,15 @@ jobs:
         working-directory: franken_node
         env:
           RCH_CARGO_WRAPPER_BYPASS: "1"
-          FRANKEN_NODE_GIT_SHA: ${{ github.sha }}
-          FRANKEN_ENGINE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
+          FRANKEN_NODE_SOURCE_GIT_SHA: ${{ github.sha }}
+          FRANKEN_ENGINE_SOURCE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
         run: cargo build --release -p frankenengine-node --bin franken-node
 
       - name: Execute genuine compatibility corpus
         working-directory: franken_node
         env:
-          FRANKEN_NODE_GIT_SHA: ${{ github.sha }}
-          FRANKEN_ENGINE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
+          FRANKEN_NODE_SOURCE_GIT_SHA: ${{ github.sha }}
+          FRANKEN_ENGINE_SOURCE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
         run: |
           set -euo pipefail
           ./target/release/franken-node ops compat-corpus-run \
@@ -89,8 +89,8 @@ jobs:
       - name: Produce proof-carrying L1 evidence from the same binary
         working-directory: franken_node
         env:
-          FRANKEN_NODE_GIT_SHA: ${{ github.sha }}
-          FRANKEN_ENGINE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
+          FRANKEN_NODE_SOURCE_GIT_SHA: ${{ github.sha }}
+          FRANKEN_ENGINE_SOURCE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
         run: |
           set -euo pipefail
           ./target/release/franken-node ops proof-carrying-evidence \
@@ -108,8 +108,8 @@ jobs:
       - name: Generate signed live composite close-condition receipt
         working-directory: franken_node
         env:
-          FRANKEN_NODE_GIT_SHA: ${{ github.sha }}
-          FRANKEN_ENGINE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
+          FRANKEN_NODE_SOURCE_GIT_SHA: ${{ github.sha }}
+          FRANKEN_ENGINE_SOURCE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
         run: |
           set -euo pipefail
           umask 077
@@ -213,8 +213,8 @@ jobs:
         working-directory: franken_node
         env:
           RCH_CARGO_WRAPPER_BYPASS: "1"
-          FRANKEN_NODE_GIT_SHA: ${{ github.sha }}
-          FRANKEN_ENGINE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
+          FRANKEN_NODE_SOURCE_GIT_SHA: ${{ github.sha }}
+          FRANKEN_ENGINE_SOURCE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}
         run: cargo build --release -p frankenengine-node --bin franken-node --target ${{ matrix.target }}
 
       - name: Create tarball

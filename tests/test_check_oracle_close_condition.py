@@ -1039,8 +1039,8 @@ class TestReleaseEvidenceBinding:
             "FRANKEN_ENGINE_REVISION: 6d204d13c710cb6e8d279f93b629ba6588add106",
             "ref: ${{ env.FRANKEN_ENGINE_REVISION }}",
             "franken-node-release-certification-${GITHUB_SHA}.tar.xz",
-            "FRANKEN_NODE_GIT_SHA: ${{ github.sha }}",
-            "FRANKEN_ENGINE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}",
+            "FRANKEN_NODE_SOURCE_GIT_SHA: ${{ github.sha }}",
+            "FRANKEN_ENGINE_SOURCE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}",
         ]
         for token in required:
             assert token in workflow, f"dist workflow missing release gate token: {token}"
