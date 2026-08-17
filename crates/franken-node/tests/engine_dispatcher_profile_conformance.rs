@@ -460,14 +460,24 @@ fn conformance_profile_capability_mappings() {
 
     // MUST: Each profile must generate valid capabilities that franken-engine recognizes
     let test_cases = [
-        (Profile::Strict, &["fs_read", "timer"] as &[&str]),
+        (
+            Profile::Strict,
+            &["module_load", "fs_read", "timer"] as &[&str],
+        ),
         (
             Profile::Balanced,
-            &["fs_read", "network_egress", "builtin", "timer"],
+            &[
+                "module_load",
+                "fs_read",
+                "network_egress",
+                "builtin",
+                "timer",
+            ],
         ),
         (
             Profile::LegacyRisky,
             &[
+                "module_load",
                 "fs_read",
                 "fs_write",
                 "network_egress",

@@ -6082,16 +6082,19 @@ impl EngineDispatcher {
     /// # Security Policy Mapping:
     ///
     /// ## Profile::Strict - Minimal Attack Surface
+    /// - `module_load`: JavaScript module loading (required for `import`/`require`)
     /// - `fs.read`: Read-only file access (100 ops/epoch) - minimal for app loading
     /// - `runtime.timeout`: Basic timeout operations (50 ops/epoch) - execution control
     ///
     /// ## Profile::Balanced - Standard Production Use
+    /// - `module_load`: JavaScript module loading (required for `import`/`require`)
     /// - `fs.read`: Standard file reading (500 ops/epoch) - normal app operations
     /// - `net.egress`: Outbound network calls (100 ops/epoch) - API integrations
     /// - `crypto.random`: Secure random generation (200 ops/epoch) - security operations
     /// - `runtime.timeout`: Timeout management (100 ops/epoch) - robust execution
     ///
     /// ## Profile::LegacyRisky - Maximum Compatibility
+    /// - `module_load`: JavaScript module loading (required for `import`/`require`)
     /// - `fs_read/fs_write`: File system access
     /// - `network_egress`: Outbound network access
     /// - `builtin`: JavaScript built-ins (includes crypto operations)
@@ -6106,16 +6109,19 @@ impl EngineDispatcher {
         // Based on frankenengine_engine::capability::RuntimeCapability::from_tag_str mapping.
         match profile {
             Profile::Strict => vec![
-                "fs_read".to_string(), // Maps to RuntimeCapability::FsRead
+                "module_load".to_string(), // Maps to RuntimeCapability::ModuleLoad
+                "fs_read".to_string(),     // Maps to RuntimeCapability::FsRead
                 "timer".to_string(), // Maps to RuntimeCapability::Timer (for timeout functionality)
             ],
             Profile::Balanced => vec![
+                "module_load".to_string(),    // Maps to RuntimeCapability::ModuleLoad
                 "fs_read".to_string(),        // Maps to RuntimeCapability::FsRead
                 "network_egress".to_string(), // Maps to RuntimeCapability::NetworkEgress
                 "builtin".to_string(), // Maps to RuntimeCapability::Builtin (for crypto builtins)
                 "timer".to_string(),   // Maps to RuntimeCapability::Timer
             ],
             Profile::LegacyRisky => vec![
+                "module_load".to_string(),    // Maps to RuntimeCapability::ModuleLoad
                 "fs_read".to_string(),        // Maps to RuntimeCapability::FsRead
                 "fs_write".to_string(),       // Maps to RuntimeCapability::FsWrite
                 "network_egress".to_string(), // Maps to RuntimeCapability::NetworkEgress
