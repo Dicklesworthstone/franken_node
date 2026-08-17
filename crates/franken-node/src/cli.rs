@@ -1405,8 +1405,8 @@ pub enum OpsCommand {
     /// Produce L1 proof-carrying host-effect evidence (v2) from a real native-engine run.
     #[command(name = "proof-carrying-evidence")]
     ProofCarryingEvidence(OpsProofCarryingEvidenceArgs),
-    /// Run the committed compatibility corpus across bun and the native
-    /// engine, adjudicating every case through the lockstep oracle, and emit
+    /// Run the committed compatibility corpus across Bun and the native
+    /// engine, optionally requiring a genuine Node.js reference leg, and emit
     /// genuine per-test results with digest-bound provenance (bd-kfseq).
     #[command(name = "compat-corpus-run")]
     CompatCorpusRun(OpsCompatCorpusRunArgs),
@@ -1604,6 +1604,13 @@ pub struct OpsCompatCorpusRunArgs {
     /// is killed and the case recorded as a genuine `fail` (timeout).
     #[arg(long = "case-timeout-secs", default_value_t = 10)]
     pub case_timeout_secs: u64,
+
+    /// Require a distinct, genuine Node.js reference leg in addition to Bun
+    /// and the native franken_engine product leg. Release certification uses
+    /// this fail-closed triad; developer runs retain the faster Bun/product
+    /// dyad unless this flag is supplied explicitly.
+    #[arg(long = "require-node-reference")]
+    pub require_node_reference: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -2400,6 +2407,45 @@ mod parser_contract_extra_tests {
         };
 
         assert_eq!(args.runtimes, "node,bun,franken-node");
+    }
+
+    #[test]
+    fn compat_corpus_run_defaults_to_developer_dyad() {
+        let cli = parse(&[
+            "franken-node",
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--out",
+            "results.json",
+        ])
+        .expect("compat corpus dyad should parse");
+
+        let Command::Ops(OpsCommand::CompatCorpusRun(args)) = cli.command else {
+            panic!("expected compat-corpus-run command");
+        };
+        assert!(!args.require_node_reference);
+    }
+
+    #[test]
+    fn compat_corpus_run_accepts_release_triad_requirement() {
+        let cli = parse(&[
+            "franken-node",
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--out",
+            "results.json",
+            "--require-node-reference",
+        ])
+        .expect("compat corpus triad should parse");
+
+        let Command::Ops(OpsCommand::CompatCorpusRun(args)) = cli.command else {
+            panic!("expected compat-corpus-run command");
+        };
+        assert!(args.require_node_reference);
     }
 
     #[test]

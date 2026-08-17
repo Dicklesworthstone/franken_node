@@ -7886,15 +7886,16 @@ fn handle_ops_proof_carrying_evidence(_args: &OpsProofCarryingEvidenceArgs) -> R
 #[cfg(feature = "engine")]
 fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
     use ops::compat_corpus_run::{
-        build_corpus_results_document, capture_corpus, content_addressed_corpus_version,
-        corpus_generated_at_utc, run_corpus,
+        build_corpus_results_document_with_references, capture_corpus,
+        content_addressed_corpus_version, corpus_generated_at_utc, run_corpus,
     };
 
     let snapshot = capture_corpus(&args.corpus_root)?;
     let corpus_version = content_addressed_corpus_version(&snapshot)?;
-    let (outcomes, bun_version) = run_corpus(
+    let run = run_corpus(
         &snapshot,
         std::time::Duration::from_secs(args.case_timeout_secs.clamp(1, 600)),
+        args.require_node_reference,
     )?;
 
     let existing = match std::fs::read_to_string(&args.out) {
@@ -7913,11 +7914,12 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
         }
     };
 
-    let document = build_corpus_results_document(
+    let document = build_corpus_results_document_with_references(
         existing.as_ref(),
-        &outcomes,
+        &run.outcomes,
         &corpus_version,
-        &bun_version,
+        &run.runtimes.bun,
+        run.runtimes.node.as_deref(),
         &corpus_generated_at_utc(),
         &args.corpus_root.display().to_string(),
     )?;
@@ -7940,7 +7942,8 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "corpus_version": corpus_version,
-                "reference_runtime": format!("bun {bun_version}"),
+                "reference_runtimes": document.pointer("/corpus/reference_runtimes"),
+                "lockstep_topology": document.pointer("/corpus/lockstep_topology"),
                 "totals": totals,
                 "ci_gate": document.get("ci_gate"),
                 "out": args.out.display().to_string(),
@@ -7950,9 +7953,12 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
         let rendered = format!(
             "compatibility corpus lockstep run (genuine)\n\
              corpus version: {corpus_version}\n\
-             reference runtime: bun {bun_version}\n\
+             topology: {}\n\
+             reference runtimes: {}\n\
              totals: {totals}\n\
              written to: {}",
+            document["corpus"]["lockstep_topology"],
+            document["corpus"]["reference_runtimes"],
             args.out.display()
         );
         emit_operator_surface_output("ops-compat-corpus-run", &rendered)?;

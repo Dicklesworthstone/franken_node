@@ -13,7 +13,9 @@
 use frankenengine_node::ops::close_condition::{
     COMPATIBILITY_CORPUS_ONLINE_PROVENANCE, compute_compatibility_corpus_result_digest,
 };
-use frankenengine_node::ops::compat_corpus_run::{CaseOutcome, build_corpus_results_document};
+use frankenengine_node::ops::compat_corpus_run::{
+    CaseOutcome, build_corpus_results_document, build_corpus_results_document_with_references,
+};
 #[cfg(unix)]
 use frankenengine_node::ops::compat_corpus_run::{
     MAX_CASE_FILE_BYTES, MAX_SUPPORT_FILES_PER_FAMILY, MAX_SUPPORT_FILES_TOTAL,
@@ -63,6 +65,18 @@ fn write_family(
         serde_json::to_string_pretty(&manifest).expect("render manifest"),
     )
     .expect("write manifest");
+}
+
+#[cfg(unix)]
+fn write_executable(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, contents).expect("write executable fixture");
+    let mut permissions = std::fs::metadata(path)
+        .expect("executable fixture metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(path, permissions).expect("make fixture executable");
 }
 
 #[cfg(unix)]
@@ -811,6 +825,58 @@ fn document_builder_binds_digest_and_rederives_totals_honestly() {
 }
 
 #[test]
+fn triad_document_builder_binds_exact_reference_topology() {
+    let outcomes = vec![outcome(
+        "tc::fs::0001",
+        "fs",
+        "core",
+        "critical",
+        "pass",
+        None,
+    )];
+    let document = build_corpus_results_document_with_references(
+        None,
+        &outcomes,
+        "compat-corpus-v2-triad",
+        "1.3.14",
+        Some("v22.14.0"),
+        "2026-08-17T00:00:00Z",
+        "corpus",
+    )
+    .expect("build triad document");
+
+    assert_eq!(document["corpus"]["lockstep_topology"], "triad");
+    assert_eq!(
+        document["corpus"]["reference_runtimes"],
+        json!([
+            {
+                "runtime_id": "node",
+                "runtime_name": "node",
+                "version": "v22.14.0",
+                "is_reference": true,
+            },
+            {
+                "runtime_id": "bun",
+                "runtime_name": "bun",
+                "version": "1.3.14",
+                "is_reference": true,
+            }
+        ])
+    );
+    assert_eq!(
+        document["corpus"]["product_runtime"]["runtime_id"],
+        "franken-engine-native"
+    );
+    assert_eq!(document["corpus"]["product_runtime"]["is_reference"], false);
+    assert!(
+        document["reproducibility"]["external_repro_command"]
+            .as_str()
+            .expect("repro command")
+            .contains("--require-node-reference")
+    );
+}
+
+#[test]
 fn document_builder_ratchets_only_against_genuine_previous_runs() {
     // Prior artifact with AUTHORED provenance: not a valid ratchet floor.
     let authored_existing = json!({
@@ -967,6 +1033,186 @@ fn compat_corpus_run_preflights_template_collisions_before_bun() {
     assert!(
         !marker.exists(),
         "Bun must not be invoked before all staging targets pass preflight"
+    );
+}
+
+#[cfg(all(feature = "engine", unix))]
+#[test]
+fn release_triad_fails_closed_when_node_is_missing() {
+    let work = tempfile::TempDir::new().expect("tempdir");
+    write_family(
+        &work.path().join("corpus"),
+        "path",
+        "path",
+        "bd-2djfa",
+        &[(
+            "tc::path::missing-node",
+            "case.js",
+            "console.log('must-not-run');\n",
+            "core",
+            "critical",
+        )],
+    );
+    let fake_bin = work.path().join("fake-bin");
+    std::fs::create_dir(&fake_bin).expect("create fake bin");
+    write_executable(
+        &fake_bin.join("bun"),
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '1.3.14\\n'; exit 0; fi\nprintf invoked > \"$BUN_CASE_MARKER\"\nprintf 'must-not-run\\n'\n",
+    );
+    let marker = work.path().join("bun-case-invoked");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args([
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--out",
+            "results.json",
+            "--require-node-reference",
+            "--json",
+        ])
+        .current_dir(work.path())
+        .env("PATH", &fake_bin)
+        .env("BUN_CASE_MARKER", &marker)
+        .output()
+        .expect("run missing-node triad");
+
+    assert!(!output.status.success());
+    let diagnostic = format!(
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains("node is required for the corpus reference leg"));
+    assert!(
+        !marker.exists(),
+        "no corpus case may execute without Node.js"
+    );
+    assert!(!work.path().join("results.json").exists());
+}
+
+#[cfg(all(feature = "engine", unix))]
+#[test]
+fn release_triad_refuses_a_node_command_that_is_a_bun_shim() {
+    let work = tempfile::TempDir::new().expect("tempdir");
+    write_family(
+        &work.path().join("corpus"),
+        "path",
+        "path",
+        "bd-2djfa",
+        &[(
+            "tc::path::bun-shim",
+            "case.js",
+            "console.log('must-not-run');\n",
+            "core",
+            "critical",
+        )],
+    );
+    let fake_bin = work.path().join("fake-bin");
+    std::fs::create_dir(&fake_bin).expect("create fake bin");
+    write_executable(
+        &fake_bin.join("bun"),
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '1.3.14\\n'; exit 0; fi\nprintf 'must-not-run\\n'\n",
+    );
+    write_executable(
+        &fake_bin.join("node"),
+        "#!/bin/sh\nif [ \"$1\" = \"-e\" ]; then printf 'node|object'; exit 0; fi\nif [ \"$1\" = \"--version\" ]; then printf 'v22.14.0\\n'; exit 0; fi\nprintf invoked > \"$NODE_CASE_MARKER\"\n",
+    );
+    let marker = work.path().join("node-case-invoked");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args([
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--out",
+            "results.json",
+            "--require-node-reference",
+            "--json",
+        ])
+        .current_dir(work.path())
+        .env("PATH", &fake_bin)
+        .env("NODE_CASE_MARKER", &marker)
+        .output()
+        .expect("run Bun-shim triad");
+
+    assert!(!output.status.success());
+    let diagnostic = format!(
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains("Node.js identity probe failed"));
+    assert!(diagnostic.contains("refusing a Bun shim or unknown executor"));
+    assert!(
+        !marker.exists(),
+        "the shim must be refused before case execution"
+    );
+    assert!(!work.path().join("results.json").exists());
+}
+
+#[cfg(all(feature = "engine", unix))]
+#[test]
+fn release_triad_records_node_only_divergence_as_a_measured_failure() {
+    let work = tempfile::TempDir::new().expect("tempdir");
+    write_family(
+        &work.path().join("corpus"),
+        "path",
+        "path",
+        "bd-2djfa",
+        &[(
+            "tc::path::node-only-divergence",
+            "case.js",
+            "console.log('common');\n",
+            "core",
+            "critical",
+        )],
+    );
+    let fake_bin = work.path().join("fake-bin");
+    std::fs::create_dir(&fake_bin).expect("create fake bin");
+    write_executable(
+        &fake_bin.join("bun"),
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '1.3.14\\n'; exit 0; fi\nprintf 'common\\n'\n",
+    );
+    write_executable(
+        &fake_bin.join("node"),
+        "#!/bin/sh\nif [ \"$1\" = \"-e\" ]; then printf 'node|undefined'; exit 0; fi\nif [ \"$1\" = \"--version\" ]; then printf 'v22.14.0\\n'; exit 0; fi\nprintf 'node-only\\n'\n",
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args([
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--out",
+            "results.json",
+            "--require-node-reference",
+            "--json",
+        ])
+        .current_dir(work.path())
+        .env("PATH", &fake_bin)
+        .output()
+        .expect("run Node-divergence triad");
+    assert!(
+        output.status.success(),
+        "behavioral divergence must produce an honest artifact, not an infrastructure error: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact: Value = serde_json::from_str(
+        &std::fs::read_to_string(work.path().join("results.json")).expect("read triad artifact"),
+    )
+    .expect("parse triad artifact");
+    assert_eq!(artifact["corpus"]["lockstep_topology"], "triad");
+    assert_eq!(artifact["totals"]["failed_test_cases"], 1);
+    assert_eq!(artifact["per_test_results"][0]["status"], "fail");
+    assert_eq!(
+        artifact["failing_tests_tracking"][0]["reason"],
+        "lockstep divergence: node and bun reference legs disagree"
     );
 }
 

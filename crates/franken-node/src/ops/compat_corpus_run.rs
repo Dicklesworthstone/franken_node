@@ -2,10 +2,11 @@
 //!
 //! Walks the committed compat-corpus fixture tree (one
 //! `compat-corpus-fixture-v1` manifest per Node API family), executes every
-//! case on TWO real runtimes — bun as the independent reference leg and the
-//! native in-process franken_engine (a fresh `franken-node run
-//! --console-only` subprocess of this very binary) — and adjudicates each
-//! case through the N-version [`crate::runtime::nversion_oracle::RuntimeOracle`].
+//! case on Bun plus the native in-process franken_engine (a fresh
+//! `franken-node run --console-only` subprocess of this very binary). Release
+//! mode additionally requires a distinct, identity-checked Node.js reference
+//! leg, producing a unanimous Node+Bun+product triad through the N-version
+//! [`crate::runtime::nversion_oracle::RuntimeOracle`].
 //!
 //! The emitted `artifacts/13/compatibility_corpus_results.json` document
 //! carries per-test statuses that were actually measured, a recomputable
@@ -192,6 +193,21 @@ pub struct CaseOutcome {
     /// Populated for `fail` outcomes; feeds `failing_tests_tracking`.
     pub failure_reason: Option<String>,
     pub investigation_bead_id: Option<String>,
+}
+
+/// Genuine runtime versions observed before a corpus execution begins.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CorpusRuntimeVersions {
+    pub bun: String,
+    pub node: Option<String>,
+}
+
+/// Measured corpus outcomes and the exact reference-runtime topology used to
+/// produce them.
+#[derive(Clone, Debug)]
+pub struct CorpusRunResult {
+    pub outcomes: Vec<CaseOutcome>,
+    pub runtimes: CorpusRuntimeVersions,
 }
 
 impl CorpusSnapshot {
@@ -1450,12 +1466,11 @@ fn unix_time_millis() -> Result<u64> {
 }
 
 #[cfg(feature = "engine")]
-fn stage_identical_corpus_config(
+fn stage_identical_corpus_config_in_dirs(
     authority: &CorpusProcessAuthority,
-    bun_dir: &Path,
-    franken_dir: &Path,
+    directories: &[&Path],
 ) -> Result<()> {
-    for directory in [bun_dir, franken_dir] {
+    for directory in directories {
         let path = directory.join("franken_node.toml");
         std::fs::write(&path, authority.config_toml.as_bytes())
             .with_context(|| format!("stage signed corpus config {}", path.display()))?;
@@ -1471,23 +1486,88 @@ fn configure_child_process_leg_environment(command: &mut Command) {
 }
 
 #[cfg(all(feature = "engine", unix))]
-fn resolve_bun_executable() -> Result<PathBuf> {
-    let path = std::env::var_os("PATH").context("PATH is unavailable while resolving bun")?;
+fn resolve_reference_executable(runtime: &str) -> Result<PathBuf> {
+    let path = std::env::var_os("PATH")
+        .with_context(|| format!("PATH is unavailable while resolving {runtime}"))?;
     for directory in std::env::split_paths(&path) {
-        let candidate = directory.join("bun");
+        let candidate = directory.join(runtime);
         if !candidate.is_file() {
             continue;
         }
         return candidate
             .canonicalize()
-            .with_context(|| format!("canonicalize bun executable {}", candidate.display()));
+            .with_context(|| format!("canonicalize {runtime} executable {}", candidate.display()));
     }
-    bail!("bun is required for the corpus reference leg but was not found on PATH")
+    bail!("{runtime} is required for the corpus reference leg but was not found on PATH")
 }
 
 #[cfg(all(feature = "engine", not(unix)))]
-fn resolve_bun_executable() -> Result<PathBuf> {
-    Ok(PathBuf::from("bun"))
+fn resolve_reference_executable(runtime: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(runtime))
+}
+
+#[cfg(feature = "engine")]
+fn runtime_version(executable: &Path, runtime: &str) -> Result<String> {
+    let output = Command::new(executable)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("{runtime} --version failed"))?;
+    if !output.status.success() {
+        bail!("{runtime} --version exited nonzero; cannot pin the reference runtime version");
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() || version.len() > 128 {
+        bail!("{runtime} --version returned an invalid version string");
+    }
+    Ok(version)
+}
+
+#[cfg(feature = "engine")]
+fn validate_node_identity(executable: &Path) -> Result<()> {
+    let output = Command::new(executable)
+        .args([
+            "-e",
+            "process.stdout.write(`${process.release?.name}|${typeof Bun}`)",
+        ])
+        .output()
+        .context("execute Node.js identity probe")?;
+    let identity = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() || identity != "node|undefined" {
+        bail!(
+            "Node.js identity probe failed: expected `node|undefined`, got {:?} (exit {:?}); refusing a Bun shim or unknown executor",
+            identity,
+            output.status.code()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "engine", unix))]
+fn ensure_distinct_reference_executables(bun: &Path, node: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let bun_metadata = std::fs::metadata(bun)
+        .with_context(|| format!("inspect Bun executable {}", bun.display()))?;
+    let node_metadata = std::fs::metadata(node)
+        .with_context(|| format!("inspect Node.js executable {}", node.display()))?;
+    if bun == node
+        || (bun_metadata.dev() == node_metadata.dev() && bun_metadata.ino() == node_metadata.ino())
+    {
+        bail!(
+            "node and bun reference legs resolve to the same executable; refusing degenerate triad"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "engine", not(unix)))]
+fn ensure_distinct_reference_executables(bun: &Path, node: &Path) -> Result<()> {
+    if bun == node {
+        bail!(
+            "node and bun reference legs resolve to the same executable; refusing degenerate triad"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(feature = "engine")]
@@ -1617,7 +1697,8 @@ fn sanitize_reason_excerpt(bytes: &[u8]) -> String {
 pub fn run_corpus(
     snapshot: &CorpusSnapshot,
     case_timeout: Duration,
-) -> Result<(Vec<CaseOutcome>, String)> {
+    require_node_reference: bool,
+) -> Result<CorpusRunResult> {
     use crate::runtime::nversion_oracle::{
         BoundaryScope, CheckOutcome, RuntimeEntry, RuntimeOracle,
     };
@@ -1629,10 +1710,10 @@ pub fn run_corpus(
     let current_exe = std::env::current_exe().context("resolve current executable")?;
 
     // Bootstrap ONE fail-closed-valid workspace template exactly as an
-    // operator would (`franken-node init`), then clone it into BOTH legs. The
-    // franken leg needs this for config validation, while the bun leg needs the
-    // same visible filesystem scaffold so guest `readdir('.')` observations
-    // compare the runtime semantics rather than two different sandboxes.
+    // operator would (`franken-node init`), then clone it into every leg. The
+    // franken leg needs this for config validation, while the reference legs
+    // need the same visible filesystem scaffold so guest `readdir('.')`
+    // observations compare runtime semantics rather than different sandboxes.
     let template = tempfile::TempDir::new().context("create workspace template dir")?;
     let init = Command::new(&current_exe)
         .args(["init", "--profile", "balanced", "--out-dir", "."])
@@ -1654,17 +1735,17 @@ pub fn run_corpus(
     // Resolve Bun before any child-process case replaces the guest's PATH with
     // the signed fixed value. Command lookup otherwise consults that guest
     // environment at spawn time and can lose a valid Bun installed elsewhere.
-    let bun_executable = resolve_bun_executable()?;
-    let bun_version_output = Command::new(&bun_executable)
-        .arg("--version")
-        .output()
-        .context("bun is required for the corpus reference leg (bun --version failed)")?;
-    if !bun_version_output.status.success() {
-        bail!("bun --version exited nonzero; cannot pin the reference-leg runtime version");
-    }
-    let bun_version = String::from_utf8_lossy(&bun_version_output.stdout)
-        .trim()
-        .to_string();
+    let bun_executable = resolve_reference_executable("bun")?;
+    let bun_version = runtime_version(&bun_executable, "bun")?;
+    let node_runtime = if require_node_reference {
+        let executable = resolve_reference_executable("node")?;
+        ensure_distinct_reference_executables(&bun_executable, &executable)?;
+        validate_node_identity(&executable)?;
+        let version = runtime_version(&executable, "node")?;
+        Some((executable, version))
+    } else {
+        None
+    };
 
     let mut outcomes = Vec::with_capacity(snapshot.cases.len());
     for snapshot_case in &snapshot.cases {
@@ -1676,7 +1757,7 @@ pub fn run_corpus(
                 format!("snapshot family `{}` is missing", snapshot_case.family_key)
             })?;
 
-        // Both isolated legs live under one canonical per-case root. Process
+        // All isolated legs live under one canonical per-case root. Process
         // authority can therefore commit one honest cwd jail into the exact
         // same TOML bytes without letting Bun's filesystem mutations reach the
         // Franken leg.
@@ -1686,14 +1767,26 @@ pub fn run_corpus(
             .canonicalize()
             .context("canonicalize per-case corpus run root")?;
         let bun_dir = canonical_run_root.join("bun");
+        let node_dir = node_runtime
+            .as_ref()
+            .map(|_| canonical_run_root.join("node"));
         let franken_dir = canonical_run_root.join("franken");
         std::fs::create_dir(&bun_dir).context("create bun leg sandbox")?;
+        if let Some(node_dir) = &node_dir {
+            std::fs::create_dir(node_dir).context("create node leg sandbox")?;
+        }
         std::fs::create_dir(&franken_dir).context("create franken leg sandbox")?;
 
         copy_dir_recursive(template.path(), &bun_dir, 0)
             .context("clone workspace template into bun leg sandbox")?;
         stage_snapshot_case(snapshot_case, family, &bun_dir)
             .context("stage bun leg executable inputs")?;
+        if let Some(node_dir) = &node_dir {
+            copy_dir_recursive(template.path(), node_dir, 0)
+                .context("clone workspace template into node leg sandbox")?;
+            stage_snapshot_case(snapshot_case, family, node_dir)
+                .context("stage node leg executable inputs")?;
+        }
         copy_dir_recursive(template.path(), &franken_dir, 0)
             .context("clone workspace template into franken leg sandbox")?;
         stage_snapshot_case(snapshot_case, family, &franken_dir)
@@ -1711,7 +1804,11 @@ pub fn run_corpus(
                     case.test_id
                 )
             })?;
-            stage_identical_corpus_config(&authority, &bun_dir, &franken_dir)?;
+            let mut directories = vec![bun_dir.as_path(), franken_dir.as_path()];
+            if let Some(node_dir) = &node_dir {
+                directories.push(node_dir.as_path());
+            }
+            stage_identical_corpus_config_in_dirs(&authority, &directories)?;
             Some(authority)
         } else {
             None
@@ -1727,6 +1824,22 @@ pub fn run_corpus(
         if process_authority.is_some() {
             configure_child_process_leg_environment(&mut bun_cmd);
         }
+
+        let mut node_cmd =
+            node_runtime
+                .as_ref()
+                .zip(node_dir.as_ref())
+                .map(|((node_executable, _), node_dir)| {
+                    let mut command = Command::new(node_executable);
+                    command
+                        .arg(&snapshot_case.staged_relative_path)
+                        .current_dir(node_dir);
+                    configure_runtime_leg_environment(&mut command, case.suppress_runtime_warnings);
+                    if process_authority.is_some() {
+                        configure_child_process_leg_environment(&mut command);
+                    }
+                    command
+                });
 
         // Franken leg sandbox: cloned workspace template + case file.
         let mut franken_cmd = Command::new(&current_exe);
@@ -1746,11 +1859,11 @@ pub fn run_corpus(
             configure_child_process_leg_environment(&mut franken_cmd);
         }
 
-        let (bun_leg, franken_leg) = match process_authority {
+        let (bun_leg, node_leg, franken_leg) = match process_authority {
             Some(authority) => {
                 #[cfg(not(target_os = "linux"))]
                 {
-                    let _ = (authority, bun_cmd, franken_cmd);
+                    let _ = (authority, bun_cmd, node_cmd, franken_cmd);
                     bail!("corpus child-process authority is supported only on Linux");
                 }
                 #[cfg(target_os = "linux")]
@@ -1783,7 +1896,15 @@ pub fn run_corpus(
                     let bun_leg = run_leg(bun_cmd, case_timeout).with_context(|| {
                         format!("bun leg failed to launch for case `{}`", case.test_id)
                     })?;
-                    (bun_leg, franken_leg)
+                    let node_leg = node_cmd
+                        .take()
+                        .map(|command| {
+                            run_leg(command, case_timeout).with_context(|| {
+                                format!("node leg failed to launch for case `{}`", case.test_id)
+                            })
+                        })
+                        .transpose()?;
+                    (bun_leg, node_leg, franken_leg)
                 }
             }
             None => {
@@ -1793,7 +1914,15 @@ pub fn run_corpus(
                 let franken_leg = run_leg(franken_cmd, case_timeout).with_context(|| {
                     format!("franken leg failed to launch for case `{}`", case.test_id)
                 })?;
-                (bun_leg, franken_leg)
+                let node_leg = node_cmd
+                    .take()
+                    .map(|command| {
+                        run_leg(command, case_timeout).with_context(|| {
+                            format!("node leg failed to launch for case `{}`", case.test_id)
+                        })
+                    })
+                    .transpose()?;
+                (bun_leg, node_leg, franken_leg)
             }
         };
 
@@ -1808,6 +1937,16 @@ pub fn run_corpus(
                 is_reference: true,
             })
             .map_err(|err| anyhow::anyhow!("oracle registration failed for bun: {err}"))?;
+        if let (Some((_, node_version)), Some(_)) = (&node_runtime, &node_leg) {
+            oracle
+                .register_runtime(RuntimeEntry {
+                    runtime_id: "node".to_string(),
+                    runtime_name: "node".to_string(),
+                    version: node_version.clone(),
+                    is_reference: true,
+                })
+                .map_err(|err| anyhow::anyhow!("oracle registration failed for node: {err}"))?;
+        }
         oracle
             .register_runtime(RuntimeEntry {
                 runtime_id: "franken-engine-native".to_string(),
@@ -1818,6 +1957,9 @@ pub fn run_corpus(
             .map_err(|err| anyhow::anyhow!("oracle registration failed for franken leg: {err}"))?;
         let mut outputs = BTreeMap::new();
         outputs.insert("bun".to_string(), bun_leg.comparison.clone());
+        if let Some(node_leg) = &node_leg {
+            outputs.insert("node".to_string(), node_leg.comparison.clone());
+        }
         outputs.insert(
             "franken-engine-native".to_string(),
             franken_leg.comparison.clone(),
@@ -1835,7 +1977,10 @@ pub fn run_corpus(
         let (status, failure_reason): (&'static str, Option<String>) = if agreed {
             ("pass", None)
         } else {
-            ("fail", Some(classify_failure(&bun_leg, &franken_leg)))
+            (
+                "fail",
+                Some(classify_failure(&bun_leg, node_leg.as_ref(), &franken_leg)),
+            )
         };
         outcomes.push(CaseOutcome {
             test_id: case.test_id.clone(),
@@ -1848,18 +1993,31 @@ pub fn run_corpus(
         });
     }
 
-    Ok((outcomes, bun_version))
+    Ok(CorpusRunResult {
+        outcomes,
+        runtimes: CorpusRuntimeVersions {
+            bun: bun_version,
+            node: node_runtime.map(|(_, version)| version),
+        },
+    })
 }
 
 #[cfg(feature = "engine")]
-fn classify_failure(bun: &LegCapture, franken: &LegCapture) -> String {
-    if bun.timed_out || franken.timed_out {
+fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCapture) -> String {
+    if bun.timed_out || node.is_some_and(|leg| leg.timed_out) || franken.timed_out {
         let leg = if franken.timed_out {
             "franken-engine"
+        } else if node.is_some_and(|leg| leg.timed_out) {
+            "node reference"
         } else {
             "bun reference"
         };
         return format!("lockstep divergence: {leg} leg timed out");
+    }
+    if let Some(node) = node
+        && node.comparison != bun.comparison
+    {
+        return "lockstep divergence: node and bun reference legs disagree".to_string();
     }
     match (bun.exit_code, franken.exit_code) {
         (Some(0), Some(0)) => "lockstep divergence: output mismatch vs bun reference".to_string(),
@@ -2074,6 +2232,28 @@ pub fn build_corpus_results_document(
     generated_at_utc: &str,
     corpus_root_display: &str,
 ) -> Result<Value> {
+    build_corpus_results_document_with_references(
+        existing,
+        outcomes,
+        corpus_version,
+        bun_version,
+        None,
+        generated_at_utc,
+        corpus_root_display,
+    )
+}
+
+/// Triad-aware results builder used by release certification. The legacy
+/// builder above remains the stable Bun/product dyad entrypoint.
+pub fn build_corpus_results_document_with_references(
+    existing: Option<&Value>,
+    outcomes: &[CaseOutcome],
+    corpus_version: &str,
+    bun_version: &str,
+    node_version: Option<&str>,
+    generated_at_utc: &str,
+    corpus_root_display: &str,
+) -> Result<Value> {
     if outcomes.is_empty() {
         bail!("refusing to build a corpus results document with zero outcomes");
     }
@@ -2242,6 +2422,33 @@ pub fn build_corpus_results_document(
         "trace_id".to_string(),
         carry("trace_id", json!("trace-bd-28sz-corpus-gate")),
     );
+    let mut reference_runtimes = vec![json!({
+        "runtime_id": "bun",
+        "runtime_name": "bun",
+        "version": bun_version,
+        "is_reference": true,
+    })];
+    if let Some(node_version) = node_version {
+        reference_runtimes.insert(
+            0,
+            json!({
+                "runtime_id": "node",
+                "runtime_name": "node",
+                "version": node_version,
+                "is_reference": true,
+            }),
+        );
+    }
+    let topology = if node_version.is_some() {
+        "triad"
+    } else {
+        "dyad"
+    };
+    let reproduce_node_flag = if node_version.is_some() {
+        " --require-node-reference"
+    } else {
+        ""
+    };
     let mut corpus_metadata = json!({
         "corpus_version": corpus_version,
         "franken_node_version": env!("CARGO_PKG_VERSION"),
@@ -2252,6 +2459,14 @@ pub fn build_corpus_results_document(
         "runner": "franken-node ops compat-corpus-run",
         "policy_mode": "legacy-risky",
         "reference_runtime": format!("bun {bun_version}"),
+        "reference_runtimes": reference_runtimes,
+        "product_runtime": {
+            "runtime_id": "franken-engine-native",
+            "runtime_name": "franken-engine-native",
+            "version": env!("CARGO_PKG_VERSION"),
+            "is_reference": false,
+        },
+        "lockstep_topology": topology,
         "corpus_root": corpus_root_display,
     });
     if let Some(source_revision) = crate::ops::embedded_source_revision()? {
@@ -2314,10 +2529,10 @@ pub fn build_corpus_results_document(
         json!({
             "deterministic_seed": "compat-corpus-generator-v1",
             "same_inputs_same_digest": true,
-            "external_repro_command": "franken-node ops compat-corpus-run \
+            "external_repro_command": format!("franken-node ops compat-corpus-run \
                 --corpus-root crates/franken-node/tests/fixtures/compat_corpus \
-                --out artifacts/13/compatibility_corpus_results.json \
-                && python3 scripts/check_compatibility_corpus_pass_gate.py --json",
+                --out artifacts/13/compatibility_corpus_results.json{reproduce_node_flag} \
+                && python3 scripts/check_compatibility_corpus_pass_gate.py --json"),
             "result_digest_algorithm": "ccg_corpus_result_digest_v1 (domain+field-separated \
                 sha256 over sorted per_test_results)",
         }),
@@ -2532,7 +2747,7 @@ mod snapshot_staging_tests {
             Duration::from_secs(30),
         )
         .expect("provision authority");
-        stage_identical_corpus_config(&authority, &bun_dir, &franken_dir)
+        stage_identical_corpus_config_in_dirs(&authority, &[&bun_dir, &franken_dir])
             .expect("stage identical configs");
         let bun_toml = std::fs::read(bun_dir.join("franken_node.toml")).expect("read bun config");
         let franken_toml =

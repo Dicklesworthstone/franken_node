@@ -151,6 +151,27 @@ def release_corpus(proof, generated_at):
             "generated_at_utc": generated_at,
             "result_digest": compute_result_digest(rows),
             "source_revision": source_revision(),
+            "lockstep_topology": "triad",
+            "reference_runtimes": [
+                {
+                    "runtime_id": "node",
+                    "runtime_name": "node",
+                    "version": "v22.14.0",
+                    "is_reference": True,
+                },
+                {
+                    "runtime_id": "bun",
+                    "runtime_name": "bun",
+                    "version": "1.3.14",
+                    "is_reference": True,
+                },
+            ],
+            "product_runtime": {
+                "runtime_id": "franken-engine-native",
+                "runtime_name": "franken-engine-native",
+                "version": "0.1.0",
+                "is_reference": False,
+            },
         },
         "totals": {
             "total_test_cases": 20,
@@ -945,6 +966,54 @@ class TestReleaseEvidenceBinding:
             "franken_engine_commit": ENGINE_REVISION,
         }
 
+    def test_release_mode_rejects_dyad_corpus_even_when_other_evidence_is_green(
+        self, tmp_path
+    ):
+        generated_at = datetime.now(timezone.utc).isoformat()
+        corpus_path, receipt_path = write_release_fixture(tmp_path, generated_at)
+        corpus = json.loads(corpus_path.read_text())
+        corpus["corpus"]["lockstep_topology"] = "dyad"
+        corpus["corpus"]["reference_runtimes"] = [
+            runtime
+            for runtime in corpus["corpus"]["reference_runtimes"]
+            if runtime["runtime_id"] == "bun"
+        ]
+        corpus_path.write_text(json.dumps(corpus))
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--release-mode",
+                "--artifacts-dir",
+                str(tmp_path),
+                "--corpus-results",
+                str(corpus_path),
+                "--close-receipt",
+                str(receipt_path),
+                "--expected-franken-node-revision",
+                NODE_REVISION,
+                "--expected-franken-engine-revision",
+                ENGINE_REVISION,
+                "--expected-release-run-url",
+                RELEASE_RUN_URL,
+                "--max-age-hours",
+                "6",
+                "--json",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 1
+        report = json.loads(proc.stdout)
+        assert report["verdict"] == "FAIL"
+        assert "lockstep_topology must be 'triad'" in report["dimensions"][
+            "l1_product"
+        ]["error"]
+
     def test_source_mismatch_fails_closed(self, tmp_path):
         generated_at = datetime.now(timezone.utc).isoformat()
         _, receipt_path = write_release_fixture(tmp_path, generated_at)
@@ -1037,10 +1106,13 @@ class TestReleaseEvidenceBinding:
             "--expected-release-run-url",
             "--max-age-hours",
             "FRANKEN_ENGINE_REVISION: 6d204d13c710cb6e8d279f93b629ba6588add106",
+            "NODE_VERSION: 22.14.0",
+            "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
             "ref: ${{ env.FRANKEN_ENGINE_REVISION }}",
             "franken-node-release-certification-${GITHUB_SHA}.tar.xz",
             "FRANKEN_NODE_SOURCE_GIT_SHA: ${{ github.sha }}",
             "FRANKEN_ENGINE_SOURCE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}",
+            "--require-node-reference",
         ]
         for token in required:
             assert token in workflow, f"dist workflow missing release gate token: {token}"

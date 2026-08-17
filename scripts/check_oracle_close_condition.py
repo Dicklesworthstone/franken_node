@@ -604,7 +604,12 @@ def validate_l1_lockstep_verdict(data: dict) -> list[str]:
     return errors
 
 
-def validate_l1_corpus_binding(data: dict, corpus_results_path: Path) -> list[str]:
+def validate_l1_corpus_binding(
+    data: dict,
+    corpus_results_path: Path,
+    *,
+    require_runtime_triad: bool = False,
+) -> list[str]:
     """bd-ry7d1 cross-file binding: the verdict artifact's
     proof_carrying_effects copy must be value-identical to the
     compatibility-corpus results copy the Rust gate's pass-rate leg reads.
@@ -645,6 +650,86 @@ def validate_l1_corpus_binding(data: dict, corpus_results_path: Path) -> list[st
             "proof-carrying-evidence --merge-corpus --merge-l1-verdict`)"
         ]
     errors.extend(_validate_l1_corpus_pass_rate(corpus))
+    if require_runtime_triad:
+        errors.extend(_validate_release_runtime_triad(corpus))
+    return errors
+
+
+def _validate_release_runtime_triad(corpus: dict) -> list[str]:
+    """Release certification requires two genuine references plus product.
+
+    The producer identity-probes Node and rejects same-executable Node/Bun
+    aliases. This consumer pins the resulting machine-readable topology so a
+    future workflow cannot silently fall back to the developer dyad.
+    """
+    metadata = corpus.get("corpus")
+    if not isinstance(metadata, dict):
+        return ["release compatibility corpus metadata must be an object"]
+
+    errors = []
+    if metadata.get("lockstep_topology") != "triad":
+        errors.append(
+            "release compatibility corpus lockstep_topology must be 'triad' "
+            "(Node.js, Bun, and franken-engine-native)"
+        )
+
+    references = metadata.get("reference_runtimes")
+    parsed_references = {}
+    if not isinstance(references, list):
+        errors.append("release compatibility corpus reference_runtimes must be an array")
+    else:
+        for position, runtime in enumerate(references):
+            if not isinstance(runtime, dict):
+                errors.append(
+                    f"release reference runtime {position} must be an object"
+                )
+                continue
+            runtime_id = runtime.get("runtime_id")
+            if not isinstance(runtime_id, str) or not runtime_id:
+                errors.append(
+                    f"release reference runtime {position} has no runtime_id"
+                )
+                continue
+            if runtime_id in parsed_references:
+                errors.append(f"release reference runtime {runtime_id!r} is duplicated")
+            parsed_references[runtime_id] = runtime
+
+        if set(parsed_references) != {"node", "bun"}:
+            errors.append(
+                "release compatibility corpus reference runtime ids must be exactly "
+                f"['bun', 'node']; got {sorted(parsed_references)}"
+            )
+        for runtime_id, runtime in parsed_references.items():
+            if runtime.get("runtime_name") != runtime_id:
+                errors.append(
+                    f"release reference runtime {runtime_id!r} has mismatched runtime_name"
+                )
+            version = runtime.get("version")
+            if not isinstance(version, str) or not version.strip():
+                errors.append(
+                    f"release reference runtime {runtime_id!r} has no pinned version"
+                )
+            if runtime.get("is_reference") is not True:
+                errors.append(
+                    f"release reference runtime {runtime_id!r} is not marked as a reference"
+                )
+
+    product = metadata.get("product_runtime")
+    if not isinstance(product, dict):
+        errors.append("release compatibility corpus product_runtime must be an object")
+    else:
+        if product.get("runtime_id") != "franken-engine-native":
+            errors.append(
+                "release compatibility corpus product runtime id must be "
+                "'franken-engine-native'"
+            )
+        version = product.get("version")
+        if not isinstance(version, str) or not version.strip():
+            errors.append("release compatibility corpus product runtime has no version")
+        if product.get("is_reference") is not False:
+            errors.append(
+                "release compatibility corpus product runtime must not be marked as a reference"
+            )
     return errors
 
 
@@ -1083,6 +1168,7 @@ def check_dimension(
     expected_franken_engine: str | None = None,
     max_age: timedelta | None = None,
     now: datetime | None = None,
+    require_runtime_triad: bool = False,
 ) -> dict:
     """Check a single oracle dimension."""
     artifact_path = artifacts_dir / dim["artifact"]
@@ -1139,7 +1225,13 @@ def check_dimension(
         errors.extend(validate_l1_proof_carrying_evidence(data))
         errors.extend(validate_l1_lockstep_verdict(data))
         if corpus_results_path is not None:
-            errors.extend(validate_l1_corpus_binding(data, corpus_results_path))
+            errors.extend(
+                validate_l1_corpus_binding(
+                    data,
+                    corpus_results_path,
+                    require_runtime_triad=require_runtime_triad,
+                )
+            )
             if (
                 expected_franken_node is not None
                 and expected_franken_engine is not None
@@ -1244,6 +1336,7 @@ def main(argv: list[str] | None = None):
             expected_franken_node=expected_node,
             expected_franken_engine=expected_engine,
             max_age=max_age,
+            require_runtime_triad=args.release_mode,
         )
         dimensions[dim["id"]] = result
 
