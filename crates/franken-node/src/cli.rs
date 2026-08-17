@@ -2055,6 +2055,12 @@ pub struct DoctorCloseConditionArgs {
     /// Ed25519 trusted key used to sign the close-condition receipt.
     #[arg(long)]
     pub receipt_signing_key: Option<PathBuf>,
+
+    /// Exact GitHub Actions run/attempt URL whose required release-
+    /// certification job consumes this receipt. Release CI supplies this;
+    /// ordinary local diagnostics should omit it.
+    #[arg(long)]
+    pub release_run_url: Option<String>,
 }
 
 #[derive(Debug, Parser)]

@@ -19,14 +19,16 @@ import hashlib
 import hmac
 import json
 import re
+import subprocess
 import sys
+import tempfile
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 DEFAULT_ARTIFACTS_DIR = ROOT / "artifacts" / "oracle"
 # Mirrors the canonical Rust constants in
@@ -47,7 +49,12 @@ NVERSION_ORACLE_REPORT_SCHEMA = "nvo-v1.0"
 DEFAULT_CLOSE_RECEIPT = DEFAULT_ARTIFACTS_DIR / "close_condition_receipt.json"
 SOURCE_REVISION_SCHEMA = "franken-node/source-revision/v1"
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_GITHUB_ACTIONS_RUN_URL_RE = re.compile(
+    r"^https://github\.com/[^/\s]+/[^/\s]+/actions/runs/[0-9]+/attempts/[0-9]+$"
+)
 _CLOSE_RECEIPT_PREIMAGE_DOMAIN = b"close_condition_receipt_v1:"
+_ED25519_SUBJECT_PUBLIC_KEY_INFO_PREFIX = bytes.fromhex("302a300506032b6570032100")
+_ARTIFACT_SIGNING_KEY_ID_DOMAIN = b"artifact_signing_keyid_v1:"
 
 # ---------------------------------------------------------------------------
 # v2 re-derivation (bd-qr5i2.3): the gate does not trust the declared summary.
@@ -822,6 +829,48 @@ def validate_release_corpus_binding(
     return errors
 
 
+def _verify_close_receipt_ed25519_signature(
+    public_key: bytes, signed_preimage: bytes, signature: bytes
+) -> str | None:
+    """Verify the Rust receipt signature with the OpenSSL already required by dist."""
+    with tempfile.TemporaryDirectory(prefix="franken-node-close-receipt-") as directory:
+        directory_path = Path(directory)
+        public_key_path = directory_path / "public-key.der"
+        payload_path = directory_path / "signed-preimage.bin"
+        signature_path = directory_path / "signature.bin"
+        public_key_path.write_bytes(_ED25519_SUBJECT_PUBLIC_KEY_INFO_PREFIX + public_key)
+        payload_path.write_bytes(signed_preimage)
+        signature_path.write_bytes(signature)
+        try:
+            completed = subprocess.run(
+                [
+                    "openssl",
+                    "pkeyutl",
+                    "-verify",
+                    "-pubin",
+                    "-inkey",
+                    str(public_key_path),
+                    "-keyform",
+                    "DER",
+                    "-rawin",
+                    "-in",
+                    str(payload_path),
+                    "-sigfile",
+                    str(signature_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as err:
+            return f"close-condition receipt signature verifier unavailable: {err}"
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "verification failed"
+        return f"close-condition receipt Ed25519 signature verification failed: {detail}"
+    return None
+
+
 def _close_receipt_tamper_errors(receipt: dict) -> list[str]:
     tamper = receipt.get("tamper_evidence")
     if not isinstance(tamper, dict):
@@ -847,14 +896,37 @@ def _close_receipt_tamper_errors(receipt: dict) -> list[str]:
         str(signature.get("signed_payload_sha256") or ""), derived
     ):
         errors.append("close-condition receipt signed payload hash does not match its canonical core")
-    if signature.get("algorithm") != "ed25519":
+    if not hmac.compare_digest(str(signature.get("algorithm") or ""), "ed25519"):
         errors.append("close-condition receipt signature algorithm must be ed25519")
     public_key = signature.get("public_key_hex")
     signature_hex = signature.get("signature_hex")
-    if not isinstance(public_key, str) or re.fullmatch(r"[0-9a-f]{64}", public_key) is None:
+    public_key_valid = (
+        isinstance(public_key, str) and re.fullmatch(r"[0-9a-f]{64}", public_key) is not None
+    )
+    signature_valid = (
+        isinstance(signature_hex, str)
+        and re.fullmatch(r"[0-9a-f]{128}", signature_hex) is not None
+    )
+    if not public_key_valid:
         errors.append("close-condition receipt public key must be 32 lowercase-hex bytes")
-    if not isinstance(signature_hex, str) or re.fullmatch(r"[0-9a-f]{128}", signature_hex) is None:
+    if not signature_valid:
         errors.append("close-condition receipt signature must be 64 lowercase-hex bytes")
+    if public_key_valid:
+        public_key_bytes = bytes.fromhex(public_key)
+        key_id_hash = hashlib.sha256(
+            _ARTIFACT_SIGNING_KEY_ID_DOMAIN
+            + len(public_key_bytes).to_bytes(8, "little")
+            + public_key_bytes
+        ).digest()
+        derived_key_id = key_id_hash[:8].hex()
+        if not hmac.compare_digest(str(signature.get("key_id") or ""), derived_key_id):
+            errors.append("close-condition receipt key_id does not match its public key")
+    if public_key_valid and signature_valid:
+        signature_error = _verify_close_receipt_ed25519_signature(
+            bytes.fromhex(public_key), signed_preimage, bytes.fromhex(signature_hex)
+        )
+        if signature_error is not None:
+            errors.append(signature_error)
     return errors
 
 
@@ -863,6 +935,7 @@ def check_release_receipt(
     *,
     expected_franken_node: str,
     expected_franken_engine: str,
+    expected_release_run_url: str,
     max_age: timedelta,
     now: datetime | None = None,
 ) -> dict:
@@ -902,6 +975,31 @@ def check_release_receipt(
         )
     )
     errors.extend(_close_receipt_tamper_errors(receipt))
+
+    release_linkage = receipt.get("release_policy_linkage")
+    if not isinstance(release_linkage, dict):
+        errors.append("close-condition release_policy_linkage object is missing")
+    else:
+        if release_linkage.get("source") != "github_actions_release_certification_context":
+            errors.append(
+                "close-condition release_policy_linkage source is not the live "
+                "GitHub Actions certification context"
+            )
+        if release_linkage.get("ci_outputs_accessible") is not True:
+            errors.append("close-condition release_policy_linkage is not CI-accessible")
+        ci_output_ref = str(release_linkage.get("ci_output_ref") or "")
+        if not hmac.compare_digest(ci_output_ref, expected_release_run_url):
+            errors.append(
+                "close-condition release_policy_linkage run URL does not match the "
+                "current release run attempt"
+            )
+        if release_linkage.get("consumed_oracles") != [
+            "L1_product_oracle",
+            "L2_engine_boundary_oracle",
+        ]:
+            errors.append(
+                "close-condition release_policy_linkage must consume both release oracles"
+            )
 
     if receipt.get("composite_verdict") != "GREEN":
         errors.append(
@@ -1085,6 +1183,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--close-receipt", type=Path, default=DEFAULT_CLOSE_RECEIPT)
     parser.add_argument("--expected-franken-node-revision", type=_git_sha)
     parser.add_argument("--expected-franken-engine-revision", type=_git_sha)
+    parser.add_argument("--expected-release-run-url")
     parser.add_argument("--max-age-hours", type=float)
     args = parser.parse_args(argv)
 
@@ -1101,6 +1200,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             parser.error("--release-mode requires both expected source revisions")
         if args.max_age_hours is None:
             parser.error("--release-mode requires --max-age-hours")
+        if (
+            args.expected_release_run_url is None
+            or _GITHUB_ACTIONS_RUN_URL_RE.fullmatch(args.expected_release_run_url) is None
+        ):
+            parser.error(
+                "--release-mode requires --expected-release-run-url for an exact "
+                "https://github.com/.../actions/runs/.../attempts/... URL"
+            )
     return args
 
 
@@ -1153,6 +1260,7 @@ def main(argv: list[str] | None = None):
             args.close_receipt,
             expected_franken_node=expected_node,
             expected_franken_engine=expected_engine,
+            expected_release_run_url=args.expected_release_run_url,
             max_age=max_age,
         )
         for dim in REQUIRED_DIMENSIONS[1:]:
@@ -1194,6 +1302,9 @@ def main(argv: list[str] | None = None):
         ),
         "max_age_hours": args.max_age_hours,
         "close_receipt": str(args.close_receipt) if args.release_mode else None,
+        "expected_release_run_url": (
+            args.expected_release_run_url if args.release_mode else None
+        ),
         "dimensions": {
             k: {
                 "present": v["present"],

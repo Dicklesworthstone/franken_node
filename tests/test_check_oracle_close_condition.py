@@ -4,8 +4,10 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -111,6 +113,15 @@ def green_payload(dim_id):
 
 NODE_REVISION = "1" * 40
 ENGINE_REVISION = "2" * 40
+RELEASE_RUN_URL = (
+    "https://github.com/Dicklesworthstone/franken_node/actions/runs/123/attempts/1"
+)
+_RELEASE_TEST_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIHVvAUl+RBwJjotTmYSsHtGGU1UKlx2A9uO7xYUCMeGB
+-----END PRIVATE KEY-----
+"""
+_RELEASE_TEST_PUBLIC_KEY = "24fde2db8557b80e6279a658b42eddbfa84d37b28e28f3e4fb3f43d5c85955b0"
+_RELEASE_TEST_KEY_ID = "f3b8a3095b9d8911"
 
 
 def source_revision(node=NODE_REVISION, engine=ENGINE_REVISION):
@@ -154,6 +165,32 @@ def release_corpus(proof, generated_at):
     }
 
 
+def sign_release_receipt(preimage):
+    with tempfile.TemporaryDirectory(prefix="franken-node-test-signature-") as directory:
+        directory_path = Path(directory)
+        private_key_path = directory_path / "private-key.pem"
+        payload_path = directory_path / "signed-preimage.bin"
+        private_key_path.write_text(_RELEASE_TEST_PRIVATE_KEY, encoding="utf-8")
+        payload_path.write_bytes(preimage)
+        completed = subprocess.run(
+            [
+                "openssl",
+                "pkeyutl",
+                "-sign",
+                "-inkey",
+                str(private_key_path),
+                "-rawin",
+                "-in",
+                str(payload_path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    assert len(completed.stdout) == 64
+    return completed.stdout.hex()
+
+
 def release_receipt(generated_at, *, composite_verdict="GREEN"):
     core = {
         "schema_version": "oracle-close-condition-receipt/v1",
@@ -162,7 +199,13 @@ def release_receipt(generated_at, *, composite_verdict="GREEN"):
         "source_revision": source_revision(),
         "L1_product_oracle": {"verdict": "GREEN"},
         "L2_engine_boundary_oracle": {"verdict": "GREEN"},
-        "release_policy_linkage": {"verdict": "GREEN"},
+        "release_policy_linkage": {
+            "verdict": "GREEN",
+            "source": "github_actions_release_certification_context",
+            "ci_outputs_accessible": True,
+            "ci_output_ref": RELEASE_RUN_URL,
+            "consumed_oracles": ["L1_product_oracle", "L2_engine_boundary_oracle"],
+        },
         "composite_verdict": composite_verdict,
         "failing_dimensions": [],
     }
@@ -179,9 +222,10 @@ def release_receipt(generated_at, *, composite_verdict="GREEN"):
             "sha256": f"sha256:{digest}",
             "signature": {
                 "algorithm": "ed25519",
-                "public_key_hex": "3" * 64,
+                "public_key_hex": _RELEASE_TEST_PUBLIC_KEY,
+                "key_id": _RELEASE_TEST_KEY_ID,
                 "signed_payload_sha256": digest,
-                "signature_hex": "4" * 128,
+                "signature_hex": sign_release_receipt(preimage),
             },
         },
     }
@@ -880,6 +924,8 @@ class TestReleaseEvidenceBinding:
                 NODE_REVISION,
                 "--expected-franken-engine-revision",
                 ENGINE_REVISION,
+                "--expected-release-run-url",
+                RELEASE_RUN_URL,
                 "--max-age-hours",
                 "6",
                 "--json",
@@ -909,6 +955,7 @@ class TestReleaseEvidenceBinding:
             receipt_path,
             expected_franken_node=NODE_REVISION,
             expected_franken_engine=ENGINE_REVISION,
+            expected_release_run_url=RELEASE_RUN_URL,
             max_age=timedelta(hours=6),
         )
         assert result["error"] is not None
@@ -921,6 +968,7 @@ class TestReleaseEvidenceBinding:
             receipt_path,
             expected_franken_node=NODE_REVISION,
             expected_franken_engine=ENGINE_REVISION,
+            expected_release_run_url=RELEASE_RUN_URL,
             max_age=timedelta(hours=6),
         )
         assert result["error"] is not None
@@ -936,11 +984,44 @@ class TestReleaseEvidenceBinding:
             receipt_path,
             expected_franken_node=NODE_REVISION,
             expected_franken_engine=ENGINE_REVISION,
+            expected_release_run_url=RELEASE_RUN_URL,
             max_age=timedelta(hours=6),
         )
         assert result["error"] is not None
         assert "tamper hash does not match" in result["error"]
         assert "L2_engine_boundary_oracle verdict is 'RED'" in result["error"]
+
+    def test_rehashed_but_forged_receipt_signature_fails_closed(self, tmp_path):
+        generated_at = datetime.now(timezone.utc).isoformat()
+        _, receipt_path = write_release_fixture(tmp_path, generated_at)
+        receipt = json.loads(receipt_path.read_text())
+        receipt["release_policy_linkage"]["verdict"] = "RED"
+        core = copy.deepcopy(receipt)
+        core.pop("tamper_evidence")
+        canonical = json.dumps(
+            core, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
+        preimage = (
+            mod._CLOSE_RECEIPT_PREIMAGE_DOMAIN
+            + len(canonical).to_bytes(8, "little")
+            + canonical
+        )
+        digest = hashlib.sha256(preimage).hexdigest()
+        receipt["tamper_evidence"]["sha256"] = f"sha256:{digest}"
+        receipt["tamper_evidence"]["signature"]["signed_payload_sha256"] = digest
+        receipt["tamper_evidence"]["signature"]["signature_hex"] = "0" * 128
+        receipt_path.write_text(json.dumps(receipt))
+
+        result = mod.check_release_receipt(
+            receipt_path,
+            expected_franken_node=NODE_REVISION,
+            expected_franken_engine=ENGINE_REVISION,
+            expected_release_run_url=RELEASE_RUN_URL,
+            max_age=timedelta(hours=6),
+        )
+
+        assert result["error"] is not None
+        assert "Ed25519 signature verification failed" in result["error"]
 
     def test_release_workflow_executes_and_consumes_live_gate(self):
         workflow = (ROOT / ".github" / "workflows" / "dist.yml").read_text()
@@ -953,10 +1034,21 @@ class TestReleaseEvidenceBinding:
             "--release-mode",
             "--expected-franken-node-revision",
             "--expected-franken-engine-revision",
+            "--expected-release-run-url",
             "--max-age-hours",
             "FRANKEN_ENGINE_REVISION: 6d204d13c710cb6e8d279f93b629ba6588add106",
             "ref: ${{ env.FRANKEN_ENGINE_REVISION }}",
+            "franken-node-release-certification-${GITHUB_SHA}.tar.xz",
+            "FRANKEN_NODE_GIT_SHA: ${{ github.sha }}",
+            "FRANKEN_ENGINE_GIT_SHA: ${{ env.FRANKEN_ENGINE_REVISION }}",
         ]
         for token in required:
             assert token in workflow, f"dist workflow missing release gate token: {token}"
         assert "ref: main" not in workflow
+        action_uses = re.findall(
+            r"^\s*(?:-\s*)?uses:\s+([^\s#]+)", workflow, flags=re.MULTILINE
+        )
+        assert action_uses
+        assert all(
+            re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) for action in action_uses
+        ), f"dist workflow has mutable action references: {action_uses}"

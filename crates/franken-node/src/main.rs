@@ -6457,6 +6457,7 @@ fn handle_doctor_close_condition(
     let receipt = ops::close_condition::generate_close_condition_receipt(
         &root,
         &close_condition_signing_material,
+        args.release_run_url.as_deref(),
     )
     .context("failed generating close-condition receipt")?;
     let receipt_key_id = crate::supply_chain::artifact_signing::KeyId::from_verifying_key(

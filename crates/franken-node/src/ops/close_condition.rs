@@ -234,10 +234,11 @@ pub struct CloseConditionReceipt {
 pub fn generate_close_condition_receipt(
     root: &Path,
     signing_material: &CloseConditionSigningMaterial<'_>,
+    release_run_url: Option<&str>,
 ) -> Result<CloseConditionReceipt> {
     let l1_product_oracle = evaluate_l1_product_oracle(root);
     let l2_engine_boundary_oracle = evaluate_l2_engine_boundary_oracle(root)?;
-    let release_policy_linkage = evaluate_release_policy_linkage(root)
+    let release_policy_linkage = evaluate_release_policy_linkage(root, release_run_url)
         .context("failed evaluating release-policy linkage")?;
 
     let mut failing_dimensions = Vec::new();
@@ -1111,7 +1112,24 @@ fn evaluate_l2_engine_boundary_oracle(root: &Path) -> Result<L2EngineBoundaryOra
 
 fn evaluate_release_policy_linkage(
     root: &Path,
+    release_run_url: Option<&str>,
 ) -> std::result::Result<ReleasePolicyLinkage, ReleasePolicyLinkageError> {
+    if let Some(release_run_url) = release_run_url {
+        validate_github_actions_run_url(release_run_url)
+            .map_err(|detail| ReleasePolicyLinkageError::CiOutputNotAccessible { detail })?;
+        return Ok(ReleasePolicyLinkage {
+            verdict: OracleColor::Green,
+            source: "github_actions_release_certification_context".to_string(),
+            ci_outputs_accessible: true,
+            ci_output_ref: Some(release_run_url.to_string()),
+            consumed_oracles: vec![
+                "L1_product_oracle".to_string(),
+                "L2_engine_boundary_oracle".to_string(),
+            ],
+            blocking_findings: Vec::new(),
+        });
+    }
+
     let source_path = root.join(SECTION_10N_GATE_VERDICT_PATH);
     let data = read_json_value(&source_path)
         .map_err(|detail| ReleasePolicyLinkageError::CiOutputNotAccessible { detail })?;
@@ -1154,6 +1172,29 @@ fn evaluate_release_policy_linkage(
         ],
         blocking_findings,
     })
+}
+
+fn validate_github_actions_run_url(value: &str) -> std::result::Result<(), String> {
+    let path = value
+        .strip_prefix("https://github.com/")
+        .ok_or_else(|| "release run URL must use https://github.com/".to_string())?;
+    let segments = path.split('/').collect::<Vec<_>>();
+    let valid = matches!(
+        segments.as_slice(),
+        [owner, repository, "actions", "runs", run_id, "attempts", attempt]
+            if !owner.is_empty()
+                && !repository.is_empty()
+                && run_id.bytes().all(|byte| byte.is_ascii_digit())
+                && !run_id.is_empty()
+                && attempt.bytes().all(|byte| byte.is_ascii_digit())
+                && !attempt.is_empty()
+    );
+    if !valid {
+        return Err(
+            "release run URL must identify an exact GitHub Actions run attempt".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn check_no_local_engine_crates(root: &Path) -> SplitContractCheck {
@@ -1650,6 +1691,27 @@ mod tests {
     use super::*;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn release_run_url_requires_an_exact_github_actions_attempt() {
+        assert!(
+            validate_github_actions_run_url(
+                "https://github.com/Dicklesworthstone/franken_node/actions/runs/123/attempts/2"
+            )
+            .is_ok()
+        );
+        for invalid in [
+            "http://github.com/owner/repo/actions/runs/123/attempts/1",
+            "https://example.com/owner/repo/actions/runs/123/attempts/1",
+            "https://github.com/owner/repo/actions/runs/latest/attempts/1",
+            "https://github.com/owner/repo/actions/runs/123",
+        ] {
+            assert!(
+                validate_github_actions_run_url(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
 
     fn corpus_totals_json(passed: u64, failed: u64, pass_rate_pct: f64) -> Value {
         // Honest fixture per the bd-ihusm gate: genuine-run provenance plus

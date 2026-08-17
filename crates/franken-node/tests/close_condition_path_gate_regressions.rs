@@ -229,7 +229,10 @@ frankenengine-extension-host = {{ path = "{extension_host_path}" }}
     }
 }
 
-fn generate_fixture_receipt(root: &Path) -> CloseConditionReceipt {
+fn generate_fixture_receipt_result(
+    root: &Path,
+    release_run_url: Option<&str>,
+) -> anyhow::Result<CloseConditionReceipt> {
     let seed = [73_u8; 32];
     let signing_key = SigningKey::from_bytes(&seed);
     let signing_material = CloseConditionSigningMaterial {
@@ -238,7 +241,11 @@ fn generate_fixture_receipt(root: &Path) -> CloseConditionReceipt {
         signing_identity: "close-condition-path-gate-regression",
     };
 
-    generate_close_condition_receipt(root, &signing_material).expect("close-condition receipt")
+    generate_close_condition_receipt(root, &signing_material, release_run_url)
+}
+
+fn generate_fixture_receipt(root: &Path) -> CloseConditionReceipt {
+    generate_fixture_receipt_result(root, None).expect("close-condition receipt")
 }
 
 fn split_path_dependency_check_status(receipt: &CloseConditionReceipt) -> OracleColor {
@@ -350,6 +357,52 @@ pub fn fixture() -> bool { true }
                     .blocking_findings
                     .iter()
                     .all(|finding| finding != "SPLIT-NO-INTERNALS failed")
+            );
+        }
+
+        #[test]
+        fn exact_github_actions_attempt_is_bound_to_the_release_receipt() {
+            let root = fixture_root_with_engine_paths(
+                "../../../franken_engine/crates/franken-engine",
+                "../../../franken_engine/crates/franken-extension-host",
+            );
+            let run_url =
+                "https://github.com/Dicklesworthstone/franken_node/actions/runs/123/attempts/2";
+
+            let receipt = generate_fixture_receipt_result(root.path(), Some(run_url))
+                .expect("exact release run attempt should be accepted");
+            let linkage = receipt.core.release_policy_linkage;
+
+            assert_eq!(linkage.verdict, OracleColor::Green);
+            assert_eq!(
+                linkage.source,
+                "github_actions_release_certification_context"
+            );
+            assert!(linkage.ci_outputs_accessible);
+            assert_eq!(linkage.ci_output_ref.as_deref(), Some(run_url));
+            assert_eq!(
+                linkage.consumed_oracles,
+                ["L1_product_oracle", "L2_engine_boundary_oracle"]
+            );
+        }
+
+        #[test]
+        fn non_exact_github_actions_attempt_is_rejected() {
+            let root = fixture_root_with_engine_paths(
+                "../../../franken_engine/crates/franken-engine",
+                "../../../franken_engine/crates/franken-extension-host",
+            );
+
+            let error = generate_fixture_receipt_result(
+                root.path(),
+                Some("https://github.com/owner/repo/actions/runs/latest/attempts/1"),
+            )
+            .expect_err("symbolic release run should fail closed");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("failed evaluating release-policy linkage")
             );
         }
     }
