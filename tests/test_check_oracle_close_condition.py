@@ -4,6 +4,9 @@ import copy
 import hashlib
 import importlib.util
 import json
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -104,6 +107,98 @@ def green_payload(dim_id):
     if dim_id == "l1_product":
         payload.update(l1_proof_evidence())
     return payload
+
+
+NODE_REVISION = "1" * 40
+ENGINE_REVISION = "2" * 40
+
+
+def source_revision(node=NODE_REVISION, engine=ENGINE_REVISION):
+    return {
+        "schema_version": mod.SOURCE_REVISION_SCHEMA,
+        "franken_node_commit": node,
+        "franken_engine_commit": engine,
+    }
+
+
+def release_corpus(proof, generated_at):
+    from scripts.check_compatibility_corpus_pass_gate import compute_result_digest
+
+    rows = [
+        {
+            "test_id": f"release-pass-{index}",
+            "api_family": "fs",
+            "band": "core",
+            "risk_band": "low",
+            "status": "pass",
+        }
+        for index in range(20)
+    ]
+    return {
+        "corpus": {
+            "provenance": "lockstep-oracle-run",
+            "generated_at_utc": generated_at,
+            "result_digest": compute_result_digest(rows),
+            "source_revision": source_revision(),
+        },
+        "totals": {
+            "total_test_cases": 20,
+            "passed_test_cases": 20,
+            "failed_test_cases": 0,
+            "errored_test_cases": 0,
+            "skipped_test_cases": 0,
+        },
+        "thresholds": {"overall_pass_rate_min_pct": 95.0},
+        "per_test_results": rows,
+        "proof_carrying_effects": proof,
+    }
+
+
+def release_receipt(generated_at, *, composite_verdict="GREEN"):
+    core = {
+        "schema_version": "oracle-close-condition-receipt/v1",
+        "receipt_path": "artifacts/oracle/close_condition_receipt.json",
+        "generated_at_utc": generated_at,
+        "source_revision": source_revision(),
+        "L1_product_oracle": {"verdict": "GREEN"},
+        "L2_engine_boundary_oracle": {"verdict": "GREEN"},
+        "release_policy_linkage": {"verdict": "GREEN"},
+        "composite_verdict": composite_verdict,
+        "failing_dimensions": [],
+    }
+    canonical = json.dumps(core, sort_keys=True, separators=(",", ":"))
+    preimage = (
+        mod._CLOSE_RECEIPT_PREIMAGE_DOMAIN
+        + len(canonical.encode()).to_bytes(8, "little")
+        + canonical.encode()
+    )
+    digest = hashlib.sha256(preimage).hexdigest()
+    return {
+        **core,
+        "tamper_evidence": {
+            "sha256": f"sha256:{digest}",
+            "signature": {
+                "algorithm": "ed25519",
+                "public_key_hex": "3" * 64,
+                "signed_payload_sha256": digest,
+                "signature_hex": "4" * 128,
+            },
+        },
+    }
+
+
+def write_release_fixture(tmp_path, generated_at):
+    l1 = green_payload("l1_product")
+    l1["timestamp"] = generated_at
+    l1["source_revision"] = source_revision()
+    (tmp_path / "l1_product_verdict.json").write_text(json.dumps(l1))
+    corpus_path = tmp_path / "compatibility_corpus_results.json"
+    corpus_path.write_text(
+        json.dumps(release_corpus(l1["evidence"]["proof_carrying_effects"], generated_at))
+    )
+    receipt_path = tmp_path / "close_condition_receipt.json"
+    receipt_path.write_text(json.dumps(release_receipt(generated_at)))
+    return corpus_path, receipt_path
 
 
 # ---------------------------------------------------------------------------
@@ -764,3 +859,104 @@ class TestCorpusBinding:
         )
         errors = mod.validate_l1_corpus_binding(payload, corpus_path)
         assert any("does not match declared total_test_cases" in e for e in errors)
+
+
+class TestReleaseEvidenceBinding:
+    def test_release_mode_accepts_fresh_source_bound_evidence(self, tmp_path):
+        generated_at = datetime.now(timezone.utc).isoformat()
+        corpus_path, receipt_path = write_release_fixture(tmp_path, generated_at)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--release-mode",
+                "--artifacts-dir",
+                str(tmp_path),
+                "--corpus-results",
+                str(corpus_path),
+                "--close-receipt",
+                str(receipt_path),
+                "--expected-franken-node-revision",
+                NODE_REVISION,
+                "--expected-franken-engine-revision",
+                ENGINE_REVISION,
+                "--max-age-hours",
+                "6",
+                "--json",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr or proc.stdout
+        report = json.loads(proc.stdout)
+        assert report["verdict"] == "PASS"
+        assert report["release_mode"] is True
+        assert report["expected_source_revision"] == {
+            "franken_node_commit": NODE_REVISION,
+            "franken_engine_commit": ENGINE_REVISION,
+        }
+
+    def test_source_mismatch_fails_closed(self, tmp_path):
+        generated_at = datetime.now(timezone.utc).isoformat()
+        _, receipt_path = write_release_fixture(tmp_path, generated_at)
+        receipt = json.loads(receipt_path.read_text())
+        receipt["source_revision"]["franken_engine_commit"] = "5" * 40
+        receipt_path.write_text(json.dumps(receipt))
+        result = mod.check_release_receipt(
+            receipt_path,
+            expected_franken_node=NODE_REVISION,
+            expected_franken_engine=ENGINE_REVISION,
+            max_age=timedelta(hours=6),
+        )
+        assert result["error"] is not None
+        assert "does not match release source" in result["error"]
+
+    def test_stale_receipt_fails_closed(self, tmp_path):
+        generated_at = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
+        _, receipt_path = write_release_fixture(tmp_path, generated_at)
+        result = mod.check_release_receipt(
+            receipt_path,
+            expected_franken_node=NODE_REVISION,
+            expected_franken_engine=ENGINE_REVISION,
+            max_age=timedelta(hours=6),
+        )
+        assert result["error"] is not None
+        assert "is stale" in result["error"]
+
+    def test_tampered_receipt_fails_closed(self, tmp_path):
+        generated_at = datetime.now(timezone.utc).isoformat()
+        _, receipt_path = write_release_fixture(tmp_path, generated_at)
+        receipt = json.loads(receipt_path.read_text())
+        receipt["L2_engine_boundary_oracle"]["verdict"] = "RED"
+        receipt_path.write_text(json.dumps(receipt))
+        result = mod.check_release_receipt(
+            receipt_path,
+            expected_franken_node=NODE_REVISION,
+            expected_franken_engine=ENGINE_REVISION,
+            max_age=timedelta(hours=6),
+        )
+        assert result["error"] is not None
+        assert "tamper hash does not match" in result["error"]
+        assert "L2_engine_boundary_oracle verdict is 'RED'" in result["error"]
+
+    def test_release_workflow_executes_and_consumes_live_gate(self):
+        workflow = (ROOT / ".github" / "workflows" / "dist.yml").read_text()
+        required = [
+            "release-certification:",
+            "needs: release-certification",
+            "ops compat-corpus-run",
+            "ops proof-carrying-evidence",
+            "doctor close-condition",
+            "--release-mode",
+            "--expected-franken-node-revision",
+            "--expected-franken-engine-revision",
+            "--max-age-hours",
+            "FRANKEN_ENGINE_REVISION: 6d204d13c710cb6e8d279f93b629ba6588add106",
+            "ref: ${{ env.FRANKEN_ENGINE_REVISION }}",
+        ]
+        for token in required:
+            assert token in workflow, f"dist workflow missing release gate token: {token}"
+        assert "ref: main" not in workflow

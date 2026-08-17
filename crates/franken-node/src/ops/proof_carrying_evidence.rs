@@ -504,6 +504,19 @@ pub fn merge_into_l1_verdict(
         "timestamp".to_string(),
         serde_json::Value::String(lockstep_evidence.produced_at.clone()),
     );
+    match crate::ops::embedded_source_revision()? {
+        Some(source_revision) => {
+            object.insert(
+                "source_revision".to_string(),
+                serde_json::to_value(source_revision).context("serialize source revision")?,
+            );
+        }
+        None => {
+            // Never preserve a source claim from an older artifact when the
+            // current producer binary was compiled without a binding.
+            object.remove("source_revision");
+        }
+    }
     let evidence = object
         .entry("evidence".to_string())
         .or_insert_with(|| serde_json::json!({}));
@@ -561,6 +574,21 @@ pub fn merge_into_corpus_results(
         PROOF_CARRYING_EFFECTS_KEY.to_string(),
         serde_json::to_value(evidence).context("serialize proof-carrying evidence")?,
     );
+    let corpus = object
+        .get_mut("corpus")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("corpus results field `corpus` must be a JSON object"))?;
+    match crate::ops::embedded_source_revision()? {
+        Some(source_revision) => {
+            corpus.insert(
+                "source_revision".to_string(),
+                serde_json::to_value(source_revision).context("serialize source revision")?,
+            );
+        }
+        None => {
+            corpus.remove("source_revision");
+        }
+    }
     std::fs::write(
         corpus_path,
         format!(
@@ -619,7 +647,7 @@ mod tests {
         let corpus_path = dir.path().join("compatibility_corpus_results.json");
         std::fs::write(
             &corpus_path,
-            r#"{"totals": {"total_test_cases": 7}, "proof_carrying_effects": {"schema_version": "franken-node/l1-proof-carrying-effects/v1"}}"#,
+            r#"{"corpus": {}, "totals": {"total_test_cases": 7}, "proof_carrying_effects": {"schema_version": "franken-node/l1-proof-carrying-effects/v1"}}"#,
         )
         .expect("write corpus fixture");
 
@@ -637,6 +665,10 @@ mod tests {
         assert_eq!(
             merged[PROOF_CARRYING_EFFECTS_KEY]["effect_receipts_verified"],
             3
+        );
+        assert!(
+            merged["corpus"].get("source_revision").is_none(),
+            "an unbound development binary must not emit release provenance"
         );
     }
 
@@ -752,6 +784,10 @@ mod tests {
         assert_eq!(
             merged["evidence"][LOCKSTEP_VERDICT_KEY]["report"]["verdict"],
             "Pass"
+        );
+        assert!(
+            merged.get("source_revision").is_none(),
+            "an unbound development binary must not emit release provenance"
         );
     }
 

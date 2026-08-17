@@ -2242,21 +2242,28 @@ pub fn build_corpus_results_document(
         "trace_id".to_string(),
         carry("trace_id", json!("trace-bd-28sz-corpus-gate")),
     );
-    document.insert(
-        "corpus".to_string(),
-        json!({
-            "corpus_version": corpus_version,
-            "franken_node_version": env!("CARGO_PKG_VERSION"),
-            "lockstep_oracle_version": crate::runtime::nversion_oracle::SCHEMA_VERSION,
-            "generated_at_utc": generated_at_utc,
-            "result_digest": result_digest,
-            "provenance": COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
-            "runner": "franken-node ops compat-corpus-run",
-            "policy_mode": "legacy-risky",
-            "reference_runtime": format!("bun {bun_version}"),
-            "corpus_root": corpus_root_display,
-        }),
-    );
+    let mut corpus_metadata = json!({
+        "corpus_version": corpus_version,
+        "franken_node_version": env!("CARGO_PKG_VERSION"),
+        "lockstep_oracle_version": crate::runtime::nversion_oracle::SCHEMA_VERSION,
+        "generated_at_utc": generated_at_utc,
+        "result_digest": result_digest,
+        "provenance": COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
+        "runner": "franken-node ops compat-corpus-run",
+        "policy_mode": "legacy-risky",
+        "reference_runtime": format!("bun {bun_version}"),
+        "corpus_root": corpus_root_display,
+    });
+    if let Some(source_revision) = crate::ops::embedded_source_revision()? {
+        corpus_metadata
+            .as_object_mut()
+            .expect("corpus metadata is constructed as an object")
+            .insert(
+                "source_revision".to_string(),
+                serde_json::to_value(source_revision).context("serialize source revision")?,
+            );
+    }
+    document.insert("corpus".to_string(), corpus_metadata);
     document.insert(
         "thresholds".to_string(),
         carry(

@@ -244,6 +244,7 @@ impl From<RawCloseConditionReceipt> for CloseConditionReceipt {
             schema_version: raw.schema_version,
             receipt_path: raw.receipt_path,
             generated_at_utc: raw.generated_at_utc,
+            source_revision: None,
             l1_product_oracle,
             l2_engine_boundary_oracle,
             release_policy_linkage,

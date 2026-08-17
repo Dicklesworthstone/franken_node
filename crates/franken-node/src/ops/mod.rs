@@ -1,3 +1,64 @@
+use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
+
+pub const SOURCE_REVISION_SCHEMA: &str = "franken-node/source-revision/v1";
+
+/// Exact FrankenNode + FrankenEngine source pair that produced releasable
+/// evidence. The values come from compile-time CI inputs, not ambient runtime
+/// environment variables, so a later process cannot relabel an old binary as
+/// a different source revision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceRevision {
+    pub schema_version: String,
+    pub franken_node_commit: String,
+    pub franken_engine_commit: String,
+}
+
+impl SourceRevision {
+    pub fn try_new(franken_node_commit: &str, franken_engine_commit: &str) -> Result<Self> {
+        validate_full_git_sha("FRANKEN_NODE_GIT_SHA", franken_node_commit)?;
+        validate_full_git_sha("FRANKEN_ENGINE_GIT_SHA", franken_engine_commit)?;
+        Ok(Self {
+            schema_version: SOURCE_REVISION_SCHEMA.to_string(),
+            franken_node_commit: franken_node_commit.to_string(),
+            franken_engine_commit: franken_engine_commit.to_string(),
+        })
+    }
+}
+
+fn validate_full_git_sha(label: &str, value: &str) -> Result<()> {
+    if value.len() != 40
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{label} must be a lowercase 40-hex Git commit SHA");
+    }
+    Ok(())
+}
+
+/// Read the revision pair embedded when this binary was compiled. Ordinary
+/// development builds remain usable without provenance, but emit no binding;
+/// the tag-release checker rejects such unbound evidence. A half-configured
+/// build fails instead of producing an ambiguous single-repository claim.
+pub fn embedded_source_revision() -> Result<Option<SourceRevision>> {
+    match (
+        option_env!("FRANKEN_NODE_GIT_SHA"),
+        option_env!("FRANKEN_ENGINE_GIT_SHA"),
+    ) {
+        (Some(franken_node), Some(franken_engine)) => {
+            SourceRevision::try_new(franken_node, franken_engine).map(Some)
+        }
+        (None, None) => Ok(None),
+        (Some(_), None) => bail!(
+            "FRANKEN_NODE_GIT_SHA was embedded without FRANKEN_ENGINE_GIT_SHA; refusing partial source binding"
+        ),
+        (None, Some(_)) => bail!(
+            "FRANKEN_ENGINE_GIT_SHA was embedded without FRANKEN_NODE_GIT_SHA; refusing partial source binding"
+        ),
+    }
+}
+
 pub mod cleanup_executor;
 pub mod close_condition;
 pub mod closed_bead_compliance;
@@ -35,12 +96,31 @@ mod ops_conformance_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::SourceRevision;
     use super::tokio_drift_checker::{
         check_api_transport_boundary_trigger, check_tokio_drift, format_drift_report,
     };
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn source_revision_requires_full_lowercase_git_shas() {
+        let revision = SourceRevision::try_new(&"a".repeat(40), &"9".repeat(40))
+            .expect("full lowercase Git SHAs should bind");
+        assert_eq!(revision.franken_node_commit, "a".repeat(40));
+        assert_eq!(revision.franken_engine_commit, "9".repeat(40));
+
+        for invalid in [
+            String::new(),
+            "abc".to_string(),
+            "A".repeat(40),
+            "g".repeat(40),
+            "0".repeat(39),
+        ] {
+            assert!(SourceRevision::try_new(&invalid, &"1".repeat(40)).is_err());
+        }
+    }
 
     fn crate_root(cargo_toml: &str) -> TempDir {
         let dir = TempDir::new().expect("temp crate root should be created");

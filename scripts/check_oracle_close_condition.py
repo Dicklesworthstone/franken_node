@@ -14,15 +14,18 @@ Exit codes:
     2 = ERROR (malformed artifacts, parse error)
 """
 
+import argparse
 import hashlib
 import hmac
 import json
+import re
 import sys
+from copy import deepcopy
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DEFAULT_ARTIFACTS_DIR = ROOT / "artifacts" / "oracle"
@@ -41,6 +44,10 @@ REQUIRED_L1_PROOF_SUBJECTS = ("fs.read", "fs.write", "http.request")
 L1_LOCKSTEP_VERDICT_SCHEMA = "franken-node/l1-lockstep-verdict/v1"
 # Mirrors runtime::nversion_oracle::SCHEMA_VERSION.
 NVERSION_ORACLE_REPORT_SCHEMA = "nvo-v1.0"
+DEFAULT_CLOSE_RECEIPT = DEFAULT_ARTIFACTS_DIR / "close_condition_receipt.json"
+SOURCE_REVISION_SCHEMA = "franken-node/source-revision/v1"
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_CLOSE_RECEIPT_PREIMAGE_DOMAIN = b"close_condition_receipt_v1:"
 
 # ---------------------------------------------------------------------------
 # v2 re-derivation (bd-qr5i2.3): the gate does not trust the declared summary.
@@ -706,6 +713,220 @@ def _validate_l1_corpus_pass_rate(corpus: dict) -> list[str]:
     return errors
 
 
+def _parse_rfc3339(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty RFC3339 timestamp")
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as err:
+        raise ValueError(f"{label} is not a valid RFC3339 timestamp: {value!r}") from err
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must include an explicit UTC offset")
+    return parsed.astimezone(timezone.utc)
+
+
+def validate_evidence_freshness(
+    timestamp: object,
+    *,
+    label: str,
+    max_age: timedelta,
+    now: datetime | None = None,
+) -> list[str]:
+    """Fail closed when release evidence is stale or implausibly future-dated."""
+    try:
+        observed = _parse_rfc3339(timestamp, label)
+    except ValueError as err:
+        return [str(err)]
+
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if observed > current + timedelta(minutes=5):
+        return [
+            f"{label} {observed.isoformat()} is more than five minutes in the future"
+        ]
+    age = current - observed
+    if age > max_age:
+        return [
+            f"{label} is stale: age {age.total_seconds() / 3600:.2f}h exceeds "
+            f"the release maximum {max_age.total_seconds() / 3600:.2f}h"
+        ]
+    return []
+
+
+def validate_source_revision(
+    data: dict,
+    *,
+    label: str,
+    expected_franken_node: str,
+    expected_franken_engine: str,
+) -> list[str]:
+    """Require evidence to name the exact source pair being released."""
+    errors = []
+    revision = data.get("source_revision")
+    if not isinstance(revision, dict):
+        return [f"{label} source_revision object is missing"]
+    if revision.get("schema_version") != SOURCE_REVISION_SCHEMA:
+        errors.append(
+            f"{label} source_revision schema_version {revision.get('schema_version')!r} "
+            f"does not match {SOURCE_REVISION_SCHEMA!r}"
+        )
+
+    declared_node = revision.get("franken_node_commit")
+    declared_engine = revision.get("franken_engine_commit")
+    for name, declared, expected in (
+        ("franken_node_commit", declared_node, expected_franken_node),
+        ("franken_engine_commit", declared_engine, expected_franken_engine),
+    ):
+        if not isinstance(declared, str) or _GIT_SHA_RE.fullmatch(declared) is None:
+            errors.append(f"{label} source_revision.{name} must be a lowercase 40-hex Git SHA")
+        elif not hmac.compare_digest(declared, expected):
+            errors.append(
+                f"{label} source_revision.{name} {declared} does not match release source {expected}"
+            )
+    return errors
+
+
+def validate_release_corpus_binding(
+    corpus_results_path: Path,
+    *,
+    expected_franken_node: str,
+    expected_franken_engine: str,
+    max_age: timedelta,
+    now: datetime | None = None,
+) -> list[str]:
+    try:
+        corpus = json.loads(corpus_results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        return [f"release corpus evidence is unreadable: {err}"]
+    if not isinstance(corpus, dict):
+        return ["release corpus evidence must be a JSON object"]
+    corpus_meta = corpus.get("corpus")
+    if not isinstance(corpus_meta, dict):
+        return ["release corpus evidence corpus object is missing"]
+    errors = validate_source_revision(
+        corpus_meta,
+        label="release corpus",
+        expected_franken_node=expected_franken_node,
+        expected_franken_engine=expected_franken_engine,
+    )
+    errors.extend(
+        validate_evidence_freshness(
+            corpus_meta.get("generated_at_utc"),
+            label="release corpus generated_at_utc",
+            max_age=max_age,
+            now=now,
+        )
+    )
+    return errors
+
+
+def _close_receipt_tamper_errors(receipt: dict) -> list[str]:
+    tamper = receipt.get("tamper_evidence")
+    if not isinstance(tamper, dict):
+        return ["close-condition receipt tamper_evidence object is missing"]
+    signature = tamper.get("signature")
+    if not isinstance(signature, dict):
+        return ["close-condition receipt signature object is missing"]
+
+    core = deepcopy(receipt)
+    core.pop("tamper_evidence", None)
+    canonical = json.dumps(core, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    canonical_bytes = canonical.encode("utf-8")
+    signed_preimage = (
+        _CLOSE_RECEIPT_PREIMAGE_DOMAIN
+        + len(canonical_bytes).to_bytes(8, "little")
+        + canonical_bytes
+    )
+    derived = hashlib.sha256(signed_preimage).hexdigest()
+    errors = []
+    if not hmac.compare_digest(str(tamper.get("sha256") or ""), f"sha256:{derived}"):
+        errors.append("close-condition receipt tamper hash does not match its canonical core")
+    if not hmac.compare_digest(
+        str(signature.get("signed_payload_sha256") or ""), derived
+    ):
+        errors.append("close-condition receipt signed payload hash does not match its canonical core")
+    if signature.get("algorithm") != "ed25519":
+        errors.append("close-condition receipt signature algorithm must be ed25519")
+    public_key = signature.get("public_key_hex")
+    signature_hex = signature.get("signature_hex")
+    if not isinstance(public_key, str) or re.fullmatch(r"[0-9a-f]{64}", public_key) is None:
+        errors.append("close-condition receipt public key must be 32 lowercase-hex bytes")
+    if not isinstance(signature_hex, str) or re.fullmatch(r"[0-9a-f]{128}", signature_hex) is None:
+        errors.append("close-condition receipt signature must be 64 lowercase-hex bytes")
+    return errors
+
+
+def check_release_receipt(
+    receipt_path: Path,
+    *,
+    expected_franken_node: str,
+    expected_franken_engine: str,
+    max_age: timedelta,
+    now: datetime | None = None,
+) -> dict:
+    """Validate the live, signed composite receipt consumed by tag publication."""
+    result = {
+        "present": False,
+        "composite_verdict": None,
+        "dimensions": {},
+        "error": None,
+    }
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        result["error"] = f"close-condition receipt not found: {receipt_path}"
+        return result
+    except (OSError, json.JSONDecodeError) as err:
+        result["error"] = f"close-condition receipt is malformed: {err}"
+        return result
+    if not isinstance(receipt, dict):
+        result["error"] = "close-condition receipt must be a JSON object"
+        return result
+
+    result["present"] = True
+    result["composite_verdict"] = receipt.get("composite_verdict")
+    errors = validate_source_revision(
+        receipt,
+        label="close-condition receipt",
+        expected_franken_node=expected_franken_node,
+        expected_franken_engine=expected_franken_engine,
+    )
+    errors.extend(
+        validate_evidence_freshness(
+            receipt.get("generated_at_utc"),
+            label="close-condition receipt generated_at_utc",
+            max_age=max_age,
+            now=now,
+        )
+    )
+    errors.extend(_close_receipt_tamper_errors(receipt))
+
+    if receipt.get("composite_verdict") != "GREEN":
+        errors.append(
+            f"close-condition composite_verdict is {receipt.get('composite_verdict')!r}, expected 'GREEN'"
+        )
+    failing = receipt.get("failing_dimensions")
+    if failing != []:
+        errors.append(f"close-condition failing_dimensions must be empty, got {failing!r}")
+
+    for field, dimension_id in (
+        ("L1_product_oracle", "l1_product"),
+        ("L2_engine_boundary_oracle", "l2_engine_boundary"),
+        ("release_policy_linkage", "release_policy_linkage"),
+    ):
+        dimension = receipt.get(field)
+        verdict = dimension.get("verdict") if isinstance(dimension, dict) else None
+        result["dimensions"][dimension_id] = verdict
+        if verdict != "GREEN":
+            errors.append(f"close-condition {field} verdict is {verdict!r}, expected 'GREEN'")
+
+    if errors:
+        result["error"] = "; ".join(errors)
+    return result
+
+
 REQUIRED_DIMENSIONS = [
     {
         "id": "l1_product",
@@ -755,7 +976,16 @@ def validate_l1_proof_carrying_evidence(data: dict) -> list[str]:
     ]
 
 
-def check_dimension(artifacts_dir: Path, dim: dict, corpus_results_path=None) -> dict:
+def check_dimension(
+    artifacts_dir: Path,
+    dim: dict,
+    corpus_results_path=None,
+    *,
+    expected_franken_node: str | None = None,
+    expected_franken_engine: str | None = None,
+    max_age: timedelta | None = None,
+    now: datetime | None = None,
+) -> dict:
     """Check a single oracle dimension."""
     artifact_path = artifacts_dir / dim["artifact"]
     result = {
@@ -789,28 +1019,97 @@ def check_dimension(artifacts_dir: Path, dim: dict, corpus_results_path=None) ->
     errors = []
     if verdict != "GREEN":
         errors.append(f"Verdict is {verdict}, expected GREEN")
+    if expected_franken_node is not None and expected_franken_engine is not None:
+        errors.extend(
+            validate_source_revision(
+                data,
+                label=f"{dim['label']} artifact",
+                expected_franken_node=expected_franken_node,
+                expected_franken_engine=expected_franken_engine,
+            )
+        )
+    if max_age is not None:
+        errors.extend(
+            validate_evidence_freshness(
+                data.get("timestamp"),
+                label=f"{dim['label']} timestamp",
+                max_age=max_age,
+                now=now,
+            )
+        )
     if dim["id"] == "l1_product":
         errors.extend(validate_l1_proof_carrying_evidence(data))
         errors.extend(validate_l1_lockstep_verdict(data))
         if corpus_results_path is not None:
             errors.extend(validate_l1_corpus_binding(data, corpus_results_path))
+            if (
+                expected_franken_node is not None
+                and expected_franken_engine is not None
+                and max_age is not None
+            ):
+                errors.extend(
+                    validate_release_corpus_binding(
+                        corpus_results_path,
+                        expected_franken_node=expected_franken_node,
+                        expected_franken_engine=expected_franken_engine,
+                        max_age=max_age,
+                        now=now,
+                    )
+                )
     if errors:
         result["error"] = "; ".join(errors)
 
     return result
 
 
-def main():
-    logger = configure_test_logging("check_oracle_close_condition")
-    json_output = "--json" in sys.argv
-    artifacts_dir = DEFAULT_ARTIFACTS_DIR
-    corpus_results_path = None
+def _git_sha(value: str) -> str:
+    normalized = value.strip().lower()
+    if _GIT_SHA_RE.fullmatch(normalized) is None:
+        raise argparse.ArgumentTypeError("expected a full 40-hex Git commit SHA")
+    return normalized
 
-    for i, arg in enumerate(sys.argv):
-        if arg == "--artifacts-dir" and i + 1 < len(sys.argv):
-            artifacts_dir = Path(sys.argv[i + 1])
-        if arg == "--corpus-results" and i + 1 < len(sys.argv):
-            corpus_results_path = Path(sys.argv[i + 1])
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--artifacts-dir", type=Path, default=DEFAULT_ARTIFACTS_DIR)
+    parser.add_argument("--corpus-results", type=Path)
+    parser.add_argument(
+        "--release-mode",
+        action="store_true",
+        help=(
+            "validate the live L1 artifact plus signed composite receipt consumed by "
+            "tag publication instead of trusting standalone historical L2/linkage verdict files"
+        ),
+    )
+    parser.add_argument("--close-receipt", type=Path, default=DEFAULT_CLOSE_RECEIPT)
+    parser.add_argument("--expected-franken-node-revision", type=_git_sha)
+    parser.add_argument("--expected-franken-engine-revision", type=_git_sha)
+    parser.add_argument("--max-age-hours", type=float)
+    args = parser.parse_args(argv)
+
+    revision_args = (
+        args.expected_franken_node_revision,
+        args.expected_franken_engine_revision,
+    )
+    if any(revision_args) and not all(revision_args):
+        parser.error("both expected source revisions must be provided together")
+    if args.max_age_hours is not None and args.max_age_hours <= 0:
+        parser.error("--max-age-hours must be greater than zero")
+    if args.release_mode:
+        if not all(revision_args):
+            parser.error("--release-mode requires both expected source revisions")
+        if args.max_age_hours is None:
+            parser.error("--release-mode requires --max-age-hours")
+    return args
+
+
+def main(argv: list[str] | None = None):
+    logger = configure_test_logging("check_oracle_close_condition")
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    json_output = args.json
+    artifacts_dir = args.artifacts_dir
+    corpus_results_path = args.corpus_results
 
     # bd-ry7d1: on the live repo (default artifacts dir), the corpus binding
     # is enforced by default so the Rust and Python gate inputs cannot drift;
@@ -819,11 +1118,26 @@ def main():
         corpus_results_path = ROOT / "artifacts" / "13" / "compatibility_corpus_results.json"
 
     timestamp = datetime.now(timezone.utc).isoformat()
+    expected_node = args.expected_franken_node_revision
+    expected_engine = args.expected_franken_engine_revision
+    max_age = (
+        timedelta(hours=args.max_age_hours) if args.max_age_hours is not None else None
+    )
     dimensions = {}
     failing = []
 
-    for dim in REQUIRED_DIMENSIONS:
-        result = check_dimension(artifacts_dir, dim, corpus_results_path)
+    dimensions_to_check = (
+        [REQUIRED_DIMENSIONS[0]] if args.release_mode else REQUIRED_DIMENSIONS
+    )
+    for dim in dimensions_to_check:
+        result = check_dimension(
+            artifacts_dir,
+            dim,
+            corpus_results_path,
+            expected_franken_node=expected_node,
+            expected_franken_engine=expected_engine,
+            max_age=max_age,
+        )
         dimensions[dim["id"]] = result
 
         if result.get("error") or result["verdict"] != "GREEN":
@@ -833,6 +1147,34 @@ def main():
                 "reason": result.get("error", f"Verdict: {result['verdict']}"),
             })
 
+    release_receipt = None
+    if args.release_mode:
+        release_receipt = check_release_receipt(
+            args.close_receipt,
+            expected_franken_node=expected_node,
+            expected_franken_engine=expected_engine,
+            max_age=max_age,
+        )
+        for dim in REQUIRED_DIMENSIONS[1:]:
+            verdict = release_receipt["dimensions"].get(dim["id"])
+            dimensions[dim["id"]] = {
+                "dimension": dim["id"],
+                "label": dim["label"],
+                "owner_track": dim["owner_track"],
+                "present": release_receipt["present"],
+                "verdict": verdict,
+                "error": release_receipt.get("error"),
+            }
+        if release_receipt.get("error") or release_receipt["composite_verdict"] != "GREEN":
+            failing.append(
+                {
+                    "dimension": "composite_release_receipt",
+                    "label": "Commit-bound Composite Release Receipt",
+                    "reason": release_receipt.get("error")
+                    or f"Verdict: {release_receipt['composite_verdict']}",
+                }
+            )
+
     verdict = "PASS" if not failing else "FAIL"
 
     report = {
@@ -841,6 +1183,17 @@ def main():
         "timestamp": timestamp,
         "artifacts_dir": str(artifacts_dir),
         "corpus_results": str(corpus_results_path) if corpus_results_path else None,
+        "release_mode": args.release_mode,
+        "expected_source_revision": (
+            {
+                "franken_node_commit": expected_node,
+                "franken_engine_commit": expected_engine,
+            }
+            if expected_node is not None
+            else None
+        ),
+        "max_age_hours": args.max_age_hours,
+        "close_receipt": str(args.close_receipt) if args.release_mode else None,
         "dimensions": {
             k: {
                 "present": v["present"],
@@ -860,7 +1213,11 @@ def main():
         print(f"Timestamp: {timestamp}")
         print()
         for dim_id, dim_data in dimensions.items():
-            status = "OK" if dim_data["verdict"] == "GREEN" else "FAIL"
+            status = (
+                "OK"
+                if dim_data["verdict"] == "GREEN" and not dim_data.get("error")
+                else "FAIL"
+            )
             label = [d for d in REQUIRED_DIMENSIONS if d["id"] == dim_id][0]["label"]
             if dim_data["present"]:
                 print(f"  [{status}] {label}: {dim_data['verdict']}")

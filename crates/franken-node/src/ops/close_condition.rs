@@ -213,6 +213,8 @@ pub struct CloseConditionReceiptCore {
     pub schema_version: String,
     pub receipt_path: String,
     pub generated_at_utc: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<crate::ops::SourceRevision>,
     #[serde(rename = "L1_product_oracle")]
     pub l1_product_oracle: L1ProductOracle,
     #[serde(rename = "L2_engine_boundary_oracle")]
@@ -259,6 +261,7 @@ pub fn generate_close_condition_receipt(
         schema_version: "oracle-close-condition-receipt/v1".to_string(),
         receipt_path: CLOSE_CONDITION_RECEIPT_PATH.to_string(),
         generated_at_utc: generated_at_utc(),
+        source_revision: crate::ops::embedded_source_revision()?,
         l1_product_oracle,
         l2_engine_boundary_oracle,
         release_policy_linkage,
@@ -2315,6 +2318,7 @@ mod tests {
                 schema_version: "oracle-close-condition-receipt/v1".to_string(),
                 receipt_path: CLOSE_CONDITION_RECEIPT_PATH.to_string(),
                 generated_at_utc: "2026-07-04T00:00:00Z".to_string(),
+                source_revision: None,
                 l1_product_oracle: L1ProductOracle {
                     verdict: l1_verdict,
                     source_path: COMPATIBILITY_CORPUS_RESULTS_PATH.to_string(),

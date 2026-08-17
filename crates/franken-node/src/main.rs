@@ -6459,6 +6459,12 @@ fn handle_doctor_close_condition(
         &close_condition_signing_material,
     )
     .context("failed generating close-condition receipt")?;
+    let receipt_key_id = crate::supply_chain::artifact_signing::KeyId::from_verifying_key(
+        &signing_material.signing_key.verifying_key(),
+    )
+    .to_string();
+    ops::close_condition::verify_close_condition_receipt_signature(&receipt, &receipt_key_id)
+        .context("failed self-verifying close-condition receipt signature")?;
     let receipt_path = ops::close_condition::write_close_condition_receipt(&root, &receipt)
         .context("failed writing close-condition receipt")?;
     let rendered = ops::close_condition::render_close_condition_receipt_json(&receipt)?;
