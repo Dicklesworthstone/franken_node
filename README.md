@@ -619,7 +619,7 @@ The policy is configured in `franken_node.toml`:
 
 ```toml
 [security.network_policy]
-mode = "enforced"     # enforced | report-only
+ssrf_enforcement = "block"     # none | monitor | block
 ```
 
 Mechanics:
@@ -644,9 +644,9 @@ Mechanics:
 - **Capability binding.** `franken-node remotecap issue --endpoint <e>`
   pins capability tokens to specific endpoints; the gate refuses use of
   a token at any other endpoint regardless of the operation requested.
-- **Report-only mode.** During migration, `mode = "report-only"` allows
+- **Monitor mode.** During migration, `ssrf_enforcement = "monitor"` allows
   the call but records the would-be-decision so operators can review
-  before flipping the gate to `enforced`.
+  before flipping the gate to `block`.
 - **TLS for guest `https` egress.** A guest `https.*`/`fetch(https://…)`
   call performs a real TLS handshake in the engine's network mechanism
   (rustls; certificate verification against the built-in webpki roots).
@@ -909,8 +909,12 @@ max_degraded_duration_secs = 3600
 # max_runtime_millis = 30000
 
 [security.network_policy]
-# Network egress policy enforcement mode: enforced | report-only
-mode = "enforced"
+# SSRF enforcement mode: none | monitor | block
+ssrf_enforcement = "block"
+# Keep the legacy boolean guard enabled while migrating older configs.
+ssrf_protection_enabled = true
+block_cloud_metadata = true
+audit_blocked_requests = true
 
 [engine]
 # Optional path override for the franken_engine binary
@@ -946,9 +950,12 @@ max_variance_pct = 5.0
 regression_threshold_pct = 10.0
 ```
 
-`franken-node init` writes a starter file with the active profile and the
-default state layout. `franken-node ops config-audit --json` prints the
-resolved configuration with profile overlays applied.
+With `--out-dir`, `franken-node init` writes starter configuration files with
+the active profile. Without `--out-dir`, it prints the resolved starter TOML to
+stdout instead. Unless `--no-state` is supplied, it also bootstraps the default
+state layout under `--state-dir`, `--out-dir`, or the current directory, in
+that order. `franken-node ops config-audit --json` prints the resolved
+configuration with profile overlays applied.
 
 ---
 
@@ -972,7 +979,7 @@ keep the binary small; product surfaces opt in explicitly.
 | `test-support` | opt-in | Shared test helpers (enables `control-plane` and `admin-tools`). |
 | `asupersync-transport` | opt-in | Direct asupersync transport integration. |
 | `compression` | opt-in | Gzip/deflate support via `flate2`. |
-| `cbor-serialization` | opt-in | CBOR encoding support via `serde_cbor`. |
+| `cbor-serialization` | opt-in | CBOR encoding support via `ciborium`. |
 | `blake3` | opt-in | Optional BLAKE3 hashing support. |
 
 ```bash
@@ -1786,7 +1793,7 @@ together make replay deterministic across time and across machines.
 | Key derivation | HKDF-SHA-256 | `hkdf` |
 | Random nonces / IDs | OS RNG | `rand` (cryptographic backend) |
 | Secret zeroization | `Zeroize` derive | `zeroize` |
-| Canonical CBOR (optional) | `serde_cbor` | feature-gated |
+| Canonical CBOR (optional) | `ciborium` | feature-gated |
 | Replay-bundle compression | Gzip via DEFLATE | `flate2` (feature-gated) |
 
 Every signature and every keyed-hash input begins with a domain
@@ -1846,10 +1853,11 @@ across multiple writers is required (see `lib.rs::lock_utils`).
 
 ## Environment Variables
 
-`franken-node` reads configuration in this precedence: CLI flags →
-`franken_node.toml` (resolved by `--config` or default discovery) →
-environment variables → built-in safe defaults. Environment variables
-follow the `FRANKEN_NODE_<SECTION>_<KEY>` convention. The most common:
+`franken-node` reads configuration in this precedence: CLI flags → environment
+variables → the selected profile block in `franken_node.toml` → base values in
+that file (resolved by `--config` or default discovery) → built-in safe
+defaults. Environment variables follow the `FRANKEN_NODE_<SECTION>_<KEY>`
+convention. The most common:
 
 | Variable | Equivalent config | Notes |
 |---|---|---|
@@ -2831,14 +2839,14 @@ Profile selection changes concrete behavior. The salient differences:
 | Behavior | `strict` | `balanced` | `legacy-risky` |
 |---|---|---|---|
 | `risky_requires_fresh_revocation` | required | required | relaxed |
-| `dangerous_requires_fresh_revocation` | required | required | relaxed |
+| `dangerous_requires_fresh_revocation` | required | required | required |
 | `quarantine_on_high_risk` | auto-quarantine | auto-quarantine | warn-only |
-| Lockstep validation before rollout | required | recommended | optional |
+| Lockstep validation before rollout | required | required | optional |
 | Divergence receipts | always emitted | emitted in production | optional |
 | `registry.require_signatures` | required | required | may be relaxed |
 | `registry.require_provenance` | required | required | may be relaxed |
 | Compatibility mode | tightest | balanced | permissive |
-| SSRF default | enforced | enforced | report-only viable |
+| SSRF default | block | block | block |
 | Safe-mode auto-entry on crash-loop | yes | yes | yes |
 | Camouflage severity threshold for risk bump | low | medium | high |
 
