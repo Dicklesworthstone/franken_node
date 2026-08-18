@@ -895,8 +895,15 @@ max_degraded_duration_secs = 3600
 #
 # [security.child_process_spawn.execution_policy.limits]
 # max_children = 4
+# max_executable_path_bytes = 4096
+# max_executable_bytes = 134217728
 # max_argv_count = 128
 # max_argv_bytes = 65536
+# max_env_count = 128
+# max_env_bytes = 65536
+# max_cwd_bytes = 4096
+# max_prelaunch_bytes = 131072
+# max_request_bytes = 16777216
 # max_stdin_bytes = 1048576
 # max_output_bytes = 4194304
 # max_runtime_millis = 30000

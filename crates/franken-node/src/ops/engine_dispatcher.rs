@@ -22,7 +22,7 @@ use frankenengine_engine::ast::ParseGoal;
 use frankenengine_engine::checkpoint::CancellationToken;
 #[cfg(feature = "engine")]
 use frankenengine_engine::execution_orchestrator::{
-    ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
+    ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig, ProcessSpawnAttemptAuthority,
 };
 #[cfg(feature = "engine")]
 use frankenengine_engine::lowering_pipeline::AmbientAuthorityGrant;
@@ -47,9 +47,9 @@ use frankenengine_extension_host::host_io::{
 };
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::process_spawn::{
-    NativeProcessSpawn, ProcessSignal, ProcessSpawnCapability, ProcessSpawnError,
-    ProcessSpawnLimits, ProcessSpawnOutcome, ProcessSpawnPolicy, ProcessSpawnProvider,
-    ProcessSpawnRequest, ProcessStdioMode,
+    NativeProcessSpawn, ProcessSignal, ProcessSpawnCapability, ProcessSpawnControl,
+    ProcessSpawnError, ProcessSpawnLimits, ProcessSpawnOutcome, ProcessSpawnPolicy,
+    ProcessSpawnProvider, ProcessSpawnRequest, ProcessStdioMode,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -335,12 +335,17 @@ impl ProcessSpawnProvider for AdmissionBoundProcessSpawn {
         "admission-bound-native-process-spawn"
     }
 
+    fn preflight_request(
+        &self,
+        request: &ProcessSpawnRequest,
+    ) -> std::result::Result<(), ProcessSpawnError> {
+        self.inner.preflight_request(request)
+    }
+
     fn prepare_request(
         &self,
         request: &ProcessSpawnRequest,
     ) -> std::result::Result<ProcessSpawnRequest, ProcessSpawnError> {
-        self.ensure_current()
-            .map_err(|reason| ProcessSpawnError::Denied { reason })?;
         self.inner.prepare_request(request)
     }
 
@@ -352,6 +357,17 @@ impl ProcessSpawnProvider for AdmissionBoundProcessSpawn {
         self.ensure_current()
             .map_err(|reason| ProcessSpawnError::Denied { reason })?;
         self.inner.perform(request, granted)
+    }
+
+    fn perform_controlled(
+        &self,
+        request: &ProcessSpawnRequest,
+        granted: &[ProcessSpawnCapability],
+        control: Arc<dyn ProcessSpawnControl>,
+    ) -> ProcessSpawnOutcome {
+        self.ensure_current()
+            .map_err(|reason| ProcessSpawnError::Denied { reason })?;
+        self.inner.perform_controlled(request, granted, control)
     }
 
     fn cleanup_handle(&self, handle: &str) -> ProcessSpawnOutcome {
@@ -6265,8 +6281,15 @@ impl EngineDispatcher {
             jailed_cwd_root: jailed_cwd_root.to_string(),
             limits: ProcessSpawnLimits {
                 max_children: source.limits.max_children,
+                max_executable_path_bytes: source.limits.max_executable_path_bytes,
+                max_executable_bytes: source.limits.max_executable_bytes,
                 max_argv_count: source.limits.max_argv_count,
                 max_argv_bytes: source.limits.max_argv_bytes,
+                max_env_count: source.limits.max_env_count,
+                max_env_bytes: source.limits.max_env_bytes,
+                max_cwd_bytes: source.limits.max_cwd_bytes,
+                max_prelaunch_bytes: source.limits.max_prelaunch_bytes,
+                max_request_bytes: source.limits.max_request_bytes,
                 max_stdin_bytes: source.limits.max_stdin_bytes,
                 max_output_bytes: source.limits.max_output_bytes,
                 max_runtime_millis: source.limits.max_runtime_millis,
@@ -6815,6 +6838,8 @@ impl EngineDispatcher {
         // The shared journal is installed at the same time so interleaved
         // filesystem/network/process crossings retain their real global order.
         if let Some(admission) = process_spawn_admission.as_ref() {
+            let process_spawn_authority =
+                ProcessSpawnAttemptAuthority::expiring_at_unix_ms(admission.expires_at_ms());
             let policy = Self::process_spawn_policy_for_execution(config).map_err(|error| {
                 native_engine_spawn_error_with_telemetry_cleanup(
                     error.to_string(),
@@ -6832,7 +6857,7 @@ impl EngineDispatcher {
                 expires_at_ms: admission.expires_at_ms(),
             };
             let journal = Arc::new(InMemoryHostEffectJournal::recording());
-            orchestrator.set_process_spawn(Arc::new(provider), journal);
+            orchestrator.set_process_spawn(Arc::new(provider), journal, process_spawn_authority);
             tracing::info!(
                 execution_mode = "native",
                 "Installed signed, containment-bound process-spawn provider"
@@ -7790,6 +7815,19 @@ mod tests {
     const BD_45CK9_PANIC_HOOK_CHILD_ENV: &str = "FRANKEN_NODE_BD_45CK9_PANIC_HOOK_CHILD";
 
     #[cfg(feature = "engine")]
+    #[derive(Debug)]
+    struct RejectingProcessSpawnControl;
+
+    #[cfg(feature = "engine")]
+    impl ProcessSpawnControl for RejectingProcessSpawnControl {
+        fn checkpoint(&self) -> std::result::Result<(), ProcessSpawnError> {
+            Err(ProcessSpawnError::Denied {
+                reason: "TEST_PROCESS_CONTROL_REACHED_NATIVE_PROVIDER".to_string(),
+            })
+        }
+    }
+
+    #[cfg(feature = "engine")]
     fn runtime_evidence_grant_for_test(
         session_nonce: &str,
         signing_seed: [u8; 32],
@@ -8035,6 +8073,14 @@ mod tests {
             },
         };
 
+        provider
+            .preflight_request(&request)
+            .expect("shape preflight is temporal-state independent");
+        assert!(matches!(
+            provider.prepare_request(&request),
+            Err(ProcessSpawnError::PolicyViolation { code, .. })
+                if code == "executable_alias_denied"
+        ));
         assert!(matches!(
             provider.perform(&request, &[ProcessSpawnCapability::Spawn]),
             Err(ProcessSpawnError::Denied { reason })
@@ -8048,6 +8094,31 @@ mod tests {
         assert!(debug.contains("AdmissionBoundProcessSpawn"));
         assert!(!debug.contains("must-not-appear-in-debug"));
         assert!(!debug.contains("SECRET_TOKEN"));
+
+        let live_provider = AdmissionBoundProcessSpawn {
+            inner: NativeProcessSpawn::new(
+                ProcessSpawnPolicy::jailed(jail.path())
+                    .expect("construct live forwarding-test policy"),
+            )
+            .expect("construct live forwarding-test provider"),
+            expires_at_ms: u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("test clock must be after Unix epoch")
+                    .as_millis(),
+            )
+            .expect("test clock must fit u64 milliseconds")
+            .saturating_add(60_000),
+        };
+        assert!(matches!(
+            live_provider.perform_controlled(
+                &request,
+                &[ProcessSpawnCapability::Spawn],
+                Arc::new(RejectingProcessSpawnControl),
+            ),
+            Err(ProcessSpawnError::Denied { reason })
+                if reason == "TEST_PROCESS_CONTROL_REACHED_NATIVE_PROVIDER"
+        ));
     }
 
     #[cfg(all(feature = "engine", target_os = "linux"))]

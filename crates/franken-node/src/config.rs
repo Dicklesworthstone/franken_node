@@ -2377,8 +2377,18 @@ fn validate_child_process_resource_limits(
 ) -> Result<(), ConfigError> {
     let named_limits = [
         ("max_children", limits.max_children),
+        (
+            "max_executable_path_bytes",
+            limits.max_executable_path_bytes,
+        ),
+        ("max_executable_bytes", limits.max_executable_bytes),
         ("max_argv_count", limits.max_argv_count),
         ("max_argv_bytes", limits.max_argv_bytes),
+        ("max_env_count", limits.max_env_count),
+        ("max_env_bytes", limits.max_env_bytes),
+        ("max_cwd_bytes", limits.max_cwd_bytes),
+        ("max_prelaunch_bytes", limits.max_prelaunch_bytes),
+        ("max_request_bytes", limits.max_request_bytes),
         ("max_stdin_bytes", limits.max_stdin_bytes),
         ("max_output_bytes", limits.max_output_bytes),
         ("max_runtime_millis", limits.max_runtime_millis),
@@ -2401,12 +2411,41 @@ fn validate_child_process_resource_limits(
             "{field}.limits.max_argv_count must not exceed max_argv_bytes"
         )));
     }
+    if limits.max_env_count > limits.max_env_bytes {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field}.limits.max_env_count must not exceed max_env_bytes"
+        )));
+    }
+    for (name, value) in [
+        (
+            "max_executable_path_bytes",
+            limits.max_executable_path_bytes,
+        ),
+        ("max_argv_bytes", limits.max_argv_bytes),
+        ("max_env_bytes", limits.max_env_bytes),
+        ("max_cwd_bytes", limits.max_cwd_bytes),
+    ] {
+        if value > limits.max_prelaunch_bytes {
+            return Err(ConfigError::ValidationFailed(format!(
+                "{field}.limits.{name} must not exceed max_prelaunch_bytes"
+            )));
+        }
+    }
+    if limits.max_prelaunch_bytes > limits.max_request_bytes
+        || limits.max_stdin_bytes > limits.max_request_bytes
+    {
+        return Err(ConfigError::ValidationFailed(format!(
+            "{field}.limits max_prelaunch_bytes and max_stdin_bytes must not exceed max_request_bytes"
+        )));
+    }
 
     let argv_metadata_bytes = u128::from(limits.max_argv_count)
         * u128::from(u64::try_from(std::mem::size_of::<String>()).unwrap_or(u64::MAX));
-    let per_child_bytes = u128::from(limits.max_argv_bytes)
+    let env_metadata_bytes = u128::from(limits.max_env_count)
+        * u128::from(u64::try_from(std::mem::size_of::<(String, String)>()).unwrap_or(u64::MAX));
+    let per_child_bytes = u128::from(limits.max_request_bytes)
         + argv_metadata_bytes
-        + u128::from(limits.max_stdin_bytes)
+        + env_metadata_bytes
         + u128::from(limits.max_output_bytes) * 2;
     if per_child_bytes > usize::MAX as u128 {
         return Err(ConfigError::ValidationFailed(format!(
@@ -3344,8 +3383,15 @@ pub struct ChildProcessExecutablePolicy {
 #[serde(deny_unknown_fields)]
 pub struct ChildProcessResourceLimits {
     pub max_children: u64,
+    pub max_executable_path_bytes: u64,
+    pub max_executable_bytes: u64,
     pub max_argv_count: u64,
     pub max_argv_bytes: u64,
+    pub max_env_count: u64,
+    pub max_env_bytes: u64,
+    pub max_cwd_bytes: u64,
+    pub max_prelaunch_bytes: u64,
+    pub max_request_bytes: u64,
     pub max_stdin_bytes: u64,
     pub max_output_bytes: u64,
     pub max_runtime_millis: u64,
@@ -3355,8 +3401,15 @@ impl Default for ChildProcessResourceLimits {
     fn default() -> Self {
         Self {
             max_children: 4,
+            max_executable_path_bytes: 4 * 1024,
+            max_executable_bytes: 128 * 1024 * 1024,
             max_argv_count: 128,
             max_argv_bytes: 64 * 1024,
+            max_env_count: 128,
+            max_env_bytes: 64 * 1024,
+            max_cwd_bytes: 4 * 1024,
+            max_prelaunch_bytes: 128 * 1024,
+            max_request_bytes: 16 * 1024 * 1024,
             max_stdin_bytes: 1024 * 1024,
             max_output_bytes: 4 * 1024 * 1024,
             max_runtime_millis: 30_000,
@@ -4552,8 +4605,23 @@ mod tests {
     fn child_process_spawn_rejects_zero_or_incoherent_resource_ceilings() {
         let zero_mutations: &[(&str, fn(&mut ChildProcessResourceLimits))] = &[
             ("max_children", |limits| limits.max_children = 0),
+            ("max_executable_path_bytes", |limits| {
+                limits.max_executable_path_bytes = 0;
+            }),
+            ("max_executable_bytes", |limits| {
+                limits.max_executable_bytes = 0;
+            }),
             ("max_argv_count", |limits| limits.max_argv_count = 0),
             ("max_argv_bytes", |limits| limits.max_argv_bytes = 0),
+            ("max_env_count", |limits| limits.max_env_count = 0),
+            ("max_env_bytes", |limits| limits.max_env_bytes = 0),
+            ("max_cwd_bytes", |limits| limits.max_cwd_bytes = 0),
+            ("max_prelaunch_bytes", |limits| {
+                limits.max_prelaunch_bytes = 0;
+            }),
+            ("max_request_bytes", |limits| {
+                limits.max_request_bytes = 0;
+            }),
             ("max_stdin_bytes", |limits| limits.max_stdin_bytes = 0),
             ("max_output_bytes", |limits| limits.max_output_bytes = 0),
             ("max_runtime_millis", |limits| {
@@ -4575,6 +4643,41 @@ mod tests {
         assert_child_process_policy_error(
             process_spawn,
             "max_argv_count must not exceed max_argv_bytes",
+        );
+
+        let mut process_spawn = child_process_spawn_fixture();
+        process_spawn.execution_policy.limits.max_env_count = 65;
+        process_spawn.execution_policy.limits.max_env_bytes = 64;
+        assert_child_process_policy_error(
+            process_spawn,
+            "max_env_count must not exceed max_env_bytes",
+        );
+
+        let mut process_spawn = child_process_spawn_fixture();
+        let max_prelaunch_bytes = process_spawn
+            .execution_policy
+            .limits
+            .max_prelaunch_bytes
+            .saturating_add(1);
+        process_spawn
+            .execution_policy
+            .limits
+            .max_executable_path_bytes = max_prelaunch_bytes;
+        assert_child_process_policy_error(
+            process_spawn,
+            "max_executable_path_bytes must not exceed max_prelaunch_bytes",
+        );
+
+        let mut process_spawn = child_process_spawn_fixture();
+        let max_request_bytes = process_spawn
+            .execution_policy
+            .limits
+            .max_request_bytes
+            .saturating_add(1);
+        process_spawn.execution_policy.limits.max_prelaunch_bytes = max_request_bytes;
+        assert_child_process_policy_error(
+            process_spawn,
+            "max_prelaunch_bytes and max_stdin_bytes must not exceed max_request_bytes",
         );
 
         let mut process_spawn = child_process_spawn_fixture();
@@ -4630,11 +4733,32 @@ mod tests {
                     .insert("MODE".to_string(), "production".to_string());
             }),
             ("max children", |policy| policy.limits.max_children += 1),
+            ("max executable path bytes", |policy| {
+                policy.limits.max_executable_path_bytes += 1;
+            }),
+            ("max executable bytes", |policy| {
+                policy.limits.max_executable_bytes += 1;
+            }),
             ("max argv count", |policy| {
                 policy.limits.max_argv_count += 1;
             }),
             ("max argv bytes", |policy| {
                 policy.limits.max_argv_bytes += 1;
+            }),
+            ("max env count", |policy| {
+                policy.limits.max_env_count += 1;
+            }),
+            ("max env bytes", |policy| {
+                policy.limits.max_env_bytes += 1;
+            }),
+            ("max cwd bytes", |policy| {
+                policy.limits.max_cwd_bytes += 1;
+            }),
+            ("max prelaunch bytes", |policy| {
+                policy.limits.max_prelaunch_bytes += 1;
+            }),
+            ("max request bytes", |policy| {
+                policy.limits.max_request_bytes += 1;
             }),
             ("max stdin bytes", |policy| {
                 policy.limits.max_stdin_bytes += 1;
