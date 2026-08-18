@@ -190,6 +190,25 @@ class DocsTruthTests(unittest.TestCase):
 
         self.assertTrue(all(check["pass"] for check in checks), checks)
 
+    def test_docs_truth_diagnostics_have_stable_structured_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_minimal_docs_truth_root(root)
+
+            checks = mod.evaluate_docs_truth(root)
+
+        required_fields = {
+            "check_id",
+            "document_path",
+            "expected_value",
+            "observed_value",
+            "severity",
+            "remediation_hint",
+            "trace_id",
+        }
+        for check in checks:
+            self.assertTrue(required_fields <= check.keys(), check)
+
     def test_stale_reproduction_placeholder_text_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -290,6 +309,15 @@ class RealRepoTests(unittest.TestCase):
     def test_ci_workflow_exists(self) -> None:
         workflow = ROOT / ".github/workflows/placeholder-remediation-gate.yml"
         self.assertTrue(workflow.is_file())
+        workflow_text = workflow.read_text(encoding="utf-8")
+        for truth_input in (
+            "AGENTS.md",
+            "crates/franken-node/Cargo.toml",
+            "docs/ARCHITECTURE_OVERVIEW.md",
+            "docs/governance/placeholder_surface_inventory.md",
+            "docs/reproduction_playbook.md",
+        ):
+            self.assertIn(f'- "{truth_input}"', workflow_text)
 
     def test_fixture_incident_events_rule_confines_occurrences_to_allowlist(self) -> None:
         payload = mod.run_all()

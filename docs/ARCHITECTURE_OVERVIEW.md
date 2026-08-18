@@ -207,12 +207,14 @@ FrankenNode uses granular feature flags for compile-time optimization and option
 
 ### Development Features
 - **`test-support`** - Test utilities and extended testing surfaces; composes `control-plane` and `admin-tools`
+- **`loom-models`** - Library-level `#[cfg(loom)]` model helpers for explicit Loom test invocations; not enabled by default or by `test-support`
 - **`asupersync-transport`** - Direct asupersync integration
 
 ### Optional Dependencies
 - **`compression`** - GZIP/deflate support via flate2
-- **`cbor-serialization`** - CBOR encoding support
+- **`cbor-serialization`** - CBOR encoding support via ciborium
 - **`blake3`** - BLAKE3 hashing (performance optimization)
+- **`profiling`** - Per-hot-path latency histograms via hdrhistogram; opt-in and compiled out of default builds
 
 ## Data Flow
 

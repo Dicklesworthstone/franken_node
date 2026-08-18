@@ -3,20 +3,28 @@ name: Placeholder Remediation Gate
 on:
   pull_request:
     paths:
+      - "AGENTS.md"
+      - "crates/franken-node/Cargo.toml"
       - "crates/franken-node/src/**"
       - "crates/franken-node/tests/**"
       - "scripts/**"
       - "tests/**"
+      - "docs/ARCHITECTURE_OVERVIEW.md"
       - "docs/governance/placeholder_surface_inventory.md"
+      - "docs/reproduction_playbook.md"
       - ".github/workflows/placeholder-remediation-gate.yml"
   push:
     branches: [main]
     paths:
+      - "AGENTS.md"
+      - "crates/franken-node/Cargo.toml"
       - "crates/franken-node/src/**"
       - "crates/franken-node/tests/**"
       - "scripts/**"
       - "tests/**"
+      - "docs/ARCHITECTURE_OVERVIEW.md"
       - "docs/governance/placeholder_surface_inventory.md"
+      - "docs/reproduction_playbook.md"
       - ".github/workflows/placeholder-remediation-gate.yml"
 
 jobs:

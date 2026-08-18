@@ -130,9 +130,10 @@ Current crate features:
 | `verifier-tools` | opt-in | Verifier-specific tooling, economy, and SDK surfaces. |
 | `advanced-features` | opt-in | Claims, conformance, encoding, extensions, federation, performance, and repair surfaces. |
 | `test-support` | opt-in | Shared test helpers; currently enables `control-plane` and `admin-tools`. |
+| `loom-models` | opt-in | Compiles library-level `#[cfg(loom)]` model helpers for explicit Loom test invocations; it is not part of default or `test-support` builds. |
 | `asupersync-transport` | opt-in | Direct asupersync transport integration. |
 | `compression` | opt-in | Gzip/deflate support via `flate2`. |
-| `cbor-serialization` | opt-in | CBOR encoding support via `serde_cbor`. |
+| `cbor-serialization` | opt-in | CBOR encoding support via `ciborium`. |
 | `blake3` | opt-in | Optional BLAKE3 hashing support. |
 | `profiling` | opt-in | Pulls in `hdrhistogram` for per-hot-path latency histograms behind `#[cfg(feature = "profiling")]` gates (bd-98xo5.12.x sentinel + span instrumentation). Default builds elide the code path entirely. Enable with `cargo build --features profiling` under a perf-round measurement skill. |
 

@@ -179,6 +179,7 @@ RULES: tuple[RuleSpec, ...] = (
         allowed_paths=(
             "crates/franken-node/src/main.rs",
             "crates/franken-node/src/tools/replay_bundle.rs",
+            "crates/franken-node/tests/incident_replay_counterfactual_cli_e2e.rs",
         ),
         allowed_line_substrings=("fn fixture_incident_events(",),
         inventory_id="PSI-003",
