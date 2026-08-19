@@ -18,7 +18,34 @@ fn load_scrubbed_artifact(relative_path: &str) -> Result<Value, Box<dyn Error>> 
     let raw = std::fs::read_to_string(&path)?;
     let mut value: Value = serde_json::from_str(&raw)?;
     scrub_dynamic_fields(&mut value);
+    if relative_path == "artifacts/13/compatibility_corpus_results.json" {
+        scrub_runtime_observation_run_variance(&mut value);
+    }
     Ok(sort_value(value))
+}
+
+fn scrub_runtime_observation_run_variance(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields.iter_mut() {
+                match key.as_str() {
+                    "runtime_observations_digest" => {
+                        *child = Value::String("sha256:[RUN_SPECIFIC]".to_string());
+                    }
+                    "elapsed_ms" => {
+                        *child = Value::String("[ELAPSED_MS]".to_string());
+                    }
+                    _ => scrub_runtime_observation_run_variance(child),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_runtime_observation_run_variance(item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 fn scrub_dynamic_fields(value: &mut Value) {
@@ -346,6 +373,8 @@ fn scrubbing_rules() -> Value {
         "trace_id": "[TRACE_ID]",
         "uuid_keys": "[UUID]",
         "nonce_keys": "[NONCE]",
+        "compatibility_runtime_elapsed_ms": "[ELAPSED_MS]",
+        "compatibility_runtime_observations_digest": "sha256:[RUN_SPECIFIC]",
         "kept_exact": [
             "schema_version",
             "bead_id",
