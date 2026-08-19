@@ -207,3 +207,8 @@ crates/franken-node/artifacts/
 
 # Zero-epoch / generated orphan-census scratch
 artifacts/verification/orphan_census_*.jsonl
+
+# Skill-loop / repo-janitor scratch
+.skill-loop-progress.md
+.skill-loop-progress-*.md
+
