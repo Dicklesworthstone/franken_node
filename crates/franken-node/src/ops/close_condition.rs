@@ -31,11 +31,9 @@ const L1_PRODUCT_VERDICT_PATH: &str = "artifacts/oracle/l1_product_verdict.json"
 /// unmeasured evidence and fails closed — synthesized/authored results can
 /// never be consumed as a genuine compatibility pass rate.
 pub const COMPATIBILITY_CORPUS_ONLINE_PROVENANCE: &str = "lockstep-oracle-run";
-pub const COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION: &str =
-    "ccg-runtime-observations-v1";
+pub const COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION: &str = "ccg-runtime-observations-v1";
 const CCG_RESULT_DIGEST_DOMAIN: &[u8] = b"ccg_corpus_result_digest_v1:";
-const CCG_RUNTIME_OBSERVATIONS_DIGEST_DOMAIN: &[u8] =
-    b"ccg_runtime_observations_digest_v1:";
+const CCG_RUNTIME_OBSERVATIONS_DIGEST_DOMAIN: &[u8] = b"ccg_runtime_observations_digest_v1:";
 const CLOSE_CONDITION_TIMESTAMP_ENV: &str = "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC";
 pub const MAX_CLOSE_CONDITION_CARGO_FILES: usize = 256;
 pub const MAX_CLOSE_CONDITION_SCAN_FILES: usize = 4_096;
@@ -178,11 +176,17 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
         elapsed_ms: u64,
     }
 
+    let max_stream_bytes =
+        u64::try_from(super::compat_corpus_run::MAX_LEG_OUTPUT_BYTES).unwrap_or(u64::MAX);
+    let mut seen_test_ids = BTreeSet::new();
     let mut observations = Vec::<CanonicalObservation>::new();
     for row in per_test_results {
         let test_id = get_str(row, &["test_id"])
             .filter(|value| !value.is_empty())
             .context("runtime observation row is missing test_id")?;
+        if !seen_test_ids.insert(test_id) {
+            bail!("duplicate runtime observation test_id `{test_id}`");
+        }
         let status = get_str(row, &["status"])
             .with_context(|| format!("runtime observation row `{test_id}` is missing status"))?;
         if status != "pass" && status != "fail" {
@@ -208,7 +212,10 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
             let observation = observation.as_object().with_context(|| {
                 format!("runtime observation `{test_id}`/`{runtime_id}` is not an object")
             })?;
-            let keys = observation.keys().map(String::as_str).collect::<BTreeSet<_>>();
+            let keys = observation
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
             let expected_keys = OBSERVATION_KEYS.into_iter().collect::<BTreeSet<_>>();
             if keys != expected_keys {
                 bail!(
@@ -298,6 +305,13 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
             let stdout_truncated = bool_field("stdout_truncated")?;
             let stderr_truncated = bool_field("stderr_truncated")?;
             let elapsed_ms = u64_field("elapsed_ms")?;
+            if stdout_truncated != (stdout_bytes > max_stream_bytes)
+                || stderr_truncated != (stderr_bytes > max_stream_bytes)
+            {
+                bail!(
+                    "runtime observation `{test_id}`/`{runtime_id}` has inconsistent stream truncation state"
+                );
+            }
             if status == "pass" && (timed_out || stdout_truncated || stderr_truncated) {
                 bail!(
                     "runtime observation row `{test_id}` cannot pass with timed-out or truncated evidence"
@@ -376,10 +390,7 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
             }
             None => hash_field(b"exit_code", &[0])?,
         }
-        hash_field(
-            b"termination_kind",
-            observation.termination_kind.as_bytes(),
-        )?;
+        hash_field(b"termination_kind", observation.termination_kind.as_bytes())?;
         hash_field(b"timed_out", &[u8::from(observation.timed_out)])?;
         hash_field(b"elapsed_ms", &observation.elapsed_ms.to_be_bytes())?;
     }
@@ -439,10 +450,7 @@ pub fn validate_compatibility_corpus_runtime_observations(data: &Value) -> Resul
         .filter(|value| !value.is_empty())
         .context("product runtime version is missing")?;
     if runtime_versions
-        .insert(
-            product_runtime_id.to_string(),
-            product_version.to_string(),
-        )
+        .insert(product_runtime_id.to_string(), product_version.to_string())
         .is_some()
     {
         bail!("duplicate runtime identity `{product_runtime_id}`");
@@ -2124,15 +2132,14 @@ mod tests {
                 "0.1.0-test".to_string(),
             ),
         ]);
-        let observations_digest =
-            compute_compatibility_corpus_runtime_observations_digest(
-                &per_test_results,
-                COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
-                &result_digest,
-                "dyad",
-                &runtime_versions,
-            )
-            .expect("fixture runtime observations digest");
+        let observations_digest = compute_compatibility_corpus_runtime_observations_digest(
+            &per_test_results,
+            COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+            &result_digest,
+            "dyad",
+            &runtime_versions,
+        )
+        .expect("fixture runtime observations digest");
         serde_json::json!({
             "corpus": {
                 "corpus_version": "compat-corpus-test",
@@ -2187,6 +2194,33 @@ mod tests {
         let error = validate_compatibility_corpus_runtime_observations(&data)
             .expect_err("passing divergence must fail closed");
         assert!(error.to_string().contains("cannot pass with divergent"));
+    }
+
+    #[test]
+    fn runtime_observations_refuse_forged_over_cap_stream_state() {
+        let mut data = corpus_totals_json(1, 0, 100.0);
+        data["per_test_results"][0]["runtime_observations"]["bun"]["stdout_bytes"] =
+            serde_json::json!(super::compat_corpus_run::MAX_LEG_OUTPUT_BYTES as u64 + 1);
+        let error = validate_compatibility_corpus_runtime_observations(&data)
+            .expect_err("over-cap stream without truncation must fail closed");
+        assert!(error.to_string().contains("inconsistent stream truncation"));
+    }
+
+    #[test]
+    fn runtime_observations_refuse_duplicate_test_ids() {
+        let mut data = corpus_totals_json(1, 0, 100.0);
+        let duplicate = data["per_test_results"][0].clone();
+        data["per_test_results"]
+            .as_array_mut()
+            .expect("fixture per-test rows")
+            .push(duplicate);
+        let error = validate_compatibility_corpus_runtime_observations(&data)
+            .expect_err("duplicate test ids must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate runtime observation test_id")
+        );
     }
 
     /// A genuine, re-derivable v2 evidence block built through the production

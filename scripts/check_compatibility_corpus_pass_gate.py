@@ -32,6 +32,8 @@ ONLINE_PROVENANCE = "lockstep-oracle-run"
 _RESULT_DIGEST_DOMAIN = b"ccg_corpus_result_digest_v1:"
 RUNTIME_OBSERVATIONS_SCHEMA_VERSION = "ccg-runtime-observations-v1"
 _RUNTIME_OBSERVATIONS_DIGEST_DOMAIN = b"ccg_runtime_observations_digest_v1:"
+# Must byte-match compat_corpus_run::MAX_LEG_OUTPUT_BYTES.
+MAX_RUNTIME_OBSERVATION_STREAM_BYTES = 1_048_576
 
 
 def compute_result_digest(per_test_results: list[dict]) -> str:
@@ -140,6 +142,7 @@ def compute_runtime_observations_digest(data: dict) -> str:
         "timed_out",
     }
     observations = []
+    seen_test_ids = set()
     per_tests = data.get("per_test_results")
     if not isinstance(per_tests, list):
         raise ValueError("per_test_results are missing")
@@ -149,6 +152,9 @@ def compute_runtime_observations_digest(data: dict) -> str:
         test_id = row.get("test_id")
         if not isinstance(test_id, str) or not test_id:
             raise ValueError("runtime observation row is missing test_id")
+        if test_id in seen_test_ids:
+            raise ValueError(f"duplicate runtime observation test_id {test_id!r}")
+        seen_test_ids.add(test_id)
         status = row.get("status")
         if status not in {"pass", "fail"}:
             raise ValueError(
@@ -190,6 +196,16 @@ def compute_runtime_observations_digest(data: dict) -> str:
             ):
                 raise ValueError(
                     f"runtime observation {test_id!r}/{runtime_id!r} has invalid boolean field"
+                )
+            if (
+                stdout_truncated
+                != (stdout_bytes > MAX_RUNTIME_OBSERVATION_STREAM_BYTES)
+                or stderr_truncated
+                != (stderr_bytes > MAX_RUNTIME_OBSERVATION_STREAM_BYTES)
+            ):
+                raise ValueError(
+                    f"runtime observation {test_id!r}/{runtime_id!r} has inconsistent "
+                    "stream truncation state"
                 )
             exit_code = observation.get("exit_code")
             if exit_code is not None and not (

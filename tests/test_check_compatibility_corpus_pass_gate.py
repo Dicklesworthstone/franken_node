@@ -311,6 +311,25 @@ class TestSyntheticReportGate(unittest.TestCase):
             )["pass"]
         )
 
+    def test_over_cap_stream_without_truncation_fails_closed(self):
+        report = passing_report()
+        report["per_test_results"][0]["runtime_observations"]["bun"][
+            "stdout_bytes"
+        ] = mod.MAX_RUNTIME_OBSERVATION_STREAM_BYTES + 1
+        with self.assertRaisesRegex(ValueError, "inconsistent stream truncation"):
+            mod.compute_runtime_observations_digest(report)
+
+    def test_duplicate_runtime_observation_test_id_fails_closed(self):
+        report = passing_report()
+        report["per_test_results"][1]["test_id"] = report["per_test_results"][0][
+            "test_id"
+        ]
+        report["corpus"]["result_digest"] = mod.compute_result_digest(
+            report["per_test_results"]
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate runtime observation test_id"):
+            mod.compute_runtime_observations_digest(report)
+
     def test_regression_fails_closed(self):
         report = passing_report()
         report["previous_release"]["overall_pass_rate_pct"] = 100.01
