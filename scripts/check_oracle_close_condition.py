@@ -741,6 +741,7 @@ def _validate_l1_corpus_pass_rate(corpus: dict) -> list[str]:
     from scripts.check_compatibility_corpus_pass_gate import (
         ONLINE_PROVENANCE,
         compute_result_digest,
+        compute_runtime_observations_digest,
     )
 
     errors = []
@@ -769,6 +770,26 @@ def _validate_l1_corpus_pass_rate(corpus: dict) -> list[str]:
             f"L1 compatibility corpus result_digest {declared_digest!r} does not match the "
             f"digest recomputed from per_test_results {recomputed_digest!r}"
         )
+
+    declared_observations_digest = (
+        corpus_meta.get("runtime_observations_digest")
+        if isinstance(corpus_meta, dict)
+        else None
+    )
+    try:
+        recomputed_observations_digest = compute_runtime_observations_digest(corpus)
+    except (TypeError, ValueError) as error:
+        errors.append(f"L1 compatibility corpus runtime observations are invalid: {error}")
+    else:
+        if not hmac.compare_digest(
+            str(declared_observations_digest or ""),
+            recomputed_observations_digest,
+        ):
+            errors.append(
+                "L1 compatibility corpus runtime observations digest "
+                f"{declared_observations_digest!r} does not match recomputed "
+                f"{recomputed_observations_digest!r}"
+            )
 
     totals = corpus.get("totals", {})
     declared_total = int(totals.get("total_test_cases", 0)) if isinstance(totals, dict) else 0

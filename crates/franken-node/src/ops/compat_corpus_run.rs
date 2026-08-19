@@ -28,7 +28,7 @@ use anyhow::{Context, Result, bail};
 use ed25519_dalek::{Signer as _, SigningKey};
 #[cfg(feature = "engine")]
 use rand::rngs::OsRng;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,7 +49,10 @@ use rustix::fs::{
 };
 
 use crate::ops::close_condition::{
-    COMPATIBILITY_CORPUS_ONLINE_PROVENANCE, compute_compatibility_corpus_result_digest,
+    COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
+    COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+    compute_compatibility_corpus_runtime_observations_digest,
+    compute_compatibility_corpus_result_digest,
 };
 #[cfg(all(feature = "engine", target_os = "linux"))]
 use crate::ops::engine_dispatcher::InternalCorpusProcessAuthorityServer;
@@ -80,7 +83,8 @@ pub const MAX_SUPPORT_FILES_TOTAL: usize = 128;
 pub const MAX_SUPPORT_TOTAL_BYTES: usize = 4_194_304;
 /// Upper bound on all manifest, case, and support bytes held by one snapshot.
 pub const MAX_CORPUS_SNAPSHOT_BYTES: usize = 134_217_728;
-/// Upper bound on captured bytes per runtime leg (stdout + stderr).
+/// Upper bound on the retained diagnostic prefix for each runtime output
+/// stream. Full-stream hashes and byte counts continue beyond this bound.
 pub const MAX_LEG_OUTPUT_BYTES: usize = 1_048_576;
 /// Environment override for the artifact's `generated_at_utc` (deterministic
 /// test runs), mirroring the close-condition timestamp override pattern.
@@ -193,6 +197,24 @@ pub struct CaseOutcome {
     /// Populated for `fail` outcomes; feeds `failing_tests_tracking`.
     pub failure_reason: Option<String>,
     pub investigation_bead_id: Option<String>,
+    /// Privacy-bounded evidence from every runtime leg in the configured
+    /// dyad/triad. Raw guest output is never serialized into the artifact.
+    pub runtime_observations: BTreeMap<String, RuntimeLegObservation>,
+}
+
+/// One runtime leg's machine-verifiable, non-raw execution evidence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RuntimeLegObservation {
+    pub stdout_digest: String,
+    pub stderr_digest: String,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub exit_code: Option<i32>,
+    pub termination_kind: String,
+    pub timed_out: bool,
+    pub elapsed_ms: u64,
 }
 
 /// Genuine runtime versions observed before a corpus execution begins.
@@ -1204,28 +1226,85 @@ fn hash_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<()> {
 #[cfg(feature = "engine")]
 struct LegCapture {
     comparison: Vec<u8>,
-    stderr: Vec<u8>,
-    exit_code: Option<i32>,
-    timed_out: bool,
+    observation: RuntimeLegObservation,
 }
 
 #[cfg(feature = "engine")]
-fn drain_capped(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+struct PipeDrainResult {
+    retained_bytes: Vec<u8>,
+    sha256: String,
+    total_bytes: u64,
+    capture_truncated: bool,
+}
+
+#[cfg(feature = "engine")]
+fn drain_capped(
+    mut pipe: impl Read + Send + 'static,
+) -> std::thread::JoinHandle<std::io::Result<PipeDrainResult>> {
     std::thread::spawn(move || {
         let mut buffer = Vec::new();
         let mut chunk = [0u8; 8_192];
+        let mut hasher = Sha256::new();
+        let mut total_bytes = 0_u64;
+        let mut capture_truncated = false;
         loop {
             match pipe.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
                 Ok(n) => {
-                    if buffer.len().saturating_add(n) <= MAX_LEG_OUTPUT_BYTES {
-                        buffer.extend_from_slice(&chunk[..n]);
+                    hasher.update(&chunk[..n]);
+                    let count = u64::try_from(n).map_err(|_| {
+                        std::io::Error::other("runtime output read length does not fit u64")
+                    })?;
+                    total_bytes = total_bytes.checked_add(count).ok_or_else(|| {
+                        std::io::Error::other("runtime output byte count overflowed u64")
+                    })?;
+                    let remaining = MAX_LEG_OUTPUT_BYTES.saturating_sub(buffer.len());
+                    let retained = remaining.min(n);
+                    buffer.extend_from_slice(&chunk[..retained]);
+                    if retained < n {
+                        capture_truncated = true;
                     }
                 }
             }
         }
-        buffer
+        Ok(PipeDrainResult {
+            retained_bytes: buffer,
+            sha256: format!("sha256:{}", hex::encode(hasher.finalize())),
+            total_bytes,
+            capture_truncated,
+        })
     })
+}
+
+#[cfg(feature = "engine")]
+fn append_comparison_field(comparison: &mut Vec<u8>, value: &[u8]) {
+    comparison.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    comparison.extend_from_slice(value);
+}
+
+#[cfg(feature = "engine")]
+fn runtime_comparison(
+    stdout: &PipeDrainResult,
+    stderr: &PipeDrainResult,
+    timed_out: bool,
+    exit_code: Option<i32>,
+) -> Vec<u8> {
+    let mut comparison = b"ccg-runtime-comparison-v2\0".to_vec();
+    append_comparison_field(&mut comparison, stdout.sha256.as_bytes());
+    append_comparison_field(&mut comparison, &stdout.total_bytes.to_be_bytes());
+    append_comparison_field(&mut comparison, stderr.sha256.as_bytes());
+    append_comparison_field(&mut comparison, &stderr.total_bytes.to_be_bytes());
+    let termination = if timed_out {
+        "timeout".to_string()
+    } else if let Some(code) = exit_code {
+        format!("exit:{code}")
+    } else {
+        "signal_or_unknown".to_string()
+    };
+    append_comparison_field(&mut comparison, termination.as_bytes());
+    comparison
 }
 
 /// Apply a fixture's explicit runtime-warning policy without weakening guest
@@ -1600,6 +1679,7 @@ fn run_leg_after_spawn(
     timeout: Duration,
     after_spawn: impl FnOnce(u32) -> Result<()>,
 ) -> Result<LegCapture> {
+    let supervised_started = Instant::now();
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1619,9 +1699,15 @@ fn run_leg_after_spawn(
     if let Err(error) = after_spawn(child.id()) {
         let _ = child.kill();
         let _ = child.wait();
-        let stdout = stdout_thread.join().unwrap_or_default();
-        let stderr = stderr_thread.join().unwrap_or_default();
-        let diagnostic = sanitize_reason_excerpt(if stderr.is_empty() { &stdout } else { &stderr });
+        let stdout = stdout_thread.join().ok().and_then(|result| result.ok());
+        let stderr = stderr_thread.join().ok().and_then(|result| result.ok());
+        let stdout = stdout
+            .as_ref()
+            .map_or(&[][..], |result| result.retained_bytes.as_slice());
+        let stderr = stderr
+            .as_ref()
+            .map_or(&[][..], |result| result.retained_bytes.as_slice());
+        let diagnostic = sanitize_reason_excerpt(if stderr.is_empty() { stdout } else { stderr });
         let context = if diagnostic.is_empty() {
             "authenticate corpus process-authority child".to_string()
         } else {
@@ -1646,28 +1732,38 @@ fn run_leg_after_spawn(
         }
     };
 
-    let stdout_bytes = stdout_thread
+    let stdout = stdout_thread
         .join()
-        .map_err(|_| anyhow::anyhow!("runtime leg stdout drain thread panicked"))?;
-    let stderr_bytes = stderr_thread
+        .map_err(|_| anyhow::anyhow!("runtime leg stdout drain thread panicked"))?
+        .context("read runtime leg stdout")?;
+    let stderr = stderr_thread
         .join()
-        .map_err(|_| anyhow::anyhow!("runtime leg stderr drain thread panicked"))?;
+        .map_err(|_| anyhow::anyhow!("runtime leg stderr drain thread panicked"))?
+        .context("read runtime leg stderr")?;
 
     let exit_code = status.code();
-    let stderr_excerpt = stderr_bytes[..stderr_bytes.len().min(4_096)].to_vec();
-    let mut comparison = stdout_bytes;
-    comparison.extend_from_slice(&stderr_bytes[..]);
-    comparison.extend_from_slice(b"\nexit:");
-    match (timed_out, exit_code) {
-        (true, _) => comparison.extend_from_slice(b"timeout"),
-        (false, Some(code)) => comparison.extend_from_slice(code.to_string().as_bytes()),
-        (false, None) => comparison.extend_from_slice(b"signal"),
-    }
+    let comparison = runtime_comparison(&stdout, &stderr, timed_out, exit_code);
+    let elapsed_ms = u64::try_from(supervised_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(LegCapture {
         comparison,
-        stderr: stderr_excerpt,
-        exit_code,
-        timed_out,
+        observation: RuntimeLegObservation {
+            stdout_digest: stdout.sha256,
+            stderr_digest: stderr.sha256,
+            stdout_bytes: stdout.total_bytes,
+            stderr_bytes: stderr.total_bytes,
+            stdout_truncated: stdout.capture_truncated,
+            stderr_truncated: stderr.capture_truncated,
+            exit_code,
+            termination_kind: if timed_out {
+                "timed_out".to_string()
+            } else if exit_code.is_some() {
+                "exited".to_string()
+            } else {
+                "signal_or_unknown".to_string()
+            },
+            timed_out,
+            elapsed_ms,
+        },
     })
 }
 
@@ -1980,7 +2076,16 @@ pub fn run_corpus(
             )
             .map_err(|err| anyhow::anyhow!("oracle cross-check failed: {err}"))?;
 
-        let agreed = matches!(check.outcome, Some(CheckOutcome::Agree { .. }));
+        let observations_complete = [&bun_leg, &franken_leg]
+            .into_iter()
+            .chain(node_leg.iter())
+            .all(|leg| {
+                !leg.observation.timed_out
+                    && !leg.observation.stdout_truncated
+                    && !leg.observation.stderr_truncated
+            });
+        let agreed = observations_complete
+            && matches!(check.outcome, Some(CheckOutcome::Agree { .. }));
         let (status, failure_reason): (&'static str, Option<String>) = if agreed {
             ("pass", None)
         } else {
@@ -1989,6 +2094,16 @@ pub fn run_corpus(
                 Some(classify_failure(&bun_leg, node_leg.as_ref(), &franken_leg)),
             )
         };
+        let mut runtime_observations = BTreeMap::from([
+            ("bun".to_string(), bun_leg.observation.clone()),
+            (
+                "franken-engine-native".to_string(),
+                franken_leg.observation.clone(),
+            ),
+        ]);
+        if let Some(node_leg) = &node_leg {
+            runtime_observations.insert("node".to_string(), node_leg.observation.clone());
+        }
         outcomes.push(CaseOutcome {
             test_id: case.test_id.clone(),
             api_family: case.api_family.clone(),
@@ -1997,6 +2112,7 @@ pub fn run_corpus(
             status,
             failure_reason,
             investigation_bead_id: case.investigation_bead_id.clone(),
+            runtime_observations,
         });
     }
 
@@ -2011,28 +2127,54 @@ pub fn run_corpus(
 
 #[cfg(feature = "engine")]
 fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCapture) -> String {
-    if bun.timed_out || node.is_some_and(|leg| leg.timed_out) || franken.timed_out {
-        let leg = if franken.timed_out {
+    if bun.observation.timed_out
+        || node.is_some_and(|leg| leg.observation.timed_out)
+        || franken.observation.timed_out
+    {
+        let leg = if franken.observation.timed_out {
             "franken-engine"
-        } else if node.is_some_and(|leg| leg.timed_out) {
+        } else if node.is_some_and(|leg| leg.observation.timed_out) {
             "node reference"
         } else {
             "bun reference"
         };
         return format!("lockstep divergence: {leg} leg timed out");
     }
+    if bun.observation.stdout_truncated
+        || bun.observation.stderr_truncated
+        || node.is_some_and(|leg| {
+            leg.observation.stdout_truncated || leg.observation.stderr_truncated
+        })
+        || franken.observation.stdout_truncated
+        || franken.observation.stderr_truncated
+    {
+        let leg = if franken.observation.stdout_truncated
+            || franken.observation.stderr_truncated
+        {
+            "franken-engine"
+        } else if node.is_some_and(|leg| {
+            leg.observation.stdout_truncated || leg.observation.stderr_truncated
+        }) {
+            "node reference"
+        } else {
+            "bun reference"
+        };
+        return format!("lockstep divergence: {leg} leg output exceeded the capture budget");
+    }
     if let Some(node) = node
         && node.comparison != bun.comparison
     {
         return "lockstep divergence: node and bun reference legs disagree".to_string();
     }
-    match (bun.exit_code, franken.exit_code) {
+    match (
+        bun.observation.exit_code,
+        franken.observation.exit_code,
+    ) {
         (Some(0), Some(0)) => "lockstep divergence: output mismatch vs bun reference".to_string(),
         (Some(0), other) => {
-            let excerpt = sanitize_reason_excerpt(&franken.stderr);
             format!(
-                "lockstep divergence: franken-engine leg refused or crashed (exit {:?}): {excerpt}",
-                other
+                "lockstep divergence: franken-engine leg refused or crashed (exit {:?}, stderr_sha256={})",
+                other, franken.observation.stderr_digest
             )
         }
         (other, Some(0)) => format!(
@@ -2197,6 +2339,33 @@ fn aggregate<'a>(
     grouped
 }
 
+fn is_sha256_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn runtime_observation_is_valid(observation: &RuntimeLegObservation) -> bool {
+    let stdout_bound = u64::try_from(MAX_LEG_OUTPUT_BYTES).unwrap_or(u64::MAX);
+    let stderr_bound = stdout_bound;
+    let termination_is_consistent = match observation.termination_kind.as_str() {
+        "timed_out" => observation.timed_out,
+        "exited" => !observation.timed_out && observation.exit_code.is_some(),
+        "signal_or_unknown" => !observation.timed_out && observation.exit_code.is_none(),
+        _ => false,
+    };
+    is_sha256_digest(&observation.stdout_digest)
+        && is_sha256_digest(&observation.stderr_digest)
+        && observation.stdout_truncated == (observation.stdout_bytes > stdout_bound)
+        && observation.stderr_truncated == (observation.stderr_bytes > stderr_bound)
+        && termination_is_consistent
+}
+
 fn thresholds_from(existing: Option<&Value>) -> (f64, f64, BTreeMap<String, f64>) {
     let overall = existing
         .and_then(|doc| doc.pointer("/thresholds/overall_pass_rate_min_pct"))
@@ -2273,6 +2442,74 @@ pub fn build_corpus_results_document_with_references(
             );
         }
     }
+    let mut expected_runtime_ids = BTreeSet::from([
+        "bun".to_string(),
+        "franken-engine-native".to_string(),
+    ]);
+    if node_version.is_some() {
+        expected_runtime_ids.insert("node".to_string());
+    }
+    for outcome in outcomes {
+        let observed_runtime_ids = outcome
+            .runtime_observations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if observed_runtime_ids != expected_runtime_ids {
+            bail!(
+                "corpus outcome `{}` runtime observations {:?} do not match expected topology {:?}",
+                outcome.test_id,
+                observed_runtime_ids,
+                expected_runtime_ids
+            );
+        }
+        if outcome
+            .runtime_observations
+            .values()
+            .any(|observation| !runtime_observation_is_valid(observation))
+        {
+            bail!(
+                "corpus outcome `{}` carries a malformed runtime observation",
+                outcome.test_id
+            );
+        }
+        let has_incomplete_observation = outcome.runtime_observations.values().any(|observation| {
+            observation.timed_out
+                || observation.stdout_truncated
+                || observation.stderr_truncated
+        });
+        if outcome.status == "pass" && has_incomplete_observation {
+            bail!(
+                "corpus outcome `{}` cannot pass with timed-out or truncated runtime evidence",
+                outcome.test_id
+            );
+        }
+        if outcome.status == "pass" {
+            let comparable_observations = outcome
+                .runtime_observations
+                .values()
+                .map(|observation| {
+                    (
+                        observation.stdout_digest.as_str(),
+                        observation.stderr_digest.as_str(),
+                        observation.stdout_bytes,
+                        observation.stderr_bytes,
+                        observation.stdout_truncated,
+                        observation.stderr_truncated,
+                        observation.exit_code,
+                        observation.termination_kind.as_str(),
+                        observation.timed_out,
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            if comparable_observations.len() != 1 {
+                bail!(
+                    "corpus outcome `{}` cannot pass with divergent runtime observations",
+                    outcome.test_id
+                );
+            }
+        }
+    }
 
     let total = outcomes.len();
     let passed = outcomes.iter().filter(|o| o.status == "pass").count();
@@ -2288,6 +2525,7 @@ pub fn build_corpus_results_document_with_references(
                 "band": o.band,
                 "risk_band": o.risk_band,
                 "status": o.status,
+                "runtime_observations": o.runtime_observations,
             })
         })
         .collect();
@@ -2297,6 +2535,29 @@ pub fn build_corpus_results_document_with_references(
             .cmp(&b.get("test_id").and_then(Value::as_str))
     });
     let result_digest = compute_compatibility_corpus_result_digest(&per_test_rows);
+    let topology = if node_version.is_some() {
+        "triad"
+    } else {
+        "dyad"
+    };
+    let mut runtime_versions = BTreeMap::from([
+        ("bun".to_string(), bun_version.to_string()),
+        (
+            "franken-engine-native".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        ),
+    ]);
+    if let Some(node_version) = node_version {
+        runtime_versions.insert("node".to_string(), node_version.to_string());
+    }
+    let runtime_observations_digest =
+        compute_compatibility_corpus_runtime_observations_digest(
+            &per_test_rows,
+            COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+            &result_digest,
+            topology,
+            &runtime_versions,
+        )?;
 
     let family_breakdown = aggregate(outcomes, |o| o.api_family.as_str());
     let band_breakdown = aggregate(outcomes, |o| o.band.as_str());
@@ -2446,11 +2707,6 @@ pub fn build_corpus_results_document_with_references(
             }),
         );
     }
-    let topology = if node_version.is_some() {
-        "triad"
-    } else {
-        "dyad"
-    };
     let reproduce_node_flag = if node_version.is_some() {
         " --require-node-reference"
     } else {
@@ -2462,6 +2718,8 @@ pub fn build_corpus_results_document_with_references(
         "lockstep_oracle_version": crate::runtime::nversion_oracle::SCHEMA_VERSION,
         "generated_at_utc": generated_at_utc,
         "result_digest": result_digest,
+        "runtime_observations_schema_version": COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+        "runtime_observations_digest": runtime_observations_digest,
         "provenance": COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
         "runner": "franken-node ops compat-corpus-run",
         "policy_mode": "legacy-risky",
@@ -2710,6 +2968,85 @@ mod snapshot_staging_tests {
                 .all(|(key, _)| key == std::ffi::OsStr::new(NODE_NO_WARNINGS_ENV)),
             "the fixture opt-out must not inject unrelated guest-visible environment"
         );
+    }
+
+    fn pipe_result(bytes: &[u8]) -> PipeDrainResult {
+        PipeDrainResult {
+            retained_bytes: bytes.to_vec(),
+            sha256: format!("sha256:{}", hex::encode(Sha256::digest(bytes))),
+            total_bytes: u64::try_from(bytes.len()).expect("fixture length fits u64"),
+            capture_truncated: false,
+        }
+    }
+
+    #[test]
+    fn runtime_comparison_frames_streams_and_full_stream_digests() {
+        let first = runtime_comparison(
+            &pipe_result(b"a"),
+            &pipe_result(b"bc"),
+            false,
+            Some(0),
+        );
+        let repartitioned = runtime_comparison(
+            &pipe_result(b"ab"),
+            &pipe_result(b"c"),
+            false,
+            Some(0),
+        );
+        assert_ne!(first, repartitioned);
+
+        let mut prefix = vec![b'x'; MAX_LEG_OUTPUT_BYTES];
+        let prefix_only = pipe_result(&prefix);
+        prefix.push(b'a');
+        let first_tail = pipe_result(&prefix);
+        prefix.pop();
+        prefix.push(b'b');
+        let second_tail = pipe_result(&prefix);
+        assert_ne!(
+            runtime_comparison(&first_tail, &pipe_result(b""), false, Some(0)),
+            runtime_comparison(&second_tail, &pipe_result(b""), false, Some(0))
+        );
+        assert_ne!(
+            runtime_comparison(&prefix_only, &pipe_result(b""), false, Some(0)),
+            runtime_comparison(&first_tail, &pipe_result(b""), false, Some(0))
+        );
+    }
+
+    #[test]
+    fn drain_capped_hashes_and_counts_the_full_stream_with_an_exact_prefix() {
+        let mut bytes = vec![b'x'; MAX_LEG_OUTPUT_BYTES];
+        bytes.extend_from_slice(b"different-tail");
+        let result = drain_capped(std::io::Cursor::new(bytes.clone()))
+            .join()
+            .expect("drain thread")
+            .expect("drain stream");
+        assert_eq!(result.retained_bytes, bytes[..MAX_LEG_OUTPUT_BYTES]);
+        assert_eq!(
+            result.total_bytes,
+            u64::try_from(bytes.len()).expect("fixture length fits u64")
+        );
+        assert!(result.capture_truncated);
+        assert_eq!(
+            result.sha256,
+            format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))
+        );
+    }
+
+    #[test]
+    fn drain_capped_fails_closed_on_non_interrupted_read_error() {
+        struct BrokenReader;
+
+        impl Read for BrokenReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("planted read failure"))
+            }
+        }
+
+        let error = drain_capped(BrokenReader)
+            .join()
+            .expect("drain thread")
+            .expect_err("read failure must propagate");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
     }
 
     #[cfg(target_os = "linux")]

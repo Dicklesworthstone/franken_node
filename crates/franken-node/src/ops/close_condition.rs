@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +31,11 @@ const L1_PRODUCT_VERDICT_PATH: &str = "artifacts/oracle/l1_product_verdict.json"
 /// unmeasured evidence and fails closed — synthesized/authored results can
 /// never be consumed as a genuine compatibility pass rate.
 pub const COMPATIBILITY_CORPUS_ONLINE_PROVENANCE: &str = "lockstep-oracle-run";
+pub const COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION: &str =
+    "ccg-runtime-observations-v1";
 const CCG_RESULT_DIGEST_DOMAIN: &[u8] = b"ccg_corpus_result_digest_v1:";
+const CCG_RUNTIME_OBSERVATIONS_DIGEST_DOMAIN: &[u8] =
+    b"ccg_runtime_observations_digest_v1:";
 const CLOSE_CONDITION_TIMESTAMP_ENV: &str = "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC";
 pub const MAX_CLOSE_CONDITION_CARGO_FILES: usize = 256;
 pub const MAX_CLOSE_CONDITION_SCAN_FILES: usize = 4_096;
@@ -112,6 +117,321 @@ pub fn compute_compatibility_corpus_result_digest(per_test_results: &[Value]) ->
         hasher.update([0x1e]);
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// Recompute the run-specific digest over privacy-bounded per-runtime
+/// observations. Unlike `result_digest`, this intentionally includes elapsed
+/// time and therefore binds one concrete execution rather than promising
+/// cross-run byte identity.
+pub fn compute_compatibility_corpus_runtime_observations_digest(
+    per_test_results: &[Value],
+    schema_version: &str,
+    result_digest: &str,
+    topology: &str,
+    runtime_versions: &BTreeMap<String, String>,
+) -> Result<String> {
+    const OBSERVATION_KEYS: [&str; 10] = [
+        "elapsed_ms",
+        "exit_code",
+        "stderr_bytes",
+        "stderr_digest",
+        "stderr_truncated",
+        "stdout_bytes",
+        "stdout_digest",
+        "stdout_truncated",
+        "termination_kind",
+        "timed_out",
+    ];
+    if schema_version != COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION {
+        bail!("unsupported runtime observations schema `{schema_version}`");
+    }
+    let expected_runtime_ids = match topology {
+        "dyad" => BTreeSet::from(["bun", "franken-engine-native"]),
+        "triad" => BTreeSet::from(["bun", "franken-engine-native", "node"]),
+        _ => bail!("unsupported runtime observation topology `{topology}`"),
+    };
+    let declared_runtime_ids = runtime_versions
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if declared_runtime_ids != expected_runtime_ids {
+        bail!(
+            "runtime observation versions {:?} do not match {topology} topology {:?}",
+            declared_runtime_ids,
+            expected_runtime_ids
+        );
+    }
+
+    #[derive(Eq, Ord, PartialEq, PartialOrd)]
+    struct CanonicalObservation {
+        test_id: String,
+        runtime_id: String,
+        stdout_digest: String,
+        stderr_digest: String,
+        stdout_bytes: u64,
+        stderr_bytes: u64,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+        exit_code: Option<i32>,
+        termination_kind: String,
+        timed_out: bool,
+        elapsed_ms: u64,
+    }
+
+    let mut observations = Vec::<CanonicalObservation>::new();
+    for row in per_test_results {
+        let test_id = get_str(row, &["test_id"])
+            .filter(|value| !value.is_empty())
+            .context("runtime observation row is missing test_id")?;
+        let runtime_observations = row
+            .get("runtime_observations")
+            .and_then(Value::as_object)
+            .with_context(|| format!("runtime observation row `{test_id}` is missing an object"))?;
+        let observed_runtime_ids = runtime_observations
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if observed_runtime_ids != expected_runtime_ids {
+            bail!(
+                "runtime observation row `{test_id}` keys {:?} do not match {topology} topology {:?}",
+                observed_runtime_ids,
+                expected_runtime_ids
+            );
+        }
+        for (runtime_id, observation) in runtime_observations {
+            let observation = observation.as_object().with_context(|| {
+                format!("runtime observation `{test_id}`/`{runtime_id}` is not an object")
+            })?;
+            let keys = observation.keys().map(String::as_str).collect::<BTreeSet<_>>();
+            let expected_keys = OBSERVATION_KEYS.into_iter().collect::<BTreeSet<_>>();
+            if keys != expected_keys {
+                bail!(
+                    "runtime observation `{test_id}`/`{runtime_id}` keys {:?} do not match v1 schema {:?}",
+                    keys,
+                    expected_keys
+                );
+            }
+            let string_field = |field: &str| -> Result<&str> {
+                observation
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .with_context(|| {
+                        format!(
+                            "runtime observation `{test_id}`/`{runtime_id}` field `{field}` is not a string"
+                        )
+                    })
+            };
+            let digest_field = |field: &str| -> Result<String> {
+                let value = string_field(field)?;
+                let valid = value.strip_prefix("sha256:").is_some_and(|hex| {
+                    hex.len() == 64
+                        && hex
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                });
+                if !valid {
+                    bail!(
+                        "runtime observation `{test_id}`/`{runtime_id}` field `{field}` is not canonical lowercase sha256"
+                    );
+                }
+                Ok(value.to_string())
+            };
+            let u64_field = |field: &str| -> Result<u64> {
+                observation
+                    .get(field)
+                    .and_then(Value::as_u64)
+                    .with_context(|| {
+                        format!(
+                            "runtime observation `{test_id}`/`{runtime_id}` field `{field}` is not u64"
+                        )
+                    })
+            };
+            let bool_field = |field: &str| -> Result<bool> {
+                observation
+                    .get(field)
+                    .and_then(Value::as_bool)
+                    .with_context(|| {
+                        format!(
+                            "runtime observation `{test_id}`/`{runtime_id}` field `{field}` is not boolean"
+                        )
+                    })
+            };
+            let exit_code = match observation.get("exit_code") {
+                Some(Value::Null) => None,
+                Some(value) => Some(i32::try_from(value.as_i64().with_context(|| {
+                    format!(
+                        "runtime observation `{test_id}`/`{runtime_id}` exit_code is not i32 or null"
+                    )
+                })?)
+                .with_context(|| {
+                    format!(
+                        "runtime observation `{test_id}`/`{runtime_id}` exit_code is outside i32"
+                    )
+                })?),
+                None => bail!(
+                    "runtime observation `{test_id}`/`{runtime_id}` is missing exit_code"
+                ),
+            };
+            let termination_kind = string_field("termination_kind")?.to_string();
+            let timed_out = bool_field("timed_out")?;
+            let termination_is_consistent = match termination_kind.as_str() {
+                "timed_out" => timed_out,
+                "exited" => !timed_out && exit_code.is_some(),
+                "signal_or_unknown" => !timed_out && exit_code.is_none(),
+                _ => false,
+            };
+            if !termination_is_consistent {
+                bail!(
+                    "runtime observation `{test_id}`/`{runtime_id}` has inconsistent termination state"
+                );
+            }
+            observations.push(CanonicalObservation {
+                test_id: test_id.to_string(),
+                runtime_id: runtime_id.to_string(),
+                stdout_digest: digest_field("stdout_digest")?,
+                stderr_digest: digest_field("stderr_digest")?,
+                stdout_bytes: u64_field("stdout_bytes")?,
+                stderr_bytes: u64_field("stderr_bytes")?,
+                stdout_truncated: bool_field("stdout_truncated")?,
+                stderr_truncated: bool_field("stderr_truncated")?,
+                exit_code,
+                termination_kind,
+                timed_out,
+                elapsed_ms: u64_field("elapsed_ms")?,
+            });
+        }
+    }
+    observations.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(CCG_RUNTIME_OBSERVATIONS_DIGEST_DOMAIN);
+    let mut hash_field = |label: &[u8], value: &[u8]| -> Result<()> {
+        let label_len = u64::try_from(label.len()).context("observation digest label too long")?;
+        let value_len = u64::try_from(value.len()).context("observation digest value too long")?;
+        hasher.update(label_len.to_be_bytes());
+        hasher.update(label);
+        hasher.update(value_len.to_be_bytes());
+        hasher.update(value);
+        Ok(())
+    };
+    hash_field(b"schema_version", schema_version.as_bytes())?;
+    hash_field(b"result_digest", result_digest.as_bytes())?;
+    hash_field(b"topology", topology.as_bytes())?;
+    for (runtime_id, version) in runtime_versions {
+        hash_field(b"runtime_id", runtime_id.as_bytes())?;
+        hash_field(b"runtime_version", version.as_bytes())?;
+    }
+    for observation in &observations {
+        hash_field(b"test_id", observation.test_id.as_bytes())?;
+        hash_field(b"runtime_id", observation.runtime_id.as_bytes())?;
+        hash_field(b"stdout_digest", observation.stdout_digest.as_bytes())?;
+        hash_field(b"stderr_digest", observation.stderr_digest.as_bytes())?;
+        hash_field(b"stdout_bytes", &observation.stdout_bytes.to_be_bytes())?;
+        hash_field(b"stderr_bytes", &observation.stderr_bytes.to_be_bytes())?;
+        hash_field(
+            b"stdout_truncated",
+            &[u8::from(observation.stdout_truncated)],
+        )?;
+        hash_field(
+            b"stderr_truncated",
+            &[u8::from(observation.stderr_truncated)],
+        )?;
+        match observation.exit_code {
+            Some(code) => {
+                let mut encoded = [0_u8; 5];
+                encoded[0] = 1;
+                encoded[1..].copy_from_slice(&code.to_be_bytes());
+                hash_field(b"exit_code", &encoded)?;
+            }
+            None => hash_field(b"exit_code", &[0])?,
+        }
+        hash_field(
+            b"termination_kind",
+            observation.termination_kind.as_bytes(),
+        )?;
+        hash_field(b"timed_out", &[u8::from(observation.timed_out)])?;
+        hash_field(b"elapsed_ms", &observation.elapsed_ms.to_be_bytes())?;
+    }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+/// Validate and re-derive the complete run-specific observation binding from
+/// a compatibility-corpus report. Shared by the product verifier and the L1
+/// close-condition gate so topology and shape checks cannot drift.
+pub fn validate_compatibility_corpus_runtime_observations(data: &Value) -> Result<String> {
+    let corpus = data
+        .get("corpus")
+        .and_then(Value::as_object)
+        .context("compatibility corpus metadata is missing")?;
+    let schema_version = corpus
+        .get("runtime_observations_schema_version")
+        .and_then(Value::as_str)
+        .context("runtime observations schema version is missing")?;
+    let declared_digest = corpus
+        .get("runtime_observations_digest")
+        .and_then(Value::as_str)
+        .context("runtime observations digest is missing")?;
+    let result_digest = corpus
+        .get("result_digest")
+        .and_then(Value::as_str)
+        .context("semantic result digest is missing")?;
+    let topology = corpus
+        .get("lockstep_topology")
+        .and_then(Value::as_str)
+        .context("lockstep topology is missing")?;
+    let mut runtime_versions = BTreeMap::new();
+    let references = corpus
+        .get("reference_runtimes")
+        .and_then(Value::as_array)
+        .context("reference runtimes are missing")?;
+    for runtime in references {
+        let runtime_id = get_str(runtime, &["runtime_id"])
+            .filter(|value| !value.is_empty())
+            .context("reference runtime_id is missing")?;
+        let version = get_str(runtime, &["version"])
+            .filter(|value| !value.is_empty())
+            .with_context(|| format!("reference runtime `{runtime_id}` version is missing"))?;
+        if runtime_versions
+            .insert(runtime_id.to_string(), version.to_string())
+            .is_some()
+        {
+            bail!("duplicate runtime identity `{runtime_id}`");
+        }
+    }
+    let product = corpus
+        .get("product_runtime")
+        .context("product runtime is missing")?;
+    let product_runtime_id = get_str(product, &["runtime_id"])
+        .filter(|value| !value.is_empty())
+        .context("product runtime_id is missing")?;
+    let product_version = get_str(product, &["version"])
+        .filter(|value| !value.is_empty())
+        .context("product runtime version is missing")?;
+    if runtime_versions
+        .insert(
+            product_runtime_id.to_string(),
+            product_version.to_string(),
+        )
+        .is_some()
+    {
+        bail!("duplicate runtime identity `{product_runtime_id}`");
+    }
+    let per_test_results = data
+        .get("per_test_results")
+        .and_then(Value::as_array)
+        .context("per_test_results are missing")?;
+    let recomputed = compute_compatibility_corpus_runtime_observations_digest(
+        per_test_results,
+        schema_version,
+        result_digest,
+        topology,
+        &runtime_versions,
+    )?;
+    if !crate::security::constant_time::ct_eq(declared_digest, &recomputed) {
+        bail!(
+            "runtime observations digest `{declared_digest}` does not match recomputed `{recomputed}`"
+        );
+    }
+    Ok(recomputed)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -657,6 +977,11 @@ fn validate_l1_corpus_provenance(data: &Value, provenance: Option<&str>) -> Vec<
                 ));
             }
         }
+    }
+    if let Err(error) = validate_compatibility_corpus_runtime_observations(data) {
+        findings.push(format!(
+            "compatibility corpus runtime observations are not valid and content-bound: {error}"
+        ));
     }
     findings
 }

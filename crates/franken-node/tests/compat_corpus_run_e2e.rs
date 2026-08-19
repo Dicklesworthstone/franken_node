@@ -11,10 +11,14 @@
 //!    when bun is not on PATH (the producer itself fails closed there).
 
 use frankenengine_node::ops::close_condition::{
-    COMPATIBILITY_CORPUS_ONLINE_PROVENANCE, compute_compatibility_corpus_result_digest,
+    COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
+    COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+    validate_compatibility_corpus_runtime_observations,
+    compute_compatibility_corpus_result_digest,
 };
 use frankenengine_node::ops::compat_corpus_run::{
-    CaseOutcome, build_corpus_results_document, build_corpus_results_document_with_references,
+    CaseOutcome, RuntimeLegObservation, build_corpus_results_document,
+    build_corpus_results_document_with_references,
 };
 #[cfg(unix)]
 use frankenengine_node::ops::compat_corpus_run::{
@@ -24,6 +28,8 @@ use frankenengine_node::ops::compat_corpus_run::{
 #[cfg(unix)]
 use serde_json::Value;
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
@@ -726,6 +732,18 @@ fn outcome(
     status: &'static str,
     bead: Option<&str>,
 ) -> CaseOutcome {
+    let observation = RuntimeLegObservation {
+        stdout_digest: format!("sha256:{}", hex::encode(Sha256::digest([]))),
+        stderr_digest: format!("sha256:{}", hex::encode(Sha256::digest([]))),
+        stdout_bytes: 0,
+        stderr_bytes: 0,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        exit_code: Some(0),
+        termination_kind: "exited".to_string(),
+        timed_out: false,
+        elapsed_ms: 1,
+    };
     CaseOutcome {
         test_id: test_id.to_string(),
         api_family: family.to_string(),
@@ -735,7 +753,15 @@ fn outcome(
         failure_reason: (status == "fail")
             .then(|| "lockstep divergence: output mismatch vs bun reference".to_string()),
         investigation_bead_id: bead.map(str::to_string),
+        runtime_observations: BTreeMap::from([
+            ("bun".to_string(), observation.clone()),
+            ("franken-engine-native".to_string(), observation),
+        ]),
     }
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 #[test]
@@ -794,6 +820,25 @@ fn document_builder_binds_digest_and_rederives_totals_honestly() {
         doc["corpus"]["result_digest"].as_str(),
         Some(recomputed.as_str())
     );
+    assert_eq!(
+        doc["corpus"]["runtime_observations_schema_version"],
+        COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION
+    );
+    let observation_digest = validate_compatibility_corpus_runtime_observations(&doc)
+        .expect("runtime observations are topology-bound and digest-bound");
+    assert_eq!(
+        doc["corpus"]["runtime_observations_digest"],
+        observation_digest
+    );
+    assert_eq!(
+        rows[0]["runtime_observations"]
+            .as_object()
+            .expect("runtime observations")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["bun", "franken-engine-native"])
+    );
 
     // Honest gate evaluation: 75% < 95% => blocked with a measured reason.
     assert_eq!(doc["ci_gate"]["threshold_met"], false);
@@ -825,15 +870,100 @@ fn document_builder_binds_digest_and_rederives_totals_honestly() {
 }
 
 #[test]
-fn triad_document_builder_binds_exact_reference_topology() {
-    let outcomes = vec![outcome(
+fn observation_digest_is_run_specific_without_changing_semantic_result_digest() {
+    let baseline = outcome(
         "tc::fs::0001",
         "fs",
         "core",
         "critical",
         "pass",
         None,
-    )];
+    );
+    let baseline_doc = build_corpus_results_document(
+        None,
+        std::slice::from_ref(&baseline),
+        "compat-corpus-v2-observation",
+        "1.3.14",
+        "2026-08-19T00:00:00Z",
+        "corpus",
+    )
+    .expect("build baseline document");
+    let mut later = baseline;
+    for observation in later.runtime_observations.values_mut() {
+        observation.elapsed_ms += 1;
+    }
+    let later_doc = build_corpus_results_document(
+        None,
+        &[later],
+        "compat-corpus-v2-observation",
+        "1.3.14",
+        "2026-08-19T00:00:00Z",
+        "corpus",
+    )
+    .expect("build later document");
+
+    assert_eq!(
+        baseline_doc["corpus"]["result_digest"],
+        later_doc["corpus"]["result_digest"]
+    );
+    assert_ne!(
+        baseline_doc["corpus"]["runtime_observations_digest"],
+        later_doc["corpus"]["runtime_observations_digest"]
+    );
+}
+
+#[test]
+fn document_builder_refuses_partial_or_incomplete_runtime_observations() {
+    let mut partial = outcome(
+        "tc::fs::partial",
+        "fs",
+        "core",
+        "critical",
+        "fail",
+        None,
+    );
+    partial.runtime_observations.remove("bun");
+    let error = build_corpus_results_document(None, &[partial], "v", "b", "t", "c")
+        .expect_err("partial topology must refuse");
+    assert!(error.to_string().contains("do not match expected topology"));
+
+    let mut timed_out_pass = outcome(
+        "tc::fs::timeout",
+        "fs",
+        "core",
+        "critical",
+        "pass",
+        None,
+    );
+    for observation in timed_out_pass.runtime_observations.values_mut() {
+        observation.exit_code = None;
+        observation.termination_kind = "timed_out".to_string();
+        observation.timed_out = true;
+    }
+    let error = build_corpus_results_document(None, &[timed_out_pass], "v", "b", "t", "c")
+        .expect_err("timed-out pass must refuse");
+    assert!(error.to_string().contains("cannot pass with timed-out"));
+}
+
+#[test]
+fn triad_document_builder_binds_exact_reference_topology() {
+    let mut triad_outcome = outcome(
+        "tc::fs::0001",
+        "fs",
+        "core",
+        "critical",
+        "pass",
+        None,
+    );
+    triad_outcome.runtime_observations.insert(
+        "node".to_string(),
+        triad_outcome
+            .runtime_observations
+            .get("bun")
+            .expect("bun observation")
+            .clone(),
+    );
+    let outcomes = vec![triad_outcome];
     let document = build_corpus_results_document_with_references(
         None,
         &outcomes,
@@ -1210,6 +1340,33 @@ fn release_triad_records_node_only_divergence_as_a_measured_failure() {
     assert_eq!(artifact["corpus"]["lockstep_topology"], "triad");
     assert_eq!(artifact["totals"]["failed_test_cases"], 1);
     assert_eq!(artifact["per_test_results"][0]["status"], "fail");
+    let observations = artifact["per_test_results"][0]["runtime_observations"]
+        .as_object()
+        .expect("triad runtime observations");
+    assert_eq!(
+        observations.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["bun", "franken-engine-native", "node"]
+    );
+    assert_eq!(
+        observations["bun"]["stdout_digest"],
+        sha256_prefixed(b"common\n")
+    );
+    assert_eq!(observations["bun"]["stdout_bytes"], 7);
+    assert_eq!(observations["bun"]["stderr_bytes"], 0);
+    assert_eq!(observations["bun"]["exit_code"], 0);
+    assert_eq!(observations["bun"]["termination_kind"], "exited");
+    assert_eq!(observations["bun"]["timed_out"], false);
+    assert!(observations["bun"]["elapsed_ms"].is_u64());
+    assert_eq!(
+        observations["node"]["stdout_digest"],
+        sha256_prefixed(b"node-only\n")
+    );
+    assert_eq!(observations["node"]["stdout_bytes"], 10);
+    validate_compatibility_corpus_runtime_observations(&artifact)
+        .expect("triad observations must be bound");
+    let serialized = serde_json::to_string(&artifact).expect("serialize triad artifact");
+    assert!(!serialized.contains("node-only\\n"));
+    assert!(!serialized.contains("common\\n"));
     assert_eq!(
         artifact["failing_tests_tracking"][0]["reason"],
         "lockstep divergence: node and bun reference legs disagree"

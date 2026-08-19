@@ -30,6 +30,8 @@ ONLINE_PROVENANCE = "lockstep-oracle-run"
 # Must byte-match crates/franken-node/src/ops/close_condition.rs
 # (CCG_RESULT_DIGEST_DOMAIN + compute_compatibility_corpus_result_digest).
 _RESULT_DIGEST_DOMAIN = b"ccg_corpus_result_digest_v1:"
+RUNTIME_OBSERVATIONS_SCHEMA_VERSION = "ccg-runtime-observations-v1"
+_RUNTIME_OBSERVATIONS_DIGEST_DOMAIN = b"ccg_runtime_observations_digest_v1:"
 
 
 def compute_result_digest(per_test_results: list[dict]) -> str:
@@ -52,6 +54,221 @@ def compute_result_digest(per_test_results: list[dict]) -> str:
             hasher.update(field.encode("utf-8"))
             hasher.update(b"\x1f")
         hasher.update(b"\x1e")
+    return f"sha256:{hasher.hexdigest()}"
+
+
+def _canonical_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("sha256:")
+        and len(value) == 71
+        and all(char in "0123456789abcdef" for char in value[7:])
+    )
+
+
+def _u64(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= (2**64 - 1)
+
+
+def compute_runtime_observations_digest(data: dict) -> str:
+    """Validate and bind one concrete run's typed per-runtime observations.
+
+    Elapsed time is intentionally included, so this digest is run-specific;
+    the stable semantic result digest remains the five-field v1 projection.
+    """
+    corpus = data.get("corpus")
+    if not isinstance(corpus, dict):
+        raise ValueError("compatibility corpus metadata is missing")
+    schema = corpus.get("runtime_observations_schema_version")
+    if schema != RUNTIME_OBSERVATIONS_SCHEMA_VERSION:
+        raise ValueError(f"unsupported runtime observations schema {schema!r}")
+    result_digest = corpus.get("result_digest")
+    if not isinstance(result_digest, str):
+        raise ValueError("semantic result digest is missing")
+    topology = corpus.get("lockstep_topology")
+    expected_ids = {
+        "dyad": {"bun", "franken-engine-native"},
+        "triad": {"bun", "franken-engine-native", "node"},
+    }.get(topology)
+    if expected_ids is None:
+        raise ValueError(f"unsupported runtime observation topology {topology!r}")
+
+    runtime_versions: dict[str, str] = {}
+    references = corpus.get("reference_runtimes")
+    if not isinstance(references, list):
+        raise ValueError("reference runtimes are missing")
+    for runtime in references:
+        if not isinstance(runtime, dict):
+            raise ValueError("reference runtime is not an object")
+        runtime_id = runtime.get("runtime_id")
+        version = runtime.get("version")
+        if not isinstance(runtime_id, str) or not runtime_id:
+            raise ValueError("reference runtime_id is missing")
+        if not isinstance(version, str) or not version:
+            raise ValueError(f"reference runtime {runtime_id!r} version is missing")
+        if runtime_id in runtime_versions:
+            raise ValueError(f"duplicate runtime identity {runtime_id!r}")
+        runtime_versions[runtime_id] = version
+    product = corpus.get("product_runtime")
+    if not isinstance(product, dict):
+        raise ValueError("product runtime is missing")
+    product_id = product.get("runtime_id")
+    product_version = product.get("version")
+    if not isinstance(product_id, str) or not product_id:
+        raise ValueError("product runtime_id is missing")
+    if not isinstance(product_version, str) or not product_version:
+        raise ValueError("product runtime version is missing")
+    if product_id in runtime_versions:
+        raise ValueError(f"duplicate runtime identity {product_id!r}")
+    runtime_versions[product_id] = product_version
+    if set(runtime_versions) != expected_ids:
+        raise ValueError(
+            f"runtime observation versions {sorted(runtime_versions)} do not match "
+            f"{topology} topology {sorted(expected_ids)}"
+        )
+
+    observation_keys = {
+        "elapsed_ms",
+        "exit_code",
+        "stderr_bytes",
+        "stderr_digest",
+        "stderr_truncated",
+        "stdout_bytes",
+        "stdout_digest",
+        "stdout_truncated",
+        "termination_kind",
+        "timed_out",
+    }
+    observations = []
+    per_tests = data.get("per_test_results")
+    if not isinstance(per_tests, list):
+        raise ValueError("per_test_results are missing")
+    for row in per_tests:
+        if not isinstance(row, dict):
+            raise ValueError("runtime observation row is not an object")
+        test_id = row.get("test_id")
+        if not isinstance(test_id, str) or not test_id:
+            raise ValueError("runtime observation row is missing test_id")
+        runtime_observations = row.get("runtime_observations")
+        if not isinstance(runtime_observations, dict):
+            raise ValueError(f"runtime observation row {test_id!r} is missing an object")
+        if set(runtime_observations) != expected_ids:
+            raise ValueError(
+                f"runtime observation row {test_id!r} keys "
+                f"{sorted(runtime_observations)} do not match {topology} topology"
+            )
+        for runtime_id, observation in runtime_observations.items():
+            if not isinstance(observation, dict) or set(observation) != observation_keys:
+                raise ValueError(
+                    f"runtime observation {test_id!r}/{runtime_id!r} has invalid v1 keys"
+                )
+            stdout_digest = observation.get("stdout_digest")
+            stderr_digest = observation.get("stderr_digest")
+            if not _canonical_sha256(stdout_digest) or not _canonical_sha256(stderr_digest):
+                raise ValueError(
+                    f"runtime observation {test_id!r}/{runtime_id!r} has noncanonical digest"
+                )
+            stdout_bytes = observation.get("stdout_bytes")
+            stderr_bytes = observation.get("stderr_bytes")
+            elapsed_ms = observation.get("elapsed_ms")
+            if not all(_u64(value) for value in (stdout_bytes, stderr_bytes, elapsed_ms)):
+                raise ValueError(
+                    f"runtime observation {test_id!r}/{runtime_id!r} has invalid u64 field"
+                )
+            stdout_truncated = observation.get("stdout_truncated")
+            stderr_truncated = observation.get("stderr_truncated")
+            timed_out = observation.get("timed_out")
+            if not all(
+                isinstance(value, bool)
+                for value in (stdout_truncated, stderr_truncated, timed_out)
+            ):
+                raise ValueError(
+                    f"runtime observation {test_id!r}/{runtime_id!r} has invalid boolean field"
+                )
+            exit_code = observation.get("exit_code")
+            if exit_code is not None and not (
+                isinstance(exit_code, int)
+                and not isinstance(exit_code, bool)
+                and -(2**31) <= exit_code <= (2**31 - 1)
+            ):
+                raise ValueError(
+                    f"runtime observation {test_id!r}/{runtime_id!r} exit_code is invalid"
+                )
+            termination_kind = observation.get("termination_kind")
+            consistent = (
+                (termination_kind == "timed_out" and timed_out)
+                or (termination_kind == "exited" and not timed_out and exit_code is not None)
+                or (
+                    termination_kind == "signal_or_unknown"
+                    and not timed_out
+                    and exit_code is None
+                )
+            )
+            if not consistent:
+                raise ValueError(
+                    f"runtime observation {test_id!r}/{runtime_id!r} termination is inconsistent"
+                )
+            observations.append(
+                (
+                    test_id,
+                    runtime_id,
+                    stdout_digest,
+                    stderr_digest,
+                    stdout_bytes,
+                    stderr_bytes,
+                    stdout_truncated,
+                    stderr_truncated,
+                    exit_code,
+                    termination_kind,
+                    timed_out,
+                    elapsed_ms,
+                )
+            )
+
+    hasher = hashlib.sha256()
+    hasher.update(_RUNTIME_OBSERVATIONS_DIGEST_DOMAIN)
+
+    def hash_field(label: str, value: bytes) -> None:
+        label_bytes = label.encode("utf-8")
+        hasher.update(len(label_bytes).to_bytes(8, "big"))
+        hasher.update(label_bytes)
+        hasher.update(len(value).to_bytes(8, "big"))
+        hasher.update(value)
+
+    hash_field("schema_version", schema.encode("utf-8"))
+    hash_field("result_digest", result_digest.encode("utf-8"))
+    hash_field("topology", topology.encode("utf-8"))
+    for runtime_id, version in sorted(runtime_versions.items()):
+        hash_field("runtime_id", runtime_id.encode("utf-8"))
+        hash_field("runtime_version", version.encode("utf-8"))
+    for observation in sorted(observations):
+        (
+            test_id,
+            runtime_id,
+            stdout_digest,
+            stderr_digest,
+            stdout_bytes,
+            stderr_bytes,
+            stdout_truncated,
+            stderr_truncated,
+            exit_code,
+            termination_kind,
+            timed_out,
+            elapsed_ms,
+        ) = observation
+        hash_field("test_id", test_id.encode("utf-8"))
+        hash_field("runtime_id", runtime_id.encode("utf-8"))
+        hash_field("stdout_digest", stdout_digest.encode("utf-8"))
+        hash_field("stderr_digest", stderr_digest.encode("utf-8"))
+        hash_field("stdout_bytes", stdout_bytes.to_bytes(8, "big"))
+        hash_field("stderr_bytes", stderr_bytes.to_bytes(8, "big"))
+        hash_field("stdout_truncated", bytes([stdout_truncated]))
+        hash_field("stderr_truncated", bytes([stderr_truncated]))
+        encoded_exit = bytes([0]) if exit_code is None else bytes([1]) + exit_code.to_bytes(4, "big", signed=True)
+        hash_field("exit_code", encoded_exit)
+        hash_field("termination_kind", termination_kind.encode("utf-8"))
+        hash_field("timed_out", bytes([timed_out]))
+        hash_field("elapsed_ms", elapsed_ms.to_bytes(8, "big"))
     return f"sha256:{hasher.hexdigest()}"
 
 CONTRACT = ROOT / "docs" / "specs" / "section_13" / "bd-28sz_contract.md"
@@ -302,6 +519,31 @@ def check_report(data: dict | None, minimum_cases: int = DEFAULT_MIN_CASES) -> l
             and hmac.compare_digest(declared_digest, recomputed_digest)
         ),
         "detail": f"declared={declared_digest} computed={recomputed_digest}",
+    })
+    declared_runtime_observations_digest = corpus_meta.get("runtime_observations_digest")
+    runtime_observations_error = None
+    try:
+        recomputed_runtime_observations_digest = compute_runtime_observations_digest(data)
+    except (TypeError, ValueError) as error:
+        recomputed_runtime_observations_digest = None
+        runtime_observations_error = str(error)
+    checks.append({
+        "check": "provenance: runtime observations are topology-bound and digest-bound",
+        "pass": (
+            recomputed_runtime_observations_digest is not None
+            and isinstance(declared_runtime_observations_digest, str)
+            and hmac.compare_digest(
+                declared_runtime_observations_digest,
+                recomputed_runtime_observations_digest,
+            )
+        ),
+        "detail": (
+            f"error={runtime_observations_error}"
+            if runtime_observations_error is not None
+            else "declared="
+            f"{declared_runtime_observations_digest} "
+            f"computed={recomputed_runtime_observations_digest}"
+        ),
     })
 
     gate_eval = evaluate_gate(data)

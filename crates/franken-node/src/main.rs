@@ -26791,6 +26791,23 @@ fn validate_compatibility_report(
         "regenerate corpus.result_digest from the canonical per_test_results content",
     ));
 
+    let runtime_observations_validation =
+        ops::close_condition::validate_compatibility_corpus_runtime_observations(data);
+    let (runtime_observations_valid, runtime_observations_message) =
+        match runtime_observations_validation {
+            Ok(recomputed) => (
+                true,
+                format!("runtime observations are topology-bound and digest-bound: {recomputed}"),
+            ),
+            Err(error) => (false, error.to_string()),
+        };
+    invariants.push(verify_corpus_invariant(
+        "VCORPUS-REPORT-RUNTIME-OBSERVATIONS",
+        runtime_observations_valid,
+        runtime_observations_message,
+        "regenerate the report with complete dyad/triad runtime observations and their canonical digest",
+    ));
+
     let (fresh, freshness_message) =
         verify_corpus_timestamp_fresh(verify_corpus_string(&corpus, "generated_at_utc"));
     invariants.push(verify_corpus_invariant(
