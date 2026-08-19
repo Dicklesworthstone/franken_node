@@ -212,3 +212,8 @@ artifacts/verification/orphan_census_*.jsonl
 .skill-loop-progress.md
 .skill-loop-progress-*.md
 
+
+# Root-level rustc shebang scratch (not cargo tests)
+/test_hygiene.rs
+/test_race_condition_fix.rs
+/test_validation_readiness_compile.rs
