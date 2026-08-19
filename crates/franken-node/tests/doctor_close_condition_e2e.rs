@@ -1,5 +1,7 @@
 use assert_cmd::Command;
 use frankenengine_node::ops::close_condition::MAX_CLOSE_CONDITION_CARGO_FILES;
+#[cfg(feature = "engine")]
+use frankenengine_node::ops::proof_carrying_evidence::ProofCarryingEffectsEvidence;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -1430,6 +1432,25 @@ fn doctor_close_condition_fails_l1_when_v2_chain_missing_http_subject() {
 
 // ── bd-qr5i2.2: real-run producer → re-deriving v2 gate, the full loop ──
 
+#[cfg(feature = "engine")]
+fn produce_proof_carrying_effects_evidence_via_product_cli() -> ProofCarryingEffectsEvidence {
+    let work = TempDir::new().expect("isolated product CLI working directory");
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(work.path())
+        .args(["ops", "proof-carrying-evidence", "--json"])
+        .output()
+        .expect("public proof-carrying-evidence CLI should run");
+    assert!(
+        output.status.success(),
+        "public same-image evidence supervisor must succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .expect("public proof-carrying-evidence CLI stdout must match the evidence wire type")
+}
+
 /// The evidence produced by a REAL native-engine run (one guest program
 /// performing fs.write + fs.read + http.request against a loopback sink)
 /// passes the re-deriving v2 gate end to end: producer → corpus artifact →
@@ -1439,9 +1460,7 @@ fn doctor_close_condition_fails_l1_when_v2_chain_missing_http_subject() {
 #[test]
 #[cfg(feature = "engine")]
 fn real_run_producer_evidence_passes_v2_close_condition_gate() {
-    let evidence =
-        frankenengine_node::ops::proof_carrying_evidence::produce_proof_carrying_effects_evidence()
-            .expect("producer must emit verified evidence from a real run");
+    let evidence = produce_proof_carrying_effects_evidence_via_product_cli();
 
     assert_eq!(
         evidence.schema_version,
@@ -1478,9 +1497,7 @@ fn real_run_producer_evidence_passes_v2_close_condition_gate() {
 #[test]
 #[cfg(feature = "engine")]
 fn real_run_producer_evidence_chain_verifies_via_verifier_sdk() {
-    let evidence =
-        frankenengine_node::ops::proof_carrying_evidence::produce_proof_carrying_effects_evidence()
-            .expect("producer must emit verified evidence from a real run");
+    let evidence = produce_proof_carrying_effects_evidence_via_product_cli();
 
     let entries_json = serde_json::to_string(&evidence.receipt_chain_entries)
         .expect("serialize producer chain entries");
