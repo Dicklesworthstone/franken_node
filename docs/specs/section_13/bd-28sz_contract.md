@@ -15,18 +15,19 @@ Enforce a hard release gate requiring compatibility corpus pass performance at o
 - `INV-CCG-RATCHET`: Decrease versus previous release corpus pass rate is treated as regression and escalated.
 - `INV-CCG-PROVENANCE` (bd-ihusm): The corpus must attest a genuine measurement via `corpus.provenance`. Only `"lockstep-oracle-run"` is accepted by the release gate; any other value (for example `"authored-fixture-expectations"`) or an absent field is refused fail-closed, so synthesized or hand-authored results can never satisfy the L1 pass-rate leg.
 - `INV-CCG-DIGEST-BINDING` (bd-ihusm): `corpus.result_digest` MUST recompute from `per_test_results` under the canonical `ccg_corpus_result_digest_v1` scheme (domain-separated, field-separated, sorted). A fabricated or silently-edited digest fails both the Python CI gate and the Rust close-condition L1 leg, and the declared `totals` are re-derived from `per_test_results` rather than trusted as-is.
+- `INV-CCG-RUNTIME-OBSERVATIONS` (bd-2djfa.4): Every result row MUST carry the exact dyad or triad runtime set. Each runtime observation records full-stream stdout/stderr SHA-256 digests and byte counts, bounded-capture truncation flags, typed termination/timeout state, and supervised `elapsed_ms`, without embedding raw stream bytes. `corpus.runtime_observations_digest` MUST recompute under `ccg_runtime_observations_digest_v1` from the schema, semantic result digest, topology, runtime versions, test IDs, and observations. Pass rows with timeout, truncation, or cross-runtime output/termination divergence are refused fail-closed. Because elapsed time is included, this digest binds one concrete run and is intentionally distinct from the stable semantic `result_digest`.
 
 ## Required Data Contract
 
 `artifacts/13/compatibility_corpus_results.json` must include:
 
-- Corpus metadata: `corpus_version`, `franken_node_version`, `lockstep_oracle_version`, `result_digest`.
+- Corpus metadata: `corpus_version`, `franken_node_version`, `lockstep_oracle_version`, `result_digest`, `runtime_observations_schema_version`, `runtime_observations_digest`, `lockstep_topology`, `reference_runtimes`, and `product_runtime`.
 - Aggregate metrics: totals, passes, failures, pass percentage.
 - Band breakdown: `core`, `high-value`, `edge`.
 - API-family breakdown for Node.js families:
   `fs`, `http`, `net`, `crypto`, `stream`, `buffer`, `path`, `os`, `child_process`,
   `cluster`, `events`, `timers`, `url`, `querystring`, `zlib`, `tls`.
-- Per-test records with at least: `test_id`, `api_family`, `band`, `risk_band`, `status`.
+- Per-test records with at least: `test_id`, `api_family`, `band`, `risk_band`, `status`, and exact-topology `runtime_observations`.
 - Failing-test investigation mapping: `test_id -> bead_id + investigation_status`.
 - CI gate decision metadata including threshold/rachet evaluation.
 
@@ -34,6 +35,7 @@ Enforce a hard release gate requiring compatibility corpus pass performance at o
 
 - Re-running verification on identical artifact input yields identical aggregate metrics and verdict.
 - Reordering `per_test_results` does not change computed pass rates or gate outcome.
+- Reordering result rows or runtime-object keys does not change either canonical digest. Changing an observation, runtime identity/version, or topology changes the run-specific observation digest.
 - Adversarial perturbation (drop pass rate below 95%) deterministically flips release decision to blocked.
 
 ## Required Scenarios

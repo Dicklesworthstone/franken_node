@@ -166,6 +166,13 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(aggregate["fs"]["passed"], 1)
         self.assertEqual(aggregate["http"]["total"], 1)
 
+    def test_runtime_observation_digest_cross_language_pin(self):
+        report = passing_report(1)
+        self.assertEqual(
+            report["corpus"]["runtime_observations_digest"],
+            "sha256:1ab42659e6407b492f5f57af96cf5fece52a61573d47e39c18c668c182ffe47e",
+        )
+
 
 class TestSyntheticReportGate(unittest.TestCase):
     def setUp(self):

@@ -340,6 +340,7 @@ REQUIRED_CONTRACT_TERMS = [
     "INV-CCG-RATCHET",
     "INV-CCG-PROVENANCE",
     "INV-CCG-DIGEST-BINDING",
+    "INV-CCG-RUNTIME-OBSERVATIONS",
     "Scenario A",
     "Scenario B",
     "Scenario C",
