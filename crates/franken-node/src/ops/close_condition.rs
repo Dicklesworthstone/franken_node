@@ -2017,6 +2017,26 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    fn successful_runtime_observations_json(elapsed_ms: u64) -> Value {
+        let empty_digest = format!("sha256:{}", hex::encode(Sha256::digest([])));
+        let observation = serde_json::json!({
+            "stdout_digest": empty_digest,
+            "stderr_digest": empty_digest,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "exit_code": 0,
+            "termination_kind": "exited",
+            "timed_out": false,
+            "elapsed_ms": elapsed_ms,
+        });
+        serde_json::json!({
+            "bun": observation.clone(),
+            "franken-engine-native": observation,
+        })
+    }
+
     #[test]
     fn release_run_url_requires_an_exact_github_actions_attempt() {
         assert!(
@@ -2050,6 +2070,7 @@ mod tests {
                     "band": "core",
                     "risk_band": "low",
                     "status": "pass",
+                    "runtime_observations": successful_runtime_observations_json(i + 1),
                 })
             })
             .chain((0..failed).map(|i| {
@@ -2059,15 +2080,47 @@ mod tests {
                     "band": "core",
                     "risk_band": "low",
                     "status": "fail",
+                    "runtime_observations": successful_runtime_observations_json(i + passed + 1),
                 })
             }))
             .collect();
         let result_digest = compute_compatibility_corpus_result_digest(&per_test_results);
+        let runtime_versions = BTreeMap::from([
+            ("bun".to_string(), "1.3.14-test".to_string()),
+            (
+                "franken-engine-native".to_string(),
+                "0.1.0-test".to_string(),
+            ),
+        ]);
+        let observations_digest =
+            compute_compatibility_corpus_runtime_observations_digest(
+                &per_test_results,
+                COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+                &result_digest,
+                "dyad",
+                &runtime_versions,
+            )
+            .expect("fixture runtime observations digest");
         serde_json::json!({
             "corpus": {
                 "corpus_version": "compat-corpus-test",
                 "provenance": COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
                 "result_digest": result_digest,
+                "runtime_observations_schema_version": COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+                "runtime_observations_digest": observations_digest,
+                "lockstep_topology": "dyad",
+                "reference_runtimes": [{
+                    "runtime_id": "bun",
+                    "runtime_name": "bun",
+                    "version": "1.3.14-test",
+                    "is_reference": true,
+                }],
+                "product_runtime": {
+                    "runtime_id": "franken-engine-native",
+                    "runtime_name": "franken-engine-native",
+                    "version": "0.1.0-test",
+                    "is_reference": false,
+                },
             },
             "thresholds": { "overall_pass_rate_min_pct": 95.0 },
             "totals": {
