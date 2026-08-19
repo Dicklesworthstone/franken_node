@@ -180,12 +180,12 @@ fn valid_compatibility_report() -> serde_json::Value {
         }));
     }
 
-    serde_json::json!({
+    let mut report = serde_json::json!({
         "corpus": {
             "corpus_version": "compat-corpus-e2e-v1",
             "franken_node_version": "0.1.0-test",
             "lockstep_oracle_version": "lockstep-e2e-v1",
-            "result_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "result_digest": "",
             "generated_at_utc": timestamp,
         },
         "totals": {
@@ -220,7 +220,19 @@ fn valid_compatibility_report() -> serde_json::Value {
             "external_repro_command": "franken-node verify corpus compatibility-report.json --kind compatibility-report --json",
         },
         "per_test_results": per_test_results,
-    })
+    });
+    refresh_compatibility_report_digest(&mut report);
+    report
+}
+
+fn refresh_compatibility_report_digest(report: &mut serde_json::Value) {
+    let digest =
+        frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(
+            report["per_test_results"]
+                .as_array()
+                .expect("compatibility report per_test_results array"),
+        );
+    report["corpus"]["result_digest"] = serde_json::json!(digest);
 }
 
 fn write_valid_compatibility_report(path: &Path) {
@@ -1180,6 +1192,7 @@ fn verify_corpus_rejects_report_missing_required_api_family() {
             row["api_family"] = serde_json::json!("fs");
         }
     }
+    refresh_compatibility_report_digest(&mut report);
     write_json_fixture(&report_file, &report);
 
     assert_verify_corpus_failed_invariant(
@@ -1196,6 +1209,7 @@ fn verify_corpus_rejects_artifact_report_invalid_risk_band() {
     let mut report =
         read_json_fixture(&repo_root().join("artifacts/13/compatibility_corpus_results.json"));
     report["per_test_results"][0]["risk_band"] = serde_json::json!("catastrophic");
+    refresh_compatibility_report_digest(&mut report);
     write_json_fixture(&report_file, &report);
 
     assert_verify_corpus_failed_invariant(
@@ -1284,6 +1298,56 @@ fn verify_corpus_accepts_compatibility_report_kind() {
 }
 
 #[test]
+fn verify_corpus_rejects_compatibility_report_result_digest_mismatch() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("compatibility-report-tampered.json");
+    let mut report = valid_compatibility_report();
+    report["per_test_results"][0]["test_id"] =
+        serde_json::json!("compat-case-tampered-after-digest");
+    write_json_fixture(&report_file, &report);
+
+    let payload = assert_verify_corpus_failed_invariant(
+        &report_file,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-RESULT-DIGEST",
+    );
+    assert_eq!(
+        payload["details"]["failed_invariants"]
+            .as_array()
+            .expect("failed invariants array")
+            .len(),
+        1,
+        "the digest tamper should not violate an unrelated report invariant: {payload:#?}"
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_whitespace_padded_compatibility_result_digest() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("compatibility-report-padded-digest.json");
+    let mut report = valid_compatibility_report();
+    let canonical_digest = report["corpus"]["result_digest"]
+        .as_str()
+        .expect("canonical compatibility result digest");
+    report["corpus"]["result_digest"] = serde_json::json!(format!(" {canonical_digest} "));
+    write_json_fixture(&report_file, &report);
+
+    let payload = assert_verify_corpus_failed_invariant(
+        &report_file,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-RESULT-DIGEST",
+    );
+    assert_eq!(
+        payload["details"]["failed_invariants"]
+            .as_array()
+            .expect("failed invariants array")
+            .len(),
+        1,
+        "digest bytes must match exactly without normalization: {payload:#?}"
+    );
+}
+
+#[test]
 fn verify_corpus_rejects_duplicate_manifest_fixture_ids() {
     let temp = TempDir::new().expect("temp dir");
     let corpus_file = temp.path().join("duplicate-fixtures.json");
@@ -1358,6 +1422,7 @@ fn verify_corpus_rejects_missing_required_report_family() {
             row["api_family"] = serde_json::json!("fs");
         }
     }
+    refresh_compatibility_report_digest(&mut report);
     write_json_fixture(&report_file, &report);
 
     assert_verify_corpus_failed_invariant(
@@ -1373,6 +1438,7 @@ fn verify_corpus_rejects_invalid_report_risk_band() {
     let report_file = temp.path().join("invalid-risk-report.json");
     let mut report = valid_compatibility_report();
     report["per_test_results"][0]["risk_band"] = serde_json::json!("severe");
+    refresh_compatibility_report_digest(&mut report);
     write_json_fixture(&report_file, &report);
 
     assert_verify_corpus_failed_invariant(
@@ -1399,6 +1465,7 @@ fn verify_corpus_rejects_threshold_regression() {
             "investigation_status": "open"
         }
     ]);
+    refresh_compatibility_report_digest(&mut report);
     write_json_fixture(&report_file, &report);
 
     assert_verify_corpus_failed_invariant(

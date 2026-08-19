@@ -26773,12 +26773,22 @@ fn validate_compatibility_report(
         "include corpus.corpus_version",
     ));
 
-    let result_digest = verify_corpus_string(&corpus, "result_digest");
+    let result_digest = corpus
+        .get("result_digest")
+        .and_then(serde_json::Value::as_str);
+    let recomputed_result_digest =
+        ops::close_condition::compute_compatibility_corpus_result_digest(&per_tests);
+    let result_digest_matches = result_digest.is_some_and(|declared| {
+        security::constant_time::ct_eq(declared, &recomputed_result_digest)
+    });
     invariants.push(verify_corpus_invariant(
         "VCORPUS-REPORT-RESULT-DIGEST",
-        result_digest.is_some_and(|digest| digest.starts_with("sha256:")),
-        format!("result_digest={}", result_digest.unwrap_or("<missing>")),
-        "include corpus.result_digest with a sha256: prefix",
+        result_digest_matches,
+        format!(
+            "declared_result_digest={} recomputed_result_digest={recomputed_result_digest}",
+            result_digest.unwrap_or("<missing>")
+        ),
+        "regenerate corpus.result_digest from the canonical per_test_results content",
     ));
 
     let (fresh, freshness_message) =
