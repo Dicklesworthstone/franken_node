@@ -345,7 +345,7 @@ fn corpus_and_replay_manifest() -> Result<Value, Box<dyn Error>> {
     Ok(json!({
         "surface": "corpus-and-replay-artifact-gates",
         "golden_strategy": "freeze compatibility matrix and replay coverage contract summaries plus scrubbed full-artifact hashes",
-        "scrubbing_rules": scrubbing_rules(),
+        "scrubbing_rules": corpus_scrubbing_rules(),
         "compatibility_corpus_results": {
             "summary": corpus_summary,
             "thresholds": corpus.get("thresholds").cloned(),
@@ -373,8 +373,6 @@ fn scrubbing_rules() -> Value {
         "trace_id": "[TRACE_ID]",
         "uuid_keys": "[UUID]",
         "nonce_keys": "[NONCE]",
-        "compatibility_runtime_elapsed_ms": "[ELAPSED_MS]",
-        "compatibility_runtime_observations_digest": "sha256:[RUN_SPECIFIC]",
         "kept_exact": [
             "schema_version",
             "bead_id",
@@ -385,6 +383,22 @@ fn scrubbing_rules() -> Value {
             "gate verdicts",
         ],
     })
+}
+
+fn corpus_scrubbing_rules() -> Value {
+    let mut rules = scrubbing_rules();
+    let fields = rules
+        .as_object_mut()
+        .expect("scrubbing rules are always represented as an object");
+    fields.insert(
+        "compatibility_runtime_elapsed_ms".to_string(),
+        Value::String("[ELAPSED_MS]".to_string()),
+    );
+    fields.insert(
+        "compatibility_runtime_observations_digest".to_string(),
+        Value::String("sha256:[RUN_SPECIFIC]".to_string()),
+    );
+    rules
 }
 
 #[test]
