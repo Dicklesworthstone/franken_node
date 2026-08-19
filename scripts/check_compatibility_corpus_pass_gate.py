@@ -241,7 +241,7 @@ def compute_runtime_observations_digest(data: dict) -> str:
     for runtime_id, version in sorted(runtime_versions.items()):
         hash_field("runtime_id", runtime_id.encode("utf-8"))
         hash_field("runtime_version", version.encode("utf-8"))
-    for observation in sorted(observations):
+    for observation in sorted(observations, key=lambda item: (item[0], item[1])):
         (
             test_id,
             runtime_id,
@@ -264,7 +264,11 @@ def compute_runtime_observations_digest(data: dict) -> str:
         hash_field("stderr_bytes", stderr_bytes.to_bytes(8, "big"))
         hash_field("stdout_truncated", bytes([stdout_truncated]))
         hash_field("stderr_truncated", bytes([stderr_truncated]))
-        encoded_exit = bytes([0]) if exit_code is None else bytes([1]) + exit_code.to_bytes(4, "big", signed=True)
+        encoded_exit = (
+            bytes([0])
+            if exit_code is None
+            else bytes([1]) + exit_code.to_bytes(4, "big", signed=True)
+        )
         hash_field("exit_code", encoded_exit)
         hash_field("termination_kind", termination_kind.encode("utf-8"))
         hash_field("timed_out", bytes([timed_out]))

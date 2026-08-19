@@ -1,6 +1,7 @@
 """Unit tests for scripts/check_compatibility_corpus_pass_gate.py."""
 
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -14,6 +15,28 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import check_compatibility_corpus_pass_gate as mod  # noqa: E402
 
 
+def successful_observation(elapsed_ms: int = 1) -> dict:
+    empty_digest = "sha256:" + hashlib.sha256(b"").hexdigest()
+    return {
+        "stdout_digest": empty_digest,
+        "stderr_digest": empty_digest,
+        "stdout_bytes": 0,
+        "stderr_bytes": 0,
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "exit_code": 0,
+        "termination_kind": "exited",
+        "timed_out": False,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+def refresh_runtime_observations_digest(report: dict) -> None:
+    report["corpus"]["runtime_observations_digest"] = (
+        mod.compute_runtime_observations_digest(report)
+    )
+
+
 def passing_report(total: int = 1000) -> dict:
     families = sorted(mod.REQUIRED_FAMILIES)
     bands = sorted(mod.REQUIRED_BANDS)
@@ -25,13 +48,35 @@ def passing_report(total: int = 1000) -> dict:
             "band": bands[index % len(bands)],
             "risk_band": risk_bands[index % len(risk_bands)],
             "status": "pass",
+            "runtime_observations": {
+                "bun": successful_observation(index + 1),
+                "franken-engine-native": successful_observation(index + 2),
+            },
         }
         for index in range(total)
     ]
-    return {
+    report = {
         "corpus": {
             "provenance": mod.ONLINE_PROVENANCE,
             "result_digest": mod.compute_result_digest(per_test_results),
+            "runtime_observations_schema_version": (
+                mod.RUNTIME_OBSERVATIONS_SCHEMA_VERSION
+            ),
+            "lockstep_topology": "dyad",
+            "reference_runtimes": [
+                {
+                    "runtime_id": "bun",
+                    "runtime_name": "bun",
+                    "version": "1.3.14-test",
+                    "is_reference": True,
+                }
+            ],
+            "product_runtime": {
+                "runtime_id": "franken-engine-native",
+                "runtime_name": "franken-engine-native",
+                "version": "0.1.0-test",
+                "is_reference": False,
+            },
         },
         "totals": {
             "total_test_cases": total,
@@ -67,6 +112,8 @@ def passing_report(total: int = 1000) -> dict:
             "external_repro_command": "synthetic fixture",
         },
     }
+    refresh_runtime_observations_digest(report)
+    return report
 
 
 def write_report(path: Path, report: dict) -> None:
@@ -186,6 +233,7 @@ class TestSyntheticReportGate(unittest.TestCase):
         report["corpus"]["result_digest"] = mod.compute_result_digest(
             report["per_test_results"]
         )
+        refresh_runtime_observations_digest(report)
         report["failing_tests_tracking"] = [
             {
                 "test_id": row["test_id"],
@@ -198,6 +246,32 @@ class TestSyntheticReportGate(unittest.TestCase):
         result = self.run_report(report)
         self.assertFalse(result["overall_pass"])
         self.assertFalse(named_check(result, "gate: overall threshold >=95 met")["pass"])
+
+    def test_runtime_observation_tamper_fails_closed(self):
+        report = passing_report()
+        report["per_test_results"][0]["runtime_observations"]["bun"][
+            "elapsed_ms"
+        ] += 1
+        result = self.run_report(report)
+        self.assertFalse(result["overall_pass"])
+        self.assertFalse(
+            named_check(
+                result,
+                "provenance: runtime observations are topology-bound and digest-bound",
+            )["pass"]
+        )
+
+    def test_runtime_observation_topology_gap_fails_closed(self):
+        report = passing_report()
+        del report["per_test_results"][0]["runtime_observations"]["bun"]
+        result = self.run_report(report)
+        self.assertFalse(result["overall_pass"])
+        self.assertFalse(
+            named_check(
+                result,
+                "provenance: runtime observations are topology-bound and digest-bound",
+            )["pass"]
+        )
 
     def test_regression_fails_closed(self):
         report = passing_report()
