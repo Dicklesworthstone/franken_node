@@ -25897,6 +25897,17 @@ fn evaluate_engine_requirement_satisfaction(
     runtime_major_satisfies_requirement(major, requirement)
 }
 
+fn runtime_engine_requirement_allows_compatibility(
+    runtime: &str,
+    engine_requirement_satisfied: Option<bool>,
+) -> bool {
+    match runtime {
+        "franken-node" => true,
+        "node" | "bun" => engine_requirement_satisfied == Some(true),
+        _ => false,
+    }
+}
+
 fn read_runtime_engine_requirement(project_root: &Path, runtime: &str) -> Result<Option<String>> {
     let engine_key = match runtime {
         "node" => "node",
@@ -26307,8 +26318,10 @@ fn emit_verify_compatibility(args: &VerifyCompatibilityArgs) -> i32 {
                                     engine_requirement.as_deref(),
                                     engine_requirement_satisfied,
                                 );
-                                let compatible = engine_requirement_satisfied.unwrap_or(false)
-                                    && known_issues.is_empty();
+                                let compatible = runtime_engine_requirement_allows_compatibility(
+                                    runtime,
+                                    engine_requirement_satisfied,
+                                ) && known_issues.is_empty();
 
                                 build_verify_output_with_details(
                                     "verify compatibility",

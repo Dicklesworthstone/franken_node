@@ -9,13 +9,13 @@ expression: "canonicalize_verify_release_snapshot(payload, &release_dir, &key_di
     {
       "artifact_name": "franken-node-darwin-arm64.tar.xz",
       "passed": true,
-      "key_id": "4b077d42181dd752",
+      "key_id": "d71b59ff094a2868",
       "failure_reason": null
     },
     {
       "artifact_name": "franken-node-linux-x64.tar.xz",
       "passed": true,
-      "key_id": "4b077d42181dd752",
+      "key_id": "d71b59ff094a2868",
       "failure_reason": null
     }
   ],

@@ -32,7 +32,13 @@ expression: matrix
           "sha256": "[sha256]"
         },
         "deps_satisfied": true,
-        "dependencies": [],
+        "dependencies": [
+          {
+            "name": "timeouts",
+            "path": "[repo]/crates/franken-node/src/config/timeouts.rs",
+            "exists": true
+          }
+        ],
         "health": "not_declared"
       }
     },
@@ -274,13 +280,13 @@ expression: matrix
         {
           "artifact_name": "franken-node-linux-x64.tar.xz",
           "passed": true,
-          "key_id": "4b077d42181dd752",
+          "key_id": "d71b59ff094a2868",
           "failure_reason": null
         },
         {
           "artifact_name": "rogue-extra.bin",
           "passed": false,
-          "key_id": "4b077d42181dd752",
+          "key_id": "d71b59ff094a2868",
           "failure_reason": "artifact present but not listed in SHA256SUMS"
         }
       ],

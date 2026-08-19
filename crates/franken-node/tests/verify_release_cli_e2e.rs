@@ -2,7 +2,9 @@ use insta::assert_json_snapshot;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use frankenengine_node::supply_chain::artifact_signing::{build_and_sign_manifest, sign_artifact};
+use frankenengine_node::supply_chain::artifact_signing::{
+    KeyId, build_and_sign_manifest, sign_artifact,
+};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -970,6 +972,12 @@ fn verify_compatibility_accepts_current_binary_runtime() {
     assert_eq!(payload["details"]["target_kind"], "runtime");
     assert_eq!(payload["details"]["runtime"], "franken-node");
     assert_eq!(payload["details"]["installed"], true);
+    assert_eq!(
+        payload["details"]["engine_requirement"],
+        serde_json::Value::Null
+    );
+    assert_eq!(payload["details"]["compatible"], true);
+    assert_eq!(payload["details"]["known_issues"], serde_json::json!([]));
 }
 
 #[test]
@@ -1550,10 +1558,18 @@ fn verify_release_succeeds_with_hex_encoded_signatures_and_key_dir() {
     assert_eq!(payload["overall_pass"], serde_json::Value::Bool(true));
     let results = payload["results"].as_array().expect("results array");
     assert_eq!(results.len(), artifacts.len());
+    let expected_key_id =
+        KeyId::from_verifying_key(&fixture_artifact_signing_key(b"current").verifying_key());
+    assert_eq!(expected_key_id.0, "d71b59ff094a2868");
     assert!(
         results
             .iter()
             .all(|row| row["passed"] == serde_json::Value::Bool(true))
+    );
+    assert!(
+        results
+            .iter()
+            .all(|row| row["key_id"].as_str() == Some(expected_key_id.0.as_str()))
     );
 }
 
