@@ -1436,7 +1436,9 @@ fn verify_corpus_rejects_whitespace_padded_compatibility_result_digest() {
 #[test]
 fn verify_corpus_rejects_runtime_observation_tamper() {
     let temp = TempDir::new().expect("temp dir");
-    let report_file = temp.path().join("compatibility-report-observation-tamper.json");
+    let report_file = temp
+        .path()
+        .join("compatibility-report-observation-tamper.json");
     let mut report = valid_compatibility_report();
     report["per_test_results"][0]["runtime_observations"]["bun"]["elapsed_ms"] =
         serde_json::json!(99);

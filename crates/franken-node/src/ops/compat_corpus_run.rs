@@ -49,10 +49,9 @@ use rustix::fs::{
 };
 
 use crate::ops::close_condition::{
-    COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
-    COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
-    compute_compatibility_corpus_runtime_observations_digest,
+    COMPATIBILITY_CORPUS_ONLINE_PROVENANCE, COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
     compute_compatibility_corpus_result_digest,
+    compute_compatibility_corpus_runtime_observations_digest,
 };
 #[cfg(all(feature = "engine", target_os = "linux"))]
 use crate::ops::engine_dispatcher::InternalCorpusProcessAuthorityServer;
@@ -2084,8 +2083,8 @@ pub fn run_corpus(
                     && !leg.observation.stdout_truncated
                     && !leg.observation.stderr_truncated
             });
-        let agreed = observations_complete
-            && matches!(check.outcome, Some(CheckOutcome::Agree { .. }));
+        let agreed =
+            observations_complete && matches!(check.outcome, Some(CheckOutcome::Agree { .. }));
         let (status, failure_reason): (&'static str, Option<String>) = if agreed {
             ("pass", None)
         } else {
@@ -2142,19 +2141,16 @@ fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCa
     }
     if bun.observation.stdout_truncated
         || bun.observation.stderr_truncated
-        || node.is_some_and(|leg| {
-            leg.observation.stdout_truncated || leg.observation.stderr_truncated
-        })
+        || node
+            .is_some_and(|leg| leg.observation.stdout_truncated || leg.observation.stderr_truncated)
         || franken.observation.stdout_truncated
         || franken.observation.stderr_truncated
     {
-        let leg = if franken.observation.stdout_truncated
-            || franken.observation.stderr_truncated
-        {
+        let leg = if franken.observation.stdout_truncated || franken.observation.stderr_truncated {
             "franken-engine"
-        } else if node.is_some_and(|leg| {
-            leg.observation.stdout_truncated || leg.observation.stderr_truncated
-        }) {
+        } else if node
+            .is_some_and(|leg| leg.observation.stdout_truncated || leg.observation.stderr_truncated)
+        {
             "node reference"
         } else {
             "bun reference"
@@ -2166,10 +2162,7 @@ fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCa
     {
         return "lockstep divergence: node and bun reference legs disagree".to_string();
     }
-    match (
-        bun.observation.exit_code,
-        franken.observation.exit_code,
-    ) {
+    match (bun.observation.exit_code, franken.observation.exit_code) {
         (Some(0), Some(0)) => "lockstep divergence: output mismatch vs bun reference".to_string(),
         (Some(0), other) => {
             format!(
@@ -2340,14 +2333,12 @@ fn aggregate<'a>(
 }
 
 fn is_sha256_digest(value: &str) -> bool {
-    value
-        .strip_prefix("sha256:")
-        .is_some_and(|hex| {
-            hex.len() == 64
-                && hex
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn runtime_observation_is_valid(observation: &RuntimeLegObservation) -> bool {
@@ -2442,10 +2433,8 @@ pub fn build_corpus_results_document_with_references(
             );
         }
     }
-    let mut expected_runtime_ids = BTreeSet::from([
-        "bun".to_string(),
-        "franken-engine-native".to_string(),
-    ]);
+    let mut expected_runtime_ids =
+        BTreeSet::from(["bun".to_string(), "franken-engine-native".to_string()]);
     if node_version.is_some() {
         expected_runtime_ids.insert("node".to_string());
     }
@@ -2474,9 +2463,7 @@ pub fn build_corpus_results_document_with_references(
             );
         }
         let has_incomplete_observation = outcome.runtime_observations.values().any(|observation| {
-            observation.timed_out
-                || observation.stdout_truncated
-                || observation.stderr_truncated
+            observation.timed_out || observation.stdout_truncated || observation.stderr_truncated
         });
         if outcome.status == "pass" && has_incomplete_observation {
             bail!(
@@ -2550,14 +2537,13 @@ pub fn build_corpus_results_document_with_references(
     if let Some(node_version) = node_version {
         runtime_versions.insert("node".to_string(), node_version.to_string());
     }
-    let runtime_observations_digest =
-        compute_compatibility_corpus_runtime_observations_digest(
-            &per_test_rows,
-            COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
-            &result_digest,
-            topology,
-            &runtime_versions,
-        )?;
+    let runtime_observations_digest = compute_compatibility_corpus_runtime_observations_digest(
+        &per_test_rows,
+        COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+        &result_digest,
+        topology,
+        &runtime_versions,
+    )?;
 
     let family_breakdown = aggregate(outcomes, |o| o.api_family.as_str());
     let band_breakdown = aggregate(outcomes, |o| o.band.as_str());
@@ -2981,18 +2967,9 @@ mod snapshot_staging_tests {
 
     #[test]
     fn runtime_comparison_frames_streams_and_full_stream_digests() {
-        let first = runtime_comparison(
-            &pipe_result(b"a"),
-            &pipe_result(b"bc"),
-            false,
-            Some(0),
-        );
-        let repartitioned = runtime_comparison(
-            &pipe_result(b"ab"),
-            &pipe_result(b"c"),
-            false,
-            Some(0),
-        );
+        let first = runtime_comparison(&pipe_result(b"a"), &pipe_result(b"bc"), false, Some(0));
+        let repartitioned =
+            runtime_comparison(&pipe_result(b"ab"), &pipe_result(b"c"), false, Some(0));
         assert_ne!(first, repartitioned);
 
         let mut prefix = vec![b'x'; MAX_LEG_OUTPUT_BYTES];

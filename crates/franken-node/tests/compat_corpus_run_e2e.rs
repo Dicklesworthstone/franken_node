@@ -11,10 +11,8 @@
 //!    when bun is not on PATH (the producer itself fails closed there).
 
 use frankenengine_node::ops::close_condition::{
-    COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
-    COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
-    validate_compatibility_corpus_runtime_observations,
-    compute_compatibility_corpus_result_digest,
+    COMPATIBILITY_CORPUS_ONLINE_PROVENANCE, COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+    compute_compatibility_corpus_result_digest, validate_compatibility_corpus_runtime_observations,
 };
 use frankenengine_node::ops::compat_corpus_run::{
     CaseOutcome, RuntimeLegObservation, build_corpus_results_document,
@@ -871,14 +869,7 @@ fn document_builder_binds_digest_and_rederives_totals_honestly() {
 
 #[test]
 fn observation_digest_is_run_specific_without_changing_semantic_result_digest() {
-    let baseline = outcome(
-        "tc::fs::0001",
-        "fs",
-        "core",
-        "critical",
-        "pass",
-        None,
-    );
+    let baseline = outcome("tc::fs::0001", "fs", "core", "critical", "pass", None);
     let baseline_doc = build_corpus_results_document(
         None,
         std::slice::from_ref(&baseline),
@@ -914,27 +905,13 @@ fn observation_digest_is_run_specific_without_changing_semantic_result_digest() 
 
 #[test]
 fn document_builder_refuses_partial_or_incomplete_runtime_observations() {
-    let mut partial = outcome(
-        "tc::fs::partial",
-        "fs",
-        "core",
-        "critical",
-        "fail",
-        None,
-    );
+    let mut partial = outcome("tc::fs::partial", "fs", "core", "critical", "fail", None);
     partial.runtime_observations.remove("bun");
     let error = build_corpus_results_document(None, &[partial], "v", "b", "t", "c")
         .expect_err("partial topology must refuse");
     assert!(error.to_string().contains("do not match expected topology"));
 
-    let mut timed_out_pass = outcome(
-        "tc::fs::timeout",
-        "fs",
-        "core",
-        "critical",
-        "pass",
-        None,
-    );
+    let mut timed_out_pass = outcome("tc::fs::timeout", "fs", "core", "critical", "pass", None);
     for observation in timed_out_pass.runtime_observations.values_mut() {
         observation.exit_code = None;
         observation.termination_kind = "timed_out".to_string();
@@ -947,14 +924,7 @@ fn document_builder_refuses_partial_or_incomplete_runtime_observations() {
 
 #[test]
 fn triad_document_builder_binds_exact_reference_topology() {
-    let mut triad_outcome = outcome(
-        "tc::fs::0001",
-        "fs",
-        "core",
-        "critical",
-        "pass",
-        None,
-    );
+    let mut triad_outcome = outcome("tc::fs::0001", "fs", "core", "critical", "pass", None);
     triad_outcome.runtime_observations.insert(
         "node".to_string(),
         triad_outcome
