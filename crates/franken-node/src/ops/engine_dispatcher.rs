@@ -6113,7 +6113,8 @@ impl EngineDispatcher {
     /// - `module_load`: JavaScript module loading (required for `import`/`require`)
     /// - `fs_read/fs_write`: File system access
     /// - `network_egress`: Outbound network access
-    /// - `builtin`: JavaScript built-ins (includes crypto operations)
+    /// - `builtin`: JavaScript built-ins that do not cross a dedicated host authority
+    /// - `random_read`: Host CSPRNG access for Node-compatible crypto randomness
     /// - `env_read`: Environment variable access
     /// - `timer`: Timeout/timer operations
     ///
@@ -6133,17 +6134,19 @@ impl EngineDispatcher {
                 "module_load".to_string(),    // Maps to RuntimeCapability::ModuleLoad
                 "fs_read".to_string(),        // Maps to RuntimeCapability::FsRead
                 "network_egress".to_string(), // Maps to RuntimeCapability::NetworkEgress
-                "builtin".to_string(), // Maps to RuntimeCapability::Builtin (for crypto builtins)
-                "timer".to_string(),   // Maps to RuntimeCapability::Timer
+                "builtin".to_string(),        // Maps to RuntimeCapability::Builtin
+                "random_read".to_string(),    // Maps to RuntimeCapability::RandomRead
+                "timer".to_string(),          // Maps to RuntimeCapability::Timer
             ],
             Profile::LegacyRisky => vec![
                 "module_load".to_string(),    // Maps to RuntimeCapability::ModuleLoad
                 "fs_read".to_string(),        // Maps to RuntimeCapability::FsRead
                 "fs_write".to_string(),       // Maps to RuntimeCapability::FsWrite
                 "network_egress".to_string(), // Maps to RuntimeCapability::NetworkEgress
-                "builtin".to_string(), // Maps to RuntimeCapability::Builtin (includes crypto)
-                "env_read".to_string(), // Maps to RuntimeCapability::EnvRead
-                "timer".to_string(),   // Maps to RuntimeCapability::Timer
+                "builtin".to_string(),        // Maps to RuntimeCapability::Builtin
+                "random_read".to_string(),    // Maps to RuntimeCapability::RandomRead
+                "env_read".to_string(),       // Maps to RuntimeCapability::EnvRead
+                "timer".to_string(),          // Maps to RuntimeCapability::Timer
             ],
         }
     }
@@ -7456,6 +7459,7 @@ impl EngineDispatcher {
                         // auditable receipt instead of crashing the dispatcher.
                         HostIoCapability::NetworkSend => EffectKind::HttpRequest,
                         HostIoCapability::NetworkRecv => EffectKind::HttpRequest,
+                        HostIoCapability::RandomRead => EffectKind::RandomRead,
                     };
                     (
                         effect_kind,
@@ -7491,6 +7495,11 @@ impl EngineDispatcher {
                     endpoint.as_bytes().to_vec(),
                     payload.clone(),
                 ),
+                HostIoRequest::RandomRead { byte_len } => (
+                    EffectKind::RandomRead,
+                    byte_len.to_be_bytes().to_vec(),
+                    Vec::new(),
+                ),
             };
             let args_hash = content_hash(&args_bytes);
 
@@ -7516,7 +7525,8 @@ impl EngineDispatcher {
                         | HostIoResponse::NetworkRecv { bytes }
                         // bd-3894s slice (4): a round trip's produced/post-state IS
                         // the response the peer sent back.
-                        | HostIoResponse::NetworkRequest { response: bytes } => bytes.clone(),
+                        | HostIoResponse::NetworkRequest { response: bytes }
+                        | HostIoResponse::RandomRead { bytes } => bytes.clone(),
                         HostIoResponse::FsWrite { .. } | HostIoResponse::NetworkSend { .. } => {
                             input_bytes.clone()
                         }
@@ -7810,6 +7820,90 @@ mod tests {
     };
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn crypto_entropy_is_an_explicit_profile_grant_bd_opsnv() {
+        let strict = EngineDispatcher::map_profile_to_capabilities(Profile::Strict);
+        let balanced = EngineDispatcher::map_profile_to_capabilities(Profile::Balanced);
+        let legacy = EngineDispatcher::map_profile_to_capabilities(Profile::LegacyRisky);
+
+        assert!(!strict.iter().any(|capability| capability == "random_read"));
+        assert!(
+            balanced
+                .iter()
+                .any(|capability| capability == "random_read")
+        );
+        assert!(legacy.iter().any(|capability| capability == "random_read"));
+        EngineDispatcher::validate_capabilities(&balanced)
+            .expect("balanced random_read grant is recognized by the engine");
+        EngineDispatcher::validate_capabilities(&legacy)
+            .expect("legacy random_read grant is recognized by the engine");
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn entropy_passes_non_entropy_policy_wrappers_unchanged_bd_opsnv() {
+        use crate::ops::flow_gated_host_io::FlowGatedHostIo;
+        use crate::ops::ssrf_gated_host_io::SsrfGatedHostIo;
+        use frankenengine_extension_host::host_io::{
+            HostIoCapability, HostIoExceptionProvenance, HostIoOutcome, HostIoProvider,
+            HostIoRequest, HostIoResponse,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct RecordingEntropyProvider {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl HostIoProvider for RecordingEntropyProvider {
+            fn name(&self) -> &str {
+                "recording-entropy-provider"
+            }
+
+            fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+                HostIoExceptionProvenance::ProviderInternal
+            }
+
+            fn perform(
+                &self,
+                request: &HostIoRequest,
+                granted: &[HostIoCapability],
+            ) -> HostIoOutcome {
+                assert_eq!(request, &HostIoRequest::RandomRead { byte_len: 4 });
+                assert_eq!(granted, &[HostIoCapability::RandomRead]);
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(HostIoResponse::RandomRead {
+                    bytes: vec![0x10, 0x20, 0x30, 0x40],
+                })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = FlowGatedHostIo::new(
+            SsrfGatedHostIo::new(
+                RecordingEntropyProvider {
+                    calls: Arc::clone(&calls),
+                },
+                "trace-entropy-ssrf",
+            ),
+            "trace-entropy-flow",
+        );
+        let outcome = provider
+            .perform(
+                &HostIoRequest::RandomRead { byte_len: 4 },
+                &[HostIoCapability::RandomRead],
+            )
+            .expect("non-network, non-flow-source entropy passes unchanged");
+        assert_eq!(
+            outcome,
+            HostIoResponse::RandomRead {
+                bytes: vec![0x10, 0x20, 0x30, 0x40]
+            }
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     #[cfg(feature = "engine")]
     const BD_45CK9_PANIC_HOOK_CHILD_ENV: &str = "FRANKEN_NODE_BD_45CK9_PANIC_HOOK_CHILD";
@@ -12887,6 +12981,49 @@ mod tests {
             &ledger.entries,
         )
         .expect("franken_node-side chain integrity");
+        assert_ledger_sdk_verifiable(&ledger);
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn random_read_ledger_commits_entropy_without_rendering_it_bd_opsnv() {
+        use crate::runtime::effect_receipt::{EffectKind, PolicyOutcome};
+        use crate::storage::cas::content_hash;
+        use frankenengine_extension_host::host_io::{HostIoOutcome, HostIoRequest, HostIoResponse};
+
+        let entropy = b"bd-opsnv-raw-entropy-never-rendered".to_vec();
+        let byte_len = u64::try_from(entropy.len()).expect("bounded fixture length");
+        let transcript: Vec<(HostIoRequest, HostIoOutcome)> = vec![(
+            HostIoRequest::RandomRead { byte_len },
+            Ok(HostIoResponse::RandomRead {
+                bytes: entropy.clone(),
+            }),
+        )];
+
+        let ledger = EngineDispatcher::build_host_effect_ledger("trace-random-read", &transcript);
+        assert_eq!(ledger.effect_count, 1);
+        assert_eq!(ledger.allowed_count, 1);
+        assert_eq!(ledger.denied_count, 0);
+        let receipt = &ledger.entries[0].receipt;
+        assert_eq!(receipt.effect_kind, EffectKind::RandomRead);
+        assert!(matches!(
+            &receipt.policy_outcome,
+            PolicyOutcome::Allowed { capability_ref } if capability_ref == "host-io:random_read"
+        ));
+        assert_eq!(receipt.pre_state_hash, content_hash(&[]));
+        assert_eq!(receipt.args_hash, content_hash(&byte_len.to_be_bytes()));
+        assert_eq!(receipt.result_hash.as_ref(), Some(&content_hash(&entropy)));
+        assert_eq!(
+            receipt.post_state_hash.as_ref(),
+            Some(&content_hash(&entropy))
+        );
+
+        let rendered = serde_json::to_string(&ledger).expect("serialize entropy receipt ledger");
+        assert!(!rendered.contains("bd-opsnv-raw-entropy-never-rendered"));
+        crate::runtime::effect_receipt::EffectReceiptChain::verify_entries_integrity(
+            &ledger.entries,
+        )
+        .expect("random-read receipt chain integrity");
         assert_ledger_sdk_verifiable(&ledger);
     }
 

@@ -236,7 +236,8 @@ impl<P: HostIoProvider> HostIoProvider for SsrfGatedHostIo<P> {
             // Filesystem effects carry no network endpoint: delegate unchanged.
             HostIoRequest::FsRead { .. }
             | HostIoRequest::FsWrite { .. }
-            | HostIoRequest::FsMeta { .. } => self.inner.perform(request, granted),
+            | HostIoRequest::FsMeta { .. }
+            | HostIoRequest::RandomRead { .. } => self.inner.perform(request, granted),
         }
     }
 }

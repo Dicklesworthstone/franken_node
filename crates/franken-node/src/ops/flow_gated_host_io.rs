@@ -171,7 +171,8 @@ impl<P: HostIoProvider> HostIoProvider for FlowGatedHostIo<P> {
             // operations such as append and remains a local sink here.
             HostIoRequest::NetworkRecv { .. }
             | HostIoRequest::FsWrite { .. }
-            | HostIoRequest::FsMeta { .. } => self.inner.perform(request, granted),
+            | HostIoRequest::FsMeta { .. }
+            | HostIoRequest::RandomRead { .. } => self.inner.perform(request, granted),
         }
     }
 }

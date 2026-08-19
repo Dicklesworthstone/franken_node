@@ -1168,6 +1168,7 @@ fn effect_kind_tag(kind: EffectKind) -> u8 {
         EffectKind::HttpRequest => 4,
         EffectKind::Spawn => 5,
         EffectKind::ModuleResolve => 6,
+        EffectKind::RandomRead => 7,
     }
 }
 

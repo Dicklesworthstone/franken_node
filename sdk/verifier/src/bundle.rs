@@ -149,6 +149,7 @@ pub enum EffectKind {
     HttpRequest,
     Spawn,
     ModuleResolve,
+    RandomRead,
 }
 
 impl EffectKind {
@@ -160,6 +161,7 @@ impl EffectKind {
             Self::HttpRequest => 4,
             Self::Spawn => 5,
             Self::ModuleResolve => 6,
+            Self::RandomRead => 7,
         }
     }
 
@@ -171,6 +173,7 @@ impl EffectKind {
             Self::HttpRequest => "http_request",
             Self::Spawn => "spawn",
             Self::ModuleResolve => "module_resolve",
+            Self::RandomRead => "random_read",
         }
     }
 }
@@ -2606,6 +2609,16 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn random_read_receipt_kind_matches_product_wire_identity_bd_opsnv() {
+        assert_eq!(EffectKind::RandomRead.tag(), 7);
+        assert_eq!(EffectKind::RandomRead.label(), "random_read");
+        assert_eq!(
+            serde_json::to_string(&EffectKind::RandomRead).expect("serialize effect kind"),
+            "\"random_read\""
+        );
+    }
 
     /// bd-5r99w.12: the verifier SDK re-derives a bare effect-receipt chain — the
     /// `franken-node run --json` host-effect ledger surface — offline, with no

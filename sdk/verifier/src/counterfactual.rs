@@ -309,6 +309,7 @@ fn effect_kind_label(kind: EffectKind) -> &'static str {
         EffectKind::HttpRequest => "http_request",
         EffectKind::Spawn => "spawn",
         EffectKind::ModuleResolve => "module_resolve",
+        EffectKind::RandomRead => "random_read",
     }
 }
 

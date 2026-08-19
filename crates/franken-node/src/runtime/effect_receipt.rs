@@ -67,6 +67,7 @@ pub enum EffectKind {
     HttpRequest,
     Spawn,
     ModuleResolve,
+    RandomRead,
 }
 
 impl EffectKind {
@@ -79,6 +80,7 @@ impl EffectKind {
             EffectKind::HttpRequest => 4,
             EffectKind::Spawn => 5,
             EffectKind::ModuleResolve => 6,
+            EffectKind::RandomRead => 7,
         }
     }
 
@@ -91,6 +93,7 @@ impl EffectKind {
             EffectKind::HttpRequest => "http_request",
             EffectKind::Spawn => "spawn",
             EffectKind::ModuleResolve => "module_resolve",
+            EffectKind::RandomRead => "random_read",
         }
     }
 
@@ -105,7 +108,10 @@ impl EffectKind {
             EffectKind::FsRead => Some("fs.read"),
             EffectKind::FsWrite => Some("fs.write"),
             EffectKind::HttpRequest => Some("http.request"),
-            EffectKind::NetConnect | EffectKind::Spawn | EffectKind::ModuleResolve => None,
+            EffectKind::NetConnect
+            | EffectKind::Spawn
+            | EffectKind::ModuleResolve
+            | EffectKind::RandomRead => None,
         }
     }
 }
@@ -796,6 +802,17 @@ mod tests {
         assert_eq!(
             r.label_set_commitment,
             EFFECT_RECEIPT_EMPTY_LABEL_SET_COMMITMENT
+        );
+    }
+
+    #[test]
+    fn random_read_kind_has_stable_receipt_identity_bd_opsnv() {
+        assert_eq!(EffectKind::RandomRead.tag(), 7);
+        assert_eq!(EffectKind::RandomRead.label(), "random_read");
+        assert_eq!(EffectKind::RandomRead.l1_acceptance_subject(), None);
+        assert_eq!(
+            serde_json::to_string(&EffectKind::RandomRead).expect("serialize effect kind"),
+            "\"random_read\""
         );
     }
 

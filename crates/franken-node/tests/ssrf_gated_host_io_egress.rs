@@ -53,6 +53,9 @@ impl HostIoProvider for RecordingInner {
             HostIoRequest::NetworkRequest { .. } => HostIoResponse::NetworkRequest {
                 response: b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
             },
+            HostIoRequest::RandomRead { byte_len } => HostIoResponse::RandomRead {
+                bytes: vec![0; usize::try_from(*byte_len).expect("bounded test request")],
+            },
         })
     }
 }
