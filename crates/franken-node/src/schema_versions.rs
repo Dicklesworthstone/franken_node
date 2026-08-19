@@ -24,7 +24,7 @@ pub const INCIDENT_LAB: &str = "incident-lab-v1.0";
 pub const AUTHORITY_AUDIT: &str = "aa-v1.0";
 pub const SPECULATION_PROOF_EXECUTOR: &str = "speculation-proof-v1.0";
 pub const EFFECT_RECEIPT: &str = "effect-receipt-v1.1";
-pub const HOST_EFFECT_LEDGER: &str = "host-effect-ledger-v1.0";
+pub const HOST_EFFECT_LEDGER: &str = "host-effect-ledger-v2.0";
 pub const RUN_SENTINEL_REPORT: &str = "runtime_sentinel.run_report.v1";
 
 // ── Control Plane ──────────────────────────────────────────────────

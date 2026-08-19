@@ -31,7 +31,8 @@ use frankenengine_engine::runtime_config::RuntimeConfig as EngineRuntimeConfig;
 #[cfg(feature = "engine")]
 use frankenengine_engine::{
     evidence_ledger::{
-        EvidenceTrustSnapshot, EvidenceVerificationIdentity, RuntimeEvidenceAuthority,
+        EvidenceSignatureEnvelope, EvidenceTrustSnapshot, EvidenceVerificationIdentity,
+        RuntimeEvidenceAuthority,
     },
     security_epoch::SecurityEpoch,
     signature_preimage::SigningKey as EngineEvidenceSigningKey,
@@ -2463,7 +2464,7 @@ pub struct RunDispatchReport {
     pub terminated_by_signal: bool,
     pub telemetry: Option<TelemetryRuntimeReport>,
     pub captured_output: CapturedProcessOutput,
-    /// bd-5r99w.12: the capability-metered, hash-chained ledger of host effects
+    /// bd-5r99w.12: the capability-metered, signed, hash-chained ledger of host effects
     /// the program performed or was denied during this run. `None` for runs that
     /// did not execute through the native effect-producing engine path (e.g.
     /// external-runtime fallbacks). Auto-surfaced in `run --json`.
@@ -2498,9 +2499,11 @@ pub struct RunDispatchReport {
 /// hash-chained, content-addressed [`EffectReceipt`]. The chain is
 /// tamper-evident: `chain_head_hash` commits to the whole sequence and the
 /// verifier SDK re-derives every link offline from `entries` alone (see
-/// `frankenengine_verifier_sdk::verify_effect_chain_entries`). It carries only
-/// content hashes, not the addressed bytes; full CAS byte-binding verification
-/// requires exporting a replay bundle.
+/// `frankenengine_verifier_sdk::verify_effect_chain_entries`). The detached
+/// `signature` then binds the complete ledger to the independently authenticated
+/// runtime-evidence identity, so recomputing a forged chain is not sufficient to
+/// forge evidence. It carries only content hashes, not the addressed bytes; full
+/// CAS byte-binding verification requires exporting a replay bundle.
 ///
 /// An empty `entries` (with `effect_count == 0`) is the honest representation of
 /// "the program produced no host effects" — never fabricated, never deny-only by
@@ -2523,6 +2526,118 @@ pub struct HostEffectLedger {
     /// verifier SDK's `EffectReceiptChainEntry`, so the SDK re-derives the chain
     /// directly from this list.
     pub entries: Vec<crate::runtime::effect_receipt::EffectReceiptChainEntry>,
+    /// Detached runtime-evidence signature over every semantic field above.
+    /// The signer is the short-lived session authority whose public identity is
+    /// independently authenticated by [`RuntimeEvidenceIdentityCapture`].
+    #[cfg(feature = "engine")]
+    pub signature: EvidenceSignatureEnvelope,
+}
+
+#[cfg(feature = "engine")]
+const HOST_EFFECT_LEDGER_SIGNATURE_DOMAIN: &[u8] =
+    b"franken-node:host-effect-ledger-signature:v2\0";
+
+#[cfg(feature = "engine")]
+#[derive(Serialize)]
+struct HostEffectLedgerSignaturePayload<'a> {
+    schema_version: &'a str,
+    trace_id: &'a str,
+    chain_head_hash: &'a str,
+    effect_count: usize,
+    allowed_count: usize,
+    denied_count: usize,
+    entries: &'a [crate::runtime::effect_receipt::EffectReceiptChainEntry],
+}
+
+#[cfg(feature = "engine")]
+fn host_effect_ledger_signature_payload_fields(
+    schema_version: &str,
+    trace_id: &str,
+    chain_head_hash: &str,
+    effect_count: usize,
+    allowed_count: usize,
+    denied_count: usize,
+    entries: &[crate::runtime::effect_receipt::EffectReceiptChainEntry],
+) -> Result<Vec<u8>> {
+    let payload = serde_json::to_vec(&HostEffectLedgerSignaturePayload {
+        schema_version,
+        trace_id,
+        chain_head_hash,
+        effect_count,
+        allowed_count,
+        denied_count,
+        entries,
+    })
+    .context("serialize host-effect ledger signature payload")?;
+    let payload_len = u64::try_from(payload.len())
+        .context("host-effect ledger signature payload is too large")?;
+    let mut preimage = Vec::with_capacity(
+        HOST_EFFECT_LEDGER_SIGNATURE_DOMAIN
+            .len()
+            .saturating_add(8)
+            .saturating_add(payload.len()),
+    );
+    preimage.extend_from_slice(HOST_EFFECT_LEDGER_SIGNATURE_DOMAIN);
+    preimage.extend_from_slice(&payload_len.to_be_bytes());
+    preimage.extend_from_slice(&payload);
+    Ok(preimage)
+}
+
+#[cfg(feature = "engine")]
+fn host_effect_ledger_signature_payload(ledger: &HostEffectLedger) -> Result<Vec<u8>> {
+    host_effect_ledger_signature_payload_fields(
+        &ledger.schema_version,
+        &ledger.trace_id,
+        &ledger.chain_head_hash,
+        ledger.effect_count,
+        ledger.allowed_count,
+        ledger.denied_count,
+        &ledger.entries,
+    )
+}
+
+#[cfg(feature = "engine")]
+fn validate_host_effect_ledger(
+    ledger: &HostEffectLedger,
+    trusted_identity: &EvidenceVerificationIdentity,
+) -> std::result::Result<(), String> {
+    use crate::runtime::effect_receipt::EffectReceiptChain;
+
+    if ledger.schema_version != crate::schema_versions::HOST_EFFECT_LEDGER {
+        return Err(format!(
+            "native-session ledger schema {} did not match {}",
+            ledger.schema_version,
+            crate::schema_versions::HOST_EFFECT_LEDGER
+        ));
+    }
+    if ledger.trace_id.trim().is_empty() {
+        return Err("native-session ledger trace_id was empty".to_string());
+    }
+    if ledger.effect_count != ledger.entries.len() {
+        return Err(format!(
+            "native-session ledger effect_count {} did not match {} entries",
+            ledger.effect_count,
+            ledger.entries.len()
+        ));
+    }
+    if ledger.allowed_count.saturating_add(ledger.denied_count) != ledger.effect_count {
+        return Err("native-session ledger outcome counts were inconsistent".to_string());
+    }
+    EffectReceiptChain::verify_entries_integrity(&ledger.entries)
+        .map_err(|error| format!("native-session ledger integrity failed: {error}"))?;
+    let expected_head = ledger.entries.last().map_or_else(
+        || EffectReceiptChain::new().head_hash(),
+        |entry| entry.chain_hash.clone(),
+    );
+    if ledger.chain_head_hash != expected_head {
+        return Err("native-session ledger chain head was inconsistent".to_string());
+    }
+    let signature_payload = host_effect_ledger_signature_payload(ledger)
+        .map_err(|error| format!("native-session ledger signature payload failed: {error}"))?;
+    ledger
+        .signature
+        .verify_detached(&signature_payload, trusted_identity)
+        .map_err(|error| format!("native-session ledger signature failed: {error}"))
 }
 
 /// Parent-observed state of one provider call in a native-session write-ahead
@@ -5257,41 +5372,6 @@ impl EngineDispatcher {
             (!failures.is_empty()).then(|| failures.join("; "))
         }
 
-        fn validate_ledger(ledger: &HostEffectLedger) -> std::result::Result<(), String> {
-            use crate::runtime::effect_receipt::EffectReceiptChain;
-
-            if ledger.schema_version != crate::schema_versions::HOST_EFFECT_LEDGER {
-                return Err(format!(
-                    "native-session ledger schema {} did not match {}",
-                    ledger.schema_version,
-                    crate::schema_versions::HOST_EFFECT_LEDGER
-                ));
-            }
-            if ledger.trace_id.trim().is_empty() {
-                return Err("native-session ledger trace_id was empty".to_string());
-            }
-            if ledger.effect_count != ledger.entries.len() {
-                return Err(format!(
-                    "native-session ledger effect_count {} did not match {} entries",
-                    ledger.effect_count,
-                    ledger.entries.len()
-                ));
-            }
-            if ledger.allowed_count.saturating_add(ledger.denied_count) != ledger.effect_count {
-                return Err("native-session ledger outcome counts were inconsistent".to_string());
-            }
-            EffectReceiptChain::verify_entries_integrity(&ledger.entries)
-                .map_err(|error| format!("native-session ledger integrity failed: {error}"))?;
-            let expected_head = ledger.entries.last().map_or_else(
-                || EffectReceiptChain::new().head_hash(),
-                |entry| entry.chain_hash.clone(),
-            );
-            if ledger.chain_head_hash != expected_head {
-                return Err("native-session ledger chain head was inconsistent".to_string());
-            }
-            Ok(())
-        }
-
         let app_path_buf = app_path.to_path_buf();
         let working_dir = std::env::current_dir().map_err(|error| {
             let dispatch_error = EngineDispatchError::EngineExecutionError {
@@ -5927,7 +6007,11 @@ impl EngineDispatcher {
                     .to_actionable()
                 })?;
                 if let Some(ledger) = host_effect_ledger.as_ref() {
-                    validate_ledger(ledger).map_err(|message| {
+                    validate_host_effect_ledger(
+                        ledger,
+                        &expected_evidence_capture.evidence_verification_identity,
+                    )
+                    .map_err(|message| {
                         EngineDispatchError::EngineExecutionError {
                             app_path: app_path_buf.clone(),
                             error_message: message,
@@ -6025,7 +6109,10 @@ impl EngineDispatcher {
                 // an evidence-protocol fault must never hide the execution
                 // failure that is the operator's actual problem.
                 let (host_effect_ledger, evidence_note) = match host_effect_ledger {
-                    Some(ledger) => match validate_ledger(&ledger) {
+                    Some(ledger) => match validate_host_effect_ledger(
+                        &ledger,
+                        &expected_evidence_capture.evidence_verification_identity,
+                    ) {
                         Ok(()) => (Some(ledger), String::new()),
                         Err(rejection) => (
                             None,
@@ -6820,6 +6907,8 @@ impl EngineDispatcher {
 
         let ambient_authority_grant = Self::map_profile_to_ambient_authority_grant(config.profile);
         let expected_evidence_identity = evidence_authority.verification_identity();
+        let host_effect_ledger_authority = evidence_authority.clone();
+        let host_effect_ledger_epoch = security_epoch_for_profile(config.profile);
         let mut orchestrator = ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
             orchestrator_config,
             runtime_config,
@@ -6992,8 +7081,8 @@ impl EngineDispatcher {
                     // only its evidence is recovered, never fabricated: the
                     // ledger is omitted entirely when the engine could not
                     // certify the attempt's effect boundary.
-                    let host_effect_ledger =
-                        orchestrator.last_failed_trace_id().map(|failed_trace_id| {
+                    let host_effect_ledger = match orchestrator.last_failed_trace_id() {
+                        Some(failed_trace_id) => Some(
                             Self::build_host_effect_journal_ledger(
                                 failed_trace_id,
                                 orchestrator.last_failed_host_effect_journal(),
@@ -7003,8 +7092,20 @@ impl EngineDispatcher {
                                     .child_process_spawn
                                     .as_ref()
                                     .map(|configured| &configured.execution_policy),
+                                &host_effect_ledger_authority,
+                                host_effect_ledger_epoch,
                             )
-                        });
+                            .map_err(|signing_error| {
+                                native_engine_spawn_error_with_telemetry_cleanup(
+                                    format!(
+                                        "Native execution failed and its host-effect ledger could not be signed: {signing_error}"
+                                    ),
+                                    &mut telemetry_guard,
+                                )
+                            })?,
+                        ),
+                        None => None,
+                    };
                     if let Some(ledger) = host_effect_ledger.as_ref() {
                         tracing::info!(
                             execution_mode = "native",
@@ -7054,13 +7155,23 @@ impl EngineDispatcher {
                     .child_process_spawn
                     .as_ref()
                     .map(|configured| &configured.execution_policy),
+                &host_effect_ledger_authority,
+                host_effect_ledger_epoch,
             )
         } else {
             Self::build_host_effect_ledger(
                 &execution_result.trace_id,
                 &execution_result.host_effect_transcript,
+                &host_effect_ledger_authority,
+                host_effect_ledger_epoch,
             )
-        };
+        }
+        .map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                format!("Failed signing native host-effect ledger: {error}"),
+                &mut telemetry_guard,
+            )
+        })?;
         tracing::info!(
             execution_mode = "native",
             phase = "execution",
@@ -7131,7 +7242,9 @@ impl EngineDispatcher {
             frankenengine_extension_host::host_io::HostIoRequest,
             frankenengine_extension_host::host_io::HostIoOutcome,
         )],
-    ) -> HostEffectLedger {
+        signing_authority: &RuntimeEvidenceAuthority,
+        signed_epoch: SecurityEpoch,
+    ) -> Result<HostEffectLedger> {
         let journal = transcript
             .iter()
             .map(|(request, outcome)| HostEffectJournalEntry::HostIo {
@@ -7139,7 +7252,14 @@ impl EngineDispatcher {
                 outcome: outcome.clone(),
             })
             .collect::<Vec<_>>();
-        Self::build_host_effect_journal_ledger(trace_id, &journal, None, None)
+        Self::build_host_effect_journal_ledger(
+            trace_id,
+            &journal,
+            None,
+            None,
+            signing_authority,
+            signed_epoch,
+        )
     }
 
     /// Harvest the globally ordered journal used when extraordinary process
@@ -7152,7 +7272,9 @@ impl EngineDispatcher {
         journal: &[HostEffectJournalEntry],
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
         process_execution_policy: Option<&crate::config::ChildProcessExecutionPolicy>,
-    ) -> HostEffectLedger {
+        signing_authority: &RuntimeEvidenceAuthority,
+        signed_epoch: SecurityEpoch,
+    ) -> Result<HostEffectLedger> {
         use crate::runtime::effect_receipt::{
             EFFECT_RECEIPT_EMPTY_LINEAGE_HASH, EffectKind, EffectLineageFields, EffectReceipt,
             EffectReceiptChain, FlowPolicyVerdict,
@@ -7634,15 +7756,34 @@ impl EngineDispatcher {
             }
         }
 
-        HostEffectLedger {
-            schema_version: crate::schema_versions::HOST_EFFECT_LEDGER.to_string(),
-            trace_id: trace_id.to_string(),
-            chain_head_hash: chain.head_hash(),
-            effect_count: chain.len(),
+        let schema_version = crate::schema_versions::HOST_EFFECT_LEDGER.to_string();
+        let trace_id = trace_id.to_string();
+        let chain_head_hash = chain.head_hash();
+        let effect_count = chain.len();
+        let entries = chain.entries().to_vec();
+        let signature_payload = host_effect_ledger_signature_payload_fields(
+            &schema_version,
+            &trace_id,
+            &chain_head_hash,
+            effect_count,
             allowed_count,
             denied_count,
-            entries: chain.entries().to_vec(),
-        }
+            &entries,
+        )?;
+        let signature = signing_authority
+            .sign_detached(&signature_payload, signed_epoch)
+            .context("sign host-effect ledger with runtime evidence authority")?;
+
+        Ok(HostEffectLedger {
+            schema_version,
+            trace_id,
+            chain_head_hash,
+            effect_count,
+            allowed_count,
+            denied_count,
+            entries,
+            signature,
+        })
     }
 
     #[cfg(any(not(feature = "engine"), test))]
@@ -7948,6 +8089,19 @@ mod tests {
             signing_seed,
             capture,
         }
+    }
+
+    #[cfg(feature = "engine")]
+    fn host_effect_ledger_authority_for_test() -> RuntimeEvidenceAuthority {
+        RuntimeEvidenceAuthority::from_signing_key(
+            "franken-node.test-host-effect-ledger",
+            EngineEvidenceSigningKey::from_bytes([0xA7; 32])
+                .expect("valid test host-effect ledger seed"),
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+            1,
+            None,
+        )
+        .expect("construct test host-effect ledger authority")
     }
 
     #[cfg(feature = "engine")]
@@ -12816,8 +12970,9 @@ mod tests {
     /// Round-trip a host-effect ledger through the PUBLIC verifier SDK exactly as
     /// an external auditor would: serialize the ledger's entries (the `run --json`
     /// surface), deserialize them into the SDK's wire types, and re-derive the
-    /// hash chain offline. This proves the ledger is SDK-verifiable without
-    /// trusting the runtime that produced it.
+    /// inner hash chain offline. Runtime-identity signature verification is a
+    /// separate product-boundary check because the compact SDK currently exposes
+    /// only the receipt-chain wire contract.
     #[cfg(feature = "engine")]
     fn assert_ledger_sdk_verifiable(ledger: &HostEffectLedger) {
         let entries_json =
@@ -12859,7 +13014,7 @@ mod tests {
         let bridge = TelemetryBridge::new(socket_path.to_str().expect("utf8"), adapter);
         let handle = bridge.start().expect("start telemetry bridge");
 
-        let (_output, _telemetry, ledger, _evidence_identity) =
+        let (_output, _telemetry, ledger, evidence_identity) =
             EngineDispatcher::run_engine_native(&app, &config, "legacy-risky", handle)
                 .expect("native run succeeds");
         let ledger = ledger.expect("native path always surfaces a host-effect ledger");
@@ -12889,6 +13044,8 @@ mod tests {
             ledger.schema_version,
             crate::schema_versions::HOST_EFFECT_LEDGER
         );
+        validate_host_effect_ledger(&ledger, &evidence_identity)
+            .expect("real native-run ledger signature verifies against its runtime identity");
 
         // The ledger auto-surfaces in `run --json` via the dispatch report.
         let report = EngineDispatcher::build_dispatch_report(DispatchReportInputs {
@@ -12918,7 +13075,7 @@ mod tests {
         );
         assert!(json.contains("\"fs_write\"") && json.contains("\"fs_read\""));
 
-        // Tamper-evident chain + offline verifier-SDK re-derivation.
+        // Signed ledger + offline verifier-SDK re-derivation of its inner chain.
         crate::runtime::effect_receipt::EffectReceiptChain::verify_entries_integrity(
             &ledger.entries,
         )
@@ -12958,7 +13115,14 @@ mod tests {
             ),
         ];
 
-        let ledger = EngineDispatcher::build_host_effect_ledger("trace-bd-5r99w-12", &transcript);
+        let signing_authority = host_effect_ledger_authority_for_test();
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "trace-bd-5r99w-12",
+            &transcript,
+            &signing_authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .expect("sign host-effect ledger");
 
         assert_eq!(ledger.effect_count, 2);
         assert_eq!(ledger.allowed_count, 1);
@@ -13000,7 +13164,15 @@ mod tests {
             }),
         )];
 
-        let ledger = EngineDispatcher::build_host_effect_ledger("trace-random-read", &transcript);
+        let signing_authority = host_effect_ledger_authority_for_test();
+        let trusted_identity = signing_authority.verification_identity();
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "trace-random-read",
+            &transcript,
+            &signing_authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .expect("sign random-read host-effect ledger");
         assert_eq!(ledger.effect_count, 1);
         assert_eq!(ledger.allowed_count, 1);
         assert_eq!(ledger.denied_count, 0);
@@ -13024,7 +13196,49 @@ mod tests {
             &ledger.entries,
         )
         .expect("random-read receipt chain integrity");
+        validate_host_effect_ledger(&ledger, &trusted_identity)
+            .expect("random-read receipt signature verifies");
         assert_ledger_sdk_verifiable(&ledger);
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn recomputed_random_read_chain_cannot_forge_runtime_signature_bd_opsnv() {
+        use crate::runtime::effect_receipt::EffectReceiptChain;
+        use crate::storage::cas::content_hash;
+        use frankenengine_extension_host::host_io::{HostIoOutcome, HostIoRequest, HostIoResponse};
+
+        let transcript: Vec<(HostIoRequest, HostIoOutcome)> = vec![(
+            HostIoRequest::RandomRead { byte_len: 4 },
+            Ok(HostIoResponse::RandomRead {
+                bytes: vec![1, 2, 3, 4],
+            }),
+        )];
+        let signing_authority = host_effect_ledger_authority_for_test();
+        let trusted_identity = signing_authority.verification_identity();
+        let mut ledger = EngineDispatcher::build_host_effect_ledger(
+            "trace-random-read-forgery",
+            &transcript,
+            &signing_authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .expect("sign original random-read ledger");
+
+        let mut forged_receipt = ledger.entries[0].receipt.clone();
+        forged_receipt.result_hash = Some(content_hash(b"attacker-chosen-entropy"));
+        forged_receipt.post_state_hash = forged_receipt.result_hash.clone();
+        let mut attacker_chain = EffectReceiptChain::new();
+        attacker_chain
+            .append(forged_receipt)
+            .expect("attacker can recompute an internally consistent hash chain");
+        ledger.entries = attacker_chain.entries().to_vec();
+        ledger.chain_head_hash = attacker_chain.head_hash();
+
+        EffectReceiptChain::verify_entries_integrity(&ledger.entries)
+            .expect("forged chain is internally self-consistent");
+        let rejection = validate_host_effect_ledger(&ledger, &trusted_identity)
+            .expect_err("session signature must reject a recomputed forged chain");
+        assert!(rejection.contains("signature failed"), "{rejection}");
     }
 
     /// bd-x85a7/bd-at11s: process effects share the same journal and signed
@@ -13086,13 +13300,17 @@ mod tests {
             u64::MAX,
             PathBuf::from("/usr/bin/bwrap"),
         );
+        let signing_authority = host_effect_ledger_authority_for_test();
 
         let ledger = EngineDispatcher::build_host_effect_journal_ledger(
             "trace-process-ledger",
             &journal,
             Some(&admission),
             None,
-        );
+            &signing_authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .expect("sign process host-effect ledger");
 
         assert_eq!(ledger.effect_count, 3);
         assert_eq!(ledger.allowed_count, 2);
@@ -13144,7 +13362,10 @@ mod tests {
             &journal[1..2],
             None,
             None,
-        );
+            &signing_authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .expect("sign missing-admission host-effect ledger");
         assert_eq!(missing_admission.allowed_count, 0);
         assert_eq!(missing_admission.denied_count, 1);
         assert!(matches!(
@@ -13206,12 +13427,16 @@ mod tests {
             u64::MAX,
             PathBuf::from("/usr/bin/bwrap"),
         );
+        let signing_authority = host_effect_ledger_authority_for_test();
         let ledger = EngineDispatcher::build_host_effect_journal_ledger(
             "trace-process-response-lineage",
             &journal,
             Some(&admission),
             None,
-        );
+            &signing_authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .expect("sign process response-lineage ledger");
 
         assert_eq!(
             ledger.entries[1].receipt.label_set_commitment,
@@ -13290,7 +13515,14 @@ mod tests {
             ),
         ];
 
-        let ledger = EngineDispatcher::build_host_effect_ledger("trace-bd-b0hm6", &transcript);
+        let signing_authority = host_effect_ledger_authority_for_test();
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "trace-bd-b0hm6",
+            &transcript,
+            &signing_authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .expect("sign fs-meta host-effect ledger");
         assert_eq!(ledger.effect_count, 3);
         assert_eq!(ledger.allowed_count, 2);
         assert_eq!(ledger.denied_count, 1);
@@ -13329,7 +13561,14 @@ mod tests {
                     result: FsMetaResult::Unit,
                 }),
             )];
-            EngineDispatcher::build_host_effect_ledger("trace-frame-probe", &probe).entries[0]
+            EngineDispatcher::build_host_effect_ledger(
+                "trace-frame-probe",
+                &probe,
+                &signing_authority,
+                SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+            )
+            .expect("sign framed host-effect ledger")
+            .entries[0]
                 .receipt
                 .args_hash
                 .clone()
