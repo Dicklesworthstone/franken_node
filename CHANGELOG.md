@@ -28,7 +28,7 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   policy decision (balanced / conservative / permissive thresholds), emitting
   recommended operator actions in JSON or human form. Implementation lives in
   `crates/franken-node/src/ops/doctor.rs` and is documented in
-  `BD_P9MPD5_IMPLEMENTATION.md` (bd-p9mpd.5).
+  `docs/progress/BD_P9MPD5_IMPLEMENTATION.md` (bd-p9mpd.5).
 - `franken-node ops resource-governor`: advisory subcommand that takes a
   process snapshot plus requested/active proof classes, RCH queue depth, and
   target-dir usage, and answers whether validation should run, defer, or
@@ -59,14 +59,14 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
 - Cleanup executor with audit receipts (bd-p9mpd.7): age- and extension-aware
   cleanup driven through `ops/cleanup_executor.rs` and durable
   `storage/cleanup_receipts.rs`, with dry-run/execute modes and full
-  store→search→retrieve→delete lifecycle. See `BD_P9MPD7_IMPLEMENTATION.md`.
+  store→search→retrieve→delete lifecycle. See `docs/progress/BD_P9MPD7_IMPLEMENTATION.md`.
 - Flight-recorder hygiene tracking (bd-iwa3z): `FlightRecorderTargetDir`
   wraps a `FlightRecorderTargetDirHygiene` (status enum
   `clean/stale/dirty/mixed/unknown`) plus a `FlightRecorderSyncRootHygiene`
   (status enum `clean/modified/untracked/conflicted/unknown`), and
   surfaces artifact-count, stale-artifact-count, and size analysis
   through the validation broker (`ops/validation_broker.rs`).
-  See `BD_IWA3Z_IMPLEMENTATION.md`.
+  See `docs/progress/BD_IWA3Z_IMPLEMENTATION.md`.
 
 #### Validation infrastructure
 
@@ -161,11 +161,11 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
 - `beads_compliance_audit/closer_discipline_memo.md` (2026-05-12)
   documents the false-closed bead anti-pattern and three-fix roadmap
   (checklist, pre-commit guard, CI gate).
-- BD implementation memos at repo root:
-  `BD_IWA3Z_IMPLEMENTATION.md` (flight-recorder hygiene),
-  `BD_P9MPD5_IMPLEMENTATION.md` (workspace-pressure doctor),
-  `BD_P9MPD7_IMPLEMENTATION.md` (cleanup executor + receipts),
-  `BD_SH95A_IMPLEMENTATION.md` (RCH fixture-replay E2E patterns).
+- BD implementation memos in `docs/progress/`:
+  `docs/progress/BD_IWA3Z_IMPLEMENTATION.md` (flight-recorder hygiene),
+  `docs/progress/BD_P9MPD5_IMPLEMENTATION.md` (workspace-pressure doctor),
+  `docs/progress/BD_P9MPD7_IMPLEMENTATION.md` (cleanup executor + receipts),
+  `docs/progress/BD_SH95A_IMPLEMENTATION.md` (RCH fixture-replay E2E patterns).
 
 ### Changed
 
@@ -355,7 +355,7 @@ hardening, validation infrastructure, operator tooling, and CI gate work.
   timeout E104, missing toolchain, filesystem pressure, local fallback
   refusal, cargo contention deferral, source-only blocking, product
   compile failure) in `tests/e2e_rch_validation_fixture_replay.rs`
-  (bd-sh95a, `BD_SH95A_IMPLEMENTATION.md`).
+  (bd-sh95a, `docs/progress/BD_SH95A_IMPLEMENTATION.md`).
 
 ### Tooling and CI
 
