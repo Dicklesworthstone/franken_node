@@ -970,9 +970,7 @@ fn ccg_runtime_observation_digest_cross_language_pin_bd_2djfa_4() {
         },
     })];
     let result_digest =
-        frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(
-            &rows,
-        );
+        frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(&rows);
     assert_eq!(
         result_digest,
         "sha256:bef4696695c64de2faa63b843567054d445da98e62f969485aa8137b5002789a"
@@ -993,21 +991,19 @@ fn ccg_runtime_observation_digest_cross_language_pin_bd_2djfa_4() {
     )
     .expect("runtime observation digest");
     assert_eq!(
-        digest,
-        "sha256:1ab42659e6407b492f5f57af96cf5fece52a61573d47e39c18c668c182ffe47e",
+        digest, "sha256:1ab42659e6407b492f5f57af96cf5fece52a61573d47e39c18c668c182ffe47e",
         "runtime observation digest drifted from the Python gate"
     );
 }
 
-/// bd-ihusm: a corpus whose provenance is authored/synthesized (the real
-/// committed artifact's honest state) must fail the L1 leg closed even when
-/// every other leg is valid — synthesized totals can never satisfy the ship
-/// gate.
+/// bd-ihusm: a corpus whose provenance is authored/synthesized must fail the
+/// L1 leg closed even when every other leg is valid — synthesized totals can
+/// never satisfy the ship gate.
 #[test]
 fn doctor_close_condition_fails_l1_on_authored_corpus_provenance_bd_ihusm() {
     let root = fixture_root();
-    // Start from the valid GREEN baseline, then flip provenance to the honest
-    // "authored" label the real artifact carries.
+    // Start from the valid GREEN baseline, then flip provenance to the
+    // explicitly non-operational "authored" label.
     let corpus_path = root
         .path()
         .join("artifacts/13/compatibility_corpus_results.json");
@@ -1072,7 +1068,10 @@ fn online_per_test_results(passed: u64, failed: u64) -> Vec<Value> {
 /// recomputed from `per_tests` by the same helper the gate uses — so the
 /// fixture represents a valid (not synthesized) artifact.
 fn online_corpus_meta(per_tests: &[Value]) -> Value {
-    let result_digest = frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(per_tests);
+    let result_digest =
+        frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(
+            per_tests,
+        );
     let runtime_versions = BTreeMap::from([
         ("bun".to_string(), "1.3.14-test".to_string()),
         (
