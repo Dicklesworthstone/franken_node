@@ -7,13 +7,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Per-vector test data has its own log in [`vectors/CHANGELOG.md`](vectors/CHANGELOG.md).
 
-Scope: this file tracks the `frankenengine-node` Rust crate (binary
+Scope window: 2026-04-25 through HEAD
+[`07d1e66af`](https://github.com/Dicklesworthstone/franken_node/commit/07d1e66afbe026718fc853b7f5bc55cbb74a5110)
+(2026-08-19), with the previous Unreleased cut ending 2026-05-16.
+
+This file tracks the `frankenengine-node` Rust crate (binary
 `franken-node`) and its companion crates `franken-security-macros` and
 `frankenengine-verifier-sdk`. Task references use the project's local Beads
-tracker (`br-…` / `bd-…` IDs stored under `.beads/`); commits referenced by
-shorthash are reachable with `git show <hash>`.
+tracker (`br-…` / `bd-…` IDs stored under `.beads/`).
+
+## Version Timeline
+
+| Version | Kind | Date | Summary |
+|---------|------|------|---------|
+| `main` @ [`07d1e66af`](https://github.com/Dicklesworthstone/franken_node/commit/07d1e66afbe026718fc853b7f5bc55cbb74a5110) | Unreleased `main` tip (not a tag, not a Release) | 2026-08-19 | Current window: lockstep observations, host-effect ledger v2, janitor docs-reorg. |
+| [`v0.1.0`](https://github.com/Dicklesworthstone/franken_node/releases/tag/v0.1.0) | Published GitHub Release | 2026-05-29 | Only GitHub Release in this repo. Tag points at [`08e1edf11`](https://github.com/Dicklesworthstone/franken_node/commit/08e1edf11f262693202d6466ba2392de9f3f3e4b). |
 
 ## [Unreleased]
+
+Two windows live under this heading. The **current window** is 2026-05-17
+through [`07d1e66af`](https://github.com/Dicklesworthstone/franken_node/commit/07d1e66afbe026718fc853b7f5bc55cbb74a5110)
+(2026-08-19): 1,303 non-merge commits after the previous changelog cut.
+Cargo remains `0.1.0`. The only GitHub Release in this repo is
+[`v0.1.0`](https://github.com/Dicklesworthstone/franken_node/releases/tag/v0.1.0)
+(published 2026-05-29; the `v0.1.0` tag points at
+[`08e1edf11`](https://github.com/Dicklesworthstone/franken_node/commit/08e1edf11f262693202d6466ba2392de9f3f3e4b)).
+There is no later tag and no later Release.
+
+The previous window (2026-04-25 through 2026-05-16) is preserved below it.
+
+### Current window (2026-05-17 → 2026-08-19)
+
+#### First published Release (`v0.1.0`, 2026-05-29)
+
+This is a real GitHub Release, not a tag-only marker. The tag itself is a
+Windows telemetry-bridge portability commit; the Release page is
+[`releases/tag/v0.1.0`](https://github.com/Dicklesworthstone/franken_node/releases/tag/v0.1.0).
+
+#### Verification gauntlet, fuzz honesty, and closer-discipline (May)
+
+The `bd-rjc2m` verification-scaffolding wave landed an aggregate-validators
+gate and gauntlet-remediation infra. Fuzz targets that had been coverage
+theater grew real security assertions (digest integrity, timing, threshold
+signatures, manifests). Concurrent lock recovery replaced poison-cascade
+`.unwrap()` paths.
+
+**Representative commits**
+- [`651e454f2`](https://github.com/Dicklesworthstone/franken_node/commit/651e454f2bfff676c3dd06b659eea3e7aef71bc8) — `feat(verification-scaffolding): bd-rjc2m.VALWIRE — aggregate-validators-gate`
+
+#### Reality-alignment, SSRF-gated host I/O, Honesty Manifest (June)
+
+`run --json` grew a signed, SDK-verifiable host-effect ledger. Network
+requests on the run path go through `[security.network_policy]` and record
+the HTTP response in that ledger (`bd-3894s` / `bd-656a2`). The Honesty
+Manifest became a signed, SDK-recomputable claims artifact with a CI
+recompute gate (`bd-5r99w`). MCP gained a control-surface catalog,
+audience-gated mutations, and replayable delegated sessions.
+
+**Representative commits**
+- [`80f1bbf3a`](https://github.com/Dicklesworthstone/franken_node/commit/80f1bbf3a53e103f0b133cf077ded5f65ca5bee0) — `feat(run): surface signed, SDK-verifiable host-effect ledger in run --json (bd-5r99w.12)`
+- [`7b9372dea`](https://github.com/Dicklesworthstone/franken_node/commit/7b9372dea6b0d8ca7215daa53690a181ac6d61bc) — `feat(ssrf): wire [security.network_policy] into run gate + http-run e2e`
+- [`7486ffcf0`](https://github.com/Dicklesworthstone/franken_node/commit/7486ffcf0540bd15a6cef23598e78659b86a0f23) — `feat(reality-alignment): signed SDK-recomputable Honesty Manifest (bd-5r99w.9)`
+
+#### Native spawn authority, lockstep corpus, flow gates (July)
+
+Authenticated run-scoped `child_process` spawn authority landed, with
+execution-policy config (`bd-ztr5v`). Compatibility grew a genuine
+560-case lockstep corpus and an `ops compat-corpus-run` producer
+(`bd-kfseq`). `FlowGatedHostIo` labels secret flows on the run path and
+refuses secret network egress before the socket (`bd-n1bym` / `bd-plhag`).
+Product-root runtime evidence handoff for native sessions closed
+`bd-fzpkz`.
+
+**Representative commits**
+- [`09edf24ff`](https://github.com/Dicklesworthstone/franken_node/commit/09edf24ff8ef9327df0935daea36f323b8eb419c) — `feat(security): gate process spawn admission (bd-ztr5v)`
+- [`38675b9cd`](https://github.com/Dicklesworthstone/franken_node/commit/38675b9cde97362a24472d27c8212ceeba0c2173) — `feat(compat-corpus): genuine 560-case lockstep corpus + ops compat-corpus-run producer (bd-kfseq)`
+- [`72d0c681c`](https://github.com/Dicklesworthstone/franken_node/commit/72d0c681c136c2c13380bea4eb36acbfd693df47) — `feat(flow): FlowGatedHostIo prevents secret network egress before the socket (bd-n1bym)`
+- [`5c1a377ab`](https://github.com/Dicklesworthstone/franken_node/commit/5c1a377abcbe0b5a3f54f68ed6463f995c90b3e9) — `feat(engine): product-root runtime evidence handoff for native sessions (bd-fzpkz)`
+
+#### Lockstep observations, host-effect ledger v2, inline-lane closeout (August)
+
+Release close-condition evidence now binds to an exact source pair, an
+exact GHA run attempt, and a genuine Node+Bun+product lockstep triad
+(`bd-2djfa`). Per-runtime lockstep observations attach without leaking raw
+I/O (`bd-2djfa.4`); truncated or divergent legs cannot pass. Host-effect
+ledgers sign as v2 runtime evidence; CSPRNG reads are a first-class
+`random_read` effect (`bd-opsnv`). The `bd-o776s` inline-lane reconciliation
+closed the Half-A / Half-B residual clusters. Docs-truth drift became a
+recurrent gate (`bd-15zqy`).
+
+**Representative commits**
+- [`0e554ac2e`](https://github.com/Dicklesworthstone/franken_node/commit/0e554ac2e6d50ad326ffa57803c62f80d1a4d241) — `feat(release): require a genuine Node+Bun+product lockstep triad`
+- [`9d5f969ed`](https://github.com/Dicklesworthstone/franken_node/commit/9d5f969edee4bd5c08d70087f3d89047e642cefe) — `feat(compat): bind per-runtime lockstep observations without leaking raw IO (bd-2djfa.4)`
+- [`6c02eaece`](https://github.com/Dicklesworthstone/franken_node/commit/6c02eaece0bb2ab3ab05ef985c25b6ae05e49f1b) — `feat(ledger): sign host-effect ledgers as v2 runtime evidence (bd-opsnv)`
+- [`83ba8eece`](https://github.com/Dicklesworthstone/franken_node/commit/83ba8eece82f006479f05cf2e91bdbb5991f47e5) — `fix(inline-lane): reconcile the 42 runtime-cluster inline failures (bd-o776s)`
+- [`7454bd234`](https://github.com/Dicklesworthstone/franken_node/commit/7454bd234e2b909435aa86b9248ff4c1d22fd4d9) — `fix(governance): make docs-truth drift gate recurrent (bd-15zqy)`
+
+#### Janitor docs-reorg (2026-08-19)
+
+Root MODE_OUTPUT reports moved to
+[`docs/planning/modes/`](https://github.com/Dicklesworthstone/franken_node/tree/main/docs/planning/modes)
+(`MODE_OUTPUT_B1`, `F4`, `F5`, `G1`, `H1`, `H2`, `I4`, `L2`). BD
+implementation memos moved to
+[`docs/progress/`](https://github.com/Dicklesworthstone/franken_node/tree/main/docs/progress)
+(`BD_IWA3Z`, `BD_P9MPD5`, `BD_P9MPD7`, `BD_SH95A`). Root rustc scratch that
+was never in the cargo test graph (`test_hygiene.rs`,
+`test_race_condition_fix.rs`, `test_validation_readiness_compile.rs`,
+`get_golden_hashes.rs`, `syntax_check.rs`) was dropped. Skill-loop scratch
+is untracked. Citations in this file were retargeted in the same window.
+
+**Representative commits**
+- [`8fb109ddf`](https://github.com/Dicklesworthstone/franken_node/commit/8fb109ddf112a11a637bb20aa87a70f3115b0e4e) — `chore(janitor): untrack skill-loop scratch; move root planning docs into docs/planning/`
+- [`230d3c9e5`](https://github.com/Dicklesworthstone/franken_node/commit/230d3c9e589d89e949bf6b7abfb35be1516132be) — `chore(janitor): drop root rustc scratch that is not in the cargo test graph`
+- [`746c2aa8e`](https://github.com/Dicklesworthstone/franken_node/commit/746c2aa8e4d4723ed6ca2cd86580d9a3963b8e29) — `chore(janitor): drop agent-identity leaks and root scratch artifacts`
+- [`07d1e66af`](https://github.com/Dicklesworthstone/franken_node/commit/07d1e66afbe026718fc853b7f5bc55cbb74a5110) — `chore(janitor): relocate remaining root reports and planning docs`
+
+### Previous window (2026-04-25 → 2026-05-16)
 
 This window covers work landed on `main` between the previous changelog cut
 (2026-04-25) and 2026-05-16: roughly 1,500+ commits across security

@@ -2987,6 +2987,8 @@ Beyond the README, the most-used reference documents under
 | [`runbooks/README.md`](docs/runbooks/README.md) | Index of operational runbooks |
 | [`specs/`](docs/specs/) | 100+ contract specifications, one per gate/protocol |
 | [`adr/`](docs/adr/) | Architecture decision records |
+| [`planning/`](docs/planning/) | Relocated MODE_OUTPUT reports under `docs/planning/modes/` |
+| [`progress/`](docs/progress/) | Relocated BD implementation memos (`BD_IWA3Z`, `BD_P9MPD5`, `BD_P9MPD7`, `BD_SH95A`) |
 
 Spec documents are part of the product contract: changes there must
 land alongside the corresponding `scripts/check_<gate>.py` and
