@@ -132,6 +132,75 @@ def source_revision(node=NODE_REVISION, engine=ENGINE_REVISION):
     }
 
 
+def successful_runtime_observation(elapsed_ms=1):
+    empty_digest = f"sha256:{hashlib.sha256(b'').hexdigest()}"
+    return {
+        "stdout_digest": empty_digest,
+        "stderr_digest": empty_digest,
+        "stdout_bytes": 0,
+        "stderr_bytes": 0,
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+        "exit_code": 0,
+        "termination_kind": "exited",
+        "timed_out": False,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+def bind_runtime_observations(document, *, topology="triad"):
+    from scripts.check_compatibility_corpus_pass_gate import (
+        RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+        compute_runtime_observations_digest,
+    )
+
+    runtime_ids = ["bun", "franken-engine-native"]
+    references = [
+        {
+            "runtime_id": "bun",
+            "runtime_name": "bun",
+            "version": "1.3.14",
+            "is_reference": True,
+        }
+    ]
+    if topology == "triad":
+        runtime_ids.append("node")
+        references.insert(
+            0,
+            {
+                "runtime_id": "node",
+                "runtime_name": "node",
+                "version": "v22.14.0",
+                "is_reference": True,
+            },
+        )
+    for index, row in enumerate(document["per_test_results"]):
+        row["runtime_observations"] = {
+            runtime_id: successful_runtime_observation(index + offset + 1)
+            for offset, runtime_id in enumerate(runtime_ids)
+        }
+    corpus = document["corpus"]
+    corpus.update(
+        {
+            "runtime_observations_schema_version": (
+                RUNTIME_OBSERVATIONS_SCHEMA_VERSION
+            ),
+            "lockstep_topology": topology,
+            "reference_runtimes": references,
+            "product_runtime": {
+                "runtime_id": "franken-engine-native",
+                "runtime_name": "franken-engine-native",
+                "version": "0.1.0",
+                "is_reference": False,
+            },
+        }
+    )
+    corpus["runtime_observations_digest"] = compute_runtime_observations_digest(
+        document
+    )
+    return document
+
+
 def release_corpus(proof, generated_at):
     from scripts.check_compatibility_corpus_pass_gate import compute_result_digest
 
@@ -145,33 +214,12 @@ def release_corpus(proof, generated_at):
         }
         for index in range(20)
     ]
-    return {
+    document = {
         "corpus": {
             "provenance": "lockstep-oracle-run",
             "generated_at_utc": generated_at,
             "result_digest": compute_result_digest(rows),
             "source_revision": source_revision(),
-            "lockstep_topology": "triad",
-            "reference_runtimes": [
-                {
-                    "runtime_id": "node",
-                    "runtime_name": "node",
-                    "version": "v22.14.0",
-                    "is_reference": True,
-                },
-                {
-                    "runtime_id": "bun",
-                    "runtime_name": "bun",
-                    "version": "1.3.14",
-                    "is_reference": True,
-                },
-            ],
-            "product_runtime": {
-                "runtime_id": "franken-engine-native",
-                "runtime_name": "franken-engine-native",
-                "version": "0.1.0",
-                "is_reference": False,
-            },
         },
         "totals": {
             "total_test_cases": 20,
@@ -184,6 +232,7 @@ def release_corpus(proof, generated_at):
         "per_test_results": rows,
         "proof_carrying_effects": proof,
     }
+    return bind_runtime_observations(document)
 
 
 def sign_release_receipt(preimage):
@@ -787,7 +836,7 @@ class TestCorpusBinding:
             }
             for index in range(1, 21)
         ]
-        return {
+        document = {
             "corpus": {
                 "provenance": ONLINE_PROVENANCE,
                 "result_digest": compute_result_digest(per_tests),
@@ -801,6 +850,7 @@ class TestCorpusBinding:
             "per_test_results": per_tests,
             "proof_carrying_effects": proof,
         }
+        return bind_runtime_observations(document)
 
     def _write_corpus(self, tmp_path, proof, mutate=None):
         document = self._green_corpus_document(proof)
@@ -893,6 +943,13 @@ class TestCorpusBinding:
             document["totals"]["passed_test_cases"] = 15
             document["corpus"]["result_digest"] = compute_result_digest(
                 document["per_test_results"]
+            )
+            from scripts.check_compatibility_corpus_pass_gate import (
+                compute_runtime_observations_digest,
+            )
+
+            document["corpus"]["runtime_observations_digest"] = (
+                compute_runtime_observations_digest(document)
             )
 
         corpus_path = self._write_corpus(
