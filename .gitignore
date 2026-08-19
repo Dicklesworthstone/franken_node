@@ -217,3 +217,5 @@ artifacts/verification/orphan_census_*.jsonl
 /test_hygiene.rs
 /test_race_condition_fix.rs
 /test_validation_readiness_compile.rs
+/get_golden_hashes.rs
+/syntax_check.rs
