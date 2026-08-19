@@ -93,6 +93,25 @@ jobs:
             --require-node-reference \
             --json | tee /tmp/release_compatibility_corpus_run.json
 
+      - name: Semantically verify the generated compatibility report
+        working-directory: franken_node
+        run: |
+          set -euo pipefail
+          ./target/release/franken-node verify corpus \
+            artifacts/13/compatibility_corpus_results.json \
+            --kind compatibility-report \
+            --json | tee /tmp/release_verify_corpus.json
+
+      - name: Enforce release compatibility policy before evidence generation
+        working-directory: franken_node
+        run: |
+          set -euo pipefail
+          python3 scripts/check_compatibility_corpus_pass_gate.py \
+            --report artifacts/13/compatibility_corpus_results.json \
+            --min-cases 1000 \
+            --json \
+            | tee /tmp/release_compatibility_gate.json
+
       - name: Produce proof-carrying L1 evidence from the same binary
         working-directory: franken_node
         env:
@@ -104,13 +123,6 @@ jobs:
             --merge-corpus artifacts/13/compatibility_corpus_results.json \
             --merge-l1-verdict artifacts/oracle/l1_product_verdict.json \
             --json | tee /tmp/release_l1_evidence.json
-
-      - name: Enforce compatibility thresholds before receipt generation
-        working-directory: franken_node
-        run: |
-          set -euo pipefail
-          python3 scripts/check_compatibility_corpus_pass_gate.py --json \
-            | tee /tmp/release_compatibility_gate.json
 
       - name: Generate signed live composite close-condition receipt
         working-directory: franken_node
@@ -147,6 +159,7 @@ jobs:
           cp artifacts/oracle/l1_product_verdict.json release-evidence/payload/
           cp artifacts/oracle/close_condition_receipt.json release-evidence/payload/
           cp /tmp/release_compatibility_corpus_run.json release-evidence/payload/
+          cp /tmp/release_verify_corpus.json release-evidence/payload/
           cp /tmp/release_l1_evidence.json release-evidence/payload/
           cp /tmp/release_compatibility_gate.json release-evidence/payload/
           cp /tmp/release_close_condition.json release-evidence/payload/
@@ -168,6 +181,7 @@ jobs:
           name: release-certification-evidence
           path: |
             /tmp/release_compatibility_corpus_run.json
+            /tmp/release_verify_corpus.json
             /tmp/release_l1_evidence.json
             /tmp/release_compatibility_gate.json
             /tmp/release_close_condition.json

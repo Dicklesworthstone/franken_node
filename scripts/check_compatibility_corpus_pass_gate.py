@@ -7,14 +7,16 @@ Usage:
     python3 scripts/check_compatibility_corpus_pass_gate.py --self-test --json
 """
 
+import argparse
 import hashlib
+import hmac
 import json
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
 
 
 BEAD_ID = "bd-28sz"
@@ -54,6 +56,7 @@ def compute_result_digest(per_test_results: list[dict]) -> str:
 
 CONTRACT = ROOT / "docs" / "specs" / "section_13" / "bd-28sz_contract.md"
 REPORT = ROOT / "artifacts" / "13" / "compatibility_corpus_results.json"
+DEFAULT_MIN_CASES = 500
 
 REQUIRED_EVENT_CODES = ["CCG-001", "CCG-002", "CCG-003", "CCG-004"]
 REQUIRED_RISK_BANDS = {"critical", "high", "medium", "low"}
@@ -95,10 +98,14 @@ REQUIRED_CONTRACT_TERMS = [
 
 def check_file(path: Path, label: str) -> dict:
     ok = path.exists()
+    try:
+        display_path = path.relative_to(ROOT)
+    except ValueError:
+        display_path = path
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"MISSING: {path}",
+        "detail": f"exists: {display_path}" if ok else f"MISSING: {path}",
     }
 
 
@@ -121,16 +128,16 @@ def check_contract() -> list[dict]:
     return checks
 
 
-def load_report() -> tuple[dict | None, list[dict]]:
+def load_report(report_path: Path = REPORT) -> tuple[dict | None, list[dict]]:
     checks = []
-    if not REPORT.exists():
+    if not report_path.exists():
         checks.append({"check": "report: exists", "pass": False, "detail": "MISSING"})
         return None, checks
 
     checks.append({"check": "report: exists", "pass": True, "detail": "found"})
 
     try:
-        data = json.loads(REPORT.read_text(encoding="utf-8"))
+        data = json.loads(report_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         checks.append({"check": "report: valid json", "pass": False, "detail": "invalid"})
         return None, checks
@@ -195,7 +202,7 @@ def evaluate_gate(data: dict) -> dict:
     }
 
 
-def check_report(data: dict | None) -> list[dict]:
+def check_report(data: dict | None, minimum_cases: int = DEFAULT_MIN_CASES) -> list[dict]:
     if data is None:
         return []
 
@@ -203,7 +210,6 @@ def check_report(data: dict | None) -> list[dict]:
     totals = data.get("totals", {})
     per_tests = data.get("per_test_results", [])
     families = data.get("api_families", [])
-    bands = data.get("bands", [])
     failures = data.get("failing_tests_tracking", [])
     ci = data.get("ci_gate", {})
     reproducibility = data.get("reproducibility", {})
@@ -215,8 +221,8 @@ def check_report(data: dict | None) -> list[dict]:
     skipped = int(totals.get("skipped_test_cases", 0))
 
     checks.append({
-        "check": "corpus: total test cases >= 500",
-        "pass": total >= 500,
+        "check": f"corpus: total test cases >= {minimum_cases}",
+        "pass": total >= minimum_cases,
         "detail": f"total={total}",
     })
 
@@ -292,7 +298,8 @@ def check_report(data: dict | None) -> list[dict]:
         "check": "provenance: result_digest recomputes from per_test_results",
         "pass": (
             recomputed_digest is not None
-            and declared_digest == recomputed_digest
+            and isinstance(declared_digest, str)
+            and hmac.compare_digest(declared_digest, recomputed_digest)
         ),
         "detail": f"declared={declared_digest} computed={recomputed_digest}",
     })
@@ -407,14 +414,17 @@ def check_report(data: dict | None) -> list[dict]:
     return checks
 
 
-def run_checks() -> dict:
+def run_checks(
+    report_path: Path = REPORT,
+    minimum_cases: int = DEFAULT_MIN_CASES,
+) -> dict:
     checks = []
     checks.append(check_file(CONTRACT, "contract doc"))
-    checks.append(check_file(REPORT, "compatibility corpus report"))
+    checks.append(check_file(report_path, "compatibility corpus report"))
     checks.extend(check_contract())
-    data, load_checks = load_report()
+    data, load_checks = load_report(report_path)
     checks.extend(load_checks)
-    checks.extend(check_report(data))
+    checks.extend(check_report(data, minimum_cases))
 
     passing = sum(1 for c in checks if c["pass"])
     failing = sum(1 for c in checks if not c["pass"])
@@ -423,6 +433,8 @@ def run_checks() -> dict:
         "bead_id": BEAD_ID,
         "title": TITLE,
         "section": SECTION,
+        "report_path": str(report_path),
+        "minimum_cases": minimum_cases,
         "overall_pass": failing == 0,
         "verdict": "PASS" if failing == 0 else "FAIL",
         "summary": {
@@ -463,18 +475,36 @@ def self_test() -> tuple[bool, list[dict]]:
     expected_digest = "sha256:06e98e8bb825890faefa66f04c5e9682ed86738c3eac75725db7f636881257b0"
     checks.append({
         "check": "self: result_digest cross-language vector",
-        "pass": compute_result_digest(digest_vector) == expected_digest
-        and compute_result_digest(list(reversed(digest_vector))) == expected_digest,
+        "pass": hmac.compare_digest(compute_result_digest(digest_vector), expected_digest)
+        and hmac.compare_digest(
+            compute_result_digest(list(reversed(digest_vector))), expected_digest
+        ),
     })
     return all(c["pass"] for c in checks), checks
 
 
 def main() -> int:
-    logger = configure_test_logging("check_compatibility_corpus_pass_gate")
-    as_json = "--json" in sys.argv
-    run_self_test = "--self-test" in sys.argv
+    configure_test_logging("check_compatibility_corpus_pass_gate")
+    parser = argparse.ArgumentParser(description=TITLE)
+    parser.add_argument("--json", action="store_true", help="emit JSON output")
+    parser.add_argument("--self-test", action="store_true", help="run internal checks")
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=REPORT,
+        help="compatibility corpus report to validate",
+    )
+    parser.add_argument(
+        "--min-cases",
+        type=int,
+        default=DEFAULT_MIN_CASES,
+        help="minimum required per-test result count",
+    )
+    args = parser.parse_args()
+    if args.min_cases <= 0:
+        parser.error("--min-cases must be greater than zero")
 
-    if run_self_test:
+    if args.self_test:
         ok, checks = self_test()
         result = {
             "self_test_passed": ok,
@@ -482,7 +512,7 @@ def main() -> int:
             "checks_passing": sum(1 for c in checks if c["pass"]),
             "checks_failing": sum(1 for c in checks if not c["pass"]),
         }
-        if as_json:
+        if args.json:
             print(json.dumps(result, indent=2))
         else:
             print("PASS" if ok else "FAIL")
@@ -491,8 +521,8 @@ def main() -> int:
                 print(f"[{status}] {check['check']}")
         return 0 if ok else 1
 
-    result = run_checks()
-    if as_json:
+    result = run_checks(args.report, args.min_cases)
+    if args.json:
         print(json.dumps(result, indent=2))
     else:
         verdict = result["verdict"]

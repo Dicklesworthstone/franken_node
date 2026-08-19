@@ -1067,31 +1067,27 @@ fn verify_corpus_rejects_existing_but_unsupported_json() {
 }
 
 #[test]
-fn verify_corpus_accepts_compatibility_report_path() {
+fn verify_corpus_rejects_checked_in_red_compatibility_report() {
     let report_path = repo_root().join("artifacts/13/compatibility_corpus_results.json");
-    let output = run_verify_corpus(&report_path, Some("compatibility-report"));
-    assert!(
-        output.status.success(),
-        "verify corpus should pass for the compatibility report; stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+    let payload = assert_verify_corpus_failed_invariant(
+        &report_path,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-OVERALL-THRESHOLD",
     );
-
-    let payload = parse_json_stdout(&output);
     assert_eq!(payload["command"], "verify corpus");
-    assert_eq!(payload["verdict"], "PASS");
+    assert_eq!(payload["verdict"], "FAIL");
     assert_eq!(
         payload["details"]["selected_validation_kind"],
         "compatibility-report"
     );
     assert_eq!(payload["details"]["case_count"], serde_json::json!(560));
     assert!(
-        payload["details"]["events"]
+        payload["details"]["failed_invariants"]
             .as_array()
-            .expect("events array")
+            .expect("failed invariants array")
             .iter()
-            .any(|event| event["event"] == "coverage_summary_emitted"
-                && event["validation_kind"] == "compatibility-report"),
-        "compatibility report should emit a coverage event: {payload:#?}"
+            .any(|invariant| invariant["invariant_id"] == "VCORPUS-REPORT-CI-GATE"),
+        "the checked-in report must remain visibly release-blocked: {payload:#?}"
     );
 }
 

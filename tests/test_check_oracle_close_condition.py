@@ -1098,6 +1098,11 @@ class TestReleaseEvidenceBinding:
             "release-certification:",
             "needs: release-certification",
             "ops compat-corpus-run",
+            "./target/release/franken-node verify corpus",
+            "--kind compatibility-report",
+            "--report artifacts/13/compatibility_corpus_results.json",
+            "--min-cases 1000",
+            "/tmp/release_verify_corpus.json",
             "ops proof-carrying-evidence",
             "doctor close-condition",
             "--release-mode",
@@ -1116,6 +1121,21 @@ class TestReleaseEvidenceBinding:
         ]
         for token in required:
             assert token in workflow, f"dist workflow missing release gate token: {token}"
+        corpus_run_index = workflow.index("ops compat-corpus-run")
+        semantic_verify_index = workflow.index(
+            "./target/release/franken-node verify corpus"
+        )
+        operational_gate_index = workflow.index(
+            "scripts/check_compatibility_corpus_pass_gate.py"
+        )
+        proof_index = workflow.index("ops proof-carrying-evidence")
+        assert (
+            corpus_run_index
+            < semantic_verify_index
+            < operational_gate_index
+            < proof_index
+        )
+        assert workflow.count("/tmp/release_verify_corpus.json") >= 3
         assert "ref: main" not in workflow
         action_uses = re.findall(
             r"^\s*(?:-\s*)?uses:\s+([^\s#]+)", workflow, flags=re.MULTILINE
