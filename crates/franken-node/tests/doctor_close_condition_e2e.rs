@@ -2,6 +2,7 @@ use assert_cmd::Command;
 use frankenengine_node::ops::close_condition::MAX_CLOSE_CONDITION_CARGO_FILES;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -940,6 +941,64 @@ fn ccg_result_digest_cross_language_pin_bd_ihusm() {
     );
 }
 
+#[test]
+fn ccg_runtime_observation_digest_cross_language_pin_bd_2djfa_4() {
+    let empty_digest = format!("sha256:{}", hex::encode(Sha256::digest([])));
+    let observation = |elapsed_ms| {
+        serde_json::json!({
+            "stdout_digest": empty_digest.clone(),
+            "stderr_digest": empty_digest.clone(),
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "exit_code": 0,
+            "termination_kind": "exited",
+            "timed_out": false,
+            "elapsed_ms": elapsed_ms,
+        })
+    };
+    let rows = vec![serde_json::json!({
+        "test_id": "synthetic::0000",
+        "api_family": "buffer",
+        "band": "core",
+        "risk_band": "critical",
+        "status": "pass",
+        "runtime_observations": {
+            "bun": observation(1),
+            "franken-engine-native": observation(2),
+        },
+    })];
+    let result_digest =
+        frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(
+            &rows,
+        );
+    assert_eq!(
+        result_digest,
+        "sha256:bef4696695c64de2faa63b843567054d445da98e62f969485aa8137b5002789a"
+    );
+    let runtime_versions = BTreeMap::from([
+        ("bun".to_string(), "1.3.14-test".to_string()),
+        (
+            "franken-engine-native".to_string(),
+            "0.1.0-test".to_string(),
+        ),
+    ]);
+    let digest = frankenengine_node::ops::close_condition::compute_compatibility_corpus_runtime_observations_digest(
+        &rows,
+        frankenengine_node::ops::close_condition::COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+        &result_digest,
+        "dyad",
+        &runtime_versions,
+    )
+    .expect("runtime observation digest");
+    assert_eq!(
+        digest,
+        "sha256:1ab42659e6407b492f5f57af96cf5fece52a61573d47e39c18c668c182ffe47e",
+        "runtime observation digest drifted from the Python gate"
+    );
+}
+
 /// bd-ihusm: a corpus whose provenance is authored/synthesized (the real
 /// committed artifact's honest state) must fail the L1 leg closed even when
 /// every other leg is valid — synthesized totals can never satisfy the ship
@@ -979,14 +1038,31 @@ fn doctor_close_condition_fails_l1_on_authored_corpus_provenance_bd_ihusm() {
 /// fixture (the first `passed` records pass, the rest fail). Real fixtures
 /// carry these so the L1 leg can re-derive the pass rate and verify the digest.
 fn online_per_test_results(passed: u64, failed: u64) -> Vec<Value> {
+    let empty_digest = format!("sha256:{}", hex::encode(Sha256::digest([])));
     (0..passed + failed)
         .map(|index| {
+            let observation = serde_json::json!({
+                "stdout_digest": empty_digest.clone(),
+                "stderr_digest": empty_digest.clone(),
+                "stdout_bytes": 0,
+                "stderr_bytes": 0,
+                "stdout_truncated": false,
+                "stderr_truncated": false,
+                "exit_code": 0,
+                "termination_kind": "exited",
+                "timed_out": false,
+                "elapsed_ms": index + 1,
+            });
             serde_json::json!({
                 "test_id": format!("tc::fs::{index:04}"),
                 "api_family": "fs",
                 "band": "core",
                 "risk_band": "critical",
                 "status": if index < passed { "pass" } else { "fail" },
+                "runtime_observations": {
+                    "bun": observation.clone(),
+                    "franken-engine-native": observation,
+                },
             })
         })
         .collect()
@@ -996,10 +1072,41 @@ fn online_per_test_results(passed: u64, failed: u64) -> Vec<Value> {
 /// recomputed from `per_tests` by the same helper the gate uses — so the
 /// fixture represents a valid (not synthesized) artifact.
 fn online_corpus_meta(per_tests: &[Value]) -> Value {
+    let result_digest = frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(per_tests);
+    let runtime_versions = BTreeMap::from([
+        ("bun".to_string(), "1.3.14-test".to_string()),
+        (
+            "franken-engine-native".to_string(),
+            "0.1.0-test".to_string(),
+        ),
+    ]);
+    let observations_digest = frankenengine_node::ops::close_condition::compute_compatibility_corpus_runtime_observations_digest(
+        per_tests,
+        frankenengine_node::ops::close_condition::COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+        &result_digest,
+        "dyad",
+        &runtime_versions,
+    )
+    .expect("fixture runtime observations digest");
     serde_json::json!({
         "corpus_version": "compat-corpus-test",
         "provenance": frankenengine_node::ops::close_condition::COMPATIBILITY_CORPUS_ONLINE_PROVENANCE,
-        "result_digest": frankenengine_node::ops::close_condition::compute_compatibility_corpus_result_digest(per_tests),
+        "result_digest": result_digest,
+        "runtime_observations_schema_version": frankenengine_node::ops::close_condition::COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+        "runtime_observations_digest": observations_digest,
+        "lockstep_topology": "dyad",
+        "reference_runtimes": [{
+            "runtime_id": "bun",
+            "runtime_name": "bun",
+            "version": "1.3.14-test",
+            "is_reference": true,
+        }],
+        "product_runtime": {
+            "runtime_id": "franken-engine-native",
+            "runtime_name": "franken-engine-native",
+            "version": "0.1.0-test",
+            "is_reference": false,
+        },
     })
 }
 
