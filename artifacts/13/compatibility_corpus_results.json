@@ -7,13 +7,39 @@
     "corpus_version": "compat-corpus-v2-7b86e9d21758c6d06b8ae0cbc4d79c1b",
     "franken_node_version": "0.1.0",
     "lockstep_oracle_version": "nvo-v1.0",
-    "generated_at_utc": "2026-07-22T09:24:36.177520747+00:00",
-    "result_digest": "sha256:5980941c47e88945e15b4aeffde405e725b930f733b9738e8378878830aa7c03",
+    "generated_at_utc": "2026-08-19T14:19:59.682467353+00:00",
+    "result_digest": "sha256:5c14fd7cef40eb513806b228ee4d752da9884b11b2280f6396e48addce114225",
     "provenance": "lockstep-oracle-run",
     "runner": "franken-node ops compat-corpus-run",
     "policy_mode": "legacy-risky",
     "reference_runtime": "bun 1.3.14",
-    "corpus_root": "crates/franken-node/tests/fixtures/compat_corpus"
+    "reference_runtimes": [
+      {
+        "runtime_id": "node",
+        "runtime_name": "node",
+        "version": "v20.19.4",
+        "is_reference": true
+      },
+      {
+        "runtime_id": "bun",
+        "runtime_name": "bun",
+        "version": "1.3.14",
+        "is_reference": true
+      }
+    ],
+    "product_runtime": {
+      "runtime_id": "franken-engine-native",
+      "runtime_name": "franken-engine-native",
+      "version": "0.1.0",
+      "is_reference": false
+    },
+    "lockstep_topology": "triad",
+    "corpus_root": "crates/franken-node/tests/fixtures/compat_corpus",
+    "source_revision": {
+      "schema_version": "franken-node/source-revision/v1",
+      "franken_node_commit": "add344bf99faf27524b9b8f3d466d5e2b2e65bb8",
+      "franken_engine_commit": "94f43cfb3c8a9840b04112204204d3cc8059c2f8"
+    }
   },
   "thresholds": {
     "overall_pass_rate_min_pct": 95.0,
@@ -26,30 +52,30 @@
   },
   "totals": {
     "total_test_cases": 560,
-    "passed_test_cases": 472,
-    "failed_test_cases": 88,
+    "passed_test_cases": 488,
+    "failed_test_cases": 72,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "overall_pass_rate_pct": 84.29
+    "overall_pass_rate_pct": 87.14
   },
   "bands": [
     {
       "band": "core",
       "total": 254,
-      "passed": 221,
-      "pass_rate_pct": 87.01
+      "passed": 226,
+      "pass_rate_pct": 88.98
     },
     {
       "band": "edge",
       "total": 56,
-      "passed": 43,
-      "pass_rate_pct": 76.79
+      "passed": 48,
+      "pass_rate_pct": 85.71
     },
     {
       "band": "high-value",
       "total": 250,
-      "passed": 208,
-      "pass_rate_pct": 83.2
+      "passed": 214,
+      "pass_rate_pct": 85.6
     }
   ],
   "api_families": [
@@ -68,26 +94,26 @@
     {
       "family": "cluster",
       "total": 20,
-      "passed": 17,
-      "pass_rate_pct": 85.0
+      "passed": 18,
+      "pass_rate_pct": 90.0
     },
     {
       "family": "crypto",
       "total": 45,
-      "passed": 32,
-      "pass_rate_pct": 71.11
+      "passed": 38,
+      "pass_rate_pct": 84.44
     },
     {
       "family": "events",
       "total": 30,
-      "passed": 27,
-      "pass_rate_pct": 90.0
+      "passed": 28,
+      "pass_rate_pct": 93.33
     },
     {
       "family": "fs",
       "total": 50,
-      "passed": 39,
-      "pass_rate_pct": 78.0
+      "passed": 44,
+      "pass_rate_pct": 88.0
     },
     {
       "family": "http",
@@ -140,8 +166,8 @@
     {
       "family": "url",
       "total": 25,
-      "passed": 22,
-      "pass_rate_pct": 88.0
+      "passed": 25,
+      "pass_rate_pct": 100.0
     },
     {
       "family": "zlib",
@@ -653,7 +679,7 @@
       "api_family": "cluster",
       "band": "core",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::cluster::0013",
@@ -863,7 +889,7 @@
       "api_family": "crypto",
       "band": "core",
       "risk_band": "critical",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0023",
@@ -877,35 +903,35 @@
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0025",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0026",
       "api_family": "crypto",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0027",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0028",
       "api_family": "crypto",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::crypto::0029",
@@ -1192,7 +1218,7 @@
       "api_family": "events",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::events::0025",
@@ -1451,35 +1477,35 @@
       "api_family": "fs",
       "band": "edge",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::fs::0032",
       "api_family": "fs",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::fs::0033",
       "api_family": "fs",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::fs::0034",
       "api_family": "fs",
       "band": "edge",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::fs::0035",
       "api_family": "fs",
       "band": "edge",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::fs::0036",
@@ -3908,21 +3934,21 @@
       "api_family": "url",
       "band": "core",
       "risk_band": "high",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::url::0023",
       "api_family": "url",
       "band": "high-value",
       "risk_band": "low",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::url::0024",
       "api_family": "url",
       "band": "high-value",
       "risk_band": "medium",
-      "status": "fail"
+      "status": "pass"
     },
     {
       "test_id": "tc::url::0025",
@@ -4076,232 +4102,225 @@
     {
       "test_id": "tc::buffer::0028",
       "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 18: TopSecret -> Internal (artifact_id=sha256:f4a490a7cd56895370192bd887fdf21643b7e",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 18: TopSecret -> Internal (artifact_id=sha256:69051bca0cb0959edf8d398446fb65e9ea86f",
       "investigation_bead_id": "bd-8qvy6",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::buffer::0030",
       "api_family": "buffer",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 21: TopSecret -> Internal (artifact_id=sha256:324a0726c9525b0df463adb6d97f8ab0919f3",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 21: TopSecret -> Internal (artifact_id=sha256:13feb1067a93da68aa2c2f53edbafd18a20d4",
       "investigation_bead_id": "bd-8qvy6",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0001",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0002",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine crashed with panic: native-session worker exited unexpectedly: exit status: 1",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0003",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such file or directory (os error 2)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0004",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0005",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0006",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such file or directory (os error 2)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0007",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0008",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0009",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such file or directory (os error 2)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0010",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such file or directory (os error 2)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0011",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0012",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0013",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0014",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: Bubblewrap namespace init parent 0 did not match supervisor 1925685",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0015",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0016",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0017",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0018",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0019",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such file or directory (os error 2)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0020",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0021",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0022",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such file or directory (os error 2)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0023",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0024",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine crashed with panic: native-session worker exited unexpectedly: exit status: 1",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0025",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0026",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0027",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0028",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0029",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such process (os error 3)",
       "investigation_bead_id": "bd-at11s",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::child_process::0030",
       "api_family": "child_process",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during worker startup: failed establishing Bubblewrap containment unit: No such file or directory (os error 2)",
       "investigation_bead_id": "bd-at11s",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::cluster::0012",
-      "api_family": "cluster",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-zyp0c",
       "investigation_status": "open"
     },
     {
@@ -4321,70 +4340,28 @@
     {
       "test_id": "tc::crypto::0015",
       "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 5: Secret -> Internal (artifact_id=sha256:6e17db537afa1eff61c3921979b9060209a24c451",
-      "investigation_bead_id": "bd-y4t2i",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0022",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-y4t2i",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0024",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-y4t2i",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0025",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-y4t2i",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0026",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-y4t2i",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0027",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-y4t2i",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::crypto::0028",
-      "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 5: Secret -> Internal (artifact_id=sha256:fb6b6873f5c41ff1c8cba6c9227106a0f0d00b3ad",
       "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0029",
       "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 8: Secret -> Internal (artifact_id=sha256:7e157d60fb2591d4e4ddd1128a3e28ec2d2311b50",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 8: Secret -> Internal (artifact_id=sha256:6dc4e2956e8ecc9f1320506d0057a9a10bb0c65a4",
       "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0032",
       "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 6: Secret -> Internal (artifact_id=sha256:e07af1a27c2c70bdf5ace2d57a57dee320104db49",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 6: Secret -> Internal (artifact_id=sha256:866047a36e34f6523c3e73f0d5e9e05677e776acd",
       "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::crypto::0034",
       "api_family": "crypto",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 26: Secret -> Internal (artifact_id=sha256:3330dd01404618f8458505fa456084ad76ae91d7",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 26: Secret -> Internal (artifact_id=sha256:18b82d1e9f2c305da638080953b1390766f86566",
       "investigation_bead_id": "bd-y4t2i",
       "investigation_status": "open"
     },
@@ -4412,7 +4389,7 @@
     {
       "test_id": "tc::events::0017",
       "api_family": "events",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 26: TopSecret -> Internal (artifact_id=sha256:80ee50e7a21501cb8b3495add1c6e724fdf2d",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 29: TopSecret -> Internal (artifact_id=sha256:1170478034343f7e910239145904650143604",
       "investigation_bead_id": "bd-asw4m",
       "investigation_status": "open"
     },
@@ -4424,30 +4401,23 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::events::0024",
-      "api_family": "events",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected function, got undefined. telemetry bridge stopped after native execution failure in 85ms",
-      "investigation_bead_id": "bd-asw4m",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::fs::0021",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 90ms",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined; execution cell close succeeded. telemetry bridge stopped after native",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::fs::0022",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 86ms",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined; execution cell close succeeded. telemetry bridge stopped after native",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::fs::0023",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 90ms",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined; execution cell close succeeded. telemetry bridge stopped after native",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
@@ -4459,65 +4429,30 @@
       "investigation_status": "open"
     },
     {
-      "test_id": "tc::fs::0031",
-      "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 17: TopSecret -> Internal (artifact_id=sha256:fb98c7871de11895a3d8227ca3c0ef1e9f6e9",
-      "investigation_bead_id": "bd-zco6t",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::fs::0032",
-      "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 21: TopSecret -> Internal (artifact_id=sha256:c99361a2313c864fb81a69fe033da81ac67a7",
-      "investigation_bead_id": "bd-zco6t",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::fs::0033",
-      "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 21: TopSecret -> Internal (artifact_id=sha256:8ede5b42c5966dd97e03bba4ee2378a97ecdb",
-      "investigation_bead_id": "bd-zco6t",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::fs::0034",
-      "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 20: TopSecret -> Internal (artifact_id=sha256:076f10c20ed68737c2922988d9621b0ea0817",
-      "investigation_bead_id": "bd-zco6t",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::fs::0035",
-      "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 17: TopSecret -> Internal (artifact_id=sha256:e77f488ffad694c00af6c4040e8717fd24745",
-      "investigation_bead_id": "bd-zco6t",
-      "investigation_status": "open"
-    },
-    {
       "test_id": "tc::fs::0044",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 86ms",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined; execution cell close succeeded. telemetry bridge stopped after native",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::fs::0045",
       "api_family": "fs",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 90ms",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined; execution cell close succeeded. telemetry bridge stopped after native",
       "investigation_bead_id": "bd-zco6t",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::net::0005",
       "api_family": "net",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "reason": "lockstep divergence: node and bun reference legs disagree",
       "investigation_bead_id": "bd-sul35",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::net::0024",
       "api_family": "net",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "reason": "lockstep divergence: node and bun reference legs disagree",
       "investigation_bead_id": "bd-sul35",
       "investigation_status": "open"
     },
@@ -4531,7 +4466,7 @@
     {
       "test_id": "tc::stream::0048",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected iterable, got object. telemetry bridge stopped after native execution failure in 79ms",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected iterable, got object; execution cell close succeeded. telemetry bridge stopped after native ",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
@@ -4545,14 +4480,14 @@
     {
       "test_id": "tc::stream::0061",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 67: TopSecret -> Internal (artifact_id=sha256:7a5d0f97536eb1fc5df0707f39e902776dfbd",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: unauthorized flow detected at op 69: TopSecret -> Internal (artifact_id=sha256:44332272254b5a865cc89349aa907c2e996e0",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::stream::0003",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected array or string source for Readable.from, got object. telemetry bridge stopped after native ",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected array or string source for Readable.from, got object; execution cell close succeeded. teleme",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
@@ -4566,7 +4501,7 @@
     {
       "test_id": "tc::stream::0024",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected iterable, got object. telemetry bridge stopped after native execution failure in 92ms",
+      "reason": "lockstep divergence: output mismatch vs bun reference",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
@@ -4601,7 +4536,7 @@
     {
       "test_id": "tc::stream::0040",
       "api_family": "stream",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected live Writable that has not ended, got write after end. telemetry bridge stopped after native",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected live Writable that has not ended, got write after end; execution cell close succeeded. telem",
       "investigation_bead_id": "bd-m8vaa.1",
       "investigation_status": "open"
     },
@@ -4615,28 +4550,28 @@
     {
       "test_id": "tc::tls::0002",
       "api_family": "tls",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "reason": "lockstep divergence: node and bun reference legs disagree",
       "investigation_bead_id": "bd-387cw",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::tls::0008",
       "api_family": "tls",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 70ms",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined; execution cell close succeeded. telemetry bridge stopped after native",
       "investigation_bead_id": "bd-387cw",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::tls::0017",
       "api_family": "tls",
-      "reason": "lockstep divergence: output mismatch vs bun reference",
+      "reason": "lockstep divergence: node and bun reference legs disagree",
       "investigation_bead_id": "bd-387cw",
       "investigation_status": "open"
     },
     {
       "test_id": "tc::tls::0022",
       "api_family": "tls",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined. telemetry bridge stopped after native execution failure in 65ms",
+      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: interpreter: type error: expected object, got undefined; execution cell close succeeded. telemetry bridge stopped after native",
       "investigation_bead_id": "bd-387cw",
       "investigation_status": "open"
     },
@@ -4645,27 +4580,6 @@
       "api_family": "tls",
       "reason": "lockstep divergence: output mismatch vs bun reference",
       "investigation_bead_id": "bd-387cw",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::url::0022",
-      "api_family": "url",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-4awsz",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::url::0023",
-      "api_family": "url",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-4awsz",
-      "investigation_status": "open"
-    },
-    {
-      "test_id": "tc::url::0024",
-      "api_family": "url",
-      "reason": "lockstep divergence: franken-engine leg refused or crashed (exit Some(1)): Error: Engine execution failed during execution: Native execution failed: lowering: ambient authority violation: access to 'require' requires effect 'fs.read' but caller's profile '{process.shape_read",
-      "investigation_bead_id": "bd-4awsz",
       "investigation_status": "open"
     },
     {
@@ -4692,8 +4606,8 @@
   ],
   "previous_release": {
     "release_version": "0.1.0",
-    "overall_pass_rate_pct": 83.57,
-    "corpus_version": "compat-corpus-v2-9c8cffef8f21e2a36bf46e057d4fa29e"
+    "overall_pass_rate_pct": 84.29,
+    "corpus_version": "compat-corpus-v2-7b86e9d21758c6d06b8ae0cbc4d79c1b"
   },
   "ci_gate": {
     "workflow_name": "compatibility-corpus-pass-gate",
@@ -4701,12 +4615,12 @@
     "threshold_met": false,
     "release_blocked": true,
     "regression_detected": false,
-    "release_blocked_reason": "genuine lockstep-oracle-run measured 84.29% overall (required 95.00%); families below the 80% floor: [child_process 0.00%, crypto 71.11%, fs 78.00%]"
+    "release_blocked_reason": "genuine lockstep-oracle-run measured 87.14% overall (required 95.00%); families below the 80% floor: [child_process 0.00%]"
   },
   "reproducibility": {
     "deterministic_seed": "compat-corpus-generator-v1",
     "same_inputs_same_digest": true,
-    "external_repro_command": "franken-node ops compat-corpus-run --corpus-root crates/franken-node/tests/fixtures/compat_corpus --out artifacts/13/compatibility_corpus_results.json && python3 scripts/check_compatibility_corpus_pass_gate.py --json",
+    "external_repro_command": "franken-node ops compat-corpus-run --corpus-root crates/franken-node/tests/fixtures/compat_corpus --out artifacts/13/compatibility_corpus_results.json --require-node-reference && python3 scripts/check_compatibility_corpus_pass_gate.py --json",
     "result_digest_algorithm": "ccg_corpus_result_digest_v1 (domain+field-separated sha256 over sorted per_test_results)"
   },
   "event_codes": [

@@ -1923,6 +1923,7 @@ name = "frankenengine-extension-host"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "rand 0.8.6",
  "rustix",
  "rustls",
  "rustls-pki-types",
