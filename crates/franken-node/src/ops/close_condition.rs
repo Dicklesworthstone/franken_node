@@ -183,6 +183,12 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
         let test_id = get_str(row, &["test_id"])
             .filter(|value| !value.is_empty())
             .context("runtime observation row is missing test_id")?;
+        let status = get_str(row, &["status"])
+            .with_context(|| format!("runtime observation row `{test_id}` is missing status"))?;
+        if status != "pass" && status != "fail" {
+            bail!("runtime observation row `{test_id}` has invalid status `{status}`");
+        }
+        let mut comparable_observations = BTreeSet::new();
         let runtime_observations = row
             .get("runtime_observations")
             .and_then(Value::as_object)
@@ -285,20 +291,46 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
                     "runtime observation `{test_id}`/`{runtime_id}` has inconsistent termination state"
                 );
             }
+            let stdout_digest = digest_field("stdout_digest")?;
+            let stderr_digest = digest_field("stderr_digest")?;
+            let stdout_bytes = u64_field("stdout_bytes")?;
+            let stderr_bytes = u64_field("stderr_bytes")?;
+            let stdout_truncated = bool_field("stdout_truncated")?;
+            let stderr_truncated = bool_field("stderr_truncated")?;
+            let elapsed_ms = u64_field("elapsed_ms")?;
+            if status == "pass" && (timed_out || stdout_truncated || stderr_truncated) {
+                bail!(
+                    "runtime observation row `{test_id}` cannot pass with timed-out or truncated evidence"
+                );
+            }
+            comparable_observations.insert((
+                stdout_digest.clone(),
+                stderr_digest.clone(),
+                stdout_bytes,
+                stderr_bytes,
+                stdout_truncated,
+                stderr_truncated,
+                exit_code,
+                termination_kind.clone(),
+                timed_out,
+            ));
             observations.push(CanonicalObservation {
                 test_id: test_id.to_string(),
                 runtime_id: runtime_id.to_string(),
-                stdout_digest: digest_field("stdout_digest")?,
-                stderr_digest: digest_field("stderr_digest")?,
-                stdout_bytes: u64_field("stdout_bytes")?,
-                stderr_bytes: u64_field("stderr_bytes")?,
-                stdout_truncated: bool_field("stdout_truncated")?,
-                stderr_truncated: bool_field("stderr_truncated")?,
+                stdout_digest,
+                stderr_digest,
+                stdout_bytes,
+                stderr_bytes,
+                stdout_truncated,
+                stderr_truncated,
                 exit_code,
                 termination_kind,
                 timed_out,
-                elapsed_ms: u64_field("elapsed_ms")?,
+                elapsed_ms,
             });
+        }
+        if status == "pass" && comparable_observations.len() != 1 {
+            bail!("runtime observation row `{test_id}` cannot pass with divergent evidence");
         }
     }
     observations.sort();

@@ -149,6 +149,12 @@ def compute_runtime_observations_digest(data: dict) -> str:
         test_id = row.get("test_id")
         if not isinstance(test_id, str) or not test_id:
             raise ValueError("runtime observation row is missing test_id")
+        status = row.get("status")
+        if status not in {"pass", "fail"}:
+            raise ValueError(
+                f"runtime observation row {test_id!r} has invalid status {status!r}"
+            )
+        comparable_observations = set()
         runtime_observations = row.get("runtime_observations")
         if not isinstance(runtime_observations, dict):
             raise ValueError(f"runtime observation row {test_id!r} is missing an object")
@@ -208,6 +214,26 @@ def compute_runtime_observations_digest(data: dict) -> str:
                 raise ValueError(
                     f"runtime observation {test_id!r}/{runtime_id!r} termination is inconsistent"
                 )
+            if status == "pass" and (
+                timed_out or stdout_truncated or stderr_truncated
+            ):
+                raise ValueError(
+                    f"runtime observation row {test_id!r} cannot pass with timed-out "
+                    "or truncated evidence"
+                )
+            comparable_observations.add(
+                (
+                    stdout_digest,
+                    stderr_digest,
+                    stdout_bytes,
+                    stderr_bytes,
+                    stdout_truncated,
+                    stderr_truncated,
+                    exit_code,
+                    termination_kind,
+                    timed_out,
+                )
+            )
             observations.append(
                 (
                     test_id,
@@ -223,6 +249,10 @@ def compute_runtime_observations_digest(data: dict) -> str:
                     timed_out,
                     elapsed_ms,
                 )
+            )
+        if status == "pass" and len(comparable_observations) != 1:
+            raise ValueError(
+                f"runtime observation row {test_id!r} cannot pass with divergent evidence"
             )
 
     hasher = hashlib.sha256()
