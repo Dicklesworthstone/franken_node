@@ -273,22 +273,46 @@ fn refresh_compatibility_report_digest(report: &mut serde_json::Value) {
 }
 
 fn refresh_runtime_observations_digest(report: &mut serde_json::Value) {
-    let runtime_versions = BTreeMap::from([
-        ("bun".to_string(), "1.3.14-test".to_string()),
-        (
-            "franken-engine-native".to_string(),
-            "0.1.0-test".to_string(),
-        ),
-    ]);
+    let corpus = report["corpus"].clone();
+    let mut runtime_versions = BTreeMap::new();
+    for runtime in corpus["reference_runtimes"]
+        .as_array()
+        .expect("compatibility report reference runtimes")
+    {
+        runtime_versions.insert(
+            runtime["runtime_id"]
+                .as_str()
+                .expect("reference runtime id")
+                .to_string(),
+            runtime["version"]
+                .as_str()
+                .expect("reference runtime version")
+                .to_string(),
+        );
+    }
+    runtime_versions.insert(
+        corpus["product_runtime"]["runtime_id"]
+            .as_str()
+            .expect("product runtime id")
+            .to_string(),
+        corpus["product_runtime"]["version"]
+            .as_str()
+            .expect("product runtime version")
+            .to_string(),
+    );
     let digest = frankenengine_node::ops::close_condition::compute_compatibility_corpus_runtime_observations_digest(
         report["per_test_results"]
             .as_array()
             .expect("compatibility report per_test_results array"),
-        frankenengine_node::ops::close_condition::COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
-        report["corpus"]["result_digest"]
+        corpus["runtime_observations_schema_version"]
+            .as_str()
+            .expect("runtime observations schema version"),
+        corpus["result_digest"]
             .as_str()
             .expect("compatibility report result digest"),
-        "dyad",
+        corpus["lockstep_topology"]
+            .as_str()
+            .expect("lockstep topology"),
         &runtime_versions,
     )
     .expect("compatibility report runtime observations digest");
