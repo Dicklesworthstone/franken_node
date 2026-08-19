@@ -2167,6 +2167,28 @@ mod tests {
         })
     }
 
+    #[test]
+    fn passing_corpus_refuses_timed_out_runtime_observation() {
+        let mut data = corpus_totals_json(1, 0, 100.0);
+        let observation = &mut data["per_test_results"][0]["runtime_observations"]["bun"];
+        observation["exit_code"] = Value::Null;
+        observation["termination_kind"] = serde_json::json!("timed_out");
+        observation["timed_out"] = serde_json::json!(true);
+        let error = validate_compatibility_corpus_runtime_observations(&data)
+            .expect_err("passing timeout must fail closed");
+        assert!(error.to_string().contains("cannot pass with timed-out"));
+    }
+
+    #[test]
+    fn passing_corpus_refuses_divergent_runtime_observation() {
+        let mut data = corpus_totals_json(1, 0, 100.0);
+        data["per_test_results"][0]["runtime_observations"]["bun"]["stdout_digest"] =
+            serde_json::json!(format!("sha256:{}", "1".repeat(64)));
+        let error = validate_compatibility_corpus_runtime_observations(&data)
+            .expect_err("passing divergence must fail closed");
+        assert!(error.to_string().contains("cannot pass with divergent"));
+    }
+
     /// A genuine, re-derivable v2 evidence block built through the production
     /// chain API (no hand-written hashes) — the only accepted schema after
     /// bd-qr5i2.4 retired v1 declared-summary acceptance.

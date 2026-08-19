@@ -280,6 +280,37 @@ class TestSyntheticReportGate(unittest.TestCase):
             )["pass"]
         )
 
+    def test_pass_row_with_timeout_fails_closed(self):
+        report = passing_report()
+        observation = report["per_test_results"][0]["runtime_observations"]["bun"]
+        observation.update(
+            exit_code=None,
+            termination_kind="timed_out",
+            timed_out=True,
+        )
+        result = self.run_report(report)
+        self.assertFalse(result["overall_pass"])
+        self.assertFalse(
+            named_check(
+                result,
+                "provenance: runtime observations are topology-bound and digest-bound",
+            )["pass"]
+        )
+
+    def test_pass_row_with_divergent_runtime_digest_fails_closed(self):
+        report = passing_report()
+        report["per_test_results"][0]["runtime_observations"]["bun"][
+            "stdout_digest"
+        ] = f"sha256:{'1' * 64}"
+        result = self.run_report(report)
+        self.assertFalse(result["overall_pass"])
+        self.assertFalse(
+            named_check(
+                result,
+                "provenance: runtime observations are topology-bound and digest-bound",
+            )["pass"]
+        )
+
     def test_regression_fails_closed(self):
         report = passing_report()
         report["previous_release"]["overall_pass_rate_pct"] = 100.01
