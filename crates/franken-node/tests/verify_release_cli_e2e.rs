@@ -1,4 +1,5 @@
 use insta::assert_json_snapshot;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -167,6 +168,22 @@ const COMPAT_REPORT_API_FAMILIES: &[&str] = &[
 const COMPAT_REPORT_BANDS: &[&str] = &["core", "high-value", "edge"];
 const COMPAT_REPORT_RISK_BANDS: &[&str] = &["critical", "high", "medium", "low"];
 
+fn successful_runtime_observation(elapsed_ms: u64) -> serde_json::Value {
+    let empty_digest = format!("sha256:{}", hex::encode(Sha256::digest([])));
+    serde_json::json!({
+        "stdout_digest": empty_digest,
+        "stderr_digest": empty_digest,
+        "stdout_bytes": 0,
+        "stderr_bytes": 0,
+        "stdout_truncated": false,
+        "stderr_truncated": false,
+        "exit_code": 0,
+        "termination_kind": "exited",
+        "timed_out": false,
+        "elapsed_ms": elapsed_ms,
+    })
+}
+
 fn valid_compatibility_report() -> serde_json::Value {
     let timestamp = chrono::Utc::now().to_rfc3339();
     let mut per_test_results = Vec::new();
@@ -177,6 +194,10 @@ fn valid_compatibility_report() -> serde_json::Value {
             "band": COMPAT_REPORT_BANDS[index % COMPAT_REPORT_BANDS.len()],
             "risk_band": COMPAT_REPORT_RISK_BANDS[index % COMPAT_REPORT_RISK_BANDS.len()],
             "status": "pass",
+            "runtime_observations": {
+                "bun": successful_runtime_observation(index as u64 + 1),
+                "franken-engine-native": successful_runtime_observation(index as u64 + 2),
+            },
         }));
     }
 
@@ -186,6 +207,21 @@ fn valid_compatibility_report() -> serde_json::Value {
             "franken_node_version": "0.1.0-test",
             "lockstep_oracle_version": "lockstep-e2e-v1",
             "result_digest": "",
+            "runtime_observations_schema_version": frankenengine_node::ops::close_condition::COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+            "runtime_observations_digest": "",
+            "lockstep_topology": "dyad",
+            "reference_runtimes": [{
+                "runtime_id": "bun",
+                "runtime_name": "bun",
+                "version": "1.3.14-test",
+                "is_reference": true,
+            }],
+            "product_runtime": {
+                "runtime_id": "franken-engine-native",
+                "runtime_name": "franken-engine-native",
+                "version": "0.1.0-test",
+                "is_reference": false,
+            },
             "generated_at_utc": timestamp,
         },
         "totals": {
@@ -233,6 +269,30 @@ fn refresh_compatibility_report_digest(report: &mut serde_json::Value) {
                 .expect("compatibility report per_test_results array"),
         );
     report["corpus"]["result_digest"] = serde_json::json!(digest);
+    refresh_runtime_observations_digest(report);
+}
+
+fn refresh_runtime_observations_digest(report: &mut serde_json::Value) {
+    let runtime_versions = BTreeMap::from([
+        ("bun".to_string(), "1.3.14-test".to_string()),
+        (
+            "franken-engine-native".to_string(),
+            "0.1.0-test".to_string(),
+        ),
+    ]);
+    let digest = frankenengine_node::ops::close_condition::compute_compatibility_corpus_runtime_observations_digest(
+        report["per_test_results"]
+            .as_array()
+            .expect("compatibility report per_test_results array"),
+        frankenengine_node::ops::close_condition::COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+        report["corpus"]["result_digest"]
+            .as_str()
+            .expect("compatibility report result digest"),
+        "dyad",
+        &runtime_versions,
+    )
+    .expect("compatibility report runtime observations digest");
+    report["corpus"]["runtime_observations_digest"] = serde_json::json!(digest);
 }
 
 fn write_valid_compatibility_report(path: &Path) {
@@ -1304,6 +1364,7 @@ fn verify_corpus_rejects_compatibility_report_result_digest_mismatch() {
     let mut report = valid_compatibility_report();
     report["per_test_results"][0]["test_id"] =
         serde_json::json!("compat-case-tampered-after-digest");
+    refresh_runtime_observations_digest(&mut report);
     write_json_fixture(&report_file, &report);
 
     let payload = assert_verify_corpus_failed_invariant(
@@ -1330,6 +1391,7 @@ fn verify_corpus_rejects_whitespace_padded_compatibility_result_digest() {
         .as_str()
         .expect("canonical compatibility result digest");
     report["corpus"]["result_digest"] = serde_json::json!(format!(" {canonical_digest} "));
+    refresh_runtime_observations_digest(&mut report);
     write_json_fixture(&report_file, &report);
 
     let payload = assert_verify_corpus_failed_invariant(
@@ -1344,6 +1406,30 @@ fn verify_corpus_rejects_whitespace_padded_compatibility_result_digest() {
             .len(),
         1,
         "digest bytes must match exactly without normalization: {payload:#?}"
+    );
+}
+
+#[test]
+fn verify_corpus_rejects_runtime_observation_tamper() {
+    let temp = TempDir::new().expect("temp dir");
+    let report_file = temp.path().join("compatibility-report-observation-tamper.json");
+    let mut report = valid_compatibility_report();
+    report["per_test_results"][0]["runtime_observations"]["bun"]["elapsed_ms"] =
+        serde_json::json!(99);
+    write_json_fixture(&report_file, &report);
+
+    let payload = assert_verify_corpus_failed_invariant(
+        &report_file,
+        Some("compatibility-report"),
+        "VCORPUS-REPORT-RUNTIME-OBSERVATIONS",
+    );
+    assert_eq!(
+        payload["details"]["failed_invariants"]
+            .as_array()
+            .expect("failed invariants array")
+            .len(),
+        1,
+        "observation tamper should fail only its binding invariant: {payload:#?}"
     );
 }
 
