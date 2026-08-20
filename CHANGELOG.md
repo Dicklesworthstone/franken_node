@@ -36,6 +36,15 @@ There is no later tag and no later Release.
 
 The previous window (2026-04-25 through 2026-05-16) is preserved below it.
 
+### Delivered capability
+
+- First published GitHub Release `v0.1.0` (2026-05-29).
+- Signed host-effect ledger, SSRF-gated network policy, lockstep observations, and a 2026-08-19 docs-reorg (`MODE_OUTPUT_*` → `docs/planning/modes/`, `BD_*` → `docs/progress/`).
+
+### Closed workstreams
+
+- Tracker: [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/franken_node/blob/main/.beads/issues.jsonl).
+
 ### Current window (2026-05-17 → 2026-08-19)
 
 #### First published Release (`v0.1.0`, 2026-05-29)
