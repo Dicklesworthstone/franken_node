@@ -539,23 +539,27 @@ fn run_surfaces_signed_host_effect_ledger_bd_5r99w_12() {
     assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
 }
 
-/// bd-opsnv: execute the exact committed crypto entropy corpus fixtures through
-/// the public product supervisor and its same-image native worker. The output
-/// assertions pin the Node-observable contract, while the SDK-verifiable
-/// ledger proves each fixture performed its non-empty entropy work through the
-/// typed RandomRead boundary instead of a deterministic interpreter fallback.
+/// bd-y4t2i.2 / engine bd-z1peg: execute the exact committed crypto entropy
+/// corpus fixtures through the public product supervisor and its same-image
+/// native worker. Each fixture tries to disclose an entropy-derived value
+/// through the `Internal` console sink, so the `Secret` RandomRead source floor
+/// must reject it during lowering before any entropy effect is dispatched.
+///
+/// This deliberately records a compatibility divergence rather than weakening
+/// the source label, console clearance, or declassification policy to match
+/// Node's observable output.
 #[test]
 #[cfg(feature = "engine")]
-fn crypto_entropy_corpus_fixtures_use_signed_random_read_effects_bd_opsnv() {
+fn crypto_entropy_corpus_disclosure_fails_before_random_read_bd_y4t2i_2() {
     let fixture_root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compat_corpus/crypto");
     let cases = [
-        ("0022_crypto_randombytes.js", "true\n16\n0\n", 1_usize),
-        ("0024_crypto_randomuuid.js", "string\n36\ntrue\n", 1_usize),
-        ("0025_crypto_randomuuid.js", "true\ntrue\n", 1_usize),
-        ("0026_crypto_randomint.js", "true\ntrue\n", 1_usize),
-        ("0027_crypto_randomint.js", "true\n3\n", 2_usize),
-        ("0028_crypto_randomfillsync.js", "true\n8\n", 1_usize),
+        "0022_crypto_randombytes.js",
+        "0024_crypto_randomuuid.js",
+        "0025_crypto_randomuuid.js",
+        "0026_crypto_randomint.js",
+        "0027_crypto_randomint.js",
+        "0028_crypto_randomfillsync.js",
     ];
 
     let config = Config {
@@ -565,64 +569,49 @@ fn crypto_entropy_corpus_fixtures_use_signed_random_read_effects_bd_opsnv() {
     let engine_dir = TempDir::new().expect("Failed to create engine dir");
     let engine_path = create_fixture_engine_binary(engine_dir.path());
 
-    for (fixture_name, expected_stdout, minimum_effects) in cases {
+    for fixture_name in cases {
         let source = std::fs::read_to_string(fixture_root.join(fixture_name))
             .unwrap_or_else(|error| panic!("read committed fixture {fixture_name}: {error}"));
         let run_dir = TempDir::new().expect("Failed to create crypto fixture run dir");
         let app_path = create_test_app(run_dir.path(), fixture_name, &source);
-        let report =
-            dispatch_via_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
-                .unwrap_or_else(|error| panic!("product run failed for {fixture_name}: {error}"));
-
-        assert_eq!(report.runtime, "franken_engine");
+        let output = invoke_product_supervisor(&app_path, &config, "legacy-risky", &engine_path)
+            .unwrap_or_else(|error| panic!("launch product run for {fixture_name}: {error}"));
         assert!(
-            !report.used_fallback_runtime,
-            "crypto fixture must execute in the native runtime: {fixture_name}"
+            !output.status.success(),
+            "entropy disclosure unexpectedly succeeded for {fixture_name}: stdout={:?}; stderr={:?}",
+            output.stdout,
+            output.stderr
         );
+        assert!(
+            output.stderr.contains("unauthorized flow detected"),
+            "product failure did not report the IFC denial for {fixture_name}: {:?}",
+            output.stderr
+        );
+        assert!(
+            output.stderr.contains("Secret -> Internal"),
+            "product failure did not preserve the source/sink labels for {fixture_name}: {:?}",
+            output.stderr
+        );
+        let evidence: ProductRunFailureEvidence = serde_json::from_str(&output.stdout)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "product run returned invalid failure evidence for {fixture_name}: {error}; stdout={:?}; stderr={:?}",
+                    output.stdout, output.stderr
+                )
+            });
         assert_eq!(
-            report.exit_code,
-            Some(0),
-            "product fixture must exit successfully: {fixture_name}"
+            evidence.schema_version,
+            "franken-node/run-failure-effect-evidence/v1"
         );
-        assert_eq!(
-            report.captured_output.stdout, expected_stdout,
-            "product output diverged from the committed Node contract: {fixture_name}"
-        );
-        assert!(
-            report.captured_output.stderr.is_empty(),
-            "product fixture emitted unexpected guest stderr: {fixture_name}: {:?}",
-            report.captured_output.stderr
-        );
-        let ledger = report.host_effect_ledger.as_ref().unwrap_or_else(|| {
-            panic!("native product run omitted its effect ledger: {fixture_name}")
-        });
-        assert!(
-            ledger.effect_count >= minimum_effects,
-            "fixture {fixture_name} recorded too few RandomRead effects: {:?}",
-            ledger.entries
-        );
-        assert_eq!(ledger.allowed_count, ledger.effect_count);
+        let ledger = evidence.host_effect_ledger;
+        assert_eq!(ledger.effect_count, 0);
+        assert_eq!(ledger.allowed_count, 0);
         assert_eq!(ledger.denied_count, 0);
         assert!(
-            ledger
-                .entries
-                .iter()
-                .all(|entry| entry.receipt.effect_kind.label() == "random_read"),
-            "fixture {fixture_name} emitted a non-RandomRead effect: {:?}",
+            ledger.entries.is_empty(),
+            "IFC must reject {fixture_name} before any RandomRead effect: {:?}",
             ledger.entries
         );
-
-        let entries_json =
-            serde_json::to_string(&ledger.entries).expect("serialize entropy ledger entries");
-        let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
-            serde_json::from_str(&entries_json)
-                .expect("verifier SDK accepts the entropy ledger wire shape");
-        let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://bd-opsnv-corpus-e2e");
-        let verdict = sdk
-            .verify_effect_chain_entries(&sdk_entries)
-            .unwrap_or_else(|error| panic!("SDK rejected {fixture_name} ledger: {error}"));
-        assert_eq!(verdict.effect_count, ledger.effect_count);
-        assert_eq!(verdict.head_chain_hash, ledger.chain_head_hash);
     }
 }
 

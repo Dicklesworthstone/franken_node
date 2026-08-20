@@ -7,8 +7,8 @@ assertion_line: 423
     "api_families": [
       {
         "family": "buffer",
-        "pass_rate_pct": 93.33,
-        "passed": 28,
+        "pass_rate_pct": 100.0,
+        "passed": 30,
         "total": 30
       },
       {
@@ -25,8 +25,8 @@ assertion_line: 423
       },
       {
         "family": "crypto",
-        "pass_rate_pct": 84.44,
-        "passed": 38,
+        "pass_rate_pct": 71.11,
+        "passed": 32,
         "total": 45
       },
       {
@@ -105,20 +105,20 @@ assertion_line: 423
     "bands": [
       {
         "band": "core",
-        "pass_rate_pct": 88.98,
-        "passed": 226,
+        "pass_rate_pct": 87.8,
+        "passed": 223,
         "total": 254
       },
       {
         "band": "edge",
-        "pass_rate_pct": 85.71,
-        "passed": 48,
+        "pass_rate_pct": 89.29,
+        "passed": 50,
         "total": 56
       },
       {
         "band": "high-value",
-        "pass_rate_pct": 85.6,
-        "passed": 214,
+        "pass_rate_pct": 84.4,
+        "passed": 211,
         "total": 250
       }
     ],
@@ -129,8 +129,6 @@ assertion_line: 423
       "CCG-004"
     ],
     "failing_test_ids": [
-      "tc::buffer::0028",
-      "tc::buffer::0030",
       "tc::child_process::0001",
       "tc::child_process::0002",
       "tc::child_process::0003",
@@ -144,7 +142,9 @@ assertion_line: 423
       "tc::child_process::0011",
       "tc::child_process::0012",
       "tc::child_process::0013",
-      "tc::child_process::0014"
+      "tc::child_process::0014",
+      "tc::child_process::0015",
+      "tc::child_process::0016"
     ],
     "per_test_result_count": 560,
     "summary": {
@@ -155,7 +155,7 @@ assertion_line: 423
       "path": "artifacts/13/compatibility_corpus_results.json",
       "sample_ids": {},
       "schema_version": null,
-      "scrubbed_sha256": "0cb1ebdb333506005c0dd719b03f23e049dcde384e2ccb2be6bff3d9cd8c01ae",
+      "scrubbed_sha256": "1738fbf09c338115895610c285d2082093c4296bbd9c6334f989da6ad046b6dd",
       "section": "13",
       "status": null,
       "top_level_keys": [
@@ -188,9 +188,9 @@ assertion_line: 423
     },
     "totals": {
       "errored_test_cases": 0,
-      "failed_test_cases": 72,
-      "overall_pass_rate_pct": 87.14,
-      "passed_test_cases": 488,
+      "failed_test_cases": 76,
+      "overall_pass_rate_pct": 86.43,
+      "passed_test_cases": 484,
       "skipped_test_cases": 0,
       "total_test_cases": 560
     }
