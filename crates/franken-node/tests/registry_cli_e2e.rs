@@ -143,7 +143,7 @@ fn registry_publish_requires_explicit_signing_key() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--signing-key"));
     assert!(stderr.contains("registry publish requires --signing-key"));
-    assert!(stderr.contains("fix_command=mkdir -p .franken-node/keys && openssl rand -hex 32 > .franken-node/keys/publisher.ed25519 && franken-node registry publish plugin.fnext --signing-key .franken-node/keys/publisher.ed25519"));
+    assert!(stderr.contains("fix_command=mkdir -p .franken-node/keys && openssl rand -hex 32 > .franken-node/keys/publisher.ed25519 && franken-node registry publish plugin.fnext --version 1.0.0 --signing-key .franken-node/keys/publisher.ed25519"));
 }
 
 #[test]

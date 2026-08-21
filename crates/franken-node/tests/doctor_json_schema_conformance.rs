@@ -872,6 +872,58 @@ fn doctor_json_live_vectors_match_schema() {
 }
 
 #[test]
+fn doctor_parent_json_workspace_pressure_emits_json_not_human() {
+    let output = run_doctor(&[
+        "doctor".to_string(),
+        "--json".to_string(),
+        "workspace-pressure".to_string(),
+    ]);
+    let report = parse_report(&output);
+    assert!(
+        !required_string(&report, "schema_version").is_empty(),
+        "workspace-pressure JSON must carry a schema_version"
+    );
+    assert!(
+        report.get("resources").is_some(),
+        "parent --json workspace-pressure must emit the doctor JSON envelope: {report}"
+    );
+    assert!(
+        report.get("policy_decisions").is_some(),
+        "workspace-pressure JSON must include policy_decisions: {report}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Coordination:"),
+        "parent --json must not emit the human workspace-pressure report: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Warning: Agent coordination degraded"),
+        "parent --json must keep the coordination warning off stderr: {stderr}"
+    );
+}
+
+#[test]
+fn doctor_parent_json_evidence_readiness_emits_json_not_human() {
+    let output = run_doctor(&[
+        "doctor".to_string(),
+        "--json".to_string(),
+        "--trace-id".to_string(),
+        "doctor-parent-json-evidence".to_string(),
+        "evidence-readiness".to_string(),
+        "--input".to_string(),
+        "fixtures/evidence_readiness/all_green.json".to_string(),
+    ]);
+    let report = parse_report(&output);
+    assert_eq!(required_string(&report, "overall_status"), "pass");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("franken-node doctor evidence-readiness"),
+        "parent --json must not emit the human evidence-readiness banner: {stdout}"
+    );
+}
+
+#[test]
 fn doctor_evidence_readiness_json_reports_all_green_snapshot() {
     let trace_id = "doctor-evidence-ready-green";
     let output = run_doctor(&evidence_readiness_args(trace_id, "all_green.json", true));

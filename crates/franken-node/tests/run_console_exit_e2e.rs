@@ -872,6 +872,30 @@ fn verify_lockstep_franken_leg_executes_against_bun() {
         "lockstep report must record Pass, got:\n{agree_stdout}"
     );
 
+    let agree_json = Command::new(franken_node_bin())
+        .args([
+            "verify",
+            "lockstep",
+            "app.js",
+            "--runtimes",
+            "bun,franken-node",
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn verify lockstep --json");
+    assert!(
+        agree_json.status.success(),
+        "identical guest behavior must pass lockstep --json; stdout=\n{}\nstderr=\n{}",
+        String::from_utf8_lossy(&agree_json.stdout),
+        String::from_utf8_lossy(&agree_json.stderr)
+    );
+    let json_stderr = String::from_utf8_lossy(&agree_json.stderr);
+    assert!(
+        !json_stderr.contains("Running lockstep verification"),
+        "verify lockstep --json must suppress the human stderr banner: {json_stderr}"
+    );
+
     std::fs::write(
         dir.path().join("divergent.js"),
         "console.log(typeof Bun !== \"undefined\" ? \"engine-bun\" : \"engine-other\");\n",
@@ -900,6 +924,37 @@ fn verify_lockstep_franken_leg_executes_against_bun() {
     assert!(
         diverge_all.contains("block_release"),
         "divergence must block release, got:\n{diverge_all}"
+    );
+
+    let diverge_json = Command::new(franken_node_bin())
+        .args([
+            "verify",
+            "lockstep",
+            "divergent.js",
+            "--runtimes",
+            "bun,franken-node",
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn verify lockstep divergent --json");
+    assert!(
+        !diverge_json.status.success(),
+        "a genuinely divergent program must fail lockstep --json"
+    );
+    let diverge_json_stdout = String::from_utf8_lossy(&diverge_json.stdout);
+    let diverge_json_stderr = String::from_utf8_lossy(&diverge_json.stderr);
+    assert!(
+        diverge_json_stdout.contains("block_release"),
+        "divergent lockstep --json must still emit the oracle report on stdout, got:\n{diverge_json_stdout}"
+    );
+    assert!(
+        !diverge_json_stderr.contains("Running lockstep verification"),
+        "verify lockstep --json must suppress the human stderr banner on failure: {diverge_json_stderr}"
+    );
+    assert!(
+        !diverge_json_stderr.contains("Lockstep harness failed"),
+        "verify lockstep --json must keep the human failure line off stderr: {diverge_json_stderr}"
     );
 }
 

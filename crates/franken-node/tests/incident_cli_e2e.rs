@@ -670,6 +670,43 @@ fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
         replay_contract.as_ref().expect("replay contract"),
     );
 
+    let replay_json = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident",
+            "replay",
+            "--bundle",
+            "INC-E2E-PIPE-001.fnbundle",
+            "--trusted-public-key",
+            &trust_anchor_arg,
+            "--json",
+        ],
+    );
+    assert!(
+        replay_json.status.success(),
+        "incident replay --json failed: {}",
+        String::from_utf8_lossy(&replay_json.stderr)
+    );
+    let replay_json_stdout = String::from_utf8_lossy(&replay_json.stdout);
+    let replay_json_stderr = String::from_utf8_lossy(&replay_json.stderr);
+    let replay_report: serde_json::Value = serde_json::from_str(replay_json_stdout.trim())
+        .unwrap_or_else(|err| {
+            panic!("incident replay --json must emit JSON on stdout ({err}):\n{replay_json_stdout}")
+        });
+    assert_eq!(
+        replay_report["schema_version"],
+        json!("incident-replay-cli-v1")
+    );
+    assert_eq!(replay_report["replay_result"]["matched"], json!(true));
+    assert!(
+        !replay_json_stderr.contains("franken-node incident replay:"),
+        "incident replay --json must suppress the human progress banner: {replay_json_stderr}"
+    );
+    assert!(
+        replay_json_stderr.contains("incident replay result:"),
+        "incident replay --json must keep the machine-parseable result line on stderr: {replay_json_stderr}"
+    );
+
     let counterfactual_output = run_cli_in_workspace(
         workspace.path(),
         &[

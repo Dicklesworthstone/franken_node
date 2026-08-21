@@ -700,6 +700,48 @@ fn doctor_close_condition_fails_l1_when_both_parity_and_proof_missing() {
 }
 
 #[test]
+fn doctor_parent_json_close_condition_emits_receipt_json_not_human() {
+    let root = fixture_root();
+    let (signing_key_path, _) =
+        write_test_signing_key(root.path(), ".franken-node/keys/oracle-close.key", 61);
+    let signing_key_path = signing_key_path.display().to_string();
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .env(
+            "FRANKEN_NODE_CLOSE_CONDITION_TIMESTAMP_UTC",
+            "2026-02-21T00:00:00Z",
+        )
+        .args([
+            "doctor",
+            "--json",
+            "close-condition",
+            "--receipt-signing-key",
+            signing_key_path.as_str(),
+        ])
+        .output()
+        .expect("doctor --json close-condition should run");
+
+    assert!(
+        output.status.success(),
+        "doctor --json close-condition failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let receipt: Value =
+        serde_json::from_str(stdout.trim()).expect("parent --json must emit JSON on stdout");
+    assert_eq!(
+        receipt["schema_version"],
+        "oracle-close-condition-receipt/v1"
+    );
+    assert!(
+        !stdout.contains("doctor close-condition: verdict="),
+        "parent --json must not emit the human close-condition line: {stdout}"
+    );
+}
+
+#[test]
 fn doctor_close_condition_requires_trusted_signing_key() {
     let root = fixture_root();
     let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");

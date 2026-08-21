@@ -406,7 +406,7 @@ struct OpsHealthCheckReport {
     pass: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct OpsPrometheusMetricsReport {
     health: OpsHealthCheckReport,
     last_successful_evidence_ledger_flush_timestamp_seconds: u64,
@@ -5667,6 +5667,22 @@ fn render_incident_list(entries: &[IncidentListEntry], severity_filter: Option<&
     lines.join("\n")
 }
 
+fn incident_list_json_payload(
+    entries: &[IncidentListEntry],
+    severity_filter: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "command": "incident.list",
+        "schema_version": "incident-list-v1",
+        "severity_filter": severity_filter,
+        "filters": {
+            "severity": severity_filter,
+        },
+        "count": entries.len(),
+        "incidents": entries,
+    })
+}
+
 fn now_unix_secs() -> u64 {
     let ts = chrono::Utc::now().timestamp();
     if ts <= 0 { 0 } else { ts as u64 }
@@ -6523,6 +6539,7 @@ fn handle_doctor_close_condition(
     args: &DoctorCloseConditionArgs,
     trace_id: &str,
     structured_logs_jsonl: bool,
+    parent_json: bool,
 ) -> Result<()> {
     let root = std::env::current_dir()
         .context("failed resolving current working directory for close-condition receipt")?;
@@ -6556,7 +6573,7 @@ fn handle_doctor_close_condition(
         );
     }
 
-    if args.json {
+    if args.json || parent_json {
         println!("{rendered}");
     } else {
         println!(
@@ -6678,13 +6695,17 @@ fn handle_doctor_process_spawn_readiness(
     }
 }
 
-fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Result<()> {
+fn handle_doctor_workspace_pressure(
+    args: &DoctorWorkspacePressureArgs,
+    parent_json: bool,
+) -> Result<()> {
     use crate::ops::doctor::WorkspacePressureDoctor;
     use crate::ops::workspace_pressure_policy::PolicyThresholds;
     use std::fs;
 
+    let json = args.json || parent_json;
     let coordination_report = collect_coordination_health();
-    if !coordination_report.is_healthy() {
+    if !json && !coordination_report.is_healthy() {
         eprintln!(
             "Warning: Agent coordination degraded: {}",
             coordination_report.reason
@@ -6708,7 +6729,7 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
     );
 
     // Output JSON report
-    if args.json || args.output.is_some() {
+    if json || args.output.is_some() {
         let json_output = serde_json::to_string_pretty(&report)?;
         if let Some(output_path) = &args.output {
             let validated_path = cli::validate_user_content_pathbuf(output_path)
@@ -6727,7 +6748,7 @@ fn handle_doctor_workspace_pressure(args: &DoctorWorkspacePressureArgs) -> Resul
         let human_report = doctor.format_human_report(&report);
         fs::write(validated_path, &human_report)
             .with_context(|| format!("failed to write human report to {:?}", human_output_path))?;
-    } else if !args.json && args.output.is_none() {
+    } else if !json && args.output.is_none() {
         // Default: output human-readable to stdout if no JSON requested
         let human_report = doctor.format_human_report(&report);
         println!("{}", human_report);
@@ -9248,7 +9269,12 @@ where
 fn emit_ops_metrics_report(
     report: &OpsPrometheusMetricsReport,
     format: OpsMetricsFormat,
+    json: bool,
 ) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
     match format {
         OpsMetricsFormat::Prometheus => {
             println!("{}", render_ops_metrics_prometheus(report));
@@ -9909,7 +9935,19 @@ fn apply_sentinel_subject_quarantine_gate(
 
 fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
     if args.operator_id.trim().is_empty() || args.reason.trim().is_empty() {
-        anyhow::bail!("trust release requires non-empty --operator-id and --reason");
+        let message = "trust release requires non-empty --operator-id and --reason";
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "franken-node/trust-release-error/v1",
+                    "command": "trust.release",
+                    "ok": false,
+                    "error": message,
+                }))?
+            );
+        }
+        anyhow::bail!("{message}");
     }
     let project_root = run_project_root(&args.app);
     let app_content_hash = sentinel_subject_content_hash(&args.app)?;
@@ -9941,12 +9979,14 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
     record.release_reason = Some(args.reason.clone());
     persist_sentinel_quarantine_record(&record_path, &record)?;
 
-    eprintln!(
-        "trust release: sentinel quarantine lifted for {} (decision {}, operator {})",
-        args.app.display(),
-        record.decision_id,
-        args.operator_id
-    );
+    if !args.json {
+        eprintln!(
+            "trust release: sentinel quarantine lifted for {} (decision {}, operator {})",
+            args.app.display(),
+            record.decision_id,
+            args.operator_id
+        );
+    }
     if args.json {
         let payload = serde_json::json!({
             "command": "trust.release",
@@ -15114,6 +15154,7 @@ mod fleet_command_tests {
         let rendered = render_fleet_status_human(&status, true);
         assert!(rendered.contains("fleet status: zone=zone-1"));
         assert!(rendered.contains("activated=false"));
+        assert!(rendered.contains("transport=file live_control_plane=false"));
         assert!(rendered.contains("quarantines=2 revocations=1"));
         assert!(rendered.contains("healthy_nodes=9/10"));
         assert!(rendered.contains("pending_convergences=0"));
@@ -15798,6 +15839,21 @@ mod incident_list_tests {
         assert_eq!(
             rendered,
             "incident list: no bundles found for severity=critical"
+        );
+    }
+
+    #[test]
+    fn incident_list_json_is_single_envelope_not_ndjson() {
+        let payload = incident_list_json_payload(&[], Some("high"));
+        assert!(payload.is_object());
+        assert_eq!(payload["command"], "incident.list");
+        assert_eq!(payload["schema_version"], "incident-list-v1");
+        assert_eq!(payload["severity_filter"], "high");
+        assert_eq!(payload["count"], 0);
+        assert_eq!(payload["incidents"], serde_json::json!([]));
+        assert!(
+            payload.get("incident_id").is_none(),
+            "--json must not emit a per-incident object at the root: {payload}"
         );
     }
 
@@ -18127,7 +18183,9 @@ fn load_ltv_witness_signers(
 }
 
 fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
-    eprintln!("franken-node ltv attest: bundle={}", args.bundle.display());
+    if !args.json {
+        eprintln!("franken-node ltv attest: bundle={}", args.bundle.display());
+    }
     let trusted_key_ids = replay_trusted_key_ids(
         args.trusted_public_key.as_deref(),
         args.trusted_key_dir.as_deref(),
@@ -18231,15 +18289,17 @@ fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
         );
         eprintln!("{}", serde_json::to_string(&cosigned)?);
     }
-    eprintln!(
-        "ltv attest result: artifact_id={} origin_tree_size={} attested_root={} witnesses={}/{} out={}",
-        evidence.artifact.artifact_id,
-        origin_root.tree_size,
-        attested_root.root_hash,
-        evidence.witness_receipt.witness_artifact.signatures.len(),
-        evidence.witness_receipt.threshold_config.total_signers,
-        args.out.display()
-    );
+    if !args.json {
+        eprintln!(
+            "ltv attest result: artifact_id={} origin_tree_size={} attested_root={} witnesses={}/{} out={}",
+            evidence.artifact.artifact_id,
+            origin_root.tree_size,
+            attested_root.root_hash,
+            evidence.witness_receipt.witness_artifact.signatures.len(),
+            evidence.witness_receipt.threshold_config.total_signers,
+            args.out.display()
+        );
+    }
 
     if args.json {
         let payload = serde_json::json!({
@@ -18272,10 +18332,12 @@ fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
 }
 
 fn handle_ltv_verify_as_of_command(args: &cli::LtvVerifyAsOfArgs) -> Result<()> {
-    eprintln!(
-        "franken-node ltv verify-as-of: evidence={}",
-        args.evidence.display()
-    );
+    if !args.json {
+        eprintln!(
+            "franken-node ltv verify-as-of: evidence={}",
+            args.evidence.display()
+        );
+    }
     let raw = crate::bounded_read(&args.evidence, MAX_LTV_EVIDENCE_BYTES)
         .with_context(|| format!("failed reading LTV evidence {}", args.evidence.display()))?;
     let mut evidence: frankenengine_verifier_sdk::LongTermVerificationEvidence =
@@ -18365,12 +18427,14 @@ fn handle_ltv_verify_as_of_command(args: &cli::LtvVerifyAsOfArgs) -> Result<()> 
             eprintln!("{}", serde_json::to_string(&unproven)?);
         }
     }
-    eprintln!(
-        "ltv verify-as-of result: verdict={:?} assertions={} as_of={}",
-        result.verdict,
-        result.checked_assertions.len(),
-        evidence.as_of_unix_seconds
-    );
+    if !args.json {
+        eprintln!(
+            "ltv verify-as-of result: verdict={:?} assertions={} as_of={}",
+            result.verdict,
+            result.checked_assertions.len(),
+            evidence.as_of_unix_seconds
+        );
+    }
 
     if args.json {
         let sdk_transcript: Vec<serde_json::Value> =
@@ -18429,10 +18493,12 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
         args.receipt_summary_out.as_deref(),
         args.receipt_signing_key.as_deref(),
     )?;
-    eprintln!(
-        "franken-node incident bundle: id={} verify={}",
-        args.id, args.verify
-    );
+    if !args.json {
+        eprintln!(
+            "franken-node incident bundle: id={} verify={}",
+            args.id, args.verify
+        );
+    }
     let evidence_path = resolve_incident_evidence_path(&args.id, args.evidence_path.as_deref())?;
     let evidence =
         read_incident_evidence_package(&evidence_path, Some(&args.id)).with_context(|| {
@@ -18450,10 +18516,12 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
     if args.verify {
         let valid = validate_bundle_integrity(&bundle)
             .with_context(|| format!("failed validating replay bundle for {}", args.id))?;
-        eprintln!(
-            "bundle integrity: {}",
-            if valid { "valid" } else { "invalid" }
-        );
+        if !args.json {
+            eprintln!(
+                "bundle integrity: {}",
+                if valid { "valid" } else { "invalid" }
+            );
+        }
         anyhow::ensure!(valid, "generated replay bundle failed integrity validation");
     }
 
@@ -18544,10 +18612,12 @@ fn incident_replay_cli_summary(
 }
 
 fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> {
-    eprintln!(
-        "franken-node incident replay: bundle={}",
-        args.bundle.display()
-    );
+    if !args.json {
+        eprintln!(
+            "franken-node incident replay: bundle={}",
+            args.bundle.display()
+        );
+    }
     let trusted_key_ids = replay_trusted_key_ids(
         args.trusted_public_key.as_deref(),
         args.trusted_key_dir.as_deref(),
@@ -19047,12 +19117,14 @@ fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs
             );
         }
     }
-    eprintln!(
-        "franken-node incident counterfactual: bundle={} policy={} model={}",
-        args.bundle.display(),
-        args.policy,
-        args.model
-    );
+    if !args.json {
+        eprintln!(
+            "franken-node incident counterfactual: bundle={} policy={} model={}",
+            args.bundle.display(),
+            args.policy,
+            args.model
+        );
+    }
     let trusted_key_ids = replay_trusted_key_ids(
         args.trusted_public_key.as_deref(),
         args.trusted_key_dir.as_deref(),
@@ -21709,8 +21781,16 @@ struct LoadedFleetState {
     active_incidents: Vec<FleetCliPendingIncident>,
 }
 
+const FLEET_CLI_STATUS_SCHEMA_VERSION: &str = "franken-node/fleet-status-cli/v1";
+const FLEET_CLI_TRANSPORT: &str = "file";
+
 #[derive(Debug, Clone, Serialize)]
 struct FleetCliStatusReport {
+    schema_version: &'static str,
+    /// CLI fleet status is always the local file-transport log, not a live API.
+    transport: &'static str,
+    /// File-transport CLI cannot claim a live control-plane heartbeat.
+    live_control_plane: bool,
     status: FleetStatus,
     state_dir: PathBuf,
     convergence_timeout_seconds: u64,
@@ -22065,6 +22145,9 @@ fn fleet_status_report(project_root: &Path, requested_zone: &str) -> Result<Flee
     let loaded = load_fleet_state(project_root)?;
     let status = fleet_status_from_loaded_state(&loaded, requested_zone);
     Ok(FleetCliStatusReport {
+        schema_version: FLEET_CLI_STATUS_SCHEMA_VERSION,
+        transport: FLEET_CLI_TRANSPORT,
+        live_control_plane: false,
         status,
         state_dir: loaded.state_dir,
         convergence_timeout_seconds: loaded.convergence_timeout_seconds,
@@ -22497,6 +22580,10 @@ fn render_fleet_status_human(status: &FleetStatus, verbose: bool) -> String {
             ));
         }
     }
+    // Keep this after the stable first-five-line shape (`fleet_status_human_output_shape_is_stable`).
+    lines.push(format!(
+        "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false"
+    ));
     lines.join("\n")
 }
 
@@ -24659,7 +24746,16 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
     if entries.is_empty() {
         if args.json {
             println!(
-                "{{\"status\":\"empty\",\"message\":\"No entries in transparency log; verify fails closed\"}}"
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "empty",
+                    "message": "No entries in transparency log; verify fails closed",
+                    "total_entries": 0,
+                    "hash_chain_errors": [],
+                    "signature_errors": [],
+                    "total_errors": 0,
+                    "signatures_verified": false,
+                }))?
             );
         } else {
             eprintln!("Transparency log is empty; verification fails closed");
@@ -28980,12 +29076,21 @@ fn main() -> Result<()> {
                     .map(|s| s.trim().to_string())
                     .collect();
                 let harness = runtime::lockstep_harness::LockstepHarness::new(runtimes);
-                eprintln!(
-                    "Running lockstep verification on {}",
-                    args.project_path.display()
-                );
+                // The oracle report is always JSON on stdout. `--json` means
+                // "do not mix a human progress banner into stderr" so agent
+                // wrappers get a machine-only stream.
+                if !args.json {
+                    eprintln!(
+                        "Running lockstep verification on {}",
+                        args.project_path.display()
+                    );
+                }
                 if let Err(e) = harness.verify_lockstep(&args.project_path, args.emit_fixtures) {
-                    eprintln!("Lockstep harness failed: {}", e);
+                    // The oracle report is already JSON on stdout. Keep the
+                    // human failure line off stderr when `--json` is set.
+                    if !args.json {
+                        eprintln!("Lockstep harness failed: {e}");
+                    }
                     std::process::exit(1);
                 }
             }
@@ -29359,16 +29464,7 @@ fn main() -> Result<()> {
                     .context("failed resolving current working directory for incident list")?;
                 let entries = collect_incident_list_entries(&cwd, severity_filter.as_deref())?;
                 if args.json {
-                    let payload = serde_json::json!({
-                        "command": "incident.list",
-                        "schema_version": "incident-list-v1",
-                        "severity_filter": severity_filter,
-                        "filters": {
-                            "severity": severity_filter,
-                        },
-                        "count": entries.len(),
-                        "incidents": entries,
-                    });
+                    let payload = incident_list_json_payload(&entries, severity_filter.as_deref());
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!(
@@ -29411,7 +29507,7 @@ fn main() -> Result<()> {
             }
             OpsCommand::Metrics(args) => {
                 let report = ops_metrics_report(Path::new("."))?;
-                emit_ops_metrics_report(&report, args.format)?;
+                emit_ops_metrics_report(&report, args.format, args.json)?;
             }
             OpsCommand::ProofCarryingEvidence(args) => {
                 handle_ops_proof_carrying_evidence(&args)?;
@@ -29462,6 +29558,7 @@ fn main() -> Result<()> {
                             close_args,
                             &args.trace_id,
                             args.structured_logs_jsonl,
+                            args.json,
                         )?;
                     }
                     DoctorCommand::EvidenceReadiness(readiness_args) => {
@@ -29472,7 +29569,7 @@ fn main() -> Result<()> {
                         )?;
                     }
                     DoctorCommand::WorkspacePressure(pressure_args) => {
-                        handle_doctor_workspace_pressure(pressure_args)?;
+                        handle_doctor_workspace_pressure(pressure_args, args.json)?;
                     }
                     DoctorCommand::ProcessSpawnReadiness(readiness_args) => {
                         handle_doctor_process_spawn_readiness(readiness_args, args.json)?;

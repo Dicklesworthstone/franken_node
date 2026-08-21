@@ -819,7 +819,8 @@ pub struct VerifyLockstepArgs {
     #[arg(long)]
     pub emit_fixtures: bool,
 
-    /// Emit structured JSON output.
+    /// Suppress the human stderr banner. The lockstep oracle report is
+    /// always JSON on stdout; `--json` makes stderr stay empty on success.
     #[arg(long)]
     pub json: bool,
 }
@@ -1339,6 +1340,8 @@ pub struct FleetStatusArgs {
     pub verbose: bool,
 
     /// Emit JSON instead of human-readable output.
+    /// JSON includes `transport=file` and `live_control_plane=false` so
+    /// `status.activated` is not a live fleet-API heartbeat.
     #[arg(long)]
     pub json: bool,
 }
@@ -1422,7 +1425,7 @@ pub enum OpsCommand {
     /// Audit the active config and compare operational impact across profiles.
     #[command(name = "config-audit")]
     ConfigAudit(OpsConfigAuditArgs),
-    /// Emit operator metrics in a scrape-friendly text format.
+    /// Emit operator metrics as Prometheus text, or as JSON with `--json`.
     Metrics(OpsMetricsArgs),
     /// Produce L1 proof-carrying host-effect evidence (v2) from a real native-engine run.
     #[command(name = "proof-carrying-evidence")]
@@ -1645,6 +1648,10 @@ pub struct OpsMetricsArgs {
     /// Metrics output format.
     #[arg(long, value_enum, default_value_t = OpsMetricsFormat::Prometheus)]
     pub format: OpsMetricsFormat,
+
+    /// Emit the same metrics snapshot as JSON instead of Prometheus text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // -- incident --
@@ -1779,7 +1786,8 @@ pub struct IncidentListArgs {
     #[arg(long)]
     pub severity: Option<String>,
 
-    /// Emit machine-readable JSON output (one object per incident).
+    /// Emit one JSON envelope on stdout (`incident-list-v1` with an `incidents` array).
+    /// This is not NDJSON; `--json` does not print one object per incident.
     #[arg(long)]
     pub json: bool,
 }
@@ -3184,6 +3192,110 @@ mod parser_contract_extra_tests {
             other => return Err(format!("expected ops metrics command, got {other:?}")),
         };
         assert_eq!(args.format, OpsMetricsFormat::Prometheus);
+        assert!(!args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn ops_metrics_parses_json_flag() -> Result<(), String> {
+        let cli =
+            parse(&["franken-node", "ops", "metrics", "--json"]).map_err(|err| err.to_string())?;
+        let args = match cli.command {
+            Command::Ops(OpsCommand::Metrics(args)) => args,
+            other => return Err(format!("expected ops metrics command, got {other:?}")),
+        };
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_parent_json_applies_to_workspace_pressure_subcommand() -> Result<(), String> {
+        let cli = parse(&["franken-node", "doctor", "--json", "workspace-pressure"])
+            .map_err(|err| err.to_string())?;
+        let args = match cli.command {
+            Command::Doctor(args) => args,
+            other => return Err(format!("expected doctor command, got {other:?}")),
+        };
+        assert!(
+            args.json,
+            "parent --json must be visible to workspace-pressure"
+        );
+        match args.command {
+            Some(DoctorCommand::WorkspacePressure(pressure)) => {
+                assert!(
+                    !pressure.json,
+                    "subcommand flag stays unset; handler must honor parent --json"
+                );
+            }
+            other => {
+                return Err(format!(
+                    "expected doctor workspace-pressure subcommand, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_parent_json_applies_to_close_condition_subcommand() -> Result<(), String> {
+        let cli = parse(&["franken-node", "doctor", "--json", "close-condition"])
+            .map_err(|err| err.to_string())?;
+        let args = match cli.command {
+            Command::Doctor(args) => args,
+            other => return Err(format!("expected doctor command, got {other:?}")),
+        };
+        assert!(
+            args.json,
+            "parent --json must be visible to close-condition"
+        );
+        match args.command {
+            Some(DoctorCommand::CloseCondition(close_args)) => {
+                assert!(
+                    !close_args.json,
+                    "subcommand flag stays unset; handler must honor parent --json"
+                );
+            }
+            other => {
+                return Err(format!(
+                    "expected doctor close-condition subcommand, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_parent_json_applies_to_evidence_readiness_subcommand() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "doctor",
+            "--json",
+            "evidence-readiness",
+            "--input",
+            "fixtures/evidence_readiness/all_green.json",
+        ])
+        .map_err(|err| err.to_string())?;
+        let args = match cli.command {
+            Command::Doctor(args) => args,
+            other => return Err(format!("expected doctor command, got {other:?}")),
+        };
+        assert!(
+            args.json,
+            "parent --json must be visible to evidence-readiness"
+        );
+        match args.command {
+            Some(DoctorCommand::EvidenceReadiness(readiness)) => {
+                assert!(
+                    !readiness.json,
+                    "subcommand flag stays unset; handler must honor parent --json"
+                );
+            }
+            other => {
+                return Err(format!(
+                    "expected doctor evidence-readiness subcommand, got {other:?}"
+                ));
+            }
+        }
         Ok(())
     }
 }

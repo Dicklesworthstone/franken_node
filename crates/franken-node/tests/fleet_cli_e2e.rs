@@ -1243,6 +1243,13 @@ fn fleet_status_json_includes_full_shared_state() {
         serde_json::from_slice(&output.stdout).expect("fleet status json");
     assert_eq!(payload["status"]["zone_id"], "all");
     assert_eq!(
+        payload["schema_version"],
+        "franken-node/fleet-status-cli/v1"
+    );
+    assert_eq!(payload["transport"], "file");
+    assert_eq!(payload["live_control_plane"], false);
+    assert_eq!(payload["status"]["activated"], false);
+    assert_eq!(
         payload["state"]["schema_version"],
         "franken-node/fleet-transport-state/v1"
     );
@@ -2277,6 +2284,13 @@ fn fleet_status_json_output_shape_is_stable() {
     assert!(payload["stale_nodes"].is_array());
     assert!(payload["active_incidents"].is_array());
     assert!(payload["convergence_timeout_seconds"].is_u64());
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/fleet-status-cli/v1"
+    );
+    assert_eq!(payload["transport"], "file");
+    assert_eq!(payload["live_control_plane"], false);
+    assert_eq!(payload["status"]["activated"], false);
     assert_eq!(payload["status"]["zone_id"], "zone-json");
     assert_eq!(payload["status"]["active_quarantines"], 1);
 }
@@ -2403,6 +2417,44 @@ fn ops_health_check_json_counts_persisted_sessions_under_workspace_root() {
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("ops health-check json");
     assert_eq!(payload["active_session_count"], 2);
+}
+
+#[test]
+fn ops_metrics_json_emits_health_snapshot_instead_of_prometheus_text() {
+    let workspace = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(workspace.path());
+
+    let prometheus = run_cli_in_dir_with_env(workspace.path(), &["ops", "metrics"], &[]);
+    assert!(
+        prometheus.status.success(),
+        "ops metrics failed: {}",
+        String::from_utf8_lossy(&prometheus.stderr)
+    );
+    let prometheus_stdout = String::from_utf8_lossy(&prometheus.stdout);
+    assert!(
+        prometheus_stdout.contains("franken_node_process_uptime_seconds"),
+        "default ops metrics must be Prometheus text: {prometheus_stdout}"
+    );
+
+    let output = run_cli_in_dir_with_env(workspace.path(), &["ops", "metrics", "--json"], &[]);
+    assert!(
+        output.status.success(),
+        "ops metrics --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("# TYPE"),
+        "ops metrics --json must not emit Prometheus text: {stdout}"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ops metrics --json");
+    assert_eq!(
+        payload["health"]["build_version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(payload["health"]["uptime_seconds"].as_u64().is_some());
+    assert!(payload["incident_evidence_files"].as_u64().is_some());
 }
 
 #[test]

@@ -1216,6 +1216,41 @@ fn trust_revoke_honors_json() {
 }
 
 #[test]
+fn trust_release_empty_fields_json_emits_error_report() {
+    let workspace = seeded_fixture_trust_workspace();
+    fs::write(workspace.path().join("app.js"), "console.log(1);\n").expect("write app.js");
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "release",
+            "--app",
+            "app.js",
+            "--operator-id",
+            "",
+            "--reason",
+            "",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "empty trust release fields must fail closed"
+    );
+    let payload = parse_json_stdout(&output, "trust release --json empty fields");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-release-error/v1"
+    );
+    assert_eq!(payload["command"], "trust.release");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(
+        payload["error"],
+        "trust release requires non-empty --operator-id and --reason"
+    );
+}
+
+#[test]
 fn trust_revoke_fails_for_unknown_extension() {
     let workspace = seeded_fixture_trust_workspace();
     let output = run_cli_in_workspace(
