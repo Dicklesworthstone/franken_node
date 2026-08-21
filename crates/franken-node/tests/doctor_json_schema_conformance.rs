@@ -924,6 +924,49 @@ fn doctor_parent_json_evidence_readiness_emits_json_not_human() {
 }
 
 #[test]
+fn doctor_parent_json_process_spawn_readiness_emits_json_not_human() {
+    let output = run_doctor(&[
+        "doctor".to_string(),
+        "--json".to_string(),
+        "process-spawn-readiness".to_string(),
+        "--bubblewrap-path".to_string(),
+        "/definitely/missing/franken-node-bwrap".to_string(),
+    ]);
+    assert!(
+        !output.status.success(),
+        "missing process-spawn backend must fail closed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value =
+        serde_json::from_slice(&output.stdout).expect("parent --json stdout must be JSON");
+    assert_eq!(
+        required_string(&report, "schema_version"),
+        "franken-node/process-spawn-readiness/v1"
+    );
+    assert_eq!(required_string(&report, "backend"), "bubblewrap");
+    let status = required_string(&report, "status");
+    assert!(
+        status == "unavailable" || status == "unsupported",
+        "missing backend must be fail-closed, got {status}: {report}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("process-spawn readiness:"),
+        "parent --json must not emit the human process-spawn banner: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("process-spawn readiness:"),
+        "parent --json must keep the human process-spawn banner off stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("process-spawn containment backend is not ready"),
+        "parent --json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn doctor_evidence_readiness_json_reports_all_green_snapshot() {
     let trace_id = "doctor-evidence-ready-green";
     let output = run_doctor(&evidence_readiness_args(trace_id, "all_green.json", true));

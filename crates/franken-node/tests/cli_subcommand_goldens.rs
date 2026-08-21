@@ -878,6 +878,11 @@ fn safe_mode_cli_exit_without_confirmation_fails_closed_json() -> Result<(), Box
             .expect("error string")
             .contains("operator_confirmed")
     );
+    let stderr = String::from_utf8_lossy(&exit_assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("safe-mode.exit failed:"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
     Ok(())
 }
 
@@ -985,6 +990,11 @@ fn proofs_workers_restart_json_denies_missing_pipeline_admin() -> Result<(), Box
     assert_eq!(
         restart_json["reason_code"],
         json!("ERR_PROOF_RESTART_PERMISSION_DENIED")
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("Error: ERR_PROOF_RESTART_PERMISSION_DENIED"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
     );
     Ok(())
 }

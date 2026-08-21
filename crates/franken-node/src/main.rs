@@ -5731,6 +5731,13 @@ fn emit_json_or_human<T: Serialize>(
     Ok(())
 }
 
+/// After a `--json` report has already been written to stdout, fail closed
+/// without appending a second human `Error:` line on stderr.
+fn fail_closed_after_json() -> ! {
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::exit(1);
+}
+
 const SAFE_MODE_CLI_SCHEMA_VERSION: &str = "franken-node/safe-mode-cli/v1";
 
 #[derive(Debug, Serialize)]
@@ -5912,11 +5919,11 @@ fn emit_safe_mode_error(
             recovery_hint: recovery_hint.to_string(),
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        eprintln!("{command} failed: {error}");
-        eprintln!("recovery: {recovery_hint}");
+        fail_closed_after_json();
     }
-    Ok(())
+    eprintln!("{command} failed: {error}");
+    eprintln!("recovery: {recovery_hint}");
+    anyhow::bail!("{error}")
 }
 
 fn handle_safe_mode_enter_command(args: SafeModeEnterArgs) -> Result<()> {
@@ -5925,14 +5932,13 @@ fn handle_safe_mode_enter_command(args: SafeModeEnterArgs) -> Result<()> {
         Ok(reason) => reason,
         Err(err) => {
             let message = err.to_string();
-            emit_safe_mode_error(
+            return emit_safe_mode_error(
                 "safe-mode.enter",
                 &state_path,
                 args.json,
                 &message,
                 "Use --reason explicit-flag, environment-variable, config-field, trust-corruption, crash-loop, or epoch-mismatch with required reason fields",
-            )?;
-            anyhow::bail!(message);
+            );
         }
     };
     reject_nul_field(&args.operator_id, "--operator-id")?;
@@ -5982,14 +5988,13 @@ fn handle_safe_mode_exit_command(args: SafeModeExitArgs) -> Result<()> {
         Ok(controller) => controller,
         Err(err) => {
             let message = err.to_string();
-            emit_safe_mode_error(
+            return emit_safe_mode_error(
                 "safe-mode.exit",
                 &state_path,
                 args.json,
                 &message,
                 "Run `franken-node safe-mode status --json` to inspect state, then enter safe mode before exit",
-            )?;
-            anyhow::bail!(message);
+            );
         }
     };
     let timestamp = safe_mode_timestamp(args.timestamp.as_deref());
@@ -6015,14 +6020,13 @@ fn handle_safe_mode_exit_command(args: SafeModeExitArgs) -> Result<()> {
         Err(err) => {
             let message = err.to_string();
             persist_safe_mode_controller(&state_path, &controller)?;
-            emit_safe_mode_error(
+            return emit_safe_mode_error(
                 "safe-mode.exit",
                 &state_path,
                 args.json,
                 &message,
                 "Pass --confirm only after trust-state, incident, and evidence-ledger pre-exit checks are true",
-            )?;
-            anyhow::bail!(message);
+            );
         }
     }
 }
@@ -6514,6 +6518,7 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
                     fixture_mode: args.fixture_mode,
                 };
                 println!("{}", serde_json::to_string_pretty(&error_report)?);
+                fail_closed_after_json();
             }
             anyhow::bail!("{message}");
         }
@@ -6675,7 +6680,8 @@ fn handle_doctor_process_spawn_readiness(
     parent_json: bool,
 ) -> Result<()> {
     let report = build_process_spawn_readiness_report(args.bubblewrap_path.as_deref());
-    if args.json || parent_json {
+    let json = args.json || parent_json;
+    if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
@@ -6690,6 +6696,8 @@ fn handle_doctor_process_spawn_readiness(
 
     if report.status == "ready" {
         Ok(())
+    } else if json {
+        fail_closed_after_json();
     } else {
         anyhow::bail!("process-spawn containment backend is not ready")
     }
@@ -8482,6 +8490,9 @@ fn handle_proofs_command(command: ProofsCommand) -> Result<()> {
                 let reason_code = report.reason_code.clone();
                 emit_proof_workers_restart_report(&report, args.json)?;
                 if !ok {
+                    if args.json {
+                        fail_closed_after_json();
+                    }
                     anyhow::bail!(reason_code);
                 }
                 Ok(())
@@ -9933,19 +9944,25 @@ fn apply_sentinel_subject_quarantine_gate(
     })
 }
 
+fn emit_trust_release_error_json(message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "franken-node/trust-release-error/v1",
+            "command": "trust.release",
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
 fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
     if args.operator_id.trim().is_empty() || args.reason.trim().is_empty() {
         let message = "trust release requires non-empty --operator-id and --reason";
         if args.json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "schema_version": "franken-node/trust-release-error/v1",
-                    "command": "trust.release",
-                    "ok": false,
-                    "error": message,
-                }))?
-            );
+            emit_trust_release_error_json(message)?;
+            fail_closed_after_json();
         }
         anyhow::bail!("{message}");
     }
@@ -9953,23 +9970,33 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
     let app_content_hash = sentinel_subject_content_hash(&args.app)?;
     let record_path = sentinel_quarantine_record_path(&project_root, &app_content_hash)?;
     let Some(mut record) = load_sentinel_quarantine_record(&record_path)? else {
+        let message = format!(
+            "no sentinel quarantine record exists for {} ({})",
+            args.app.display(),
+            app_content_hash
+        );
+        if args.json {
+            emit_trust_release_error_json(&message)?;
+            fail_closed_after_json();
+        }
         return Err(ActionableError::new(
-            format!(
-                "no sentinel quarantine record exists for {} ({})",
-                args.app.display(),
-                app_content_hash
-            ),
+            message,
             "franken-node run <app> --json   # inspect receipt.sentinel_enforcement",
         )
         .into());
     };
     if record.released {
-        anyhow::bail!(
+        let message = format!(
             "sentinel quarantine for {} was already released at {} by {}",
             args.app.display(),
             record.released_at.as_deref().unwrap_or("<unknown>"),
             record.release_operator.as_deref().unwrap_or("<unknown>")
         );
+        if args.json {
+            emit_trust_release_error_json(&message)?;
+            fail_closed_after_json();
+        }
+        anyhow::bail!("{message}");
     }
 
     let released_at = chrono::Utc::now().to_rfc3339();
@@ -16095,15 +16122,23 @@ mod incident_list_tests {
 }
 
 fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
-    let operations = args
+    let operations = match args
         .scope
         .split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
         .map(parse_remote_operation)
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()
+    {
+        Ok(operations) => operations,
+        Err(err) => return remotecap_fail("remotecap.issue", args.json, err),
+    };
     if operations.is_empty() {
-        anyhow::bail!("--scope must include at least one operation");
+        return remotecap_fail(
+            "remotecap.issue",
+            args.json,
+            "--scope must include at least one operation",
+        );
     }
 
     let endpoint_prefixes = args
@@ -16113,41 +16148,58 @@ fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
         .filter(|entry| !entry.is_empty())
         .collect::<Vec<_>>();
     if endpoint_prefixes.is_empty() {
-        anyhow::bail!("--endpoint must include at least one endpoint prefix");
+        return remotecap_fail(
+            "remotecap.issue",
+            args.json,
+            "--endpoint must include at least one endpoint prefix",
+        );
     }
 
-    let ttl_secs = parse_ttl_secs(&args.ttl)?;
+    let ttl_secs = match parse_ttl_secs(&args.ttl) {
+        Ok(ttl_secs) => ttl_secs,
+        Err(err) => return remotecap_fail("remotecap.issue", args.json, err),
+    };
     let now_epoch_secs = now_unix_secs();
-    let signing_key = resolve_remotecap_signing_key()?;
-    let provider = CapabilityProvider::try_new(&signing_key)?;
+    let signing_key = match resolve_remotecap_signing_key() {
+        Ok(signing_key) => signing_key,
+        Err(err) => return remotecap_fail("remotecap.issue", args.json, err),
+    };
+    let provider = match CapabilityProvider::try_new(&signing_key) {
+        Ok(provider) => provider,
+        Err(err) => return remotecap_fail("remotecap.issue", args.json, err),
+    };
     let scope = RemoteScope::new(operations, endpoint_prefixes);
 
     let revocation_age_secs =
         snapshot_age_secs_for_path(&remotecap_cli_state_path(), now_epoch_secs).unwrap_or(0);
-    evaluate_default_freshness(
+    if let Err(err) = evaluate_default_freshness(
         "remotecap-issue",
         SafetyTier::Dangerous,
         revocation_age_secs,
         args.trace_id.clone(),
         now_epoch_secs.to_string(),
-    )
-    .map_err(|err| {
-        anyhow::anyhow!(
-            "revocation freshness gate denied remotecap issue: {err}. Refresh revocation data before issuing a capability."
-        )
-    })?;
+    ) {
+        return remotecap_fail(
+            "remotecap.issue",
+            args.json,
+            format!(
+                "revocation freshness gate denied remotecap issue: {err}. Refresh revocation data before issuing a capability."
+            ),
+        );
+    }
 
-    let (cap, audit_event) = provider
-        .issue(
-            &args.issuer,
-            scope,
-            now_epoch_secs,
-            ttl_secs,
-            args.operator_approved,
-            args.single_use,
-            &args.trace_id,
-        )
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let (cap, audit_event) = match provider.issue(
+        &args.issuer,
+        scope,
+        now_epoch_secs,
+        ttl_secs,
+        args.operator_approved,
+        args.single_use,
+        &args.trace_id,
+    ) {
+        Ok(issued) => issued,
+        Err(err) => return remotecap_fail("remotecap.issue", args.json, err),
+    };
 
     if args.json {
         println!(
@@ -16181,35 +16233,79 @@ fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
     Ok(())
 }
 
+fn emit_remotecap_error_json(command: &str, error: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "franken-node/remotecap-error-cli/v1",
+            "command": command,
+            "ok": false,
+            "error": error,
+        }))?
+    );
+    Ok(())
+}
+
+fn remotecap_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_remotecap_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
 fn handle_remotecap_use(args: &RemoteCapUseArgs) -> Result<()> {
-    let cap = read_remotecap_token(&args.token_file)?;
-    let state = load_remotecap_cli_state()?;
+    let cap = match read_remotecap_token(&args.token_file) {
+        Ok(cap) => cap,
+        Err(err) => return remotecap_fail("remotecap.use", args.json, err),
+    };
+    let state = match load_remotecap_cli_state() {
+        Ok(state) => state,
+        Err(err) => return remotecap_fail("remotecap.use", args.json, err),
+    };
     if state.revoked_token_ids.contains(cap.token_id()) {
-        return Err(anyhow::anyhow!(
-            "{}",
+        return remotecap_fail(
+            "remotecap.use",
+            args.json,
             RemoteCapError::Revoked {
-                token_id: cap.token_id().to_string()
-            }
-        ));
+                token_id: cap.token_id().to_string(),
+            },
+        );
     }
 
-    let operation = parse_remote_operation(&args.operation)?;
+    let operation = match parse_remote_operation(&args.operation) {
+        Ok(operation) => operation,
+        Err(err) => return remotecap_fail("remotecap.use", args.json, err),
+    };
     let now_epoch_secs = now_unix_secs();
-    let signing_key = resolve_remotecap_signing_key()?;
-    let mut gate = remotecap_cli_capability_gate(&signing_key, &cap)?;
-    gate.authorize_network(
+    let signing_key = match resolve_remotecap_signing_key() {
+        Ok(signing_key) => signing_key,
+        Err(err) => return remotecap_fail("remotecap.use", args.json, err),
+    };
+    let mut gate = match remotecap_cli_capability_gate(&signing_key, &cap) {
+        Ok(gate) => gate,
+        Err(err) => return remotecap_fail("remotecap.use", args.json, err),
+    };
+    if let Err(err) = gate.authorize_network(
         Some(&cap),
         operation,
         &args.endpoint,
         now_epoch_secs,
         &args.trace_id,
-    )
-    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-    let audit_event = gate
-        .audit_log()
-        .last()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("remotecap use did not emit an audit event"))?;
+    ) {
+        return remotecap_fail("remotecap.use", args.json, err);
+    }
+    let audit_event = match gate.audit_log().last().cloned() {
+        Some(event) => event,
+        None => {
+            return remotecap_fail(
+                "remotecap.use",
+                args.json,
+                "remotecap use did not emit an audit event",
+            );
+        }
+    };
 
     if args.json {
         println!(
@@ -16239,34 +16335,56 @@ fn handle_remotecap_use(args: &RemoteCapUseArgs) -> Result<()> {
 }
 
 fn handle_remotecap_verify(args: &RemoteCapVerifyArgs) -> Result<()> {
-    let cap = read_remotecap_token(&args.token_file)?;
-    let state = load_remotecap_cli_state()?;
+    let cap = match read_remotecap_token(&args.token_file) {
+        Ok(cap) => cap,
+        Err(err) => return remotecap_fail("remotecap.verify", args.json, err),
+    };
+    let state = match load_remotecap_cli_state() {
+        Ok(state) => state,
+        Err(err) => return remotecap_fail("remotecap.verify", args.json, err),
+    };
     if state.revoked_token_ids.contains(cap.token_id()) {
-        return Err(anyhow::anyhow!(
-            "{}",
+        return remotecap_fail(
+            "remotecap.verify",
+            args.json,
             RemoteCapError::Revoked {
-                token_id: cap.token_id().to_string()
-            }
-        ));
+                token_id: cap.token_id().to_string(),
+            },
+        );
     }
 
-    let operation = parse_remote_operation(&args.operation)?;
+    let operation = match parse_remote_operation(&args.operation) {
+        Ok(operation) => operation,
+        Err(err) => return remotecap_fail("remotecap.verify", args.json, err),
+    };
     let now_epoch_secs = now_unix_secs();
-    let signing_key = resolve_remotecap_signing_key()?;
-    let mut gate = remotecap_cli_capability_gate(&signing_key, &cap)?;
-    gate.recheck_network(
+    let signing_key = match resolve_remotecap_signing_key() {
+        Ok(signing_key) => signing_key,
+        Err(err) => return remotecap_fail("remotecap.verify", args.json, err),
+    };
+    let mut gate = match remotecap_cli_capability_gate(&signing_key, &cap) {
+        Ok(gate) => gate,
+        Err(err) => return remotecap_fail("remotecap.verify", args.json, err),
+    };
+    if let Err(err) = gate.recheck_network(
         Some(&cap),
         operation,
         &args.endpoint,
         now_epoch_secs,
         &args.trace_id,
-    )
-    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-    let audit_event = gate
-        .audit_log()
-        .last()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("remotecap verify did not emit an audit event"))?;
+    ) {
+        return remotecap_fail("remotecap.verify", args.json, err);
+    }
+    let audit_event = match gate.audit_log().last().cloned() {
+        Some(event) => event,
+        None => {
+            return remotecap_fail(
+                "remotecap.verify",
+                args.json,
+                "remotecap verify did not emit an audit event",
+            );
+        }
+    };
 
     if args.json {
         println!(
@@ -16292,15 +16410,29 @@ fn handle_remotecap_verify(args: &RemoteCapVerifyArgs) -> Result<()> {
 }
 
 fn handle_remotecap_revoke(args: &RemoteCapRevokeArgs) -> Result<()> {
-    let cap = read_remotecap_token(&args.token_file)?;
+    let cap = match read_remotecap_token(&args.token_file) {
+        Ok(cap) => cap,
+        Err(err) => return remotecap_fail("remotecap.revoke", args.json, err),
+    };
     let now_epoch_secs = now_unix_secs();
-    let signing_key = resolve_remotecap_signing_key()?;
-    let mut gate = CapabilityGate::try_new(&signing_key)?;
+    let signing_key = match resolve_remotecap_signing_key() {
+        Ok(signing_key) => signing_key,
+        Err(err) => return remotecap_fail("remotecap.revoke", args.json, err),
+    };
+    let mut gate = match CapabilityGate::try_new(&signing_key) {
+        Ok(gate) => gate,
+        Err(err) => return remotecap_fail("remotecap.revoke", args.json, err),
+    };
     let audit_event = gate.revoke(&cap, now_epoch_secs, &args.trace_id);
 
-    let mut state = load_remotecap_cli_state()?;
+    let mut state = match load_remotecap_cli_state() {
+        Ok(state) => state,
+        Err(err) => return remotecap_fail("remotecap.revoke", args.json, err),
+    };
     state.revoked_token_ids.insert(cap.token_id().to_string());
-    store_remotecap_cli_state(&state)?;
+    if let Err(err) = store_remotecap_cli_state(&state) {
+        return remotecap_fail("remotecap.revoke", args.json, err);
+    }
 
     if args.json {
         println!(
@@ -18468,92 +18600,155 @@ fn handle_ltv_verify_as_of_command(args: &cli::LtvVerifyAsOfArgs) -> Result<()> 
             "sdk_transcript": sdk_transcript,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
+        if !passed {
+            fail_closed_after_json();
+        }
     } else {
         println!(
             "ltv verify-as-of: verdict={:?} artifact_id={} as_of={}",
             result.verdict, evidence.artifact.artifact_id, evidence.as_of_unix_seconds
         );
-    }
-
-    if !passed {
-        anyhow::bail!(
-            "LTV verification failed for evidence {}: {}",
-            args.evidence.display(),
-            failed_assertions.join(", ")
-        );
+        if !passed {
+            anyhow::bail!(
+                "LTV verification failed for evidence {}: {}",
+                args.evidence.display(),
+                failed_assertions.join(", ")
+            );
+        }
     }
     Ok(())
+}
+
+fn emit_incident_error_json(command: &str, error: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "franken-node/incident-error-cli/v1",
+            "command": command,
+            "ok": false,
+            "error": error,
+        }))?
+    );
+    Ok(())
+}
+
+fn incident_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_incident_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
 }
 
 fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> {
     // Prepare receipt export context upfront - fails immediately if receipt export
     // is requested but signing material is unavailable (sign-or-fail).
-    let receipt_export_ctx = prepare_receipt_export_context(
+    let receipt_export_ctx = match prepare_receipt_export_context(
         args.receipt_out.as_deref(),
         args.receipt_summary_out.as_deref(),
         args.receipt_signing_key.as_deref(),
-    )?;
+    ) {
+        Ok(ctx) => ctx,
+        Err(err) => return incident_fail("incident.bundle", args.json, err),
+    };
     if !args.json {
         eprintln!(
             "franken-node incident bundle: id={} verify={}",
             args.id, args.verify
         );
     }
-    let evidence_path = resolve_incident_evidence_path(&args.id, args.evidence_path.as_deref())?;
-    let evidence =
-        read_incident_evidence_package(&evidence_path, Some(&args.id)).with_context(|| {
+    let evidence_path =
+        match resolve_incident_evidence_path(&args.id, args.evidence_path.as_deref()) {
+            Ok(path) => path,
+            Err(err) => return incident_fail("incident.bundle", args.json, err),
+        };
+    let evidence = match read_incident_evidence_package(&evidence_path, Some(&args.id))
+        .with_context(|| {
             format!(
                 "failed reading authoritative incident evidence {}",
                 evidence_path.display()
             )
-        })?;
-    let mut bundle = generate_replay_bundle_from_evidence(&evidence).with_context(|| {
+        }) {
+        Ok(evidence) => evidence,
+        Err(err) => return incident_fail("incident.bundle", args.json, err),
+    };
+    let mut bundle = match generate_replay_bundle_from_evidence(&evidence).with_context(|| {
         format!(
             "failed generating replay bundle from authoritative evidence {}",
             evidence_path.display()
         )
-    })?;
+    }) {
+        Ok(bundle) => bundle,
+        Err(err) => return incident_fail("incident.bundle", args.json, err),
+    };
     if args.verify {
-        let valid = validate_bundle_integrity(&bundle)
-            .with_context(|| format!("failed validating replay bundle for {}", args.id))?;
+        let valid = match validate_bundle_integrity(&bundle)
+            .with_context(|| format!("failed validating replay bundle for {}", args.id))
+        {
+            Ok(valid) => valid,
+            Err(err) => return incident_fail("incident.bundle", args.json, err),
+        };
         if !args.json {
             eprintln!(
                 "bundle integrity: {}",
                 if valid { "valid" } else { "invalid" }
             );
         }
-        anyhow::ensure!(valid, "generated replay bundle failed integrity validation");
+        if !valid {
+            return incident_fail(
+                "incident.bundle",
+                args.json,
+                "generated replay bundle failed integrity validation",
+            );
+        }
     }
 
     let replay_signing_material =
-        load_receipt_signing_material(args.receipt_signing_key.as_deref())?
-            .ok_or_else(|| missing_replay_bundle_signing_key_error("export"))?;
+        match load_receipt_signing_material(args.receipt_signing_key.as_deref()) {
+            Ok(Some(material)) => material,
+            Ok(None) => {
+                return incident_fail(
+                    "incident.bundle",
+                    args.json,
+                    missing_replay_bundle_signing_key_error("export"),
+                );
+            }
+            Err(err) => return incident_fail("incident.bundle", args.json, err),
+        };
     let replay_bundle_signing_material = ReplayBundleSigningMaterial {
         signing_key: &replay_signing_material.signing_key,
         key_source: replay_signing_material.source,
         signing_identity: "incident-control-plane",
     };
-    sign_replay_bundle(&mut bundle, &replay_bundle_signing_material)
-        .context("failed signing incident replay bundle")?;
+    if let Err(err) = sign_replay_bundle(&mut bundle, &replay_bundle_signing_material)
+        .context("failed signing incident replay bundle")
+    {
+        return incident_fail("incident.bundle", args.json, err);
+    }
     let trusted_key_id = signing_material_key_id(&replay_signing_material);
 
     let output_path = incident_bundle_output_path(&args.id);
-    write_bundle_to_path_with_trusted_key(&bundle, &output_path, &trusted_key_id).with_context(
-        || {
+    if let Err(err) = write_bundle_to_path_with_trusted_key(&bundle, &output_path, &trusted_key_id)
+        .with_context(|| {
             format!(
                 "failed writing incident bundle to {}",
                 output_path.display()
             )
-        },
-    )?;
+        })
+    {
+        return incident_fail("incident.bundle", args.json, err);
+    }
 
-    if let Some(ref ctx) = receipt_export_ctx {
-        export_signed_receipts(
+    if let Some(ref ctx) = receipt_export_ctx
+        && let Err(err) = export_signed_receipts(
             "incident_bundle",
             "incident-control-plane",
             "Incident bundle receipt export for deterministic replay evidence",
             ctx,
-        )?;
+        )
+    {
+        return incident_fail("incident.bundle", args.json, err);
     }
     if args.json {
         let payload = serde_json::json!({
@@ -18618,11 +18813,17 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
             args.bundle.display()
         );
     }
-    let trusted_key_ids = replay_trusted_key_ids(
+    let trusted_key_ids = match replay_trusted_key_ids(
         args.trusted_public_key.as_deref(),
         args.trusted_key_dir.as_deref(),
-    )?;
-    let summary = incident_replay_cli_summary(&args.bundle, &trusted_key_ids)?;
+    ) {
+        Ok(ids) => ids,
+        Err(err) => return incident_fail("incident.replay", args.json, err),
+    };
+    let summary = match incident_replay_cli_summary(&args.bundle, &trusted_key_ids) {
+        Ok(summary) => summary,
+        Err(err) => return incident_fail("incident.replay", args.json, err),
+    };
     // bd-x8d9t: mirror the replay lifecycle into the registered TNR event
     // stream (docs/observability/tnr_event_metrics_registry.md) so one
     // --trace-id correlates a run's effects with the replay of its incident
@@ -18723,6 +18924,11 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
             "timeline": &summary.timeline,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
+        if !summary.matched {
+            // The machine-parseable `incident replay result:` line is already
+            // on stderr. Do not append a second human `Error:` after `--json`.
+            fail_closed_after_json();
+        }
     } else {
         println!(
             "incident replay: incident_id={} matched={} timeline_events={} (replayed {} steps)",
@@ -18731,13 +18937,13 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
             summary.timeline.len(),
             summary.event_count
         );
-    }
-    if !summary.matched {
-        anyhow::bail!(
-            "replay mismatch for incident {} in bundle {}",
-            summary.incident_id,
-            args.bundle.display()
-        );
+        if !summary.matched {
+            anyhow::bail!(
+                "replay mismatch for incident {} in bundle {}",
+                summary.incident_id,
+                args.bundle.display()
+            );
+        }
     }
     Ok(())
 }
@@ -19139,11 +19345,13 @@ fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs
     } else {
         None
     };
-    eprintln!(
-        "counterfactual summary: total_decisions={} changed_decisions={} severity_delta={}",
-        summary.total_decisions, summary.changed_decisions, summary.severity_delta
-    );
-    eprintln!("counterfactual output: {}", summary.canonical_json);
+    if !args.json {
+        eprintln!(
+            "counterfactual summary: total_decisions={} changed_decisions={} severity_delta={}",
+            summary.total_decisions, summary.changed_decisions, summary.severity_delta
+        );
+        eprintln!("counterfactual output: {}", summary.canonical_json);
+    }
     if args.json || args.promote {
         let report_json = incident_counterfactual_report_json(
             &summary,
@@ -20953,29 +21161,61 @@ fn render_registry_search_results(
     lines.join("\n")
 }
 
+const REGISTRY_PUBLISH_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/registry-publish-error/v1";
+
+fn emit_registry_publish_error_json(message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": REGISTRY_PUBLISH_ERROR_CLI_SCHEMA_VERSION,
+            "command": "registry.publish",
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
 fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
     let project_root = std::env::current_dir()
         .context("failed resolving current directory for registry publish")?;
     if !args.package_path.exists() {
-        anyhow::bail!(
+        let message = format!(
             "registry publish target does not exist: {}",
             args.package_path.display()
         );
+        if args.json {
+            emit_registry_publish_error_json(&message)?;
+            fail_closed_after_json();
+        }
+        anyhow::bail!("{message}");
     }
     if !args.package_path.is_file() {
-        anyhow::bail!(
+        let message = format!(
             "registry publish target must be a file: {}",
             args.package_path.display()
         );
+        if args.json {
+            emit_registry_publish_error_json(&message)?;
+            fail_closed_after_json();
+        }
+        anyhow::bail!("{message}");
     }
 
     let package_bytes = crate::bounded_read(&args.package_path, MAX_MANIFEST_FILE_BYTES)
         .with_context(|| format!("failed reading package {}", args.package_path.display()))?;
     let content_hash = compute_registry_artifact_sha256(&package_bytes);
-    let signing_key_path = args
-        .signing_key
-        .as_deref()
-        .ok_or_else(|| registry_publish_signing_key_required_error(&args.package_path))?;
+    let signing_key_path = match args.signing_key.as_deref() {
+        Some(path) => path,
+        None => {
+            let err = registry_publish_signing_key_required_error(&args.package_path);
+            if args.json {
+                emit_registry_publish_error_json(&err.to_string())?;
+                fail_closed_after_json();
+            }
+            return Err(err.into());
+        }
+    };
     let signing_material = load_registry_publish_signing_material(signing_key_path)?;
     let request = build_registry_publish_request(
         &args.package_path,
@@ -21001,7 +21241,12 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
         .map_or(u64::MAX, |duration| duration.as_secs()); // Fail-closed: very far future = fail expiry checks
     let result = registry.register(request, "trace-cli-registry-publish", publish_epoch);
     if !result.success {
-        anyhow::bail!("registry publish failed: {}", result.detail);
+        let message = format!("registry publish failed: {}", result.detail);
+        if args.json {
+            emit_registry_publish_error_json(&message)?;
+            fail_closed_after_json();
+        }
+        anyhow::bail!("{message}");
     }
     let extension_id = result
         .extension_id
@@ -21160,6 +21405,7 @@ fn handle_registry_verify(args: &cli::RegistryVerifyArgs) -> Result<()> {
     if verification.status != RegistryArtifactIntegrityStatus::Verified {
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
+            fail_closed_after_json();
         }
         anyhow::bail!(
             "registry verify failed: extension_id={} integrity={} archived={} artifact_path={} manifest_path={} detail={}",
@@ -21782,6 +22028,9 @@ struct LoadedFleetState {
 }
 
 const FLEET_CLI_STATUS_SCHEMA_VERSION: &str = "franken-node/fleet-status-cli/v1";
+const FLEET_CLI_DESCRIBE_SCHEMA_VERSION: &str = "franken-node/fleet-describe-cli/v1";
+const FLEET_CLI_ACTION_SCHEMA_VERSION: &str = "franken-node/fleet-action-cli/v1";
+const FLEET_CLI_AGENT_SCHEMA_VERSION: &str = "franken-node/fleet-agent-cli/v1";
 const FLEET_CLI_TRANSPORT: &str = "file";
 
 #[derive(Debug, Clone, Serialize)]
@@ -21801,6 +22050,9 @@ struct FleetCliStatusReport {
 
 #[derive(Debug, Clone, Serialize)]
 struct FleetCliNodeReport {
+    schema_version: &'static str,
+    transport: &'static str,
+    live_control_plane: bool,
     node: PersistedNodeStatus,
     stale: bool,
     zone_status: FleetStatus,
@@ -21811,6 +22063,9 @@ struct FleetCliNodeReport {
 
 #[derive(Debug, Clone, Serialize)]
 struct FleetCliActionReport {
+    schema_version: &'static str,
+    transport: &'static str,
+    live_control_plane: bool,
     action: FleetActionResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     convergence_receipt: Option<FleetCliConvergenceReceipt>,
@@ -22195,6 +22450,9 @@ fn fleet_describe_report(
         .collect::<Vec<_>>();
     let zone_status = fleet_status_from_loaded_state(&loaded, &node.zone_id);
     Ok(FleetCliNodeReport {
+        schema_version: FLEET_CLI_DESCRIBE_SCHEMA_VERSION,
+        transport: FLEET_CLI_TRANSPORT,
+        live_control_plane: false,
         node,
         stale,
         zone_status,
@@ -22432,6 +22690,9 @@ fn fleet_action_report(
     let loaded = load_fleet_state(project_root)?;
     let status = fleet_status_from_loaded_state(&loaded, requested_zone);
     Ok(FleetCliActionReport {
+        schema_version: FLEET_CLI_ACTION_SCHEMA_VERSION,
+        transport: FLEET_CLI_TRANSPORT,
+        live_control_plane: false,
         action,
         convergence_receipt,
         status,
@@ -22614,6 +22875,9 @@ fn render_fleet_node_human(report: &FleetCliNodeReport) -> String {
             .join(", ");
         lines.push(format!("  active_incidents={incidents}"));
     }
+    lines.push(format!(
+        "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false"
+    ));
     lines.join("\n")
 }
 
@@ -22649,6 +22913,9 @@ fn render_fleet_action_human(action: &FleetActionResult) -> String {
 /// Result of a single fleet agent poll cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetAgentPollResult {
+    pub schema_version: String,
+    pub transport: String,
+    pub live_control_plane: bool,
     pub cycle: u64,
     pub node_id: String,
     pub zone_id: String,
@@ -23225,6 +23492,9 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
 
         // Emit poll result
         let result = FleetAgentPollResult {
+            schema_version: FLEET_CLI_AGENT_SCHEMA_VERSION.to_string(),
+            transport: FLEET_CLI_TRANSPORT.to_string(),
+            live_control_plane: false,
             cycle,
             node_id: resolved.node_id.clone(),
             zone_id: resolved.zone_id.clone(),
@@ -23246,8 +23516,11 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             println!("{}", serde_json::to_string(&result)?);
         } else {
             eprintln!(
-                "fleet agent: poll cycle={} actions={} quarantine_version={}",
-                result.cycle, result.actions_processed, result.quarantine_version
+                "fleet agent: poll cycle={} actions={} quarantine_version={} transport={} live_control_plane=false",
+                result.cycle,
+                result.actions_processed,
+                result.quarantine_version,
+                FLEET_CLI_TRANSPORT
             );
         }
 
@@ -24702,6 +24975,9 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
     );
 
     if !overall_pass {
+        if args.json {
+            fail_closed_after_json();
+        }
         anyhow::bail!("release verification failed");
     }
 
@@ -28581,6 +28857,8 @@ fn emit_explain_steps<S: serde::Serialize>(
     }
     if overall_ok {
         Ok(())
+    } else if json {
+        fail_closed_after_json();
     } else {
         anyhow::bail!("debug explain reported one or more failed verification steps");
     }
@@ -28614,6 +28892,8 @@ fn handle_debug_evidence(args: &DebugEvidenceArgs) -> Result<()> {
     }
     if report.is_pass() {
         Ok(())
+    } else if args.json {
+        fail_closed_after_json();
     } else {
         anyhow::bail!("debug evidence reported one or more failed verification steps");
     }

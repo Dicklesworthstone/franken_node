@@ -337,6 +337,11 @@ fn bench_run_invalid_scenario_json_emits_error_report() {
         error.contains("nonexistent-invalid-scenario") || error.contains("unknown scenario"),
         "error must identify the invalid scenario: {error}"
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: benchmark suite run failed"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
 }
 
 #[test]

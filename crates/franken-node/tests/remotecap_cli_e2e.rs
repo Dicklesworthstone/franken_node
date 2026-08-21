@@ -153,11 +153,24 @@ fn remotecap_lifecycle_issue_use_revoke_uses_real_subprocesses() {
         .current_dir(workspace.path())
         .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
 
-    let denied_output = denied_cmd.assert().failure().get_output().stderr.clone();
-    let stderr = std::str::from_utf8(&denied_output).expect("stderr should be utf8");
+    let denied = denied_cmd.assert().failure().get_output().clone();
+    let denied_json: Value =
+        serde_json::from_slice(&denied.stdout).expect("revoked use --json stdout must be JSON");
+    assert_eq!(
+        denied_json["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(denied_json["command"].as_str(), Some("remotecap.use"));
+    assert_eq!(denied_json["ok"].as_bool(), Some(false));
+    let error = denied_json["error"].as_str().unwrap_or_default();
     assert!(
-        stderr.contains("REMOTECAP_REVOKED"),
-        "expected revoked denial, got {stderr}"
+        error.contains("REMOTECAP_REVOKED"),
+        "expected revoked denial in JSON, got {denied_json}"
+    );
+    let stderr = std::str::from_utf8(&denied.stderr).expect("stderr should be utf8");
+    assert!(
+        !stderr.contains("Error: REMOTECAP_REVOKED"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
 
@@ -323,11 +336,23 @@ fn remotecap_verify_authorizes_without_consuming_single_use_token() {
         .current_dir(workspace_path)
         .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
 
-    let replay_output = replay_cmd.assert().failure().get_output().stderr.clone();
-    let replay_stderr = std::str::from_utf8(&replay_output).expect("replay stderr should be utf8");
+    let replay = replay_cmd.assert().failure().get_output().clone();
+    let replay_json: Value =
+        serde_json::from_slice(&replay.stdout).expect("replay use --json stdout must be JSON");
+    assert_eq!(
+        replay_json["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(replay_json["ok"].as_bool(), Some(false));
+    let replay_error = replay_json["error"].as_str().unwrap_or_default();
     assert!(
-        replay_stderr.contains("REMOTECAP_REPLAY"),
-        "expected replay denial after prior use, got {replay_stderr}"
+        replay_error.contains("REMOTECAP_REPLAY"),
+        "expected replay denial in JSON, got {replay_json}"
+    );
+    let replay_stderr = std::str::from_utf8(&replay.stderr).expect("replay stderr should be utf8");
+    assert!(
+        !replay_stderr.contains("Error: REMOTECAP_REPLAY"),
+        "--json must not append a second human Error line after the JSON report: {replay_stderr}"
     );
 }
 
@@ -377,13 +402,23 @@ fn remotecap_issue_invalid_scope_fails() {
 
     let result = cmd.assert().failure();
     let output = result.get_output();
-    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
-
-    // Should contain error about invalid scope
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).expect("issue --json invalid scope must be JSON");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(payload["command"].as_str(), Some("remotecap.issue"));
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    let error = payload["error"].as_str().unwrap_or_default();
     assert!(
-        stderr.contains("invalid") || stderr.contains("unknown"),
-        "Expected error about invalid scope in stderr: {}",
-        stderr
+        error.contains("invalid") || error.contains("unknown"),
+        "expected invalid-scope denial in JSON, got {payload}"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    assert!(
+        !stderr.contains("Error:"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
 
@@ -408,13 +443,92 @@ fn remotecap_use_mismatched_endpoint_fails() {
 
     let result = cmd.assert().failure();
     let output = result.get_output();
-    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
-
-    // Should contain error about endpoint authorization.
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("use --json mismatched endpoint must be JSON");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    let error = payload["error"].as_str().unwrap_or_default();
     assert!(
-        stderr.contains("url") || stderr.contains("endpoint") || stderr.contains("invalid"),
-        "Expected endpoint denial in stderr: {}",
-        stderr
+        error.contains("url") || error.contains("endpoint") || error.contains("invalid"),
+        "expected endpoint denial in JSON, got {payload}"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    assert!(
+        !stderr.contains("Error:"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn remotecap_issue_empty_scope_json_emits_error_report() {
+    let workspace = setup_test_workspace();
+    let mut cmd = remotecap_cmd();
+    cmd.arg("issue")
+        .arg("--scope")
+        .arg(",")
+        .arg("--endpoint")
+        .arg("https://api.example.com")
+        .arg("--json")
+        .current_dir(workspace.path());
+
+    let output = cmd.assert().failure().get_output().clone();
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).expect("issue --json empty scope must be JSON");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(payload["command"].as_str(), Some("remotecap.issue"));
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--scope must include at least one operation"),
+        "expected empty-scope denial in JSON, got {payload}"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    assert!(
+        !stderr.contains("Error:"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn remotecap_use_missing_token_json_emits_error_report() {
+    let workspace = setup_test_workspace();
+    let missing = workspace.path().join("missing-capability.json");
+    let mut cmd = remotecap_cmd();
+    cmd.arg("use")
+        .arg("--token-file")
+        .arg(&missing)
+        .arg("--operation")
+        .arg("network_egress")
+        .arg("--endpoint")
+        .arg("https://api.example.com/v1/status")
+        .arg("--json")
+        .current_dir(workspace.path())
+        .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
+
+    let output = cmd.assert().failure().get_output().clone();
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).expect("use --json missing token must be JSON");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(payload["command"].as_str(), Some("remotecap.use"));
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("missing-capability.json") || error.contains("No such file"),
+        "expected missing-token denial in JSON, got {payload}"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    assert!(
+        !stderr.contains("Error:"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
 

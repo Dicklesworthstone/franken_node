@@ -448,6 +448,43 @@ fn incident_bundle_accepts_explicit_evidence_path_and_writes_bundle() {
     assert_eq!(signature.key_source, "config");
     assert_eq!(signature.signing_identity, "incident-control-plane");
     assert_eq!(signature.trust_scope, "incident_replay_bundle");
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident",
+            "bundle",
+            "--id",
+            "INC-E2E-001",
+            "--evidence-path",
+            &evidence_arg,
+            "--verify",
+            "--json",
+        ],
+    );
+    assert!(
+        json_output.status.success(),
+        "incident bundle --json failed: {}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&json_output.stdout)
+        .expect("incident bundle --json stdout must be JSON");
+    assert_eq!(payload["schema_version"], "incident-bundle-cli-v1");
+    assert_eq!(payload["command"], "incident.bundle");
+    assert_eq!(payload["incident_id"], "INC-E2E-001");
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(
+        !json_stderr.contains("franken-node incident bundle:"),
+        "--json must suppress the human progress banner: {json_stderr}"
+    );
+    assert!(
+        !json_stderr.contains("bundle integrity:"),
+        "--json must suppress the human integrity line: {json_stderr}"
+    );
+    assert!(
+        !json_stderr.contains("incident bundle written:"),
+        "--json must not dump the human write line: {json_stderr}"
+    );
 }
 
 #[test]
@@ -531,6 +568,39 @@ fn incident_bundle_fails_closed_when_authoritative_evidence_is_missing() {
             .join("INC-E2E-MISSING-001.fnbundle")
             .exists()
     );
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident",
+            "bundle",
+            "--id",
+            "INC-E2E-MISSING-001",
+            "--json",
+        ],
+    );
+    assert!(
+        !json_output.status.success(),
+        "incident bundle --json should fail when evidence is missing"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&json_output.stdout)
+        .expect("incident bundle --json missing-evidence stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.bundle");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("failed reading authoritative incident evidence"),
+        "missing-evidence --json must name the evidence failure: {payload}"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(
+        !json_stderr.contains("Error: failed reading authoritative incident evidence"),
+        "--json must not append a second human Error line after the JSON report: {json_stderr}"
+    );
 }
 
 #[test]
@@ -576,6 +646,43 @@ fn incident_bundle_receipt_export_fails_when_signing_key_missing() {
             .join("INC-E2E-NOSIGN-001.fnbundle")
             .exists(),
         "bundle should not be written when receipt export fails"
+    );
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident",
+            "bundle",
+            "--id",
+            "INC-E2E-NOSIGN-001",
+            "--evidence-path",
+            &evidence_arg,
+            "--receipt-out",
+            receipt_out.to_str().expect("utf8 receipt path"),
+            "--json",
+        ],
+    );
+    assert!(
+        !json_output.status.success(),
+        "incident bundle --json should fail when receipt export has no signing key"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&json_output.stdout)
+        .expect("incident bundle --json missing-signing-key stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.bundle");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("receipt export requested but no signing key was configured"),
+        "missing-signing-key --json must name the key failure: {payload}"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(
+        !json_stderr.contains("Error: receipt export requested but no signing key"),
+        "--json must not append a second human Error line after the JSON report: {json_stderr}"
     );
 }
 
@@ -840,8 +947,14 @@ fn incident_counterfactual_json_promotes_signed_contracts() {
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("counterfactual summary:"));
-    assert!(stderr.contains("counterfactual output:"));
+    assert!(
+        !stderr.contains("counterfactual summary:"),
+        "counterfactual --json must suppress the human summary line: {stderr}"
+    );
+    assert!(
+        !stderr.contains("counterfactual output:"),
+        "counterfactual --json must not dump canonical JSON on stderr: {stderr}"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let report: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("parse structured counterfactual report");

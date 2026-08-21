@@ -144,6 +144,91 @@ fn registry_publish_requires_explicit_signing_key() {
     assert!(stderr.contains("--signing-key"));
     assert!(stderr.contains("registry publish requires --signing-key"));
     assert!(stderr.contains("fix_command=mkdir -p .franken-node/keys && openssl rand -hex 32 > .franken-node/keys/publisher.ed25519 && franken-node registry publish plugin.fnext --version 1.0.0 --signing-key .franken-node/keys/publisher.ed25519"));
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "registry",
+            "publish",
+            "plugin.fnext",
+            "--version",
+            "1.0.0",
+            "--json",
+        ],
+    );
+    assert!(
+        !json_output.status.success(),
+        "registry publish --json should fail when signing key is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&json_output.stdout)
+        .expect("registry publish --json missing-key stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/registry-publish-error/v1"
+    );
+    assert_eq!(payload["command"], "registry.publish");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"]
+        .as_str()
+        .expect("error field must be a string");
+    assert!(
+        error.contains("registry publish requires --signing-key"),
+        "JSON error must keep the actionable message: {error}"
+    );
+    assert!(
+        error.contains("fix_command="),
+        "JSON error must keep the fix_command: {error}"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(
+        !json_stderr.contains("Error: registry publish requires --signing-key"),
+        "--json must not append a second human Error line after the JSON report: {json_stderr}"
+    );
+}
+
+#[test]
+fn registry_publish_missing_package_json_emits_error_report() {
+    let workspace = registry_workspace();
+    let signing_key_path = workspace.path().join("keys/publisher.ed25519");
+    write_signing_key(&signing_key_path);
+    let signing_key_arg = signing_key_path.to_string_lossy().to_string();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "registry",
+            "publish",
+            "missing.fnext",
+            "--version",
+            "1.0.0",
+            "--signing-key",
+            &signing_key_arg,
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "registry publish --json should fail when the package is missing"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("registry publish --json missing-package stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/registry-publish-error/v1"
+    );
+    assert_eq!(payload["command"], "registry.publish");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"]
+        .as_str()
+        .expect("error field must be a string");
+    assert!(
+        error.contains("registry publish target does not exist"),
+        "JSON error must name the missing package: {error}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: registry publish target does not exist"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
 }
 
 #[test]
@@ -565,6 +650,28 @@ fn registry_verify_detects_tampered_manifest_signature() {
     assert!(
         stderr.contains(".franken-node/state/registry/artifacts/"),
         "expected artifact and manifest paths in stderr, got: {stderr}"
+    );
+
+    let verify_json = run_cli_in_workspace(
+        workspace.path(),
+        &["registry", "verify", &extension_id, "--json"],
+    );
+    assert!(
+        !verify_json.status.success(),
+        "registry verify --json should fail after manifest tampering"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&verify_json.stdout)
+        .expect("registry verify --json failure stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/registry-verify-cli/v1"
+    );
+    assert_eq!(payload["command"], "registry.verify");
+    assert_eq!(payload["integrity"], "invalid-signature");
+    let json_stderr = String::from_utf8_lossy(&verify_json.stderr);
+    assert!(
+        !json_stderr.contains("Error: registry verify failed"),
+        "--json must not append a second human Error line after the JSON report: {json_stderr}"
     );
 }
 

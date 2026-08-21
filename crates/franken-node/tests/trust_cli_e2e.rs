@@ -1248,6 +1248,52 @@ fn trust_release_empty_fields_json_emits_error_report() {
         payload["error"],
         "trust release requires non-empty --operator-id and --reason"
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: trust release requires non-empty"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn trust_release_missing_record_json_emits_error_report() {
+    let workspace = seeded_fixture_trust_workspace();
+    fs::write(workspace.path().join("app.js"), "console.log(1);\n").expect("write app.js");
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "release",
+            "--app",
+            "app.js",
+            "--operator-id",
+            "ops",
+            "--reason",
+            "lift",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "missing sentinel quarantine record must fail closed"
+    );
+    let payload = parse_json_stdout(&output, "trust release --json missing record");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-release-error/v1"
+    );
+    assert_eq!(payload["command"], "trust.release");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("no sentinel quarantine record exists"),
+        "missing-record --json must name the missing record: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: no sentinel quarantine record"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
 }
 
 #[test]

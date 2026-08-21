@@ -865,6 +865,13 @@ fn fleet_release_publishes_release_action_to_transport() {
 
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("fleet release json");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/fleet-action-cli/v1"
+    );
+    assert_eq!(payload["transport"], "file");
+    assert_eq!(payload["live_control_plane"], false);
+    assert_eq!(payload["status"]["activated"], false);
     assert_eq!(payload["action"]["action_type"], "release");
     assert_eq!(payload["action"]["event_code"], "FLEET-004");
     assert_eq!(payload["action"]["convergence"]["phase"], "Converged");
@@ -2049,6 +2056,9 @@ fn fleet_agent_uses_config_defaults_for_node_id_and_poll_interval() {
 
     let poll: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("fleet agent json output");
+    assert_eq!(poll["schema_version"], "franken-node/fleet-agent-cli/v1");
+    assert_eq!(poll["transport"], "file");
+    assert_eq!(poll["live_control_plane"], false);
     assert_eq!(poll["node_id"], "config-node-1");
     assert_eq!(poll["configured_poll_interval_secs"], 9);
 }
@@ -2342,6 +2352,13 @@ fn fleet_describe_json_reports_node_state_and_zone_context() {
 
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("fleet describe json");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/fleet-describe-cli/v1"
+    );
+    assert_eq!(payload["transport"], "file");
+    assert_eq!(payload["live_control_plane"], false);
+    assert_eq!(payload["zone_status"]["activated"], false);
     assert_eq!(payload["node"]["node_id"], "node-describe");
     assert_eq!(payload["node"]["zone_id"], "zone-describe");
     assert_eq!(payload["node"]["health"], "healthy");

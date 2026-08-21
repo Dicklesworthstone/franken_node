@@ -1356,6 +1356,7 @@ pub struct FleetDescribeArgs {
     pub zone: Option<String>,
 
     /// Emit JSON instead of human-readable output.
+    /// Includes `transport=file` and `live_control_plane=false`.
     #[arg(long)]
     pub json: bool,
 }
@@ -1367,6 +1368,7 @@ pub struct FleetReleaseArgs {
     pub incident: String,
 
     /// Emit JSON instead of human-readable output.
+    /// Includes `transport=file` and `live_control_plane=false`.
     #[arg(long)]
     pub json: bool,
 }
@@ -1374,6 +1376,7 @@ pub struct FleetReleaseArgs {
 #[derive(Debug, Parser)]
 pub struct FleetReconcileArgs {
     /// Emit JSON instead of human-readable output.
+    /// Includes `transport=file` and `live_control_plane=false`.
     #[arg(long)]
     pub json: bool,
 }
@@ -1403,6 +1406,8 @@ pub struct FleetAgentArgs {
     pub once: bool,
 
     /// Emit JSON instead of human-readable output.
+    /// Includes `transport=file` and `live_control_plane=false`; this is
+    /// not a live cluster heartbeat.
     #[arg(long)]
     pub json: bool,
 }
@@ -1764,6 +1769,8 @@ pub struct IncidentCounterfactualArgs {
     pub model: String,
 
     /// Emit the structured counterfactual report as canonical JSON on stdout.
+    /// Suppresses the human `counterfactual summary:` / `counterfactual output:`
+    /// stderr lines.
     #[arg(long)]
     pub json: bool,
 
@@ -3293,6 +3300,39 @@ mod parser_contract_extra_tests {
             other => {
                 return Err(format!(
                     "expected doctor evidence-readiness subcommand, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_parent_json_applies_to_process_spawn_readiness_subcommand() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "doctor",
+            "--json",
+            "process-spawn-readiness",
+        ])
+        .map_err(|err| err.to_string())?;
+        let args = match cli.command {
+            Command::Doctor(args) => args,
+            other => return Err(format!("expected doctor command, got {other:?}")),
+        };
+        assert!(
+            args.json,
+            "parent --json must be visible to process-spawn-readiness"
+        );
+        match args.command {
+            Some(DoctorCommand::ProcessSpawnReadiness(readiness)) => {
+                assert!(
+                    !readiness.json,
+                    "subcommand flag stays unset; handler must honor parent --json"
+                );
+            }
+            other => {
+                return Err(format!(
+                    "expected doctor process-spawn-readiness subcommand, got {other:?}"
                 ));
             }
         }
