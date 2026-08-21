@@ -1329,12 +1329,16 @@ fn validate_public_corpus_pass_artifact(
                 .to_string(),
         );
     }
-    if data.get("notes").and_then(Value::as_array).is_some_and(|items| {
-        items.iter().any(|item| {
-            item.as_str()
-                .is_some_and(|note| note.to_ascii_lowercase().contains("backfill"))
+    if data
+        .get("notes")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.as_str()
+                    .is_some_and(|note| note.to_ascii_lowercase().contains("backfill"))
+            })
         })
-    }) {
+    {
         findings.push(
             "public corpus_pass artifact notes admit a backfill; L1 refuses it as \
              charter-metric evidence"
@@ -1344,9 +1348,9 @@ fn validate_public_corpus_pass_artifact(
 
     let observed = get_f64(&data, &["metric", "observed_pct"]);
     match observed {
-        None => findings.push(
-            "public corpus_pass artifact is missing metric.observed_pct".to_string(),
-        ),
+        None => {
+            findings.push("public corpus_pass artifact is missing metric.observed_pct".to_string())
+        }
         Some(observed_pct) if (observed_pct - pass_rate_pct).abs() > 0.05 => {
             findings.push(format!(
                 "public corpus_pass observed_pct {observed_pct:.2} does not match L1 corpus \
@@ -2557,7 +2561,11 @@ mod tests {
     fn write_public_corpus_pass_fixture(root: &Path, data: &Value) {
         let pass_rate = get_f64(data, &["totals", "overall_pass_rate_pct"]).unwrap_or(0.0);
         let required = get_f64(data, &["thresholds", "overall_pass_rate_min_pct"]).unwrap_or(95.0);
-        let verdict = if pass_rate >= required { "GREEN" } else { "RED" };
+        let verdict = if pass_rate >= required {
+            "GREEN"
+        } else {
+            "RED"
+        };
         let artifact = serde_json::json!({
             "gate": "compat_corpus_pass_gate",
             "verdict": verdict,
@@ -2704,7 +2712,11 @@ mod tests {
         let pass_rate = get_f64(corpus_data, &["totals", "overall_pass_rate_pct"]).unwrap_or(0.0);
         let required =
             get_f64(corpus_data, &["thresholds", "overall_pass_rate_min_pct"]).unwrap_or(95.0);
-        let verdict = if pass_rate >= required { "GREEN" } else { "RED" };
+        let verdict = if pass_rate >= required {
+            "GREEN"
+        } else {
+            "RED"
+        };
         let artifact = serde_json::json!({
             "dimension": "l1_product",
             "verdict": verdict,
@@ -2827,7 +2839,8 @@ mod tests {
             oracle
                 .blocking_findings
                 .iter()
-                .any(|finding| finding.contains("declares GREEN while compatibility corpus pass rate")),
+                .any(|finding| finding
+                    .contains("declares GREEN while compatibility corpus pass rate")),
             "{oracle:?}"
         );
     }

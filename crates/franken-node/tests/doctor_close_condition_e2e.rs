@@ -573,6 +573,72 @@ fn doctor_close_condition_fails_l1_when_proof_carrying_but_parity_red() {
     );
 }
 
+/// bd-reality-20260820-w0fc6.1: declaring GREEN on the L1 verdict artifact
+/// while the corpus is below 95% is fail-closed, even if proofs exist.
+#[test]
+fn doctor_close_condition_fails_when_l1_verdict_declares_green_below_corpus_floor() {
+    let root = fixture_root();
+    write_proof_carrying_but_parity_red_compatibility_fixture(root.path());
+    write_bound_l1_verdict_fixture(root.path());
+    let path = root.path().join("artifacts/oracle/l1_product_verdict.json");
+    let mut artifact: Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read bound verdict"))
+            .expect("parse bound verdict");
+    artifact["verdict"] = serde_json::json!("GREEN");
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&artifact).expect("render lying GREEN"),
+    )
+    .expect("write lying GREEN");
+
+    let receipt = run_close_condition_receipt(root.path(), 71);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    assert_eq!(receipt["L1_product_oracle"]["verdict"], "RED");
+    let findings = receipt["L1_product_oracle"]["blocking_findings"]
+        .as_array()
+        .expect("L1 blocking findings");
+    assert!(
+        findings.iter().any(|finding| finding.as_str().is_some_and(
+            |text| text.contains("declares GREEN while compatibility corpus pass rate")
+        )),
+        "lying GREEN must be a blocking finding: {}",
+        serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render L1")
+    );
+}
+
+#[test]
+fn doctor_close_condition_fails_when_public_corpus_pass_is_pending_backfill() {
+    let root = fixture_root();
+    write_proof_carrying_but_parity_red_compatibility_fixture(root.path());
+    write_bound_l1_verdict_fixture(root.path());
+    write_fixture(
+        &root.path().join("artifacts/compat/corpus_pass.json"),
+        r#"{
+  "gate": "compat_corpus_pass_gate",
+  "verdict": "pending",
+  "metric": { "observed_pct": null, "target_pct": 95.0 },
+  "notes": ["Backfilled 2026-05-21 from the reality-check bridge plan."]
+}"#,
+    );
+    let receipt = run_close_condition_receipt(root.path(), 72);
+    assert_eq!(receipt["composite_verdict"], "RED");
+    let findings = receipt["L1_product_oracle"]["blocking_findings"]
+        .as_array()
+        .expect("L1 blocking findings");
+    assert!(
+        findings.iter().any(|finding| finding
+            .as_str()
+            .is_some_and(|text| text.contains("pending"))),
+        "{findings:?}"
+    );
+    assert!(
+        findings.iter().any(|finding| finding
+            .as_str()
+            .is_some_and(|text| text.contains("backfill"))),
+        "{findings:?}"
+    );
+}
+
 /// Acceptance-bar conjunction, `both-missing => FAIL` arm (bd-f5b04.2.4.1): when the
 /// parity corpus carries zero test cases AND proof-carrying host-effect evidence is
 /// absent, the L1 product oracle must fail closed and report BOTH missing legs.
@@ -1232,7 +1298,11 @@ fn write_bound_l1_verdict_fixture(root: &Path) {
         .pointer("/thresholds/overall_pass_rate_min_pct")
         .and_then(Value::as_f64)
         .unwrap_or(95.0);
-    let verdict = if pass_rate >= required { "GREEN" } else { "RED" };
+    let verdict = if pass_rate >= required {
+        "GREEN"
+    } else {
+        "RED"
+    };
     let artifact = serde_json::json!({
         "dimension": "l1_product",
         "verdict": verdict,
