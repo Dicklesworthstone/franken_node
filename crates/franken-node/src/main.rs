@@ -26269,17 +26269,21 @@ fn emit_verify_compatibility(args: &VerifyCompatibilityArgs) -> i32 {
         Ok(Some(profile)) => build_verify_output_with_details(
             "verify compatibility",
             args.compat_version,
-            "PASS",
-            "pass",
-            0,
+            "FAIL",
+            "fail",
+            1,
             format!(
-                "compatibility target `{}` resolved to profile `{}`",
+                "compatibility target `{}` is runtime profile `{}`, not a compatibility claim; use `franken-node verify lockstep` or a runtime name (node, bun, franken-node)",
                 args.target, profile
             ),
             Some(serde_json::json!({
                 "target": args.target,
                 "target_kind": "profile",
                 "profile": profile.to_string(),
+                "compatible": false,
+                "known_issues": [
+                    "runtime profiles are not compatibility claims; they do not auto-PASS",
+                ],
             })),
         ),
         Ok(None) | Err(_) => match normalize_compatibility_runtime(&args.target) {
@@ -28716,7 +28720,11 @@ fn main() -> Result<()> {
                     .as_deref()
                     .unwrap_or_else(|| Path::new("."));
                 let report = run_trust_scan(project_root, args.deep, args.audit)?;
-                println!("{}", render_trust_scan_human(&report));
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!("{}", render_trust_scan_human(&report));
+                }
             }
             TrustCommand::Revoke(args) => {
                 // Prepare receipt export context upfront - fails immediately if receipt export
