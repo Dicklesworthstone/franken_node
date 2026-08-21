@@ -311,6 +311,55 @@ class TestSyntheticReportGate(unittest.TestCase):
             )["pass"]
         )
 
+    def test_triad_pass_allows_bun_divergence_when_franken_matches_node(self):
+        report = passing_report(total=1)
+        bun_only = successful_observation(1)
+        bun_only["stdout_digest"] = f"sha256:{'b' * 64}"
+        node_match = successful_observation(2)
+        report["corpus"]["lockstep_topology"] = "triad"
+        report["corpus"]["reference_runtimes"].append(
+            {
+                "runtime_id": "node",
+                "runtime_name": "node",
+                "version": "v22.14.0-test",
+                "is_reference": True,
+            }
+        )
+        report["per_test_results"][0]["runtime_observations"] = {
+            "bun": bun_only,
+            "node": node_match,
+            "franken-engine-native": successful_observation(3),
+        }
+        report["corpus"]["result_digest"] = mod.compute_result_digest(
+            report["per_test_results"]
+        )
+        refresh_runtime_observations_digest(report)
+        digest = mod.compute_runtime_observations_digest(report)
+        self.assertTrue(digest.startswith("sha256:"))
+
+    def test_triad_pass_refuses_when_franken_matches_only_bun(self):
+        report = passing_report(total=1)
+        bun_only = successful_observation(1)
+        bun_only["stdout_digest"] = f"sha256:{'b' * 64}"
+        report["corpus"]["lockstep_topology"] = "triad"
+        report["corpus"]["reference_runtimes"].append(
+            {
+                "runtime_id": "node",
+                "runtime_name": "node",
+                "version": "v22.14.0-test",
+                "is_reference": True,
+            }
+        )
+        report["per_test_results"][0]["runtime_observations"] = {
+            "bun": bun_only,
+            "node": successful_observation(2),
+            "franken-engine-native": copy.deepcopy(bun_only),
+        }
+        with self.assertRaisesRegex(
+            ValueError, "unless franken matches the node reference"
+        ):
+            mod.compute_runtime_observations_digest(report)
+
     def test_over_cap_stream_without_truncation_fails_closed(self):
         report = passing_report()
         report["per_test_results"][0]["runtime_observations"]["bun"][

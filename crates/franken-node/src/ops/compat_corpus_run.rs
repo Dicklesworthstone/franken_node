@@ -2227,9 +2227,11 @@ fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCa
                     other, franken.observation.stderr_digest
                 )
             } else {
+                // Excerpt first so a later 200-char tracking cap keeps the
+                // diagnostic instead of only the 71-char sha256 prefix.
                 format!(
-                    "lockstep divergence: franken-engine leg refused or crashed (exit {:?}, stderr_sha256={}, excerpt={})",
-                    other, franken.observation.stderr_digest, franken.stderr_excerpt
+                    "lockstep divergence: franken-engine leg refused or crashed (exit {:?}, excerpt={}, stderr_sha256={})",
+                    other, franken.stderr_excerpt, franken.observation.stderr_digest
                 )
             }
         }
@@ -2300,6 +2302,65 @@ fn franken_matches_node_observation(outcome: &CaseOutcome) -> Option<bool> {
             && node.stderr_digest == franken.stderr_digest
             && node.exit_code == franken.exit_code,
     )
+}
+
+/// Timing-free fingerprint of one lockstep leg. Elapsed time is not part of
+/// Node-canonical equality.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct LockstepObservationKey {
+    pub(crate) stdout_digest: String,
+    pub(crate) stderr_digest: String,
+    pub(crate) stdout_bytes: u64,
+    pub(crate) stderr_bytes: u64,
+    pub(crate) stdout_truncated: bool,
+    pub(crate) stderr_truncated: bool,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) termination_kind: String,
+    pub(crate) timed_out: bool,
+}
+
+impl From<&RuntimeLegObservation> for LockstepObservationKey {
+    fn from(observation: &RuntimeLegObservation) -> Self {
+        Self {
+            stdout_digest: observation.stdout_digest.clone(),
+            stderr_digest: observation.stderr_digest.clone(),
+            stdout_bytes: observation.stdout_bytes,
+            stderr_bytes: observation.stderr_bytes,
+            stdout_truncated: observation.stdout_truncated,
+            stderr_truncated: observation.stderr_truncated,
+            exit_code: observation.exit_code,
+            termination_kind: observation.termination_kind.clone(),
+            timed_out: observation.timed_out,
+        }
+    }
+}
+
+/// Node is the compatibility spec.
+///
+/// A passing triad row may have Bun diverge when franken matches Node
+/// (both exit 0). Dyad rows still require unanimous bun+franken evidence.
+/// `child_process` native-eval aborts never match Node's successful exit, so
+/// they cannot become pass through this check.
+pub(crate) fn passing_lockstep_observations_are_consistent(
+    observations: &BTreeMap<String, LockstepObservationKey>,
+) -> Result<(), String> {
+    let Some(franken) = observations.get("franken-engine-native") else {
+        return Err("cannot pass without franken-engine-native".to_string());
+    };
+    if let Some(node) = observations.get("node") {
+        if node != franken {
+            return Err("cannot pass unless franken matches the node reference".to_string());
+        }
+        if node.exit_code != Some(0) || franken.exit_code != Some(0) {
+            return Err("cannot pass with a non-zero node or franken exit".to_string());
+        }
+        return Ok(());
+    }
+    let unique = observations.values().collect::<BTreeSet<_>>();
+    if unique.len() != 1 {
+        return Err("cannot pass with divergent evidence".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "engine")]
@@ -2594,26 +2655,19 @@ pub fn build_corpus_results_document_with_references(
             );
         }
         if outcome.status == "pass" {
-            let comparable_observations = outcome
+            let fingerprints = outcome
                 .runtime_observations
-                .values()
-                .map(|observation| {
+                .iter()
+                .map(|(runtime_id, observation)| {
                     (
-                        observation.stdout_digest.as_str(),
-                        observation.stderr_digest.as_str(),
-                        observation.stdout_bytes,
-                        observation.stderr_bytes,
-                        observation.stdout_truncated,
-                        observation.stderr_truncated,
-                        observation.exit_code,
-                        observation.termination_kind.as_str(),
-                        observation.timed_out,
+                        runtime_id.clone(),
+                        LockstepObservationKey::from(observation),
                     )
                 })
-                .collect::<BTreeSet<_>>();
-            if comparable_observations.len() != 1 {
+                .collect::<BTreeMap<_, _>>();
+            if let Err(reason) = passing_lockstep_observations_are_consistent(&fingerprints) {
                 bail!(
-                    "corpus outcome `{}` cannot pass with divergent runtime observations",
+                    "corpus outcome `{}` cannot pass with divergent runtime observations: {reason}",
                     outcome.test_id
                 );
             }
@@ -3191,6 +3245,12 @@ mod snapshot_staging_tests {
             "crash reasons must surface a stderr excerpt, got {reason}"
         );
         assert!(reason.contains("stderr_sha256="));
+        let excerpt_at = reason.find("excerpt=").expect("excerpt marker");
+        let digest_at = reason.find("stderr_sha256=").expect("digest marker");
+        assert!(
+            excerpt_at < digest_at,
+            "excerpt must precede sha256 so tracking truncation keeps the diagnostic: {reason}"
+        );
         assert!(
             !reason.contains("output mismatch vs bun"),
             "crash path must not recategorize as an output mismatch: {reason}"
@@ -3966,6 +4026,115 @@ mod unsupported_descriptor_capture_tests {
         assert_eq!(
             error.to_string(),
             "descriptor-relative no-follow corpus capture is unavailable on this target; refusing to run"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lockstep_pass_policy_tests {
+    use super::*;
+
+    fn observation(stdout_nibble: char, elapsed_ms: u64) -> RuntimeLegObservation {
+        RuntimeLegObservation {
+            stdout_digest: format!("sha256:{}", stdout_nibble.to_string().repeat(64)),
+            stderr_digest: format!("sha256:{}", "e".repeat(64)),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            exit_code: Some(0),
+            termination_kind: "exited".to_string(),
+            timed_out: false,
+            elapsed_ms,
+        }
+    }
+
+    fn outcome(
+        status: &'static str,
+        observations: BTreeMap<String, RuntimeLegObservation>,
+    ) -> CaseOutcome {
+        CaseOutcome {
+            test_id: "tc::net::0005".to_string(),
+            api_family: "net".to_string(),
+            band: "core".to_string(),
+            risk_band: "critical".to_string(),
+            status,
+            failure_reason: None,
+            investigation_bead_id: None,
+            runtime_observations: observations,
+        }
+    }
+
+    #[test]
+    fn writer_accepts_triad_pass_when_franken_matches_node_and_bun_diverges() {
+        let mut observations = BTreeMap::new();
+        observations.insert("bun".to_string(), observation('b', 1));
+        observations.insert("node".to_string(), observation('a', 2));
+        observations.insert("franken-engine-native".to_string(), observation('a', 3));
+        let document = build_corpus_results_document_with_references(
+            None,
+            &[outcome("pass", observations)],
+            "compat-corpus-test",
+            "1.3.14-test",
+            Some("v22.14.0"),
+            "2026-08-21T00:00:00Z",
+            "corpus",
+        )
+        .expect("Node-canonical bun-split must serialize");
+        assert_eq!(document["totals"]["passed_test_cases"], 1);
+        assert_eq!(document["totals"]["failed_test_cases"], 0);
+        assert_eq!(document["per_test_results"][0]["status"], "pass");
+        assert_eq!(
+            document["failing_tests_tracking"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(usize::MAX),
+            0
+        );
+    }
+
+    #[test]
+    fn writer_rejects_dyad_pass_when_bun_diverges() {
+        let mut observations = BTreeMap::new();
+        observations.insert("bun".to_string(), observation('b', 1));
+        observations.insert("franken-engine-native".to_string(), observation('a', 2));
+        let error = build_corpus_results_document_with_references(
+            None,
+            &[outcome("pass", observations)],
+            "compat-corpus-test",
+            "1.3.14-test",
+            None,
+            "2026-08-21T00:00:00Z",
+            "corpus",
+        )
+        .expect_err("dyad bun-split must stay fail-closed");
+        assert!(
+            error.to_string().contains("cannot pass with divergent"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn writer_rejects_triad_pass_when_franken_matches_only_bun() {
+        let mut observations = BTreeMap::new();
+        observations.insert("bun".to_string(), observation('b', 1));
+        observations.insert("node".to_string(), observation('a', 2));
+        observations.insert("franken-engine-native".to_string(), observation('b', 3));
+        let error = build_corpus_results_document_with_references(
+            None,
+            &[outcome("pass", observations)],
+            "compat-corpus-test",
+            "1.3.14-test",
+            Some("v22.14.0"),
+            "2026-08-21T00:00:00Z",
+            "corpus",
+        )
+        .expect_err("matching only Bun must stay fail-closed");
+        assert!(
+            error
+                .to_string()
+                .contains("unless franken matches the node reference"),
+            "got {error}"
         );
     }
 }

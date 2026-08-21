@@ -7,6 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::compat_corpus_run::{
+    LockstepObservationKey, passing_lockstep_observations_are_consistent,
+};
+
 pub const CLOSE_CONDITION_RECEIPT_PATH: &str = "artifacts/oracle/close_condition_receipt.json";
 const COMPATIBILITY_CORPUS_RESULTS_PATH: &str = "artifacts/13/compatibility_corpus_results.json";
 const L1_PROOF_CARRYING_EFFECTS_PATH: &str = "proof_carrying_effects";
@@ -196,7 +200,7 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
         if status != "pass" && status != "fail" {
             bail!("runtime observation row `{test_id}` has invalid status `{status}`");
         }
-        let mut comparable_observations = BTreeSet::new();
+        let mut fingerprints = BTreeMap::new();
         let runtime_observations = row
             .get("runtime_observations")
             .and_then(Value::as_object)
@@ -321,17 +325,20 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
                     "runtime observation row `{test_id}` cannot pass with timed-out or truncated evidence"
                 );
             }
-            comparable_observations.insert((
-                stdout_digest.clone(),
-                stderr_digest.clone(),
-                stdout_bytes,
-                stderr_bytes,
-                stdout_truncated,
-                stderr_truncated,
-                exit_code,
-                termination_kind.clone(),
-                timed_out,
-            ));
+            fingerprints.insert(
+                runtime_id.clone(),
+                LockstepObservationKey {
+                    stdout_digest: stdout_digest.clone(),
+                    stderr_digest: stderr_digest.clone(),
+                    stdout_bytes,
+                    stderr_bytes,
+                    stdout_truncated,
+                    stderr_truncated,
+                    exit_code,
+                    termination_kind: termination_kind.clone(),
+                    timed_out,
+                },
+            );
             observations.push(CanonicalObservation {
                 test_id: test_id.to_string(),
                 runtime_id: runtime_id.to_string(),
@@ -347,8 +354,10 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
                 elapsed_ms,
             });
         }
-        if status == "pass" && comparable_observations.len() != 1 {
-            bail!("runtime observation row `{test_id}` cannot pass with divergent evidence");
+        if status == "pass" {
+            if let Err(reason) = passing_lockstep_observations_are_consistent(&fingerprints) {
+                bail!("runtime observation row `{test_id}` {reason}");
+            }
         }
     }
     observations.sort();
@@ -2314,6 +2323,92 @@ mod tests {
         let error = validate_compatibility_corpus_runtime_observations(&data)
             .expect_err("passing divergence must fail closed");
         assert!(error.to_string().contains("cannot pass with divergent"));
+    }
+
+    fn triad_pass_rows(bun_digest: &str, franken_matches_node: bool) -> Vec<Value> {
+        let node = successful_runtime_observations_json(1)["franken-engine-native"].clone();
+        let mut bun = node.clone();
+        bun["stdout_digest"] = serde_json::json!(bun_digest);
+        let franken = if franken_matches_node {
+            node.clone()
+        } else {
+            bun.clone()
+        };
+        vec![serde_json::json!({
+            "test_id": "tc::net::0005",
+            "api_family": "net",
+            "band": "core",
+            "risk_band": "critical",
+            "status": "pass",
+            "runtime_observations": {
+                "bun": bun,
+                "node": node,
+                "franken-engine-native": franken,
+            },
+        })]
+    }
+
+    fn triad_runtime_versions() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("bun".to_string(), "1.3.14-test".to_string()),
+            ("node".to_string(), "v22.14.0-test".to_string()),
+            (
+                "franken-engine-native".to_string(),
+                "0.1.0-test".to_string(),
+            ),
+        ])
+    }
+
+    #[test]
+    fn passing_triad_allows_bun_divergence_when_franken_matches_node() {
+        let per_test_results = triad_pass_rows(&format!("sha256:{}", "b".repeat(64)), true);
+        let result_digest = compute_compatibility_corpus_result_digest(&per_test_results);
+        let observations_digest = compute_compatibility_corpus_runtime_observations_digest(
+            &per_test_results,
+            COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+            &result_digest,
+            "triad",
+            &triad_runtime_versions(),
+        )
+        .expect("Node-canonical bun-split must bind");
+        let data = serde_json::json!({
+            "corpus": {
+                "result_digest": result_digest,
+                "runtime_observations_schema_version": COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+                "runtime_observations_digest": observations_digest,
+                "lockstep_topology": "triad",
+                "reference_runtimes": [
+                    {"runtime_id": "bun", "version": "1.3.14-test"},
+                    {"runtime_id": "node", "version": "v22.14.0-test"}
+                ],
+                "product_runtime": {
+                    "runtime_id": "franken-engine-native",
+                    "version": "0.1.0-test"
+                },
+            },
+            "per_test_results": per_test_results,
+        });
+        validate_compatibility_corpus_runtime_observations(&data)
+            .expect("Node-canonical bun-split must validate");
+    }
+
+    #[test]
+    fn passing_triad_refuses_when_franken_matches_only_bun() {
+        let per_test_results = triad_pass_rows(&format!("sha256:{}", "b".repeat(64)), false);
+        let error = compute_compatibility_corpus_runtime_observations_digest(
+            &per_test_results,
+            COMPATIBILITY_RUNTIME_OBSERVATIONS_SCHEMA_VERSION,
+            "sha256:deadbeef",
+            "triad",
+            &triad_runtime_versions(),
+        )
+        .expect_err("matching only Bun must stay fail-closed");
+        assert!(
+            error
+                .to_string()
+                .contains("unless franken matches the node reference"),
+            "got {error}"
+        );
     }
 
     #[test]

@@ -72,6 +72,56 @@ def _u64(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= (2**64 - 1)
 
 
+def _observation_fingerprint(observation: dict) -> tuple:
+    return (
+        observation.get("stdout_digest"),
+        observation.get("stderr_digest"),
+        observation.get("stdout_bytes"),
+        observation.get("stderr_bytes"),
+        observation.get("stdout_truncated"),
+        observation.get("stderr_truncated"),
+        observation.get("exit_code"),
+        observation.get("termination_kind"),
+        observation.get("timed_out"),
+    )
+
+
+def _assert_passing_lockstep_observations(test_id: str, runtime_observations: dict) -> None:
+    """Node is the spec. Bun may diverge on a passing triad row iff franken
+    matches Node (both exit 0). Dyad rows still require unanimous
+    bun+franken. child_process native-eval aborts never match Node's
+    successful exit, so they cannot pass here.
+    """
+    franken = runtime_observations.get("franken-engine-native")
+    if not isinstance(franken, dict):
+        raise ValueError(
+            f"runtime observation row {test_id!r} cannot pass without "
+            "franken-engine-native"
+        )
+    node = runtime_observations.get("node")
+    if isinstance(node, dict):
+        if _observation_fingerprint(node) != _observation_fingerprint(franken):
+            raise ValueError(
+                f"runtime observation row {test_id!r} cannot pass unless "
+                "franken matches the node reference"
+            )
+        if node.get("exit_code") != 0 or franken.get("exit_code") != 0:
+            raise ValueError(
+                f"runtime observation row {test_id!r} cannot pass with a "
+                "non-zero node or franken exit"
+            )
+        return
+    fingerprints = {
+        _observation_fingerprint(observation)
+        for observation in runtime_observations.values()
+        if isinstance(observation, dict)
+    }
+    if len(fingerprints) != 1:
+        raise ValueError(
+            f"runtime observation row {test_id!r} cannot pass with divergent evidence"
+        )
+
+
 def compute_runtime_observations_digest(data: dict) -> str:
     """Validate and bind one concrete run's typed per-runtime observations.
 
@@ -160,7 +210,6 @@ def compute_runtime_observations_digest(data: dict) -> str:
             raise ValueError(
                 f"runtime observation row {test_id!r} has invalid status {status!r}"
             )
-        comparable_observations = set()
         runtime_observations = row.get("runtime_observations")
         if not isinstance(runtime_observations, dict):
             raise ValueError(f"runtime observation row {test_id!r} is missing an object")
@@ -237,19 +286,6 @@ def compute_runtime_observations_digest(data: dict) -> str:
                     f"runtime observation row {test_id!r} cannot pass with timed-out "
                     "or truncated evidence"
                 )
-            comparable_observations.add(
-                (
-                    stdout_digest,
-                    stderr_digest,
-                    stdout_bytes,
-                    stderr_bytes,
-                    stdout_truncated,
-                    stderr_truncated,
-                    exit_code,
-                    termination_kind,
-                    timed_out,
-                )
-            )
             observations.append(
                 (
                     test_id,
@@ -266,10 +302,8 @@ def compute_runtime_observations_digest(data: dict) -> str:
                     elapsed_ms,
                 )
             )
-        if status == "pass" and len(comparable_observations) != 1:
-            raise ValueError(
-                f"runtime observation row {test_id!r} cannot pass with divergent evidence"
-            )
+        if status == "pass":
+            _assert_passing_lockstep_observations(test_id, runtime_observations)
 
     hasher = hashlib.sha256()
     hasher.update(_RUNTIME_OBSERVATIONS_DIGEST_DOMAIN)

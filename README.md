@@ -1961,8 +1961,8 @@ can pin directly against the names. Current names emitted by the CLI:
 
 | Metric | Type | Labels | Surface |
 |---|---|---|---|
-| `franken_node_health_pass` | gauge | `surface` | 1 when the named surface is healthy, 0 otherwise |
-| `franken_node_process_uptime_seconds` | gauge | — | Process uptime |
+| `franken_node_health_pass` | gauge | — | 1 when this CLI `ops health-check` passed (compiled git SHA plus a local ledger/receipt file); not per-surface daemon liveness |
+| `franken_node_process_uptime_seconds` | gauge | — | Uptime of this CLI process (`ops metrics` / `ops health-check`); not a long-running node daemon |
 | `franken_node_active_session_count` | gauge | — | Count of files under `<project>/.franken-node/state/sessions` (same source as `ops health-check`; not a live SessionManager) |
 | `franken_node_build_info` | gauge | `version`, `git_sha` | Always 1; labels carry version info |
 | `franken_node_last_successful_evidence_ledger_flush_timestamp_seconds` | gauge | — | Last successful evidence ledger flush (epoch seconds) |
@@ -2424,15 +2424,17 @@ Scrape `franken-node ops metrics --format prometheus` from your
 Prometheus deployment under the `franken_node_*` namespace. Useful
 alerts against the currently-emitted surface:
 
-- `franken_node_health_pass == 0`: any surface unhealthy.
+- `franken_node_health_pass == 0`: this CLI `ops health-check` failed
+  (missing compiled git SHA or no local ledger/receipt file), not
+  per-surface daemon liveness.
 - `time() - franken_node_last_successful_evidence_ledger_flush_timestamp_seconds > 600`:
   evidence ledger has not flushed in the last 10 minutes.
 - `rate(franken_node_evidence_ledger_spill_entries[5m]) > 0`: the ledger
   is spilling at a non-zero rate (capacity pressure).
 - `sum(franken_node_fleet_active_quarantines) > 0`: any quarantine is
   currently active across any zone.
-- `absent(franken_node_process_uptime_seconds)`: the process is not
-  scraping (down).
+- `absent(franken_node_process_uptime_seconds)`: the `ops metrics`
+  scrape is down (this is a CLI scrape, not a node daemon heartbeat).
 
 ### SIEM / audit pipelines
 
