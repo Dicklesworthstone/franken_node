@@ -1,7 +1,15 @@
 //! bd-2sx: Revocation freshness gate for risky product actions.
 //!
-//! Integrates canonical revocation freshness semantics with three safety tiers
-//! (Critical, Standard, Advisory), each with epoch-based staleness thresholds.
+//! Integrates canonical revocation freshness semantics with three *epoch*
+//! freshness classes (Critical, Standard, Advisory).
+//!
+//! Product wall-clock tiers (`Standard` / `Risky` / `Dangerous`, age in
+//! seconds) live in [`crate::security::revocation_freshness::SafetyTier`]
+//! and are what `franken-node run` consults. This module's
+//! [`EpochFreshnessTier`] is the control-plane proof-window class.
+//! [`EpochFreshnessTier::from`] maps the product tier onto this class
+//! (Dangerous→Critical, Risky→Standard, Standard→Advisory) so there is one
+//! public product enum and one named epoch class, not two silent `SafetyTier`s.
 //! Every gated action must present a signed `FreshnessProof` that attests
 //! revocation data was checked within the tier-specific window.
 //!
@@ -40,7 +48,7 @@ pub mod event_codes {
 }
 
 // ---------------------------------------------------------------------------
-// SafetyTier
+// EpochFreshnessTier
 // ---------------------------------------------------------------------------
 
 /// Safety tier classification for risky product actions.
@@ -50,7 +58,7 @@ pub mod event_codes {
 /// - Standard: 5 epochs (owner-bypass)
 /// - Advisory: 10 epochs (proceed-with-warning)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SafetyTier {
+pub enum EpochFreshnessTier {
     /// Tier-1: most dangerous actions. Max staleness = 1 epoch.
     Critical,
     /// Tier-2: important but bypassable. Max staleness = 5 epochs.
@@ -59,7 +67,7 @@ pub enum SafetyTier {
     Advisory,
 }
 
-impl SafetyTier {
+impl EpochFreshnessTier {
     /// Maximum staleness in epochs for this tier.
     pub fn max_staleness_epochs(&self) -> u64 {
         match self {
@@ -78,7 +86,7 @@ impl SafetyTier {
     }
 }
 
-impl fmt::Display for SafetyTier {
+impl fmt::Display for EpochFreshnessTier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Critical => write!(f, "Critical"),
@@ -106,7 +114,7 @@ pub struct FreshnessProof {
     /// Hex-encoded HMAC signature of the proof payload.
     pub signature: String,
     /// Safety tier of the gated action.
-    pub tier: SafetyTier,
+    pub tier: EpochFreshnessTier,
     /// Control epoch when the proof was generated.
     pub epoch: u64,
 }
@@ -145,7 +153,7 @@ impl FreshnessProof {
 pub enum FreshnessError {
     /// Proof epoch too old for the action's tier.
     Stale {
-        tier: SafetyTier,
+        tier: EpochFreshnessTier,
         proof_epoch: u64,
         current_epoch: u64,
         max_staleness: u64,
@@ -258,7 +266,7 @@ pub struct GateDecision {
     /// Action identifier.
     pub action_id: String,
     /// Tier classification of the action.
-    pub tier: SafetyTier,
+    pub tier: EpochFreshnessTier,
     /// Whether the action was allowed.
     pub allowed: bool,
     /// Event code emitted.
@@ -293,14 +301,14 @@ pub struct RevocationFreshnessGate {
     /// Expected signature for verification (simplified: real systems use HMAC).
     expected_signature_fn: Box<dyn Fn(&FreshnessProof) -> String + Send + Sync>,
     /// Action-to-tier classification table.
-    tier_table: Vec<(String, SafetyTier)>,
+    tier_table: Vec<(String, EpochFreshnessTier)>,
 }
 
 impl RevocationFreshnessGate {
     /// Create a new gate with a signature verifier function and tier table.
     pub fn new(
         signature_fn: Box<dyn Fn(&FreshnessProof) -> String + Send + Sync>,
-        tier_table: Vec<(String, SafetyTier)>,
+        tier_table: Vec<(String, EpochFreshnessTier)>,
     ) -> Self {
         Self {
             consumed_nonces: BTreeSet::new(),
@@ -310,7 +318,7 @@ impl RevocationFreshnessGate {
         }
     }
 
-    fn matching_tier(&self, action_id: &str) -> Option<SafetyTier> {
+    fn matching_tier(&self, action_id: &str) -> Option<EpochFreshnessTier> {
         self.tier_table
             .iter()
             .filter(|(pattern, _)| action_id == pattern || action_id.starts_with(pattern.as_str()))
@@ -322,9 +330,9 @@ impl RevocationFreshnessGate {
     ///
     /// Returns Advisory if the action is not in the tier table.
     /// `check()` still fails closed for unclassified actions.
-    pub fn classify_action(&self, action_id: &str) -> SafetyTier {
+    pub fn classify_action(&self, action_id: &str) -> EpochFreshnessTier {
         self.matching_tier(action_id)
-            .unwrap_or(SafetyTier::Advisory)
+            .unwrap_or(EpochFreshnessTier::Advisory)
     }
 
     /// Verify a FreshnessProof's signature and replay preconditions.
@@ -485,7 +493,7 @@ impl RevocationFreshnessGate {
 
         // Stale: apply degradation per tier
         match tier {
-            SafetyTier::Critical => {
+            EpochFreshnessTier::Critical => {
                 // INV-RFG-GATE: fail-closed, no bypass
                 Err(FreshnessError::Stale {
                     tier,
@@ -494,7 +502,7 @@ impl RevocationFreshnessGate {
                     max_staleness,
                 })
             }
-            SafetyTier::Standard => {
+            EpochFreshnessTier::Standard => {
                 // INV-RFG-DEGRADE: owner-bypass allowed
                 if owner_bypass {
                     self.consume_nonce(&proof.nonce);
@@ -518,7 +526,7 @@ impl RevocationFreshnessGate {
                     })
                 }
             }
-            SafetyTier::Advisory => {
+            EpochFreshnessTier::Advisory => {
                 // INV-RFG-DEGRADE: proceed-with-warning
                 self.consume_nonce(&proof.nonce);
                 Ok(GateDecision {
@@ -574,21 +582,21 @@ mod tests {
         RevocationFreshnessGate::new(
             Box::new(test_sig),
             vec![
-                ("key_rotate".to_string(), SafetyTier::Critical),
-                ("trust_anchor".to_string(), SafetyTier::Critical),
-                ("policy_deploy".to_string(), SafetyTier::Standard),
-                ("connector_activate".to_string(), SafetyTier::Standard),
-                ("telemetry_config".to_string(), SafetyTier::Advisory),
+                ("key_rotate".to_string(), EpochFreshnessTier::Critical),
+                ("trust_anchor".to_string(), EpochFreshnessTier::Critical),
+                ("policy_deploy".to_string(), EpochFreshnessTier::Standard),
+                ("connector_activate".to_string(), EpochFreshnessTier::Standard),
+                ("telemetry_config".to_string(), EpochFreshnessTier::Advisory),
                 // Generic advisory action used by replay/nonce/epoch tests. Prod now
                 // fails closed for unclassified action_ids (matching_tier -> None ->
                 // ProofTampered "not classified in the tier table"), so the bare "act"
                 // prefix must be registered. No other test action starts with "act".
-                ("act".to_string(), SafetyTier::Advisory),
+                ("act".to_string(), EpochFreshnessTier::Advisory),
             ],
         )
     }
 
-    fn proof(tier: SafetyTier, epoch: u64, nonce: &str) -> FreshnessProof {
+    fn proof(tier: EpochFreshnessTier, epoch: u64, nonce: &str) -> FreshnessProof {
         let mut p = FreshnessProof {
             timestamp: 1700000000,
             credentials_checked: vec!["cred-1".into(), "cred-2".into()],
@@ -601,28 +609,28 @@ mod tests {
         p
     }
 
-    // --- SafetyTier tests ---
+    // --- EpochFreshnessTier tests ---
 
     #[test]
     fn critical_max_staleness_is_1() {
-        assert_eq!(SafetyTier::Critical.max_staleness_epochs(), 1);
+        assert_eq!(EpochFreshnessTier::Critical.max_staleness_epochs(), 1);
     }
 
     #[test]
     fn standard_max_staleness_is_5() {
-        assert_eq!(SafetyTier::Standard.max_staleness_epochs(), 5);
+        assert_eq!(EpochFreshnessTier::Standard.max_staleness_epochs(), 5);
     }
 
     #[test]
     fn advisory_max_staleness_is_10() {
-        assert_eq!(SafetyTier::Advisory.max_staleness_epochs(), 10);
+        assert_eq!(EpochFreshnessTier::Advisory.max_staleness_epochs(), 10);
     }
 
     #[test]
     fn tier_display() {
-        assert_eq!(SafetyTier::Critical.to_string(), "Critical");
-        assert_eq!(SafetyTier::Standard.to_string(), "Standard");
-        assert_eq!(SafetyTier::Advisory.to_string(), "Advisory");
+        assert_eq!(EpochFreshnessTier::Critical.to_string(), "Critical");
+        assert_eq!(EpochFreshnessTier::Standard.to_string(), "Standard");
+        assert_eq!(EpochFreshnessTier::Advisory.to_string(), "Advisory");
     }
 
     // --- classify_action tests ---
@@ -630,25 +638,25 @@ mod tests {
     #[test]
     fn classify_critical_action() {
         let g = gate();
-        assert_eq!(g.classify_action("key_rotate"), SafetyTier::Critical);
+        assert_eq!(g.classify_action("key_rotate"), EpochFreshnessTier::Critical);
     }
 
     #[test]
     fn classify_standard_action() {
         let g = gate();
-        assert_eq!(g.classify_action("policy_deploy"), SafetyTier::Standard);
+        assert_eq!(g.classify_action("policy_deploy"), EpochFreshnessTier::Standard);
     }
 
     #[test]
     fn classify_advisory_action() {
         let g = gate();
-        assert_eq!(g.classify_action("telemetry_config"), SafetyTier::Advisory);
+        assert_eq!(g.classify_action("telemetry_config"), EpochFreshnessTier::Advisory);
     }
 
     #[test]
     fn classify_unknown_defaults_to_advisory() {
         let g = gate();
-        assert_eq!(g.classify_action("unknown_action"), SafetyTier::Advisory);
+        assert_eq!(g.classify_action("unknown_action"), EpochFreshnessTier::Advisory);
     }
 
     #[test]
@@ -656,17 +664,17 @@ mod tests {
         let mut g = RevocationFreshnessGate::new(
             Box::new(test_sig),
             vec![
-                ("key".to_string(), SafetyTier::Advisory),
-                ("key_rotate".to_string(), SafetyTier::Critical),
+                ("key".to_string(), EpochFreshnessTier::Advisory),
+                ("key_rotate".to_string(), EpochFreshnessTier::Critical),
             ],
         );
-        assert_eq!(g.classify_action("key_rotate"), SafetyTier::Critical);
+        assert_eq!(g.classify_action("key_rotate"), EpochFreshnessTier::Critical);
         assert_eq!(
             g.classify_action("key_rotate_extended"),
-            SafetyTier::Critical
+            EpochFreshnessTier::Critical
         );
 
-        let p = proof(SafetyTier::Advisory, 100, "shadowed-critical");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "shadowed-critical");
         let err = g
             .check(&p, 100, true, false, "key_rotate", "tr-shadowed")
             .unwrap_err();
@@ -680,7 +688,7 @@ mod tests {
 
     #[test]
     fn proof_canonical_payload_deterministic() {
-        let p = proof(SafetyTier::Critical, 100, "n1");
+        let p = proof(EpochFreshnessTier::Critical, 100, "n1");
         let a = p.canonical_payload();
         let b = p.canonical_payload();
         assert_eq!(a, b);
@@ -690,28 +698,28 @@ mod tests {
     fn proof_canonical_payload_includes_fields() {
         // canonical_payload() returns a SHA-256 hash. Verify each field
         // contributes by showing that changing any field changes the hash.
-        let baseline = proof(SafetyTier::Critical, 42, "nonce-x");
+        let baseline = proof(EpochFreshnessTier::Critical, 42, "nonce-x");
         let baseline_hash = baseline.canonical_payload();
 
         // Changing nonce changes the hash
-        let different_nonce = proof(SafetyTier::Critical, 42, "nonce-y");
+        let different_nonce = proof(EpochFreshnessTier::Critical, 42, "nonce-y");
         assert_ne!(baseline_hash, different_nonce.canonical_payload());
 
         // Changing epoch changes the hash
-        let different_epoch = proof(SafetyTier::Critical, 43, "nonce-x");
+        let different_epoch = proof(EpochFreshnessTier::Critical, 43, "nonce-x");
         assert_ne!(baseline_hash, different_epoch.canonical_payload());
 
         // Changing tier changes the hash
-        let different_tier = proof(SafetyTier::Standard, 42, "nonce-x");
+        let different_tier = proof(EpochFreshnessTier::Standard, 42, "nonce-x");
         assert_ne!(baseline_hash, different_tier.canonical_payload());
 
         // Changing timestamp changes the hash
-        let mut different_ts = proof(SafetyTier::Critical, 42, "nonce-x");
+        let mut different_ts = proof(EpochFreshnessTier::Critical, 42, "nonce-x");
         different_ts.timestamp = 1700000001;
         assert_ne!(baseline_hash, different_ts.canonical_payload());
 
         // Changing credentials changes the hash
-        let mut different_creds = proof(SafetyTier::Critical, 42, "nonce-x");
+        let mut different_creds = proof(EpochFreshnessTier::Critical, 42, "nonce-x");
         different_creds.credentials_checked = vec!["cred-3".into()];
         assert_ne!(baseline_hash, different_creds.canonical_payload());
     }
@@ -721,7 +729,7 @@ mod tests {
     #[test]
     fn critical_fresh_proof_passes() {
         let mut g = gate();
-        let p = proof(SafetyTier::Critical, 100, "n1");
+        let p = proof(EpochFreshnessTier::Critical, 100, "n1");
         let d = g.check(&p, 100, true, false, "key_rotate", "tr-1").unwrap();
         assert!(d.allowed);
         assert_eq!(d.event_code, event_codes::RFG_001);
@@ -731,7 +739,7 @@ mod tests {
     #[test]
     fn critical_at_boundary_denied() {
         let mut g = gate();
-        let p = proof(SafetyTier::Critical, 99, "n1");
+        let p = proof(EpochFreshnessTier::Critical, 99, "n1");
         // Fail-closed: staleness == max_staleness → Err(Stale), not Ok with allowed=false
         let err = g
             .check(&p, 100, true, false, "key_rotate", "tr-1")
@@ -740,7 +748,7 @@ mod tests {
             matches!(
                 err,
                 FreshnessError::Stale {
-                    tier: SafetyTier::Critical,
+                    tier: EpochFreshnessTier::Critical,
                     ..
                 }
             ),
@@ -752,7 +760,7 @@ mod tests {
     fn standard_fresh_proof_passes() {
         let mut g = gate();
         // staleness = 100 - 96 = 4 < max_staleness(Standard=5) → fresh
-        let p = proof(SafetyTier::Standard, 96, "n1");
+        let p = proof(EpochFreshnessTier::Standard, 96, "n1");
         let d = g
             .check(&p, 100, true, false, "policy_deploy", "tr-1")
             .unwrap();
@@ -763,7 +771,7 @@ mod tests {
     #[test]
     fn advisory_fresh_proof_passes() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 90, "n1");
+        let p = proof(EpochFreshnessTier::Advisory, 90, "n1");
         let d = g
             .check(&p, 100, true, false, "telemetry_config", "tr-1")
             .unwrap();
@@ -775,7 +783,7 @@ mod tests {
     #[test]
     fn critical_stale_denied() {
         let mut g = gate();
-        let p = proof(SafetyTier::Critical, 98, "n1");
+        let p = proof(EpochFreshnessTier::Critical, 98, "n1");
         let err = g
             .check(&p, 100, true, false, "key_rotate", "tr-1")
             .unwrap_err();
@@ -786,7 +794,7 @@ mod tests {
     #[test]
     fn critical_stale_no_bypass() {
         let mut g = gate();
-        let p = proof(SafetyTier::Critical, 98, "n1");
+        let p = proof(EpochFreshnessTier::Critical, 98, "n1");
         // Even with owner_bypass=true, Critical fails
         let err = g
             .check(&p, 100, true, true, "key_rotate", "tr-1")
@@ -797,7 +805,7 @@ mod tests {
     #[test]
     fn standard_stale_denied_without_bypass() {
         let mut g = gate();
-        let p = proof(SafetyTier::Standard, 94, "n1");
+        let p = proof(EpochFreshnessTier::Standard, 94, "n1");
         let err = g
             .check(&p, 100, true, false, "policy_deploy", "tr-1")
             .unwrap_err();
@@ -808,7 +816,7 @@ mod tests {
     #[test]
     fn standard_stale_with_owner_bypass() {
         let mut g = gate();
-        let p = proof(SafetyTier::Standard, 94, "n1");
+        let p = proof(EpochFreshnessTier::Standard, 94, "n1");
         let d = g
             .check(&p, 100, true, true, "policy_deploy", "tr-1")
             .unwrap();
@@ -820,7 +828,7 @@ mod tests {
     #[test]
     fn advisory_stale_proceeds_with_warning() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 89, "n1");
+        let p = proof(EpochFreshnessTier::Advisory, 89, "n1");
         let d = g
             .check(&p, 100, true, false, "telemetry_config", "tr-1")
             .unwrap();
@@ -833,7 +841,7 @@ mod tests {
     fn action_tier_mismatch_rejected_and_nonce_not_consumed() {
         let mut g = gate();
         // key_rotate is classified as Critical, but proof claims Advisory.
-        let p = proof(SafetyTier::Advisory, 100, "n-tier-mismatch");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "n-tier-mismatch");
         let err = g
             .check(&p, 100, true, false, "key_rotate", "tr-1")
             .unwrap_err();
@@ -844,11 +852,11 @@ mod tests {
     #[test]
     fn verify_proof_rejects_replay_before_signature_mismatch() {
         let mut g = gate();
-        let original = proof(SafetyTier::Advisory, 100, "n-replay-precedence");
+        let original = proof(EpochFreshnessTier::Advisory, 100, "n-replay-precedence");
         g.check(&original, 100, true, false, "telemetry_config", "tr-first")
             .unwrap();
 
-        let mut tampered_replay = proof(SafetyTier::Advisory, 100, "n-replay-precedence");
+        let mut tampered_replay = proof(EpochFreshnessTier::Advisory, 100, "n-replay-precedence");
         tampered_replay.signature = "bad-signature".to_string();
         let err = g.verify_proof(&tampered_replay).unwrap_err();
 
@@ -862,7 +870,7 @@ mod tests {
     #[test]
     fn unauthenticated_request_rejected_before_replay_lookup() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "n-auth-first");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "n-auth-first");
         g.check(&p, 100, true, false, "telemetry_config", "tr-first")
             .unwrap();
 
@@ -884,7 +892,7 @@ mod tests {
     #[test]
     fn tier_mismatch_rejected_before_bad_signature() {
         let mut g = gate();
-        let mut p = proof(SafetyTier::Advisory, 100, "n-tier-before-sig");
+        let mut p = proof(EpochFreshnessTier::Advisory, 100, "n-tier-before-sig");
         p.signature = "bad-signature".to_string();
 
         let err = g
@@ -903,7 +911,7 @@ mod tests {
     #[test]
     fn unknown_action_with_non_advisory_proof_is_rejected() {
         let mut g = gate();
-        let p = proof(SafetyTier::Critical, 100, "n-unknown-action-tier");
+        let p = proof(EpochFreshnessTier::Critical, 100, "n-unknown-action-tier");
 
         let err = g
             .check(&p, 100, true, false, "unclassified_action", "tr-unknown")
@@ -920,7 +928,7 @@ mod tests {
     #[test]
     fn unknown_action_with_advisory_proof_is_rejected() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "n-unknown-action-advisory");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "n-unknown-action-advisory");
 
         let err = g
             .check(
@@ -944,7 +952,7 @@ mod tests {
     #[test]
     fn standard_exact_boundary_without_bypass_is_stale() {
         let mut g = gate();
-        let p = proof(SafetyTier::Standard, 95, "n-standard-boundary");
+        let p = proof(EpochFreshnessTier::Standard, 95, "n-standard-boundary");
 
         let err = g
             .check(
@@ -961,7 +969,7 @@ mod tests {
             matches!(
                 err,
                 FreshnessError::Stale {
-                    tier: SafetyTier::Standard,
+                    tier: EpochFreshnessTier::Standard,
                     proof_epoch: 95,
                     current_epoch: 100,
                     max_staleness: 5
@@ -975,7 +983,7 @@ mod tests {
     #[test]
     fn standard_exact_boundary_with_bypass_degrades_and_consumes_nonce() {
         let mut g = gate();
-        let p = proof(SafetyTier::Standard, 95, "n-standard-boundary-bypass");
+        let p = proof(EpochFreshnessTier::Standard, 95, "n-standard-boundary-bypass");
 
         let decision = g
             .check(
@@ -998,7 +1006,7 @@ mod tests {
     #[test]
     fn advisory_exact_boundary_degrades_and_consumes_nonce() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 90, "n-advisory-boundary");
+        let p = proof(EpochFreshnessTier::Advisory, 90, "n-advisory-boundary");
 
         let decision = g
             .check(
@@ -1021,7 +1029,7 @@ mod tests {
     #[test]
     fn critical_future_epoch_rejected_even_with_owner_bypass_and_nonce_reusable() {
         let mut g = gate();
-        let future = proof(SafetyTier::Critical, 101, "n-critical-future");
+        let future = proof(EpochFreshnessTier::Critical, 101, "n-critical-future");
 
         let err = g
             .check(&future, 100, true, true, "key_rotate", "tr-critical-future")
@@ -1030,7 +1038,7 @@ mod tests {
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
         assert!(!g.is_nonce_consumed("n-critical-future"));
 
-        let corrected = proof(SafetyTier::Critical, 100, "n-critical-future");
+        let corrected = proof(EpochFreshnessTier::Critical, 100, "n-critical-future");
         let decision = g
             .check(
                 &corrected,
@@ -1048,7 +1056,7 @@ mod tests {
     #[test]
     fn stale_critical_rejection_does_not_poison_retry_nonce() {
         let mut g = gate();
-        let stale = proof(SafetyTier::Critical, 98, "n-critical-stale-retry");
+        let stale = proof(EpochFreshnessTier::Critical, 98, "n-critical-stale-retry");
 
         let err = g
             .check(&stale, 100, true, false, "key_rotate", "tr-critical-stale")
@@ -1057,7 +1065,7 @@ mod tests {
         assert_eq!(err.code(), "ERR_RFG_STALE");
         assert!(!g.is_nonce_consumed("n-critical-stale-retry"));
 
-        let fresh = proof(SafetyTier::Critical, 100, "n-critical-stale-retry");
+        let fresh = proof(EpochFreshnessTier::Critical, 100, "n-critical-stale-retry");
         let decision = g
             .check(&fresh, 100, true, false, "key_rotate", "tr-critical-retry")
             .unwrap();
@@ -1070,10 +1078,10 @@ mod tests {
     #[test]
     fn replay_detected() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "same-nonce");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "same-nonce");
         g.check(&p, 100, true, false, "act-1", "tr-1").unwrap();
         // Same nonce again
-        let p2 = proof(SafetyTier::Advisory, 100, "same-nonce");
+        let p2 = proof(EpochFreshnessTier::Advisory, 100, "same-nonce");
         let err = g.check(&p2, 100, true, false, "act-2", "tr-2").unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_REPLAY");
     }
@@ -1081,8 +1089,8 @@ mod tests {
     #[test]
     fn different_nonces_not_replay() {
         let mut g = gate();
-        let p1 = proof(SafetyTier::Advisory, 100, "nonce-a");
-        let p2 = proof(SafetyTier::Advisory, 100, "nonce-b");
+        let p1 = proof(EpochFreshnessTier::Advisory, 100, "nonce-a");
+        let p2 = proof(EpochFreshnessTier::Advisory, 100, "nonce-b");
         g.check(&p1, 100, true, false, "act-1", "tr-1").unwrap();
         g.check(&p2, 100, true, false, "act-2", "tr-2").unwrap();
         assert_eq!(g.consumed_nonce_count(), 2);
@@ -1093,7 +1101,7 @@ mod tests {
     #[test]
     fn tampered_proof_rejected() {
         let mut g = gate();
-        let mut p = proof(SafetyTier::Advisory, 100, "n1");
+        let mut p = proof(EpochFreshnessTier::Advisory, 100, "n1");
         p.signature = "bad-sig".to_string();
         let err = g.check(&p, 100, true, false, "act-1", "tr-1").unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
@@ -1104,7 +1112,7 @@ mod tests {
     #[test]
     fn unauthenticated_rejected() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "n1");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "n1");
         let err = g.check(&p, 100, false, false, "act-1", "tr-1").unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_UNAUTHENTICATED");
     }
@@ -1114,7 +1122,7 @@ mod tests {
     #[test]
     fn error_display_stale() {
         let e = FreshnessError::Stale {
-            tier: SafetyTier::Critical,
+            tier: EpochFreshnessTier::Critical,
             proof_epoch: 98,
             current_epoch: 100,
             max_staleness: 1,
@@ -1160,7 +1168,7 @@ mod tests {
     fn all_error_codes_present() {
         assert_eq!(
             FreshnessError::Stale {
-                tier: SafetyTier::Critical,
+                tier: EpochFreshnessTier::Critical,
                 proof_epoch: 0,
                 current_epoch: 0,
                 max_staleness: 0
@@ -1200,7 +1208,7 @@ mod tests {
     #[test]
     fn gate_decision_has_trace_id() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "n1");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "n1");
         let d = g.check(&p, 100, true, false, "act-1", "tr-42").unwrap();
         assert_eq!(d.trace_id, "tr-42");
     }
@@ -1208,7 +1216,7 @@ mod tests {
     #[test]
     fn gate_decision_has_action_id() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "n1");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "n1");
         let d = g
             .check(&p, 100, true, false, "telemetry_config", "tr-1")
             .unwrap();
@@ -1218,9 +1226,9 @@ mod tests {
     #[test]
     fn gate_decision_has_tier() {
         let mut g = gate();
-        let p = proof(SafetyTier::Critical, 100, "n1");
+        let p = proof(EpochFreshnessTier::Critical, 100, "n1");
         let d = g.check(&p, 100, true, false, "key_rotate", "tr-1").unwrap();
-        assert_eq!(d.tier, SafetyTier::Critical);
+        assert_eq!(d.tier, EpochFreshnessTier::Critical);
     }
 
     // --- Nonce tracking ---
@@ -1229,7 +1237,7 @@ mod tests {
     fn nonce_consumed_after_check() {
         let mut g = gate();
         assert!(!g.is_nonce_consumed("n1"));
-        let p = proof(SafetyTier::Advisory, 100, "n1");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "n1");
         g.check(&p, 100, true, false, "act", "tr").unwrap();
         assert!(g.is_nonce_consumed("n1"));
     }
@@ -1238,10 +1246,10 @@ mod tests {
     fn consumed_nonce_count_increments() {
         let mut g = gate();
         assert_eq!(g.consumed_nonce_count(), 0);
-        let p1 = proof(SafetyTier::Advisory, 100, "n1");
+        let p1 = proof(EpochFreshnessTier::Advisory, 100, "n1");
         g.check(&p1, 100, true, false, "act", "tr").unwrap();
         assert_eq!(g.consumed_nonce_count(), 1);
-        let p2 = proof(SafetyTier::Advisory, 100, "n2");
+        let p2 = proof(EpochFreshnessTier::Advisory, 100, "n2");
         g.check(&p2, 100, true, false, "act", "tr").unwrap();
         assert_eq!(g.consumed_nonce_count(), 2);
     }
@@ -1261,7 +1269,7 @@ mod tests {
     #[test]
     fn zero_epoch_proof() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 0, "n-zero");
+        let p = proof(EpochFreshnessTier::Advisory, 0, "n-zero");
         let d = g.check(&p, 0, true, false, "act", "tr").unwrap();
         assert!(d.allowed);
     }
@@ -1269,7 +1277,7 @@ mod tests {
     #[test]
     fn very_large_epoch() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, u64::MAX - 5, "n-large");
+        let p = proof(EpochFreshnessTier::Advisory, u64::MAX - 5, "n-large");
         let err = g
             .check(&p, u64::MAX - 10, true, false, "act", "tr")
             .unwrap_err();
@@ -1285,14 +1293,14 @@ mod tests {
     fn future_epoch_rejection_does_not_poison_retry_nonce() {
         let mut g = gate();
 
-        let future = proof(SafetyTier::Advisory, 105, "n-retry");
+        let future = proof(EpochFreshnessTier::Advisory, 105, "n-retry");
         let err = g
             .check(&future, 100, true, false, "act", "tr-future")
             .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
         assert!(!g.is_nonce_consumed("n-retry"));
 
-        let corrected = proof(SafetyTier::Advisory, 100, "n-retry");
+        let corrected = proof(EpochFreshnessTier::Advisory, 100, "n-retry");
         let decision = g
             .check(&corrected, 100, true, false, "act", "tr-corrected")
             .unwrap();
@@ -1309,7 +1317,7 @@ mod tests {
         // exceeds the configured cap.
         for i in 0..MAX_CONSUMED_NONCES + 10 {
             let nonce = format!("bounded-nonce-{i}");
-            let p = proof(SafetyTier::Advisory, 100, &nonce);
+            let p = proof(EpochFreshnessTier::Advisory, 100, &nonce);
             g.check(&p, 100, true, false, "act", "tr").unwrap();
         }
         assert!(g.consumed_nonce_count() <= MAX_CONSUMED_NONCES);
@@ -1323,11 +1331,11 @@ mod tests {
     #[test]
     fn duplicate_nonce_does_not_grow_queue() {
         let mut g = gate();
-        let p1 = proof(SafetyTier::Advisory, 100, "dup-n");
+        let p1 = proof(EpochFreshnessTier::Advisory, 100, "dup-n");
         g.check(&p1, 100, true, false, "act", "tr").unwrap();
         assert_eq!(g.consumed_nonce_count(), 1);
         // Attempting to re-use the same nonce should be rejected, not grow the queue.
-        let p2 = proof(SafetyTier::Advisory, 100, "dup-n");
+        let p2 = proof(EpochFreshnessTier::Advisory, 100, "dup-n");
         let err = g.check(&p2, 100, true, false, "act", "tr");
         assert!(err.is_err());
         assert_eq!(g.consumed_nonce_count(), 1);
@@ -1336,7 +1344,7 @@ mod tests {
     #[test]
     fn owner_bypass_does_not_override_standard_signature_mismatch() {
         let mut g = gate();
-        let mut p = proof(SafetyTier::Standard, 90, "bad-standard-sig");
+        let mut p = proof(EpochFreshnessTier::Standard, 90, "bad-standard-sig");
         p.signature = "tampered".to_string();
 
         let err = g
@@ -1350,7 +1358,7 @@ mod tests {
     #[test]
     fn advisory_replay_fails_before_stale_warning_can_reconsume_nonce() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 80, "stale-advisory-replay");
+        let p = proof(EpochFreshnessTier::Advisory, 80, "stale-advisory-replay");
         let first = g
             .check(&p, 100, true, false, "telemetry_config", "tr-first")
             .unwrap();
@@ -1368,7 +1376,7 @@ mod tests {
     #[test]
     fn critical_prefix_action_rejects_advisory_proof_without_nonce_consumption() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "prefix-tier-mismatch");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "prefix-tier-mismatch");
 
         let err = g
             .check(
@@ -1389,7 +1397,7 @@ mod tests {
     #[test]
     fn critical_owner_bypass_still_fails_closed_at_exact_boundary() {
         let mut g = gate();
-        let p = proof(SafetyTier::Critical, 99, "critical-boundary-bypass");
+        let p = proof(EpochFreshnessTier::Critical, 99, "critical-boundary-bypass");
 
         let err = g
             .check(&p, 100, true, true, "key_rotate", "tr-critical-bypass")
@@ -1402,7 +1410,7 @@ mod tests {
     #[test]
     fn standard_stale_without_bypass_leaves_nonce_available_for_owner_retry() {
         let mut g = gate();
-        let p = proof(SafetyTier::Standard, 90, "standard-retry-after-deny");
+        let p = proof(EpochFreshnessTier::Standard, 90, "standard-retry-after-deny");
         let denied = g
             .check(&p, 100, true, false, "policy_deploy", "tr-denied")
             .unwrap_err();
@@ -1421,7 +1429,7 @@ mod tests {
     #[test]
     fn unauthenticated_stale_advisory_does_not_degrade_or_consume_nonce() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 1, "unauth-stale-advisory");
+        let p = proof(EpochFreshnessTier::Advisory, 1, "unauth-stale-advisory");
 
         let err = g
             .check(&p, 100, false, false, "telemetry_config", "tr-unauth-stale")
@@ -1435,7 +1443,7 @@ mod tests {
     #[test]
     fn empty_nonce_rejected_without_consumption() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "");
 
         let err = g
             .check(&p, 100, true, false, "telemetry_config", "tr-empty-nonce")
@@ -1449,7 +1457,7 @@ mod tests {
     #[test]
     fn whitespace_nonce_rejected_without_consumption() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "   ");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "   ");
 
         let err = g
             .check(
@@ -1470,7 +1478,7 @@ mod tests {
     #[test]
     fn empty_signature_rejected_even_if_expected_signature_is_empty() {
         let g = RevocationFreshnessGate::new(Box::new(|_| String::new()), Vec::new());
-        let mut p = proof(SafetyTier::Advisory, 100, "empty-signature");
+        let mut p = proof(EpochFreshnessTier::Advisory, 100, "empty-signature");
         p.signature.clear();
 
         let err = g.verify_proof(&p).unwrap_err();
@@ -1482,7 +1490,7 @@ mod tests {
     #[test]
     fn empty_credential_list_rejected_without_nonce_consumption() {
         let mut g = gate();
-        let mut p = proof(SafetyTier::Advisory, 100, "empty-creds");
+        let mut p = proof(EpochFreshnessTier::Advisory, 100, "empty-creds");
         p.credentials_checked.clear();
         p.signature = test_sig(&p);
 
@@ -1498,7 +1506,7 @@ mod tests {
     #[test]
     fn blank_credential_id_rejected_without_nonce_consumption() {
         let mut g = gate();
-        let mut p = proof(SafetyTier::Advisory, 100, "blank-cred");
+        let mut p = proof(EpochFreshnessTier::Advisory, 100, "blank-cred");
         p.credentials_checked.push(" \t ".to_string());
         p.signature = test_sig(&p);
 
@@ -1514,7 +1522,7 @@ mod tests {
     #[test]
     fn empty_trace_id_rejected_without_nonce_consumption() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "empty-trace");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "empty-trace");
 
         let err = g
             .check(&p, 100, true, false, "telemetry_config", "")
@@ -1528,7 +1536,7 @@ mod tests {
     #[test]
     fn whitespace_action_id_rejected_before_advisory_default() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "blank-action");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "blank-action");
 
         let err = g
             .check(&p, 100, true, false, "  ", "tr-blank-action")
@@ -1542,7 +1550,7 @@ mod tests {
     #[test]
     fn unauthenticated_blank_action_still_reports_session_failure_first() {
         let mut g = gate();
-        let p = proof(SafetyTier::Advisory, 100, "unauth-blank-action");
+        let p = proof(EpochFreshnessTier::Advisory, 100, "unauth-blank-action");
 
         let err = g.check(&p, 100, false, false, "", "").unwrap_err();
 
@@ -1557,7 +1565,7 @@ mod tests {
         let mut g = gate();
 
         // Attempt signature forgery with all-zero HMAC
-        let mut forge_zero = proof(SafetyTier::Advisory, 100, "forge-zero");
+        let mut forge_zero = proof(EpochFreshnessTier::Advisory, 100, "forge-zero");
         forge_zero.signature =
             "0000000000000000000000000000000000000000000000000000000000000000".to_string();
 
@@ -1575,7 +1583,7 @@ mod tests {
         assert!(!g.is_nonce_consumed("forge-zero"));
 
         // Attempt signature forgery with all-FF HMAC
-        let mut forge_ff = proof(SafetyTier::Advisory, 100, "forge-ff");
+        let mut forge_ff = proof(EpochFreshnessTier::Advisory, 100, "forge-ff");
         forge_ff.signature =
             "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string();
 
@@ -1593,23 +1601,23 @@ mod tests {
         assert!(!g.is_nonce_consumed("forge-ff"));
 
         // Test timing attack resistance - signatures that differ only in position
-        let valid_sig = test_sig(&proof(SafetyTier::Advisory, 100, "timing-test"));
+        let valid_sig = test_sig(&proof(EpochFreshnessTier::Advisory, 100, "timing-test"));
 
-        let mut first_byte_diff = proof(SafetyTier::Advisory, 100, "timing-test");
+        let mut first_byte_diff = proof(EpochFreshnessTier::Advisory, 100, "timing-test");
         first_byte_diff.signature = if valid_sig.starts_with('s') {
             format!("t{}", &valid_sig[1..])
         } else {
             format!("s{}", &valid_sig[1..])
         };
 
-        let mut last_byte_diff = proof(SafetyTier::Advisory, 100, "timing-test");
+        let mut last_byte_diff = proof(EpochFreshnessTier::Advisory, 100, "timing-test");
         let mut last_chars: Vec<char> = valid_sig.chars().collect();
         if let Some(last) = last_chars.last_mut() {
             *last = if *last == '0' { '1' } else { '0' };
         }
         last_byte_diff.signature = last_chars.into_iter().collect();
 
-        let mut mid_byte_diff = proof(SafetyTier::Advisory, 100, "timing-test");
+        let mut mid_byte_diff = proof(EpochFreshnessTier::Advisory, 100, "timing-test");
         let mut mid_chars: Vec<char> = valid_sig.chars().collect();
         if mid_chars.len() > 2 {
             let mid_idx = mid_chars.len() / 2;
@@ -1627,8 +1635,8 @@ mod tests {
         assert_eq!(err3.code(), "ERR_RFG_TAMPERED");
 
         // Test signature substitution attack (valid signature for different proof)
-        let proof_a = proof(SafetyTier::Advisory, 100, "proof-a");
-        let proof_b_sig = test_sig(&proof(SafetyTier::Advisory, 100, "proof-b"));
+        let proof_a = proof(EpochFreshnessTier::Advisory, 100, "proof-a");
+        let proof_b_sig = test_sig(&proof(EpochFreshnessTier::Advisory, 100, "proof-b"));
 
         let mut substituted = proof_a.clone();
         substituted.signature = proof_b_sig;
@@ -1645,7 +1653,7 @@ mod tests {
         let mut consumed_nonces = Vec::new();
         for i in 0..MAX_CONSUMED_NONCES + 100 {
             let nonce = format!("flood-{:06}", i);
-            let p = proof(SafetyTier::Advisory, 100, &nonce);
+            let p = proof(EpochFreshnessTier::Advisory, 100, &nonce);
 
             let result = g.check(&p, 100, true, false, "telemetry_config", "tr-flood");
             match result {
@@ -1678,7 +1686,7 @@ mod tests {
 
         let mut successful_nonces: usize = 0;
         for pattern in &collision_patterns {
-            let p = proof(SafetyTier::Advisory, 100, pattern);
+            let p = proof(EpochFreshnessTier::Advisory, 100, pattern);
             if g.check(&p, 100, true, false, "telemetry_config", "tr-collision")
                 .is_ok()
             {
@@ -1689,7 +1697,7 @@ mod tests {
         assert_eq!(successful_nonces, collision_patterns.len()); // All should be unique
 
         // Test replay attack with modified but structurally similar proofs
-        let original = proof(SafetyTier::Advisory, 100, "replay-similar");
+        let original = proof(EpochFreshnessTier::Advisory, 100, "replay-similar");
         g.check(
             &original,
             100,
@@ -1722,7 +1730,7 @@ mod tests {
         let mut g = gate();
 
         // Test proof tier spoofing - Critical action with Advisory proof
-        let spoofed_critical = proof(SafetyTier::Advisory, 100, "spoof-critical");
+        let spoofed_critical = proof(EpochFreshnessTier::Advisory, 100, "spoof-critical");
         let err = g
             .check(
                 &spoofed_critical,
@@ -1737,7 +1745,7 @@ mod tests {
         assert!(format!("{err}").contains("does not match action tier Critical"));
 
         // Test proof tier spoofing - Advisory action with Critical proof
-        let spoofed_advisory = proof(SafetyTier::Critical, 100, "spoof-advisory");
+        let spoofed_advisory = proof(EpochFreshnessTier::Critical, 100, "spoof-advisory");
         let err = g
             .check(
                 &spoofed_advisory,
@@ -1752,7 +1760,7 @@ mod tests {
         assert!(format!("{err}").contains("is not classified in the tier table"));
 
         // Test action classification manipulation through prefix matching
-        let prefix_critical = proof(SafetyTier::Critical, 100, "prefix-critical");
+        let prefix_critical = proof(EpochFreshnessTier::Critical, 100, "prefix-critical");
         g.check(
             &prefix_critical,
             100,
@@ -1763,7 +1771,7 @@ mod tests {
         )
         .unwrap(); // Should work
 
-        let wrong_prefix = proof(SafetyTier::Standard, 100, "wrong-prefix");
+        let wrong_prefix = proof(EpochFreshnessTier::Standard, 100, "wrong-prefix");
         let err = g
             .check(
                 &wrong_prefix,
@@ -1791,7 +1799,7 @@ mod tests {
 
         for malicious_action in &bypass_attempts {
             let bypass_proof = proof(
-                SafetyTier::Advisory,
+                EpochFreshnessTier::Advisory,
                 100,
                 &format!("bypass-{}", malicious_action.len()),
             );
@@ -1812,19 +1820,19 @@ mod tests {
 
         // Test staleness calculation manipulation at tier boundaries
         let boundary_tests = [
-            (SafetyTier::Critical, 99, 100, false), // staleness=1, max=1 → stale
-            (SafetyTier::Standard, 95, 100, false), // staleness=5, max=5 → stale
-            (SafetyTier::Advisory, 90, 100, false), // staleness=10, max=10 → stale
-            (SafetyTier::Critical, 100, 100, true), // staleness=0, max=1 → fresh
-            (SafetyTier::Standard, 96, 100, true),  // staleness=4, max=5 → fresh
-            (SafetyTier::Advisory, 91, 100, true),  // staleness=9, max=10 → fresh
+            (EpochFreshnessTier::Critical, 99, 100, false), // staleness=1, max=1 → stale
+            (EpochFreshnessTier::Standard, 95, 100, false), // staleness=5, max=5 → stale
+            (EpochFreshnessTier::Advisory, 90, 100, false), // staleness=10, max=10 → stale
+            (EpochFreshnessTier::Critical, 100, 100, true), // staleness=0, max=1 → fresh
+            (EpochFreshnessTier::Standard, 96, 100, true),  // staleness=4, max=5 → fresh
+            (EpochFreshnessTier::Advisory, 91, 100, true),  // staleness=9, max=10 → fresh
         ];
 
         for (tier, proof_epoch, current_epoch, should_be_fresh) in boundary_tests {
             let action = match tier {
-                SafetyTier::Critical => "key_rotate",
-                SafetyTier::Standard => "policy_deploy",
-                SafetyTier::Advisory => "telemetry_config",
+                EpochFreshnessTier::Critical => "key_rotate",
+                EpochFreshnessTier::Standard => "policy_deploy",
+                EpochFreshnessTier::Advisory => "telemetry_config",
             };
 
             let boundary_proof = proof(
@@ -1859,7 +1867,7 @@ mod tests {
                 // Standard (no owner-bypass) fail closed with ERR_RFG_STALE; Advisory
                 // degrades to proceed-with-warning (INV-RFG-DEGRADE) -> Ok + degraded.
                 match tier {
-                    SafetyTier::Advisory => {
+                    EpochFreshnessTier::Advisory => {
                         assert!(
                             result.is_ok(),
                             "Expected stale Advisory proof to degrade (proceed-with-warning): proof_epoch={proof_epoch}, current_epoch={current_epoch}"
@@ -1886,7 +1894,7 @@ mod tests {
         let mut g = gate();
 
         // Test epoch overflow at u64::MAX boundaries
-        let max_epoch_proof = proof(SafetyTier::Advisory, u64::MAX, "max-epoch");
+        let max_epoch_proof = proof(EpochFreshnessTier::Advisory, u64::MAX, "max-epoch");
         let result = g.check(
             &max_epoch_proof,
             u64::MAX,
@@ -1897,7 +1905,7 @@ mod tests {
         );
         assert!(result.is_ok()); // Should work at exact boundary
 
-        let overflow_epoch_proof = proof(SafetyTier::Advisory, u64::MAX, "overflow-epoch");
+        let overflow_epoch_proof = proof(EpochFreshnessTier::Advisory, u64::MAX, "overflow-epoch");
         let err = g
             .check(
                 &overflow_epoch_proof,
@@ -1912,7 +1920,7 @@ mod tests {
         assert!(format!("{err}").contains("in the future"));
 
         // Test epoch arithmetic overflow in staleness calculation
-        let near_overflow_proof = proof(SafetyTier::Advisory, 0, "near-overflow");
+        let near_overflow_proof = proof(EpochFreshnessTier::Advisory, 0, "near-overflow");
         let result = g.check(
             &near_overflow_proof,
             u64::MAX,
@@ -1925,16 +1933,16 @@ mod tests {
 
         // Test epoch manipulation to bypass staleness limits
         let staleness_bypass_attempts = [
-            (SafetyTier::Critical, u64::MAX - 5, u64::MAX), // Massive staleness should still fail
-            (SafetyTier::Standard, u64::MAX - 50, u64::MAX), // Even larger staleness
-            (SafetyTier::Advisory, 0, u64::MAX),            // Maximum possible staleness
+            (EpochFreshnessTier::Critical, u64::MAX - 5, u64::MAX), // Massive staleness should still fail
+            (EpochFreshnessTier::Standard, u64::MAX - 50, u64::MAX), // Even larger staleness
+            (EpochFreshnessTier::Advisory, 0, u64::MAX),            // Maximum possible staleness
         ];
 
         for (tier, proof_epoch, current_epoch) in staleness_bypass_attempts {
             let action = match tier {
-                SafetyTier::Critical => "key_rotate",
-                SafetyTier::Standard => "policy_deploy",
-                SafetyTier::Advisory => "telemetry_config",
+                EpochFreshnessTier::Critical => "key_rotate",
+                EpochFreshnessTier::Standard => "policy_deploy",
+                EpochFreshnessTier::Advisory => "telemetry_config",
             };
 
             let bypass_proof = proof(
@@ -1946,22 +1954,22 @@ mod tests {
                 &bypass_proof,
                 current_epoch,
                 true,
-                tier == SafetyTier::Standard,
+                tier == EpochFreshnessTier::Standard,
                 action,
                 "tr-staleness",
             );
 
             match tier {
-                SafetyTier::Critical => {
+                EpochFreshnessTier::Critical => {
                     assert!(result.is_err());
                     assert_eq!(result.unwrap_err().code(), "ERR_RFG_STALE");
                 }
-                SafetyTier::Standard => {
+                EpochFreshnessTier::Standard => {
                     // With owner bypass, should degrade but succeed
                     assert!(result.is_ok());
                     assert!(result.unwrap().degraded);
                 }
-                SafetyTier::Advisory => {
+                EpochFreshnessTier::Advisory => {
                     // Should always degrade and succeed
                     assert!(result.is_ok());
                     assert!(result.unwrap().degraded);
@@ -1978,7 +1986,7 @@ mod tests {
 
         for (proof_epoch, current_epoch) in wraparound_cases {
             let wraparound_proof = proof(
-                SafetyTier::Advisory,
+                EpochFreshnessTier::Advisory,
                 proof_epoch,
                 &format!("wraparound-{}-{}", proof_epoch, current_epoch),
             );
@@ -2027,7 +2035,7 @@ mod tests {
                 credentials_checked: credentials.clone(),
                 nonce: nonce.to_string(),
                 signature: String::new(),
-                tier: SafetyTier::Advisory,
+                tier: EpochFreshnessTier::Advisory,
                 epoch: 100,
             };
             test_proof.signature = test_sig(&test_proof);
@@ -2064,7 +2072,7 @@ mod tests {
                 credentials_checked: vec![malicious_cred.to_string()],
                 nonce: "length-attack".to_string(),
                 signature: String::new(),
-                tier: SafetyTier::Advisory,
+                tier: EpochFreshnessTier::Advisory,
                 epoch: 100,
             };
             length_proof.signature = test_sig(&length_proof);
@@ -2085,7 +2093,7 @@ mod tests {
                 credentials_checked: vec!["cred1".to_string()],
                 nonce: format!("tier-{}", tier_str),
                 signature: String::new(),
-                tier: SafetyTier::Advisory, // Actual tier
+                tier: EpochFreshnessTier::Advisory, // Actual tier
                 epoch: 100,
             };
 
@@ -2130,7 +2138,7 @@ mod tests {
         ];
 
         for attack_nonce in unicode_attacks {
-            let unicode_proof = proof(SafetyTier::Advisory, 100, attack_nonce);
+            let unicode_proof = proof(EpochFreshnessTier::Advisory, 100, attack_nonce);
             let result = g.check(
                 &unicode_proof,
                 100,
@@ -2165,7 +2173,7 @@ mod tests {
                 // nonces and a spurious ReplayDetected on later iterations.
                 nonce: format!("cred-attack-{idx}"),
                 signature: String::new(),
-                tier: SafetyTier::Advisory,
+                tier: EpochFreshnessTier::Advisory,
                 epoch: 100,
             };
             cred_proof.signature = test_sig(&cred_proof);
@@ -2198,7 +2206,7 @@ mod tests {
 
         for (trace_id, action_id) in id_attacks {
             let id_proof = proof(
-                SafetyTier::Advisory,
+                EpochFreshnessTier::Advisory,
                 100,
                 &format!("id-attack-{}-{}", trace_id.len(), action_id.len()),
             );
@@ -2221,7 +2229,7 @@ mod tests {
 
         for attack_sig in signature_attacks {
             let mut sig_proof = proof(
-                SafetyTier::Advisory,
+                EpochFreshnessTier::Advisory,
                 100,
                 &format!("sig-attack-{}", attack_sig.len()),
             );
@@ -2245,7 +2253,7 @@ mod tests {
 
         for (authenticated, bypass_flag, description) in auth_bypass_cases {
             let bypass_proof = proof(
-                SafetyTier::Standard,
+                EpochFreshnessTier::Standard,
                 100,
                 &format!("auth-bypass-{}-{}", authenticated, bypass_flag),
             );
@@ -2265,19 +2273,19 @@ mod tests {
 
         // Test owner bypass escalation attacks
         let bypass_escalation_cases = [
-            (SafetyTier::Critical, true, false), // Critical should never allow bypass
-            (SafetyTier::Critical, false, false), // Critical without bypass
-            (SafetyTier::Standard, true, true),  // Standard with bypass should work
-            (SafetyTier::Standard, false, false), // Standard without bypass should fail
-            (SafetyTier::Advisory, true, true),  // Advisory always works (bypass irrelevant)
-            (SafetyTier::Advisory, false, true), // Advisory always works
+            (EpochFreshnessTier::Critical, true, false), // Critical should never allow bypass
+            (EpochFreshnessTier::Critical, false, false), // Critical without bypass
+            (EpochFreshnessTier::Standard, true, true),  // Standard with bypass should work
+            (EpochFreshnessTier::Standard, false, false), // Standard without bypass should fail
+            (EpochFreshnessTier::Advisory, true, true),  // Advisory always works (bypass irrelevant)
+            (EpochFreshnessTier::Advisory, false, true), // Advisory always works
         ];
 
         for (tier, owner_bypass, should_succeed) in bypass_escalation_cases {
             let action = match tier {
-                SafetyTier::Critical => "key_rotate",
-                SafetyTier::Standard => "policy_deploy",
-                SafetyTier::Advisory => "telemetry_config",
+                EpochFreshnessTier::Critical => "key_rotate",
+                EpochFreshnessTier::Standard => "policy_deploy",
+                EpochFreshnessTier::Advisory => "telemetry_config",
             };
 
             // Create stale proof to trigger bypass logic
@@ -2305,7 +2313,7 @@ mod tests {
                     owner_bypass
                 );
                 let decision = result.unwrap();
-                if tier != SafetyTier::Critical {
+                if tier != EpochFreshnessTier::Critical {
                     assert!(decision.degraded); // Should be marked as degraded
                 }
                 assert!(g.is_nonce_consumed(&escalation_proof.nonce));
@@ -2323,12 +2331,12 @@ mod tests {
 
         // Test privilege escalation through tier manipulation
         let privilege_escalation_tests = [
-            ("key_rotate", SafetyTier::Standard, false), // Critical action with Standard proof
-            ("key_rotate", SafetyTier::Advisory, false), // Critical action with Advisory proof
-            ("policy_deploy", SafetyTier::Advisory, false), // Standard action with Advisory proof
-            ("policy_deploy", SafetyTier::Critical, false), // Standard action with Critical proof (mismatch)
-            ("telemetry_config", SafetyTier::Critical, false), // Advisory action with Critical proof (mismatch)
-            ("unknown_action", SafetyTier::Critical, false), // Unknown action with Critical proof (mismatch)
+            ("key_rotate", EpochFreshnessTier::Standard, false), // Critical action with Standard proof
+            ("key_rotate", EpochFreshnessTier::Advisory, false), // Critical action with Advisory proof
+            ("policy_deploy", EpochFreshnessTier::Advisory, false), // Standard action with Advisory proof
+            ("policy_deploy", EpochFreshnessTier::Critical, false), // Standard action with Critical proof (mismatch)
+            ("telemetry_config", EpochFreshnessTier::Critical, false), // Advisory action with Critical proof (mismatch)
+            ("unknown_action", EpochFreshnessTier::Critical, false), // Unknown action with Critical proof (mismatch)
         ];
 
         for (action, proof_tier, should_succeed) in privilege_escalation_tests {
@@ -2391,7 +2399,7 @@ mod tests {
                     format!("nonce-{}", attack_type)
                 },
                 signature: String::new(),
-                tier: SafetyTier::Advisory,
+                tier: EpochFreshnessTier::Advisory,
                 epoch: 100,
             };
             memory_proof.signature = test_sig(&memory_proof);
@@ -2431,7 +2439,7 @@ mod tests {
                 // nonce, so probing is_nonce_consumed afterwards would always report
                 // "consumed" and mis-route a legitimate first use into the replay arm.
                 let already_consumed = g.is_nonce_consumed(&nonce);
-                let pattern_proof = proof(SafetyTier::Advisory, 100, &nonce);
+                let pattern_proof = proof(EpochFreshnessTier::Advisory, 100, &nonce);
                 let result = g.check(
                     &pattern_proof,
                     100,
@@ -2461,7 +2469,7 @@ mod tests {
             credentials_checked: (0..1000).map(|i| "x".repeat(100 + i)).collect(), // Varying lengths
             nonce: "expensive-canonical".to_string(),
             signature: String::new(),
-            tier: SafetyTier::Advisory,
+            tier: EpochFreshnessTier::Advisory,
             epoch: 100,
         };
 
@@ -2496,14 +2504,14 @@ mod tests {
             let handle = thread::spawn(move || {
                 let nonce = format!("concurrent-{:03}", i);
                 let tier = match i % 3 {
-                    0 => SafetyTier::Critical,
-                    1 => SafetyTier::Standard,
-                    _ => SafetyTier::Advisory,
+                    0 => EpochFreshnessTier::Critical,
+                    1 => EpochFreshnessTier::Standard,
+                    _ => EpochFreshnessTier::Advisory,
                 };
                 let action = match tier {
-                    SafetyTier::Critical => "key_rotate",
-                    SafetyTier::Standard => "policy_deploy",
-                    SafetyTier::Advisory => "telemetry_config",
+                    EpochFreshnessTier::Critical => "key_rotate",
+                    EpochFreshnessTier::Standard => "policy_deploy",
+                    EpochFreshnessTier::Advisory => "telemetry_config",
                 };
 
                 let test_proof = proof(tier, 100, &nonce);
@@ -2567,7 +2575,7 @@ mod tests {
             let handle = thread::spawn(move || {
                 for nonce_id in 0..10 {
                     let shared_nonce = format!("shared-nonce-{}", nonce_id);
-                    let test_proof = proof(SafetyTier::Advisory, 100, &shared_nonce);
+                    let test_proof = proof(EpochFreshnessTier::Advisory, 100, &shared_nonce);
 
                     let mut gate = try_lock(&gate_clone, "revocation freshness replay gate")
                         .expect("revocation freshness replay gate mutex should lock");
@@ -2654,17 +2662,17 @@ mod tests {
     //
     //   1. minimal (timestamp=0, no creds, empty nonce, Critical tier,
     //      epoch=0) — locks the v1 domain + LE64 framings on every empty
-    //      field + SafetyTier::Critical's Display ("Critical", 8 bytes).
+    //      field + EpochFreshnessTier::Critical's Display ("Critical", 8 bytes).
     //      Frozen: 92e949fa78b788b89effd00ed60b90b23e3978a44d149f092d611897a599f12e
     //
     //   2. realistic (timestamp=1.7e9, 3 distinct creds, 14-byte nonce,
     //      Standard tier, epoch=42) — locks the per-cred LE64-len framing
-    //      across multiple non-empty credentials, plus SafetyTier::Standard
+    //      across multiple non-empty credentials, plus EpochFreshnessTier::Standard
     //      Display ("Standard", 8 bytes).
     //      Frozen: d846f055441b9b990168f44c795606b9c11562476e5908564a6ce83e9c514955
     //
     //   3. advisory (timestamp=1.7e9+1, single cred, 1-byte nonce,
-    //      Advisory tier, epoch=100) — locks SafetyTier::Advisory Display
+    //      Advisory tier, epoch=100) — locks EpochFreshnessTier::Advisory Display
     //      ("Advisory", 8 bytes); same byte length as Critical/Standard,
     //      so the difference is encoded purely through the field BYTES
     //      not the LE64 length prefix (3-way distinction is load-bearing).
@@ -2676,7 +2684,7 @@ mod tests {
     //   - LE64 length-prefix per credential (NOT a single concatenated
     //     blob — the per-cred framing prevents the "concatenate two
     //     credentials with a delimiter to forge a third" attack)
-    //   - SafetyTier::Display mapping: Critical/Standard/Advisory all
+    //   - EpochFreshnessTier::Display mapping: Critical/Standard/Advisory all
     //     happen to be 8 chars long (and three of those distinct three-
     //     way labels are pinned through fixtures 1/2/3 respectively)
     //   - field order: timestamp → creds_count → creds → nonce → tier → epoch
@@ -2693,7 +2701,7 @@ mod tests {
     // If two nodes compute different canonical bytes for the same logical
     // FreshnessProof — because someone reordered fields, swapped LE64
     // widths, dropped the per-credential length-prefix in favour of a
-    // delimiter, or changed SafetyTier::Display — signature verification
+    // delimiter, or changed EpochFreshnessTier::Display — signature verification
     // breaks silently across the revocation-freshness gate AND the gate
     // starts denying legitimate verified actions.
     #[test]
@@ -2704,7 +2712,7 @@ mod tests {
             credentials_checked: Vec::new(),
             nonce: String::new(),
             signature: String::new(), // signature is NOT in canonical_payload
-            tier: SafetyTier::Critical,
+            tier: EpochFreshnessTier::Critical,
             epoch: 0,
         };
         assert_eq!(
@@ -2712,7 +2720,7 @@ mod tests {
             "92e949fa78b788b89effd00ed60b90b23e3978a44d149f092d611897a599f12e",
             "minimal canonical_payload drifted — check the v1 domain \
              separator, LE64(0)-on-empty-string framing, OR \
-             SafetyTier::Critical Display mapping (\"Critical\", 8 bytes)"
+             EpochFreshnessTier::Critical Display mapping (\"Critical\", 8 bytes)"
         );
 
         // 2. Realistic: populated with three distinct credentials, Standard.
@@ -2725,7 +2733,7 @@ mod tests {
             ],
             nonce: "nonce-golden-7".to_string(),
             signature: String::new(),
-            tier: SafetyTier::Standard,
+            tier: EpochFreshnessTier::Standard,
             epoch: 42,
         };
         assert_eq!(
@@ -2733,7 +2741,7 @@ mod tests {
             "d846f055441b9b990168f44c795606b9c11562476e5908564a6ce83e9c514955",
             "realistic canonical_payload drifted — check per-credential \
              LE64-len framing, credential iteration order (Vec order MUST \
-             be preserved), or SafetyTier::Standard Display mapping"
+             be preserved), or EpochFreshnessTier::Standard Display mapping"
         );
 
         // 3. Advisory tier with single-cred + single-char nonce.
@@ -2742,13 +2750,13 @@ mod tests {
             credentials_checked: vec!["cred-only".to_string()],
             nonce: "n".to_string(),
             signature: String::new(),
-            tier: SafetyTier::Advisory,
+            tier: EpochFreshnessTier::Advisory,
             epoch: 100,
         };
         assert_eq!(
             hex::encode(advisory.canonical_payload()),
             "09e5cdde52aeb9223011982f2c437fda69b875d0774591300da6424749afbbc5",
-            "advisory canonical_payload drifted — check SafetyTier::Advisory \
+            "advisory canonical_payload drifted — check EpochFreshnessTier::Advisory \
              Display mapping (\"Advisory\", 8 bytes — same length as \
              Critical/Standard, so the 3-way distinction is purely bytewise)"
         );
@@ -2763,16 +2771,16 @@ mod tests {
 
         // SAFETY-TIER DISTINGUISHABILITY INVARIANT: cloning `minimal` and
         // changing only the tier MUST flip the hash. Pins the contract
-        // that SafetyTier is fed into the hasher; a future refactor that
+        // that EpochFreshnessTier is fed into the hasher; a future refactor that
         // dropped tier (e.g. "tier is policy-only, not authenticated")
         // would catastrophically allow Advisory proofs to authorize
         // Critical actions.
         let mut minimal_advisory = minimal.clone();
-        minimal_advisory.tier = SafetyTier::Advisory;
+        minimal_advisory.tier = EpochFreshnessTier::Advisory;
         assert_ne!(
             hex::encode(minimal_advisory.canonical_payload()),
             minimal_hex,
-            "changing only SafetyTier from Critical to Advisory MUST flip \
+            "changing only EpochFreshnessTier from Critical to Advisory MUST flip \
              the canonical_payload; if it does not, tier is not being \
              authenticated and Advisory proofs could authorize Critical \
              actions"
@@ -2804,7 +2812,7 @@ mod tests {
             credentials_checked: vec!["a".to_string(), "b".to_string()],
             nonce: String::new(),
             signature: String::new(),
-            tier: SafetyTier::Critical,
+            tier: EpochFreshnessTier::Critical,
             epoch: 0,
         };
         let one_concat_cred = FreshnessProof {
@@ -2812,7 +2820,7 @@ mod tests {
             credentials_checked: vec!["ab".to_string()],
             nonce: String::new(),
             signature: String::new(),
-            tier: SafetyTier::Critical,
+            tier: EpochFreshnessTier::Critical,
             epoch: 0,
         };
         assert_ne!(
