@@ -595,7 +595,10 @@ mod tests {
                 ("key_rotate".to_string(), EpochFreshnessTier::Critical),
                 ("trust_anchor".to_string(), EpochFreshnessTier::Critical),
                 ("policy_deploy".to_string(), EpochFreshnessTier::Standard),
-                ("connector_activate".to_string(), EpochFreshnessTier::Standard),
+                (
+                    "connector_activate".to_string(),
+                    EpochFreshnessTier::Standard,
+                ),
                 ("telemetry_config".to_string(), EpochFreshnessTier::Advisory),
                 // Generic advisory action used by replay/nonce/epoch tests. Prod now
                 // fails closed for unclassified action_ids (matching_tier -> None ->
@@ -648,25 +651,37 @@ mod tests {
     #[test]
     fn classify_critical_action() {
         let g = gate();
-        assert_eq!(g.classify_action("key_rotate"), EpochFreshnessTier::Critical);
+        assert_eq!(
+            g.classify_action("key_rotate"),
+            EpochFreshnessTier::Critical
+        );
     }
 
     #[test]
     fn classify_standard_action() {
         let g = gate();
-        assert_eq!(g.classify_action("policy_deploy"), EpochFreshnessTier::Standard);
+        assert_eq!(
+            g.classify_action("policy_deploy"),
+            EpochFreshnessTier::Standard
+        );
     }
 
     #[test]
     fn classify_advisory_action() {
         let g = gate();
-        assert_eq!(g.classify_action("telemetry_config"), EpochFreshnessTier::Advisory);
+        assert_eq!(
+            g.classify_action("telemetry_config"),
+            EpochFreshnessTier::Advisory
+        );
     }
 
     #[test]
     fn classify_unknown_defaults_to_advisory() {
         let g = gate();
-        assert_eq!(g.classify_action("unknown_action"), EpochFreshnessTier::Advisory);
+        assert_eq!(
+            g.classify_action("unknown_action"),
+            EpochFreshnessTier::Advisory
+        );
     }
 
     #[test]
@@ -678,7 +693,10 @@ mod tests {
                 ("key_rotate".to_string(), EpochFreshnessTier::Critical),
             ],
         );
-        assert_eq!(g.classify_action("key_rotate"), EpochFreshnessTier::Critical);
+        assert_eq!(
+            g.classify_action("key_rotate"),
+            EpochFreshnessTier::Critical
+        );
         assert_eq!(
             g.classify_action("key_rotate_extended"),
             EpochFreshnessTier::Critical
@@ -938,7 +956,11 @@ mod tests {
     #[test]
     fn unknown_action_with_advisory_proof_is_rejected() {
         let mut g = gate();
-        let p = proof(EpochFreshnessTier::Advisory, 100, "n-unknown-action-advisory");
+        let p = proof(
+            EpochFreshnessTier::Advisory,
+            100,
+            "n-unknown-action-advisory",
+        );
 
         let err = g
             .check(
@@ -993,7 +1015,11 @@ mod tests {
     #[test]
     fn standard_exact_boundary_with_bypass_degrades_and_consumes_nonce() {
         let mut g = gate();
-        let p = proof(EpochFreshnessTier::Standard, 95, "n-standard-boundary-bypass");
+        let p = proof(
+            EpochFreshnessTier::Standard,
+            95,
+            "n-standard-boundary-bypass",
+        );
 
         let decision = g
             .check(
@@ -1420,7 +1446,11 @@ mod tests {
     #[test]
     fn standard_stale_without_bypass_leaves_nonce_available_for_owner_retry() {
         let mut g = gate();
-        let p = proof(EpochFreshnessTier::Standard, 90, "standard-retry-after-deny");
+        let p = proof(
+            EpochFreshnessTier::Standard,
+            90,
+            "standard-retry-after-deny",
+        );
         let denied = g
             .check(&p, 100, true, false, "policy_deploy", "tr-denied")
             .unwrap_err();
@@ -2287,7 +2317,7 @@ mod tests {
             (EpochFreshnessTier::Critical, false, false), // Critical without bypass
             (EpochFreshnessTier::Standard, true, true),  // Standard with bypass should work
             (EpochFreshnessTier::Standard, false, false), // Standard without bypass should fail
-            (EpochFreshnessTier::Advisory, true, true),  // Advisory always works (bypass irrelevant)
+            (EpochFreshnessTier::Advisory, true, true), // Advisory always works (bypass irrelevant)
             (EpochFreshnessTier::Advisory, false, true), // Advisory always works
         ];
 

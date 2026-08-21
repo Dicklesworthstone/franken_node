@@ -189,7 +189,11 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     let mut covered = Vec::new();
 
     let mut accepted_gate = tiered_gate();
-    let accepted = proof_for_tier(EpochFreshnessTier::Critical, CURRENT_EPOCH, "rfg-conf-fresh");
+    let accepted = proof_for_tier(
+        EpochFreshnessTier::Critical,
+        CURRENT_EPOCH,
+        "rfg-conf-fresh",
+    );
     let decision = check(
         &mut accepted_gate,
         &accepted,
@@ -231,7 +235,11 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     });
 
     let mut unauth_gate = tiered_gate();
-    let unauth = proof_for_tier(EpochFreshnessTier::Advisory, CURRENT_EPOCH, "rfg-conf-unauth");
+    let unauth = proof_for_tier(
+        EpochFreshnessTier::Advisory,
+        CURRENT_EPOCH,
+        "rfg-conf-unauth",
+    );
     expect_error_code(
         check(
             &mut unauth_gate,
@@ -253,7 +261,11 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     });
 
     let mut tamper_gate = tiered_gate();
-    let mut tampered = proof_for_tier(EpochFreshnessTier::Advisory, CURRENT_EPOCH, "rfg-conf-tamper");
+    let mut tampered = proof_for_tier(
+        EpochFreshnessTier::Advisory,
+        CURRENT_EPOCH,
+        "rfg-conf-tamper",
+    );
     tampered.signature = "wrong-signature".to_string();
     expect_error_code(
         check(
@@ -276,7 +288,11 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     });
 
     let mut unknown_gate = tiered_gate();
-    let unknown = proof_for_tier(EpochFreshnessTier::Advisory, CURRENT_EPOCH, "rfg-conf-unknown");
+    let unknown = proof_for_tier(
+        EpochFreshnessTier::Advisory,
+        CURRENT_EPOCH,
+        "rfg-conf-unknown",
+    );
     expect_error_code(
         check(
             &mut unknown_gate,
@@ -298,8 +314,11 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     });
 
     let mut stale_critical_gate = tiered_gate();
-    let stale_critical =
-        proof_for_tier(EpochFreshnessTier::Critical, CURRENT_EPOCH - 1, "rfg-conf-critical");
+    let stale_critical = proof_for_tier(
+        EpochFreshnessTier::Critical,
+        CURRENT_EPOCH - 1,
+        "rfg-conf-critical",
+    );
     expect_error_code(
         check(
             &mut stale_critical_gate,
@@ -321,8 +340,11 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     });
 
     let mut standard_gate = tiered_gate();
-    let stale_standard =
-        proof_for_tier(EpochFreshnessTier::Standard, CURRENT_EPOCH - 5, "rfg-conf-standard");
+    let stale_standard = proof_for_tier(
+        EpochFreshnessTier::Standard,
+        CURRENT_EPOCH - 5,
+        "rfg-conf-standard",
+    );
     let decision = check(
         &mut standard_gate,
         &stale_standard,
@@ -585,7 +607,8 @@ fn duplicate_replay_attempt_does_not_refresh_fifo_eviction_order() -> TestResult
 
 #[test]
 fn tier_tightening_propagates_stale_revocation_frontier_fail_closed() -> TestResult {
-    let stale_epoch = CURRENT_EPOCH.saturating_sub(EpochFreshnessTier::Advisory.max_staleness_epochs());
+    let stale_epoch =
+        CURRENT_EPOCH.saturating_sub(EpochFreshnessTier::Advisory.max_staleness_epochs());
     let cases = [
         (
             EpochFreshnessTier::Advisory,

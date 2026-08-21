@@ -4,7 +4,9 @@
 //! Standard-tier actions always pass. Higher tiers require fresher
 //! revocation data. Overrides require a policy-backed receipt.
 
-/// Safety tier classification for actions.
+/// Canonical product safety tier for wall-clock revocation freshness
+/// (`run` preflight, trust sync). Control-plane epoch windows use
+/// [`crate::security::revocation_freshness_gate::EpochFreshnessTier`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SafetyTier {
     Standard,

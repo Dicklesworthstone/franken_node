@@ -165,7 +165,9 @@ fn default_run_executes_fixture_js_through_embedded_engine_without_degraded_fall
         outcome.stderr
     );
     assert!(
-        !outcome.stderr.contains("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK"),
+        !outcome
+            .stderr
+            .contains("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK"),
         "must not demand degraded Node/Bun fallback; stderr=\n{}",
         outcome.stderr
     );
