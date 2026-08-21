@@ -2229,6 +2229,39 @@ fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCa
     }
 }
 
+/// Stable class for `failing_tests_tracking`. Does not change pass/fail.
+///
+/// `child_process` native-eval aborts stay `fail` (do not recategorize deny as
+/// pass). They are labeled `native_eval_abort` so they are not conflated with
+/// other engine crashes.
+fn corpus_failure_class(reason: &str, api_family: &str) -> &'static str {
+    if reason.contains("timed out") {
+        "timeout"
+    } else if reason.contains("node and bun reference legs disagree") {
+        "reference_disagree"
+    } else if reason.contains("refused or crashed") {
+        if api_family == "child_process" {
+            "native_eval_abort"
+        } else {
+            "engine_crash"
+        }
+    } else if reason.contains("output mismatch") {
+        "output_mismatch"
+    } else {
+        "lockstep_divergence"
+    }
+}
+
+fn franken_matches_node_observation(outcome: &CaseOutcome) -> Option<bool> {
+    let node = outcome.runtime_observations.get("node")?;
+    let franken = outcome.runtime_observations.get("franken-engine-native")?;
+    Some(
+        node.stdout_digest == franken.stdout_digest
+            && node.stderr_digest == franken.stderr_digest
+            && node.exit_code == franken.exit_code,
+    )
+}
+
 #[cfg(feature = "engine")]
 fn stage_snapshot_case(case: &SnapshotCase, family: &SnapshotFamily, sandbox: &Path) -> Result<()> {
     write_staged_input(
@@ -2690,12 +2723,16 @@ pub fn build_corpus_results_document_with_references(
         .iter()
         .filter(|o| o.status == "fail")
         .map(|o| {
+            let reason = o
+                .failure_reason
+                .clone()
+                .unwrap_or_else(|| "behavioral divergence against lockstep oracle".to_string());
             json!({
                 "test_id": o.test_id,
                 "api_family": o.api_family,
-                "reason": o.failure_reason.clone().unwrap_or_else(|| {
-                    "behavioral divergence against lockstep oracle".to_string()
-                }),
+                "failure_class": corpus_failure_class(&reason, &o.api_family),
+                "franken_matches_node": franken_matches_node_observation(o),
+                "reason": reason,
                 "investigation_bead_id": o
                     .investigation_bead_id
                     .clone()
@@ -3185,6 +3222,79 @@ mod snapshot_staging_tests {
             !reason.contains("refused or crashed"),
             "both-exit-0 mismatch must not recategorize as a crash: {reason}"
         );
+        assert_eq!(corpus_failure_class(&reason, "stream"), "output_mismatch");
+        assert_eq!(
+            corpus_failure_class(
+                "lockstep divergence: franken-engine leg refused or crashed (exit Some(1), stderr_sha256=abc)",
+                "crypto"
+            ),
+            "engine_crash"
+        );
+        assert_eq!(
+            corpus_failure_class(
+                "lockstep divergence: franken-engine leg refused or crashed (exit Some(1), stderr_sha256=abc)",
+                "child_process"
+            ),
+            "native_eval_abort"
+        );
+        assert_eq!(
+            corpus_failure_class(
+                "lockstep divergence: node and bun reference legs disagree",
+                "net"
+            ),
+            "reference_disagree"
+        );
+    }
+
+    #[test]
+    fn franken_matches_node_observation_tracks_node_agreement_without_passing() {
+        let matching = RuntimeLegObservation {
+            stdout_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            stderr_digest:
+                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string(),
+            stdout_bytes: 12,
+            stderr_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            exit_code: Some(0),
+            termination_kind: "exited".to_string(),
+            timed_out: false,
+            elapsed_ms: 1,
+        };
+        let bun = RuntimeLegObservation {
+            stdout_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_string(),
+            ..matching.clone()
+        };
+        let mut runtime_observations = BTreeMap::new();
+        runtime_observations.insert("bun".to_string(), bun);
+        runtime_observations.insert("node".to_string(), matching.clone());
+        runtime_observations.insert("franken-engine-native".to_string(), matching);
+        let outcome = CaseOutcome {
+            test_id: "tc::net::0005".to_string(),
+            api_family: "net".to_string(),
+            band: "core".to_string(),
+            risk_band: "critical".to_string(),
+            status: "fail",
+            failure_reason: Some(
+                "lockstep divergence: node and bun reference legs disagree".to_string(),
+            ),
+            investigation_bead_id: None,
+            runtime_observations,
+        };
+        assert_eq!(franken_matches_node_observation(&outcome), Some(true));
+        assert_eq!(
+            corpus_failure_class(
+                outcome.failure_reason.as_deref().expect("reason"),
+                &outcome.api_family
+            ),
+            "reference_disagree"
+        );
+        assert_eq!(outcome.status, "fail");
     }
 
     #[cfg(target_os = "linux")]
