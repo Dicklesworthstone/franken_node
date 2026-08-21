@@ -405,6 +405,7 @@ const OPS_COMPAT_CORPUS_RUN_CLI_SCHEMA_VERSION: &str = "franken-node/ops-compat-
 
 const OPS_HEALTH_SESSION_COUNT_SOURCE: &str = "persisted_session_files";
 const OPS_HEALTH_UPTIME_SOURCE: &str = "this_cli_process";
+const OPS_HEALTH_PASS_SOURCE: &str = "compiled_git_sha_and_local_ledger_file";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct OpsHealthCheckReport {
@@ -420,6 +421,8 @@ struct OpsHealthCheckReport {
     build_version: String,
     git_sha: String,
     pass: bool,
+    /// `pass` is compiled git SHA plus a local ledger/receipt file, not per-surface liveness.
+    pass_source: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -8276,6 +8279,7 @@ fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> 
         active_session_count: ops_active_session_count(project_root),
         session_count_source: OPS_HEALTH_SESSION_COUNT_SOURCE,
         pass: last_successful_evidence_ledger_flush_timestamp.is_some() && git_sha != "unknown",
+        pass_source: OPS_HEALTH_PASS_SOURCE,
         last_successful_evidence_ledger_flush_timestamp,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
         git_sha,
@@ -8443,7 +8447,10 @@ fn emit_ops_health_check_report(report: &OpsHealthCheckReport, json: bool) -> Re
             .last_successful_evidence_ledger_flush_timestamp
             .as_deref()
             .unwrap_or("none");
-        println!("ops health-check: pass={}", report.pass);
+        println!(
+            "ops health-check: pass={} (compiled git SHA plus a local ledger/receipt file; not per-surface daemon liveness)",
+            report.pass
+        );
         println!(
             "  uptime_seconds={} (this CLI process; not a long-running node daemon)",
             report.uptime_seconds
@@ -31795,6 +31802,7 @@ mod ops_metrics_tests {
         assert_eq!(report.active_session_count, 2);
         assert_eq!(report.session_count_source, OPS_HEALTH_SESSION_COUNT_SOURCE);
         assert_eq!(report.uptime_source, OPS_HEALTH_UPTIME_SOURCE);
+        assert_eq!(report.pass_source, OPS_HEALTH_PASS_SOURCE);
     }
 }
 

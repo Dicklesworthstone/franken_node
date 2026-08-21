@@ -2640,6 +2640,10 @@ fn ops_health_check_json_reports_local_state_and_build_metadata() {
     assert_eq!(payload["build_version"], env!("CARGO_PKG_VERSION"));
     assert_ne!(payload["git_sha"], "unknown");
     assert_eq!(payload["pass"], true);
+    assert_eq!(
+        payload["pass_source"],
+        "compiled_git_sha_and_local_ledger_file"
+    );
 }
 
 #[test]

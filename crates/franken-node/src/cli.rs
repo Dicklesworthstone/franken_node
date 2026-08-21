@@ -1611,6 +1611,8 @@ pub struct OpsHealthCheckArgs {
     /// Emit schema-versioned JSON (`franken-node/ops-health-check-cli/v1`)
     /// instead of human-readable output. Session counts come from persisted
     /// `.franken-node/state/sessions` files, not an empty in-process manager.
+    /// `pass` is compiled git SHA plus a local ledger/receipt file, not
+    /// per-surface daemon liveness.
     #[arg(long)]
     pub json: bool,
 }
