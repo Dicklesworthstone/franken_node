@@ -1045,13 +1045,25 @@ fn fresh_successful_receipt_passes_and_records_last_cargo_proof() {
         ..ValidationReadinessInput::default()
     };
 
-    let report = build_validation_readiness_report(&input, "vr-pass", now);
+    let report = build_validation_readiness_report(&input, "vr-pass", now)
+        .with_cli_input_source("empty_default_snapshot");
 
     assert_eq!(report.overall_status, ValidationReadinessStatus::Pass);
     assert_eq!(report.summary.proof_counts.passed, 1);
     assert_eq!(report.summary.missing_required_receipts, 0);
     assert_eq!(report.summary.last_successful_cargo_proof_at, Some(ts(2)));
-    assert!(render_validation_readiness_human(&report).contains("status=PASS"));
+    assert!(!report.live_broker);
+    assert_eq!(report.input_source, "empty_default_snapshot");
+    let human = render_validation_readiness_human(&report);
+    assert!(human.contains("status=PASS"));
+    assert!(human.contains("input_source=empty_default_snapshot live_broker=false"));
+    let report_json = render_validation_readiness_json(&report).expect("report serializes");
+    let report_value: Value = serde_json::from_str(&report_json).expect("report JSON parses");
+    assert_eq!(report_value.get("live_broker"), Some(&Value::Bool(false)));
+    assert_eq!(
+        report_value.get("input_source").and_then(Value::as_str),
+        Some("empty_default_snapshot")
+    );
 }
 
 #[test]

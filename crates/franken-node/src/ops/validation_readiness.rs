@@ -51,6 +51,11 @@ pub const MAX_VALIDATION_HANDOFF_ROWS: usize = 128;
 pub const MAX_VALIDATION_HANDOFF_FIELD_BYTES: usize = 512;
 pub const MAX_VALIDATION_SWARM_PERFORMANCE_OUTPUT_BYTES: usize = 512 * 1024;
 pub const MAX_VALIDATION_SWARM_PERFORMANCE_UNIQUE_WORK_KEYS: usize = 16;
+/// This command never talks to a live validation broker.
+pub const VALIDATION_READINESS_LIVE_BROKER: bool = false;
+pub const VALIDATION_READINESS_INPUT_SOURCE_SNAPSHOT_FILE: &str = "snapshot_file";
+pub const VALIDATION_READINESS_INPUT_SOURCE_RECEIPTS_ONLY: &str = "receipts_only";
+pub const VALIDATION_READINESS_INPUT_SOURCE_EMPTY_DEFAULT: &str = "empty_default_snapshot";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -800,6 +805,30 @@ pub struct ValidationReadinessReport {
     pub status_counts: ValidationReadinessStatusCounts,
     pub checks: Vec<ValidationReadinessCheck>,
     pub summary: ValidationReadinessSummary,
+    /// Always false: readiness is computed from `--input`/`--receipt` snapshots.
+    #[serde(default = "validation_readiness_live_broker_default")]
+    pub live_broker: bool,
+    /// `snapshot_file`, `receipts_only`, or `empty_default_snapshot`.
+    #[serde(default = "validation_readiness_input_source_default")]
+    pub input_source: String,
+}
+
+const fn validation_readiness_live_broker_default() -> bool {
+    VALIDATION_READINESS_LIVE_BROKER
+}
+
+fn validation_readiness_input_source_default() -> String {
+    VALIDATION_READINESS_INPUT_SOURCE_EMPTY_DEFAULT.to_string()
+}
+
+impl ValidationReadinessReport {
+    /// Label how the CLI supplied the snapshot without implying a live broker.
+    #[must_use]
+    pub fn with_cli_input_source(mut self, input_source: impl Into<String>) -> Self {
+        self.live_broker = VALIDATION_READINESS_LIVE_BROKER;
+        self.input_source = input_source.into();
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1023,6 +1052,8 @@ pub fn build_validation_readiness_report(
         status_counts,
         checks,
         summary,
+        live_broker: VALIDATION_READINESS_LIVE_BROKER,
+        input_source: VALIDATION_READINESS_INPUT_SOURCE_EMPTY_DEFAULT.to_string(),
     }
 }
 
@@ -1446,6 +1477,10 @@ pub fn render_validation_readiness_human(report: &ValidationReadinessReport) -> 
         format!(
             "ops validation-readiness: status={}",
             report.overall_status.as_str()
+        ),
+        format!(
+            "  input_source={} live_broker={} (snapshot/receipts or empty default; not a live broker)",
+            report.input_source, report.live_broker
         ),
         format!("  trace_id={}", report.trace_id),
         format!(
