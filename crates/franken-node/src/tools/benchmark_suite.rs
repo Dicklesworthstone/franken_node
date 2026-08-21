@@ -2002,7 +2002,10 @@ pub fn render_human_summary(report: &BenchmarkReport) -> String {
         ));
     }
 
-    lines.push(format!("provenance_hash={}", report.provenance_hash));
+    lines.push(format!(
+        "provenance_hash={} (sha256 content hash; not ed25519-signed)",
+        report.provenance_hash
+    ));
     lines.join("\n")
 }
 
@@ -2023,8 +2026,8 @@ mod tests {
     #[test]
     fn fixture_scored_scenarios_are_labeled_fixture_inputs() {
         // bd-5r99w.8: scenarios that score over hardcoded payloads must be
-        // labeled fixture-inputs even in Measured mode, so a signed report can
-        // never present them as full-pipeline measurements.
+        // labeled fixture-inputs even in Measured mode, so a provenance_hash
+        // report can never present them as full-pipeline measurements.
         for fixture_scored in [
             "adversarial_pass_rate",
             "migration_success_rate",
@@ -3056,6 +3059,10 @@ mod tests {
         assert!(summary.contains("benchmark suite:"));
         assert!(summary.contains("cold_start_latency"));
         assert!(summary.contains("provenance_hash="));
+        assert!(
+            summary.contains("not ed25519-signed"),
+            "human summary must not claim cryptographic signing: {summary}"
+        );
     }
 
     // ── Edge case tests for mathematical functions with is_finite guards ──

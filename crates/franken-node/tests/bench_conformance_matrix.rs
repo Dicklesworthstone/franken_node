@@ -372,7 +372,10 @@ fn bench_help_output_format() -> Result<(), Box<dyn Error>> {
     assert!(stdout.contains("Benchmark suite execution"));
     assert!(stdout.contains("franken-node bench"));
     assert!(stdout.contains("<COMMAND>"));
-    assert!(stdout.contains("run   Run benchmark suite and emit signed report"));
+    assert!(
+        stdout.contains("provenance_hash") && stdout.contains("not Ed25519-signed"),
+        "bench --help must not claim an Ed25519-signed report: {stdout}"
+    );
 
     Ok(())
 }
@@ -384,7 +387,10 @@ fn bench_run_help_output_format() -> Result<(), Box<dyn Error>> {
     let assertion = cmd.args(["bench", "run", "--help"]).assert().success();
 
     let stdout = std::str::from_utf8(&assertion.get_output().stdout)?;
-    assert!(stdout.contains("Run benchmark suite and emit signed report"));
+    assert!(
+        stdout.contains("provenance_hash") && stdout.contains("not Ed25519-signed"),
+        "bench run --help must not claim an Ed25519-signed report: {stdout}"
+    );
     assert!(stdout.contains("franken-node bench run"));
     assert!(stdout.contains("[OPTIONS]"));
     assert!(stdout.contains("--scenario <SCENARIO>"));

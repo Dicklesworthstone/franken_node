@@ -36,13 +36,13 @@ fn run_secure_extension_heavy_bench() -> Vec<u8> {
     );
     assert!(
         !output.stdout.is_empty(),
-        "bench run must emit signed JSON report to stdout"
+        "bench run must emit JSON provenance_hash report to stdout"
     );
 
     output.stdout
 }
 
-fn assert_signed_benchmark_report(bytes: &[u8]) -> Value {
+fn assert_provenance_hash_benchmark_report(bytes: &[u8]) -> Value {
     let report: Value = serde_json::from_slice(bytes).expect("bench stdout must be JSON");
     assert_eq!(report["suite_version"], "1.0.0");
     assert_eq!(report["scoring_formula_version"], "sf-v1");
@@ -51,7 +51,7 @@ fn assert_signed_benchmark_report(bytes: &[u8]) -> Value {
         report["provenance_hash"]
             .as_str()
             .is_some_and(|hash| hash.starts_with("sha256:") && hash.len() == 71),
-        "signed report must include sha256 provenance hash: {report}"
+        "provenance_hash report must include sha256 content hash: {report}"
     );
     assert_eq!(report["hardware_profile"]["cpu"], "deterministic-test-cpu");
     assert_eq!(report["hardware_profile"]["memory_mb"], 32768);
@@ -62,12 +62,12 @@ fn assert_signed_benchmark_report(bytes: &[u8]) -> Value {
         report["trace_id"]
             .as_str()
             .is_some_and(|trace_id| trace_id.starts_with("bench-")),
-        "signed report must include deterministic trace_id: {report}"
+        "provenance_hash report must include deterministic trace_id: {report}"
     );
 
     let scenarios = report["scenarios"]
         .as_array()
-        .expect("signed report scenarios must be an array");
+        .expect("provenance_hash report scenarios must be an array");
     assert_eq!(
         scenarios.len(),
         1,
@@ -91,7 +91,7 @@ fn assert_signed_benchmark_report(bytes: &[u8]) -> Value {
         scenarios[0]["variance_pct"]
             .as_f64()
             .is_some_and(f64::is_finite),
-        "variance must be finite in signed report: {report}"
+        "variance must be finite in provenance_hash report: {report}"
     );
     assert_eq!(report["sample_policy"]["min_measured_samples"], 3);
     assert_eq!(
@@ -103,7 +103,7 @@ fn assert_signed_benchmark_report(bytes: &[u8]) -> Value {
 
     let events = report["events"]
         .as_array()
-        .expect("signed report must include structured benchmark events");
+        .expect("provenance_hash report must include structured benchmark events");
     for expected in ["BS-001", "BS-010", "BS-002", "BS-003", "BS-008", "BS-006"] {
         assert!(
             events.iter().any(|event| event["code"] == expected),
@@ -147,7 +147,7 @@ fn bench_run_honors_json_flag() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let report = assert_signed_benchmark_report(&output.stdout);
+    let report = assert_provenance_hash_benchmark_report(&output.stdout);
     assert_eq!(report["evidence_mode"], "fixture_only");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -160,18 +160,18 @@ fn bench_run_honors_json_flag() {
 #[test]
 fn bench_run_secure_extension_heavy_is_byte_stable() {
     let first = run_secure_extension_heavy_bench();
-    let first_report = assert_signed_benchmark_report(&first);
+    let first_report = assert_provenance_hash_benchmark_report(&first);
 
     let second = run_secure_extension_heavy_bench();
-    let second_report = assert_signed_benchmark_report(&second);
+    let second_report = assert_provenance_hash_benchmark_report(&second);
 
     assert_eq!(
         first_report, second_report,
-        "same bench inputs must produce semantically identical signed reports"
+        "same bench inputs must produce semantically identical provenance_hash reports"
     );
     assert_eq!(
         first, second,
-        "same bench inputs must produce byte-stable signed JSON reports"
+        "same bench inputs must produce byte-stable provenance_hash JSON reports"
     );
 }
 
@@ -467,7 +467,7 @@ fn bench_run_successful_execution_logs_expected_events() {
 
     // Validate file contains valid benchmark report
     let file_contents = std::fs::read(&output_path).expect("read benchmark output file");
-    let file_report = assert_signed_benchmark_report(&file_contents);
+    let file_report = assert_provenance_hash_benchmark_report(&file_contents);
 
     // Validate stderr contains expected log events (no errors)
     let stderr_str = String::from_utf8_lossy(&output.stderr);
