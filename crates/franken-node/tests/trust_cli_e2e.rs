@@ -1614,6 +1614,78 @@ fn trust_release_json_fails_closed_when_app_flag_missing() {
 }
 
 #[test]
+fn trust_release_json_fails_closed_when_operator_id_flag_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust", "release", "--app", "dummy.js", "--reason", "lift", "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "trust release --json should fail when --operator-id is omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust release --json missing --operator-id");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-release-error/v1"
+    );
+    assert_eq!(payload["command"], "trust.release");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--operator-id"),
+        "missing --operator-id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: trust release requires non-empty --operator-id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn trust_release_json_fails_closed_when_reason_flag_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "release",
+            "--app",
+            "dummy.js",
+            "--operator-id",
+            "ops",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "trust release --json should fail when --reason is omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust release --json missing --reason");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-release-error/v1"
+    );
+    assert_eq!(payload["command"], "trust.release");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--reason"),
+        "missing --reason --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: trust release requires non-empty --reason"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn trust_quarantine_json_fails_closed_when_artifact_missing() {
     let workspace = seeded_fixture_trust_workspace();
     let output = run_cli_in_workspace(workspace.path(), &["trust", "quarantine", "--json"]);

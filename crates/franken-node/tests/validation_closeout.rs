@@ -858,3 +858,79 @@ fn cli_json_fails_closed_when_receipt_flag_missing() {
         "--json must not append a human clap line after the JSON report: {stderr}"
     );
 }
+
+#[test]
+fn cli_json_fails_closed_when_bead_id_flag_missing() {
+    let dir = TempDir::new().expect("tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .current_dir(dir.path())
+        .args([
+            "ops",
+            "validation-closeout",
+            "--json",
+            "--receipt",
+            "receipt.json",
+        ])
+        .output()
+        .expect("run franken-node ops validation-closeout missing --bead-id");
+    assert!(
+        !output.status.success(),
+        "ops validation-closeout --json should fail when --bead-id is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("missing --bead-id --json must be JSON, not a clap usage dump ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/ops-error-cli/v1");
+    assert_eq!(payload["command"], "ops.validation-closeout");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--bead-id"),
+        "missing --bead-id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --bead-id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn cli_json_fails_closed_when_receipt_flag_missing_with_bead_id_present() {
+    let dir = TempDir::new().expect("tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .current_dir(dir.path())
+        .args([
+            "ops",
+            "validation-closeout",
+            "--json",
+            "--bead-id",
+            "bd-closeout-cli",
+        ])
+        .output()
+        .expect("run franken-node ops validation-closeout missing --receipt");
+    assert!(
+        !output.status.success(),
+        "ops validation-closeout --json should fail when --receipt is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("missing --receipt --json must be JSON, not a clap usage dump ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/ops-error-cli/v1");
+    assert_eq!(payload["command"], "ops.validation-closeout");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--receipt"),
+        "missing --receipt --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --receipt"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}

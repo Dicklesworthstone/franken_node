@@ -218,6 +218,40 @@ fn registry_publish_json_fails_closed_when_package_path_missing() {
 }
 
 #[test]
+fn registry_publish_json_fails_closed_when_version_missing() {
+    let workspace = registry_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &["registry", "publish", "plugin.fnext", "--json"],
+    );
+    assert!(
+        !output.status.success(),
+        "registry publish --json should fail when --version is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("registry publish --json missing --version stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/registry-publish-error/v1"
+    );
+    assert_eq!(payload["command"], "registry.publish");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"]
+        .as_str()
+        .expect("error field must be a string");
+    assert!(
+        error.contains("--version"),
+        "missing --version --json must name the handler requirement: {error}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `registry publish` requires --version"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn registry_publish_missing_package_json_emits_error_report() {
     let workspace = registry_workspace();
     let signing_key_path = workspace.path().join("keys/publisher.ed25519");

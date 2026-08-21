@@ -645,6 +645,187 @@ fn remotecap_verify_missing_token_file_flag_fails() {
 }
 
 #[test]
+fn remotecap_revoke_missing_token_file_flag_fails() {
+    let workspace = setup_test_workspace();
+    let workspace_path = workspace.path().to_str().unwrap();
+
+    let mut cmd = remotecap_cmd();
+    cmd.arg("revoke")
+        .arg("--json")
+        .current_dir(workspace_path)
+        .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
+
+    let output = cmd.assert().failure().get_output().clone();
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("revoke --json missing --token-file must be JSON, not a clap usage dump");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(payload["command"].as_str(), Some("remotecap.revoke"));
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--token-file"),
+        "expected missing --token-file denial in JSON, got {payload}"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --token-file"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn remotecap_use_missing_operation_flag_fails() {
+    let workspace = setup_test_workspace();
+    let workspace_path = workspace.path().to_str().unwrap();
+
+    let mut cmd = remotecap_cmd();
+    cmd.arg("use")
+        .arg("--token-file")
+        .arg("token.json")
+        .arg("--endpoint")
+        .arg("https://api.example.com/v1/status")
+        .arg("--json")
+        .current_dir(workspace_path)
+        .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
+
+    let output = cmd.assert().failure().get_output().clone();
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("use --json missing --operation must be JSON, not a clap usage dump");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(payload["command"].as_str(), Some("remotecap.use"));
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--operation"),
+        "expected missing --operation denial in JSON, got {payload}"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --operation"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn remotecap_use_missing_endpoint_flag_fails() {
+    let workspace = setup_test_workspace();
+    let workspace_path = workspace.path().to_str().unwrap();
+
+    let mut cmd = remotecap_cmd();
+    cmd.arg("use")
+        .arg("--token-file")
+        .arg("token.json")
+        .arg("--operation")
+        .arg("network_egress")
+        .arg("--json")
+        .current_dir(workspace_path)
+        .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
+
+    let output = cmd.assert().failure().get_output().clone();
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("use --json missing --endpoint must be JSON, not a clap usage dump");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(payload["command"].as_str(), Some("remotecap.use"));
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--endpoint"),
+        "expected missing --endpoint denial in JSON, got {payload}"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --endpoint"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn remotecap_verify_missing_operation_flag_fails() {
+    let workspace = setup_test_workspace();
+    let workspace_path = workspace.path().to_str().unwrap();
+
+    let mut cmd = remotecap_cmd();
+    cmd.arg("verify")
+        .arg("--token-file")
+        .arg("token.json")
+        .arg("--endpoint")
+        .arg("https://api.example.com/v1/status")
+        .arg("--json")
+        .current_dir(workspace_path)
+        .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
+
+    let output = cmd.assert().failure().get_output().clone();
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("verify --json missing --operation must be JSON, not a clap usage dump");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(payload["command"].as_str(), Some("remotecap.verify"));
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--operation"),
+        "expected missing --operation denial in JSON, got {payload}"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --operation"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn remotecap_verify_missing_endpoint_flag_fails() {
+    let workspace = setup_test_workspace();
+    let workspace_path = workspace.path().to_str().unwrap();
+
+    let mut cmd = remotecap_cmd();
+    cmd.arg("verify")
+        .arg("--token-file")
+        .arg("token.json")
+        .arg("--operation")
+        .arg("network_egress")
+        .arg("--json")
+        .current_dir(workspace_path)
+        .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key");
+
+    let output = cmd.assert().failure().get_output().clone();
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("verify --json missing --endpoint must be JSON, not a clap usage dump");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("franken-node/remotecap-error-cli/v1")
+    );
+    assert_eq!(payload["command"].as_str(), Some("remotecap.verify"));
+    assert_eq!(payload["ok"].as_bool(), Some(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--endpoint"),
+        "expected missing --endpoint denial in JSON, got {payload}"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("Invalid UTF-8");
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --endpoint"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn remotecap_issue_human_output() {
     let workspace = setup_test_workspace();
     let workspace_path = workspace.path().to_str().unwrap();

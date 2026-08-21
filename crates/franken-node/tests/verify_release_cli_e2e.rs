@@ -633,6 +633,8 @@ fn verify_module_passes_for_known_surface_module() {
     assert_eq!(payload["details"]["module_id"], "runtime");
     assert_eq!(payload["details"]["exists"], true);
     assert_eq!(payload["details"]["deps_satisfied"], true);
+    assert_eq!(payload["details"]["target_kind"], "franken_node_crate_src");
+    assert_eq!(payload["details"]["guest_js"], false);
 }
 
 #[test]
@@ -648,6 +650,8 @@ fn verify_module_json_fails_closed_when_module_id_missing() {
     assert_eq!(payload["verdict"], "ERROR");
     assert_eq!(payload["status"], "error");
     assert_eq!(payload["exit_code"], 2);
+    assert_eq!(payload["details"]["target_kind"], "franken_node_crate_src");
+    assert_eq!(payload["details"]["guest_js"], false);
     let reason = payload["reason"].as_str().unwrap_or_default();
     assert!(
         reason.contains("module id"),
@@ -674,6 +678,8 @@ fn verify_module_fails_for_unknown_module() {
     assert_eq!(payload["verdict"], "FAIL");
     assert_eq!(payload["status"], "fail");
     assert_eq!(payload["exit_code"], 1);
+    assert_eq!(payload["details"]["target_kind"], "franken_node_crate_src");
+    assert_eq!(payload["details"]["guest_js"], false);
 }
 
 #[test]
@@ -697,6 +703,8 @@ fn verify_module_rejects_unsupported_compat_version() {
     assert_eq!(payload["verdict"], "ERROR");
     assert_eq!(payload["status"], "error");
     assert_eq!(payload["exit_code"], 2);
+    assert_eq!(payload["details"]["target_kind"], "franken_node_crate_src");
+    assert_eq!(payload["details"]["guest_js"], false);
     assert!(
         payload["reason"]
             .as_str()
@@ -718,6 +726,8 @@ fn verify_migration_json_fails_closed_when_migration_id_missing() {
     assert_eq!(payload["verdict"], "ERROR");
     assert_eq!(payload["status"], "error");
     assert_eq!(payload["exit_code"], 2);
+    assert_eq!(payload["details"]["live_rewrite"], false);
+    assert_eq!(payload["details"]["source"], "local_evidence_record");
     let reason = payload["reason"].as_str().unwrap_or_default();
     assert!(
         reason.contains("migration id"),
@@ -747,6 +757,8 @@ fn verify_migration_source_present_without_state_is_unproven() {
     assert_eq!(payload["exit_code"], 1);
     assert_eq!(payload["details"]["status"], "source_present");
     assert_eq!(payload["details"]["authority"], "diagnostic_only");
+    assert_eq!(payload["details"]["live_rewrite"], false);
+    assert_eq!(payload["details"]["source"], "local_evidence_record");
     assert_eq!(
         payload["details"]["invariant_failures"][0]["invariant_id"],
         "MIGRATION_EVIDENCE_RECORD_MISSING"
@@ -766,6 +778,8 @@ fn verify_migration_fails_for_unknown_target() {
     assert_eq!(payload["verdict"], "FAIL");
     assert_eq!(payload["status"], "fail");
     assert_eq!(payload["exit_code"], 1);
+    assert_eq!(payload["details"]["live_rewrite"], false);
+    assert_eq!(payload["details"]["source"], "local_evidence_record");
     assert!(
         payload["reason"]
             .as_str()
@@ -879,6 +893,8 @@ fn verify_migration_reads_state_record_and_checks_post_conditions() {
     assert_eq!(payload["details"]["status"], "applied");
     assert_eq!(payload["details"]["authority"], "authoritative");
     assert_eq!(payload["details"]["post_conditions_met"], true);
+    assert_eq!(payload["details"]["live_rewrite"], false);
+    assert_eq!(payload["details"]["source"], "local_evidence_record");
     assert_eq!(
         payload["details"]["invariant_failures"]
             .as_array()

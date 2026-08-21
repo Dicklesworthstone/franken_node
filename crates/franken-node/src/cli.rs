@@ -117,7 +117,7 @@ pub enum Command {
     /// Run app under policy-governed runtime controls.
     Run(RunArgs),
 
-    /// Runtime lane and epoch inspection/control.
+    /// Local default lane snapshot and integer epoch compare (not a live node).
     #[command(subcommand)]
     Runtime(RuntimeCommand),
 
@@ -841,7 +841,7 @@ pub enum VerifyCommand {
     #[command(name = "module")]
     Module(VerifyModuleArgs),
 
-    /// Verify migration compatibility contract output.
+    /// Check a local migration evidence record (not a live rewrite).
     #[command(name = "migration")]
     Migration(VerifyMigrationArgs),
 
@@ -855,7 +855,8 @@ pub enum VerifyCommand {
     #[command(name = "corpus")]
     Corpus(VerifyCorpusArgs),
 
-    /// Compare behavior across runtimes in lockstep.
+    /// Compare runtimes in lockstep (default Bun+franken dyad).
+    /// When Node is included it is the spec; matching only Bun stays fail.
     Lockstep(VerifyLockstepArgs),
 
     /// Verify release artifact signatures and checksums.
@@ -940,7 +941,8 @@ pub struct VerifyModuleArgs {
 
 #[derive(Debug, Parser)]
 pub struct VerifyMigrationArgs {
-    /// Migration identifier to verify.
+    /// Migration identifier whose local evidence record should be checked.
+    /// This does not re-run `migrate rewrite`.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `verifier-cli-contract-v1` instead of a human clap error.
     #[arg(default_value = "")]
@@ -1596,7 +1598,8 @@ pub enum OpsCommand {
     ConfigAudit(OpsConfigAuditArgs),
     /// Emit operator metrics as Prometheus text, or as schema-versioned JSON with `--json`.
     Metrics(OpsMetricsArgs),
-    /// Produce L1 proof-carrying host-effect evidence (v2) from a real native-engine run.
+    /// Produce proof-carrying host-effect evidence (v2) from a real native-engine run.
+    /// Necessary additional L1 conjunct; not a substitute for the compatibility corpus.
     #[command(name = "proof-carrying-evidence")]
     ProofCarryingEvidence(OpsProofCarryingEvidenceArgs),
     /// Run the committed compatibility corpus across Bun and the native
@@ -1662,7 +1665,8 @@ pub struct OpsResourceGovernorArgs {
 
 #[derive(Debug, Parser)]
 pub struct OpsValidationReadinessArgs {
-    /// Emit JSON instead of human-readable output.
+    /// Emit JSON instead of human-readable output. Includes `input_source`
+    /// and `live_broker=false` so an omitted `--input` is not a live broker.
     #[arg(long)]
     pub json: bool,
 
@@ -2210,7 +2214,7 @@ pub struct RegistryGcArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum BenchCommand {
-    /// Run benchmark suite and emit signed report.
+    /// Run benchmark suite and emit a SHA256 `provenance_hash` report (not Ed25519-signed).
     Run(BenchRunArgs),
 }
 
@@ -2233,9 +2237,9 @@ pub struct BenchRunArgs {
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub output: Option<PathBuf>,
 
-    /// Emit the signed JSON report on stdout. The report is always JSON;
-    /// `--json` is accepted so operator/agent wrappers match other surfaces
-    /// and suppresses the human summary on stderr.
+    /// Emit the JSON report on stdout. The report is always JSON and carries
+    /// `provenance_hash` (SHA256 of canonical content), not an Ed25519
+    /// signature. `--json` suppresses the human summary on stderr.
     #[arg(long)]
     pub json: bool,
 }
@@ -2337,7 +2341,12 @@ pub enum DoctorCommand {
 
 #[derive(Debug, Parser)]
 pub struct DoctorCloseConditionArgs {
-    /// Emit the close-condition receipt JSON to stdout.
+    /// Emit the close-condition receipt JSON to stdout. Without `--json`,
+    /// human output still names declared L1 pass_rate,
+    /// `node_canonical_observation_passes`,
+    /// `node_canonical_unscored_fail_ids`, and
+    /// `child_process_native_eval_aborts` (those remain fail; not
+    /// recategorized as pass).
     #[arg(long)]
     pub json: bool,
 
@@ -3189,6 +3198,52 @@ mod parser_contract_extra_tests {
                 assert!(args.json);
                 assert!(args.reason.is_empty());
                 assert!(args.operator_id.is_empty());
+                assert!(args.trust_state_hash.is_empty());
+            }
+            other => panic!("expected safe-mode enter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn safe_mode_enter_parses_without_operator_id_so_json_can_fail_closed() {
+        let cli = parse(&[
+            "franken-node",
+            "safe-mode",
+            "enter",
+            "--json",
+            "--reason",
+            "trust-corruption",
+        ])
+        .expect("missing --operator-id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::SafeMode(SafeModeCommand::Enter(args)) => {
+                assert!(args.json);
+                assert_eq!(args.reason, "trust-corruption");
+                assert!(args.operator_id.is_empty());
+                assert!(args.trust_state_hash.is_empty());
+            }
+            other => panic!("expected safe-mode enter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn safe_mode_enter_parses_without_trust_state_hash_so_json_can_fail_closed() {
+        let cli = parse(&[
+            "franken-node",
+            "safe-mode",
+            "enter",
+            "--json",
+            "--reason",
+            "trust-corruption",
+            "--operator-id",
+            "secops-1",
+        ])
+        .expect("missing --trust-state-hash must parse so the handler can emit JSON");
+        match cli.command {
+            Command::SafeMode(SafeModeCommand::Enter(args)) => {
+                assert!(args.json);
+                assert_eq!(args.reason, "trust-corruption");
+                assert_eq!(args.operator_id, "secops-1");
                 assert!(args.trust_state_hash.is_empty());
             }
             other => panic!("expected safe-mode enter, got {other:?}"),
@@ -4140,6 +4195,26 @@ mod tests {
     }
 
     #[test]
+    fn registry_publish_parses_without_version_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "registry",
+            "publish",
+            "plugin.fnext",
+            "--json",
+        ])
+        .expect("missing --version must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Registry(RegistryCommand::Publish(args)) => {
+                assert!(args.json);
+                assert_eq!(args.package_path.as_os_str(), "plugin.fnext");
+                assert!(args.version.is_empty());
+            }
+            other => panic!("expected registry publish, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn verify_module_parses_without_module_id_so_json_can_fail_closed() {
         let cli =
             <Cli as clap::Parser>::try_parse_from(["franken-node", "verify", "module", "--json"])
@@ -4393,6 +4468,27 @@ mod tests {
             Command::Ltv(LtvCommand::VerifyAsOf(args)) => {
                 assert!(args.json);
                 assert!(args.evidence.as_os_str().is_empty());
+                assert!(args.witness_anchor.as_os_str().is_empty());
+            }
+            other => panic!("expected ltv verify-as-of, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ltv_verify_as_of_parses_without_witness_anchor_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "ltv",
+            "verify-as-of",
+            "--json",
+            "--evidence",
+            "evidence.json",
+        ])
+        .expect("missing --witness-anchor must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Ltv(LtvCommand::VerifyAsOf(args)) => {
+                assert!(args.json);
+                assert_eq!(args.evidence.as_os_str(), "evidence.json");
                 assert!(args.witness_anchor.as_os_str().is_empty());
             }
             other => panic!("expected ltv verify-as-of, got {other:?}"),

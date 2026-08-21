@@ -997,6 +997,87 @@ fn safe_mode_enter_json_fails_closed_when_reason_flag_missing() -> Result<(), Bo
 }
 
 #[test]
+fn safe_mode_enter_json_fails_closed_when_operator_id_flag_missing() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let mut enter = Command::cargo_bin("franken-node")?;
+    let assertion = enter
+        .current_dir(temp.path())
+        .args([
+            "safe-mode",
+            "enter",
+            "--reason",
+            "trust-corruption",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "safe-mode enter missing --operator-id",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/safe-mode-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("safe-mode.enter"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--operator-id"),
+        "missing --operator-id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --operator-id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn safe_mode_enter_json_fails_closed_when_trust_state_hash_flag_missing()
+-> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let mut enter = Command::cargo_bin("franken-node")?;
+    let assertion = enter
+        .current_dir(temp.path())
+        .args([
+            "safe-mode",
+            "enter",
+            "--reason",
+            "trust-corruption",
+            "--operator-id",
+            "secops-1",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "safe-mode enter missing --trust-state-hash",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/safe-mode-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("safe-mode.enter"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--trust-state-hash"),
+        "missing --trust-state-hash --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --trust-state-hash"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn ltv_attest_json_fails_closed_when_bundle_missing() -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
     fs::write(
@@ -1192,6 +1273,52 @@ fn ltv_verify_as_of_json_fails_closed_when_evidence_flag_missing() -> Result<(),
     assert!(
         !stderr.contains("error: the following required arguments were not provided")
             && !stderr.contains("Error: --evidence"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ltv_verify_as_of_json_fails_closed_when_witness_anchor_flag_missing()
+-> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    fs::write(
+        temp.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )?;
+    fs::write(temp.path().join("evidence.json"), "{}\n")?;
+
+    let mut verify = Command::cargo_bin("franken-node")?;
+    let assertion = verify
+        .current_dir(temp.path())
+        .args([
+            "ltv",
+            "verify-as-of",
+            "--json",
+            "--evidence",
+            "evidence.json",
+        ])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "ltv verify-as-of missing --witness-anchor",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/ltv-error-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("ltv.verify-as-of"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--witness-anchor"),
+        "missing --witness-anchor --json must name the handler requirement, not a clap usage dump: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --witness-anchor"),
         "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
     Ok(())

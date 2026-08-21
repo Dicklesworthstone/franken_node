@@ -118,8 +118,10 @@ replay part of the runtime contract, so JS/TS velocity comes with:
   runtime by default; real Node.js can be added when available
 - **Fleet control plane**: quarantine, release, and reconciliation with
   signed decision receipts and convergence telemetry
-- **Verifier SDK**: independent third parties can validate security and
-  benchmark claims without trusting the runtime that produced them
+- **Verifier SDK**: independent third parties can validate receipts,
+  bundles, and the honesty manifest without trusting the producing
+  runtime. `bench run` reports are SHA256 `provenance_hash` documents,
+  not Ed25519-signed SDK attestations.
 
 ### Why use franken-node?
 
@@ -130,14 +132,14 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 | Deterministic incident replay | Signed bundles with timeline, evidence, policy decisions; replay re-derives the recorded decision sequence and verifies it against the bundle's signed hash, fail-closed on mismatch |
 | Counterfactual simulator | Re-evaluate the recorded incident decision trace under a different policy mode and inspect the diff |
 | Migration autopilot | Audit, rewrite, validate, and rollout transforms with rollback bundles |
-| Compatibility oracle | Lockstep checks across Bun and franken-engine by default, with real Node.js as an explicit third leg when available |
+| Compatibility oracle | Lockstep vs Node (spec) plus Bun as a second reference; matching only Bun stays fail |
 | Fleet quarantine plane | Quarantine, reconcile, release across zones; signed decision receipts |
 | Signed extension registry | Ed25519-signed artifacts, provenance enforcement, assurance levels |
 | Remote capability tokens | Scope-bound, single-use-optional Ed25519 capability tokens with audience binding |
-| Verifier SDK | Independent verification of receipts, bundles, and benchmark claims |
+| Verifier SDK | Independent verification of receipts, bundles, and the honesty manifest (not Ed25519-signed `bench run` reports) |
 | Operator doctor | Workspace-pressure analyzer, close-condition receipts, evidence-readiness reports |
 | Proof pipeline | VEF (Verifiable Execution Fingerprint) receipts, proof workers, queue telemetry |
-| Safe-mode lifecycle | Operator-driven enter/exit with reason codes, signed state, and pre-exit checks |
+| Safe-mode lifecycle | Operator-driven enter/exit with reason codes, persisted JSON state (not Ed25519-signed), and pre-exit operator attestations |
 | No unsafe code | `#![forbid(unsafe_code)]` in both `lib.rs` and `main.rs` |
 
 ---
@@ -157,7 +159,7 @@ franken-node migrate audit ./my-app --format json --out migration-audit.json
 # 4) Apply transforms with rollback artifact
 franken-node migrate rewrite ./my-app --apply --emit-rollback ./rollback-plan.json
 
-# 5) Validate behavior in lockstep across runtimes
+# 5) Compare default Bun+franken dyad (not L1 Node spec)
 franken-node verify lockstep ./my-app --runtimes bun,franken-node --emit-fixtures
 
 # 6) Seed trust cards from package.json + lockfile
@@ -370,10 +372,11 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
    ```bash
    franken-node trust scan ./my-app --deep --audit
    ```
-4. **Validate compatibility before rollout:**
+4. **Compare the default Bun+franken dyad (not the L1 Node spec):**
    ```bash
    franken-node verify lockstep ./my-app --runtimes bun,franken-node
    ```
+   Matching only Bun stays fail. Corpus L1 requires real Node as spec.
 5. **Run in policy-governed mode:**
    ```bash
    franken-node run ./my-app --policy strict
@@ -444,11 +447,11 @@ franken-node migrate rewrite ./app --apply --emit-rollback rollback.json
 franken-node verify lockstep ./app --runtimes bun,franken-node --emit-fixtures
 ```
 
-The rollback bundle is a signed, reversible diff. The lockstep oracle runs
-the project in `bun` and `franken-node` by default and records divergence
-receipts (with the exact event stream that diverged); material behavioral
-deltas fail closed. On hosts with a real Node.js binary, add it explicitly with
-`--runtimes node,bun,franken-node`.
+The rollback bundle is a signed, reversible diff. `verify lockstep` defaults
+to the Bun+franken dyad and records divergence receipts; that dyad is not
+the L1 spec. Matching only Bun stays fail. On hosts with real Node.js, pass
+`--runtimes node,bun,franken-node` — Node is then the spec. Material
+behavioral deltas fail closed.
 
 ### Day 5 — Pre-production validation
 
@@ -470,8 +473,9 @@ franken-node run ./app --policy balanced
 ```
 
 Run `franken-node verify lockstep ./app --runtimes bun,franken-node` as a
-separate comparative verification step before profile-governed execution.
-The `run` command never launches an external reference runtime.
+separate comparative dyad (not the L1 Node spec; matching only Bun stays
+fail) before profile-governed execution. `run` never launches an external
+reference runtime.
 
 ### Day 21 — Incident
 
@@ -713,10 +717,10 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node verify module <id>` | Verify a franken_node crate-src module contract (`api`, `cli`, …). Not guest JS conformance. The module id is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
-| `franken-node verify migration <id>` | Verify migration compatibility. The migration id is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node verify migration <id>` | Check a local migration evidence record and its post-conditions; does not re-run `migrate rewrite`. The migration id is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json` (`live_rewrite=false`, `source=local_evidence_record`). |
 | `franken-node verify compatibility <target>` | Probe a concrete runtime (`node`, `bun`, `franken-node`). Profile names (`strict`, `balanced`, `legacy-risky`) fail closed and do not auto-PASS. The target is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. `node`/`bun` smoke is `console.log`; `franken-node` smoke is fixture JS through the embedded engine (`run --console-only`), not `--version` alone. Flags: `--json`. |
 | `franken-node verify corpus <path>` | Verify corpus schema and coverage. The corpus path is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
-| `franken-node verify lockstep <path>` | Compare behavior across runtimes; default `--runtimes bun,franken-node`; use `--runtimes node,bun,franken-node` only when `node` is a real Node.js binary. The project path is handler-required so `--json` failures emit `franken-node/verify-lockstep-error-cli/v1` instead of a human clap error. `--emit-fixtures` writes divergence fixtures. Flags: `--json` (stderr banner off; early failures `franken-node/verify-lockstep-error-cli/v1`). |
+| `franken-node verify lockstep <path>` | Compare runtimes in lockstep. Default `--runtimes bun,franken-node`. Use `--runtimes node,bun,franken-node` only when `node` is real Node.js; Node is then the spec and matching only Bun stays fail. The project path is handler-required so `--json` failures emit `franken-node/verify-lockstep-error-cli/v1` instead of a human clap error. `--emit-fixtures` writes divergence fixtures. Flags: `--json` (stderr banner off; early failures `franken-node/verify-lockstep-error-cli/v1`). |
 | `franken-node verify release <path>` | Verify release artifact signatures. The release path and `--key-dir` are handler-required so `--json` failures emit `franken-node/verify-release-error-cli/v1` instead of a human clap error. **Fails closed without `--key-dir`.** Flags: `--json` (`franken-node/verify-release-cli/v1`; early failures `franken-node/verify-release-error-cli/v1`). |
 | `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. The log path is handler-required so `--json` failures emit `franken-node/verify-transparency-log-error-cli/v1` instead of a human clap error. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`; early failures `franken-node/verify-transparency-log-error-cli/v1`). |
 | `franken-node verify recovery-runbook` | Generate recovery runbook from `--readiness-input`. Flags: `--json` (early failures `franken-node/verify-recovery-runbook-error-cli/v1`). |
@@ -792,13 +796,13 @@ every leaf command available in the current build.
 |---|---|
 | `franken-node ops health-check` | Process health from compile-time git SHA, evidence-ledger flush mtime, and persisted session files under `.franken-node/state/sessions` (not a live SessionManager). Flags: `--json` (`franken-node/ops-health-check-cli/v1`; `session_count_source=persisted_session_files`). |
 | `franken-node ops resource-governor` | Advise whether validation should run / defer / deduplicate. Default observation is a live procfs sample; `--process-snapshot` is a fixture. Human output names `source=`. Flags: `--json`. |
-| `franken-node ops validation-readiness` | Report validation broker evidence freshness from receipts. Flags: `--json`. |
+| `franken-node ops validation-readiness` | Report validation evidence freshness from `--input`/`--receipt` snapshots, or an empty default snapshot when omitted. Human and `--json` name `input_source` and `live_broker=false`. Not a live broker. |
 | `franken-node ops validation-closeout` | Render closeout summary from a receipt. `--bead-id` and `--receipt` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node ops config-audit` | Audit active config across profiles. Flags: `--json` (`franken-node/ops-config-audit-cli/v1`). |
 | `franken-node ops metrics` | Emit operator metrics (Prometheus by default). Flags: `--json` (`franken-node/ops-metrics-cli/v1`). |
 | `franken-node ops compat-corpus-run` | Run the committed compatibility corpus through bun + native franken-engine lockstep and write the digest-bound results artifact. `--corpus-root` and `--out` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/ops-compat-corpus-run-cli/v1`), `--require-node-reference`. |
 | `franken-node doctor workspace-pressure` | Analyze workspace pressure: disk, memory, builds, RCH; routes through balanced/conservative/permissive policy. Flags: `--json` (failures `franken-node/doctor-error-cli/v1`). |
-| `franken-node doctor close-condition` | Emit dual-oracle close-condition receipt. Flags: `--json` (failures `franken-node/doctor-error-cli/v1`). |
+| `franken-node doctor close-condition` | Emit dual-oracle close-condition receipt. Human output names declared L1 `pass_rate`, `node_canonical_observation_passes`, `node_canonical_unscored_fail_ids`, and `child_process_native_eval_aborts` (those remain fail; not recategorized as pass). Flags: `--json` (failures `franken-node/doctor-error-cli/v1`). |
 | `franken-node doctor evidence-readiness` | Report evidence readiness from a broker snapshot. `--input` is handler-required so `--json` failures emit `franken-node/doctor-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 
 ### Registry, bench, debug
@@ -809,16 +813,17 @@ every leaf command available in the current build.
 | `franken-node registry search <query>` | Query extension registry. The query is handler-required so `--json` failures emit `franken-node/registry-error-cli/v1` instead of a human clap error. Filter: `--min-assurance`. `--json` emits `franken-node/registry-search-cli/v1`. |
 | `franken-node registry verify <id>` | Verify a locally stored registry artifact. The extension id is handler-required so `--json` failures emit `franken-node/registry-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/registry-verify-cli/v1`. |
 | `franken-node registry gc` | Archive older registry artifacts. Optional: `--keep`. `--json` emits `franken-node/registry-gc-cli/v1`. |
-| `franken-node bench run` | Run benchmark suite and emit signed report. Flags: `--scenario`, `--fixture-mode`, `--output`, `--json`. The signed report is always JSON on stdout; `--json` suppresses the human summary on stderr. |
+| `franken-node bench run` | Run benchmark suite and emit a SHA256 `provenance_hash` report (not Ed25519-signed). Flags: `--scenario`, `--fixture-mode`, `--output`, `--json`. The report is always JSON on stdout; `--json` suppresses the human summary on stderr. |
 | `franken-node debug explain` | Walk a signed decision-receipt through verification steps. `--receipt` is handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--json` emits machine-readable per-step results (`franken-node/debug-explain-cli/v1`). |
 | `franken-node debug evidence` | Inspect verifier evidence artifacts. `--artifact` is handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. `--json` emits machine-readable diagnostics. |
 | `franken-node debug trace` | Trace policy evaluation steps. `--policy` and `--input` are handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--json` emits machine-readable trace (`franken-node/debug-trace-cli/v1`). |
 
 > [!NOTE]
 > Commands that declare `--json` emit machine-readable output. That flag
-> is **not** on every subcommand. `bench run` always writes the signed
-> JSON report to stdout; `--json` is accepted for operator/agent wrappers
-> and suppresses the human summary on stderr.
+> is **not** on every subcommand. `bench run` always writes the JSON
+> report (`provenance_hash` SHA256 content hash, not Ed25519-signed) to
+> stdout; `--json` is accepted for operator/agent wrappers and suppresses
+> the human summary on stderr.
 > Many JSON-capable commands also accept `--structured-logs-jsonl` for
 > event-coded diagnostics on stderr (see [Structured Logging and
 > Observability](#structured-logging-and-observability)), and
@@ -1141,7 +1146,7 @@ conformance tests under `tests/` and `crates/franken-node/tests/`.
 | **Fleet quarantine state machine** | `api::fleet_quarantine`, `control_plane::fleet_transport` | `QuarantineScope`, `FleetAction` (quarantine/revoke/release), signed `DecisionReceipt`, `ConvergencePhase` tracking, file-backed durable transport |
 | **Deterministic incident replay** | `replay::time_travel_engine`, `tools::replay_bundle` | `WorkflowTrace` capture, environment snapshot, schema versioning, `ReplayVerdict`, divergence detection, fsync-backed durable serialization |
 | **Counterfactual simulator** | `replay::time_travel_engine` + `sdk/verifier` | Re-execute the same trace under an alternative `--policy`; emit diff of decisions, blocked actions, and evidence |
-| **Compatibility lockstep oracle** | `runtime::lockstep_harness`, `api::compat_gate` | N-version execution across Bun/franken-engine by default, with optional real Node.js coverage and divergence receipts |
+| **Compatibility lockstep oracle** | `runtime::lockstep_harness`, `api::compat_gate` | `verify lockstep` defaults to Bun+franken dyad; corpus L1 treats Node as spec (matching only Bun stays fail; `child_process` aborts remain fail) |
 | **Migration autopilot** | `migration::*`, BPET migration gate | Audit → rewrite → validate → rollout; deterministic audit logs; rollback bundles |
 | **Signed extension registry** | `registry::*`, `extensions::artifact_contract` | Ed25519-signed artifacts, schema enforcement, assurance levels, GC, search |
 | **Threshold signature verification** | `security::threshold_sig` | k-of-n quorum, cached configurations, domain-separated and constant-time verification |
@@ -2389,13 +2394,14 @@ Common integrations:
 ### CI/CD pipelines
 
 ```yaml
-# GitHub Actions: gate every merge on lockstep + audit
+# GitHub Actions: audit + default Bun+franken dyad (not L1 Node spec)
 - name: franken-node migration audit
   run: |
     franken-node migrate audit . --format sarif --out audit.sarif
 
-- name: franken-node lockstep
+- name: franken-node lockstep dyad
   run: |
+    # Matching only Bun stays fail. Corpus L1 needs real Node as spec.
     franken-node verify lockstep . --runtimes bun,franken-node \
         --emit-fixtures
 
@@ -2472,7 +2478,7 @@ implementation CI gate.
 | Bayesian sentinel inference and containment actions | Extension ecosystem and trust distribution (registry, trust cards, reputation) |
 | Native Rust execution (no V8/QuickJS bindings) | Packaging, rollout, and enterprise control planes |
 | | Product-layer policy controls and verification surfaces |
-| | L1 Product Oracle (default Bun/franken lockstep; real Node.js opt-in) |
+| | L1 Product Oracle (Node is the compatibility spec; matching only Bun stays fail; `child_process` native-eval aborts remain fail) |
 | | Fleet operations (quarantine, incident replay, convergence) |
 
 The split keeps the verifier SDK auditable: a third party can verify
@@ -2778,7 +2784,7 @@ into the corresponding section above.
 |---|---|
 | Adopt | `franken-node init --profile balanced --scan` |
 | Audit a project | `franken-node migrate audit . --format sarif --out audit.sarif` |
-| Validate behavior | `franken-node verify lockstep . --runtimes bun,franken-node` |
+| Compare Bun+franken dyad (not L1 Node spec) | `franken-node verify lockstep . --runtimes bun,franken-node` |
 | Seed trust cards | `franken-node trust scan . --deep --audit` |
 | Refresh trust | `franken-node trust sync --force` |
 | Run in strict mode | `franken-node run ./app --policy strict` |
@@ -2898,7 +2904,7 @@ Three oracle dimensions must all be GREEN:
 
 | Dimension | Owner | Validates | Artifact |
 |---|---|---|---|
-| **L1 Product Oracle** | Track 10.2 | Spec-first compatibility against Bun/franken behavior by default; real Node.js is an explicit third leg when available | `artifacts/oracle/l1_product_verdict.json` |
+| **L1 Product Oracle** | Track 10.2 | Targeted compatibility corpus vs Node (spec). Bun is a second reference; matching only Bun stays fail. `child_process` native-eval aborts remain fail (not recategorized as pass). | `artifacts/oracle/l1_product_verdict.json` |
 | **L2 Engine-Boundary Oracle** | Track 10.17 | franken_engine integration points conform to the engine-split contract | `artifacts/oracle/l2_engine_verdict.json` |
 | **Release Policy Linkage** | Track 10.2 | Release gates consume both verdicts and enforce pass-through | `artifacts/oracle/release_policy_verdict.json` |
 
@@ -2952,10 +2958,10 @@ Hot-path discipline is enforced by `tests/hot_path_perf_budget_contract.rs`
 (feature `policy-engine`): performance budgets for the most-traveled
 paths are encoded as conformance assertions, and a regression fails CI.
 
-The `bench run` CLI surface produces a **signed benchmark report**;
-external verifiers can validate the report via
-`frankenengine-verifier-sdk` without trusting the runtime that produced
-it.
+The `bench run` CLI surface produces a SHA256 `provenance_hash` report
+(not Ed25519-signed). A verifier can recompute the hash over the report
+body; that is tamper-evident content hashing, not an independently
+signed attestation.
 
 ---
 
@@ -2965,14 +2971,14 @@ The claims in this README are reproducible. Substitute your own project
 paths and trust anchors where indicated.
 
 ```bash
-# Reproduce the lockstep oracle on your project
+# Default Bun+franken dyad (not the L1 Node spec; matching only Bun stays fail)
 franken-node verify lockstep ./my-app \
     --runtimes bun,franken-node \
     --emit-fixtures
 
 # Reproduce a benchmark report
 franken-node bench run --scenario secure-extension-heavy --output bench.json
-# The signed report can be replayed through the verifier SDK; see
+# The SHA256 provenance_hash report can be replayed through the verifier SDK; see
 # tests/conformance/verifier_sdk_capsule_replay.rs for the contract.
 
 # Reproduce an incident bundle and replay verdict
@@ -3214,12 +3220,12 @@ one pass.
 
 ### Is this a drop-in replacement for Node or Bun?
 
-For many high-value workloads, yes. For edge compatibility cases, use
-`franken-node verify lockstep` and inspect divergence receipts before
-production rollout. The default lockstep oracle compares Bun and the franken
-runtime because this evaluation environment does not provide a real Node.js
-binary. On hosts with real Node.js installed, pass
-`--runtimes node,bun,franken-node` to exercise the full triad.
+No. The measured compatibility corpus is the L1 spec (currently 86.43%,
+484/560) and `child_process` native-eval aborts remain fail, not pass.
+`verify lockstep` defaults to a Bun+franken dyad for hosts without real
+Node.js; that dyad is not the spec. When `--runtimes` includes `node` as
+real Node.js, Node is the spec and matching only Bun stays fail. Inspect
+divergence receipts before any production rollout.
 
 ### Does franken-node require a full rewrite of existing projects?
 

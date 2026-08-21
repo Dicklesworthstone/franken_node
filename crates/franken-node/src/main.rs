@@ -329,7 +329,7 @@ struct TrustCardCliRegistryState {
     cache_ttl_secs: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct VerifyContractOutput {
     command: String,
     contract_version: String,
@@ -6719,6 +6719,27 @@ fn handle_doctor_close_condition(
             receipt.core.composite_verdict,
             receipt_path.display()
         );
+        let l1 = &receipt.core.l1_product_oracle;
+        println!(
+            "  L1 pass_rate={:.2}% passed={}/{} (declared per-test status; child_process deny is not recategorized as pass)",
+            l1.pass_rate_pct, l1.passed_test_cases, l1.total_test_cases
+        );
+        if let Some(node_canonical) = l1.node_canonical_observation_passes {
+            println!(
+                "  node_canonical_observation_passes={node_canonical} (franken matching Node, both exit 0; does not change declared pass_rate)"
+            );
+        }
+        if !l1.node_canonical_unscored_fail_ids.is_empty() {
+            println!(
+                "  node_canonical_unscored_fail_ids={} (declared fail; franken matches Node; child_process abort is not listed)",
+                l1.node_canonical_unscored_fail_ids.join(",")
+            );
+        }
+        if let Some(aborts) = l1.child_process_native_eval_aborts {
+            println!(
+                "  child_process_native_eval_aborts={aborts} (remain fail; not recategorized as pass)"
+            );
+        }
     }
     Ok(())
 }
@@ -8044,7 +8065,7 @@ fn run_execution_receipts_root(project_root: &Path) -> Result<PathBuf> {
     Ok(ensure_state_dir(project_root)?.join("execution-receipts"))
 }
 
-/// bd-qr5i2.2: produce L1 proof-carrying host-effect evidence (v2) from a
+/// bd-qr5i2.2: produce proof-carrying host-effect evidence (v2) from a
 /// real native-engine run, optionally writing it to a file and/or merging it
 /// into the compatibility-corpus results artifact the close-condition gate
 /// reads.
@@ -8102,7 +8123,7 @@ fn handle_ops_proof_carrying_evidence(args: &OpsProofCarryingEvidenceArgs) -> Re
         println!("{}", serde_json::to_string_pretty(&evidence)?);
     } else {
         let mut rendered = format!(
-            "L1 proof-carrying host-effect evidence (v2)\n\
+            "proof-carrying host-effect evidence (v2; additional L1 conjunct, not the compatibility corpus)\n\
              trace_id: {}\n\
              verified subjects: {}\n\
              effect receipts verified: {}\n\
@@ -8551,7 +8572,8 @@ fn ops_validation_readiness_report(
             &input,
             args.trace_id.clone(),
             Utc::now(),
-        ),
+        )
+        .with_cli_input_source(validation_readiness_input_source(args)),
     )
 }
 
@@ -8592,6 +8614,16 @@ fn emit_ops_validation_readiness_report(
         );
     }
     Ok(())
+}
+
+fn validation_readiness_input_source(args: &OpsValidationReadinessArgs) -> &'static str {
+    if args.resolved_input().is_some() {
+        ops::validation_readiness::VALIDATION_READINESS_INPUT_SOURCE_SNAPSHOT_FILE
+    } else if !args.receipts.is_empty() {
+        ops::validation_readiness::VALIDATION_READINESS_INPUT_SOURCE_RECEIPTS_ONLY
+    } else {
+        ops::validation_readiness::VALIDATION_READINESS_INPUT_SOURCE_EMPTY_DEFAULT
+    }
 }
 
 fn proof_pipeline_queue_report(
@@ -26163,8 +26195,10 @@ fn build_verify_output_with_details(
 }
 
 fn emit_verify_output(command: &str, payload: &VerifyContractOutput, json: bool) -> i32 {
+    let mut payload = payload.clone();
+    attach_verify_honesty_details(command, &mut payload);
     if json {
-        if let Ok(blob) = serde_json::to_string_pretty(payload) {
+        if let Ok(blob) = serde_json::to_string_pretty(&payload) {
             println!("{blob}");
         } else {
             println!(
@@ -26178,9 +26212,41 @@ fn emit_verify_output(command: &str, payload: &VerifyContractOutput, json: bool)
             "  contract_version={} compat_version={:?} status={} exit_code={}",
             payload.contract_version, payload.compat_version, payload.status, payload.exit_code
         );
+        if command == "verify module" {
+            eprintln!(
+                "  target_kind={VERIFY_MODULE_TARGET_KIND} guest_js=false (crate-src contract, not guest JS)"
+            );
+        }
+        if command == "verify migration" {
+            eprintln!(
+                "  live_rewrite=false source=local_evidence_record (does not re-run migrate rewrite)"
+            );
+        }
     }
 
     payload.exit_code
+}
+
+fn attach_verify_honesty_details(command: &str, payload: &mut VerifyContractOutput) {
+    match command {
+        "verify module" => {
+            payload.details = Some(merge_verify_module_details(
+                payload
+                    .details
+                    .take()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            ));
+        }
+        "verify migration" => {
+            payload.details = Some(merge_verify_migration_details(
+                payload
+                    .details
+                    .take()
+                    .unwrap_or_else(verify_migration_scope_details),
+            ));
+        }
+        _ => {}
+    }
 }
 
 fn verify_compat_error(command: &str, compat_version: u16) -> VerifyContractOutput {
@@ -26233,6 +26299,27 @@ mod verify_contract_tests {
         assert_eq!(
             payload.contract_version,
             frankenengine_node::schema_versions::VERIFY_CLI_CONTRACT
+        );
+    }
+
+    #[test]
+    fn attach_verify_honesty_details_fills_empty_verify_module_payload() {
+        let mut payload =
+            build_verify_output("verify module", None, "ERROR", "error", 2, "missing");
+        attach_verify_honesty_details("verify module", &mut payload);
+        let details = payload.details.expect("module honesty details");
+        assert_eq!(details["guest_js"], false);
+        assert_eq!(details["target_kind"], VERIFY_MODULE_TARGET_KIND);
+    }
+
+    #[test]
+    fn attach_verify_honesty_details_fills_empty_verify_migration_payload() {
+        let mut payload =
+            build_verify_output("verify migration", None, "ERROR", "error", 2, "missing");
+        attach_verify_honesty_details("verify migration", &mut payload);
+        assert_eq!(
+            payload.details.expect("migration honesty details"),
+            verify_migration_scope_details()
         );
     }
 
@@ -27063,6 +27150,8 @@ fn build_verify_migration_record_output(
             "invariant_failures": failures,
             "missing_fields": missing_fields,
             "diff_summary": diff_summary,
+            "live_rewrite": false,
+            "source": "local_evidence_record",
         })),
     )
 }
@@ -27347,15 +27436,56 @@ fn known_runtime_compatibility_issues(
     issues
 }
 
+const VERIFY_MODULE_TARGET_KIND: &str = "franken_node_crate_src";
+
+fn verify_module_scope_details() -> serde_json::Value {
+    serde_json::json!({
+        "target_kind": VERIFY_MODULE_TARGET_KIND,
+        "guest_js": false,
+    })
+}
+
+fn merge_verify_module_details(mut details: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = details.as_object_mut() {
+        object.insert(
+            "target_kind".to_string(),
+            serde_json::json!(VERIFY_MODULE_TARGET_KIND),
+        );
+        object.insert("guest_js".to_string(), serde_json::json!(false));
+    }
+    details
+}
+
+const VERIFY_MIGRATION_SOURCE: &str = "local_evidence_record";
+
+fn verify_migration_scope_details() -> serde_json::Value {
+    serde_json::json!({
+        "live_rewrite": false,
+        "source": VERIFY_MIGRATION_SOURCE,
+    })
+}
+
+fn merge_verify_migration_details(mut details: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = details.as_object_mut() {
+        object.insert("live_rewrite".to_string(), serde_json::json!(false));
+        object.insert(
+            "source".to_string(),
+            serde_json::json!(VERIFY_MIGRATION_SOURCE),
+        );
+    }
+    details
+}
+
 fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
     if args.module_id.trim().is_empty() {
-        let payload = build_verify_output(
+        let payload = build_verify_output_with_details(
             "verify module",
             args.compat_version,
             "ERROR",
             "error",
             2,
             "`verify module` requires a module id",
+            Some(verify_module_scope_details()),
         );
         return emit_verify_output("verify module", &payload, args.json);
     }
@@ -27365,7 +27495,7 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
 
     let normalized = normalize_verify_identifier(&args.module_id);
     if !is_safe_verify_identifier(&normalized) {
-        let payload = build_verify_output(
+        let payload = build_verify_output_with_details(
             "verify module",
             args.compat_version,
             "FAIL",
@@ -27375,6 +27505,7 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
                 "invalid module identifier `{}`: only ASCII letters, digits, `_`, and `-` are allowed",
                 args.module_id
             ),
+            Some(verify_module_scope_details()),
         );
         return emit_verify_output("verify module", &payload, args.json);
     }
@@ -27420,7 +27551,7 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
                     if passed { "pass" } else { "fail" },
                     if passed { 0 } else { 1 },
                     reason,
-                    Some(serde_json::json!({
+                    Some(merge_verify_module_details(serde_json::json!({
                         "module_id": normalized,
                         "exists": true,
                         "source_path": source_path.display().to_string(),
@@ -27432,10 +27563,10 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
                         "deps_satisfied": deps_satisfied,
                         "dependencies": dependencies,
                         "health": if health_declared { "declared" } else { "not_declared" },
-                    })),
+                    }))),
                 )
             }
-            Err(err) => build_verify_output(
+            Err(err) => build_verify_output_with_details(
                 "verify module",
                 args.compat_version,
                 "FAIL",
@@ -27446,6 +27577,7 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
                     normalized,
                     source_path.display()
                 ),
+                Some(verify_module_scope_details()),
             ),
         },
         Ok(None) => build_verify_output_with_details(
@@ -27460,13 +27592,13 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
                 crate_source_root().display(),
                 summarize_expected_ids(VERIFY_MODULE_IDS, 10)
             ),
-            Some(serde_json::json!({
+            Some(merge_verify_module_details(serde_json::json!({
                 "module_id": normalized,
                 "exists": false,
                 "search_root": crate_source_root().display().to_string(),
-            })),
+            }))),
         ),
-        Err(err) => build_verify_output(
+        Err(err) => build_verify_output_with_details(
             "verify module",
             args.compat_version,
             "FAIL",
@@ -27476,6 +27608,7 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
                 "failed resolving module source for `{}`: {err}",
                 args.module_id
             ),
+            Some(verify_module_scope_details()),
         ),
     };
     emit_verify_output("verify module", &payload, args.json)
