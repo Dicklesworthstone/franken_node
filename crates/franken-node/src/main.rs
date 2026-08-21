@@ -29535,7 +29535,11 @@ fn main() -> Result<()> {
             );
 
             if structured_logs_jsonl {
-                eprint!("{}", render_init_structured_logs_jsonl(&report)?);
+                if let Err(err) =
+                    render_init_structured_logs_jsonl(&report).map(|logs| eprint!("{logs}"))
+                {
+                    return init_fail(json, err);
+                }
             }
 
             if json {
@@ -29587,6 +29591,9 @@ fn main() -> Result<()> {
                 emit_run_preflight_report(&preflight, json)?;
             }
             if preflight.verdict.is_blocked() {
+                if json {
+                    fail_closed_after_json();
+                }
                 return Err(run_preflight_block_error(&preflight).into());
             }
 

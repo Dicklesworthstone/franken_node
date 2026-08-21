@@ -1012,6 +1012,11 @@ fn run_json_emits_blocked_preflight_verdict_for_revoked_dependency() {
         "run_preflight_trust_gate"
     );
     assert_eq!(payload["receipt"]["decision"], "denied");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: run blocked by trust preflight"),
+        "--json must not append a second human Error line after the blocked preflight JSON: {stderr}"
+    );
 }
 
 #[test]
