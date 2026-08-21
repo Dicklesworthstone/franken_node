@@ -166,6 +166,9 @@ use frankenengine_node::{
             CapabilityGate, CapabilityProvider, RemoteCap, RemoteCapError, RemoteOperation,
             RemoteScope,
         },
+        revocation_freshness::{
+            SafetyTier, evaluate_default_freshness, snapshot_age_secs_for_path,
+        },
     },
     supply_chain::category_shift::validate_benchmark_thresholds,
     supply_chain::{
@@ -628,6 +631,8 @@ enum TrustViolationKind {
     /// bd-fp1je: the run target itself is under an active Sentinel
     /// quarantine record; blocks in every policy mode until released.
     SentinelQuarantined,
+    /// Product revocation snapshot is older than the profile's SafetyTier window.
+    RevocationStale,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -8297,6 +8302,58 @@ fn proof_workers_restart_report(
     ))
 }
 
+fn execute_bound_proof_worker_restart(report: &mut ops::proof_pipeline::ProofWorkerRestartReport) {
+    if !report.ok {
+        report.restart_executed = false;
+        report.execution_detail = "restart request was denied; nothing was executed".to_string();
+        return;
+    }
+    let Some(executor) = std::env::var_os("FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR") else {
+        report.restart_executed = false;
+        report.ok = false;
+        report.decision = "denied".to_string();
+        report.reason_code = "ERR_PROOF_RESTART_NO_EXECUTOR".to_string();
+        report.execution_detail = "FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR is unset; refusing to pretend a supervisor exists".to_string();
+        return;
+    };
+    let executor = std::path::PathBuf::from(executor);
+    if !executor.is_absolute() || !executor.is_file() {
+        report.restart_executed = false;
+        report.ok = false;
+        report.decision = "denied".to_string();
+        report.reason_code = "ERR_PROOF_RESTART_NO_EXECUTOR".to_string();
+        report.execution_detail = "FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR must be an absolute path to an existing executable".to_string();
+        return;
+    }
+    match std::process::Command::new(&executor)
+        .args(&report.selected_workers)
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            report.restart_executed = true;
+            report.required_action = "executed_via_bound_executor".to_string();
+            report.execution_detail = format!(
+                "executor dispatched {} worker(s)",
+                report.selected_workers.len()
+            );
+        }
+        Ok(output) => {
+            report.restart_executed = false;
+            report.ok = false;
+            report.decision = "denied".to_string();
+            report.reason_code = "ERR_PROOF_RESTART_EXECUTOR_FAILED".to_string();
+            report.execution_detail = format!("executor exited {status}", status = output.status);
+        }
+        Err(err) => {
+            report.restart_executed = false;
+            report.ok = false;
+            report.decision = "denied".to_string();
+            report.reason_code = "ERR_PROOF_RESTART_EXECUTOR_FAILED".to_string();
+            report.execution_detail = format!("failed spawning bound executor: {err}");
+        }
+    }
+}
+
 fn emit_proof_workers_restart_report(
     report: &ops::proof_pipeline::ProofWorkerRestartReport,
     json: bool,
@@ -8322,7 +8379,10 @@ fn handle_proofs_command(command: ProofsCommand) -> Result<()> {
         },
         ProofsCommand::Workers(workers) => match workers {
             ProofWorkersCommand::Restart(args) => {
-                let report = proof_workers_restart_report(&args)?;
+                let mut report = proof_workers_restart_report(&args)?;
+                if args.execute {
+                    execute_bound_proof_worker_restart(&mut report);
+                }
                 let ok = report.ok;
                 let reason_code = report.reason_code.clone();
                 emit_proof_workers_restart_report(&report, args.json)?;
@@ -15931,6 +15991,21 @@ fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
     let provider = CapabilityProvider::try_new(&signing_key)?;
     let scope = RemoteScope::new(operations, endpoint_prefixes);
 
+    let revocation_age_secs =
+        snapshot_age_secs_for_path(&remotecap_cli_state_path(), now_epoch_secs).unwrap_or(0);
+    evaluate_default_freshness(
+        "remotecap-issue",
+        SafetyTier::Dangerous,
+        revocation_age_secs,
+        args.trace_id.clone(),
+        now_epoch_secs.to_string(),
+    )
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "revocation freshness gate denied remotecap issue: {err}. Refresh revocation data before issuing a capability."
+        )
+    })?;
+
     let (cap, audit_event) = provider
         .issue(
             &args.issuer,
@@ -17588,6 +17663,30 @@ fn evaluate_run_trust_preflight(
                         let mut warnings = Vec::new();
                         let mut violations = Vec::new();
                         let mut results = Vec::new();
+
+                        let policy_tier = match policy_mode {
+                            Profile::Strict => SafetyTier::Dangerous,
+                            Profile::Balanced => SafetyTier::Risky,
+                            Profile::LegacyRisky => SafetyTier::Standard,
+                        };
+                        if let Some(age) =
+                            snapshot_age_secs_for_path(&authoritative_registry, now_secs)
+                        {
+                            if let Err(err) = evaluate_default_freshness(
+                                "run-preflight",
+                                policy_tier,
+                                age,
+                                "trace-run-trust-preflight",
+                                now_secs.to_string(),
+                            ) {
+                                violations.push(TrustViolation {
+                                    dependency_name: None,
+                                    extension_id: None,
+                                    kind: TrustViolationKind::RevocationStale,
+                                    detail: format!("revocation freshness gate denied run: {err}"),
+                                });
+                            }
+                        }
 
                         for dependency in dependencies {
                             let dependency_name = dependency.dependency_name.clone();
@@ -30128,6 +30227,31 @@ mod run_trust_gate_tests {
             card.user_facing_risk_assessment
                 .summary
                 .contains("Automatically quarantined")
+        );
+    }
+
+    #[test]
+    fn run_preflight_blocks_when_revocation_snapshot_is_stale_for_strict() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_demo_project(tmp.path(), &[("@acme/auth-guard", "^1.4.2")]);
+        write_fixture_registry_to(tmp.path());
+        let registry_path = tmp.path().join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+        let mtime = frankenengine_node::security::revocation_freshness::unix_mtime_epoch_secs(
+            &registry_path,
+        )
+        .expect("registry mtime");
+        let stale_now = mtime.saturating_add(301);
+        let report = evaluate_run_trust_preflight(
+            tmp.path(),
+            Profile::Strict,
+            &config::Config::for_profile(Profile::Strict),
+            stale_now,
+        )
+        .expect("preflight");
+        assert!(
+            report.verdict.is_blocked(),
+            "strict run must fail-closed on a stale revocation snapshot: {:?}",
+            report.verdict
         );
     }
 
