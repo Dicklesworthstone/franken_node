@@ -1,7 +1,7 @@
 {
   "$schema": "../../docs/DUAL_ORACLE_CLOSE_CONDITION.md#verdict-artifact-schema",
   "dimension": "l1_product",
-  "verdict": "GREEN",
+  "verdict": "RED",
   "owner_track": "10.2",
   "timestamp": "2026-07-12T06:18:26.503971732+00:00",
   "evidence": {

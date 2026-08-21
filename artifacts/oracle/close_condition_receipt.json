@@ -5,17 +5,17 @@
   "L1_product_oracle": {
     "verdict": "RED",
     "source_path": "artifacts/13/compatibility_corpus_results.json",
-    "corpus_version": "compat-corpus-v1-af34cb312425",
+    "corpus_version": "compat-corpus-v2-7b86e9d21758c6d06b8ae0cbc4d79c1b",
     "corpus_provenance": "lockstep-oracle-run",
     "total_test_cases": 560,
-    "passed_test_cases": 14,
-    "failed_test_cases": 546,
+    "passed_test_cases": 484,
+    "failed_test_cases": 76,
     "errored_test_cases": 0,
     "skipped_test_cases": 0,
-    "pass_rate_pct": 2.5,
+    "pass_rate_pct": 86.43,
     "required_pass_rate_pct": 95.0,
     "blocking_findings": [
-      "compatibility corpus pass rate 2.50% is below required 95.00%"
+      "compatibility corpus pass rate 86.43% is below required 95.00%"
     ]
   },
   "L2_engine_boundary_oracle": {

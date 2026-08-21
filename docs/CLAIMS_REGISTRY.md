@@ -37,16 +37,15 @@ Each claim entry uses this structure:
 - **Source**: docs/PRODUCT_CHARTER.md §5 (table row 1); README.md "Comparison" L221+
 - **Claim**: franken-node achieves ≥95% pass rate on a targeted compatibility
   corpus measured by the L1 lockstep oracle against Node and Bun.
-- **Evidence artifact**: `artifacts/compat/corpus_pass.json` (target path; not
-  yet emitted)
+- **Evidence artifact**: `artifacts/compat/corpus_pass.json` (bound to
+  `artifacts/13/compatibility_corpus_results.json`)
 - **Verification command**:
-  `franken-node verify lockstep <corpus> --runtimes node,bun,franken-node --emit-fixtures`
-- **Last verified**: 2026-05-20T00:00:00Z (registry backfill — no signed
-  artifact yet)
-- **Status**: pending
-- **Notes**: `compat-corpus-pass-gate.yml` workflow exists; the workflow's
-  artifact emission step has not produced a checked-in baseline. Tracked by
-  the Track-3 bridge-plan item `[T3-CORPUS]`.
+  `python3 scripts/check_compatibility_corpus_pass_gate.py --json`
+- **Last verified**: 2026-08-20T17:40:36Z
+- **Status**: pending (measured RED: observed_pct=86.43, required=95.0; 484/560)
+- **Notes**: Live lockstep-oracle-run triad as of 2026-08-20. The L1
+  close-condition gate fails closed if this file is GREEN or pending while
+  the corpus is below 95% (bd-reality-20260820-w0fc6.1). Tracked by `bd-28sz`.
 
 ### CLAIM-002: ≥3× migration throughput vs. baseline
 

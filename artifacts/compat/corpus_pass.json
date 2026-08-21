@@ -1,26 +1,29 @@
 {
   "$schema": "../../docs/specs/section_13/bd-28sz_contract.md",
   "gate": "compat_corpus_pass_gate",
-  "verdict": "pending",
-  "timestamp": "2026-05-21T00:00:00Z",
+  "verdict": "RED",
+  "timestamp": "2026-08-20T17:40:36.705661771+00:00",
   "owner_track": "10.2",
   "metric": {
     "name": "targeted_compatibility_corpus_pass_rate",
     "target_pct": 95.0,
-    "observed_pct": null,
-    "passed": null,
-    "details_ref": "scripts/check_compat_corpus_gate.py"
+    "observed_pct": 86.43,
+    "passed": false,
+    "details_ref": "artifacts/13/compatibility_corpus_results.json"
   },
   "families": [],
   "evidence": {
     "lockstep_runner_release_gate": "tests/conformance/lockstep_runner_release_gate.rs",
     "canonical_vector_gate": ".github/workflows/canonical-vector-gate.yml",
-    "compat_corpus_gate_self_test": "scripts/check_compat_corpus_gate.py --self-test"
+    "compat_corpus_gate_self_test": "scripts/check_compat_corpus_gate.py --self-test",
+    "corpus_results": "artifacts/13/compatibility_corpus_results.json",
+    "total_test_cases": 560,
+    "passed_test_cases": 484,
+    "failed_test_cases": 76
   },
   "notes": [
-    "Backfilled 2026-05-21 from the reality-check bridge plan.",
-    "Marked verdict=pending because no signed corpus run with a real observed_pct has been emitted yet. The lockstep harness can produce one with `franken-node verify lockstep <corpus> --runtimes node,bun,franken-node --emit-fixtures`, but Node and Bun must both be installed on the runner.",
-    "Once the first real corpus run lands, populate observed_pct, set passed accordingly, and flip verdict to GREEN/RED. The gate-tier (G0..G4) ratcheting model lives in docs/specs/section_13/bd-28sz_contract.md.",
-    "This file is the README-referenced artifact at docs/CLAIMS_REGISTRY.md::CLAIM-001 and docs/PRODUCT_CHARTER.md §5."
+    "Measured 2026-08-20 from artifacts/13/compatibility_corpus_results.json (lockstep-oracle-run triad).",
+    "observed_pct 86.43 is below required 95.00; verdict is RED until bd-28sz closes.",
+    "This file is bound to the L1 close-condition gate (bd-reality-20260820-w0fc6.1). Declaring GREEN here while the corpus is below the floor is fail-closed."
   ]
 }
