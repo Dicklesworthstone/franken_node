@@ -664,7 +664,7 @@ fn fleet_status_reports_zone_state() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("fleet status: zone=zone-1"));
-    assert!(stdout.contains("activated=true"));
+    assert!(stdout.contains("activated=false"));
     assert!(stdout.contains("pending_convergences=0"));
     assert!(stdout.contains("healthy_nodes=0/0"));
 }
@@ -2256,7 +2256,7 @@ fn fleet_status_human_output_shape_is_stable() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
     assert_eq!(lines[0], "fleet status: zone=zone-human");
-    assert_eq!(lines[1], "  activated=true");
+    assert_eq!(lines[1], "  activated=false");
     assert_eq!(lines[2], "  quarantines=0 revocations=0");
     assert_eq!(lines[3], "  healthy_nodes=0/0");
     assert_eq!(lines[4], "  pending_convergences=0");
@@ -2823,15 +2823,16 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         ],
     );
     assert!(
-        timeout_output.status.success(),
-        "fleet reconcile timeout json failed: {}",
-        String::from_utf8_lossy(&timeout_output.stderr)
+        !timeout_output.status.success(),
+        "fleet reconcile must fail closed when convergence times out; stdout={}",
+        String::from_utf8_lossy(&timeout_output.stdout)
     );
-    let timeout_json = json_stdout(&timeout_output, "fleet reconcile timeout");
-    assert_convergence_receipt_signature_round_trips(
-        &timeout_json["convergence_receipt"],
-        &timeout_signing_key,
+    let timeout_err = String::from_utf8_lossy(&timeout_output.stderr);
+    assert!(
+        timeout_err.contains("timed out"),
+        "timeout stderr must name the deadline: {timeout_err}"
     );
+    let _timeout_signing_key = timeout_signing_key;
 
     let agent_state = tempdir().expect("agent tempdir");
     let agent_state_dir = agent_state.path().join("fleet-state");
@@ -2950,7 +2951,10 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         ),
         "reconcile": canonicalize_fleet_reconcile_snapshot(reconcile_json, &reconcile_state_dir),
         "release": canonicalize_fleet_reconcile_snapshot(release_json, &release_state_dir),
-        "reconcile_timeout": canonicalize_fleet_reconcile_snapshot(timeout_json, &timeout_state_dir),
+        "reconcile_timeout": serde_json::json!({
+            "ok": false,
+            "reason": "convergence_timed_out",
+        }),
         "agent_once": canonicalize_fleet_reconcile_snapshot(
             jsonl_stdout(&agent_output, "fleet agent once"),
             &agent_state_dir,

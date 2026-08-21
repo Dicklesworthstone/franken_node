@@ -9,7 +9,7 @@ expression: "&matrix[\"status_all\"]"
     "active_revocations": 0,
     "healthy_nodes": 1,
     "total_nodes": 2,
-    "activated": true,
+    "activated": false,
     "pending_convergences": [
       {
         "converged_nodes": 1,

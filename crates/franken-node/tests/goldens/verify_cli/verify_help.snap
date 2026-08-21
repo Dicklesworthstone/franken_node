@@ -6,9 +6,9 @@ Compatibility verification across runtimes
 Usage: franken-node verify <COMMAND>
 
 Commands:
-  module            Verify module conformance against the public verifier contract
+  module            Verify a crate-src module contract (not a guest JS module)
   migration         Verify migration compatibility contract output
-  compatibility     Verify compatibility claims for a target profile[PATH]
+  compatibility     Probe node, bun, or franken-node; profile names fail closed
   corpus            Verify corpus schema and coverage contract output
   lockstep          Compare behavior across runtimes in lockstep
   release           Verify release artifact signatures and checksums

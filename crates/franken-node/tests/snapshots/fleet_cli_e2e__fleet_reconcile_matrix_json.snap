@@ -65,7 +65,7 @@ expression: "&matrix[\"reconcile\"]"
     "active_revocations": 0,
     "healthy_nodes": 0,
     "total_nodes": 0,
-    "activated": true,
+    "activated": false,
     "pending_convergences": []
   },
   "state_dir": "[fleet-state]",

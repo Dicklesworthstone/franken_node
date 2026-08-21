@@ -402,7 +402,7 @@ franken-node verify release ./release-dir --key-dir ./trusted-public-keys
 | **Post-incident counterfactual analysis** | `incident bundle --verify` exports a signed, deterministic snapshot of the incident window. `incident counterfactual --policy strict` answers "would tighter policy have blocked this?" with a reproducible diff. |
 | **Public claim verification** | `frankenengine-verifier-sdk` runs outside the producing runtime. Third parties verify receipts, capsules, and counterfactuals without trusting franken-node's own logs. |
 | **Operator triage under disk / build pressure** | `doctor workspace-pressure` analyzes disk, memory, RCH queue depth, and build-fleet state, routes through balanced/conservative/permissive policy, and emits recommended actions. |
-| **Long-running fleet agent on edge nodes** | `fleet agent --zone <z> --poll-interval-secs <n>` runs an embedded control-plane worker that polls for and applies fleet actions with bounded retries. |
+| **Long-running fleet agent on edge nodes** | `fleet agent --zone <z> --poll-interval-secs <n>` polls the local file-transport action log and applies records with bounded retries. It is not a live multi-node heartbeat. |
 | **Compliance archival** | The evidence ledger is append-only, signature-chained, and witness-traced. Incident bundles plus the registry's signed publish records produce a defensible chain of custody. |
 
 ---
@@ -712,13 +712,13 @@ every leaf command available in the current build.
 
 | Command | Purpose |
 |---|---|
-| `franken-node verify module <id>` | Verify module conformance. |
+| `franken-node verify module <id>` | Verify a franken_node crate-src module contract (`api`, `cli`, …). Not guest JS conformance. |
 | `franken-node verify migration <id>` | Verify migration compatibility. |
-| `franken-node verify compatibility <target>` | Verify compatibility claims. |
+| `franken-node verify compatibility <target>` | Probe a concrete runtime (`node`, `bun`, `franken-node`). Profile names (`strict`, `balanced`, `legacy-risky`) fail closed and do not auto-PASS. |
 | `franken-node verify corpus <path>` | Verify corpus schema and coverage. |
 | `franken-node verify lockstep <path>` | Compare behavior across runtimes; default `--runtimes bun,franken-node`; use `--runtimes node,bun,franken-node` only when `node` is a real Node.js binary. `--emit-fixtures` writes divergence fixtures. |
 | `franken-node verify release <path>` | Verify release artifact signatures. **Fails closed without `--key-dir`.** |
-| `franken-node verify transparency-log <path>` | Verify transparency-log integrity. |
+| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. |
 | `franken-node verify recovery-runbook` | Generate recovery runbook from `--readiness-input`. |
 
 ### Trust and supply chain
@@ -727,7 +727,7 @@ every leaf command available in the current build.
 |---|---|
 | `franken-node trust card <id>` | Show trust profile for one extension. |
 | `franken-node trust list` | List extensions; filter by `--risk`, `--revoked`. |
-| `franken-node trust scan [path]` | Populate baseline trust cards from package.json. Flags: `--deep`, `--audit`. |
+| `franken-node trust scan [path]` | Populate baseline trust cards from package.json. Flags: `--deep`, `--audit`, `--json`. |
 | `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. |
 | `franken-node trust revoke <id>` | Revoke artifact or publisher trust. Optional `--receipt-signing-key`, `--receipt-out`. |
 | `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide. `--artifact` required. |
@@ -743,18 +743,18 @@ every leaf command available in the current build.
 |---|---|
 | `franken-node remotecap issue` | Issue signed Ed25519 capability token. Required: `--scope`, `--endpoint`. Optional: `--ttl`, `--issuer`, `--operator-approved`, `--single-use`. |
 | `franken-node remotecap verify` | Verify a capability token without using it. Required: `--token-file`, `--operation`, `--endpoint`. |
-| `franken-node remotecap use` | Use capability token for an operation. Same required flags as `verify`. |
+| `franken-node remotecap use` | Authorize a scoped network operation against a token (dry-run). Does not perform the HTTP request. Same required flags as `verify`. |
 | `franken-node remotecap revoke` | Revoke a capability token. Required: `--token-file`. |
 
 ### Fleet control plane
 
 | Command | Purpose |
 |---|---|
-| `franken-node fleet status` | Show policy and quarantine state across nodes. Flags: `--zone`, `--verbose`, `--json`. |
+| `franken-node fleet status` | Show **local persisted** fleet/quarantine state from file transport. `activated` is not a live multi-node heartbeat. Flags: `--zone`, `--verbose`, `--json`. |
 | `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. |
 | `franken-node fleet release` | Lift quarantine/revocation controls with signed receipts. `--incident` required. |
-| `franken-node fleet reconcile` | Reconcile fleet state with control plane. |
-| `franken-node fleet agent` | Run as an embedded fleet agent. Flags: `--node-id`, `--zone` (required), `--poll-interval-secs`, `--max-cycles`, `--once`. |
+| `franken-node fleet reconcile` | Reconcile local fleet-action log and wait for file-transport convergence. Times out fail-closed (same as `fleet release`). |
+| `franken-node fleet agent` | Poll local file-transport fleet actions (not a live cluster). Flags: `--node-id`, `--zone` (required), `--poll-interval-secs`, `--max-cycles`, `--once`. |
 
 ### Incident replay and forensics
 
@@ -781,7 +781,7 @@ every leaf command available in the current build.
 | `franken-node runtime epoch` | Compare two caller-supplied epoch integers. Does not inspect a live `ControlEpoch`. Flags: `--local-epoch`, `--peer-epoch`. |
 | `franken-node safe-mode enter` | Enter safe mode and persist operator state. Required: `--reason`, `--operator-id`, `--trust-state-hash`. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. |
 | `franken-node safe-mode status` | Inspect persisted safe-mode state. |
-| `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. Required: `--operator-id`, `--confirm`. Pre-exit checks: `--trust-state-consistent`, `--no-unresolved-incidents`, `--evidence-ledger-intact`. |
+| `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. Required: `--operator-id`, `--confirm`. `--trust-state-consistent`, `--no-unresolved-incidents`, and `--evidence-ledger-intact` are **operator attestations**, not independently verified checks. |
 | `franken-node proofs queue status` | Inspect proof queue, proof status, and worker readiness from broker snapshots. |
 | `franken-node proofs workers restart` | Validate and emit a restart-*request* artifact. Does **not** restart a process unless `--execute` is set and `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR` is bound. Required: `--operator-id`, `--operator-role`, `--reason`, `--confirm`. |
 
@@ -789,7 +789,7 @@ every leaf command available in the current build.
 
 | Command | Purpose |
 |---|---|
-| `franken-node ops health-check` | Process and runtime health signals. |
+| `franken-node ops health-check` | Process health from compile-time git SHA, evidence-ledger flush mtime, and persisted session files under `.franken-node/state/sessions` (not a live SessionManager). |
 | `franken-node ops resource-governor` | Advise whether validation should run / defer / deduplicate based on a process snapshot, proof class, RCH queue depth, and target-dir usage. |
 | `franken-node ops validation-readiness` | Report validation broker evidence freshness from receipts. |
 | `franken-node ops validation-closeout` | Render closeout summary from a receipt. Required: `--bead-id`, `--receipt`. |
@@ -813,9 +813,11 @@ every leaf command available in the current build.
 | `franken-node debug trace` | Trace policy evaluation steps. Required: `--policy`, `--input`. |
 
 > [!NOTE]
-> All commands accept `--json` for machine-readable output. Many also
-> accept `--structured-logs-jsonl` to emit stable, event-coded
-> diagnostic events on stderr (see [Structured Logging and
+> Commands that declare `--json` emit machine-readable output. That flag
+> is **not** on every subcommand (for example `trust revoke`,
+> `registry publish`, and `bench run` currently have no `--json`).
+> Many JSON-capable commands also accept `--structured-logs-jsonl` for
+> event-coded diagnostics on stderr (see [Structured Logging and
 > Observability](#structured-logging-and-observability)), and
 > `--trace-id <id>` to correlate log events across processes.
 
@@ -1021,11 +1023,11 @@ cargo build --release -p frankenengine-node --no-default-features --features eng
 ```mermaid
 flowchart TB
     fn["<b>franken_node</b><br/>compatibility, migration, trust UX, ops<br/>verifier SDK, fleet &amp; incident plane"]
-    asu["<b>asupersync</b><br/>control-plane &amp;<br/>transport semantics"]
-    ftui["<b>frankentui</b><br/>operator terminal<br/>surfaces &amp; dashes"]
-    fapi["<b>fastapi_rust</b><br/>control-plane<br/>HTTP / JSON API"]
+    asu["<b>asupersync</b><br/>opt-in transport feature<br/>default is file JSONL"]
+    ftui["<b>frankentui</b><br/>Buffer echo of<br/>preformatted doctor/fleet lines"]
+    fapi["<b>fastapi_rust</b><br/>dev-dep in-process catalog<br/>does not bind a socket"]
     feng["<b>franken_engine</b><br/>native JS / TS runtime<br/>+ extension host"]
-    fsql["<b>frankensqlite</b><br/>audit / replay store"]
+    fsql["<b>frankensqlite</b><br/>in-memory adapter model<br/>not the live durable store"]
 
     fn --> asu
     fn --> ftui
@@ -3303,20 +3305,21 @@ capability issuance, refuses to issue new decisions, and persists the
 entry receipt under `.franken-node/state/`. The runtime continues to
 emit telemetry and accept inspection commands. Exiting requires
 `franken-node safe-mode exit --confirm --operator-id <id>` plus the
-explicit pre-exit checks (`--trust-state-consistent`,
-`--no-unresolved-incidents`, `--evidence-ledger-intact`). The entry/exit
+operator attestations (`--trust-state-consistent`,
+`--no-unresolved-incidents`, `--evidence-ledger-intact`), which are not
+independently verified by the CLI. The entry/exit
 pair forms a signed pair of receipts so the time spent in safe mode is
 auditable after the fact.
 
 ### How do I scale up to many fleet nodes?
 
-Run `franken-node fleet agent --zone <zone>` on each node and configure
-an asupersync transport (or another supported control-plane transport)
-in `franken_node.toml`. Each agent polls for and applies fleet actions
-with bounded retries and writes signed receipts back to the control
-plane. The `convergence_timeout_seconds` setting governs how long
-`fleet release` and `fleet reconcile` wait for the last node to apply
-the action before reporting non-convergence.
+Default fleet state is **local file-transport JSONL**, not a live cluster.
+`franken-node fleet agent --zone <zone>` polls that local action log.
+Multi-node coordination requires enabling `asupersync-transport` (opt-in)
+or another configured control-plane transport in `franken_node.toml`; the
+default binary does not bind asupersync. `convergence_timeout_seconds`
+governs how long `fleet release` and `fleet reconcile` wait for file-log
+convergence before failing closed.
 
 ### What is the difference between `runtime.lanes` and `SchedulerLane`?
 

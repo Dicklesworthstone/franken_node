@@ -64,7 +64,7 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
     "active_revocations": 0,
     "healthy_nodes": 0,
     "total_nodes": 0,
-    "activated": true,
+    "activated": false,
     "pending_convergences": []
   },
   "state_dir": "[fleet-state]",

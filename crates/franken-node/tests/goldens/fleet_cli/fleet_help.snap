@@ -6,11 +6,11 @@ Fleet control plane operations
 Usage: franken-node fleet <COMMAND>
 
 Commands:
-  status     Show policy and quarantine state across nodes
-  describe   Describe one fleet node with zone context and incident state
+  status     Show local persisted fleet and quarantine state (not a live heartbeat)
+  describe   Describe one node from local persisted fleet state
   release    Lift quarantine[PATH] controls with receipts
-  reconcile  Reconcile fleet state for convergence
-  agent      Run as a fleet agent that polls for and applies fleet actions
+  reconcile  Reconcile local fleet-action log; timeout fails closed
+  agent      Poll local file-transport fleet actions (not a live cluster)
   help       Print this message or the help of the given subcommand(s)
 
 Options:

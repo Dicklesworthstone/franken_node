@@ -480,15 +480,15 @@ pub struct SafeModeExitArgs {
     #[arg(long)]
     pub confirm: bool,
 
-    /// Pre-exit check: trust state is consistent.
+    /// Operator attestation that trust state is consistent (not independently verified).
     #[arg(long)]
     pub trust_state_consistent: bool,
 
-    /// Pre-exit check: no unresolved incidents remain.
+    /// Operator attestation that no unresolved incidents remain (not independently verified).
     #[arg(long)]
     pub no_unresolved_incidents: bool,
 
-    /// Pre-exit check: evidence ledger is intact.
+    /// Operator attestation that the evidence ledger is intact (not independently verified).
     #[arg(long)]
     pub evidence_ledger_intact: bool,
 
@@ -770,7 +770,7 @@ pub struct MigrateReportArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum VerifyCommand {
-    /// Verify module conformance against the public verifier contract.
+    /// Verify a crate-src module contract (not a guest JS module).
     #[command(name = "module")]
     Module(VerifyModuleArgs),
 
@@ -778,7 +778,7 @@ pub enum VerifyCommand {
     #[command(name = "migration")]
     Migration(VerifyMigrationArgs),
 
-    /// Verify compatibility claims for a target profile/runtime.
+    /// Probe node, bun, or franken-node; profile names fail closed.
     #[command(name = "compatibility")]
     Compatibility(VerifyCompatibilityArgs),
 
@@ -1099,7 +1099,7 @@ pub enum RemoteCapCommand {
     Issue(RemoteCapIssueArgs),
     /// Verify a capability token without consuming single-use tokens.
     Verify(RemoteCapVerifyArgs),
-    /// Use a capability token for one network-bound operation.
+    /// Authorize a token (dry-run; does not send the HTTP request).
     Use(RemoteCapUseArgs),
     /// Revoke a capability token in the local CLI state.
     Revoke(RemoteCapRevokeArgs),
@@ -1300,19 +1300,19 @@ pub struct TrustCardDiffArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum FleetCommand {
-    /// Show policy and quarantine state across nodes.
+    /// Show local persisted fleet and quarantine state (not a live heartbeat).
     Status(FleetStatusArgs),
 
-    /// Describe one fleet node with zone context and incident state.
+    /// Describe one node from local persisted fleet state.
     Describe(FleetDescribeArgs),
 
     /// Lift quarantine/revocation controls with receipts.
     Release(FleetReleaseArgs),
 
-    /// Reconcile fleet state for convergence.
+    /// Reconcile local fleet-action log; timeout fails closed.
     Reconcile(FleetReconcileArgs),
 
-    /// Run as a fleet agent that polls for and applies fleet actions.
+    /// Poll local file-transport fleet actions (not a live cluster).
     Agent(FleetAgentArgs),
 }
 
@@ -1396,7 +1396,7 @@ pub struct FleetAgentArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum OpsCommand {
-    /// Inspect process/runtime health signals.
+    /// Inspect compile-time git SHA, ledger flush mtime, and persisted session files.
     HealthCheck(OpsHealthCheckArgs),
     /// Advise whether cargo/RCH validation should run, defer, dedupe, or fall back to source-only work.
     #[command(name = "resource-governor")]

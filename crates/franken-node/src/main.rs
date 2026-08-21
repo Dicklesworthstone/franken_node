@@ -92,7 +92,6 @@ mod policy {
     pub mod policy_explainer;
 }
 
-use crate::api::session_auth::{SessionConfig, SessionManager};
 use crate::api::{
     fleet_quarantine::{
         ConvergencePhase, ConvergenceState, DecisionReceipt, DecisionReceiptPayload,
@@ -140,7 +139,6 @@ use clap::Parser;
 use frankenengine_node::api::fleet_quarantine::{
     RevocationScope as PersistedRevocationScope, RevocationSeverity as PersistedRevocationSeverity,
 };
-use frankenengine_node::control_plane::control_epoch::ControlEpoch;
 use frankenengine_node::control_plane::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FLEET_NODE_DIR, FileFleetTransport, FleetAction as PersistedFleetAction,
     FleetActionRecord as PersistedFleetActionRecord, FleetConvergenceReceiptSignature,
@@ -15205,7 +15203,7 @@ mod fleet_command_tests {
         };
 
         let status = fleet_status_from_loaded_state(&loaded, "prod");
-        assert!(status.activated);
+        assert!(!status.activated);
         assert_eq!(status.active_quarantines, 1);
         assert_eq!(status.healthy_nodes, 1);
         assert_eq!(status.total_nodes, 2);
@@ -21856,7 +21854,8 @@ fn fleet_status_from_loaded_state(loaded: &LoadedFleetState, requested_zone: &st
         active_revocations: count_active_fleet_revocations(&loaded.state, requested_zone),
         healthy_nodes,
         total_nodes,
-        activated: true,
+        // File-transport CLI status is not a live fleet API; do not claim activation.
+        activated: false,
         pending_convergences,
     }
 }
@@ -24458,11 +24457,13 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
 
     if entries.is_empty() {
         if args.json {
-            println!("{{\"status\":\"empty\",\"message\":\"No entries in transparency log\"}}");
+            println!(
+                "{{\"status\":\"empty\",\"message\":\"No entries in transparency log; verify fails closed\"}}"
+            );
         } else {
-            eprintln!("Transparency log is empty");
+            eprintln!("Transparency log is empty; verification fails closed");
         }
-        return Ok(0);
+        return Ok(1);
     }
 
     let mut hash_chain_errors = Vec::new();
@@ -24517,14 +24518,22 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
 
     let total_entries = entries.len();
     let total_errors = hash_chain_errors.len() + signature_errors.len();
+    let status = if total_errors != 0 {
+        "invalid"
+    } else if verifying_key.is_none() {
+        "unproven"
+    } else {
+        "valid"
+    };
 
     if args.json {
         let result = serde_json::json!({
-            "status": if total_errors == 0 { "valid" } else { "invalid" },
+            "status": status,
             "total_entries": total_entries,
             "hash_chain_errors": hash_chain_errors,
             "signature_errors": signature_errors,
-            "total_errors": total_errors
+            "total_errors": total_errors,
+            "signatures_verified": verifying_key.is_some(),
         });
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
@@ -24532,6 +24541,7 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
         eprintln!("  Total entries: {}", total_entries);
         eprintln!("  Hash chain errors: {}", hash_chain_errors.len());
         eprintln!("  Signature errors: {}", signature_errors.len());
+        eprintln!("  Signatures verified: {}", verifying_key.is_some());
 
         if !hash_chain_errors.is_empty() {
             eprintln!("\nHash chain errors:");
@@ -24547,14 +24557,18 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
             }
         }
 
-        if total_errors == 0 {
+        if status == "valid" {
             eprintln!("\n✓ Transparency log verification PASSED");
+        } else if status == "unproven" {
+            eprintln!(
+                "\n✗ Transparency log hash chain has no errors, but signatures were not verified (pass --public-key)"
+            );
         } else {
             eprintln!("\n✗ Transparency log verification FAILED");
         }
     }
 
-    Ok(if total_errors == 0 { 0 } else { 1 })
+    Ok(if status == "valid" { 0 } else { 1 })
 }
 
 fn handle_verify_recovery_runbook(args: &VerifyRecoveryRunbookArgs) -> Result<()> {
@@ -29067,6 +29081,12 @@ fn main() -> Result<()> {
                 let convergence = aggregate_convergence(&converged_state.active_incidents);
                 let fleet_signing_material = load_fleet_signing_material()?;
                 let issued_at = Utc::now().to_rfc3339();
+                if timed_out {
+                    anyhow::bail!(
+                        "fleet reconcile convergence timed out after {}s",
+                        converged_state.convergence_timeout_seconds
+                    );
+                }
                 let report = fleet_action_report(
                     Path::new("."),
                     "all",
