@@ -125,7 +125,7 @@ pub enum Command {
     #[command(subcommand, name = "safe-mode")]
     SafeMode(SafeModeCommand),
 
-    /// Proof-pipeline queue and worker operator controls.
+    /// Proof-pipeline snapshot/receipt inspection and restart-request artifacts (not a live broker).
     #[command(subcommand)]
     Proofs(ProofsCommand),
 
@@ -536,7 +536,7 @@ pub enum ProofsCommand {
     #[command(subcommand)]
     Queue(ProofQueueCommand),
 
-    /// Proof worker operator commands.
+    /// Emit a worker restart-request artifact (does not restart a process by default).
     #[command(subcommand)]
     Workers(ProofWorkersCommand),
 }
