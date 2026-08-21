@@ -136,6 +136,17 @@ class TestCompromiseReductionGate(TestCase):
             ),
             result["checks"],
         )
+        event_codes = [event["event_code"] for event in result["events"]]
+        self.assertIn("CRG-003", event_codes)
+        self.assertNotIn("CRG-002", event_codes)
+        self.assertFalse(
+            any(
+                event["event_code"] == "CRG-002"
+                or "gate passed" in str(event.get("message", "")).lower()
+                for event in result["events"]
+            ),
+            result["events"],
+        )
 
     def test_attack_vector_count_below_twenty_fails(self) -> None:
         with TemporaryDirectory(prefix="bd-3cpa-test-") as tmp:

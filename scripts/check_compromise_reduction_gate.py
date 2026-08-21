@@ -585,11 +585,16 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
         }
     )
 
+    gate_passed = all(check["pass"] for check in CHECKS)
     events.append(
         {
-            "event_code": "CRG-002" if threshold_ok else "CRG-003",
+            "event_code": "CRG-002" if gate_passed else "CRG-003",
             "trace_id": trace,
-            "message": "Compromise reduction gate passed." if threshold_ok else "Compromise reduction gate failed.",
+            "message": (
+                "Compromise reduction gate passed."
+                if gate_passed
+                else "Compromise reduction gate failed."
+            ),
         }
     )
 
@@ -785,6 +790,11 @@ def self_test() -> bool:
             check["check"] == "equal attempts (baseline vs franken)" and not check["pass"]
             for check in pass_result["checks"]
         ):
+            return False
+        event_codes = [event["event_code"] for event in pass_result["events"]]
+        if "CRG-002" in event_codes or "CRG-003" not in event_codes:
+            return False
+        if any("gate passed" in str(event.get("message", "")).lower() for event in pass_result["events"]):
             return False
 
         # Perturb one additional hardened compromise; verdict stays FAIL.

@@ -106,8 +106,8 @@ reproducible adversarial campaign.
 ## Structured Event Codes
 
 - `CRG-001`: Compromise metrics computed.
-- `CRG-002`: Compromise reduction gate passed (`>= 10x`).
-- `CRG-003`: Compromise reduction gate failed (`< 10x`).
+- `CRG-002`: Compromise reduction gate passed (all invariants, including `>= 10x` and equal attempts).
+- `CRG-003`: Compromise reduction gate failed (`< 10x`, unequal attempts, or any other fail-closed check).
 - `CRG-004`: Attack vector coverage violation.
 - `CRG-005`: Containment requirement violation.
 - `CRG-006`: Determinism validation executed.
