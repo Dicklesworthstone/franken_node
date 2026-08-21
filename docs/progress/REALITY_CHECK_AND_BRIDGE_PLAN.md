@@ -1,6 +1,7 @@
 # Reality Check and Bridge Plan: franken_node
 
 **Reality check date:** 2026-08-20
+**Follow-up (2026-08-21):** scoreboard bound to corpus 86.43% RED; `run` e2e written; installer/CLI/revocation/10x-equal-attempts honesty landed. 95% corpus still open (`bd-28sz`: 76 remaining, mostly `child_process` 30).
 **Git HEAD:** `f74fa63b7` (`v0.1.0-709-gf74fa63b7`)
 **Shipped GitHub release:** `v0.1.0` (2026-05-29) — **709 commits behind HEAD**
 **PATH binary probed:** `/home/ubuntu/.local/bin/franken-node` (26 MB, BuildID `a3d9be2d`, dated 2026-06-08)

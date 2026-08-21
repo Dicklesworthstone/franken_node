@@ -1448,6 +1448,7 @@ def main(argv: list[str] | None = None):
         "timestamp": timestamp,
         "artifacts_dir": str(artifacts_dir),
         "corpus_results": str(corpus_results_path) if corpus_results_path else None,
+        "consistency_mode": args.consistency_mode,
         "release_mode": args.release_mode,
         "expected_source_revision": (
             {

@@ -400,10 +400,23 @@ def lib_rs_uses_override_gate(lib_rs: Path, override_cfg: str) -> bool:
     return gate in text and "#![cfg(not(test))]" not in text
 
 
+def readme_documents_inline_lane_compiled_out(readme: Path) -> bool:
+    """README must not advertise the 21k inline tests as default cargo test."""
+    if not readme.is_file():
+        return False
+    text = readme.read_text(encoding="utf-8")
+    return (
+        "franken_node_inline_tests" in text
+        and "compiled out" in text.lower()
+        and "default `cargo test`" in text
+    )
+
+
 def preflight(
     cargo_toml: Path,
     lib_rs: Path,
     override_cfg: str = DEFAULT_OVERRIDE_CFG,
+    readme: Path | None = None,
 ) -> dict[str, object]:
     checks = {
         "cargo_lib_test_true": cargo_lib_test_enabled(cargo_toml),
@@ -412,6 +425,10 @@ def preflight(
             cargo_toml, override_cfg
         ),
     }
+    if readme is not None:
+        checks["readme_documents_inline_lane_compiled_out"] = (
+            readme_documents_inline_lane_compiled_out(readme)
+        )
     issues = [name for name, passed in checks.items() if not passed]
     return {
         "schema_version": SCHEMA_PREFLIGHT,
@@ -481,10 +498,21 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("crates/franken-node/src/lib.rs"),
     )
     parser.add_argument("--override-cfg", default=DEFAULT_OVERRIDE_CFG)
+    parser.add_argument(
+        "--readme",
+        type=Path,
+        default=Path("README.md"),
+        help="README path checked for inline-lane honesty during --preflight.",
+    )
     args = parser.parse_args(argv)
 
     if args.preflight:
-        result = preflight(args.cargo_toml, args.lib_rs, args.override_cfg)
+        result = preflight(
+            args.cargo_toml,
+            args.lib_rs,
+            args.override_cfg,
+            readme=args.readme,
+        )
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
         else:

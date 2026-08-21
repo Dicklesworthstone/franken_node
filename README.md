@@ -145,8 +145,8 @@ replay part of the runtime contract, so JS/TS velocity comes with:
 ## Quick Example
 
 ```bash
-# 1) Install
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.sh | bash
+# 1) Install current main (GitHub Latest can lag; see Installation)
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.sh | bash -s -- --method source --node-ref main --engine-ref main
 
 # 2) Bootstrap policy and workspace metadata
 franken-node init --profile balanced --scan
@@ -183,6 +183,23 @@ franken-node incident counterfactual \
 # 10) Inspect fleet posture across a zone
 franken-node fleet status --zone prod-us-east --verbose --json
 ```
+
+### First safe workload (current source)
+
+The one-line installer without `--method source` can install a stale GitHub
+Latest tag that cannot `run` JS. After a source install (or `cargo run -p
+frankenengine-node`):
+
+```bash
+mkdir -p /tmp/fn-first-run && cd /tmp/fn-first-run
+franken-node init --profile balanced --json --out-dir .
+printf '%s\n' 'console.log("hello-from-engine");' > hello.js
+franken-node run ./hello.js --policy balanced
+```
+
+That path is what `default_run_executes_fixture_js_through_embedded_engine_without_degraded_fallback`
+proves. Do not set `FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK`. Do not wrap
+Node as `run`.
 
 ---
 
@@ -759,14 +776,14 @@ every leaf command available in the current build.
 
 | Command | Purpose |
 |---|---|
-| `franken-node runtime lane status` | Emit default lane policy and telemetry snapshot. |
-| `franken-node runtime lane assign <task_class>` | Assign one task class through the default lane scheduler. |
-| `franken-node runtime epoch` | Inspect control epoch compatibility. Flags: `--local-epoch`, `--peer-epoch`. |
+| `franken-node runtime lane status` | Emit the *local default* lane policy and an empty telemetry snapshot (not a running node). |
+| `franken-node runtime lane assign <task_class>` | Assign one task class through a fresh default lane scheduler; the assignment is not persisted to a live node. |
+| `franken-node runtime epoch` | Compare two caller-supplied epoch integers. Does not inspect a live `ControlEpoch`. Flags: `--local-epoch`, `--peer-epoch`. |
 | `franken-node safe-mode enter` | Enter safe mode and persist operator state. Required: `--reason`, `--operator-id`, `--trust-state-hash`. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. |
 | `franken-node safe-mode status` | Inspect persisted safe-mode state. |
 | `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. Required: `--operator-id`, `--confirm`. Pre-exit checks: `--trust-state-consistent`, `--no-unresolved-incidents`, `--evidence-ledger-intact`. |
 | `franken-node proofs queue status` | Inspect proof queue, proof status, and worker readiness from broker snapshots. |
-| `franken-node proofs workers restart` | Validate and emit proof worker restart requests. Required: `--operator-id`, `--operator-role`, `--reason`, `--confirm`. |
+| `franken-node proofs workers restart` | Validate and emit a restart-*request* artifact. Does **not** restart a process unless `--execute` is set and `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR` is bound. Required: `--operator-id`, `--operator-role`, `--reason`, `--confirm`. |
 
 ### Ops and diagnostics
 
@@ -2888,9 +2905,16 @@ PASS if and only if
 ```
 
 No partial success is accepted; an `AMBER` or `RED` verdict on any
-dimension blocks the close condition. Receipts emitted by the close-
-condition oracle are signed and chained into the evidence ledger so a
-later audit can verify exactly which inputs produced the GREEN.
+dimension blocks the close condition **for shipping**. CI section 10.N
+runs `check_oracle_close_condition.py --consistency-mode` so an honest L1
+RED (corpus below 95%) can merge while the ship gate stays fail-closed.
+Declaring L1 GREEN below the corpus floor is still FAIL in both modes.
+See [`docs/DUAL_ORACLE_CLOSE_CONDITION.md`](docs/DUAL_ORACLE_CLOSE_CONDITION.md)
+(Consistency mode vs release/ship mode).
+
+Receipts emitted by the close-condition oracle are signed and chained into
+the evidence ledger so a later audit can verify exactly which inputs
+produced the GREEN.
 
 ---
 

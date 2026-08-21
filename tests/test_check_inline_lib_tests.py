@@ -24,6 +24,7 @@ from check_inline_lib_tests import (  # noqa: E402
     main,
     run_shards,
     preflight,
+    readme_documents_inline_lane_compiled_out,
 )
 
 
@@ -170,6 +171,35 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(franken_node_inline_tests)
             self.assertFalse(result["passed"])
             self.assertIn("lib_rs_override_gate", result["issues"])
 
+    def test_preflight_requires_readme_honesty_when_readme_supplied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cargo_toml = root / "Cargo.toml"
+            lib_rs = root / "lib.rs"
+            readme = root / "README.md"
+            cargo_toml.write_text(
+                """
+[lib]
+test = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(franken_node_inline_tests)'] }
+""",
+                encoding="utf-8",
+            )
+            lib_rs.write_text(
+                "#![forbid(unsafe_code)]\n"
+                "#![cfg(any(not(test), franken_node_inline_tests))]\n",
+                encoding="utf-8",
+            )
+            readme.write_text("21,000 inline tests run on every cargo test\n", encoding="utf-8")
+            result = preflight(cargo_toml, lib_rs, readme=readme)
+            self.assertFalse(result["passed"])
+            self.assertIn("readme_documents_inline_lane_compiled_out", result["issues"])
+
+    def test_repo_readme_documents_inline_lane_compiled_out(self) -> None:
+        self.assertTrue(readme_documents_inline_lane_compiled_out(ROOT / "README.md"))
+
     def test_main_runs_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -189,6 +219,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(franken_node_inline_tests)
                 "#![cfg(any(not(test), franken_node_inline_tests))]\n",
                 encoding="utf-8",
             )
+            readme = root / "README.md"
+            readme.write_text(
+                "inline tests are compiled out of a default `cargo test` "
+                "behind franken_node_inline_tests\n",
+                encoding="utf-8",
+            )
 
             self.assertEqual(
                 main(
@@ -198,6 +234,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(franken_node_inline_tests)
                         str(cargo_toml),
                         "--lib-rs",
                         str(lib_rs),
+                        "--readme",
+                        str(readme),
                     ]
                 ),
                 0,

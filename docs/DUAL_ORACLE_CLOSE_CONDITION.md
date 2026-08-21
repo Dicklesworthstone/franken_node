@@ -276,3 +276,21 @@ The gate is invoked:
 - Before any release candidate is promoted
 - As part of the section-wide verification gate for 10.N
 - During the final program completion check (PLAN 10.N → canonical graph)
+
+### Consistency mode vs release/ship mode
+
+`scripts/check_oracle_close_condition.py` has two operator modes:
+
+| Mode | Flag | What PASS means | Used by |
+|---|---|---|---|
+| **Consistency** | `--consistency-mode` | Artifacts are well-formed and **honest**. L1 may be RED while the compatibility corpus is below 95%. Declaring L1 GREEN below the corpus floor is still FAIL. | Section 10.N CI (`scripts/verify_section_10n.py` 10N-ORACLE) so PRs can merge while the product is not yet shippable |
+| **Release / default** | `--release-mode` or no flag | All required dimensions are GREEN. This is the ship gate. | Tag publication / `franken-node doctor close-condition` |
+
+Consistency mode exists so an honest RED corpus (currently 86.43%) does not
+block every `src` PR. It does **not** waive the 95% floor for shipping.
+`--release-mode` remains fail-closed: L1 GREEN requires the measured
+compatibility corpus at or above 95%, plus proof-carrying effects and lockstep.
+
+Public charter metric: `artifacts/compat/corpus_pass.json` is bound to the
+same observed pass rate. `pending` / backfill notes / GREEN-while-below-floor
+are blocking findings in the Rust close-condition receipt.
