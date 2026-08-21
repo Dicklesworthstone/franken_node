@@ -7994,12 +7994,22 @@ fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> 
 }
 
 fn ops_active_session_count() -> usize {
-    SessionManager::new(
-        SessionConfig::default(),
-        crate::security::epoch_scoped_keys::RootSecret::from_bytes([0x5A; 32]),
-        ControlEpoch::GENESIS,
-    )
-    .active_session_count()
+    persisted_ops_session_count().unwrap_or(0)
+}
+
+fn persisted_ops_session_count() -> Result<usize> {
+    let dir = PathBuf::from(".franken-node/state/sessions");
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut count = 0usize;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 fn latest_evidence_ledger_flush_timestamp(project_root: &Path) -> Result<Option<String>> {

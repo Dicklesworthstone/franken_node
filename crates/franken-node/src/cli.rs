@@ -333,11 +333,11 @@ impl RunArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RuntimeCommand {
-    /// Inspect or exercise lane scheduler state.
+    /// Inspect or exercise the *local default* lane scheduler (not a running node).
     #[command(subcommand)]
     Lane(RuntimeLaneCommand),
 
-    /// Inspect control epoch compatibility.
+    /// Compare two caller-supplied epoch integers (does not inspect a live ControlEpoch).
     Epoch(RuntimeEpochArgs),
 }
 
@@ -545,7 +545,8 @@ pub struct ProofQueueStatusArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ProofWorkersCommand {
-    /// Validate and emit a proof worker restart request.
+    /// Validate operator identity and emit a restart-*request* artifact.
+    /// This does not restart any process.
     Restart(ProofWorkersRestartArgs),
 }
 
@@ -833,7 +834,8 @@ pub struct VerifyReleaseArgs {
 
 #[derive(Debug, Parser)]
 pub struct VerifyModuleArgs {
-    /// Module identifier to verify.
+    /// Product-crate module identifier (`api`, `cli`, `claims`, …).
+    /// This verifies franken_node source-module contracts, not a guest JS module.
     pub module_id: String,
 
     /// Emit structured JSON output.
@@ -861,7 +863,9 @@ pub struct VerifyMigrationArgs {
 
 #[derive(Debug, Parser)]
 pub struct VerifyCompatibilityArgs {
-    /// Compatibility target (for example: runtime name or profile).
+    /// Compatibility target: a runtime name (`node`, `bun`, `franken-node`).
+    /// Runtime profile names (`strict`, `balanced`, `legacy-risky`) are not
+    /// compatibility claims and fail closed.
     pub target: String,
 
     /// Emit structured JSON output.
