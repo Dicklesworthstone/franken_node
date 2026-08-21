@@ -1921,3 +1921,76 @@ fn ops_proof_carrying_evidence_cli_merges_l1_verdict_and_gate_passes() {
         serde_json::to_string_pretty(&receipt["L1_product_oracle"]).expect("render")
     );
 }
+
+#[test]
+fn doctor_close_condition_json_fails_closed_without_signing_key() {
+    let root = TempDir::new().expect("close-condition missing-key workspace");
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .args(["doctor", "close-condition", "--json"])
+        .output()
+        .expect("doctor close-condition --json without signing key");
+    assert!(
+        !output.status.success(),
+        "close-condition --json without a signing key should fail closed"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("close-condition --json missing-key stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/doctor-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "doctor.close-condition");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("receipt export requested but no signing key was configured"),
+        "missing-key --json must name the signing-key failure: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: receipt export requested")
+            && !stderr.contains("Error: failed generating close-condition"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn doctor_json_fails_closed_on_invalid_profile() {
+    let root = TempDir::new().expect("doctor invalid-profile workspace");
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(root.path())
+        .args(["doctor", "--json", "--profile", "not-a-profile"])
+        .output()
+        .expect("doctor --json with invalid profile");
+    assert!(
+        !output.status.success(),
+        "doctor --json with an invalid profile should fail closed"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "doctor --json invalid-profile stdout must be JSON ({err}): status={:?}\nstdout={}\nstderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/doctor-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "doctor");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("invalid profile") || error.contains("not-a-profile"),
+        "invalid-profile --json must name the rejected profile: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error:"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}

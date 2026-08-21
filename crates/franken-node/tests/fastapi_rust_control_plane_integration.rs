@@ -295,6 +295,8 @@ fn proof_queue_status_route_reports_running_proof_and_degraded_worker() {
     assert_eq!(response.data.summary.queue_depth, 1);
     assert_eq!(response.data.summary.degraded_workers, 1);
     assert_eq!(response.data.proof_counts.running, 1);
+    assert!(!response.data.live_queue);
+    assert_eq!(response.data.queue_source, "validation_readiness_snapshot");
 }
 
 #[test]

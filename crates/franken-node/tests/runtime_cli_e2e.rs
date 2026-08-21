@@ -390,6 +390,73 @@ fn runtime_lane_assign_json_fails_closed_for_unknown_class() {
 }
 
 #[test]
+fn runtime_lane_assign_json_fails_closed_when_task_class_missing() {
+    let mut command = franken_node();
+    let output = command
+        .args(["runtime", "lane", "assign", "--json"])
+        .output()
+        .expect("run runtime lane assign --json missing task class");
+    assert!(
+        !output.status.success(),
+        "missing task class --json should fail closed"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("runtime lane assign --json missing task class must be JSON ({err}):\n{stdout}")
+    });
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/runtime-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "runtime.lane.assign");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("task class"),
+        "missing task class --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: runtime lane assign requires a task class"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn runtime_epoch_json_fails_closed_when_local_epoch_flag_missing() {
+    let output = franken_node()
+        .args(["runtime", "epoch", "--json"])
+        .output()
+        .expect("run runtime epoch missing --local-epoch");
+    assert!(
+        !output.status.success(),
+        "runtime epoch --json should fail when --local-epoch is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("runtime epoch --json missing --local-epoch must be JSON ({err}):\n{stdout}")
+    });
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/runtime-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "runtime.epoch");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--local-epoch"),
+        "missing --local-epoch --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --local-epoch"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn runtime_epoch_reports_mismatch_delta() {
     let mut command = franken_node();
     command.args([

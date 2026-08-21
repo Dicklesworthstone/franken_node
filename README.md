@@ -696,121 +696,123 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node init` | Bootstrap config, policy profile, and `.franken-node/state/` workspace metadata. Flags: `--profile`, `--config`, `--out-dir`, `--overwrite`, `--backup-existing`, `--scan`, `--state-dir`, `--no-state`, `--json` (`franken-node/init-cli/v1`; failures `franken-node/init-error-cli/v1`). |
-| `franken-node run <app_path>` | Run app under policy-governed runtime controls. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json` (early failures `franken-node/run-error-cli/v1`; blocked preflight prints JSON then exits 1). External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
-| `franken-node doctor` | Diagnose environment and policy setup. Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json`, `--structured-logs-jsonl`. |
+| `franken-node run <app_path>` | Run app under policy-governed runtime controls. The app path is handler-required so `--json` failures emit `franken-node/run-error-cli/v1` instead of a human clap error. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json` (early failures `franken-node/run-error-cli/v1`; blocked preflight prints JSON then exits 1). External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
+| `franken-node doctor` | Diagnose environment and policy setup. Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json` (early failures `franken-node/doctor-error-cli/v1`), `--structured-logs-jsonl`. |
 
 ### Migration
 
 | Command | Purpose |
 |---|---|
-| `franken-node migrate audit <path>` | Inventory migration risk. Flags: `--format` (json\|text\|sarif), `--json` (alias for `--format json`), `--out`. |
-| `franken-node migrate rewrite <path>` | Apply migration transforms. Flags: `--apply`, `--emit-rollback`, `--json`. |
-| `franken-node migrate validate <path>` | Validate transformed project with conformance checks. Flags: `--format` (json\|text), `--json`, `--static-only`. |
-| `franken-node migrate-report <path>` | Export one-command migration assessment. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`. |
+| `franken-node migrate audit <path>` | Inventory migration risk. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text\|sarif), `--json` (alias for `--format json`), `--out`. |
+| `franken-node migrate rewrite <path>` | Apply migration transforms. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--apply`, `--emit-rollback`, `--json`. |
+| `franken-node migrate validate <path>` | Validate transformed project with conformance checks. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text), `--json`, `--static-only`. |
+| `franken-node migrate-report <path>` | Export one-command migration assessment. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`. |
 
 ### Verification
 
 | Command | Purpose |
 |---|---|
-| `franken-node verify module <id>` | Verify a franken_node crate-src module contract (`api`, `cli`, …). Not guest JS conformance. Flags: `--json`. |
-| `franken-node verify migration <id>` | Verify migration compatibility. Flags: `--json`. |
-| `franken-node verify compatibility <target>` | Probe a concrete runtime (`node`, `bun`, `franken-node`). Profile names (`strict`, `balanced`, `legacy-risky`) fail closed and do not auto-PASS. `node`/`bun` smoke is `console.log`; `franken-node` smoke is fixture JS through the embedded engine (`run --console-only`), not `--version` alone. Flags: `--json`. |
-| `franken-node verify corpus <path>` | Verify corpus schema and coverage. Flags: `--json`. |
-| `franken-node verify lockstep <path>` | Compare behavior across runtimes; default `--runtimes bun,franken-node`; use `--runtimes node,bun,franken-node` only when `node` is a real Node.js binary. `--emit-fixtures` writes divergence fixtures. Flags: `--json` (stderr banner off). |
-| `franken-node verify release <path>` | Verify release artifact signatures. **Fails closed without `--key-dir`.** Flags: `--json` (`franken-node/verify-release-cli/v1`; early failures `franken-node/verify-release-error-cli/v1`). |
-| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`; early failures `franken-node/verify-transparency-log-error-cli/v1`). |
+| `franken-node verify module <id>` | Verify a franken_node crate-src module contract (`api`, `cli`, …). Not guest JS conformance. The module id is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node verify migration <id>` | Verify migration compatibility. The migration id is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node verify compatibility <target>` | Probe a concrete runtime (`node`, `bun`, `franken-node`). Profile names (`strict`, `balanced`, `legacy-risky`) fail closed and do not auto-PASS. The target is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. `node`/`bun` smoke is `console.log`; `franken-node` smoke is fixture JS through the embedded engine (`run --console-only`), not `--version` alone. Flags: `--json`. |
+| `franken-node verify corpus <path>` | Verify corpus schema and coverage. The corpus path is handler-required so `--json` failures emit `verifier-cli-contract-v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node verify lockstep <path>` | Compare behavior across runtimes; default `--runtimes bun,franken-node`; use `--runtimes node,bun,franken-node` only when `node` is a real Node.js binary. The project path is handler-required so `--json` failures emit `franken-node/verify-lockstep-error-cli/v1` instead of a human clap error. `--emit-fixtures` writes divergence fixtures. Flags: `--json` (stderr banner off; early failures `franken-node/verify-lockstep-error-cli/v1`). |
+| `franken-node verify release <path>` | Verify release artifact signatures. The release path and `--key-dir` are handler-required so `--json` failures emit `franken-node/verify-release-error-cli/v1` instead of a human clap error. **Fails closed without `--key-dir`.** Flags: `--json` (`franken-node/verify-release-cli/v1`; early failures `franken-node/verify-release-error-cli/v1`). |
+| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. The log path is handler-required so `--json` failures emit `franken-node/verify-transparency-log-error-cli/v1` instead of a human clap error. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`; early failures `franken-node/verify-transparency-log-error-cli/v1`). |
 | `franken-node verify recovery-runbook` | Generate recovery runbook from `--readiness-input`. Flags: `--json` (early failures `franken-node/verify-recovery-runbook-error-cli/v1`). |
 
 ### Trust and supply chain
 
 | Command | Purpose |
 |---|---|
-| `franken-node trust card <id>` | Show trust profile for one extension. Flags: `--json`. |
+| `franken-node trust card <id>` | Show trust profile for one extension. The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node trust list` | List extensions; filter by `--risk`, `--revoked`. `--json` emits the card list as JSON. |
 | `franken-node trust scan [path]` | Populate baseline trust cards from package.json. Flags: `--deep`, `--audit`, `--json`. |
 | `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. `--json` emits `franken-node/trust-sync-cli/v1`. |
-| `franken-node trust revoke <id>` | Revoke artifact or publisher trust. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card. |
-| `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide. `--artifact` required. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
-| `franken-node trust-card show <id>` | Show full trust card. Flags: `--json`. |
-| `franken-node trust-card export <id> --json` | Export trust card as canonical JSON. |
+| `franken-node trust revoke <id>` | Revoke artifact or publisher trust. The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card; failures `franken-node/trust-error-cli/v1`. |
+| `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide. `--artifact` is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
+| `franken-node trust release` | Lift a sentinel quarantine for one run target. `--app`, `--operator-id`, and `--reason` are handler-required so `--json` failures emit `franken-node/trust-release-error/v1` instead of a human clap error. `--json` emits `franken-node/trust-release-cli/v1`. |
+| `franken-node trust-card show <id>` | Show full trust card. The extension id is handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node trust-card export <id> --json` | Export trust card as canonical JSON. The extension id is handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. |
 | `franken-node trust-card list` | List with filters: `--publisher`, `--query`, `--page`, `--per-page`. Flags: `--json`. |
-| `franken-node trust-card compare <left> <right>` | Compare two trust postures. Flags: `--json`. |
-| `franken-node trust-card diff <id> <left_version> <right_version>` | Diff one card across versions. Flags: `--json`. |
+| `franken-node trust-card compare <left> <right>` | Compare two trust postures. Left and right ids are handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node trust-card diff <id> <left_version> <right_version>` | Diff one card across versions. Id and versions are handler-required so `--json` failures emit `franken-node/trust-card-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 
 ### Remote capabilities
 
 | Command | Purpose |
 |---|---|
-| `franken-node remotecap issue` | Issue signed Ed25519 capability token. Required: `--scope`, `--endpoint`. Optional: `--ttl`, `--issuer`, `--operator-approved`, `--single-use`. Flags: `--json` (`franken-node/remotecap-issue-cli/v1`). |
-| `franken-node remotecap verify` | Verify a capability token without using it. Required: `--token-file`, `--operation`, `--endpoint`. Flags: `--json` (`franken-node/remotecap-verify-cli/v1`). |
-| `franken-node remotecap use` | Authorize a scoped network operation against a token (dry-run). Does not perform the HTTP request. Same required flags as `verify`. Flags: `--json` (`franken-node/remotecap-use-cli/v1`). |
+| `franken-node remotecap issue` | Issue signed Ed25519 capability token. `--scope` and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Optional: `--ttl`, `--issuer`, `--operator-approved`, `--single-use`. Flags: `--json` (`franken-node/remotecap-issue-cli/v1`). |
+| `franken-node remotecap verify` | Verify a capability token without using it. `--token-file`, `--operation`, and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/remotecap-verify-cli/v1`). |
+| `franken-node remotecap use` | Authorize a scoped network operation against a token (dry-run). Does not perform the HTTP request. `--token-file`, `--operation`, and `--endpoint` are handler-required so `--json` failures emit `franken-node/remotecap-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/remotecap-use-cli/v1`). |
 | `franken-node remotecap revoke` | Revoke a capability token. Required: `--token-file`. Flags: `--json` (`franken-node/remotecap-revoke-cli/v1`). |
 
 ### Fleet control plane
 
 | Command | Purpose |
 |---|---|
-| `franken-node fleet status` | Show **local persisted** fleet/quarantine state from file transport. `activated` is not a live multi-node heartbeat. Flags: `--zone`, `--verbose`, `--json`. |
+| `franken-node fleet status` | Show **local persisted** fleet/quarantine state from file transport. `activated` is not a live multi-node heartbeat. Flags: `--zone`, `--verbose`, `--json` (`activated_source=file_transport_not_live`). |
 | `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. Flags: `--zone`, `--json`. |
-| `franken-node fleet release` | Lift quarantine/revocation controls with signed receipts. `--incident` required. Flags: `--json`. |
+| `franken-node fleet release` | Lift quarantine/revocation controls with signed receipts. `--incident` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node fleet reconcile` | Reconcile local fleet-action log and wait for file-transport convergence. Times out fail-closed (same as `fleet release`). Flags: `--json`. |
-| `franken-node fleet agent` | Poll local file-transport fleet actions (not a live cluster). Flags: `--node-id`, `--zone` (required), `--poll-interval-secs`, `--max-cycles`, `--once`, `--json`. |
+| `franken-node fleet agent` | Poll local file-transport fleet actions (not a live cluster). `--zone` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1` instead of a human clap error. Flags: `--node-id`, `--poll-interval-secs`, `--max-cycles`, `--once`, `--json`. |
 
 ### Incident replay and forensics
 
 | Command | Purpose |
 |---|---|
-| `franken-node incident bundle` | Export deterministic incident bundle. `--id` required; reads evidence from `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `--verify` checks the bundle after writing. Optional receipt-signing controls. Flags: `--json`. |
-| `franken-node incident replay` | Replay incident timeline locally. **Fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--json`. |
-| `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. Required: `--policy`. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. Flags: `--json`. |
-| `franken-node incident list` | List recorded incidents. Filter: `--severity`. Flags: `--json`. |
+| `franken-node incident bundle` | Export deterministic incident bundle. `--id` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Reads evidence from `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `--verify` checks the bundle after writing. Optional receipt-signing controls. Flags: `--json`. |
+| `franken-node incident replay` | Replay incident timeline locally. `--bundle` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. **Also fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--json`. |
+| `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. `--bundle` and `--policy` are handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. `--model production` fails closed (engine-split kernel not in this build). Flags: `--json`. |
+| `franken-node incident list` | List recorded incidents. Filter: `--severity`. Flags: `--json` (failures `franken-node/incident-error-cli/v1`). |
 
 ### Long-term verifiability (LTV)
 
 | Command | Purpose |
 |---|---|
-| `franken-node ltv attest` | Build self-contained long-term verification evidence from a signature-verified incident bundle: the bundle (plus, with `--run-report`, its run's host-effect chain hashes) becomes Merkle leaves, the root is re-attested and threshold-cosigned by operator witness keys. **Required: `--bundle`, `--out`, at least one `--witness-key`, and a trust anchor (`--trusted-public-key` or `--key-dir`).** Flags: `--json`. |
-| `franken-node ltv verify-as-of` | Re-verify LTV evidence offline through the verifier SDK (`verify_as_of_ltv`): inclusion, re-attestation chain, witness threshold, and anteriority against `--as-of`. Fails closed (non-zero exit) on any failed assertion. Required: `--evidence`. Flags: `--json`. |
+| `franken-node ltv attest` | Build self-contained long-term verification evidence from a signature-verified incident bundle: the bundle (plus, with `--run-report`, its run's host-effect chain hashes) becomes Merkle leaves, the root is re-attested and threshold-cosigned by operator witness keys. **Required: `--bundle`, `--out`, at least one `--witness-key`, and a trust anchor (`--trusted-public-key` or `--key-dir`).** `--bundle`, `--out`, and `--witness-key` are handler-required so `--json` failures emit `franken-node/ltv-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node ltv verify-as-of` | Re-verify LTV evidence offline through the verifier SDK (`verify_as_of_ltv`): inclusion, re-attestation chain, witness threshold, and anteriority against `--as-of`. Fails closed (non-zero exit) on any failed assertion. Required: `--evidence` and `--witness-anchor`. Both are handler-required so `--json` failures emit `franken-node/ltv-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 
 ### Runtime, safe-mode, and proofs
 
 | Command | Purpose |
 |---|---|
-| `franken-node runtime lane status` | Emit the *local default* lane policy and an empty telemetry snapshot (not a running node). Flags: `--json`. |
-| `franken-node runtime lane assign <task_class>` | Assign one task class through a fresh default lane scheduler; the assignment is not persisted to a live node. Flags: `--json`. |
-| `franken-node runtime epoch` | Compare two caller-supplied epoch integers. Does not inspect a live `ControlEpoch`. Flags: `--local-epoch`, `--peer-epoch`, `--json`. |
-| `franken-node safe-mode enter` | Enter safe mode and persist operator state. Required: `--reason`, `--operator-id`, `--trust-state-hash`. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. Flags: `--json`. |
-| `franken-node safe-mode status` | Inspect persisted safe-mode state. Flags: `--json`. |
-| `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. Required: `--operator-id`, `--confirm`. `--trust-state-consistent`, `--no-unresolved-incidents`, and `--evidence-ledger-intact` are **operator attestations**, not independently verified checks. Flags: `--json`. |
-| `franken-node proofs queue status` | Inspect proof queue, proof status, and worker readiness from broker snapshots. Flags: `--json`. |
-| `franken-node proofs workers restart` | Validate and emit a restart-*request* artifact. Does **not** restart a process unless `--execute` is set and `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR` is bound. Required: `--operator-id`, `--operator-role`, `--reason`, `--confirm`. Flags: `--json`. |
+| `franken-node runtime lane status` | Emit the *local default* lane policy and an empty telemetry snapshot (not a running node). Flags: `--json` (failures `franken-node/runtime-error-cli/v1`). |
+| `franken-node runtime lane assign <task_class>` | Assign one task class through a fresh default lane scheduler; the assignment is not persisted to a live node. Flags: `--json` (failures `franken-node/runtime-error-cli/v1`). |
+| `franken-node runtime epoch` | Compare two caller-supplied epoch integers. Does not inspect a live `ControlEpoch`. `--local-epoch` is handler-required so `--json` failures emit `franken-node/runtime-error-cli/v1` instead of a human clap error. Flags: `--peer-epoch`, `--json`. |
+| `franken-node safe-mode enter` | Enter safe mode and persist operator state. `--reason`, `--operator-id`, and `--trust-state-hash` are handler-required so `--json` failures emit `franken-node/safe-mode-cli/v1` instead of a human clap error. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. Flags: `--json`. |
+| `franken-node safe-mode status` | Inspect persisted safe-mode state. Flags: `--json` (`franken-node/safe-mode-cli/v1`). |
+| `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. `--operator-id` is handler-required so `--json` failures emit `franken-node/safe-mode-cli/v1` instead of a human clap error. Required: `--confirm`. `--trust-state-consistent`, `--no-unresolved-incidents`, and `--evidence-ledger-intact` are **operator attestations**, not independently verified checks. Flags: `--json`. |
+| `franken-node proofs queue status` | Inspect proof queue, proof status, and worker readiness from `--input`/`--receipt` snapshots (`live_queue=false`, `queue_source=validation_readiness_snapshot`). Not a live broker. Flags: `--json`. |
+| `franken-node proofs workers restart` | Validate and emit a restart-*request* artifact. Does **not** restart a process unless `--execute` is set and `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR` is bound. `--operator-id`, `--operator-role`, and `--reason` are handler-required so `--json` failures emit `franken-node/proofs-error-cli/v1` instead of a human clap error. Required: `--confirm`. Flags: `--json`. |
 
 ### Ops and diagnostics
 
 | Command | Purpose |
 |---|---|
-| `franken-node ops health-check` | Process health from compile-time git SHA, evidence-ledger flush mtime, and persisted session files under `.franken-node/state/sessions` (not a live SessionManager). Flags: `--json` (`franken-node/ops-health-check-cli/v1`). |
+| `franken-node ops health-check` | Process health from compile-time git SHA, evidence-ledger flush mtime, and persisted session files under `.franken-node/state/sessions` (not a live SessionManager). Flags: `--json` (`franken-node/ops-health-check-cli/v1`; `session_count_source=persisted_session_files`). |
 | `franken-node ops resource-governor` | Advise whether validation should run / defer / deduplicate based on a process snapshot, proof class, RCH queue depth, and target-dir usage. Flags: `--json`. |
 | `franken-node ops validation-readiness` | Report validation broker evidence freshness from receipts. Flags: `--json`. |
-| `franken-node ops validation-closeout` | Render closeout summary from a receipt. Required: `--bead-id`, `--receipt`. Flags: `--json`. |
+| `franken-node ops validation-closeout` | Render closeout summary from a receipt. `--bead-id` and `--receipt` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node ops config-audit` | Audit active config across profiles. Flags: `--json` (`franken-node/ops-config-audit-cli/v1`). |
 | `franken-node ops metrics` | Emit operator metrics (Prometheus by default). Flags: `--json` (`franken-node/ops-metrics-cli/v1`). |
-| `franken-node doctor workspace-pressure` | Analyze workspace pressure: disk, memory, builds, RCH; routes through balanced/conservative/permissive policy. Flags: `--json`. |
-| `franken-node doctor close-condition` | Emit dual-oracle close-condition receipt. Flags: `--json`. |
-| `franken-node doctor evidence-readiness` | Report evidence readiness from a broker snapshot. Flags: `--json`. |
+| `franken-node ops compat-corpus-run` | Run the committed compatibility corpus through bun + native franken-engine lockstep and write the digest-bound results artifact. `--corpus-root` and `--out` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json` (`franken-node/ops-compat-corpus-run-cli/v1`), `--require-node-reference`. |
+| `franken-node doctor workspace-pressure` | Analyze workspace pressure: disk, memory, builds, RCH; routes through balanced/conservative/permissive policy. Flags: `--json` (failures `franken-node/doctor-error-cli/v1`). |
+| `franken-node doctor close-condition` | Emit dual-oracle close-condition receipt. Flags: `--json` (failures `franken-node/doctor-error-cli/v1`). |
+| `franken-node doctor evidence-readiness` | Report evidence readiness from a broker snapshot. `--input` is handler-required so `--json` failures emit `franken-node/doctor-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 
 ### Registry, bench, debug
 
 | Command | Purpose |
 |---|---|
-| `franken-node registry publish <package>` | Publish signed extension artifact. **Required: `--version` and `--signing-key`** (raw Ed25519 32-byte key; hex, base64, or supported JSON wrapper). Optional: `--max-active-artifacts`. `--json` emits `franken-node/registry-publish-cli/v1`. |
-| `franken-node registry search <query>` | Query extension registry. Filter: `--min-assurance`. `--json` emits `franken-node/registry-search-cli/v1`. |
-| `franken-node registry verify <id>` | Verify a locally stored registry artifact. `--json` emits `franken-node/registry-verify-cli/v1`. |
+| `franken-node registry publish <package>` | Publish signed extension artifact. The package path and `--version` are handler-required so `--json` failures emit `franken-node/registry-publish-error/v1` instead of a human clap error. **Required: `--version` and `--signing-key`** (raw Ed25519 32-byte key; hex, base64, or supported JSON wrapper). Optional: `--max-active-artifacts`. `--json` emits `franken-node/registry-publish-cli/v1`. |
+| `franken-node registry search <query>` | Query extension registry. The query is handler-required so `--json` failures emit `franken-node/registry-error-cli/v1` instead of a human clap error. Filter: `--min-assurance`. `--json` emits `franken-node/registry-search-cli/v1`. |
+| `franken-node registry verify <id>` | Verify a locally stored registry artifact. The extension id is handler-required so `--json` failures emit `franken-node/registry-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/registry-verify-cli/v1`. |
 | `franken-node registry gc` | Archive older registry artifacts. Optional: `--keep`. `--json` emits `franken-node/registry-gc-cli/v1`. |
 | `franken-node bench run` | Run benchmark suite and emit signed report. Flags: `--scenario`, `--fixture-mode`, `--output`, `--json`. The signed report is always JSON on stdout; `--json` suppresses the human summary on stderr. |
-| `franken-node debug explain` | Walk a signed decision-receipt through verification steps. Required: `--receipt`. `--json` emits machine-readable per-step results (`franken-node/debug-explain-cli/v1`; early failures `franken-node/debug-error-cli/v1`). |
-| `franken-node debug evidence` | Inspect verifier evidence artifacts. Required: `--artifact`. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. `--json` emits machine-readable diagnostics (early failures `franken-node/debug-error-cli/v1`). |
-| `franken-node debug trace` | Trace policy evaluation steps. Required: `--policy`, `--input`. `--json` emits machine-readable trace (`franken-node/debug-trace-cli/v1`; early failures `franken-node/debug-error-cli/v1`). |
+| `franken-node debug explain` | Walk a signed decision-receipt through verification steps. `--receipt` is handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--json` emits machine-readable per-step results (`franken-node/debug-explain-cli/v1`). |
+| `franken-node debug evidence` | Inspect verifier evidence artifacts. `--artifact` is handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. `--json` emits machine-readable diagnostics. |
+| `franken-node debug trace` | Trace policy evaluation steps. `--policy` and `--input` are handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--json` emits machine-readable trace (`franken-node/debug-trace-cli/v1`). |
 
 > [!NOTE]
 > Commands that declare `--json` emit machine-readable output. That flag

@@ -264,7 +264,9 @@ impl InitArgs {
 #[derive(Debug, Parser)]
 pub struct RunArgs {
     /// Path to the application entry point.
-    #[arg(value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/run-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub app_path: PathBuf,
 
     /// Policy mode to enforce at runtime.
@@ -316,6 +318,9 @@ pub struct RunArgs {
 impl RunArgs {
     /// Validate all user-supplied path arguments for security.
     pub fn validate_paths(&self) -> Result<()> {
+        if self.app_path.as_os_str().is_empty() {
+            anyhow::bail!("`run` requires an application path");
+        }
         // Validate app_path (required field) - user content
         validate_user_content_pathbuf(&self.app_path)
             .with_context(|| format!("Invalid app_path: {:?}", self.app_path))?;
@@ -369,6 +374,9 @@ pub struct RuntimeLaneStatusArgs {
 #[derive(Debug, Parser)]
 pub struct RuntimeLaneAssignArgs {
     /// Task class to assign, for example epoch_transition or log_rotation.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/runtime-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub task_class: String,
 
     /// Deterministic timestamp override in milliseconds.
@@ -387,8 +395,10 @@ pub struct RuntimeLaneAssignArgs {
 #[derive(Debug, Parser)]
 pub struct RuntimeEpochArgs {
     /// Local control epoch.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/runtime-error-cli/v1` instead of a human clap error.
     #[arg(long)]
-    pub local_epoch: u64,
+    pub local_epoch: Option<u64>,
 
     /// Peer control epoch to compare against.
     #[arg(long)]
@@ -416,15 +426,21 @@ pub enum SafeModeCommand {
 #[derive(Debug, Parser)]
 pub struct SafeModeEnterArgs {
     /// Entry reason: explicit-flag, environment-variable, config-field, trust-corruption, crash-loop, or epoch-mismatch.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/safe-mode-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub reason: String,
 
     /// Operator identity requesting the transition.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/safe-mode-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub operator_id: String,
 
     /// Trust state hash recorded in the safe-mode entry receipt.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/safe-mode-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub trust_state_hash: String,
 
     /// Inconsistency found during trust re-verification. Repeat for multiple findings.
@@ -478,7 +494,9 @@ pub struct SafeModeStatusArgs {
 #[derive(Debug, Parser)]
 pub struct SafeModeExitArgs {
     /// Operator identity requesting safe-mode exit.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/safe-mode-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub operator_id: String,
 
     /// Explicit operator confirmation for the transition.
@@ -575,10 +593,14 @@ pub struct ProofWorkersRestartArgs {
     pub receipts: Vec<PathBuf>,
 
     /// Operator identity requesting the restart.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/proofs-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub operator_id: String,
 
     /// Operator role; repeat as needed. Restart requires `pipeline_admin`.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/proofs-error-cli/v1` instead of a human clap error.
     #[arg(long = "operator-role")]
     pub operator_roles: Vec<String>,
 
@@ -591,7 +613,9 @@ pub struct ProofWorkersRestartArgs {
     pub all_workers: bool,
 
     /// Operator-supplied restart reason.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/proofs-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub reason: String,
 
     /// Explicit confirmation that the restart request should be emitted.
@@ -635,9 +659,11 @@ impl clap::Args for MigrateAuditArgs {
         cmd.arg(
             clap::Arg::new("project_path")
                 .value_name("PROJECT_PATH")
-                .help("Path to the project to audit.")
-                .value_parser(clap::value_parser!(PathBuf))
-                .required(true),
+                .help(
+                    "Path to the project to audit. Required by the handler (not clap) so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error.",
+                )
+                .required(false)
+                .value_parser(clap::value_parser!(PathBuf)),
         )
         .arg(
             clap::Arg::new("format")
@@ -672,8 +698,8 @@ impl clap::FromArgMatches for MigrateAuditArgs {
     fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
         let project_path = matches
             .get_one::<PathBuf>("project_path")
-            .expect("project_path is required by clap")
-            .clone();
+            .cloned()
+            .unwrap_or_default();
         let mut format = matches
             .get_one::<String>("format")
             .expect("format has a default value")
@@ -742,6 +768,9 @@ fn validate_migrate_audit_output(format: &str, out: Option<&PathBuf>) -> Result<
 #[derive(Debug, Parser)]
 pub struct MigrateRewriteArgs {
     /// Path to the project to rewrite.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/migrate-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub project_path: PathBuf,
 
     /// Apply rewrites (without this flag, dry-run mode).
@@ -760,6 +789,9 @@ pub struct MigrateRewriteArgs {
 #[derive(Debug, Parser)]
 pub struct MigrateValidateArgs {
     /// Path to the project to validate.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/migrate-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub project_path: PathBuf,
 
     /// Output format: json or text.
@@ -782,6 +814,9 @@ pub struct MigrateValidateArgs {
 #[derive(Debug, Parser)]
 pub struct MigrateReportArgs {
     /// Path to the project to assess.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/migrate-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub project_path: PathBuf,
 
     /// Output format: json or html.
@@ -839,6 +874,9 @@ pub enum VerifyCommand {
 #[derive(Debug, Parser)]
 pub struct VerifyLockstepArgs {
     /// Path to the project to verify.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/verify-lockstep-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub project_path: PathBuf,
 
     /// Comma-separated list of runtimes to compare.
@@ -855,6 +893,8 @@ pub struct VerifyLockstepArgs {
 
     /// Suppress the human stderr banner. The lockstep oracle report is
     /// always JSON on stdout; `--json` makes stderr stay empty on success.
+    /// Early failures emit `franken-node/verify-lockstep-error-cli/v1`
+    /// then exit 1.
     #[arg(long)]
     pub json: bool,
 }
@@ -862,10 +902,15 @@ pub struct VerifyLockstepArgs {
 #[derive(Debug, Parser)]
 pub struct VerifyReleaseArgs {
     /// Path to the release directory containing artifacts, .sig files, and SHA256SUMS manifest.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/verify-release-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub release_path: PathBuf,
 
     /// Directory containing trusted public keys (current and rotated). Required: no built-in trust roots are accepted.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/verify-release-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub key_dir: PathBuf,
 
     /// Emit schema-versioned JSON (`franken-node/verify-release-cli/v1`)
@@ -879,6 +924,9 @@ pub struct VerifyReleaseArgs {
 pub struct VerifyModuleArgs {
     /// Product-crate module identifier (`api`, `cli`, `claims`, …).
     /// This verifies franken_node source-module contracts, not a guest JS module.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `verifier-cli-contract-v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub module_id: String,
 
     /// Emit structured JSON output.
@@ -893,6 +941,9 @@ pub struct VerifyModuleArgs {
 #[derive(Debug, Parser)]
 pub struct VerifyMigrationArgs {
     /// Migration identifier to verify.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `verifier-cli-contract-v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub migration_id: String,
 
     /// Emit structured JSON output.
@@ -909,6 +960,9 @@ pub struct VerifyCompatibilityArgs {
     /// Compatibility target: a runtime name (`node`, `bun`, `franken-node`).
     /// Runtime profile names (`strict`, `balanced`, `legacy-risky`) are not
     /// compatibility claims and fail closed.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `verifier-cli-contract-v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub target: String,
 
     /// Emit structured JSON output.
@@ -923,6 +977,9 @@ pub struct VerifyCompatibilityArgs {
 #[derive(Debug, Parser)]
 pub struct VerifyCorpusArgs {
     /// Path to the corpus manifest to verify.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `verifier-cli-contract-v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub corpus_path: PathBuf,
 
     /// Validation kind: auto, corpus-manifest, or compatibility-report.
@@ -941,7 +998,9 @@ pub struct VerifyCorpusArgs {
 #[derive(Debug, Parser)]
 pub struct VerifyTransparencyLogArgs {
     /// Path to the transparency log file to verify.
-    #[arg(value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/verify-transparency-log-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub log_path: PathBuf,
 
     /// Public key file for signature verification.
@@ -1029,18 +1088,26 @@ pub enum TrustCommand {
 #[derive(Debug, Parser)]
 pub struct TrustReleaseArgs {
     /// Path to the previously quarantined run target (entry file).
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-release-error/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub app: PathBuf,
 
     /// Operator identity recorded on the release.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-release-error/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub operator_id: String,
 
     /// Remediation rationale recorded on the release.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-release-error/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub reason: String,
 
-    /// Emit the release report as JSON on stdout.
+    /// Emit the release report as JSON on stdout
+    /// (`franken-node/trust-release-cli/v1`). Early failures emit
+    /// `franken-node/trust-release-error/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
 }
@@ -1048,6 +1115,9 @@ pub struct TrustReleaseArgs {
 #[derive(Debug, Parser)]
 pub struct TrustCardArgs {
     /// Extension identifier (e.g., npm:@example/plugin).
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub extension_id: String,
 
     /// Emit structured JSON output.
@@ -1091,6 +1161,9 @@ pub struct TrustScanArgs {
 #[derive(Debug, Parser)]
 pub struct TrustRevokeArgs {
     /// Extension identifier with optional version.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub extension_id: String,
 
     /// Emit the revoked trust card as JSON instead of the human card dump.
@@ -1113,7 +1186,9 @@ pub struct TrustRevokeArgs {
 #[derive(Debug, Parser)]
 pub struct TrustQuarantineArgs {
     /// Artifact hash to quarantine.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub artifact: String,
 
     /// Emit a schema-versioned JSON report instead of the human card dump.
@@ -1162,12 +1237,16 @@ pub enum RemoteCapCommand {
 pub struct RemoteCapIssueArgs {
     /// Comma-separated operation scope.
     /// Example: `network_egress,federation_sync,telemetry_export`
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub scope: String,
 
     /// Allowed endpoint prefix (repeatable).
     /// Example: `--endpoint https:// --endpoint federation://`
-    #[arg(long = "endpoint", required = true)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
+    #[arg(long = "endpoint")]
     pub endpoint_prefixes: Vec<String>,
 
     /// Capability token TTL (`s`, `m`, `h`, `d` suffix supported).
@@ -1199,15 +1278,21 @@ pub struct RemoteCapIssueArgs {
 #[derive(Debug, Parser)]
 pub struct RemoteCapUseArgs {
     /// Path to a JSON capability token or full `remotecap issue --json` response.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub token_file: PathBuf,
 
     /// Operation being authorized.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub operation: String,
 
     /// Endpoint being authorized.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub endpoint: String,
 
     /// Trace correlation ID for audit logs.
@@ -1222,15 +1307,21 @@ pub struct RemoteCapUseArgs {
 #[derive(Debug, Parser)]
 pub struct RemoteCapVerifyArgs {
     /// Path to a JSON capability token or full `remotecap issue --json` response.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub token_file: PathBuf,
 
     /// Operation being verified.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub operation: String,
 
     /// Endpoint being verified.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub endpoint: String,
 
     /// Trace correlation ID for audit logs.
@@ -1245,7 +1336,9 @@ pub struct RemoteCapVerifyArgs {
 #[derive(Debug, Parser)]
 pub struct RemoteCapRevokeArgs {
     /// Path to a JSON capability token or full `remotecap issue --json` response.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/remotecap-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub token_file: PathBuf,
 
     /// Trace correlation ID for audit logs.
@@ -1280,6 +1373,9 @@ pub enum TrustCardCommand {
 #[derive(Debug, Parser)]
 pub struct TrustCardShowArgs {
     /// Extension identifier (e.g., npm:@example/plugin).
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-card-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub extension_id: String,
 
     /// Emit the trust card as JSON, or `franken-node/trust-card-error-cli/v1`
@@ -1291,6 +1387,9 @@ pub struct TrustCardShowArgs {
 #[derive(Debug, Parser)]
 pub struct TrustCardExportArgs {
     /// Extension identifier (e.g., npm:@example/plugin).
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-card-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub extension_id: String,
 
     /// Required explicit JSON export flag for machine pipelines.
@@ -1326,9 +1425,15 @@ pub struct TrustCardListArgs {
 #[derive(Debug, Parser)]
 pub struct TrustCardCompareArgs {
     /// Left extension identifier.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-card-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub left_extension_id: String,
 
     /// Right extension identifier.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-card-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub right_extension_id: String,
 
     /// Emit the comparison as JSON, or `franken-node/trust-card-error-cli/v1`
@@ -1340,13 +1445,20 @@ pub struct TrustCardCompareArgs {
 #[derive(Debug, Parser)]
 pub struct TrustCardDiffArgs {
     /// Extension identifier.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-card-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub extension_id: String,
 
     /// Left trust-card version.
-    pub left_version: u64,
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-card-error-cli/v1` instead of a human clap error.
+    pub left_version: Option<u64>,
 
     /// Right trust-card version.
-    pub right_version: u64,
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/trust-card-error-cli/v1` instead of a human clap error.
+    pub right_version: Option<u64>,
 
     /// Emit the version diff as JSON, or `franken-node/trust-card-error-cli/v1`
     /// then exit 1 without a second human `Error:` line.
@@ -1394,6 +1506,9 @@ pub struct FleetStatusArgs {
 #[derive(Debug, Parser)]
 pub struct FleetDescribeArgs {
     /// Node identifier to inspect.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/fleet-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub node_id: String,
 
     /// Optional zone filter to disambiguate duplicate node IDs.
@@ -1409,7 +1524,9 @@ pub struct FleetDescribeArgs {
 #[derive(Debug, Parser)]
 pub struct FleetReleaseArgs {
     /// Incident ID to release.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/fleet-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub incident: String,
 
     /// Emit JSON instead of human-readable output.
@@ -1434,7 +1551,9 @@ pub struct FleetAgentArgs {
     pub node_id: Option<String>,
 
     /// Zone to poll for fleet actions.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/fleet-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub zone: String,
 
     /// Poll interval in seconds.
@@ -1593,11 +1712,15 @@ pub struct OpsValidationCloseoutArgs {
     pub trace_id: String,
 
     /// Bead ID that the receipt is intended to close or update.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/ops-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub bead_id: String,
 
     /// Validation broker receipt JSON path.
-    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/ops-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub receipt: PathBuf,
 
     /// Optional swarm scheduler decision JSON to include in closeout evidence.
@@ -1675,13 +1798,17 @@ pub struct OpsCompatCorpusRunArgs {
 
     /// Corpus root containing one compat-corpus-fixture-v1 directory per
     /// Node API family.
-    #[arg(long = "corpus-root", value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/ops-error-cli/v1` instead of a human clap error.
+    #[arg(long = "corpus-root", default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub corpus_root: PathBuf,
 
     /// Write the compatibility-corpus results artifact to this path. When
     /// the file already exists its identity, thresholds, event-code, and
     /// proof-carrying-effects blocks are carried forward.
-    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/ops-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub out: PathBuf,
 
     /// Per-case, per-runtime-leg timeout in seconds. A leg that exceeds it
@@ -1734,7 +1861,9 @@ pub enum IncidentCommand {
 #[derive(Debug, Parser)]
 pub struct IncidentBundleArgs {
     /// Incident ID to bundle.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/incident-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub id: String,
 
     /// Optional authoritative incident evidence package path.
@@ -1766,7 +1895,9 @@ pub struct IncidentBundleArgs {
 #[derive(Debug, Parser)]
 pub struct IncidentReplayArgs {
     /// Path to incident bundle file.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/incident-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub bundle: PathBuf,
 
     /// Trusted Ed25519 public key file for replay bundle signature verification.
@@ -1800,7 +1931,9 @@ pub struct IncidentReplayArgs {
 #[derive(Debug, Parser)]
 pub struct IncidentCounterfactualArgs {
     /// Path to incident bundle file.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/incident-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub bundle: PathBuf,
 
     /// Trusted Ed25519 public key file for replay bundle signature verification.
@@ -1812,7 +1945,9 @@ pub struct IncidentCounterfactualArgs {
     pub trusted_key_dir: Option<PathBuf>,
 
     /// Policy to simulate.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/incident-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub policy: String,
 
     /// Decision model used to evaluate the recorded timeline: `synthetic` (a
@@ -1871,7 +2006,9 @@ pub enum LtvCommand {
 #[derive(Debug, Parser)]
 pub struct LtvAttestArgs {
     /// Path to the incident bundle whose long-term anteriority is attested.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/ltv-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub bundle: PathBuf,
 
     /// Trusted Ed25519 public key file for bundle signature verification.
@@ -1889,7 +2026,9 @@ pub struct LtvAttestArgs {
 
     /// Witness signing key file (raw Ed25519 32-byte key; hex, base64, or
     /// supported JSON wrapper). Repeat once per independent witness.
-    #[arg(long = "witness-key", required = true)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/ltv-error-cli/v1` instead of a human clap error.
+    #[arg(long = "witness-key")]
     pub witness_keys: Vec<PathBuf>,
 
     /// Minimum number of valid witness signatures the receipt requires
@@ -1910,10 +2049,14 @@ pub struct LtvAttestArgs {
     pub as_of: Option<u64>,
 
     /// Output path for the produced evidence JSON.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/ltv-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub out: PathBuf,
 
-    /// Emit the attestation summary as JSON on stdout.
+    /// Emit the attestation summary as JSON on stdout
+    /// (`franken-node/ltv-attest-cli/v1`). Early failures emit
+    /// `franken-node/ltv-error-cli/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
 
@@ -1930,7 +2073,9 @@ pub struct LtvAttestArgs {
 #[derive(Debug, Parser)]
 pub struct LtvVerifyAsOfArgs {
     /// Path to the evidence JSON produced by `ltv attest`.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/ltv-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub evidence: PathBuf,
 
     /// Path to the operator's witness trust anchor JSON.
@@ -1942,7 +2087,9 @@ pub struct LtvVerifyAsOfArgs {
     /// any forger can choose, so proof-of-anteriority would be unforgeable in
     /// name only. There are no built-in witness roots, exactly as `verify
     /// release` and `incident replay` have no built-in trust roots.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/ltv-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub witness_anchor: PathBuf,
 
     /// Override the evidence's verification target time (unix seconds).
@@ -1953,7 +2100,9 @@ pub struct LtvVerifyAsOfArgs {
     #[arg(long, default_value = "verifier://franken-node-ltv-cli")]
     pub verifier_identity: String,
 
-    /// Emit the verification result as JSON on stdout.
+    /// Emit the verification result as JSON on stdout
+    /// (`franken-node/ltv-verify-as-of-cli/v1`). Early failures emit
+    /// `franken-node/ltv-error-cli/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
 
@@ -1990,10 +2139,15 @@ pub enum RegistryCommand {
 #[command(disable_version_flag = true)]
 pub struct RegistryPublishArgs {
     /// Path to extension package to publish.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/registry-publish-error/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub package_path: PathBuf,
 
     /// Authoritative extension version for this package.
-    #[arg(long)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/registry-publish-error/v1` instead of a human clap error.
+    #[arg(long, default_value = "")]
     pub version: String,
 
     /// Path to the operator-managed Ed25519 signing key file.
@@ -2012,6 +2166,9 @@ pub struct RegistryPublishArgs {
 #[derive(Debug, Parser)]
 pub struct RegistrySearchArgs {
     /// Search query.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/registry-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub query: String,
 
     /// Minimum assurance level (1-5).
@@ -2026,6 +2183,9 @@ pub struct RegistrySearchArgs {
 #[derive(Debug, Parser)]
 pub struct RegistryVerifyArgs {
     /// Extension identifier to verify from the local registry artifact store.
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/registry-error-cli/v1` instead of a human clap error.
+    #[arg(default_value = "")]
     pub extension_id: String,
 
     /// Emit a schema-versioned JSON report instead of the human one-liner.
@@ -2108,7 +2268,9 @@ pub enum DebugEvidenceKind {
 #[derive(Debug, Parser)]
 pub struct DebugEvidenceArgs {
     /// Path to the evidence artifact JSON on the operator's local filesystem.
-    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/debug-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub artifact: PathBuf,
 
     /// Evidence artifact kind. `auto` detects the supported JSON shapes.
@@ -2130,7 +2292,9 @@ pub struct DebugExplainArgs {
     /// Path to a signed decision-receipt JSON artifact on the operator's
     /// local filesystem. Validated against path traversal before being
     /// read.
-    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/debug-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub receipt: PathBuf,
 
     /// Hex-encoded ed25519 public key (32 raw bytes → 64 hex chars) that
@@ -2189,7 +2353,9 @@ pub struct DoctorCloseConditionArgs {
 #[derive(Debug, Parser)]
 pub struct DoctorEvidenceReadinessArgs {
     /// Evidence-readiness snapshot JSON exported by operator tooling.
-    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/doctor-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub input: PathBuf,
 
     /// Emit evidence-readiness report JSON to stdout.
@@ -2233,9 +2399,6 @@ pub struct DoctorProcessSpawnReadinessArgs {
 
 #[derive(Debug, Parser)]
 pub struct DoctorArgs {
-    #[command(subcommand)]
-    pub command: Option<DoctorCommand>,
-
     /// Config file override (default discovery is used when omitted).
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -2252,6 +2415,8 @@ pub struct DoctorArgs {
     pub policy_activation_input: Option<PathBuf>,
 
     /// Emit machine-readable JSON (`franken-node/doctor-cli/v1`).
+    /// Early failures (invalid `--profile`, config resolve) emit
+    /// `franken-node/doctor-error-cli/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
 
@@ -2266,6 +2431,11 @@ pub struct DoctorArgs {
     /// Show verbose diagnostic output.
     #[arg(long)]
     pub verbose: bool,
+
+    /// Optional doctor leaf (`close-condition`, `evidence-readiness`, …).
+    /// Keep last so parent `--json` / `--profile` bind on `doctor` itself.
+    #[command(subcommand)]
+    pub command: Option<DoctorCommand>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2346,11 +2516,15 @@ pub fn load_doctor_policy_activation_input(
 #[derive(Debug, Parser)]
 pub struct DebugTraceArgs {
     /// Path to policy file to evaluate.
-    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/debug-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub policy: PathBuf,
 
     /// Path to input fixture for policy evaluation.
-    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    /// Required by the handler (not clap) so `--json` failures emit
+    /// `franken-node/debug-error-cli/v1` instead of a human clap error.
+    #[arg(long, default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub input: PathBuf,
 
     /// Emit schema-versioned JSON (`franken-node/debug-trace-cli/v1`)
@@ -2590,6 +2764,18 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn compat_corpus_run_parses_without_corpus_root_or_out_so_json_can_fail_closed() {
+        let cli = parse(&["franken-node", "ops", "compat-corpus-run", "--json"])
+            .expect("missing --corpus-root/--out must parse so the handler can emit JSON");
+        let Command::Ops(OpsCommand::CompatCorpusRun(args)) = cli.command else {
+            panic!("expected compat-corpus-run command");
+        };
+        assert!(args.json);
+        assert!(args.corpus_root.as_os_str().is_empty());
+        assert!(args.out.as_os_str().is_empty());
+    }
+
+    #[test]
     fn unknown_top_level_subcommand_is_rejected() {
         let err = parse(&["franken-node", "launch"]).expect_err("unknown command should fail");
 
@@ -2613,41 +2799,128 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
-    fn trust_revoke_requires_extension_id() {
-        let err = parse(&[
+    fn trust_card_parses_without_extension_id_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "trust", "card", "--json"])
+                .expect("missing extension id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Trust(TrustCommand::Card(args)) => {
+                assert!(args.json);
+                assert!(args.extension_id.is_empty());
+            }
+            other => panic!("expected trust card, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trust_revoke_parses_without_extension_id_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "trust", "revoke", "--json"])
+                .expect("missing extension id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Trust(TrustCommand::Revoke(args)) => {
+                assert!(args.json);
+                assert!(args.extension_id.is_empty());
+            }
+            other => panic!("expected trust revoke, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trust_release_parses_without_app_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "trust", "release", "--json"])
+                .expect("missing --app must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Trust(TrustCommand::Release(args)) => {
+                assert!(args.json);
+                assert!(args.app.as_os_str().is_empty());
+                assert!(args.operator_id.is_empty());
+                assert!(args.reason.is_empty());
+            }
+            other => panic!("expected trust release, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trust_quarantine_parses_without_artifact_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
             "franken-node",
             "trust",
-            "revoke",
-            "--receipt-out",
-            "receipt.json",
+            "quarantine",
+            "--json",
         ])
-        .expect_err("trust revoke should require an extension id");
-
-        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        .expect("missing --artifact must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Trust(TrustCommand::Quarantine(args)) => {
+                assert!(args.json);
+                assert!(args.artifact.is_empty());
+            }
+            other => panic!("expected trust quarantine, got {other:?}"),
+        }
     }
 
     #[test]
-    fn incident_replay_requires_bundle() {
-        let err = parse(&["franken-node", "incident", "replay"])
-            .expect_err("incident replay should require a bundle path");
-
-        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    fn incident_replay_parses_without_bundle_so_json_can_fail_closed() -> Result<(), String> {
+        let cli = parse(&["franken-node", "incident", "replay", "--json"])
+            .map_err(|err| err.to_string())?;
+        match cli.command {
+            Command::Incident(IncidentCommand::Replay(args)) => {
+                assert!(args.json);
+                assert!(args.bundle.as_os_str().is_empty());
+            }
+            other => return Err(format!("expected incident replay, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
-    fn fleet_agent_requires_zone() {
-        let err = parse(&["franken-node", "fleet", "agent", "--node-id", "node-7"])
-            .expect_err("fleet agent should require a polling zone");
-
-        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    fn fleet_agent_parses_without_zone_so_json_can_fail_closed() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "fleet",
+            "agent",
+            "--node-id",
+            "node-7",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+        match cli.command {
+            Command::Fleet(FleetCommand::Agent(args)) => {
+                assert!(args.json);
+                assert!(args.zone.is_empty());
+            }
+            other => return Err(format!("expected fleet agent, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
-    fn registry_search_requires_query() {
-        let err = parse(&["franken-node", "registry", "search"])
-            .expect_err("registry search query should be required");
+    fn registry_search_parses_without_query_so_json_can_fail_closed() -> Result<(), String> {
+        let cli = parse(&["franken-node", "registry", "search", "--json"])
+            .map_err(|err| err.to_string())?;
+        match cli.command {
+            Command::Registry(RegistryCommand::Search(args)) => {
+                assert!(args.json);
+                assert!(args.query.is_empty());
+            }
+            other => return Err(format!("expected registry search, got {other:?}")),
+        }
+        Ok(())
+    }
 
-        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    #[test]
+    fn registry_verify_parses_without_extension_id_so_json_can_fail_closed() -> Result<(), String> {
+        let cli = parse(&["franken-node", "registry", "verify", "--json"])
+            .map_err(|err| err.to_string())?;
+        match cli.command {
+            Command::Registry(RegistryCommand::Verify(args)) => {
+                assert!(args.json);
+                assert!(args.extension_id.is_empty());
+            }
+            other => return Err(format!("expected registry verify, got {other:?}")),
+        }
+        Ok(())
     }
 
     #[test]
@@ -2857,6 +3130,19 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn fleet_describe_parses_without_node_id_so_json_can_fail_closed() {
+        let cli = parse(&["franken-node", "fleet", "describe", "--json"])
+            .expect("missing node id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Fleet(FleetCommand::Describe(args)) => {
+                assert!(args.json);
+                assert!(args.node_id.is_empty());
+            }
+            other => panic!("expected fleet describe, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn safe_mode_enter_parses_operator_surface() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
@@ -2893,6 +3179,21 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn safe_mode_enter_parses_without_reason_so_json_can_fail_closed() {
+        let cli = parse(&["franken-node", "safe-mode", "enter", "--json"])
+            .expect("missing --reason must parse so the handler can emit JSON");
+        match cli.command {
+            Command::SafeMode(SafeModeCommand::Enter(args)) => {
+                assert!(args.json);
+                assert!(args.reason.is_empty());
+                assert!(args.operator_id.is_empty());
+                assert!(args.trust_state_hash.is_empty());
+            }
+            other => panic!("expected safe-mode enter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn safe_mode_exit_parses_fail_closed_checks() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
@@ -2919,6 +3220,19 @@ mod parser_contract_extra_tests {
         assert!(args.evidence_ledger_intact);
         assert!(args.json);
         Ok(())
+    }
+
+    #[test]
+    fn safe_mode_exit_parses_without_operator_id_so_json_can_fail_closed() {
+        let cli = parse(&["franken-node", "safe-mode", "exit", "--json"])
+            .expect("missing --operator-id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::SafeMode(SafeModeCommand::Exit(args)) => {
+                assert!(args.json);
+                assert!(args.operator_id.is_empty());
+            }
+            other => panic!("expected safe-mode exit, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2998,6 +3312,47 @@ mod parser_contract_extra_tests {
         assert!(!args.execute);
         assert!(args.json);
         Ok(())
+    }
+
+    #[test]
+    fn proofs_workers_restart_parses_without_operator_id_or_reason_so_json_can_fail_closed() {
+        let cli = parse(&["franken-node", "proofs", "workers", "restart", "--json"])
+            .expect("missing --operator-id/--reason must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Proofs(ProofsCommand::Workers(ProofWorkersCommand::Restart(args))) => {
+                assert!(args.json);
+                assert!(args.operator_id.is_empty());
+                assert!(args.operator_roles.is_empty());
+                assert!(args.reason.is_empty());
+            }
+            other => panic!("expected proofs workers restart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_lane_assign_parses_without_task_class_so_json_can_fail_closed() {
+        let cli = parse(&["franken-node", "runtime", "lane", "assign", "--json"])
+            .expect("missing task class must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Runtime(RuntimeCommand::Lane(RuntimeLaneCommand::Assign(args))) => {
+                assert!(args.json);
+                assert!(args.task_class.is_empty());
+            }
+            other => panic!("expected runtime lane assign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_epoch_parses_without_local_epoch_so_json_can_fail_closed() {
+        let cli = parse(&["franken-node", "runtime", "epoch", "--json"])
+            .expect("missing --local-epoch must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Runtime(RuntimeCommand::Epoch(args)) => {
+                assert!(args.json);
+                assert!(args.local_epoch.is_none());
+            }
+            other => panic!("expected runtime epoch, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3222,6 +3577,20 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn ops_validation_closeout_parses_without_receipt_so_json_can_fail_closed() {
+        let cli = parse(&["franken-node", "ops", "validation-closeout", "--json"])
+            .expect("missing --bead-id/--receipt must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Ops(OpsCommand::ValidationCloseout(args)) => {
+                assert!(args.json);
+                assert!(args.bead_id.is_empty());
+                assert!(args.receipt.as_os_str().is_empty());
+            }
+            other => panic!("expected ops validation-closeout, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ops_config_audit_parses_profile_config_and_json() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
@@ -3366,6 +3735,22 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn doctor_evidence_readiness_parses_without_input_so_json_can_fail_closed() {
+        let cli = parse(&["franken-node", "doctor", "evidence-readiness", "--json"])
+            .expect("missing --input must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Doctor(args) => match args.command {
+                Some(DoctorCommand::EvidenceReadiness(readiness)) => {
+                    assert!(readiness.json);
+                    assert!(readiness.input.as_os_str().is_empty());
+                }
+                other => panic!("expected doctor evidence-readiness, got {other:?}"),
+            },
+            other => panic!("expected doctor command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn doctor_parent_json_applies_to_process_spawn_readiness_subcommand() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
@@ -3429,131 +3814,587 @@ mod tests {
     }
 
     #[test]
-    fn run_requires_app_path() {
-        assert_eq!(
-            parse_error_kind(&["run"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn run_parses_without_app_path_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from(["franken-node", "run", "--json"])
+            .expect("missing app path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Run(args) => {
+                assert!(args.json);
+                assert!(args.app_path.as_os_str().is_empty());
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
     }
 
     #[test]
-    fn migrate_audit_requires_project_path() {
-        assert_eq!(
-            parse_error_kind(&["migrate", "audit", "--format", "json"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn migrate_audit_parses_without_project_path_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "migrate", "audit", "--json"])
+                .expect("missing project path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Migrate(MigrateCommand::Audit(args)) => {
+                assert_eq!(args.format, "json");
+                assert!(args.project_path.as_os_str().is_empty());
+            }
+            other => panic!("expected migrate audit, got {other:?}"),
+        }
     }
 
     #[test]
-    fn verify_release_requires_explicit_key_dir() {
-        assert_eq!(
-            parse_error_kind(&["verify", "release", "dist/release"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn migrate_rewrite_parses_without_project_path_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "migrate", "rewrite", "--json"])
+                .expect("missing project path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Migrate(MigrateCommand::Rewrite(args)) => {
+                assert!(args.json);
+                assert!(args.project_path.as_os_str().is_empty());
+            }
+            other => panic!("expected migrate rewrite, got {other:?}"),
+        }
     }
 
     #[test]
-    fn remote_cap_issue_requires_at_least_one_endpoint_prefix() {
-        assert_eq!(
-            parse_error_kind(&["remotecap", "issue", "--scope", "network_egress"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn migrate_validate_parses_without_project_path_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "migrate",
+            "validate",
+            "--json",
+        ])
+        .expect("missing project path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Migrate(MigrateCommand::Validate(args)) => {
+                assert!(args.json);
+                assert!(args.project_path.as_os_str().is_empty());
+            }
+            other => panic!("expected migrate validate, got {other:?}"),
+        }
     }
 
     #[test]
-    fn trust_card_compare_requires_both_extension_ids() {
-        assert_eq!(
-            parse_error_kind(&["trust-card", "compare", "npm:left"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn migrate_report_parses_without_project_path_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "migrate-report", "--json"])
+                .expect("missing project path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::MigrateReport(args) => {
+                assert!(args.json);
+                assert!(args.project_path.as_os_str().is_empty());
+            }
+            other => panic!("expected migrate-report, got {other:?}"),
+        }
     }
 
     #[test]
-    fn fleet_release_requires_incident_id() {
-        assert_eq!(
-            parse_error_kind(&["fleet", "release"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn verify_lockstep_parses_without_project_path_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "verify", "lockstep", "--json"])
+                .expect("missing project path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Verify(VerifyCommand::Lockstep(args)) => {
+                assert!(args.json);
+                assert!(args.project_path.as_os_str().is_empty());
+            }
+            other => panic!("expected verify lockstep, got {other:?}"),
+        }
     }
 
     #[test]
-    fn incident_counterfactual_requires_policy() {
-        assert_eq!(
-            parse_error_kind(&["incident", "counterfactual", "--bundle", "incident.json"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn verify_release_parses_without_key_dir_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "verify",
+            "release",
+            "dist/release",
+            "--json",
+        ])
+        .expect("missing --key-dir must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Verify(VerifyCommand::Release(args)) => {
+                assert!(args.json);
+                assert_eq!(args.release_path.as_os_str(), "dist/release");
+                assert!(args.key_dir.as_os_str().is_empty());
+            }
+            other => panic!("expected verify release, got {other:?}"),
+        }
     }
 
     #[test]
-    fn registry_publish_requires_package_path() {
-        assert_eq!(
-            parse_error_kind(&["registry", "publish", "--signing-key", "operator.ed25519"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn verify_release_parses_without_release_path_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "verify", "release", "--json"])
+                .expect("missing release path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Verify(VerifyCommand::Release(args)) => {
+                assert!(args.json);
+                assert!(args.release_path.as_os_str().is_empty());
+                assert!(args.key_dir.as_os_str().is_empty());
+            }
+            other => panic!("expected verify release, got {other:?}"),
+        }
     }
 
     #[test]
-    fn verify_module_requires_module_id() {
-        assert_eq!(
-            parse_error_kind(&["verify", "module", "--json"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn remote_cap_issue_parses_without_endpoint_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "remotecap",
+            "issue",
+            "--scope",
+            "network_egress",
+            "--json",
+        ])
+        .expect("missing --endpoint must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Remotecap(RemoteCapCommand::Issue(args)) => {
+                assert!(args.json);
+                assert!(args.endpoint_prefixes.is_empty());
+            }
+            other => panic!("expected remotecap issue, got {other:?}"),
+        }
     }
 
     #[test]
-    fn verify_corpus_requires_corpus_path() {
-        assert_eq!(
-            parse_error_kind(&["verify", "corpus", "--compat-version", "1"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn trust_card_compare_parses_without_extension_ids_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "trust-card",
+            "compare",
+            "--json",
+        ])
+        .expect("missing extension ids must parse so the handler can emit JSON");
+        match cli.command {
+            Command::TrustCard(TrustCardCommand::Compare(args)) => {
+                assert!(args.json);
+                assert!(args.left_extension_id.is_empty());
+                assert!(args.right_extension_id.is_empty());
+            }
+            other => panic!("expected trust-card compare, got {other:?}"),
+        }
     }
 
     #[test]
-    fn migrate_rewrite_requires_project_path() {
-        assert_eq!(
-            parse_error_kind(&["migrate", "rewrite", "--apply"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn trust_card_show_parses_without_extension_id_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "trust-card", "show", "--json"])
+                .expect("missing extension id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::TrustCard(TrustCardCommand::Show(args)) => {
+                assert!(args.json);
+                assert!(args.extension_id.is_empty());
+            }
+            other => panic!("expected trust-card show, got {other:?}"),
+        }
     }
 
     #[test]
-    fn trust_card_export_requires_extension_id() {
-        assert_eq!(
-            parse_error_kind(&["trust-card", "export", "--json"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn trust_card_export_parses_without_extension_id_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "trust-card",
+            "export",
+            "--json",
+        ])
+        .expect("missing extension id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::TrustCard(TrustCardCommand::Export(args)) => {
+                assert!(args.json);
+                assert!(args.extension_id.is_empty());
+            }
+            other => panic!("expected trust-card export, got {other:?}"),
+        }
     }
 
     #[test]
-    fn trust_card_diff_requires_right_version() {
-        assert_eq!(
-            parse_error_kind(&["trust-card", "diff", "npm:pkg", "1"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn trust_card_diff_parses_without_args_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "trust-card", "diff", "--json"])
+                .expect("missing diff args must parse so the handler can emit JSON");
+        match cli.command {
+            Command::TrustCard(TrustCardCommand::Diff(args)) => {
+                assert!(args.json);
+                assert!(args.extension_id.is_empty());
+                assert!(args.left_version.is_none());
+                assert!(args.right_version.is_none());
+            }
+            other => panic!("expected trust-card diff, got {other:?}"),
+        }
     }
 
     #[test]
-    fn incident_bundle_requires_incident_id() {
-        assert_eq!(
-            parse_error_kind(&["incident", "bundle", "--verify"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn fleet_release_parses_without_incident_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "fleet", "release", "--json"])
+                .expect("missing --incident must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Fleet(FleetCommand::Release(args)) => {
+                assert!(args.json);
+                assert!(args.incident.is_empty());
+            }
+            other => panic!("expected fleet release, got {other:?}"),
+        }
     }
 
     #[test]
-    fn registry_verify_requires_extension_id() {
-        assert_eq!(
-            parse_error_kind(&["registry", "verify"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn debug_trace_parses_without_policy_and_input_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "debug", "trace", "--json"])
+                .expect("missing --policy/--input must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Debug(DebugCommand::Trace(args)) => {
+                assert!(args.json);
+                assert!(args.policy.as_os_str().is_empty());
+                assert!(args.input.as_os_str().is_empty());
+            }
+            other => panic!("expected debug trace, got {other:?}"),
+        }
     }
 
     #[test]
-    fn remote_cap_issue_requires_scope_even_with_endpoint() {
-        assert_eq!(
-            parse_error_kind(&["remotecap", "issue", "--endpoint", "https://"]),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn debug_explain_parses_without_receipt_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "debug", "explain", "--json"])
+                .expect("missing --receipt must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Debug(DebugCommand::Explain(args)) => {
+                assert!(args.json);
+                assert!(args.receipt.as_os_str().is_empty());
+            }
+            other => panic!("expected debug explain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn debug_evidence_parses_without_artifact_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "debug", "evidence", "--json"])
+                .expect("missing --artifact must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Debug(DebugCommand::Evidence(args)) => {
+                assert!(args.json);
+                assert!(args.artifact.as_os_str().is_empty());
+            }
+            other => panic!("expected debug evidence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incident_counterfactual_parses_without_policy_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "incident",
+            "counterfactual",
+            "--bundle",
+            "incident.json",
+            "--json",
+        ])
+        .expect("missing --policy must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Incident(IncidentCommand::Counterfactual(args)) => {
+                assert!(args.json);
+                assert!(args.policy.is_empty());
+            }
+            other => panic!("expected incident counterfactual, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incident_counterfactual_parses_without_bundle_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "incident",
+            "counterfactual",
+            "--json",
+        ])
+        .expect("missing --bundle must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Incident(IncidentCommand::Counterfactual(args)) => {
+                assert!(args.json);
+                assert!(args.bundle.as_os_str().is_empty());
+                assert!(args.policy.is_empty());
+            }
+            other => panic!("expected incident counterfactual, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn registry_publish_parses_without_package_path_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "registry",
+            "publish",
+            "--json",
+        ])
+        .expect("missing package path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Registry(RegistryCommand::Publish(args)) => {
+                assert!(args.json);
+                assert!(args.package_path.as_os_str().is_empty());
+                assert!(args.version.is_empty());
+            }
+            other => panic!("expected registry publish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_module_parses_without_module_id_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "verify", "module", "--json"])
+                .expect("missing module id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Verify(VerifyCommand::Module(args)) => {
+                assert!(args.json);
+                assert!(args.module_id.is_empty());
+            }
+            other => panic!("expected verify module, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_migration_parses_without_migration_id_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "verify",
+            "migration",
+            "--json",
+        ])
+        .expect("missing migration id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Verify(VerifyCommand::Migration(args)) => {
+                assert!(args.json);
+                assert!(args.migration_id.is_empty());
+            }
+            other => panic!("expected verify migration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_compatibility_parses_without_target_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "verify",
+            "compatibility",
+            "--json",
+        ])
+        .expect("missing target must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Verify(VerifyCommand::Compatibility(args)) => {
+                assert!(args.json);
+                assert!(args.target.is_empty());
+            }
+            other => panic!("expected verify compatibility, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_transparency_log_parses_without_log_path_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "verify",
+            "transparency-log",
+            "--json",
+        ])
+        .expect("missing log path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Verify(VerifyCommand::TransparencyLog(args)) => {
+                assert!(args.json);
+                assert!(args.log_path.as_os_str().is_empty());
+            }
+            other => panic!("expected verify transparency-log, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_corpus_parses_without_corpus_path_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "verify", "corpus", "--json"])
+                .expect("missing corpus path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Verify(VerifyCommand::Corpus(args)) => {
+                assert!(args.json);
+                assert!(args.corpus_path.as_os_str().is_empty());
+            }
+            other => panic!("expected verify corpus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn migrate_rewrite_parses_without_project_path_with_apply_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "migrate",
+            "rewrite",
+            "--apply",
+            "--json",
+        ])
+        .expect("missing project path must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Migrate(MigrateCommand::Rewrite(args)) => {
+                assert!(args.json);
+                assert!(args.apply);
+                assert!(args.project_path.as_os_str().is_empty());
+            }
+            other => panic!("expected migrate rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trust_card_export_parses_without_extension_id_in_parser_contract() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "trust-card",
+            "export",
+            "--json",
+        ])
+        .expect("missing extension id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::TrustCard(TrustCardCommand::Export(args)) => {
+                assert!(args.json);
+                assert!(args.extension_id.is_empty());
+            }
+            other => panic!("expected trust-card export, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trust_card_diff_parses_partial_versions_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "trust-card",
+            "diff",
+            "npm:pkg",
+            "1",
+            "--json",
+        ])
+        .expect("missing right version must parse so the handler can emit JSON");
+        match cli.command {
+            Command::TrustCard(TrustCardCommand::Diff(args)) => {
+                assert!(args.json);
+                assert_eq!(args.extension_id, "npm:pkg");
+                assert_eq!(args.left_version, Some(1));
+                assert!(args.right_version.is_none());
+            }
+            other => panic!("expected trust-card diff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incident_bundle_parses_without_id_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "incident", "bundle", "--json"])
+                .expect("missing --id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Incident(IncidentCommand::Bundle(args)) => {
+                assert!(args.json);
+                assert!(args.id.is_empty());
+            }
+            other => panic!("expected incident bundle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn registry_verify_parses_without_extension_id_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "registry", "verify", "--json"])
+                .expect("missing extension id must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Registry(RegistryCommand::Verify(args)) => {
+                assert!(args.json);
+                assert!(args.extension_id.is_empty());
+            }
+            other => panic!("expected registry verify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_cap_issue_parses_without_scope_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "remotecap",
+            "issue",
+            "--endpoint",
+            "https://",
+            "--json",
+        ])
+        .expect("missing --scope must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Remotecap(RemoteCapCommand::Issue(args)) => {
+                assert!(args.json);
+                assert!(args.scope.is_empty());
+            }
+            other => panic!("expected remotecap issue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remotecap_use_parses_without_token_file_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "remotecap", "use", "--json"])
+                .expect("missing --token-file must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Remotecap(RemoteCapCommand::Use(args)) => {
+                assert!(args.json);
+                assert!(args.token_file.as_os_str().is_empty());
+                assert!(args.operation.is_empty());
+                assert!(args.endpoint.is_empty());
+            }
+            other => panic!("expected remotecap use, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remotecap_verify_parses_without_token_file_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "remotecap",
+            "verify",
+            "--json",
+        ])
+        .expect("missing --token-file must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Remotecap(RemoteCapCommand::Verify(args)) => {
+                assert!(args.json);
+                assert!(args.token_file.as_os_str().is_empty());
+                assert!(args.operation.is_empty());
+                assert!(args.endpoint.is_empty());
+            }
+            other => panic!("expected remotecap verify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ltv_attest_parses_without_bundle_or_out_so_json_can_fail_closed() {
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["franken-node", "ltv", "attest", "--json"])
+                .expect("missing --bundle/--out must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Ltv(LtvCommand::Attest(args)) => {
+                assert!(args.json);
+                assert!(args.bundle.as_os_str().is_empty());
+                assert!(args.out.as_os_str().is_empty());
+            }
+            other => panic!("expected ltv attest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ltv_verify_as_of_parses_without_evidence_so_json_can_fail_closed() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "ltv",
+            "verify-as-of",
+            "--json",
+        ])
+        .expect("missing --evidence must parse so the handler can emit JSON");
+        match cli.command {
+            Command::Ltv(LtvCommand::VerifyAsOf(args)) => {
+                assert!(args.json);
+                assert!(args.evidence.as_os_str().is_empty());
+                assert!(args.witness_anchor.as_os_str().is_empty());
+            }
+            other => panic!("expected ltv verify-as-of, got {other:?}"),
+        }
     }
 
     /// Test Unicode injection attacks in CLI argument parsing

@@ -4,8 +4,8 @@
 //! length prefixes using safe try_from patterns instead of unsafe casts.
 
 use frankenengine_node::connector::migration_pipeline::{
-    new, CohortDefinition, ExtensionSpec, ExtensionEvidence, RiskTier, DependencyComplexity,
-    error_codes, PipelineError
+    CohortDefinition, DependencyComplexity, ExtensionEvidence, ExtensionSpec, PipelineError,
+    RiskTier, error_codes, new,
 };
 
 #[test]
@@ -19,7 +19,9 @@ fn test_4gb_plus_input_hash_length_cast() -> Result<(), Box<dyn std::error::Erro
 
     let huge_cohort = CohortDefinition {
         cohort_id: format!("huge_cohort_{}", huge_string),
-        extensions: large_extension_names.into_iter().map(|name| ExtensionSpec {
+        extensions: large_extension_names
+            .into_iter()
+            .map(|name| ExtensionSpec {
                 name: name.clone(),
                 source_version: format!("1.0.0_{}", name),
                 target_version: format!("2.0.0_{}", name),
@@ -35,7 +37,8 @@ fn test_4gb_plus_input_hash_length_cast() -> Result<(), Box<dyn std::error::Erro
                     known_divergences: Vec::new(),
                     dependency_edges: Vec::new(),
                 },
-            }).collect(),
+            })
+            .collect(),
         selection_criteria: format!("huge_criteria_{}", huge_string),
     };
 
@@ -83,7 +86,8 @@ fn test_maximum_safe_extension_count() -> Result<(), Box<dyn std::error::Error>>
                     known_divergences: Vec::new(),
                     dependency_edges: Vec::new(),
                 },
-            }).collect(),
+            })
+            .collect(),
         selection_criteria: "max_safe_test".to_string(),
     };
 

@@ -187,6 +187,37 @@ fn registry_publish_requires_explicit_signing_key() {
 }
 
 #[test]
+fn registry_publish_json_fails_closed_when_package_path_missing() {
+    let workspace = registry_workspace();
+    let output = run_cli_in_workspace(workspace.path(), &["registry", "publish", "--json"]);
+    assert!(
+        !output.status.success(),
+        "registry publish --json should fail when the package path is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("registry publish --json missing package path stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/registry-publish-error/v1"
+    );
+    assert_eq!(payload["command"], "registry.publish");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"]
+        .as_str()
+        .expect("error field must be a string");
+    assert!(
+        error.contains("package path"),
+        "missing package path --json must name the handler requirement: {error}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `registry publish` requires a package path"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn registry_publish_missing_package_json_emits_error_report() {
     let workspace = registry_workspace();
     let signing_key_path = workspace.path().join("keys/publisher.ed25519");
@@ -228,6 +259,68 @@ fn registry_publish_missing_package_json_emits_error_report() {
     assert!(
         !stderr.contains("Error: registry publish target does not exist"),
         "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn registry_search_json_fails_closed_when_query_missing() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let output = run_cli_in_workspace(workspace.path(), &["registry", "search", "--json"]);
+    assert!(
+        !output.status.success(),
+        "registry search --json should fail when the query is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("registry search --json missing query must be JSON, not a clap usage dump");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/registry-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "registry.search");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"]
+        .as_str()
+        .expect("error field must be a string");
+    assert!(
+        error.contains("query"),
+        "missing query --json must name the handler requirement: {error}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `registry search` requires a query"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn registry_verify_json_fails_closed_when_extension_id_missing() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let output = run_cli_in_workspace(workspace.path(), &["registry", "verify", "--json"]);
+    assert!(
+        !output.status.success(),
+        "registry verify --json should fail when the extension id is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("registry verify --json missing id must be JSON, not a clap usage dump");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/registry-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "registry.verify");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"]
+        .as_str()
+        .expect("error field must be a string");
+    assert!(
+        error.contains("extension id"),
+        "missing id --json must name the handler requirement: {error}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `registry verify` requires an extension id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
 }
 

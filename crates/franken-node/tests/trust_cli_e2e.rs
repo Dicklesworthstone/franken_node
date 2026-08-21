@@ -864,6 +864,31 @@ fn write_receipt_signing_key(path: &Path) {
 }
 
 #[test]
+fn trust_card_json_fails_closed_when_extension_id_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(workspace.path(), &["trust", "card", "--json"]);
+    assert!(
+        !output.status.success(),
+        "trust card --json should fail when the extension id is omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust card --json missing extension id");
+    assert_eq!(payload["schema_version"], "franken-node/trust-error-cli/v1");
+    assert_eq!(payload["command"], "trust.card");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("extension id"),
+        "missing extension id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `trust card` requires an extension id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn trust_card_displays_known_extension_details() {
     let workspace = seeded_fixture_trust_workspace();
     let output = run_cli_in_workspace(workspace.path(), &["trust", "card", "npm:@acme/auth-guard"]);
@@ -1020,6 +1045,31 @@ fn run_json_emits_blocked_preflight_verdict_for_revoked_dependency() {
 }
 
 #[test]
+fn run_json_fails_closed_when_app_path_missing() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let output = run_cli_in_workspace(workspace.path(), &["run", "--json"]);
+    assert!(
+        !output.status.success(),
+        "run --json should fail when the application path is omitted"
+    );
+    let payload = parse_json_stdout(&output, "run --json missing app path");
+    assert_eq!(payload["schema_version"], "franken-node/run-error-cli/v1");
+    assert_eq!(payload["command"], "run");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("application path"),
+        "missing app path --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `run` requires an application path"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn run_json_fails_closed_when_security_defaults_are_missing() {
     let workspace = tempfile::tempdir().expect("run json missing-config workspace");
     std::fs::write(workspace.path().join("index.js"), "console.log('hi');\n")
@@ -1043,6 +1093,35 @@ fn run_json_fails_closed_when_security_defaults_are_missing() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("Error: failed resolving configuration for run"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn run_json_fails_closed_on_invalid_runtime_override() {
+    let workspace = seeded_fixture_trust_workspace();
+    std::fs::write(workspace.path().join("index.js"), "console.log('hi');\n")
+        .expect("write guest fixture");
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &["run", "--json", "--runtime", "not-a-runtime", "index.js"],
+    );
+    assert!(
+        !output.status.success(),
+        "run --json should fail closed on an unknown --runtime"
+    );
+    let payload = parse_json_stdout(&output, "run --json invalid runtime");
+    assert_eq!(payload["schema_version"], "franken-node/run-error-cli/v1");
+    assert_eq!(payload["command"], "run");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("invalid preferred runtime") && error.contains("not-a-runtime"),
+        "invalid --runtime --json must name the rejected runtime: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: invalid preferred runtime"),
         "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
@@ -1084,6 +1163,45 @@ fn run_explicit_runtime_missing_returns_127() {
     assert!(stderr.contains("fix_command=franken-node run --runtime auto ."));
     assert!(stderr.contains("help_url=https://nodejs.org/en/download"));
     assert!(stderr.contains("help_url=https://bun.sh/docs/installation"));
+}
+
+#[cfg(unix)]
+#[test]
+fn run_json_missing_runtime_emits_error_report_and_exits_127() {
+    let workspace = seeded_fixture_trust_workspace();
+    write_run_package_manifest(workspace.path(), &[]);
+    let empty_path = workspace.path().join("empty-bin");
+    fs::create_dir_all(&empty_path).expect("create empty PATH dir");
+
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &[
+            "run",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "node",
+            "--json",
+            ".",
+        ],
+        &[("PATH", empty_path.to_str().expect("utf8 path"))],
+    );
+
+    assert_eq!(output.status.code(), Some(127));
+    let payload = parse_json_stdout(&output, "run --json missing runtime");
+    assert_eq!(payload["schema_version"], "franken-node/run-error-cli/v1");
+    assert_eq!(payload["command"], "run");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("requested runtime `node` was not found"),
+        "missing-runtime --json must name the missing runtime: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: requested runtime `node` was not found"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
 }
 
 #[cfg(unix)]
@@ -1353,6 +1471,46 @@ fn trust_release_missing_record_json_emits_error_report() {
 }
 
 #[test]
+fn trust_release_missing_app_json_emits_error_report() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "release",
+            "--app",
+            "missing-app.js",
+            "--operator-id",
+            "ops",
+            "--reason",
+            "lift",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "missing app --json must fail closed"
+    );
+    let payload = parse_json_stdout(&output, "trust release --json missing app");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-release-error/v1"
+    );
+    assert_eq!(payload["command"], "trust.release");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("failed reading run target") && error.contains("missing-app.js"),
+        "missing-app --json must name the unreadable target: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: failed reading run target"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn trust_revoke_fails_for_unknown_extension() {
     let workspace = seeded_fixture_trust_workspace();
     let output = run_cli_in_workspace(
@@ -1388,6 +1546,95 @@ fn trust_revoke_fails_for_unknown_extension() {
     assert!(
         !json_stderr.contains("Error: trust card not found"),
         "--json must not append a second human Error line after the JSON report: {json_stderr}"
+    );
+}
+
+#[test]
+fn trust_revoke_json_fails_closed_when_extension_id_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(workspace.path(), &["trust", "revoke", "--json"]);
+    assert!(
+        !output.status.success(),
+        "trust revoke --json should fail when the extension id is omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust revoke --json missing extension id");
+    assert_eq!(payload["schema_version"], "franken-node/trust-error-cli/v1");
+    assert_eq!(payload["command"], "trust.revoke");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("extension id"),
+        "missing extension id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `trust revoke` requires an extension id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn trust_release_json_fails_closed_when_app_flag_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "release",
+            "--operator-id",
+            "ops",
+            "--reason",
+            "lift",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "trust release --json should fail when --app is omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust release --json missing --app");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-release-error/v1"
+    );
+    assert_eq!(payload["command"], "trust.release");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--app"),
+        "missing --app --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: trust release requires --app"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn trust_quarantine_json_fails_closed_when_artifact_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(workspace.path(), &["trust", "quarantine", "--json"]);
+    assert!(
+        !output.status.success(),
+        "trust quarantine --json should fail when --artifact is omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust quarantine --json missing --artifact");
+    assert_eq!(payload["schema_version"], "franken-node/trust-error-cli/v1");
+    assert_eq!(payload["command"], "trust.quarantine");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--artifact"),
+        "missing --artifact --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `trust quarantine` requires --artifact"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
 }
 
@@ -2837,6 +3084,34 @@ fn trust_card_list_rejects_zero_page() {
 }
 
 #[test]
+fn trust_card_show_json_fails_closed_when_extension_id_missing() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let output = run_cli_in_workspace(workspace.path(), &["trust-card", "show", "--json"]);
+    assert!(
+        !output.status.success(),
+        "trust-card show --json should fail when the extension id is omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust-card show --json missing extension id");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-card-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust-card.show");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("extension id"),
+        "missing extension id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `trust-card show` requires an extension id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn trust_card_show_json_fails_closed_when_card_missing() {
     let workspace = seeded_fixture_trust_workspace();
     let output = run_cli_in_workspace(
@@ -2867,6 +3142,34 @@ fn trust_card_show_json_fails_closed_when_card_missing() {
 }
 
 #[test]
+fn trust_card_export_json_fails_closed_when_extension_id_missing() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let output = run_cli_in_workspace(workspace.path(), &["trust-card", "export", "--json"]);
+    assert!(
+        !output.status.success(),
+        "trust-card export --json should fail when the extension id is omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust-card export --json missing extension id");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-card-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust-card.export");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("extension id"),
+        "missing extension id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `trust-card export` requires an extension id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn trust_card_export_json_fails_closed_when_card_missing() {
     let workspace = seeded_fixture_trust_workspace();
     let output = run_cli_in_workspace(
@@ -2893,6 +3196,35 @@ fn trust_card_export_json_fails_closed_when_card_missing() {
     assert!(
         !stderr.contains("Error: trust card not found"),
         "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn trust_card_compare_json_fails_closed_when_extension_ids_missing() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let output = run_cli_in_workspace(workspace.path(), &["trust-card", "compare", "--json"]);
+    assert!(
+        !output.status.success(),
+        "trust-card compare --json should fail when extension ids are omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust-card compare --json missing extension ids");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-card-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust-card.compare");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("left and right extension ids"),
+        "missing ids --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr
+                .contains("Error: `trust-card compare` requires left and right extension ids"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
 }
 
@@ -2955,6 +3287,36 @@ fn trust_card_compare_reports_expected_differences() {
     assert!(stdout.contains("- certification_level: gold -> bronze"));
     assert!(stdout.contains("- extension_version: 1.4.2 -> 0.9.1"));
     assert!(stdout.contains("- active_quarantine: false -> true"));
+}
+
+#[test]
+fn trust_card_diff_json_fails_closed_when_args_missing() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let output = run_cli_in_workspace(workspace.path(), &["trust-card", "diff", "--json"]);
+    assert!(
+        !output.status.success(),
+        "trust-card diff --json should fail when args are omitted"
+    );
+    let payload = parse_json_stdout(&output, "trust-card diff --json missing args");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-card-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust-card.diff");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("extension id") && error.contains("left/right versions"),
+        "missing args --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains(
+                "Error: `trust-card diff` requires an extension id and left/right versions"
+            ),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
 }
 
 #[test]

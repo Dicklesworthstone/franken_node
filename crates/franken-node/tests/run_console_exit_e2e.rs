@@ -822,6 +822,37 @@ fn console_only_run_emits_guest_streams_verbatim() {
     );
 }
 
+#[test]
+fn verify_lockstep_json_fails_closed_when_project_path_missing() {
+    let output = Command::new(franken_node_bin())
+        .args(["verify", "lockstep", "--json"])
+        .output()
+        .expect("spawn verify lockstep --json missing project path");
+    assert!(
+        !output.status.success(),
+        "verify lockstep --json should fail when the project path is omitted"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("verify lockstep --json missing path must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/verify-lockstep-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "verify.lockstep");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("project path"),
+        "missing project path --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `verify lockstep` requires a project path"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
 /// bd-zi9hj: the operator-facing `verify lockstep --runtimes bun,franken-node`
 /// franken leg historically spawned a `franken-engine` binary that does not
 /// exist anywhere (the engine repo ships no such [[bin]]), so the leg had
@@ -830,6 +861,47 @@ fn console_only_run_emits_guest_streams_verbatim() {
 /// in-process native engine. Positive control: identical guest behavior must
 /// agree. Negative control: a genuinely divergent program must still block
 /// release, proving the comparison is discriminating rather than vacuous.
+#[test]
+fn verify_lockstep_json_fails_closed_on_single_runtime() {
+    let dir = tempfile::tempdir().expect("lockstep json workspace");
+    std::fs::write(dir.path().join("app.js"), "console.log('lockstep');\n")
+        .expect("write lockstep fixture");
+    let output = Command::new(franken_node_bin())
+        .args([
+            "verify",
+            "lockstep",
+            "app.js",
+            "--json",
+            "--runtimes",
+            "bun",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("spawn verify lockstep --json single runtime");
+    assert!(
+        !output.status.success(),
+        "verify lockstep --json with one runtime must fail closed"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("verify lockstep --json early failure must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/verify-lockstep-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "verify.lockstep");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("at least two distinct runtimes"),
+        "single-runtime --json must name the runtime floor: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Lockstep harness failed"),
+        "--json must not append a human Error line after the JSON report: {stderr}"
+    );
+}
+
 #[test]
 fn verify_lockstep_franken_leg_executes_against_bun() {
     for (tool, probe_arg) in [("bun", "--version"), ("strace", "-V")] {

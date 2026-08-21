@@ -1483,3 +1483,159 @@ fn ltv_attest_json_fails_closed_when_bundle_missing() {
         "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
+
+#[test]
+fn ltv_attest_json_fails_closed_when_witness_key_missing() {
+    let workspace = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(
+        workspace.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )
+    .expect("write fail-closed config");
+    std::fs::write(
+        workspace.path().join("present.fnbundle"),
+        b"not-a-real-bundle",
+    )
+    .expect("write dummy bundle so the handler reaches the witness-key check");
+    let output = run_cli(
+        workspace.path(),
+        &[
+            "ltv",
+            "attest",
+            "--bundle",
+            "present.fnbundle",
+            "--out",
+            "ltv-evidence.json",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "ltv attest --json should fail when --witness-key is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("ltv attest --json missing-witness-key stdout must be JSON ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/ltv-error-cli/v1");
+    assert_eq!(payload["command"], "ltv.attest");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("witness-key") || error.contains("witness key"),
+        "missing --witness-key --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: ltv attest requires at least one --witness-key"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn ltv_attest_json_fails_closed_when_bundle_flag_missing() {
+    let workspace = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(
+        workspace.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )
+    .expect("write fail-closed config");
+    let output = run_cli(workspace.path(), &["ltv", "attest", "--json"]);
+    assert!(
+        !output.status.success(),
+        "ltv attest --json should fail when --bundle is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("ltv attest --json missing --bundle stdout must be JSON ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/ltv-error-cli/v1");
+    assert_eq!(payload["command"], "ltv.attest");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--bundle"),
+        "missing --bundle --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --bundle"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn ltv_attest_json_fails_closed_when_out_flag_missing() {
+    let workspace = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(
+        workspace.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )
+    .expect("write fail-closed config");
+    std::fs::write(
+        workspace.path().join("present.fnbundle"),
+        b"not-a-real-bundle",
+    )
+    .expect("write dummy bundle so the handler reaches the --out check");
+    let output = run_cli(
+        workspace.path(),
+        &["ltv", "attest", "--bundle", "present.fnbundle", "--json"],
+    );
+    assert!(
+        !output.status.success(),
+        "ltv attest --json should fail when --out is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("ltv attest --json missing --out stdout must be JSON ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/ltv-error-cli/v1");
+    assert_eq!(payload["command"], "ltv.attest");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--out"),
+        "missing --out --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --out"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn ltv_verify_as_of_json_fails_closed_when_evidence_flag_missing() {
+    let workspace = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(
+        workspace.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )
+    .expect("write fail-closed config");
+    let output = run_cli(workspace.path(), &["ltv", "verify-as-of", "--json"]);
+    assert!(
+        !output.status.success(),
+        "ltv verify-as-of --json should fail when --evidence is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("ltv verify-as-of --json missing --evidence stdout must be JSON ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/ltv-error-cli/v1");
+    assert_eq!(payload["command"], "ltv.verify-as-of");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--evidence"),
+        "missing --evidence --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --evidence"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}

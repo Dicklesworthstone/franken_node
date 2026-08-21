@@ -924,6 +924,36 @@ fn doctor_parent_json_evidence_readiness_emits_json_not_human() {
 }
 
 #[test]
+fn doctor_evidence_readiness_json_fails_closed_when_input_flag_missing() {
+    let output = run_doctor(&[
+        "doctor".to_string(),
+        "evidence-readiness".to_string(),
+        "--json".to_string(),
+    ]);
+    assert!(
+        !output.status.success(),
+        "doctor evidence-readiness --json should fail when --input is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("missing --input --json must be JSON, not a clap usage dump ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/doctor-error-cli/v1");
+    assert_eq!(payload["command"], "doctor.evidence-readiness");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--input"),
+        "missing --input --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided"),
+        "--json must not append a human clap line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn doctor_parent_json_process_spawn_readiness_emits_json_not_human() {
     let output = run_doctor(&[
         "doctor".to_string(),

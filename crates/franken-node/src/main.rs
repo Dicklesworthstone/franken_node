@@ -403,12 +403,19 @@ const OPS_PROOF_CARRYING_EVIDENCE_CLI_SCHEMA_VERSION: &str =
     "franken-node/ops-proof-carrying-evidence-cli/v1";
 const OPS_COMPAT_CORPUS_RUN_CLI_SCHEMA_VERSION: &str = "franken-node/ops-compat-corpus-run-cli/v1";
 
+const OPS_HEALTH_SESSION_COUNT_SOURCE: &str = "persisted_session_files";
+const OPS_HEALTH_UPTIME_SOURCE: &str = "this_cli_process";
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct OpsHealthCheckReport {
     schema_version: &'static str,
     command: &'static str,
     uptime_seconds: u64,
+    /// `uptime_seconds` is this CLI process, not a long-running node daemon.
+    uptime_source: &'static str,
     active_session_count: usize,
+    /// `active_session_count` is a directory listing, not a live SessionManager.
+    session_count_source: &'static str,
     last_successful_evidence_ledger_flush_timestamp: Option<String>,
     build_version: String,
     git_sha: String,
@@ -5750,8 +5757,12 @@ fn emit_json_or_human<T: Serialize>(
 /// After a `--json` report has already been written to stdout, fail closed
 /// without appending a second human `Error:` line on stderr.
 fn fail_closed_after_json() -> ! {
+    fail_closed_after_json_with_code(1)
+}
+
+fn fail_closed_after_json_with_code(code: i32) -> ! {
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    std::process::exit(1);
+    std::process::exit(code);
 }
 
 const SAFE_MODE_CLI_SCHEMA_VERSION: &str = "franken-node/safe-mode-cli/v1";
@@ -5943,6 +5954,15 @@ fn emit_safe_mode_error(
 }
 
 fn handle_safe_mode_enter_command(args: SafeModeEnterArgs) -> Result<()> {
+    if args.reason.trim().is_empty() {
+        anyhow::bail!("--reason is required");
+    }
+    if args.operator_id.trim().is_empty() {
+        anyhow::bail!("--operator-id is required");
+    }
+    if args.trust_state_hash.trim().is_empty() {
+        anyhow::bail!("--trust-state-hash is required");
+    }
     let state_path = safe_mode_state_path(args.state_dir.as_deref());
     let reason = match parse_safe_mode_reason(&args) {
         Ok(reason) => reason,
@@ -5998,6 +6018,9 @@ fn handle_safe_mode_status_command(args: SafeModeStatusArgs) -> Result<()> {
 }
 
 fn handle_safe_mode_exit_command(args: SafeModeExitArgs) -> Result<()> {
+    if args.operator_id.trim().is_empty() {
+        anyhow::bail!("--operator-id is required");
+    }
     let state_path = safe_mode_state_path(args.state_dir.as_deref());
     reject_nul_field(&args.operator_id, "--operator-id")?;
     let mut controller = match load_safe_mode_controller(&state_path, false) {
@@ -6105,6 +6128,9 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 })?;
             }
             RuntimeLaneCommand::Assign(args) => {
+                if args.task_class.trim().is_empty() {
+                    anyhow::bail!("runtime lane assign requires a task class");
+                }
                 let policy = runtime::lane_scheduler::default_policy();
                 let mut scheduler = runtime::lane_scheduler::LaneScheduler::new(policy)
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -6133,9 +6159,12 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
             }
         },
         RuntimeCommand::Epoch(args) => {
+            let local_epoch = args
+                .local_epoch
+                .ok_or_else(|| anyhow::anyhow!("--local-epoch is required"))?;
             let (verdict, epoch_delta) = match args.peer_epoch {
-                Some(peer_epoch) if peer_epoch == args.local_epoch => ("matched", Some(0)),
-                Some(peer_epoch) => ("mismatch", Some(args.local_epoch.abs_diff(peer_epoch))),
+                Some(peer_epoch) if peer_epoch == local_epoch => ("matched", Some(0)),
+                Some(peer_epoch) => ("mismatch", Some(local_epoch.abs_diff(peer_epoch))),
                 None => ("local_only", None),
             };
             let report = RuntimeEpochReport {
@@ -6143,7 +6172,7 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 command: "runtime.epoch",
                 live_node: false,
                 compares_live_control_epoch: false,
-                local_epoch: args.local_epoch,
+                local_epoch,
                 peer_epoch: args.peer_epoch,
                 verdict,
                 epoch_delta,
@@ -6526,6 +6555,13 @@ fn migrate_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Res
 }
 
 fn handle_migrate_report(args: &MigrateReportArgs) -> Result<()> {
+    if args.project_path.as_os_str().is_empty() {
+        return migrate_fail(
+            "migrate.report",
+            args.json,
+            "`migrate-report` requires a project path",
+        );
+    }
     if args.json && args.format != "json" {
         return migrate_fail(
             "migrate.report",
@@ -6689,6 +6725,9 @@ fn handle_doctor_evidence_readiness(
     trace_id: &str,
     parent_json: bool,
 ) -> Result<()> {
+    if args.input.as_os_str().is_empty() {
+        anyhow::bail!("--input is required");
+    }
     let input_path = cli::validate_user_content_pathbuf(&args.input)
         .with_context(|| format!("invalid evidence-readiness input path: {:?}", args.input))?;
     let report = build_evidence_readiness_report_from_path(input_path, trace_id)?;
@@ -8121,6 +8160,13 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
         content_addressed_corpus_version, corpus_generated_at_utc, run_corpus,
     };
 
+    if args.corpus_root.as_os_str().is_empty() {
+        anyhow::bail!("--corpus-root is required");
+    }
+    if args.out.as_os_str().is_empty() {
+        anyhow::bail!("--out is required");
+    }
+
     let snapshot = capture_corpus(&args.corpus_root)?;
     let corpus_version = content_addressed_corpus_version(&snapshot)?;
     let run = run_corpus(
@@ -8202,7 +8248,13 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
 /// Without the `engine` feature the franken leg cannot execute natively, so
 /// the corpus runner fails closed instead of measuring a fallback runtime.
 #[cfg(not(feature = "engine"))]
-fn handle_ops_compat_corpus_run(_args: &OpsCompatCorpusRunArgs) -> Result<()> {
+fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
+    if args.corpus_root.as_os_str().is_empty() {
+        anyhow::bail!("--corpus-root is required");
+    }
+    if args.out.as_os_str().is_empty() {
+        anyhow::bail!("--out is required");
+    }
     anyhow::bail!(
         "ops compat-corpus-run requires the `engine` feature: the franken leg must be \
          the real native engine, not a fallback runtime"
@@ -8220,7 +8272,9 @@ fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> 
         schema_version: OPS_HEALTH_CHECK_CLI_SCHEMA_VERSION,
         command: "ops.health-check",
         uptime_seconds: OPS_HEALTH_CHECK_PROCESS_START.elapsed().as_secs(),
+        uptime_source: OPS_HEALTH_UPTIME_SOURCE,
         active_session_count: ops_active_session_count(project_root),
+        session_count_source: OPS_HEALTH_SESSION_COUNT_SOURCE,
         pass: last_successful_evidence_ledger_flush_timestamp.is_some() && git_sha != "unknown",
         last_successful_evidence_ledger_flush_timestamp,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -8390,7 +8444,10 @@ fn emit_ops_health_check_report(report: &OpsHealthCheckReport, json: bool) -> Re
             .as_deref()
             .unwrap_or("none");
         println!("ops health-check: pass={}", report.pass);
-        println!("  uptime_seconds={}", report.uptime_seconds);
+        println!(
+            "  uptime_seconds={} (this CLI process; not a long-running node daemon)",
+            report.uptime_seconds
+        );
         println!(
             "  active_session_count={} (persisted .franken-node/state/sessions files; not a live SessionManager)",
             report.active_session_count
@@ -8565,6 +8622,29 @@ fn proof_worker_restart_target(
 fn proof_workers_restart_report(
     args: &ProofWorkersRestartArgs,
 ) -> Result<ops::proof_pipeline::ProofWorkerRestartReport> {
+    let mut missing = Vec::new();
+    if args.operator_id.trim().is_empty() {
+        missing.push("--operator-id");
+    }
+    if args.operator_roles.is_empty() {
+        missing.push("--operator-role");
+    }
+    if args.reason.trim().is_empty() {
+        missing.push("--reason");
+    }
+    if !args.all_workers
+        && args
+            .worker_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+    {
+        missing.push("--worker-id or --all-workers");
+    }
+    if !missing.is_empty() {
+        anyhow::bail!("proofs workers restart requires {}", missing.join(", "));
+    }
     let input = proof_pipeline_readiness_input(args.input.as_deref(), &args.receipts)?;
     let target = proof_worker_restart_target(args)?;
     let request = ops::proof_pipeline::ProofWorkerRestartRequest {
@@ -8681,6 +8761,12 @@ fn handle_proofs_command(command: ProofsCommand) -> Result<()> {
 fn ops_validation_closeout_report(
     args: &OpsValidationCloseoutArgs,
 ) -> Result<ops::validation_closeout::ValidationCloseoutReport> {
+    if args.bead_id.is_empty() {
+        anyhow::bail!("--bead-id is required");
+    }
+    if args.receipt.as_os_str().is_empty() {
+        anyhow::bail!("--receipt is required");
+    }
     let receipt = ops::validation_readiness::read_validation_receipt(&args.receipt)
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let mut options =
@@ -10182,6 +10268,14 @@ fn emit_trust_release_error_json(message: &str) -> Result<()> {
 }
 
 fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
+    if args.app.as_os_str().is_empty() {
+        let message = "trust release requires --app";
+        if args.json {
+            emit_trust_release_error_json(message)?;
+            fail_closed_after_json();
+        }
+        anyhow::bail!("{message}");
+    }
     if args.operator_id.trim().is_empty() || args.reason.trim().is_empty() {
         let message = "trust release requires non-empty --operator-id and --reason";
         if args.json {
@@ -16488,6 +16582,15 @@ fn remotecap_fail(command: &str, json: bool, error: impl std::fmt::Display) -> R
 }
 
 fn handle_remotecap_use(args: &RemoteCapUseArgs) -> Result<()> {
+    if args.token_file.as_os_str().is_empty() {
+        return remotecap_fail("remotecap.use", args.json, "--token-file is required");
+    }
+    if args.operation.trim().is_empty() {
+        return remotecap_fail("remotecap.use", args.json, "--operation is required");
+    }
+    if args.endpoint.trim().is_empty() {
+        return remotecap_fail("remotecap.use", args.json, "--endpoint is required");
+    }
     let cap = match read_remotecap_token(&args.token_file) {
         Ok(cap) => cap,
         Err(err) => return remotecap_fail("remotecap.use", args.json, err),
@@ -16567,6 +16670,15 @@ fn handle_remotecap_use(args: &RemoteCapUseArgs) -> Result<()> {
 }
 
 fn handle_remotecap_verify(args: &RemoteCapVerifyArgs) -> Result<()> {
+    if args.token_file.as_os_str().is_empty() {
+        return remotecap_fail("remotecap.verify", args.json, "--token-file is required");
+    }
+    if args.operation.trim().is_empty() {
+        return remotecap_fail("remotecap.verify", args.json, "--operation is required");
+    }
+    if args.endpoint.trim().is_empty() {
+        return remotecap_fail("remotecap.verify", args.json, "--endpoint is required");
+    }
     let cap = match read_remotecap_token(&args.token_file) {
         Ok(cap) => cap,
         Err(err) => return remotecap_fail("remotecap.verify", args.json, err),
@@ -16644,6 +16756,9 @@ fn handle_remotecap_verify(args: &RemoteCapVerifyArgs) -> Result<()> {
 }
 
 fn handle_remotecap_revoke(args: &RemoteCapRevokeArgs) -> Result<()> {
+    if args.token_file.as_os_str().is_empty() {
+        return remotecap_fail("remotecap.revoke", args.json, "--token-file is required");
+    }
     let cap = match read_remotecap_token(&args.token_file) {
         Ok(cap) => cap,
         Err(err) => return remotecap_fail("remotecap.revoke", args.json, err),
@@ -18574,8 +18689,21 @@ fn load_ltv_witness_signers(
 }
 
 fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
+    if args.bundle.as_os_str().is_empty() {
+        anyhow::bail!("--bundle is required");
+    }
+    if args.out.as_os_str().is_empty() {
+        anyhow::bail!("--out is required");
+    }
     if !args.json {
         eprintln!("franken-node ltv attest: bundle={}", args.bundle.display());
+    }
+    // Name a missing/unreadable bundle before trust-anchor or witness-key
+    // checks so `--json` fail-closed reports the operator-supplied path.
+    crate::bounded_read(&args.bundle, MAX_LTV_RUN_REPORT_BYTES)
+        .with_context(|| format!("failed reading replay bundle {}", args.bundle.display()))?;
+    if args.witness_keys.is_empty() {
+        anyhow::bail!("ltv attest requires at least one --witness-key");
     }
     let trusted_key_ids = replay_trusted_key_ids(
         args.trusted_public_key.as_deref(),
@@ -18723,6 +18851,12 @@ fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
 }
 
 fn handle_ltv_verify_as_of_command(args: &cli::LtvVerifyAsOfArgs) -> Result<()> {
+    if args.evidence.as_os_str().is_empty() {
+        anyhow::bail!("--evidence is required");
+    }
+    if args.witness_anchor.as_os_str().is_empty() {
+        anyhow::bail!("--witness-anchor is required");
+    }
     if !args.json {
         eprintln!(
             "franken-node ltv verify-as-of: evidence={}",
@@ -18901,6 +19035,13 @@ fn incident_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Re
 }
 
 fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> {
+    if args.id.trim().is_empty() {
+        return incident_fail(
+            "incident.bundle",
+            args.json,
+            "`incident bundle` requires --id",
+        );
+    }
     // Prepare receipt export context upfront - fails immediately if receipt export
     // is requested but signing material is unavailable (sign-or-fail).
     let receipt_export_ctx = match prepare_receipt_export_context(
@@ -19066,6 +19207,13 @@ fn incident_replay_cli_summary(
 }
 
 fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> {
+    if args.bundle.as_os_str().is_empty() {
+        return incident_fail(
+            "incident.replay",
+            args.json,
+            "`incident replay` requires --bundle",
+        );
+    }
     if !args.json {
         eprintln!(
             "franken-node incident replay: bundle={}",
@@ -19561,6 +19709,12 @@ fn incident_counterfactual_sha256(bytes: &[u8]) -> String {
 }
 
 fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs) -> Result<()> {
+    if args.bundle.as_os_str().is_empty() {
+        anyhow::bail!("`incident counterfactual` requires --bundle");
+    }
+    if args.policy.trim().is_empty() {
+        anyhow::bail!("`incident counterfactual` requires --policy");
+    }
     // bd-5r99w.4: the synthetic, sandboxed risk-score model is the only executor
     // available today; the production decision engine is gated on the engine-split
     // runtime decision kernel (bd-f5b04.2). Make the model explicit so a synthetic
@@ -21458,6 +21612,12 @@ fn registry_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Re
 }
 
 fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
+    if args.package_path.as_os_str().is_empty() {
+        anyhow::bail!("`registry publish` requires a package path");
+    }
+    if args.version.trim().is_empty() {
+        anyhow::bail!("`registry publish` requires --version");
+    }
     let project_root = std::env::current_dir()
         .context("failed resolving current directory for registry publish")?;
     if !args.package_path.exists() {
@@ -21617,6 +21777,9 @@ struct RegistryPublishCliReport<'a> {
 }
 
 fn handle_registry_search(args: &cli::RegistrySearchArgs) -> Result<()> {
+    if args.query.trim().is_empty() {
+        anyhow::bail!("`registry search` requires a query");
+    }
     let project_root = std::env::current_dir()
         .context("failed resolving current directory for registry search")?;
     let min_assurance = parse_min_assurance(args.min_assurance)?;
@@ -21667,6 +21830,9 @@ struct RegistryVerifyCliReport<'a> {
 }
 
 fn handle_registry_verify(args: &cli::RegistryVerifyArgs) -> Result<()> {
+    if args.extension_id.trim().is_empty() {
+        anyhow::bail!("`registry verify` requires an extension id");
+    }
     let project_root = std::env::current_dir()
         .context("failed resolving current directory for registry verify")?;
     let artifact = find_local_registry_artifact(&project_root, &args.extension_id)?;
@@ -22314,6 +22480,7 @@ const FLEET_CLI_ACTION_SCHEMA_VERSION: &str = "franken-node/fleet-action-cli/v1"
 const FLEET_CLI_AGENT_SCHEMA_VERSION: &str = "franken-node/fleet-agent-cli/v1";
 const FLEET_CLI_ERROR_SCHEMA_VERSION: &str = "franken-node/fleet-error-cli/v1";
 const FLEET_CLI_TRANSPORT: &str = "file";
+const FLEET_CLI_ACTIVATED_SOURCE: &str = "file_transport_not_live";
 
 fn emit_fleet_error_json(command: &str, message: &str) -> Result<()> {
     println!(
@@ -22346,6 +22513,8 @@ struct FleetCliStatusReport {
     transport: &'static str,
     /// File-transport CLI cannot claim a live control-plane heartbeat.
     live_control_plane: bool,
+    /// `status.activated` is hardcoded for file transport; not a live fleet API.
+    activated_source: &'static str,
     status: FleetStatus,
     state_dir: PathBuf,
     convergence_timeout_seconds: u64,
@@ -22359,6 +22528,8 @@ struct FleetCliNodeReport {
     schema_version: &'static str,
     transport: &'static str,
     live_control_plane: bool,
+    /// `zone_status.activated` is hardcoded for file transport; not a live fleet API.
+    activated_source: &'static str,
     node: PersistedNodeStatus,
     stale: bool,
     zone_status: FleetStatus,
@@ -22372,6 +22543,8 @@ struct FleetCliActionReport {
     schema_version: &'static str,
     transport: &'static str,
     live_control_plane: bool,
+    /// `status.activated` is hardcoded for file transport; not a live fleet API.
+    activated_source: &'static str,
     action: FleetActionResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     convergence_receipt: Option<FleetCliConvergenceReceipt>,
@@ -22709,6 +22882,7 @@ fn fleet_status_report(project_root: &Path, requested_zone: &str) -> Result<Flee
         schema_version: FLEET_CLI_STATUS_SCHEMA_VERSION,
         transport: FLEET_CLI_TRANSPORT,
         live_control_plane: false,
+        activated_source: FLEET_CLI_ACTIVATED_SOURCE,
         status,
         state_dir: loaded.state_dir,
         convergence_timeout_seconds: loaded.convergence_timeout_seconds,
@@ -22759,6 +22933,7 @@ fn fleet_describe_report(
         schema_version: FLEET_CLI_DESCRIBE_SCHEMA_VERSION,
         transport: FLEET_CLI_TRANSPORT,
         live_control_plane: false,
+        activated_source: FLEET_CLI_ACTIVATED_SOURCE,
         node,
         stale,
         zone_status,
@@ -22999,6 +23174,7 @@ fn fleet_action_report(
         schema_version: FLEET_CLI_ACTION_SCHEMA_VERSION,
         transport: FLEET_CLI_TRANSPORT,
         live_control_plane: false,
+        activated_source: FLEET_CLI_ACTIVATED_SOURCE,
         action,
         convergence_receipt,
         status,
@@ -23253,6 +23429,9 @@ fn resolve_fleet_agent_args(args: &FleetAgentArgs) -> Result<ResolvedFleetAgentA
         .or_else(|| resolved.config.fleet.node_id.clone())
         .ok_or_else(|| anyhow::anyhow!("fleet agent requires --node-id or fleet.node_id"))?;
     validate_node_id(&node_id).map_err(|err| anyhow::anyhow!("invalid node_id: {err}"))?;
+    if args.zone.trim().is_empty() {
+        anyhow::bail!("`fleet agent` requires --zone");
+    }
     validate_zone_id(&args.zone).map_err(|err| anyhow::anyhow!("invalid zone: {err}"))?;
 
     let poll_interval_secs = args
@@ -25210,6 +25389,8 @@ const VERIFY_TRANSPARENCY_LOG_ERROR_CLI_SCHEMA_VERSION: &str =
     "franken-node/verify-transparency-log-error-cli/v1";
 const VERIFY_RECOVERY_RUNBOOK_ERROR_CLI_SCHEMA_VERSION: &str =
     "franken-node/verify-recovery-runbook-error-cli/v1";
+const VERIFY_LOCKSTEP_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/verify-lockstep-error-cli/v1";
+const DOCTOR_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/doctor-error-cli/v1";
 
 fn emit_named_cli_error_json(schema: &str, command: &str, message: &str) -> Result<()> {
     println!(
@@ -25243,6 +25424,13 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
         ASV_002_VERIFICATION_OK, ASV_003_VERIFICATION_FAILED, ArtifactVerificationResult,
         AuditLogEntry, verify_release,
     };
+
+    if args.release_path.as_os_str().is_empty() {
+        anyhow::bail!("`verify release` requires a release path");
+    }
+    if args.key_dir.as_os_str().is_empty() {
+        anyhow::bail!("`verify release` requires --key-dir");
+    }
 
     let release_dir = &args.release_path;
     let context = load_release_verification_context(release_dir, &args.key_dir)?;
@@ -25377,6 +25565,10 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
     };
     use std::fs::File;
     use std::io::{BufRead, BufReader};
+
+    if args.log_path.as_os_str().is_empty() {
+        anyhow::bail!("`verify transparency-log` requires a log path");
+    }
 
     // Validate path
     args.log_path
@@ -27138,6 +27330,17 @@ fn known_runtime_compatibility_issues(
 }
 
 fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
+    if args.module_id.trim().is_empty() {
+        let payload = build_verify_output(
+            "verify module",
+            args.compat_version,
+            "ERROR",
+            "error",
+            2,
+            "`verify module` requires a module id",
+        );
+        return emit_verify_output("verify module", &payload, args.json);
+    }
     if let Some(error_payload) = validate_verify_compat("verify module", args.compat_version) {
         return emit_verify_output("verify module", &error_payload, args.json);
     }
@@ -27261,6 +27464,17 @@ fn emit_verify_module(args: &VerifyModuleArgs) -> i32 {
 }
 
 fn emit_verify_migration(args: &VerifyMigrationArgs) -> i32 {
+    if args.migration_id.trim().is_empty() {
+        let payload = build_verify_output(
+            "verify migration",
+            args.compat_version,
+            "ERROR",
+            "error",
+            2,
+            "`verify migration` requires a migration id",
+        );
+        return emit_verify_output("verify migration", &payload, args.json);
+    }
     if let Some(error_payload) = validate_verify_compat("verify migration", args.compat_version) {
         return emit_verify_output("verify migration", &error_payload, args.json);
     }
@@ -27431,6 +27645,17 @@ fn emit_verify_migration(args: &VerifyMigrationArgs) -> i32 {
 }
 
 fn emit_verify_compatibility(args: &VerifyCompatibilityArgs) -> i32 {
+    if args.target.trim().is_empty() {
+        let payload = build_verify_output(
+            "verify compatibility",
+            args.compat_version,
+            "ERROR",
+            "error",
+            2,
+            "`verify compatibility` requires a target",
+        );
+        return emit_verify_output("verify compatibility", &payload, args.json);
+    }
     if let Some(error_payload) = validate_verify_compat("verify compatibility", args.compat_version)
     {
         return emit_verify_output("verify compatibility", &error_payload, args.json);
@@ -28541,6 +28766,17 @@ fn verify_corpus_events(
 }
 
 fn emit_verify_corpus(args: &VerifyCorpusArgs) -> i32 {
+    if args.corpus_path.as_os_str().is_empty() {
+        let payload = build_verify_output(
+            "verify corpus",
+            args.compat_version,
+            "ERROR",
+            "error",
+            2,
+            "`verify corpus` requires a corpus path",
+        );
+        return emit_verify_output("verify corpus", &payload, args.json);
+    }
     if let Some(error_payload) = validate_verify_compat("verify corpus", args.compat_version) {
         return emit_verify_output("verify corpus", &error_payload, args.json);
     }
@@ -28571,10 +28807,10 @@ fn emit_verify_corpus(args: &VerifyCorpusArgs) -> i32 {
         let payload = build_verify_output(
             "verify corpus",
             args.compat_version,
-            "FAIL",
-            "fail",
-            1,
-            "corpus identifier cannot be empty".to_string(),
+            "ERROR",
+            "error",
+            2,
+            "`verify corpus` requires a corpus path",
         );
         return emit_verify_output("verify corpus", &payload, args.json);
     }
@@ -28787,6 +29023,9 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
 
     match command {
         TrustCardCommand::Show(args) => {
+            if args.extension_id.trim().is_empty() {
+                anyhow::bail!("`trust-card show` requires an extension id");
+            }
             let mut state = trust_card_cli_registry(now_secs)?;
             let response = get_trust_card(
                 &identity,
@@ -28805,6 +29044,9 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
             }
         }
         TrustCardCommand::Export(args) => {
+            if args.extension_id.trim().is_empty() {
+                anyhow::bail!("`trust-card export` requires an extension id");
+            }
             if !args.json {
                 anyhow::bail!("`trust-card export` requires `--json`");
             }
@@ -28855,6 +29097,10 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
             }
         }
         TrustCardCommand::Compare(args) => {
+            if args.left_extension_id.trim().is_empty() || args.right_extension_id.trim().is_empty()
+            {
+                anyhow::bail!("`trust-card compare` requires left and right extension ids");
+            }
             let mut state = trust_card_cli_registry(now_secs)?;
             let response = compare_trust_cards(
                 &mut state.registry,
@@ -28870,12 +29116,19 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
             }
         }
         TrustCardCommand::Diff(args) => {
+            let (Some(left_version), Some(right_version)) = (args.left_version, args.right_version)
+            else {
+                anyhow::bail!("`trust-card diff` requires an extension id and left/right versions");
+            };
+            if args.extension_id.trim().is_empty() {
+                anyhow::bail!("`trust-card diff` requires an extension id and left/right versions");
+            }
             let mut state = trust_card_cli_registry(now_secs)?;
             let response = compare_trust_card_versions(
                 &mut state.registry,
                 &args.extension_id,
-                args.left_version,
-                args.right_version,
+                left_version,
+                right_version,
                 now_secs,
                 trace_id,
             )?;
@@ -28894,6 +29147,13 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
 fn handle_debug_trace(args: &DebugTraceArgs) -> Result<()> {
     use crate::cli::validate_user_content_pathbuf;
     use serde_json::Value;
+
+    if args.policy.as_os_str().is_empty() {
+        anyhow::bail!("debug trace requires --policy");
+    }
+    if args.input.as_os_str().is_empty() {
+        anyhow::bail!("debug trace requires --input");
+    }
 
     // Validate paths
     let policy_path = validate_user_content_pathbuf(&args.policy)
@@ -29025,6 +29285,10 @@ fn handle_debug_explain(args: &DebugExplainArgs) -> Result<()> {
         signer_key_id: String,
         chain_hash: String,
         signature: String,
+    }
+
+    if args.receipt.as_os_str().is_empty() {
+        anyhow::bail!("debug explain requires --receipt");
     }
 
     let mut steps: Vec<ExplainStep> = Vec::new();
@@ -29342,6 +29606,9 @@ fn emit_explain_steps<S: serde::Serialize>(
 }
 
 fn handle_debug_evidence(args: &DebugEvidenceArgs) -> Result<()> {
+    if args.artifact.as_os_str().is_empty() {
+        anyhow::bail!("debug evidence requires --artifact");
+    }
     let kind = match args.kind {
         DebugEvidenceKind::Auto => tools::evidence_explain::EvidenceArtifactKind::Auto,
         DebugEvidenceKind::NodeReplayCapsule => {
@@ -29376,6 +29643,170 @@ fn handle_debug_evidence(args: &DebugEvidenceArgs) -> Result<()> {
     }
 }
 
+fn clap_error_should_emit_json(err: &clap::Error) -> bool {
+    use clap::error::ErrorKind;
+    if matches!(
+        err.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            | ErrorKind::DisplayVersion
+    ) {
+        return false;
+    }
+    std::env::args().any(|arg| arg == "--json")
+}
+
+fn clap_json_error_surface() -> (&'static str, &'static str) {
+    let positional: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .collect();
+    let top = positional.first().map(String::as_str).unwrap_or("cli");
+    let sub = positional.get(1).map(String::as_str);
+    match (top, sub) {
+        ("remotecap", Some("issue")) => ("franken-node/remotecap-error-cli/v1", "remotecap.issue"),
+        ("remotecap", Some("use")) => ("franken-node/remotecap-error-cli/v1", "remotecap.use"),
+        ("remotecap", Some("verify")) => {
+            ("franken-node/remotecap-error-cli/v1", "remotecap.verify")
+        }
+        ("remotecap", Some("revoke")) => {
+            ("franken-node/remotecap-error-cli/v1", "remotecap.revoke")
+        }
+        ("debug", Some("trace")) => (DEBUG_ERROR_CLI_SCHEMA_VERSION, "debug.trace"),
+        ("debug", Some("explain")) => (DEBUG_ERROR_CLI_SCHEMA_VERSION, "debug.explain"),
+        ("debug", Some("evidence")) => (DEBUG_ERROR_CLI_SCHEMA_VERSION, "debug.evidence"),
+        ("trust", Some("revoke")) => ("franken-node/trust-error-cli/v1", "trust.revoke"),
+        ("trust", Some("quarantine")) => ("franken-node/trust-error-cli/v1", "trust.quarantine"),
+        ("trust", Some("release")) => ("franken-node/trust-release-error/v1", "trust.release"),
+        ("trust-card", Some("show")) => ("franken-node/trust-card-error-cli/v1", "trust-card.show"),
+        ("trust-card", Some("export")) => {
+            ("franken-node/trust-card-error-cli/v1", "trust-card.export")
+        }
+        ("trust-card", Some("compare")) => {
+            ("franken-node/trust-card-error-cli/v1", "trust-card.compare")
+        }
+        ("trust-card", Some("diff")) => ("franken-node/trust-card-error-cli/v1", "trust-card.diff"),
+        ("fleet", Some("release")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.release"),
+        ("fleet", Some("agent")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.agent"),
+        ("fleet", Some("describe")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.describe"),
+        ("fleet", Some("status")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.status"),
+        ("fleet", Some("reconcile")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.reconcile"),
+        ("ltv", Some("attest")) => (LTV_ERROR_CLI_SCHEMA, "ltv.attest"),
+        ("ltv", Some("verify-as-of")) => (LTV_ERROR_CLI_SCHEMA, "ltv.verify-as-of"),
+        ("incident", Some("bundle")) => ("franken-node/incident-error-cli/v1", "incident.bundle"),
+        ("incident", Some("replay")) => ("franken-node/incident-error-cli/v1", "incident.replay"),
+        ("incident", Some("counterfactual")) => (
+            "franken-node/incident-error-cli/v1",
+            "incident.counterfactual",
+        ),
+        ("safe-mode", Some("enter")) => (SAFE_MODE_CLI_SCHEMA_VERSION, "safe-mode.enter"),
+        ("safe-mode", Some("exit")) => (SAFE_MODE_CLI_SCHEMA_VERSION, "safe-mode.exit"),
+        ("safe-mode", Some("status")) => (SAFE_MODE_CLI_SCHEMA_VERSION, "safe-mode.status"),
+        ("registry", Some("search")) => ("franken-node/registry-error-cli/v1", "registry.search"),
+        ("registry", Some("verify")) => ("franken-node/registry-error-cli/v1", "registry.verify"),
+        ("registry", Some("publish")) => ("franken-node/registry-error-cli/v1", "registry.publish"),
+        ("registry", Some("gc")) => ("franken-node/registry-error-cli/v1", "registry.gc"),
+        ("ops", Some("compat-corpus-run")) => {
+            (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.compat-corpus-run")
+        }
+        ("ops", Some("validation-closeout")) => {
+            (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.validation-closeout")
+        }
+        ("ops", Some("health-check")) => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.health-check"),
+        ("ops", Some("resource-governor")) => {
+            (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.resource-governor")
+        }
+        ("ops", Some("validation-readiness")) => {
+            (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.validation-readiness")
+        }
+        ("ops", Some("config-audit")) => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.config-audit"),
+        ("ops", Some("metrics")) => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.metrics"),
+        ("ops", Some("proof-carrying-evidence")) => {
+            (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.proof-carrying-evidence")
+        }
+        ("doctor", Some("evidence-readiness")) => {
+            (DOCTOR_ERROR_CLI_SCHEMA_VERSION, "doctor.evidence-readiness")
+        }
+        ("doctor", Some("close-condition")) => {
+            (DOCTOR_ERROR_CLI_SCHEMA_VERSION, "doctor.close-condition")
+        }
+        ("doctor", Some("workspace-pressure")) => {
+            (DOCTOR_ERROR_CLI_SCHEMA_VERSION, "doctor.workspace-pressure")
+        }
+        ("doctor", Some("process-spawn-readiness")) => {
+            (DOCTOR_ERROR_CLI_SCHEMA_VERSION, "doctor.process-spawn-readiness")
+        }
+        ("migrate", Some("audit")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.audit"),
+        ("migrate", Some("rewrite")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.rewrite"),
+        ("migrate", Some("validate")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.validate"),
+        ("migrate", Some("report")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.report"),
+        ("runtime", Some("lane")) => match positional.get(2).map(String::as_str) {
+            Some("assign") => (RUNTIME_ERROR_CLI_SCHEMA_VERSION, "runtime.lane.assign"),
+            Some("status") => (RUNTIME_ERROR_CLI_SCHEMA_VERSION, "runtime.lane.status"),
+            _ => (RUNTIME_ERROR_CLI_SCHEMA_VERSION, "runtime.lane"),
+        },
+        ("runtime", Some("epoch")) => (RUNTIME_ERROR_CLI_SCHEMA_VERSION, "runtime.epoch"),
+        ("verify", Some("release")) => (VERIFY_RELEASE_ERROR_CLI_SCHEMA_VERSION, "verify.release"),
+        ("verify", Some("lockstep")) => {
+            (VERIFY_LOCKSTEP_ERROR_CLI_SCHEMA_VERSION, "verify.lockstep")
+        }
+        ("verify", Some("module")) => ("franken-node/verify-error-cli/v1", "verify.module"),
+        ("verify", Some("migration")) => ("franken-node/verify-error-cli/v1", "verify.migration"),
+        ("verify", Some("compatibility")) => {
+            ("franken-node/verify-error-cli/v1", "verify.compatibility")
+        }
+        ("verify", Some("corpus")) => ("franken-node/verify-error-cli/v1", "verify.corpus"),
+        ("verify", Some("transparency-log")) => (
+            "franken-node/verify-error-cli/v1",
+            "verify.transparency-log",
+        ),
+        ("verify", Some("recovery-runbook")) => (
+            "franken-node/verify-error-cli/v1",
+            "verify.recovery-runbook",
+        ),
+        ("proofs", Some("queue")) => (PROOFS_ERROR_CLI_SCHEMA_VERSION, "proofs.queue.status"),
+        ("proofs", Some("workers")) => (PROOFS_ERROR_CLI_SCHEMA_VERSION, "proofs.workers.restart"),
+        ("bench", Some("run")) => (BENCH_RUN_ERROR_CLI_SCHEMA_VERSION, "bench.run"),
+        _ => match top {
+            "doctor" => (DOCTOR_ERROR_CLI_SCHEMA_VERSION, "doctor"),
+            "init" => (INIT_ERROR_CLI_SCHEMA_VERSION, "init"),
+            "run" => ("franken-node/run-error-cli/v1", "run"),
+            "ltv" => (LTV_ERROR_CLI_SCHEMA, "ltv"),
+            "ops" => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops"),
+            "debug" => (DEBUG_ERROR_CLI_SCHEMA_VERSION, "debug"),
+            "migrate" => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate"),
+            "runtime" => (RUNTIME_ERROR_CLI_SCHEMA_VERSION, "runtime"),
+            "proofs" => (PROOFS_ERROR_CLI_SCHEMA_VERSION, "proofs"),
+            "trust" => ("franken-node/trust-error-cli/v1", "trust"),
+            "fleet" => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet"),
+            "registry" => ("franken-node/registry-error-cli/v1", "registry"),
+            "remotecap" => ("franken-node/remotecap-error-cli/v1", "remotecap"),
+            "incident" => ("franken-node/incident-error-cli/v1", "incident"),
+            "safe-mode" => (SAFE_MODE_CLI_SCHEMA_VERSION, "safe-mode"),
+            "verify" => ("franken-node/verify-error-cli/v1", "verify"),
+            "bench" => (BENCH_RUN_ERROR_CLI_SCHEMA_VERSION, "bench"),
+            "trust-card" => ("franken-node/trust-card-error-cli/v1", "trust-card"),
+            "migrate-report" => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate-report"),
+            _ => ("franken-node/cli-error/v1", "cli"),
+        },
+    }
+}
+
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            if clap_error_should_emit_json(&err) {
+                let (schema, command) = clap_json_error_surface();
+                let message = err.to_string();
+                let _ = emit_named_cli_error_json(schema, command, message.trim());
+                fail_closed_after_json();
+            }
+            err.exit()
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // bd-wwjxn: the private native-session worker must be selected before
     // Clap parses public commands. It receives a bounded, versioned request on
@@ -29384,7 +29815,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
     match cli.command {
         Command::Init(args) => {
@@ -29435,13 +29866,16 @@ fn main() -> Result<()> {
             ) {
                 Ok(resolved) => resolved,
                 Err(err) => {
-                    return init_fail(json, err.context("failed resolving configuration for init"));
+                    return init_fail(
+                        json,
+                        format!("failed resolving configuration for init: {err}"),
+                    );
                 }
             };
             let config_toml = match resolved.config.to_toml() {
                 Ok(toml) => toml,
                 Err(err) => {
-                    return init_fail(json, err.context("failed serializing resolved config"));
+                    return init_fail(json, format!("failed serializing resolved config: {err}"));
                 }
             };
 
@@ -29616,8 +30050,12 @@ fn main() -> Result<()> {
                 return Err(run_preflight_block_error(&preflight).into());
             }
 
-            let requested_runtime = parse_runtime_override(runtime.as_deref())?
-                .unwrap_or(resolved.config.runtime.preferred);
+            let requested_runtime = match parse_runtime_override(runtime.as_deref()) {
+                Ok(requested) => requested.unwrap_or(resolved.config.runtime.preferred),
+                Err(err) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                }
+            };
             let project_root = run_project_root(&app_path);
             let compat_preflight_report = if compat_preflight {
                 Some(run_compat_preflight_report(
@@ -29694,6 +30132,14 @@ fn main() -> Result<()> {
                         unavailable @ ops::engine_dispatcher::DispatchResolutionError::RequestedRuntimeUnavailable(_),
                     ) = err.downcast_ref::<ops::engine_dispatcher::DispatchResolutionError>()
                     {
+                        if json {
+                            emit_named_cli_error_json(
+                                "franken-node/run-error-cli/v1",
+                                "run",
+                                &unavailable.to_string(),
+                            )?;
+                            fail_closed_after_json_with_code(127);
+                        }
                         eprintln!("{unavailable}");
                         std::process::exit(127);
                     }
@@ -29788,7 +30234,32 @@ fn main() -> Result<()> {
         }
 
         Command::SafeMode(sub) => {
-            handle_safe_mode_command(sub)?;
+            let (json, command_name, state_path) = match &sub {
+                SafeModeCommand::Enter(args) => (
+                    args.json,
+                    "safe-mode.enter",
+                    safe_mode_state_path(args.state_dir.as_deref()),
+                ),
+                SafeModeCommand::Status(args) => (
+                    args.json,
+                    "safe-mode.status",
+                    safe_mode_state_path(args.state_dir.as_deref()),
+                ),
+                SafeModeCommand::Exit(args) => (
+                    args.json,
+                    "safe-mode.exit",
+                    safe_mode_state_path(args.state_dir.as_deref()),
+                ),
+            };
+            if let Err(err) = handle_safe_mode_command(sub) {
+                return emit_safe_mode_error(
+                    command_name,
+                    &state_path,
+                    json,
+                    &err.to_string(),
+                    "Inspect `franken-node safe-mode status --json` and retry after the reported cause is fixed",
+                );
+            }
         }
 
         Command::Proofs(sub) => {
@@ -29808,6 +30279,13 @@ fn main() -> Result<()> {
         Command::Migrate(sub) => match sub {
             MigrateCommand::Audit(args) => {
                 let json = args.format == "json";
+                if args.project_path.as_os_str().is_empty() {
+                    return migrate_fail(
+                        "migrate.audit",
+                        json,
+                        "`migrate audit` requires a project path",
+                    );
+                }
                 let format = match migration::AuditOutputFormat::parse(&args.format)
                     .map_err(|err| anyhow::anyhow!(err))
                 {
@@ -29837,6 +30315,13 @@ fn main() -> Result<()> {
                 }
             }
             MigrateCommand::Rewrite(args) => {
+                if args.project_path.as_os_str().is_empty() {
+                    return migrate_fail(
+                        "migrate.rewrite",
+                        args.json,
+                        "`migrate rewrite` requires a project path",
+                    );
+                }
                 let report = match migration::run_rewrite(&args.project_path, args.apply)
                     .with_context(|| {
                         format!(
@@ -29900,6 +30385,13 @@ fn main() -> Result<()> {
                 }
             }
             MigrateCommand::Validate(args) => {
+                if args.project_path.as_os_str().is_empty() {
+                    return migrate_fail(
+                        "migrate.validate",
+                        args.json,
+                        "`migrate validate` requires a project path",
+                    );
+                }
                 if args.json && args.format != "text" && args.format != "json" {
                     return migrate_fail(
                         "migrate.validate",
@@ -29978,6 +30470,14 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
             VerifyCommand::Lockstep(args) => {
+                if args.project_path.as_os_str().is_empty() {
+                    return named_cli_fail(
+                        VERIFY_LOCKSTEP_ERROR_CLI_SCHEMA_VERSION,
+                        "verify.lockstep",
+                        args.json,
+                        "`verify lockstep` requires a project path",
+                    );
+                }
                 let runtimes: Vec<String> = args
                     .runtimes
                     .split(',')
@@ -29994,11 +30494,21 @@ fn main() -> Result<()> {
                     );
                 }
                 if let Err(e) = harness.verify_lockstep(&args.project_path, args.emit_fixtures) {
-                    // The oracle report is already JSON on stdout. Keep the
-                    // human failure line off stderr when `--json` is set.
-                    if !args.json {
-                        eprintln!("Lockstep harness failed: {e}");
+                    if args.json {
+                        let message = e.to_string();
+                        // Divergence already printed the oracle JSON report.
+                        // Do not append a second envelope after that document.
+                        if message.contains("lockstep verification diverged; verdict=") {
+                            fail_closed_after_json();
+                        }
+                        return named_cli_fail(
+                            VERIFY_LOCKSTEP_ERROR_CLI_SCHEMA_VERSION,
+                            "verify.lockstep",
+                            true,
+                            e,
+                        );
                     }
+                    eprintln!("Lockstep harness failed: {e}");
                     std::process::exit(1);
                 }
             }
@@ -30032,6 +30542,13 @@ fn main() -> Result<()> {
 
         Command::Trust(sub) => match sub {
             TrustCommand::Card(args) => {
+                if args.extension_id.trim().is_empty() {
+                    return trust_fail(
+                        "trust.card",
+                        args.json,
+                        "`trust card` requires an extension id",
+                    );
+                }
                 let now_secs = now_unix_secs();
                 let trace_id = "trace-cli-trust-card";
                 let identity = trust_card_cli_identity();
@@ -30108,6 +30625,13 @@ fn main() -> Result<()> {
                 }
             }
             TrustCommand::Revoke(args) => {
+                if args.extension_id.trim().is_empty() {
+                    return trust_fail(
+                        "trust.revoke",
+                        args.json,
+                        "`trust revoke` requires an extension id",
+                    );
+                }
                 // Prepare receipt export context upfront - fails immediately if receipt export
                 // is requested but signing material is unavailable (sign-or-fail).
                 let receipt_export_ctx = match prepare_receipt_export_context(
@@ -30144,6 +30668,13 @@ fn main() -> Result<()> {
                 }
             }
             TrustCommand::Quarantine(args) => {
+                if args.artifact.trim().is_empty() {
+                    return trust_fail(
+                        "trust.quarantine",
+                        args.json,
+                        "`trust quarantine` requires --artifact",
+                    );
+                }
                 // Prepare receipt export context upfront - fails immediately if receipt export
                 // is requested but signing material is unavailable (sign-or-fail).
                 let receipt_export_ctx = match prepare_receipt_export_context(
@@ -30204,7 +30735,13 @@ fn main() -> Result<()> {
                 }
             }
             TrustCommand::Release(args) => {
-                handle_trust_release_command(&args)?;
+                if let Err(err) = handle_trust_release_command(&args) {
+                    if args.json {
+                        emit_trust_release_error_json(&err.to_string())?;
+                        fail_closed_after_json();
+                    }
+                    return Err(err);
+                }
             }
             TrustCommand::Sync(args) => {
                 let now_secs = now_unix_secs();
@@ -30263,16 +30800,24 @@ fn main() -> Result<()> {
 
         Command::Remotecap(sub) => match sub {
             RemoteCapCommand::Issue(args) => {
-                handle_remotecap_issue(&args)?;
+                if let Err(err) = handle_remotecap_issue(&args) {
+                    return remotecap_fail("remotecap.issue", args.json, err);
+                }
             }
             RemoteCapCommand::Verify(args) => {
-                handle_remotecap_verify(&args)?;
+                if let Err(err) = handle_remotecap_verify(&args) {
+                    return remotecap_fail("remotecap.verify", args.json, err);
+                }
             }
             RemoteCapCommand::Use(args) => {
-                handle_remotecap_use(&args)?;
+                if let Err(err) = handle_remotecap_use(&args) {
+                    return remotecap_fail("remotecap.use", args.json, err);
+                }
             }
             RemoteCapCommand::Revoke(args) => {
-                handle_remotecap_revoke(&args)?;
+                if let Err(err) = handle_remotecap_revoke(&args) {
+                    return remotecap_fail("remotecap.revoke", args.json, err);
+                }
             }
         },
 
@@ -30308,6 +30853,13 @@ fn main() -> Result<()> {
                 }
             }
             FleetCommand::Describe(args) => {
+                if args.node_id.trim().is_empty() {
+                    return fleet_fail(
+                        "fleet.describe",
+                        args.json,
+                        "`fleet describe` requires a node id",
+                    );
+                }
                 let report = match fleet_describe_report(
                     Path::new("."),
                     &args.node_id,
@@ -30321,6 +30873,13 @@ fn main() -> Result<()> {
                 }
             }
             FleetCommand::Release(args) => {
+                if args.incident.trim().is_empty() {
+                    return fleet_fail(
+                        "fleet.release",
+                        args.json,
+                        "`fleet release` requires --incident",
+                    );
+                }
                 let identity = fleet_cli_identity();
                 let trace = fleet_cli_trace("trace-cli-fleet-release");
                 let loaded = match load_fleet_state(Path::new(".")) {
@@ -30529,7 +31088,9 @@ fn main() -> Result<()> {
                 }
             }
             FleetCommand::Agent(args) => {
-                run_fleet_agent(&args)?;
+                if let Err(err) = run_fleet_agent(&args) {
+                    return fleet_fail("fleet.agent", args.json, err);
+                }
             }
         },
 
@@ -30753,31 +31314,72 @@ fn main() -> Result<()> {
             if let Some(command) = &args.command {
                 match command {
                     DoctorCommand::CloseCondition(close_args) => {
-                        handle_doctor_close_condition(
+                        if let Err(err) = handle_doctor_close_condition(
                             close_args,
                             &args.trace_id,
                             args.structured_logs_jsonl,
                             args.json,
-                        )?;
+                        ) {
+                            return named_cli_fail(
+                                DOCTOR_ERROR_CLI_SCHEMA_VERSION,
+                                "doctor.close-condition",
+                                close_args.json || args.json,
+                                err,
+                            );
+                        }
                     }
                     DoctorCommand::EvidenceReadiness(readiness_args) => {
-                        handle_doctor_evidence_readiness(
+                        if let Err(err) = handle_doctor_evidence_readiness(
                             readiness_args,
                             &args.trace_id,
                             args.json,
-                        )?;
+                        ) {
+                            return named_cli_fail(
+                                DOCTOR_ERROR_CLI_SCHEMA_VERSION,
+                                "doctor.evidence-readiness",
+                                readiness_args.json || args.json,
+                                err,
+                            );
+                        }
                     }
                     DoctorCommand::WorkspacePressure(pressure_args) => {
-                        handle_doctor_workspace_pressure(pressure_args, args.json)?;
+                        if let Err(err) = handle_doctor_workspace_pressure(pressure_args, args.json)
+                        {
+                            return named_cli_fail(
+                                DOCTOR_ERROR_CLI_SCHEMA_VERSION,
+                                "doctor.workspace-pressure",
+                                pressure_args.json || args.json,
+                                err,
+                            );
+                        }
                     }
                     DoctorCommand::ProcessSpawnReadiness(readiness_args) => {
-                        handle_doctor_process_spawn_readiness(readiness_args, args.json)?;
+                        if let Err(err) =
+                            handle_doctor_process_spawn_readiness(readiness_args, args.json)
+                        {
+                            return named_cli_fail(
+                                DOCTOR_ERROR_CLI_SCHEMA_VERSION,
+                                "doctor.process-spawn-readiness",
+                                readiness_args.json || args.json,
+                                err,
+                            );
+                        }
                     }
                 }
                 return Ok(());
             }
 
-            let profile_override = parse_profile_override(args.profile.as_deref())?;
+            let profile_override = match parse_profile_override(args.profile.as_deref()) {
+                Ok(profile) => profile,
+                Err(err) => {
+                    return named_cli_fail(
+                        DOCTOR_ERROR_CLI_SCHEMA_VERSION,
+                        "doctor",
+                        args.json,
+                        err,
+                    );
+                }
+            };
             // `doctor` is a read-only diagnostic that only READS merged config
             // fields to build its report (it reports on config state via the
             // DR-CONFIG/DR-TRUST checks rather than enforcing it). Resolve WITHOUT
@@ -30788,14 +31390,25 @@ fn main() -> Result<()> {
             // that had not yet run `franken-node init`, defeating the purpose of a
             // diagnostic meant to run anywhere. Mirrors the receipt-export probe
             // (bd-3c2ie) which uses the same lenient entry point for the same reason.
-            let resolved = config::Config::resolve_without_validation_with_env(
+            let resolved = match config::Config::resolve_without_validation_with_env(
                 args.config.as_deref(),
                 CliOverrides {
                     profile: profile_override,
                 },
                 &|key| std::env::var(key).ok(),
             )
-            .context("failed resolving configuration for doctor")?;
+            .context("failed resolving configuration for doctor")
+            {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    return named_cli_fail(
+                        DOCTOR_ERROR_CLI_SCHEMA_VERSION,
+                        "doctor",
+                        args.json,
+                        err,
+                    );
+                }
+            };
             let report = build_doctor_report_with_policy_input(
                 &resolved,
                 &args.trace_id,
@@ -31122,6 +31735,10 @@ mod ops_metrics_tests {
             OPS_HEALTH_CHECK_CLI_SCHEMA_VERSION
         );
         assert_eq!(report.health.active_session_count, 0);
+        assert_eq!(
+            report.health.session_count_source,
+            OPS_HEALTH_SESSION_COUNT_SOURCE
+        );
         assert!(report.health.pass, "expected health-check to pass");
         assert!(
             report.last_successful_evidence_ledger_flush_timestamp_seconds > 0,
@@ -31156,6 +31773,8 @@ mod ops_metrics_tests {
         assert_eq!(report.schema_version, OPS_HEALTH_CHECK_CLI_SCHEMA_VERSION);
         assert_eq!(report.command, "ops.health-check");
         assert_eq!(report.active_session_count, 2);
+        assert_eq!(report.session_count_source, OPS_HEALTH_SESSION_COUNT_SOURCE);
+        assert_eq!(report.uptime_source, OPS_HEALTH_UPTIME_SOURCE);
     }
 }
 

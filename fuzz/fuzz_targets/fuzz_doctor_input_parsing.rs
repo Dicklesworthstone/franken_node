@@ -108,11 +108,8 @@ fn assert_doctor_cli_shape(cli: &Cli) {
                     );
                 }
             }
-            Some(DoctorCommand::EvidenceReadiness(evidence_readiness)) => {
-                assert!(
-                    !evidence_readiness.input.as_os_str().is_empty(),
-                    "evidence-readiness input path should remain non-empty when parsed"
-                );
+            Some(DoctorCommand::EvidenceReadiness(_evidence_readiness)) => {
+                // `--input` is handler-required; empty parses so `--json` can fail closed.
             }
             Some(DoctorCommand::WorkspacePressure(workspace_pressure)) => {
                 if let Some(path) = &workspace_pressure.output {

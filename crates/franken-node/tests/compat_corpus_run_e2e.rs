@@ -1343,6 +1343,86 @@ fn release_triad_records_node_only_divergence_as_a_measured_failure() {
     );
 }
 
+#[cfg(all(feature = "engine", unix))]
+#[test]
+fn release_triad_passes_when_franken_matches_node_and_bun_disagrees() {
+    let work = tempfile::TempDir::new().expect("tempdir");
+    write_family(
+        &work.path().join("corpus"),
+        "path",
+        "path",
+        "bd-2djfa",
+        &[(
+            "tc::path::node-canonical-split",
+            "case.js",
+            "console.log('common');\n",
+            "core",
+            "critical",
+        )],
+    );
+    let fake_bin = work.path().join("fake-bin");
+    std::fs::create_dir(&fake_bin).expect("create fake bin");
+    write_executable(
+        &fake_bin.join("bun"),
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '1.3.14\\n'; exit 0; fi\nprintf 'bun-only\\n'\n",
+    );
+    write_executable(
+        &fake_bin.join("node"),
+        "#!/bin/sh\nif [ \"$1\" = \"-e\" ]; then printf 'node|undefined'; exit 0; fi\nif [ \"$1\" = \"--version\" ]; then printf 'v22.14.0\\n'; exit 0; fi\nprintf 'common\\n'\n",
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args([
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--out",
+            "results.json",
+            "--require-node-reference",
+            "--json",
+        ])
+        .current_dir(work.path())
+        .env("PATH", &fake_bin)
+        .output()
+        .expect("run Node-canonical split triad");
+    assert!(
+        output.status.success(),
+        "matching Node must produce an artifact: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let artifact: Value = serde_json::from_str(
+        &std::fs::read_to_string(work.path().join("results.json")).expect("read split artifact"),
+    )
+    .expect("parse split artifact");
+    assert_eq!(artifact["corpus"]["lockstep_topology"], "triad");
+    assert_eq!(artifact["totals"]["passed_test_cases"], 1);
+    assert_eq!(artifact["totals"]["failed_test_cases"], 0);
+    assert_eq!(artifact["per_test_results"][0]["status"], "pass");
+    assert_eq!(
+        artifact["failing_tests_tracking"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(usize::MAX),
+        0
+    );
+    let observations = artifact["per_test_results"][0]["runtime_observations"]
+        .as_object()
+        .expect("split runtime observations");
+    assert_eq!(
+        observations["node"]["stdout_digest"],
+        observations["franken-engine-native"]["stdout_digest"]
+    );
+    assert_ne!(
+        observations["bun"]["stdout_digest"],
+        observations["node"]["stdout_digest"]
+    );
+    validate_compatibility_corpus_runtime_observations(&artifact)
+        .expect("split observations must be bound");
+}
+
 /// Mock-free process-authority e2e: the corpus runner signs an exact
 /// run-scoped policy, authenticates its same-executable child over the private
 /// channel, and the native Bubblewrap worker re-verifies that authority before
@@ -1615,4 +1695,72 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
     // Honest gate state for an 83.33% run: blocked, no fabricated pass.
     assert_eq!(artifact["ci_gate"]["threshold_met"], false);
     assert_eq!(artifact["ci_gate"]["release_blocked"], true);
+}
+
+#[test]
+fn compat_corpus_run_json_fails_closed_when_corpus_root_flag_missing() {
+    let work = tempfile::TempDir::new().expect("tempdir");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args(["ops", "compat-corpus-run", "--json"])
+        .current_dir(work.path())
+        .output()
+        .expect("spawn compat-corpus-run missing --corpus-root");
+    assert!(
+        !output.status.success(),
+        "ops compat-corpus-run --json should fail when --corpus-root is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("missing --corpus-root --json must be JSON, not a clap usage dump ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/ops-error-cli/v1");
+    assert_eq!(payload["command"], "ops.compat-corpus-run");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--corpus-root"),
+        "missing --corpus-root --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided"),
+        "--json must not append a human clap line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn compat_corpus_run_json_fails_closed_when_out_flag_missing() {
+    let work = tempfile::TempDir::new().expect("tempdir");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .args([
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--json",
+        ])
+        .current_dir(work.path())
+        .output()
+        .expect("spawn compat-corpus-run missing --out");
+    assert!(
+        !output.status.success(),
+        "ops compat-corpus-run --json should fail when --out is omitted"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("missing --out --json must be JSON, not a clap usage dump ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/ops-error-cli/v1");
+    assert_eq!(payload["command"], "ops.compat-corpus-run");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--out"),
+        "missing --out --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided"),
+        "--json must not append a human clap line after the JSON report: {stderr}"
+    );
 }

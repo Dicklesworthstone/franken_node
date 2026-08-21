@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[derive(Debug, serde::Deserialize)]
@@ -72,21 +72,29 @@ impl TestLogger {
     }
 
     fn log_network_call(&self, url: &str, method: &str, status: u16, duration_ms: u64) {
-        self.log_phase("network", "http_request", json!({
-            "url": url,
-            "method": method,
-            "status": status,
-            "duration_ms": duration_ms
-        }));
+        self.log_phase(
+            "network",
+            "http_request",
+            json!({
+                "url": url,
+                "method": method,
+                "status": status,
+                "duration_ms": duration_ms
+            }),
+        );
     }
 
     fn log_assertion(&self, field: &str, expected: Value, actual: Value, matches: bool) {
-        self.log_phase("assert", "assertion", json!({
-            "field": field,
-            "expected": expected,
-            "actual": actual,
-            "match": matches
-        }));
+        self.log_phase(
+            "assert",
+            "assertion",
+            json!({
+                "field": field,
+                "expected": expected,
+                "actual": actual,
+                "match": matches
+            }),
+        );
     }
 }
 
@@ -161,11 +169,8 @@ fn create_test_workspace_with_real_packages() -> TempDir {
 }}"#
     );
 
-    fs::write(
-        dir.path().join("trust_workspace.json"),
-        trust_workspace,
-    )
-    .expect("write trust workspace");
+    fs::write(dir.path().join("trust_workspace.json"), trust_workspace)
+        .expect("write trust workspace");
 
     dir
 }
@@ -176,30 +181,35 @@ fn test_trust_sync_with_real_osv_api() {
     validate_test_environment();
     let logger = TestLogger::new("trust_sync_real_osv");
 
-    logger.log_phase("setup", "test_start", json!({
-        "osv_endpoint": REAL_OSV_API,
-        "test_type": "mock_free_e2e"
-    }));
+    logger.log_phase(
+        "setup",
+        "test_start",
+        json!({
+            "osv_endpoint": REAL_OSV_API,
+            "test_type": "mock_free_e2e"
+        }),
+    );
 
     // Create test workspace with real packages
     let workspace = create_test_workspace_with_real_packages();
-    logger.log_phase("setup", "workspace_created", json!({
-        "path": workspace.path().to_string_lossy()
-    }));
+    logger.log_phase(
+        "setup",
+        "workspace_created",
+        json!({
+            "path": workspace.path().to_string_lossy()
+        }),
+    );
 
     // Run trust sync with real OSV API
     let start_time = SystemTime::now();
-    let output = run_cli_with_real_osv(
-        workspace.path(),
-        &["trust", "sync", "--force"]
-    );
+    let output = run_cli_with_real_osv(workspace.path(), &["trust", "sync", "--force"]);
     let duration = start_time.elapsed().unwrap().as_millis() as u64;
 
     logger.log_network_call(
         REAL_OSV_API,
         "POST",
         if output.status.success() { 200 } else { 0 },
-        duration
+        duration,
     );
 
     // Parse structured logs from stderr
@@ -216,11 +226,15 @@ fn test_trust_sync_with_real_osv_api() {
         }
     }
 
-    logger.log_phase("assert", "command_execution", json!({
-        "exit_code": output.status.code(),
-        "stdout_bytes": output.stdout.len(),
-        "stderr_bytes": output.stderr.len()
-    }));
+    logger.log_phase(
+        "assert",
+        "command_execution",
+        json!({
+            "exit_code": output.status.code(),
+            "stdout_bytes": output.stdout.len(),
+            "stderr_bytes": output.stderr.len()
+        }),
+    );
 
     // Verify successful execution
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -228,7 +242,7 @@ fn test_trust_sync_with_real_osv_api() {
         "command_success",
         json!(true),
         json!(output.status.success()),
-        output.status.success()
+        output.status.success(),
     );
 
     assert!(
@@ -242,7 +256,7 @@ fn test_trust_sync_with_real_osv_api() {
         "sync_completion_message",
         json!("contains 'trust sync completed'"),
         json!(stdout.contains("trust sync completed")),
-        stdout.contains("trust sync completed")
+        stdout.contains("trust sync completed"),
     );
 
     assert!(
@@ -256,21 +270,29 @@ fn test_trust_sync_with_real_osv_api() {
         "network_activity",
         json!("network requests > 0"),
         json!(network_requests > 0),
-        network_requests > 0
+        network_requests > 0,
     );
 
     // Note: We don't assert on specific vulnerability findings since real API data changes
     // but we verify the system can handle real responses
-    logger.log_phase("verify", "real_api_integration", json!({
-        "api_responsive": output.status.success(),
-        "vulnerability_scan_attempted": vulnerability_found,
-        "network_requests": network_requests
-    }));
+    logger.log_phase(
+        "verify",
+        "real_api_integration",
+        json!({
+            "api_responsive": output.status.success(),
+            "vulnerability_scan_attempted": vulnerability_found,
+            "network_requests": network_requests
+        }),
+    );
 
-    logger.log_phase("teardown", "test_complete", json!({
-        "duration_ms": duration,
-        "workspace_cleaned": true
-    }));
+    logger.log_phase(
+        "teardown",
+        "test_complete",
+        json!({
+            "duration_ms": duration,
+            "workspace_cleaned": true
+        }),
+    );
 }
 
 /// Test trust sync error handling with real network conditions
@@ -279,10 +301,14 @@ fn test_trust_sync_network_error_handling() {
     validate_test_environment();
     let logger = TestLogger::new("trust_sync_network_errors");
 
-    logger.log_phase("setup", "test_start", json!({
-        "test_type": "network_error_handling",
-        "invalid_endpoint": true
-    }));
+    logger.log_phase(
+        "setup",
+        "test_start",
+        json!({
+            "test_type": "network_error_handling",
+            "invalid_endpoint": true
+        }),
+    );
 
     let workspace = create_test_workspace_with_real_packages();
 
@@ -293,7 +319,10 @@ fn test_trust_sync_network_error_handling() {
     let output = Command::new(&binary_path)
         .current_dir(workspace.path())
         .args(&["trust", "sync", "--force"])
-        .env("FRANKEN_NODE_OSV_QUERY_URL", "http://invalid-osv-endpoint.example.com/v1/query")
+        .env(
+            "FRANKEN_NODE_OSV_QUERY_URL",
+            "http://invalid-osv-endpoint.example.com/v1/query",
+        )
         .env("RUST_LOG", "debug")
         .output()
         .expect("run command with invalid endpoint");
@@ -304,7 +333,7 @@ fn test_trust_sync_network_error_handling() {
         "http://invalid-osv-endpoint.example.com/v1/query",
         "POST",
         0, // Network error
-        duration
+        duration,
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -313,8 +342,12 @@ fn test_trust_sync_network_error_handling() {
     logger.log_assertion(
         "graceful_network_error",
         json!("contains network error message"),
-        json!(stderr.contains("network") || stderr.contains("connection") || stderr.contains("timeout")),
-        stderr.contains("network") || stderr.contains("connection") || stderr.contains("timeout")
+        json!(
+            stderr.contains("network")
+                || stderr.contains("connection")
+                || stderr.contains("timeout")
+        ),
+        stderr.contains("network") || stderr.contains("connection") || stderr.contains("timeout"),
     );
 
     // System should either handle the error gracefully or report it properly
@@ -324,8 +357,12 @@ fn test_trust_sync_network_error_handling() {
         stderr
     );
 
-    logger.log_phase("verify", "error_handling_validated", json!({
-        "network_error_detected": true,
-        "graceful_failure": !output.status.success()
-    }));
+    logger.log_phase(
+        "verify",
+        "error_handling_validated",
+        json!({
+            "network_error_detected": true,
+            "graceful_failure": !output.status.success()
+        }),
+    );
 }

@@ -548,6 +548,35 @@ fn incident_bundle_round_trips_evidence_refs_and_trust_artifacts() {
 }
 
 #[test]
+fn incident_bundle_json_fails_closed_when_id_missing() {
+    let workspace = config_only_workspace();
+    let output = run_cli_in_workspace(workspace.path(), &["incident", "bundle", "--json"]);
+    assert!(
+        !output.status.success(),
+        "incident bundle --json should fail when --id is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("incident bundle --json missing --id must be JSON, not a clap usage dump");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.bundle");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--id"),
+        "missing --id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `incident bundle` requires --id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn incident_bundle_fails_closed_when_authoritative_evidence_is_missing() {
     let workspace = config_only_workspace();
 
@@ -604,6 +633,35 @@ fn incident_bundle_fails_closed_when_authoritative_evidence_is_missing() {
 }
 
 #[test]
+fn incident_replay_json_fails_closed_when_bundle_missing() {
+    let workspace = config_only_workspace();
+    let output = run_cli_in_workspace(workspace.path(), &["incident", "replay", "--json"]);
+    assert!(
+        !output.status.success(),
+        "incident replay --json should fail when --bundle is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("incident replay --json missing --bundle must be JSON, not a clap usage dump");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.replay");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--bundle"),
+        "missing --bundle --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `incident replay` requires --bundle"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn incident_list_json_fails_closed_for_unknown_severity() {
     let workspace = config_only_workspace();
     let output = run_cli_in_workspace(
@@ -631,6 +689,78 @@ fn incident_list_json_fails_closed_for_unknown_severity() {
     assert!(
         !stderr.contains("Error: invalid --severity"),
         "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn incident_counterfactual_json_fails_closed_when_policy_missing() {
+    let workspace = config_only_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident",
+            "counterfactual",
+            "--bundle",
+            "missing.fnbundle",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "incident counterfactual --json should fail when --policy is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect(
+        "incident counterfactual --json missing --policy must be JSON, not a clap usage dump",
+    );
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.counterfactual");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--policy"),
+        "missing --policy --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `incident counterfactual` requires --policy"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn incident_counterfactual_json_fails_closed_when_bundle_flag_missing() {
+    let workspace = config_only_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &["incident", "counterfactual", "--json"],
+    );
+    assert!(
+        !output.status.success(),
+        "incident counterfactual --json should fail when --bundle is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect(
+        "incident counterfactual --json missing --bundle must be JSON, not a clap usage dump",
+    );
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.counterfactual");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--bundle"),
+        "missing --bundle --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `incident counterfactual` requires --bundle"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
 }
 

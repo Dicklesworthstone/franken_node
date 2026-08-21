@@ -6,8 +6,8 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use tempfile::TempDir;
-use tracing::{info, warn, debug, span, Level};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing::{Level, debug, info, span, warn};
+use tracing_subscriber::{EnvFilter, fmt};
 
 #[path = "../src/connector/vef_execution_receipt.rs"]
 pub mod vef_execution_receipt;
@@ -54,7 +54,10 @@ mod tests {
             fs::create_dir_all(&receipts_dir).expect("create receipts directory");
             fs::create_dir_all(&proofs_dir).expect("create proofs directory");
 
-            info!("Initialized test harness with temp dir: {}", temp_dir.path().display());
+            info!(
+                "Initialized test harness with temp dir: {}",
+                temp_dir.path().display()
+            );
 
             Self {
                 temp_dir,
@@ -88,7 +91,11 @@ mod tests {
             proof_path
         }
 
-        fn create_real_receipt(&self, action_type: ExecutionActionType, sequence: u64) -> ExecutionReceipt {
+        fn create_real_receipt(
+            &self,
+            action_type: ExecutionActionType,
+            sequence: u64,
+        ) -> ExecutionReceipt {
             let now = Utc::now();
             let timestamp_millis = now.timestamp_millis() as u64;
 
@@ -208,7 +215,10 @@ mod tests {
 
         // Use real hash computed from the receipt data
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        serde_json::to_string(&chain.entries()).unwrap().as_bytes().hash(&mut hasher);
+        serde_json::to_string(&chain.entries())
+            .unwrap()
+            .as_bytes()
+            .hash(&mut hasher);
         let chain_hash = format!("sha256:{:064x}", hasher.finish());
 
         let input = ProofInputEnvelope::from_scheduler_job(
@@ -243,7 +253,11 @@ mod tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        let _span = span!(Level::INFO, "proof_service_round_trip_with_real_persistence").entered();
+        let _span = span!(
+            Level::INFO,
+            "proof_service_round_trip_with_real_persistence"
+        )
+        .entered();
 
         info!("Phase: initialization - Setting up real filesystem test harness");
 
@@ -263,8 +277,11 @@ mod tests {
             "created_at": Utc::now().to_rfc3339(),
             "config_hash": "real_config_hash"
         });
-        fs::write(&config_path, serde_json::to_string_pretty(&config_json).unwrap())
-            .expect("write config to filesystem");
+        fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&config_json).unwrap(),
+        )
+        .expect("write config to filesystem");
 
         let mut service = VefProofService::new(config);
 
@@ -300,7 +317,9 @@ mod tests {
 
         // Verify proof
         info!("Phase: verification - Verifying proof against original input");
-        service.verify_proof(&input, &proof).expect("proof verification should succeed");
+        service
+            .verify_proof(&input, &proof)
+            .expect("proof verification should succeed");
 
         info!(
             verification_passed = true,
@@ -308,14 +327,23 @@ mod tests {
         );
 
         // Verify filesystem persistence worked
-        assert!(config_path.exists(), "Configuration should be persisted to filesystem");
-        assert!(proof_path.exists(), "Proof should be persisted to filesystem");
+        assert!(
+            config_path.exists(),
+            "Configuration should be persisted to filesystem"
+        );
+        assert!(
+            proof_path.exists(),
+            "Proof should be persisted to filesystem"
+        );
 
-        let persisted_proof: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(&proof_path).expect("read persisted proof")
-        ).expect("parse persisted proof");
+        let persisted_proof: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&proof_path).expect("read persisted proof"))
+                .expect("parse persisted proof");
 
-        assert_eq!(persisted_proof["generated_at"].as_u64().unwrap(), proof_timestamp);
+        assert_eq!(
+            persisted_proof["generated_at"].as_u64().unwrap(),
+            proof_timestamp
+        );
         assert_eq!(persisted_proof["backend_id"], json!(proof.backend_id));
 
         info!(
@@ -334,14 +362,19 @@ mod tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        let _span = span!(Level::INFO, "proof_service_backend_swap_with_real_filesystem_persistence").entered();
+        let _span = span!(
+            Level::INFO,
+            "proof_service_backend_swap_with_real_filesystem_persistence"
+        )
+        .entered();
 
         info!("Phase: setup - Creating test harness with real filesystem");
 
         let harness = VefProofTestHarness::new();
         let input = build_real_input(&harness);
 
-        let mut service = VefProofService::new(ProofServiceConfig::reference_attestation_defaults());
+        let mut service =
+            VefProofService::new(ProofServiceConfig::reference_attestation_defaults());
 
         // Generate proofs with different backends using real timestamps
         let now = Utc::now();
@@ -350,11 +383,7 @@ mod tests {
 
         info!("Phase: proof_generation_a - Generating proof with HashAttestationV1 backend");
         let proof_a = service
-            .generate_proof(
-                &input,
-                Some(ProofBackendId::HashAttestationV1),
-                timestamp_a,
-            )
+            .generate_proof(&input, Some(ProofBackendId::HashAttestationV1), timestamp_a)
             .expect("generate proof with HashAttestationV1");
 
         // Persist proof A to filesystem
@@ -403,19 +432,23 @@ mod tests {
         assert_ne!(proof_a.backend_id, proof_b.backend_id);
 
         info!("Phase: verification_a - Verifying HashAttestationV1 proof");
-        service.verify_proof(&input, &proof_a).expect("verify HashAttestationV1 proof");
+        service
+            .verify_proof(&input, &proof_a)
+            .expect("verify HashAttestationV1 proof");
 
         info!("Phase: verification_b - Verifying DoubleHashAttestationV1 proof");
-        service.verify_proof(&input, &proof_b).expect("verify DoubleHashAttestationV1 proof");
+        service
+            .verify_proof(&input, &proof_b)
+            .expect("verify DoubleHashAttestationV1 proof");
 
         // Verify filesystem persistence integrity
-        let persisted_a: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(&proof_a_path).expect("read proof A")
-        ).expect("parse proof A");
+        let persisted_a: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&proof_a_path).expect("read proof A"))
+                .expect("parse proof A");
 
-        let persisted_b: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(&proof_b_path).expect("read proof B")
-        ).expect("parse proof B");
+        let persisted_b: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&proof_b_path).expect("read proof B"))
+                .expect("parse proof B");
 
         assert_eq!(persisted_a["backend_type"], "HashAttestationV1");
         assert_eq!(persisted_b["backend_type"], "DoubleHashAttestationV1");
@@ -438,7 +471,11 @@ mod tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        let _span = span!(Level::INFO, "proof_service_handles_metadata_with_real_filesystem_logging").entered();
+        let _span = span!(
+            Level::INFO,
+            "proof_service_handles_metadata_with_real_filesystem_logging"
+        )
+        .entered();
 
         info!("Phase: setup - Creating harness and input with adversarial metadata");
 
@@ -446,8 +483,13 @@ mod tests {
         let mut input = build_real_input(&harness);
 
         // Add adversarial metadata that should be ignored by the proof service
-        input.metadata.insert("simulate_failure".to_string(), "timeout".to_string());
-        input.metadata.insert("inject_malicious_data".to_string(), "evil_payload".to_string());
+        input
+            .metadata
+            .insert("simulate_failure".to_string(), "timeout".to_string());
+        input.metadata.insert(
+            "inject_malicious_data".to_string(),
+            "evil_payload".to_string(),
+        );
 
         // Persist the input with adversarial metadata to filesystem for audit trail
         let input_json = json!({
@@ -456,8 +498,11 @@ mod tests {
             "test_timestamp": Utc::now().to_rfc3339()
         });
         let input_path = harness.proofs_dir.join("adversarial_input.json");
-        fs::write(&input_path, serde_json::to_string_pretty(&input_json).unwrap())
-            .expect("persist adversarial input");
+        fs::write(
+            &input_path,
+            serde_json::to_string_pretty(&input_json).unwrap(),
+        )
+        .expect("persist adversarial input");
 
         warn!(
             metadata_count = input.metadata.len(),
@@ -465,7 +510,8 @@ mod tests {
             "Phase: setup complete - Input with adversarial metadata persisted for audit"
         );
 
-        let mut service = VefProofService::new(ProofServiceConfig::reference_attestation_defaults());
+        let mut service =
+            VefProofService::new(ProofServiceConfig::reference_attestation_defaults());
 
         info!("Phase: proof_generation - Generating proof despite adversarial metadata");
         let timestamp = Utc::now().timestamp_millis() as u64;
@@ -482,7 +528,8 @@ mod tests {
             "timestamp": timestamp,
             "input_metadata": input.metadata
         });
-        let proof_path = harness.save_proof_to_file(&proof_result_json, "metadata_resilience_proof.json");
+        let proof_path =
+            harness.save_proof_to_file(&proof_result_json, "metadata_resilience_proof.json");
 
         info!(
             proof_generated = true,
@@ -492,7 +539,9 @@ mod tests {
         );
 
         info!("Phase: verification - Verifying proof resilience");
-        service.verify_proof(&input, &proof).expect("proof verification should succeed");
+        service
+            .verify_proof(&input, &proof)
+            .expect("proof verification should succeed");
 
         // Verify that the adversarial metadata didn't affect the proof
         let audit_log_path = harness.proofs_dir.join("audit_log.json");
@@ -505,8 +554,11 @@ mod tests {
             "verification_succeeded": true,
             "test_completed_at": Utc::now().to_rfc3339()
         });
-        fs::write(&audit_log_path, serde_json::to_string_pretty(&audit_entry).unwrap())
-            .expect("write audit log");
+        fs::write(
+            &audit_log_path,
+            serde_json::to_string_pretty(&audit_entry).unwrap(),
+        )
+        .expect("write audit log");
 
         info!(
             audit_log = %audit_log_path.display(),

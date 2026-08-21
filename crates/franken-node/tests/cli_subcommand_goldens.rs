@@ -887,6 +887,317 @@ fn safe_mode_cli_exit_without_confirmation_fails_closed_json() -> Result<(), Box
 }
 
 #[test]
+fn safe_mode_exit_json_fails_closed_when_operator_id_flag_missing() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let mut exit = Command::cargo_bin("franken-node")?;
+    let assertion = exit
+        .current_dir(temp.path())
+        .args(["safe-mode", "exit", "--json"])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "safe-mode exit missing --operator-id",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/safe-mode-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("safe-mode.exit"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--operator-id"),
+        "missing --operator-id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --operator-id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn safe_mode_enter_json_fails_closed_when_state_dir_is_a_file() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let blocked = temp.path().join("blocked-state");
+    fs::write(&blocked, b"not-a-directory")?;
+
+    let mut enter = Command::cargo_bin("franken-node")?;
+    let assertion = enter
+        .current_dir(temp.path())
+        .args([
+            "safe-mode",
+            "enter",
+            "--reason",
+            "trust-corruption",
+            "--operator-id",
+            "secops-1",
+            "--trust-state-hash",
+            "sha256:trusted",
+            "--state-dir",
+            "blocked-state",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout("safe-mode enter", &assertion.get_output().stdout)?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/safe-mode-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("safe-mode.enter"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("failed creating safe-mode state dir") || error.contains("blocked-state"),
+        "state-dir-is-file --json must name the persist failure: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("Error: failed creating safe-mode state dir"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn safe_mode_enter_json_fails_closed_when_reason_flag_missing() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let mut enter = Command::cargo_bin("franken-node")?;
+    let assertion = enter
+        .current_dir(temp.path())
+        .args(["safe-mode", "enter", "--json"])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "safe-mode enter missing --reason",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/safe-mode-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("safe-mode.enter"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--reason"),
+        "missing --reason --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --reason"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ltv_attest_json_fails_closed_when_bundle_missing() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    fs::write(
+        temp.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )?;
+
+    let mut attest = Command::cargo_bin("franken-node")?;
+    let assertion = attest
+        .current_dir(temp.path())
+        .args([
+            "ltv",
+            "attest",
+            "--bundle",
+            "missing.fnbundle",
+            "--out",
+            "ltv-evidence.json",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout("ltv attest", &assertion.get_output().stdout)?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/ltv-error-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("ltv.attest"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("failed reading replay bundle") || error.contains("missing.fnbundle"),
+        "missing-bundle --json must name the bundle failure: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("Error: failed reading replay bundle"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ltv_attest_json_fails_closed_when_witness_key_missing() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    fs::write(
+        temp.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )?;
+    fs::write(temp.path().join("present.fnbundle"), b"not-a-real-bundle")?;
+
+    let mut attest = Command::cargo_bin("franken-node")?;
+    let assertion = attest
+        .current_dir(temp.path())
+        .args([
+            "ltv",
+            "attest",
+            "--bundle",
+            "present.fnbundle",
+            "--out",
+            "ltv-evidence.json",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "ltv attest missing-witness-key",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/ltv-error-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("ltv.attest"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("witness-key") || error.contains("witness key"),
+        "missing --witness-key --json must name the handler requirement, not a clap usage dump: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: ltv attest requires at least one --witness-key"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ltv_attest_json_fails_closed_when_bundle_flag_missing() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    fs::write(
+        temp.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )?;
+
+    let mut attest = Command::cargo_bin("franken-node")?;
+    let assertion = attest
+        .current_dir(temp.path())
+        .args(["ltv", "attest", "--json"])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "ltv attest missing --bundle",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/ltv-error-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("ltv.attest"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--bundle"),
+        "missing --bundle --json must name the handler requirement, not a clap usage dump: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --bundle"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ltv_attest_json_fails_closed_when_out_flag_missing() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    fs::write(
+        temp.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )?;
+    fs::write(temp.path().join("present.fnbundle"), b"not-a-real-bundle")?;
+
+    let mut attest = Command::cargo_bin("franken-node")?;
+    let assertion = attest
+        .current_dir(temp.path())
+        .args(["ltv", "attest", "--bundle", "present.fnbundle", "--json"])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout("ltv attest missing --out", &assertion.get_output().stdout)?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/ltv-error-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("ltv.attest"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--out"),
+        "missing --out --json must name the handler requirement, not a clap usage dump: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --out"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ltv_verify_as_of_json_fails_closed_when_evidence_flag_missing() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    fs::write(
+        temp.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )?;
+
+    let mut verify = Command::cargo_bin("franken-node")?;
+    let assertion = verify
+        .current_dir(temp.path())
+        .args(["ltv", "verify-as-of", "--json"])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "ltv verify-as-of missing --evidence",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/ltv-error-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("ltv.verify-as-of"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--evidence"),
+        "missing --evidence --json must name the handler requirement, not a clap usage dump: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: --evidence"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn proofs_queue_status_json_reports_broker_and_worker_state() -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
     let input_arg = write_proof_pipeline_readiness_fixture(temp.path())?;
@@ -912,6 +1223,11 @@ fn proofs_queue_status_json_reports_broker_and_worker_state() -> Result<(), Box<
         json!("franken-node/proof-pipeline/queue-report/v1")
     );
     assert_eq!(status_json["command"], json!("proofs queue status"));
+    assert_eq!(status_json["live_queue"], json!(false));
+    assert_eq!(
+        status_json["queue_source"],
+        json!("validation_readiness_snapshot")
+    );
     assert_eq!(status_json["summary"]["queue_depth"], json!(1));
     assert_eq!(status_json["summary"]["degraded_workers"], json!(1));
     Ok(())
@@ -995,6 +1311,133 @@ fn proofs_workers_restart_json_denies_missing_pipeline_admin() -> Result<(), Box
     assert!(
         !stderr.contains("Error: ERR_PROOF_RESTART_PERMISSION_DENIED"),
         "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proofs_workers_restart_json_fails_closed_when_operator_id_flag_missing()
+-> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let mut restart = Command::cargo_bin("franken-node")?;
+    let assertion = restart
+        .current_dir(temp.path())
+        .args([
+            "proofs",
+            "workers",
+            "restart",
+            "--reason",
+            "outage drill",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "proofs workers restart missing --operator-id",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/proofs-error-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("proofs.workers.restart"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--operator-id"),
+        "missing --operator-id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: proofs workers restart requires --operator-id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proofs_workers_restart_json_fails_closed_when_reason_flag_missing() -> Result<(), Box<dyn Error>>
+{
+    let temp = TempDir::new()?;
+    let mut restart = Command::cargo_bin("franken-node")?;
+    let assertion = restart
+        .current_dir(temp.path())
+        .args([
+            "proofs",
+            "workers",
+            "restart",
+            "--operator-id",
+            "ops-1",
+            "--operator-role",
+            "pipeline_admin",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "proofs workers restart missing --reason",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/proofs-error-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("proofs.workers.restart"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--reason"),
+        "missing --reason --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: proofs workers restart requires --reason"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn proofs_workers_restart_json_fails_closed_when_operator_role_flag_missing()
+-> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    let mut restart = Command::cargo_bin("franken-node")?;
+    let assertion = restart
+        .current_dir(temp.path())
+        .args([
+            "proofs",
+            "workers",
+            "restart",
+            "--operator-id",
+            "ops-1",
+            "--reason",
+            "outage drill",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let payload = parse_json_stdout(
+        "proofs workers restart missing --operator-role",
+        &assertion.get_output().stdout,
+    )?;
+    assert_eq!(
+        payload["schema_version"],
+        json!("franken-node/proofs-error-cli/v1")
+    );
+    assert_eq!(payload["command"], json!("proofs.workers.restart"));
+    assert_eq!(payload["ok"], json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--operator-role"),
+        "missing --operator-role --json must name the handler requirement, not a permission deny: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: proofs workers restart requires --operator-role"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
     Ok(())
 }

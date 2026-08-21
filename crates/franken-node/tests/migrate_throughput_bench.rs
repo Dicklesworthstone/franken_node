@@ -1,5 +1,5 @@
 use hmac::{Hmac, KeyInit, Mac};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::Sha256;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -181,11 +181,7 @@ fn command_version(command: &Path) -> String {
         .ok()
         .and_then(|output| {
             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if text.is_empty() {
-                None
-            } else {
-                Some(text)
-            }
+            if text.is_empty() { None } else { Some(text) }
         });
     if let Some(version) = direct {
         return version;
@@ -202,11 +198,7 @@ fn command_version(command: &Path) -> String {
                         .ok()
                         .and_then(|output| {
                             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                            if text.is_empty() {
-                                None
-                            } else {
-                                Some(text)
-                            }
+                            if text.is_empty() { None } else { Some(text) }
                         })
                 {
                     return format!("bun-node-wrapper {version}");

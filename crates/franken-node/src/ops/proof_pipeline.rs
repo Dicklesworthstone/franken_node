@@ -25,6 +25,8 @@ pub const PROOF_PIPELINE_RESTART_REPORT_SCHEMA_VERSION: &str =
     "franken-node/proof-pipeline/restart-report/v1";
 pub const PROOF_WORKER_SCHEDULING_BASELINE_SCHEMA_VERSION: &str =
     "franken-node/proof-pipeline/worker-scheduling-baseline/v1";
+/// Queue counts are derived from `--input` / `--receipt` snapshots, not a live broker.
+pub const PROOF_PIPELINE_QUEUE_SOURCE: &str = "validation_readiness_snapshot";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,6 +90,10 @@ pub struct ProofPipelineQueueReport {
     pub trace_id: String,
     pub generated_at_utc: DateTime<Utc>,
     pub status: ProofPipelineStatus,
+    /// False: this report never talks to a live proof broker.
+    pub live_queue: bool,
+    /// `validation_readiness_snapshot` from `--input` / `--receipt`.
+    pub queue_source: String,
     pub summary: ProofPipelineQueueSummary,
     pub proof_counts: ProofKindCounts,
     pub workers: Vec<RchWorkerReadiness>,
@@ -269,6 +275,8 @@ pub fn build_queue_report(
         trace_id: trace_id.into(),
         generated_at_utc: now,
         status,
+        live_queue: false,
+        queue_source: PROOF_PIPELINE_QUEUE_SOURCE.to_string(),
         summary,
         proof_counts,
         workers: input.rch_workers.clone(),
@@ -338,8 +346,15 @@ pub fn render_worker_scheduling_baseline_jsonl(
 #[must_use]
 pub fn render_queue_report_human(report: &ProofPipelineQueueReport) -> String {
     let mut lines = vec![
-        format!("proofs queue status: status={}", report.status.as_str()),
+        format!(
+            "proofs queue status: status={} (validation-readiness snapshot; not a live queue)",
+            report.status.as_str()
+        ),
         format!("  trace_id={}", report.trace_id),
+        format!(
+            "  live_queue={} queue_source={}",
+            report.live_queue, report.queue_source
+        ),
         format!(
             "  queue_depth={} active_proofs={} terminal_proofs={}",
             report.summary.queue_depth,
@@ -1259,6 +1274,8 @@ mod tests {
         let report = build_queue_report(&input_with_running_proof(), "trace-1", now());
 
         assert_eq!(report.status, ProofPipelineStatus::Degraded);
+        assert!(!report.live_queue);
+        assert_eq!(report.queue_source, PROOF_PIPELINE_QUEUE_SOURCE);
         assert_eq!(report.summary.queue_depth, 1);
         assert_eq!(report.summary.degraded_workers, 1);
         assert_eq!(report.proof_counts.running, 1);

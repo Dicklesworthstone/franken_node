@@ -122,7 +122,10 @@ fn adversarial_remote_cap_replay_reused_nonce_is_rejected_after_restart() {
     let consumed_markers = fs::read_dir(harness.consumed_dir())
         .expect("read replay markers")
         .count();
-    assert_eq!(consumed_markers, 1, "replay store should persist one consumed token");
+    assert_eq!(
+        consumed_markers, 1,
+        "replay store should persist one consumed token"
+    );
 
     let mut restarted_gate = harness.gate();
     let err = authorize(
@@ -141,7 +144,10 @@ fn adversarial_remote_cap_replay_reused_nonce_is_rejected_after_restart() {
     );
     assert_eq!(err.code(), "REMOTECAP_REPLAY");
 
-    let denial = restarted_gate.audit_log().last().expect("replay denial audit");
+    let denial = restarted_gate
+        .audit_log()
+        .last()
+        .expect("replay denial audit");
     assert!(!denial.allowed, "replay attempt must be denied");
     assert_eq!(denial.token_id.as_deref(), Some(captured.token_id()));
     assert_eq!(denial.denial_code.as_deref(), Some("REMOTECAP_REPLAY"));

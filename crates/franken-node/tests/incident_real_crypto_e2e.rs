@@ -13,13 +13,13 @@
 //! - Key loading from different encodings
 
 use assert_cmd::Command;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier, rand_core::OsRng};
-use serde_json::{json, Value};
+use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, rand_core::OsRng};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use tracing::{info, debug, warn, span, Level};
-use chrono::{DateTime, Utc};
+use tracing::{Level, debug, info, span, warn};
 
 const BINARY_UNDER_TEST: &str = env!("CARGO_BIN_EXE_franken-node");
 
@@ -56,8 +56,7 @@ impl RealCryptoIncidentTestHarness {
         fs::create_dir_all(key_path.parent().unwrap()).expect("create keys directory");
 
         // Write real key in production format (hex-encoded bytes)
-        fs::write(&key_path, hex::encode(signing_key.to_bytes()))
-            .expect("write real signing key");
+        fs::write(&key_path, hex::encode(signing_key.to_bytes())).expect("write real signing key");
 
         debug!("Wrote real signing key to: {}", key_path.display());
 
@@ -140,9 +139,15 @@ enforce_signature_verification = true
             }
         });
 
-        let bundle_path = self.workspace.path().join(format!("{}.fnbundle", bundle_name));
-        fs::write(&bundle_path, serde_json::to_string_pretty(&signed_bundle).unwrap())
-            .expect("write signed bundle");
+        let bundle_path = self
+            .workspace
+            .path()
+            .join(format!("{}.fnbundle", bundle_name));
+        fs::write(
+            &bundle_path,
+            serde_json::to_string_pretty(&signed_bundle).unwrap(),
+        )
+        .expect("write signed bundle");
 
         debug!("Real signed bundle written to: {}", bundle_path.display());
         self.operation_count += 1;
@@ -153,15 +158,16 @@ enforce_signature_verification = true
     fn verify_signature(&self, bundle_path: &str) -> Result<(), String> {
         let _span = span!(Level::DEBUG, "signature_verification").entered();
 
-        let bundle_content = fs::read_to_string(bundle_path)
-            .map_err(|e| format!("read bundle: {}", e))?;
+        let bundle_content =
+            fs::read_to_string(bundle_path).map_err(|e| format!("read bundle: {}", e))?;
         let bundle_json: Value = serde_json::from_str(&bundle_content)
             .map_err(|e| format!("parse bundle JSON: {}", e))?;
 
-        let signature_hex = bundle_json["signature"]["signature_bytes"].as_str()
+        let signature_hex = bundle_json["signature"]["signature_bytes"]
+            .as_str()
             .ok_or("missing signature_bytes")?;
-        let signature_bytes = hex::decode(signature_hex)
-            .map_err(|e| format!("decode signature hex: {}", e))?;
+        let signature_bytes =
+            hex::decode(signature_hex).map_err(|e| format!("decode signature hex: {}", e))?;
         let signature = Signature::from_bytes(&signature_bytes.try_into().unwrap())
             .map_err(|e| format!("parse signature: {}", e))?;
 
@@ -169,7 +175,8 @@ enforce_signature_verification = true
             .map_err(|e| format!("serialize bundle for verification: {}", e))?;
 
         // REAL signature verification using Ed25519
-        self.verifying_key.verify(&bundle_bytes, &signature)
+        self.verifying_key
+            .verify(&bundle_bytes, &signature)
             .map_err(|e| format!("signature verification failed: {}", e))?;
 
         info!("Real Ed25519 signature verification PASSED");
@@ -212,15 +219,16 @@ fn real_crypto_incident_replay_success() {
     let bundle_path = harness.create_signed_bundle("real-crypto-incident-001");
 
     info!("Phase: verify - checking real signature before CLI test");
-    harness.verify_signature(&bundle_path)
+    harness
+        .verify_signature(&bundle_path)
         .expect("real signature verification should pass");
 
     info!("Phase: act - executing CLI with real crypto bundle");
     let mut cmd = harness.incident_cmd();
     cmd.arg("replay")
-       .arg("--bundle")
-       .arg(&bundle_path)
-       .arg("--json");
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--json");
 
     let result = cmd.assert().success();
     let output = result.get_output();
@@ -231,13 +239,22 @@ fn real_crypto_incident_replay_success() {
 
     // Assert CLI properly processed the real crypto bundle
     assert!(json["incident_id"].is_string(), "incident_id field present");
-    assert!(json["replay_result"].is_object(), "replay_result object present");
+    assert!(
+        json["replay_result"].is_object(),
+        "replay_result object present"
+    );
     assert!(json["timeline"].is_array(), "timeline array present");
 
     // Assert crypto-specific fields that hardcoded keys wouldn't test
     if let Some(crypto_info) = json.get("crypto_verification") {
-        assert_eq!(crypto_info["algorithm"], "Ed25519", "Ed25519 algorithm detected");
-        assert_eq!(crypto_info["verification_status"], "valid", "signature verification passed");
+        assert_eq!(
+            crypto_info["algorithm"], "Ed25519",
+            "Ed25519 algorithm detected"
+        );
+        assert_eq!(
+            crypto_info["verification_status"], "valid",
+            "signature verification passed"
+        );
     }
 
     harness.log_test_summary("real_crypto_incident_replay_success", "PASS");
@@ -265,20 +282,28 @@ fn real_crypto_incident_replay_invalid_signature_fails() {
     let mut bundle_json: Value = serde_json::from_str(&bundle_content).expect("parse JSON");
 
     // Replace signature with invalid bytes
-    bundle_json["signature"]["signature_bytes"] = json!("0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    bundle_json["signature"]["signature_bytes"] = json!(
+        "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    );
 
-    fs::write(&bundle_path, serde_json::to_string_pretty(&bundle_json).unwrap())
-        .expect("write corrupted bundle");
+    fs::write(
+        &bundle_path,
+        serde_json::to_string_pretty(&bundle_json).unwrap(),
+    )
+    .expect("write corrupted bundle");
 
     info!("Phase: verify - confirming signature corruption");
-    assert!(harness.verify_signature(&bundle_path).is_err(), "corrupted signature should fail");
+    assert!(
+        harness.verify_signature(&bundle_path).is_err(),
+        "corrupted signature should fail"
+    );
 
     info!("Phase: act - testing CLI with invalid signature");
     let mut cmd = harness.incident_cmd();
     cmd.arg("replay")
-       .arg("--bundle")
-       .arg(&bundle_path)
-       .arg("--json");
+        .arg("--bundle")
+        .arg(&bundle_path)
+        .arg("--json");
 
     let result = cmd.assert().failure();
     let output = result.get_output();
@@ -286,7 +311,9 @@ fn real_crypto_incident_replay_invalid_signature_fails() {
 
     info!("Phase: assert - verifying proper crypto failure handling");
     assert!(
-        stderr.contains("signature") || stderr.contains("crypto") || stderr.contains("verification"),
+        stderr.contains("signature")
+            || stderr.contains("crypto")
+            || stderr.contains("verification"),
         "CLI should report cryptographic verification failure"
     );
 
@@ -310,7 +337,9 @@ fn real_crypto_key_loading_edge_cases() {
     fs::remove_file(&harness.key_path).expect("remove key file");
 
     let mut cmd = harness.incident_cmd();
-    cmd.arg("replay").arg("--bundle").arg("nonexistent.fnbundle");
+    cmd.arg("replay")
+        .arg("--bundle")
+        .arg("nonexistent.fnbundle");
     let result = cmd.assert().failure();
 
     let stderr = std::str::from_utf8(&result.get_output().stderr).expect("valid UTF-8");
@@ -323,7 +352,9 @@ fn real_crypto_key_loading_edge_cases() {
     fs::write(&harness.key_path, "invalid_hex_key_data").expect("write invalid key");
 
     let mut cmd2 = harness.incident_cmd();
-    cmd2.arg("replay").arg("--bundle").arg("nonexistent.fnbundle");
+    cmd2.arg("replay")
+        .arg("--bundle")
+        .arg("nonexistent.fnbundle");
     let result2 = cmd2.assert().failure();
 
     let stderr2 = std::str::from_utf8(&result2.get_output().stderr).expect("valid UTF-8");

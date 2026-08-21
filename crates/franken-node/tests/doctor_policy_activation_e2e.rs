@@ -1199,3 +1199,193 @@ fn debug_trace_missing_input_file_fails_closed() {
         "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
+
+#[test]
+fn debug_trace_json_fails_closed_when_policy_flag_missing() {
+    let test_name = "debug_trace_json_fails_closed_when_policy_flag_missing";
+    let workspace = tempfile::tempdir().expect("debug trace workspace");
+    let input_file = "policy_input.json";
+    std::fs::write(workspace.path().join(input_file), "{}").expect("input writes");
+    log_phase(
+        test_name,
+        "fixtures_written",
+        json!({ "input_file": input_file }),
+    );
+
+    let args = vec![
+        "debug".to_string(),
+        "trace".to_string(),
+        "--input".to_string(),
+        input_file.to_string(),
+        "--json".to_string(),
+        "--trace-id".to_string(),
+        test_name.to_string(),
+    ];
+    let output = run_debug_trace_in_workspace(workspace.path(), &args);
+    log_phase(
+        test_name,
+        "failure_path_checked",
+        json!({
+            "status": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        }),
+    );
+    assert!(
+        !output.status.success(),
+        "missing --policy --json must fail closed"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("debug trace --json missing --policy must be JSON, not a clap usage dump");
+    assert_eq!(payload["schema_version"], "franken-node/debug-error-cli/v1");
+    assert_eq!(payload["command"], "debug.trace");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--policy"),
+        "missing --policy --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: debug trace requires --policy"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn debug_trace_json_fails_closed_when_input_flag_missing() {
+    let test_name = "debug_trace_json_fails_closed_when_input_flag_missing";
+    let workspace = tempfile::tempdir().expect("debug trace workspace");
+    let policy_path = write_debug_trace_policy(
+        workspace.path(),
+        DEBUG_TRACE_POLICY_ENGINE_DOCTOR_ACTIVATION,
+    );
+    log_phase(
+        test_name,
+        "fixtures_written",
+        json!({ "policy_path": policy_path.display().to_string() }),
+    );
+
+    let args = vec![
+        "debug".to_string(),
+        "trace".to_string(),
+        "--policy".to_string(),
+        "debug_trace_policy.json".to_string(),
+        "--json".to_string(),
+        "--trace-id".to_string(),
+        test_name.to_string(),
+    ];
+    let output = run_debug_trace_in_workspace(workspace.path(), &args);
+    log_phase(
+        test_name,
+        "failure_path_checked",
+        json!({
+            "status": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        }),
+    );
+    assert!(
+        !output.status.success(),
+        "missing --input --json must fail closed"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("debug trace --json missing --input must be JSON, not a clap usage dump");
+    assert_eq!(payload["schema_version"], "franken-node/debug-error-cli/v1");
+    assert_eq!(payload["command"], "debug.trace");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--input"),
+        "missing --input --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: debug trace requires --input"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn debug_explain_json_fails_closed_when_receipt_flag_missing() {
+    let test_name = "debug_explain_json_fails_closed_when_receipt_flag_missing";
+    let workspace = tempfile::tempdir().expect("debug explain workspace");
+    let args = vec![
+        "debug".to_string(),
+        "explain".to_string(),
+        "--json".to_string(),
+    ];
+    let output = run_debug_trace_in_workspace(workspace.path(), &args);
+    log_phase(
+        test_name,
+        "failure_path_checked",
+        json!({
+            "status": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        }),
+    );
+    assert!(
+        !output.status.success(),
+        "missing --receipt --json must fail closed"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("debug explain --json missing --receipt must be JSON, not a clap usage dump");
+    assert_eq!(payload["schema_version"], "franken-node/debug-error-cli/v1");
+    assert_eq!(payload["command"], "debug.explain");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--receipt"),
+        "missing --receipt --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: debug explain requires --receipt"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn debug_evidence_json_fails_closed_when_artifact_flag_missing() {
+    let test_name = "debug_evidence_json_fails_closed_when_artifact_flag_missing";
+    let workspace = tempfile::tempdir().expect("debug evidence workspace");
+    let args = vec![
+        "debug".to_string(),
+        "evidence".to_string(),
+        "--json".to_string(),
+    ];
+    let output = run_debug_trace_in_workspace(workspace.path(), &args);
+    log_phase(
+        test_name,
+        "failure_path_checked",
+        json!({
+            "status": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        }),
+    );
+    assert!(
+        !output.status.success(),
+        "missing --artifact --json must fail closed"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("debug evidence --json missing --artifact must be JSON, not a clap usage dump");
+    assert_eq!(payload["schema_version"], "franken-node/debug-error-cli/v1");
+    assert_eq!(payload["command"], "debug.evidence");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--artifact"),
+        "missing --artifact --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: debug evidence requires --artifact"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}

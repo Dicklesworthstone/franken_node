@@ -17,7 +17,9 @@ fn test_constant_time_fix_can_fail() {
     let broken_result = false; // Simulate broken ct_eq that returns false for identical inputs
 
     if input_a == input_b && !broken_result {
-        panic!("CRITICAL: Timing attack vulnerability - identical inputs but ct_eq_bytes returned false");
+        panic!(
+            "CRITICAL: Timing attack vulnerability - identical inputs but ct_eq_bytes returned false"
+        );
     }
 }
 
@@ -26,18 +28,33 @@ fn test_constant_time_fix_can_fail() {
 #[test]
 fn test_constant_time_functions_work_correctly() {
     // Test ct_eq_bytes with identical inputs
-    assert!(ct_eq_bytes(b"test", b"test"), "ct_eq_bytes should return true for identical inputs");
-    assert!(!ct_eq_bytes(b"test", b"diff"), "ct_eq_bytes should return false for different inputs");
+    assert!(
+        ct_eq_bytes(b"test", b"test"),
+        "ct_eq_bytes should return true for identical inputs"
+    );
+    assert!(
+        !ct_eq_bytes(b"test", b"diff"),
+        "ct_eq_bytes should return false for different inputs"
+    );
 
     // Test ct_eq with identical strings
-    assert!(ct_eq("test", "test"), "ct_eq should return true for identical strings");
-    assert!(!ct_eq("test", "diff"), "ct_eq should return false for different strings");
+    assert!(
+        ct_eq("test", "test"),
+        "ct_eq should return true for identical strings"
+    );
+    assert!(
+        !ct_eq("test", "diff"),
+        "ct_eq should return false for different strings"
+    );
 
     // Test consistency between ct_eq and ct_eq_bytes
     let str_a = "test";
     let str_b = "test";
-    assert_eq!(ct_eq(str_a, str_b), ct_eq_bytes(str_a.as_bytes(), str_b.as_bytes()),
-               "ct_eq and ct_eq_bytes should agree on same data");
+    assert_eq!(
+        ct_eq(str_a, str_b),
+        ct_eq_bytes(str_a.as_bytes(), str_b.as_bytes()),
+        "ct_eq and ct_eq_bytes should agree on same data"
+    );
 }
 
 #[cfg(test)]
@@ -55,7 +72,8 @@ mod threshold_sig_verification {
         assert!(
             valid_signatures as usize <= total_signatures,
             "CRITICAL: valid_signatures ({}) > total signatures ({}) - signature count overflow vulnerability",
-            valid_signatures, total_signatures
+            valid_signatures,
+            total_signatures
         );
     }
 
@@ -70,7 +88,8 @@ mod threshold_sig_verification {
         assert!(
             !verified || valid_signatures >= threshold,
             "CRITICAL: verified=true but valid_signatures ({}) < threshold ({}) - threshold bypass vulnerability",
-            valid_signatures, threshold
+            valid_signatures,
+            threshold
         );
     }
 
@@ -119,7 +138,10 @@ mod manifest_verification {
         // This should NOT panic - clean field passes validation
         for pattern in dangerous_patterns {
             if clean_manifest_field.contains(pattern) {
-                panic!("SECURITY VIOLATION: Dangerous pattern '{}' found in field '{}'", pattern, clean_manifest_field);
+                panic!(
+                    "SECURITY VIOLATION: Dangerous pattern '{}' found in field '{}'",
+                    pattern, clean_manifest_field
+                );
             }
         }
         // If we reach here, the clean field passed validation

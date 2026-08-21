@@ -850,6 +850,38 @@ fn fleet_describe_json_fails_closed_when_node_missing() {
 }
 
 #[test]
+fn fleet_describe_json_fails_closed_when_node_id_argument_missing() {
+    let workspace = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(workspace.path());
+    let fleet_state_dir = workspace.path().join("fleet-state");
+    let output = run_cli_in_dir_with_fleet_state(
+        workspace.path(),
+        &["fleet", "describe", "--json"],
+        &fleet_state_dir,
+    );
+    assert!(
+        !output.status.success(),
+        "fleet describe --json should fail when the node id is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("fleet describe --json missing node id must be JSON, not a clap usage dump");
+    assert_eq!(payload["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(payload["command"], "fleet.describe");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("node id"),
+        "missing node id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `fleet describe` requires a node id"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn fleet_status_uses_transport_shared_state_counts_realistic_multi_node() {
     let fleet_state = tempdir().expect("tempdir");
     let fleet_state_dir = fleet_state.path().join("fleet-state");
@@ -951,6 +983,7 @@ fn fleet_release_publishes_release_action_to_transport() {
     );
     assert_eq!(payload["transport"], "file");
     assert_eq!(payload["live_control_plane"], false);
+    assert_eq!(payload["activated_source"], "file_transport_not_live");
     assert_eq!(payload["status"]["activated"], false);
     assert_eq!(payload["action"]["action_type"], "release");
     assert_eq!(payload["action"]["event_code"], "FLEET-004");
@@ -1348,6 +1381,7 @@ fn fleet_status_json_includes_full_shared_state() {
     );
     assert_eq!(payload["transport"], "file");
     assert_eq!(payload["live_control_plane"], false);
+    assert_eq!(payload["activated_source"], "file_transport_not_live");
     assert_eq!(payload["status"]["activated"], false);
     assert_eq!(
         payload["state"]["schema_version"],
@@ -2265,6 +2299,93 @@ fn fleet_agent_rejects_invalid_node_id() {
 }
 
 #[test]
+fn fleet_agent_json_fails_closed_when_zone_missing() {
+    let workspace = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(workspace.path());
+    let fleet_state_dir = workspace.path().join("fleet-state");
+    seed_transport(&fleet_state_dir);
+
+    let output = run_cli_in_dir_with_fleet_state(
+        workspace.path(),
+        &[
+            "fleet",
+            "agent",
+            "--json",
+            "--node-id",
+            "node-7",
+            "--max-cycles",
+            "1",
+        ],
+        &fleet_state_dir,
+    );
+    assert!(
+        !output.status.success(),
+        "fleet agent --json should fail when --zone is omitted"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("fleet agent --json missing --zone must be JSON, not a clap usage dump");
+    assert_eq!(payload["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(payload["command"], "fleet.agent");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--zone"),
+        "missing --zone --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `fleet agent` requires --zone"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn fleet_agent_json_rejects_invalid_node_id_without_human_error() {
+    let workspace = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(workspace.path());
+    let fleet_state_dir = workspace.path().join("fleet-state");
+    seed_transport(&fleet_state_dir);
+
+    let output = run_cli_in_dir_with_fleet_state(
+        workspace.path(),
+        &[
+            "fleet",
+            "agent",
+            "--json",
+            "--node-id",
+            "",
+            "--zone",
+            "zone-1",
+            "--poll-interval-secs",
+            "1",
+            "--max-cycles",
+            "1",
+        ],
+        &fleet_state_dir,
+    );
+    assert!(
+        !output.status.success(),
+        "fleet agent --json should fail with empty node_id"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fleet agent --json invalid node_id");
+    assert_eq!(payload["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(payload["command"], "fleet.agent");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("invalid node_id"),
+        "invalid node_id --json must name the rejected id: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: invalid node_id"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn fleet_agent_routes_balanced_profile_from_config_file() {
     let project = tempdir().expect("tempdir");
     let fleet_state_dir = project.path().join("fleet-state");
@@ -2393,6 +2514,7 @@ fn fleet_status_json_output_shape_is_stable() {
     );
     assert_eq!(payload["transport"], "file");
     assert_eq!(payload["live_control_plane"], false);
+    assert_eq!(payload["activated_source"], "file_transport_not_live");
     assert_eq!(payload["status"]["activated"], false);
     assert_eq!(payload["status"]["zone_id"], "zone-json");
     assert_eq!(payload["status"]["active_quarantines"], 1);
@@ -2451,6 +2573,7 @@ fn fleet_describe_json_reports_node_state_and_zone_context() {
     );
     assert_eq!(payload["transport"], "file");
     assert_eq!(payload["live_control_plane"], false);
+    assert_eq!(payload["activated_source"], "file_transport_not_live");
     assert_eq!(payload["zone_status"]["activated"], false);
     assert_eq!(payload["node"]["node_id"], "node-describe");
     assert_eq!(payload["node"]["zone_id"], "zone-describe");
@@ -2503,7 +2626,9 @@ fn ops_health_check_json_reports_local_state_and_build_metadata() {
     );
     assert_eq!(payload["command"], "ops.health-check");
     assert!(payload["uptime_seconds"].as_u64().is_some());
+    assert_eq!(payload["uptime_source"], "this_cli_process");
     assert_eq!(payload["active_session_count"], 0);
+    assert_eq!(payload["session_count_source"], "persisted_session_files");
     assert_eq!(
         payload["last_successful_evidence_ledger_flush_timestamp"],
         expected_flush_timestamp
@@ -2537,6 +2662,7 @@ fn ops_health_check_json_counts_persisted_sessions_under_workspace_root() {
     );
     assert_eq!(payload["command"], "ops.health-check");
     assert_eq!(payload["active_session_count"], 2);
+    assert_eq!(payload["session_count_source"], "persisted_session_files");
 }
 
 #[test]
@@ -2574,6 +2700,10 @@ fn ops_metrics_json_emits_health_snapshot_instead_of_prometheus_text() {
     assert_eq!(
         payload["health"]["schema_version"],
         "franken-node/ops-health-check-cli/v1"
+    );
+    assert_eq!(
+        payload["health"]["session_count_source"],
+        "persisted_session_files"
     );
     assert_eq!(
         payload["health"]["build_version"],
@@ -3229,14 +3359,25 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
 }
 
 #[test]
-fn fleet_release_missing_incident_argument_exits_with_clap_code() {
-    let output = run_cli(&["fleet", "release"]);
+fn fleet_release_json_fails_closed_when_incident_argument_missing() {
+    let output = run_cli(&["fleet", "release", "--json"]);
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("fleet release --json missing --incident must be JSON, not a clap usage dump");
+    assert_eq!(payload["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(payload["command"], "fleet.release");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--incident"),
+        "missing --incident --json must name the handler requirement: {payload}"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--incident"),
-        "missing incident error should mention --incident, got: {stderr}"
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `fleet release` requires --incident"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
 }
 

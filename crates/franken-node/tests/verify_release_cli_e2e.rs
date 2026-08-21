@@ -636,6 +636,32 @@ fn verify_module_passes_for_known_surface_module() {
 }
 
 #[test]
+fn verify_module_json_fails_closed_when_module_id_missing() {
+    let output = run_cli(&["verify", "module", "--json"]);
+    assert!(
+        !output.status.success(),
+        "verify module --json should fail when the module id is omitted"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["schema_version"], "verifier-cli-contract-v1");
+    assert_eq!(payload["command"], "verify module");
+    assert_eq!(payload["verdict"], "ERROR");
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["exit_code"], 2);
+    let reason = payload["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("module id"),
+        "missing module id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("franken-node verify module:"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn verify_module_fails_for_unknown_module() {
     let output = run_cli(&["verify", "module", "definitely-not-a-real-module", "--json"]);
     assert!(
@@ -680,6 +706,32 @@ fn verify_module_rejects_unsupported_compat_version() {
 }
 
 #[test]
+fn verify_migration_json_fails_closed_when_migration_id_missing() {
+    let output = run_cli(&["verify", "migration", "--json"]);
+    assert!(
+        !output.status.success(),
+        "verify migration --json should fail when the migration id is omitted"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["schema_version"], "verifier-cli-contract-v1");
+    assert_eq!(payload["command"], "verify migration");
+    assert_eq!(payload["verdict"], "ERROR");
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["exit_code"], 2);
+    let reason = payload["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("migration id"),
+        "missing migration id --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("franken-node verify migration:"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn verify_migration_source_present_without_state_is_unproven() {
     let output = run_cli(&["verify", "migration", "rewrite", "--json"]);
     assert!(
@@ -719,6 +771,33 @@ fn verify_migration_fails_for_unknown_target() {
             .as_str()
             .unwrap_or_default()
             .contains("unknown migration target")
+    );
+}
+
+#[test]
+fn verify_compatibility_json_fails_closed_when_target_missing() {
+    let output = run_cli(&["verify", "compatibility", "--json"]);
+    assert!(
+        !output.status.success(),
+        "verify compatibility --json should fail when the target is omitted"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["schema_version"], "verifier-cli-contract-v1");
+    assert_eq!(payload["command"], "verify compatibility");
+    assert_eq!(payload["verdict"], "ERROR");
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["exit_code"], 2);
+    let reason = payload["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("requires a target"),
+        "missing target --json must name the handler requirement: {payload}"
+    );
+    assert_ne!(payload["verdict"], "PASS");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("franken-node verify compatibility:"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
 }
 
@@ -1098,6 +1177,32 @@ fn verify_compatibility_fails_when_runtime_is_missing_from_path() {
     assert_eq!(payload["verdict"], "FAIL");
     assert_eq!(payload["details"]["runtime"], "node");
     assert_eq!(payload["details"]["installed"], false);
+}
+
+#[test]
+fn verify_corpus_json_fails_closed_when_corpus_path_missing() {
+    let output = run_cli(&["verify", "corpus", "--json"]);
+    assert!(
+        !output.status.success(),
+        "verify corpus --json should fail when the corpus path is omitted"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(payload["schema_version"], "verifier-cli-contract-v1");
+    assert_eq!(payload["command"], "verify corpus");
+    assert_eq!(payload["verdict"], "ERROR");
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["exit_code"], 2);
+    let reason = payload["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("corpus path"),
+        "missing corpus path --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("franken-node verify corpus:"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
 }
 
 #[test]
@@ -1961,8 +2066,51 @@ fn verify_release_fails_without_key_dir() {
         "expected verify release failure without an explicit key directory"
     );
 
+    let payload = parse_json_stdout(&output);
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/verify-release-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "verify.release");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("--key-dir"),
+        "missing --key-dir --json must name the handler requirement: {payload}"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--key-dir"));
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `verify release` requires --key-dir"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn verify_release_json_fails_closed_when_release_path_missing() {
+    let output = run_cli(&["verify", "release", "--json"]);
+    assert!(
+        !output.status.success(),
+        "verify release --json should fail when the release path is omitted"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/verify-release-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "verify.release");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("release path"),
+        "missing release path --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `verify release` requires a release path"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
 }
 
 #[test]
@@ -2012,6 +2160,33 @@ fn verify_release_fails_with_invalid_key_directory() {
     assert!(
         !stderr.contains("Error: no usable Ed25519 public keys found"),
         "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn verify_transparency_log_json_fails_closed_when_log_path_missing() {
+    let output = run_cli(&["verify", "transparency-log", "--json"]);
+    assert!(
+        !output.status.success(),
+        "verify transparency-log --json should fail when the log path is omitted"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/verify-transparency-log-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "verify.transparency-log");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("log path"),
+        "missing log path --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `verify transparency-log` requires a log path"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
 }
 

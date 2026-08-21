@@ -428,6 +428,114 @@ fn parse_json_stdout(output: &Output, label: &str) -> serde_json::Value {
     })
 }
 
+#[test]
+fn migrate_audit_json_fails_closed_when_project_path_missing() {
+    let output = run_cli(&["migrate", "audit", "--json"]);
+    assert!(
+        !output.status.success(),
+        "migrate audit --json should fail when the project path is omitted"
+    );
+    let payload = parse_json_stdout(&output, "migrate audit --json missing project path");
+    assert_eq!(
+        payload["schema_version"],
+        serde_json::json!("franken-node/migrate-error-cli/v1")
+    );
+    assert_eq!(payload["command"], serde_json::json!("migrate.audit"));
+    assert_eq!(payload["ok"], serde_json::json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("project path"),
+        "missing project path --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `migrate audit` requires a project path"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn migrate_rewrite_json_fails_closed_when_project_path_missing() {
+    let output = run_cli(&["migrate", "rewrite", "--json"]);
+    assert!(
+        !output.status.success(),
+        "migrate rewrite --json should fail when the project path is omitted"
+    );
+    let payload = parse_json_stdout(&output, "migrate rewrite --json missing project path");
+    assert_eq!(
+        payload["schema_version"],
+        serde_json::json!("franken-node/migrate-error-cli/v1")
+    );
+    assert_eq!(payload["command"], serde_json::json!("migrate.rewrite"));
+    assert_eq!(payload["ok"], serde_json::json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("project path"),
+        "missing project path --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `migrate rewrite` requires a project path"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn migrate_validate_json_fails_closed_when_project_path_missing() {
+    let output = run_cli(&["migrate", "validate", "--json"]);
+    assert!(
+        !output.status.success(),
+        "migrate validate --json should fail when the project path is omitted"
+    );
+    let payload = parse_json_stdout(&output, "migrate validate --json missing project path");
+    assert_eq!(
+        payload["schema_version"],
+        serde_json::json!("franken-node/migrate-error-cli/v1")
+    );
+    assert_eq!(payload["command"], serde_json::json!("migrate.validate"));
+    assert_eq!(payload["ok"], serde_json::json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("project path"),
+        "missing project path --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `migrate validate` requires a project path"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn migrate_report_json_fails_closed_when_project_path_missing() {
+    let output = run_cli(&["migrate-report", "--json"]);
+    assert!(
+        !output.status.success(),
+        "migrate-report --json should fail when the project path is omitted"
+    );
+    let payload = parse_json_stdout(&output, "migrate-report --json missing project path");
+    assert_eq!(
+        payload["schema_version"],
+        serde_json::json!("franken-node/migrate-error-cli/v1")
+    );
+    assert_eq!(payload["command"], serde_json::json!("migrate.report"));
+    assert_eq!(payload["ok"], serde_json::json!(false));
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("project path"),
+        "missing project path --json must name the handler requirement: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("error: the following required arguments were not provided")
+            && !stderr.contains("Error: `migrate-report` requires a project path"),
+        "--json must not append a human clap/Error line after the JSON report: {stderr}"
+    );
+}
+
 fn write_basic_rewrite_project(project_path: &Path) {
     std::fs::create_dir_all(project_path).expect("project dir");
     std::fs::write(

@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use frankenengine_node::supply_chain::ecosystem_telemetry::CompromiseReductionReport;
-use sha2::{Digest, Sha256};
 use serde_json;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 const CAMPAIGN_NAME: &str = "adversarial-tampering-test";
 const CAMPAIGN_VERSION: &str = "2026.01.01";
@@ -82,7 +82,8 @@ impl CompromiseReductionHarness {
         }
 
         // Tamper with the entry after its hash has been computed
-        self.entries[index].baseline_compromised = self.entries[index].baseline_compromised.wrapping_add(1);
+        self.entries[index].baseline_compromised =
+            self.entries[index].baseline_compromised.wrapping_add(1);
         Ok(())
     }
 
@@ -123,7 +124,8 @@ fn create_sample_report(
         trace_id,
         campaign_name: CAMPAIGN_NAME.to_string(),
         campaign_version: CAMPAIGN_VERSION.to_string(),
-        reproducible_command: "python3 scripts/check_compromise_reduction_gate.py --json".to_string(),
+        reproducible_command: "python3 scripts/check_compromise_reduction_gate.py --json"
+            .to_string(),
         minimum_required_ratio: 2.0,
         baseline_compromised,
         hardened_compromised,
@@ -153,7 +155,9 @@ fn adversarial_compromise_reduction_tampering_modify_entry_post_hash() {
     );
 
     // Tamper with the middle entry post-hash-chain-init
-    harness.tamper_entry_post_hash(1).expect("tampering should succeed");
+    harness
+        .tamper_entry_post_hash(1)
+        .expect("tampering should succeed");
 
     // Assert integrity check catches the tampering
     let integrity_result = harness.verify_integrity();
@@ -186,17 +190,17 @@ fn adversarial_compromise_reduction_tampering_reorder_entries() {
     );
 
     // Store original entry order for comparison
-    let original_bead_ids: Vec<String> = harness.entries.iter()
-        .map(|e| e.bead_id.clone())
-        .collect();
+    let original_bead_ids: Vec<String> =
+        harness.entries.iter().map(|e| e.bead_id.clone()).collect();
 
     // Reorder entries (swap first and last)
-    harness.reorder_entries(0, 2).expect("reordering should succeed");
+    harness
+        .reorder_entries(0, 2)
+        .expect("reordering should succeed");
 
     // Verify entries were actually reordered
-    let reordered_bead_ids: Vec<String> = harness.entries.iter()
-        .map(|e| e.bead_id.clone())
-        .collect();
+    let reordered_bead_ids: Vec<String> =
+        harness.entries.iter().map(|e| e.bead_id.clone()).collect();
     assert_ne!(
         original_bead_ids, reordered_bead_ids,
         "Entries should be in different order after reordering"
@@ -236,7 +240,9 @@ fn adversarial_compromise_reduction_tampering_drop_middle_entry() {
     let original_count = harness.entries.len();
 
     // Drop middle entry
-    harness.drop_middle_entry().expect("dropping entry should succeed");
+    harness
+        .drop_middle_entry()
+        .expect("dropping entry should succeed");
 
     // Verify entry was actually dropped
     assert_eq!(

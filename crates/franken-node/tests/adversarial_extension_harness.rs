@@ -7,7 +7,7 @@ use frankenengine_node::supply_chain::trust_card::{
     TrustCardRegistry,
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -457,10 +457,12 @@ fn adversarial_extension_fixtures_are_blocked_by_strict_policy() {
     assert_eq!(outcomes.len(), 10);
     assert_eq!(signed_artifact.payload.totals.cases, outcomes.len());
     assert_eq!(signed_artifact.payload.totals.not_blocked, 0);
-    assert!(signed_artifact
-        .signature
-        .payload_sha256
-        .starts_with("sha256:"));
+    assert!(
+        signed_artifact
+            .signature
+            .payload_sha256
+            .starts_with("sha256:")
+    );
     assert!(signed_artifact.signature.value.starts_with("ed25519:"));
 
     for outcome in &outcomes {
