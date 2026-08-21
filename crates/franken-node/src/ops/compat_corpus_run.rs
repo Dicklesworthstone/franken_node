@@ -1472,7 +1472,17 @@ struct ResolvedExecutable {
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
 fn resolve_fixed_path_executable(alias: &str) -> Result<ResolvedExecutable> {
-    for directory in std::env::split_paths(CORPUS_PROCESS_FIXED_PATH) {
+    resolve_fixed_path_executable_in(alias, CORPUS_PROCESS_FIXED_PATH)
+}
+
+/// Search `search_path` for `alias`. Missing or non-executable entries are
+/// skipped. An *insecure* first hit (non-root, symlink, group/world-writable)
+/// is also skipped so a later uid0 system binary can still be admitted. The
+/// uid0 / no-symlink / no group-write checks themselves are not relaxed.
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn resolve_fixed_path_executable_in(alias: &str, search_path: &str) -> Result<ResolvedExecutable> {
+    let mut last_rejection: Option<String> = None;
+    for directory in std::env::split_paths(search_path) {
         let candidate = directory.join(alias);
         let Ok(metadata) = std::fs::metadata(&candidate) else {
             continue;
@@ -1480,48 +1490,61 @@ fn resolve_fixed_path_executable(alias: &str) -> Result<ResolvedExecutable> {
         if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
             continue;
         }
-        let canonical = candidate
-            .canonicalize()
-            .with_context(|| format!("canonicalize corpus executable {}", candidate.display()))?;
-        let canonical_metadata = std::fs::symlink_metadata(&canonical)
-            .with_context(|| format!("inspect corpus executable {}", canonical.display()))?;
-        if !canonical_metadata.is_file()
-            || canonical_metadata.file_type().is_symlink()
-            || canonical_metadata.permissions().mode() & 0o111 == 0
-            || canonical_metadata.uid() != 0
-            || canonical_metadata.permissions().mode() & 0o022 != 0
+        match admit_fixed_path_executable(alias, &candidate) {
+            Ok(resolved) => return Ok(resolved),
+            Err(error) => last_rejection = Some(error.to_string()),
+        }
+    }
+    match last_rejection {
+        Some(reason) => bail!(
+            "required corpus executable alias `{alias}` had no secure match in fixed PATH {search_path}: {reason}"
+        ),
+        None => bail!(
+            "required corpus executable alias `{alias}` was not found in fixed PATH {search_path}"
+        ),
+    }
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn admit_fixed_path_executable(alias: &str, candidate: &Path) -> Result<ResolvedExecutable> {
+    let canonical = candidate
+        .canonicalize()
+        .with_context(|| format!("canonicalize corpus executable {}", candidate.display()))?;
+    let canonical_metadata = std::fs::symlink_metadata(&canonical)
+        .with_context(|| format!("inspect corpus executable {}", canonical.display()))?;
+    if !canonical_metadata.is_file()
+        || canonical_metadata.file_type().is_symlink()
+        || canonical_metadata.permissions().mode() & 0o111 == 0
+        || canonical_metadata.uid() != 0
+        || canonical_metadata.permissions().mode() & 0o022 != 0
+    {
+        bail!(
+            "corpus executable alias `{alias}` resolved to insecure path {}",
+            canonical.display()
+        );
+    }
+    for ancestor in canonical.ancestors().skip(1) {
+        let metadata = std::fs::symlink_metadata(ancestor).with_context(|| {
+            format!(
+                "inspect corpus executable ancestor {} for alias `{alias}`",
+                ancestor.display()
+            )
+        })?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
         {
             bail!(
-                "corpus executable alias `{alias}` resolved to insecure path {}",
-                canonical.display()
+                "corpus executable alias `{alias}` has insecure ancestor {}",
+                ancestor.display()
             );
         }
-        for ancestor in canonical.ancestors().skip(1) {
-            let metadata = std::fs::symlink_metadata(ancestor).with_context(|| {
-                format!(
-                    "inspect corpus executable ancestor {} for alias `{alias}`",
-                    ancestor.display()
-                )
-            })?;
-            if !metadata.is_dir()
-                || metadata.file_type().is_symlink()
-                || metadata.uid() != 0
-                || metadata.permissions().mode() & 0o022 != 0
-            {
-                bail!(
-                    "corpus executable alias `{alias}` has insecure ancestor {}",
-                    ancestor.display()
-                );
-            }
-        }
-        return Ok(ResolvedExecutable {
-            sha256: sha256_file(&canonical)?,
-            path: canonical,
-        });
     }
-    bail!(
-        "required corpus executable alias `{alias}` was not found in fixed PATH {CORPUS_PROCESS_FIXED_PATH}"
-    )
+    Ok(ResolvedExecutable {
+        sha256: sha256_file(&canonical)?,
+        path: canonical,
+    })
 }
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
@@ -3144,6 +3167,77 @@ mod snapshot_staging_tests {
         verifying_key
             .verify(opt_in.token.content_hash().as_bytes(), &signature)
             .expect("verify exact policy-bound token");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_fixed_path_skips_insecure_first_entry_and_admits_later_uid0() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::TempDir::new().expect("insecure path tempdir");
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).expect("create insecure bin");
+        let planted = bin.join("echo");
+        std::fs::write(&planted, b"#!/bin/sh\necho pwned\n").expect("write planted echo");
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777))
+            .expect("make planted echo world-writable");
+
+        let search = format!("{}:/usr/bin:/bin", bin.display());
+        let resolved = resolve_fixed_path_executable_in("echo", &search)
+            .expect("uid0 echo after skipping insecure planted first hit");
+        assert_ne!(
+            resolved.path, planted,
+            "insecure first PATH entry must not be admitted"
+        );
+        assert_eq!(
+            resolved.path,
+            PathBuf::from("/usr/bin/echo")
+                .canonicalize()
+                .expect("canonicalize system echo")
+        );
+        assert_eq!(
+            resolved.sha256,
+            sha256_file(&resolved.path).expect("rehash admitted echo")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_fixed_path_fails_closed_when_every_hit_is_insecure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::TempDir::new().expect("insecure-only path tempdir");
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).expect("create insecure bin");
+        let planted = bin.join("echo");
+        std::fs::write(&planted, b"#!/bin/sh\necho pwned\n").expect("write planted echo");
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777))
+            .expect("make planted echo world-writable");
+
+        let error = resolve_fixed_path_executable_in("echo", &bin.display().to_string())
+            .expect_err("insecure-only PATH must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("had no secure match"),
+            "expected secure-match failure, got {message}"
+        );
+        assert!(
+            message.contains("insecure"),
+            "expected insecure rejection in {message}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolve_fixed_path_reports_not_found_when_alias_is_absent() {
+        let tmp = tempfile::TempDir::new().expect("empty path tempdir");
+        let error = resolve_fixed_path_executable_in("echo", &tmp.path().display().to_string())
+            .expect_err("empty PATH must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("was not found"),
+            "expected not-found failure, got {message}"
+        );
     }
 
     #[test]
