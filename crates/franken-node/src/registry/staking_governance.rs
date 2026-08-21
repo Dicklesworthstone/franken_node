@@ -3088,7 +3088,7 @@ mod tests {
 // Integration tests: Security → Verifier Economy (bd-17ds.5.5)
 // ===========================================================================
 
-#[cfg(test)]
+#[cfg(all(test, feature = "verifier-tools"))]
 mod security_verifier_economy_integration_tests {
     use super::*;
     use crate::security::sybil_defense::{SybilDefensePipeline, TrustNode, TrustSignal};

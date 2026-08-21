@@ -6596,7 +6596,7 @@ min_quality_score = "0.8"
         assert_eq!(policy.max_degraded_duration_secs, 91);
     }
 
-    #[cfg(any(
+    #[cfg(all(
         feature = "remote-ops",
         feature = "control-plane",
         feature = "verifier-tools"

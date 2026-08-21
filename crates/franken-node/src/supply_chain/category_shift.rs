@@ -3365,6 +3365,7 @@ mod tests {
         assert!(result.message.contains("No benchmark summary found"));
     }
 
+    #[cfg(feature = "advanced-features")]
     #[test]
     fn real_benchmark_metrics_integration() {
         // Test that the benchmark metrics function uses real data when available
