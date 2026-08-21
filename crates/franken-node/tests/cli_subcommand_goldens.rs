@@ -540,9 +540,20 @@ frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-
 
 // === help commands (guaranteed to work) ===
 
+fn disable_cli_color(cmd: &mut Command) {
+    // clap color help injects ANSI (`\x1b[1mstatus`) that the duration
+    // scrubber then treats as `1ms` → `[DURATION]`. Keep help goldens
+    // hermetic the same way `doctor_help_output` already does.
+    cmd.env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .env("CLICOLOR_FORCE", "0")
+        .env_remove("FORCE_COLOR");
+}
+
 #[test]
 fn franken_node_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["--help"]).assert().success();
 
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
@@ -554,6 +565,7 @@ fn franken_node_help_output() {
 #[test]
 fn trust_card_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["trust-card", "--help"]).assert().success();
 
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
@@ -565,6 +577,7 @@ fn trust_card_help_output() {
 #[test]
 fn fleet_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["fleet", "--help"]).assert().success();
 
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);

@@ -620,6 +620,28 @@ struct TrustSyncAuditRefreshReport {
     warnings: Vec<String>,
 }
 
+const TRUST_SYNC_CLI_SCHEMA_VERSION: &str = "franken-node/trust-sync-cli/v1";
+
+#[derive(Debug, Serialize)]
+struct TrustSyncCliReport {
+    schema_version: &'static str,
+    command: &'static str,
+    force: bool,
+    cards: usize,
+    refreshed: usize,
+    vulnerabilities: usize,
+    network_errors: usize,
+    risk_lowering_rejections: usize,
+    cache_hits: usize,
+    cache_misses: usize,
+    stale_refreshes: usize,
+    forced_refreshes: usize,
+    revoked: usize,
+    quarantined: usize,
+    critical_risk: usize,
+    warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum TrustViolationKind {
@@ -846,7 +868,7 @@ struct RegistryArtifactVerification {
     artifact_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct RegistrySearchDisplayRow {
     assurance: u8,
     extension_id: String,
@@ -855,6 +877,18 @@ struct RegistrySearchDisplayRow {
     status: String,
     artifact_path: String,
     integrity_status: String,
+}
+
+const REGISTRY_SEARCH_CLI_SCHEMA_VERSION: &str = "franken-node/registry-search-cli/v1";
+
+#[derive(Debug, Serialize)]
+struct RegistrySearchCliReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    query: &'a str,
+    min_assurance: Option<u8>,
+    matched: usize,
+    rows: &'a [RegistrySearchDisplayRow],
 }
 
 /// RAII guard that orphans a temp file on drop (unless defused after rename).
@@ -14048,6 +14082,7 @@ mod trust_command_tests {
             refreshed_count: 5,
             vulnerabilities_found: 6,
             network_errors: 7,
+            risk_lowering_rejections: 0,
             warnings: Vec::new(),
         };
 
@@ -20919,10 +20954,17 @@ fn handle_registry_search(args: &cli::RegistrySearchArgs) -> Result<()> {
             .then_with(|| left.name.cmp(&right.name))
             .then_with(|| left.extension_id.cmp(&right.extension_id))
     });
-    println!(
-        "{}",
+    let report = RegistrySearchCliReport {
+        schema_version: REGISTRY_SEARCH_CLI_SCHEMA_VERSION,
+        command: "registry.search",
+        query: &args.query,
+        min_assurance,
+        matched: rows.len(),
+        rows: &rows,
+    };
+    emit_json_or_human(&report, args.json, || {
         render_registry_search_results(&rows, &args.query, min_assurance)
-    );
+    })?;
     Ok(())
 }
 
@@ -21235,12 +21277,12 @@ fn quarantine_trust_cards(
     Ok(updates)
 }
 
-fn render_trust_sync_summary(
+fn trust_sync_cli_report(
     cards: &[TrustCard],
     sync_report: &TrustCardSyncReport,
     audit_report: &TrustSyncAuditRefreshReport,
     force: bool,
-) -> String {
+) -> TrustSyncCliReport {
     let revoked = cards
         .iter()
         .filter(|card| matches!(card.revocation_status, RevocationStatus::Revoked { .. }))
@@ -21250,19 +21292,56 @@ fn render_trust_sync_summary(
         .iter()
         .filter(|card| card.user_facing_risk_assessment.level == RiskLevel::Critical)
         .count();
-    format!(
-        "trust sync completed: force={force} cards={} refreshed={} vulnerabilities={} network_errors={} risk_lowering_rejections={} cache_hits={} cache_misses={} stale_refreshes={} forced_refreshes={} revoked={} quarantined={} critical_risk={critical}",
-        cards.len(),
-        audit_report.refreshed_count,
-        audit_report.vulnerabilities_found,
-        audit_report.network_errors,
-        audit_report.risk_lowering_rejections,
-        sync_report.cache_hits,
-        sync_report.cache_misses,
-        sync_report.stale_refreshes,
-        sync_report.forced_refreshes,
+    TrustSyncCliReport {
+        schema_version: TRUST_SYNC_CLI_SCHEMA_VERSION,
+        command: "trust.sync",
+        force,
+        cards: cards.len(),
+        refreshed: audit_report.refreshed_count,
+        vulnerabilities: audit_report.vulnerabilities_found,
+        network_errors: audit_report.network_errors,
+        risk_lowering_rejections: audit_report.risk_lowering_rejections,
+        cache_hits: sync_report.cache_hits,
+        cache_misses: sync_report.cache_misses,
+        stale_refreshes: sync_report.stale_refreshes,
+        forced_refreshes: sync_report.forced_refreshes,
         revoked,
-        quarantined
+        quarantined,
+        critical_risk: critical,
+        warnings: audit_report.warnings.clone(),
+    }
+}
+
+fn render_trust_sync_summary(
+    cards: &[TrustCard],
+    sync_report: &TrustCardSyncReport,
+    audit_report: &TrustSyncAuditRefreshReport,
+    force: bool,
+) -> String {
+    render_trust_sync_summary_from_report(&trust_sync_cli_report(
+        cards,
+        sync_report,
+        audit_report,
+        force,
+    ))
+}
+
+fn render_trust_sync_summary_from_report(report: &TrustSyncCliReport) -> String {
+    format!(
+        "trust sync completed: force={} cards={} refreshed={} vulnerabilities={} network_errors={} risk_lowering_rejections={} cache_hits={} cache_misses={} stale_refreshes={} forced_refreshes={} revoked={} quarantined={} critical_risk={}",
+        report.force,
+        report.cards,
+        report.refreshed,
+        report.vulnerabilities,
+        report.network_errors,
+        report.risk_lowering_rejections,
+        report.cache_hits,
+        report.cache_misses,
+        report.stale_refreshes,
+        report.forced_refreshes,
+        report.revoked,
+        report.quarantined,
+        report.critical_risk
     )
 }
 
@@ -28932,10 +29011,11 @@ fn main() -> Result<()> {
                         now_secs,
                     )
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-                println!(
-                    "{}",
-                    render_trust_sync_summary(&cards, &sync_report, &audit_report, args.force)
-                );
+                let report =
+                    trust_sync_cli_report(&cards, &sync_report, &audit_report, args.force);
+                emit_json_or_human(&report, args.json, || {
+                    render_trust_sync_summary_from_report(&report)
+                })?;
             }
         },
 

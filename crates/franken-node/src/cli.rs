@@ -1089,6 +1089,10 @@ pub struct TrustSyncArgs {
     /// Force sync even if cache is fresh.
     #[arg(long)]
     pub force: bool,
+
+    /// Emit a schema-versioned JSON report instead of the human one-liner.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // -- remotecap --
@@ -1931,6 +1935,10 @@ pub struct RegistrySearchArgs {
     /// Minimum assurance level (1-5).
     #[arg(long)]
     pub min_assurance: Option<u8>,
+
+    /// Emit a schema-versioned JSON report instead of the human table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -2520,6 +2528,29 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn registry_search_parses_json_flag() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "registry",
+            "search",
+            "plugin",
+            "--min-assurance",
+            "3",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Registry(RegistryCommand::Search(args)) => args,
+            other => return Err(format!("expected registry search command, got {other:?}")),
+        };
+        assert_eq!(args.query, "plugin");
+        assert_eq!(args.min_assurance, Some(3));
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
     fn run_parses_runtime_options() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
@@ -2755,6 +2786,20 @@ mod parser_contract_extra_tests {
             Command::Ops(OpsCommand::HealthCheck(args)) => args,
             other => return Err(format!("expected ops health-check command, got {other:?}")),
         };
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn trust_sync_parses_json_flag() -> Result<(), String> {
+        let cli = parse(&["franken-node", "trust", "sync", "--force", "--json"])
+            .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Trust(TrustCommand::Sync(args)) => args,
+            other => return Err(format!("expected trust sync command, got {other:?}")),
+        };
+        assert!(args.force);
         assert!(args.json);
         Ok(())
     }

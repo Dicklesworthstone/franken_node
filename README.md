@@ -728,7 +728,7 @@ every leaf command available in the current build.
 | `franken-node trust card <id>` | Show trust profile for one extension. |
 | `franken-node trust list` | List extensions; filter by `--risk`, `--revoked`. |
 | `franken-node trust scan [path]` | Populate baseline trust cards from package.json. Flags: `--deep`, `--audit`, `--json`. |
-| `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. |
+| `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. `--json` emits `franken-node/trust-sync-cli/v1`. |
 | `franken-node trust revoke <id>` | Revoke artifact or publisher trust. Optional `--receipt-signing-key`, `--receipt-out`. |
 | `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide. `--artifact` required. |
 | `franken-node trust-card show <id>` | Show full trust card. |
@@ -804,7 +804,7 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node registry publish <package>` | Publish signed extension artifact. **Required: `--version` and `--signing-key`** (raw Ed25519 32-byte key; hex, base64, or supported JSON wrapper). Optional: `--max-active-artifacts`. |
-| `franken-node registry search <query>` | Query extension registry. Filter: `--min-assurance`. |
+| `franken-node registry search <query>` | Query extension registry. Filter: `--min-assurance`. `--json` emits `franken-node/registry-search-cli/v1`. |
 | `franken-node registry verify <id>` | Verify a locally stored registry artifact. |
 | `franken-node registry gc` | Archive older registry artifacts. Optional: `--keep`. |
 | `franken-node bench run` | Run benchmark suite and emit signed report. Flags: `--scenario`, `--fixture-mode`, `--output`. |

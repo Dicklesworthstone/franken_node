@@ -1662,6 +1662,48 @@ fn trust_sync_reports_summary_counts() {
 }
 
 #[test]
+fn trust_sync_honors_json() {
+    let workspace = seeded_fixture_trust_workspace();
+    let (osv_url, requests, server) = spawn_osv_fixture_server();
+    let token_path = issue_osv_fixture_remotecap(workspace.path(), &osv_url);
+    let token_path = token_path.to_str().expect("fixture token path is utf8");
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["trust", "sync", "--force", "--json"],
+        &[
+            ("FRANKEN_NODE_OSV_QUERY_URL", osv_url.as_str()),
+            ("FRANKEN_NODE_REMOTECAP_KEY", FIXTURE_REMOTECAP_KEY),
+            ("FRANKEN_NODE_TRUST_SCAN_REMOTECAP_TOKEN", token_path),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "trust sync --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload = parse_json_stdout(&output, "trust sync --json");
+    assert_eq!(payload["schema_version"], "franken-node/trust-sync-cli/v1");
+    assert_eq!(payload["command"], "trust.sync");
+    assert_eq!(payload["force"], true);
+    assert_eq!(payload["cards"], 2);
+    assert_eq!(payload["refreshed"], 1);
+    assert_eq!(payload["vulnerabilities"], 1);
+    assert_eq!(payload["network_errors"], 1);
+    assert_eq!(payload["revoked"], 1);
+    assert_eq!(payload["quarantined"], 1);
+    assert!(payload["warnings"].is_array());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("trust sync completed:"),
+        "json mode must not emit the human one-liner:\n{stdout}"
+    );
+
+    server.join().expect("join OSV fixture server");
+    assert_eq!(requests.lock().expect("lock requests").len(), 2);
+}
+
+#[test]
 fn trust_sync_offline_clean_refresh_reports_zero_vulnerabilities() {
     let workspace = seeded_fixture_trust_workspace();
     let (osv_url, requests, server) =
