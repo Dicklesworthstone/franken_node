@@ -271,7 +271,10 @@ pub struct RunArgs {
     #[arg(long, default_value = "balanced")]
     pub policy: String,
 
-    /// Emit a machine-readable trust pre-flight report.
+    /// Emit a machine-readable trust pre-flight report. Early failures emit
+    /// `franken-node/run-error-cli/v1` then exit 1. A blocked preflight
+    /// prints the preflight JSON then exits 1 without a second human Error
+    /// line.
     #[arg(long)]
     pub json: bool,
 

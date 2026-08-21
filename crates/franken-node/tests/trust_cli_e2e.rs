@@ -1020,6 +1020,34 @@ fn run_json_emits_blocked_preflight_verdict_for_revoked_dependency() {
 }
 
 #[test]
+fn run_json_fails_closed_when_security_defaults_are_missing() {
+    let workspace = tempfile::tempdir().expect("run json missing-config workspace");
+    std::fs::write(workspace.path().join("index.js"), "console.log('hi');\n")
+        .expect("write guest fixture");
+    let output = run_cli_in_workspace(workspace.path(), &["run", "--json", "index.js"]);
+    assert!(
+        !output.status.success(),
+        "run --json should fail closed without fail-closed security defaults"
+    );
+    let payload = parse_json_stdout(&output, "run --json missing security defaults");
+    assert_eq!(payload["schema_version"], "franken-node/run-error-cli/v1");
+    assert_eq!(payload["command"], "run");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("trust.registry_signing_key")
+            || error.contains("authorized_api_keys")
+            || error.contains("failed resolving configuration for run"),
+        "missing-config --json must name the fail-closed config boundary: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: failed resolving configuration for run"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn run_blocked_preflight_error_suggests_trust_list() {
     let workspace = seeded_fixture_trust_workspace();
     write_run_package_manifest(workspace.path(), &[("@beta/telemetry-bridge", "^0.9.1")]);

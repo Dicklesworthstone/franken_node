@@ -696,7 +696,7 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node init` | Bootstrap config, policy profile, and `.franken-node/state/` workspace metadata. Flags: `--profile`, `--config`, `--out-dir`, `--overwrite`, `--backup-existing`, `--scan`, `--state-dir`, `--no-state`, `--json` (`franken-node/init-cli/v1`; failures `franken-node/init-error-cli/v1`). |
-| `franken-node run <app_path>` | Run app under policy-governed runtime controls. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json`. External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
+| `franken-node run <app_path>` | Run app under policy-governed runtime controls. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json` (early failures `franken-node/run-error-cli/v1`; blocked preflight prints JSON then exits 1). External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
 | `franken-node doctor` | Diagnose environment and policy setup. Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json`, `--structured-logs-jsonl`. |
 
 ### Migration

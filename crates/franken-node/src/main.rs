@@ -29555,7 +29555,10 @@ fn main() -> Result<()> {
         }
 
         Command::Run(args) => {
-            args.validate_paths()?;
+            let json = args.json;
+            if let Err(err) = args.validate_paths() {
+                return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+            }
             let cli::RunArgs {
                 app_path,
                 policy,
@@ -29569,21 +29572,37 @@ fn main() -> Result<()> {
                 compat_preflight,
             } = args;
 
-            let profile_override = parse_profile_override(Some(&policy))?;
-            let resolved = config::Config::resolve(
+            let profile_override = match parse_profile_override(Some(&policy)) {
+                Ok(profile) => profile,
+                Err(err) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                }
+            };
+            let resolved = match config::Config::resolve(
                 config.as_deref(),
                 CliOverrides {
                     profile: profile_override,
                 },
             )
-            .context("failed resolving configuration for run")?;
+            .context("failed resolving configuration for run")
+            {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                }
+            };
 
-            let preflight = evaluate_run_trust_preflight(
+            let preflight = match evaluate_run_trust_preflight(
                 &app_path,
                 resolved.selected_profile,
                 &resolved.config,
                 now_unix_secs(),
-            )?;
+            ) {
+                Ok(preflight) => preflight,
+                Err(err) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                }
+            };
             // bd-zi9hj: in console-only mode the advisory preflight banner is
             // suppressed (it writes to stderr and would register as guest
             // divergence in lockstep comparison); blocking still blocks below.
