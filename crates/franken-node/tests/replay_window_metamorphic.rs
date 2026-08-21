@@ -10,7 +10,7 @@
 use frankenengine_node::capacity_defaults::aliases::MAX_CONSUMED_NONCES;
 use frankenengine_node::security::constant_time::ct_eq;
 use frankenengine_node::security::revocation_freshness_gate::{
-    FreshnessError, FreshnessProof, GateDecision, RevocationFreshnessGate, SafetyTier,
+    EpochFreshnessTier, FreshnessError, FreshnessProof, GateDecision, RevocationFreshnessGate,
 };
 use std::fmt::Debug;
 
@@ -33,26 +33,26 @@ fn test_sig(proof: &FreshnessProof) -> String {
 }
 
 fn gate() -> RevocationFreshnessGate {
-    gate_with_tiers(vec![(ACTION_ID.to_string(), SafetyTier::Advisory)])
+    gate_with_tiers(vec![(ACTION_ID.to_string(), EpochFreshnessTier::Advisory)])
 }
 
 fn tiered_gate() -> RevocationFreshnessGate {
     gate_with_tiers(vec![
-        (CRITICAL_ACTION_ID.to_string(), SafetyTier::Critical),
-        (STANDARD_ACTION_ID.to_string(), SafetyTier::Standard),
-        (ACTION_ID.to_string(), SafetyTier::Advisory),
+        (CRITICAL_ACTION_ID.to_string(), EpochFreshnessTier::Critical),
+        (STANDARD_ACTION_ID.to_string(), EpochFreshnessTier::Standard),
+        (ACTION_ID.to_string(), EpochFreshnessTier::Advisory),
     ])
 }
 
-fn gate_with_tiers(tier_table: Vec<(String, SafetyTier)>) -> RevocationFreshnessGate {
+fn gate_with_tiers(tier_table: Vec<(String, EpochFreshnessTier)>) -> RevocationFreshnessGate {
     RevocationFreshnessGate::new(Box::new(test_sig), tier_table)
 }
 
 fn proof_for(nonce: &str) -> FreshnessProof {
-    proof_for_tier(SafetyTier::Advisory, CURRENT_EPOCH, nonce)
+    proof_for_tier(EpochFreshnessTier::Advisory, CURRENT_EPOCH, nonce)
 }
 
-fn proof_for_tier(tier: SafetyTier, epoch: u64, nonce: &str) -> FreshnessProof {
+fn proof_for_tier(tier: EpochFreshnessTier, epoch: u64, nonce: &str) -> FreshnessProof {
     let mut proof = FreshnessProof {
         timestamp: 1_700_000_000,
         credentials_checked: vec![
@@ -189,7 +189,7 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     let mut covered = Vec::new();
 
     let mut accepted_gate = tiered_gate();
-    let accepted = proof_for_tier(SafetyTier::Critical, CURRENT_EPOCH, "rfg-conf-fresh");
+    let accepted = proof_for_tier(EpochFreshnessTier::Critical, CURRENT_EPOCH, "rfg-conf-fresh");
     let decision = check(
         &mut accepted_gate,
         &accepted,
@@ -209,7 +209,7 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
         requirement: "fresh classified authenticated proofs must consume their nonce exactly once",
     });
 
-    let mut duplicate = proof_for_tier(SafetyTier::Critical, 0, &accepted.nonce);
+    let mut duplicate = proof_for_tier(EpochFreshnessTier::Critical, 0, &accepted.nonce);
     duplicate.signature = test_sig(&duplicate);
     let duplicate_result = check(
         &mut accepted_gate,
@@ -231,7 +231,7 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     });
 
     let mut unauth_gate = tiered_gate();
-    let unauth = proof_for_tier(SafetyTier::Advisory, CURRENT_EPOCH, "rfg-conf-unauth");
+    let unauth = proof_for_tier(EpochFreshnessTier::Advisory, CURRENT_EPOCH, "rfg-conf-unauth");
     expect_error_code(
         check(
             &mut unauth_gate,
@@ -253,7 +253,7 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     });
 
     let mut tamper_gate = tiered_gate();
-    let mut tampered = proof_for_tier(SafetyTier::Advisory, CURRENT_EPOCH, "rfg-conf-tamper");
+    let mut tampered = proof_for_tier(EpochFreshnessTier::Advisory, CURRENT_EPOCH, "rfg-conf-tamper");
     tampered.signature = "wrong-signature".to_string();
     expect_error_code(
         check(
@@ -276,7 +276,7 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
     });
 
     let mut unknown_gate = tiered_gate();
-    let unknown = proof_for_tier(SafetyTier::Advisory, CURRENT_EPOCH, "rfg-conf-unknown");
+    let unknown = proof_for_tier(EpochFreshnessTier::Advisory, CURRENT_EPOCH, "rfg-conf-unknown");
     expect_error_code(
         check(
             &mut unknown_gate,
@@ -299,7 +299,7 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
 
     let mut stale_critical_gate = tiered_gate();
     let stale_critical =
-        proof_for_tier(SafetyTier::Critical, CURRENT_EPOCH - 1, "rfg-conf-critical");
+        proof_for_tier(EpochFreshnessTier::Critical, CURRENT_EPOCH - 1, "rfg-conf-critical");
     expect_error_code(
         check(
             &mut stale_critical_gate,
@@ -322,7 +322,7 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
 
     let mut standard_gate = tiered_gate();
     let stale_standard =
-        proof_for_tier(SafetyTier::Standard, CURRENT_EPOCH - 5, "rfg-conf-standard");
+        proof_for_tier(EpochFreshnessTier::Standard, CURRENT_EPOCH - 5, "rfg-conf-standard");
     let decision = check(
         &mut standard_gate,
         &stale_standard,
@@ -351,7 +351,7 @@ fn anti_replay_conformance_matrix_covers_fail_closed_nonce_contracts() -> TestRe
 
     let mut advisory_gate = tiered_gate();
     let stale_advisory = proof_for_tier(
-        SafetyTier::Advisory,
+        EpochFreshnessTier::Advisory,
         CURRENT_EPOCH - 10,
         "rfg-conf-advisory",
     );
@@ -585,24 +585,24 @@ fn duplicate_replay_attempt_does_not_refresh_fifo_eviction_order() -> TestResult
 
 #[test]
 fn tier_tightening_propagates_stale_revocation_frontier_fail_closed() -> TestResult {
-    let stale_epoch = CURRENT_EPOCH.saturating_sub(SafetyTier::Advisory.max_staleness_epochs());
+    let stale_epoch = CURRENT_EPOCH.saturating_sub(EpochFreshnessTier::Advisory.max_staleness_epochs());
     let cases = [
         (
-            SafetyTier::Advisory,
+            EpochFreshnessTier::Advisory,
             ACTION_ID,
             false,
             Ok(("RFG-003", true)),
             "rwmm-tier-advisory",
         ),
         (
-            SafetyTier::Standard,
+            EpochFreshnessTier::Standard,
             STANDARD_ACTION_ID,
             true,
             Ok(("RFG-003", true)),
             "rwmm-tier-standard",
         ),
         (
-            SafetyTier::Critical,
+            EpochFreshnessTier::Critical,
             CRITICAL_ACTION_ID,
             true,
             Err("ERR_RFG_STALE"),

@@ -723,18 +723,18 @@ fn verify_migration_fails_for_unknown_target() {
 }
 
 #[test]
-fn verify_compatibility_accepts_known_profile_targets() {
+fn verify_compatibility_rejects_profile_names_as_auto_pass() {
     let output = run_cli(&["verify", "compatibility", "strict", "--json"]);
     assert!(
-        output.status.success(),
-        "verify compatibility strict should pass; stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "verify compatibility strict must not auto-PASS a runtime profile"
     );
     let payload = parse_json_stdout(&output);
     assert_eq!(payload["command"], "verify compatibility");
-    assert_eq!(payload["verdict"], "PASS");
-    assert_eq!(payload["exit_code"], 0);
+    assert_eq!(payload["verdict"], "FAIL");
+    assert_eq!(payload["exit_code"], 1);
     assert_eq!(payload["details"]["target_kind"], "profile");
+    assert_eq!(payload["details"]["compatible"], false);
 }
 
 #[test]
@@ -748,17 +748,16 @@ fn verify_compatibility_accepts_previous_major_compat_version() {
         "--json",
     ]);
     assert!(
-        output.status.success(),
-        "verify compatibility should accept previous major compat version; stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "compat-version must not restore profile auto-PASS"
     );
 
     let payload = parse_json_stdout(&output);
     assert_eq!(payload["command"], "verify compatibility");
     assert_eq!(payload["compat_version"], 2);
-    assert_eq!(payload["verdict"], "PASS");
-    assert_eq!(payload["status"], "pass");
-    assert_eq!(payload["exit_code"], 0);
+    assert_eq!(payload["verdict"], "FAIL");
+    assert_eq!(payload["status"], "fail");
+    assert_eq!(payload["exit_code"], 1);
 }
 
 #[test]

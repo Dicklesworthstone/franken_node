@@ -96,6 +96,16 @@ impl fmt::Display for EpochFreshnessTier {
     }
 }
 
+impl From<crate::security::revocation_freshness::SafetyTier> for EpochFreshnessTier {
+    fn from(tier: crate::security::revocation_freshness::SafetyTier) -> Self {
+        match tier {
+            crate::security::revocation_freshness::SafetyTier::Dangerous => Self::Critical,
+            crate::security::revocation_freshness::SafetyTier::Risky => Self::Standard,
+            crate::security::revocation_freshness::SafetyTier::Standard => Self::Advisory,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FreshnessProof
 // ---------------------------------------------------------------------------
