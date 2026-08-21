@@ -5,8 +5,10 @@
 //! case on Bun plus the native in-process franken_engine (a fresh
 //! `franken-node run --console-only` subprocess of this very binary). Release
 //! mode additionally requires a distinct, identity-checked Node.js reference
-//! leg, producing a unanimous Node+Bun+product triad through the N-version
-//! [`crate::runtime::nversion_oracle::RuntimeOracle`].
+//! leg, adjudicated through the N-version
+//! [`crate::runtime::nversion_oracle::RuntimeOracle`]. Unanimous Node+Bun+product
+//! output is a pass. When Node and Bun disagree, matching Node is a pass
+//! (Node is the compatibility spec); matching only Bun stays a fail.
 //!
 //! The emitted `artifacts/13/compatibility_corpus_results.json` document
 //! carries per-test statuses that were actually measured, a recomputable
@@ -2055,8 +2057,9 @@ pub fn run_corpus(
             }
         };
 
-        // Adjudicate through the real N-version oracle: bun is the reference
-        // executor, the native engine is the runtime under test.
+        // Adjudicate through the real N-version oracle. Node is the
+        // compatibility spec; bun is a second reference. The native engine is
+        // the runtime under test.
         let mut oracle = RuntimeOracle::new(&format!("ccg:{}", case.test_id), 100);
         oracle
             .register_runtime(RuntimeEntry {
@@ -2110,8 +2113,13 @@ pub fn run_corpus(
                     && !leg.observation.stdout_truncated
                     && !leg.observation.stderr_truncated
             });
-        let agreed =
-            observations_complete && matches!(check.outcome, Some(CheckOutcome::Agree { .. }));
+        let oracle_agreed = matches!(check.outcome, Some(CheckOutcome::Agree { .. }));
+        let agreed = lockstep_case_passed(
+            observations_complete,
+            oracle_agreed,
+            node_leg.as_ref(),
+            &franken_leg,
+        );
         let (status, failure_reason): (&'static str, Option<String>) = if agreed {
             ("pass", None)
         } else {
@@ -2187,6 +2195,12 @@ fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCa
     if let Some(node) = node
         && node.comparison != bun.comparison
     {
+        if node.comparison == franken.comparison
+            && node.observation.exit_code == Some(0)
+            && franken.observation.exit_code == Some(0)
+        {
+            return "lockstep divergence: node and bun reference legs disagree (franken matched node; observations incomplete)".to_string();
+        }
         return "lockstep divergence: node and bun reference legs disagree".to_string();
     }
     match (bun.observation.exit_code, franken.observation.exit_code) {
@@ -2227,6 +2241,32 @@ fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCa
             "lockstep divergence: both legs failed with divergent diagnostics (bun exit {bun_exit:?}, franken exit {franken_exit:?})"
         ),
     }
+}
+
+/// Node is the compatibility spec.
+///
+/// Unanimous triad output is a pass. When Node and Bun disagree, matching Node
+/// (byte-identical comparison, both exit 0) is a pass. Matching only Bun, or
+/// matching neither, stays fail. `child_process` native-eval aborts never match
+/// Node's successful exit, so they are not recategorized as pass.
+#[cfg(feature = "engine")]
+fn lockstep_case_passed(
+    observations_complete: bool,
+    oracle_agreed: bool,
+    node: Option<&LegCapture>,
+    franken: &LegCapture,
+) -> bool {
+    if !observations_complete {
+        return false;
+    }
+    if oracle_agreed {
+        return true;
+    }
+    node.is_some_and(|node| {
+        node.comparison == franken.comparison
+            && node.observation.exit_code == Some(0)
+            && franken.observation.exit_code == Some(0)
+    })
 }
 
 /// Stable class for `failing_tests_tracking`. Does not change pass/fail.
@@ -3246,12 +3286,9 @@ mod snapshot_staging_tests {
         );
     }
 
-    #[test]
-    fn franken_matches_node_observation_tracks_node_agreement_without_passing() {
-        let matching = RuntimeLegObservation {
-            stdout_digest:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_string(),
+    fn observation_with_stdout_digest(digest: &str) -> RuntimeLegObservation {
+        RuntimeLegObservation {
+            stdout_digest: digest.to_string(),
             stderr_digest:
                 "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                     .to_string(),
@@ -3263,38 +3300,87 @@ mod snapshot_staging_tests {
             termination_kind: "exited".to_string(),
             timed_out: false,
             elapsed_ms: 1,
+        }
+    }
+
+    #[test]
+    fn franken_matching_node_passes_when_bun_reference_disagrees() {
+        let node_obs = observation_with_stdout_digest(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let bun_obs = observation_with_stdout_digest(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        let node = LegCapture {
+            comparison: b"node-canonical".to_vec(),
+            observation: node_obs.clone(),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
         };
-        let bun = RuntimeLegObservation {
-            stdout_digest:
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                    .to_string(),
-            ..matching.clone()
+        let bun = LegCapture {
+            comparison: b"bun-only".to_vec(),
+            observation: bun_obs.clone(),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
         };
+        let franken = LegCapture {
+            comparison: b"node-canonical".to_vec(),
+            observation: node_obs.clone(),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
+        };
+        assert!(
+            lockstep_case_passed(true, false, Some(&node), &franken),
+            "matching Node is a pass when Bun disagrees"
+        );
+        assert!(!lockstep_case_passed(false, false, Some(&node), &franken));
+        let incomplete_reason = classify_failure(&bun, Some(&node), &franken);
+        assert!(
+            incomplete_reason.contains("franken matched node"),
+            "incomplete observations must not hide a Node match: {incomplete_reason}"
+        );
+        assert_eq!(
+            corpus_failure_class(&incomplete_reason, "net"),
+            "reference_disagree"
+        );
+        let franken_matches_bun = LegCapture {
+            comparison: b"bun-only".to_vec(),
+            observation: bun_obs,
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
+        };
+        assert!(
+            !lockstep_case_passed(true, false, Some(&node), &franken_matches_bun),
+            "matching only Bun must stay fail"
+        );
+        let mut crashed = franken;
+        crashed.observation.exit_code = Some(1);
+        assert!(
+            !lockstep_case_passed(true, false, Some(&node), &crashed),
+            "child_process-style abort must not recategorize as pass"
+        );
         let mut runtime_observations = BTreeMap::new();
-        runtime_observations.insert("bun".to_string(), bun);
-        runtime_observations.insert("node".to_string(), matching.clone());
-        runtime_observations.insert("franken-engine-native".to_string(), matching);
+        runtime_observations.insert("bun".to_string(), bun.observation);
+        runtime_observations.insert("node".to_string(), node_obs.clone());
+        runtime_observations.insert("franken-engine-native".to_string(), node_obs);
         let outcome = CaseOutcome {
             test_id: "tc::net::0005".to_string(),
             api_family: "net".to_string(),
             band: "core".to_string(),
             risk_band: "critical".to_string(),
-            status: "fail",
-            failure_reason: Some(
-                "lockstep divergence: node and bun reference legs disagree".to_string(),
-            ),
+            status: "pass",
+            failure_reason: None,
             investigation_bead_id: None,
             runtime_observations,
         };
         assert_eq!(franken_matches_node_observation(&outcome), Some(true));
         assert_eq!(
             corpus_failure_class(
-                outcome.failure_reason.as_deref().expect("reason"),
-                &outcome.api_family
+                "lockstep divergence: node and bun reference legs disagree",
+                "net"
             ),
             "reference_disagree"
         );
-        assert_eq!(outcome.status, "fail");
     }
 
     #[cfg(target_os = "linux")]
