@@ -41,6 +41,10 @@ __pycache__/
 .beads/*.bad_*
 .beads/*.rebuild_*
 .beads/recovery_*/
+# WAL certification sidecars (`*.db-wal` does not match beads.db-wal-cert).
+# Per-machine br fsqlite probes, like -wal/-shm; never canonical tracker state.
+.beads/*.db-wal-cert
+.beads/*.db-wal-cert-head
 
 # Agent coordination config
 .agent-mail.yaml
@@ -48,6 +52,7 @@ __pycache__/
 # Remote compilation helper temp directories
 .rch_tmp/
 .rch_*/
+.rch-target/
 /.rch-target-*/
 
 # UBS (Ultimate Bug Scanner) output
