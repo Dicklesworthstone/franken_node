@@ -287,6 +287,32 @@ fn registry_publish_persists_artifact_and_search_reports_integrity() {
     assert!(search_stdout.contains(&extension_id));
     assert!(search_stdout.contains(".franken-node/state/registry/artifacts/"));
     assert!(search_stdout.contains("verified"));
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &["registry", "search", "plugin", "--json"],
+    );
+    assert!(
+        json_output.status.success(),
+        "registry search --json failed: {}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&json_output.stdout)
+        .expect("registry search --json should emit valid JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/registry-search-cli/v1"
+    );
+    assert_eq!(payload["command"], "registry.search");
+    assert_eq!(payload["query"], "plugin");
+    assert_eq!(payload["matched"], 1);
+    assert_eq!(payload["rows"][0]["extension_id"], extension_id);
+    assert_eq!(payload["rows"][0]["integrity_status"], "verified");
+    let json_stdout = String::from_utf8_lossy(&json_output.stdout);
+    assert!(
+        !json_stdout.contains("registry search: query="),
+        "json mode must not emit the human table:\n{json_stdout}"
+    );
 }
 
 #[test]

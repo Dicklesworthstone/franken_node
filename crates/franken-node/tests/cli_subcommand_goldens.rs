@@ -589,9 +589,8 @@ fn fleet_help_output() {
 #[test]
 fn doctor_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    disable_cli_color(&mut cmd);
     let assertion = cmd
-        .env("NO_COLOR", "1")
-        .env("CLICOLOR", "0")
         // clap renders `[env: NAME=value]` with the live value when the
         // fallback variable is set (bd-lmbt0); strip it for hermeticity.
         .env_remove("FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT")
