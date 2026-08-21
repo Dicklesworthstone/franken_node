@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Gate cargo's inline library test harness for bd-rjc2m.21.
 
-`cargo test -p frankenengine-node --lib -- --list` must discover at least
-one test. This script keeps the CI check out of ad hoc shell grep so the
-parser and exit behavior are unit-tested.
+A default `cargo test -p frankenengine-node --lib` compiles the inline
+`#[cfg(test)]` suite out via `#![cfg(any(not(test), franken_node_inline_tests))]`
+and therefore lists 0 tests. The dedicated lane sets
+`RUSTFLAGS=--cfg franken_node_inline_tests` and then `cargo test --lib -- --list`
+must discover at least one test. `--preflight` only checks that this override
+is still wired (Cargo.toml, lib.rs gate, README honesty). This script keeps
+the CI check out of ad hoc shell grep so the parser and exit behavior are
+unit-tested.
 """
 
 from __future__ import annotations
@@ -441,7 +446,11 @@ def preflight(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Fail if cargo test --lib -- --list discovers too few inline tests."
+        description=(
+            "Fail if the dedicated inline-lib lane "
+            "(`RUSTFLAGS=--cfg franken_node_inline_tests cargo test --lib -- --list`) "
+            "discovers too few tests. Default cargo test --lib is expected to list 0."
+        ),
     )
     parser.add_argument(
         "list_output",
