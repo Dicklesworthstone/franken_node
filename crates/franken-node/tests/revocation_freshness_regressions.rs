@@ -1,6 +1,7 @@
 use frankenengine_node::security::revocation_freshness::{
     FreshnessCheck, FreshnessError, FreshnessPolicy, OverrideReceipt, SafetyTier,
-    evaluate_freshness,
+    evaluate_default_freshness, evaluate_freshness, snapshot_age_secs, snapshot_age_secs_for_path,
+    unix_mtime_epoch_secs,
 };
 
 fn policy() -> FreshnessPolicy {
@@ -100,5 +101,52 @@ fn stale_override_rejects_actor_with_trailing_space() {
             tier: "Risky".to_string(),
             age_secs: 7200,
         }
+    );
+}
+
+#[test]
+fn policy_mode_maps_onto_product_tiers() {
+    assert_eq!(SafetyTier::for_policy_mode("strict"), SafetyTier::Dangerous);
+    assert_eq!(SafetyTier::for_policy_mode("balanced"), SafetyTier::Risky);
+    assert_eq!(
+        SafetyTier::for_policy_mode("legacy-risky"),
+        SafetyTier::Standard
+    );
+}
+
+#[test]
+fn snapshot_age_saturates_when_clock_is_behind_mtime() {
+    assert_eq!(snapshot_age_secs(1_700_000_000, 2_000), 0);
+    assert_eq!(snapshot_age_secs(1_000, 4_601), 3_601);
+}
+
+#[test]
+fn default_freshness_denies_stale_dangerous_actions() {
+    let err = evaluate_default_freshness(
+        "remotecap-issue",
+        SafetyTier::Dangerous,
+        301,
+        "tr-default",
+        "ts-default",
+    )
+    .expect_err("stale dangerous must fail closed");
+    assert!(matches!(
+        err,
+        FreshnessError::StaleFrontier {
+            age_secs: 301,
+            max_age_secs: 300,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn unix_mtime_none_for_missing_path() {
+    assert!(
+        unix_mtime_epoch_secs(std::path::Path::new("/no/such/revocation-snapshot.json")).is_none()
+    );
+    assert!(
+        snapshot_age_secs_for_path(std::path::Path::new("/no/such/revocation-snapshot.json"), 9)
+            .is_none()
     );
 }

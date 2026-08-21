@@ -48,7 +48,11 @@ fn inv_rf_tier_gate_risky_denies_stale() {
 #[test]
 fn inv_rf_tier_gate_dangerous_denies_stale() {
     let err = evaluate_freshness(&pol(), &chk(SafetyTier::Dangerous, 600), None).unwrap_err();
-    assert_eq!(err.code(), "RF_STALE_FRONTIER", "INV-RF-TIER-GATE violated for Dangerous");
+    assert_eq!(
+        err.code(),
+        "RF_STALE_FRONTIER",
+        "INV-RF-TIER-GATE violated for Dangerous"
+    );
 }
 
 #[test]
@@ -95,4 +99,44 @@ fn boundary_risky_exactly_at_max() {
 fn boundary_dangerous_exactly_at_max() {
     let d = evaluate_freshness(&pol(), &chk(SafetyTier::Dangerous, 300), None).unwrap();
     assert!(d.allowed);
+}
+
+#[test]
+fn policy_mode_maps_onto_product_tiers() {
+    assert_eq!(SafetyTier::for_policy_mode("strict"), SafetyTier::Dangerous);
+    assert_eq!(SafetyTier::for_policy_mode("balanced"), SafetyTier::Risky);
+    assert_eq!(
+        SafetyTier::for_policy_mode("legacy-risky"),
+        SafetyTier::Standard
+    );
+}
+
+#[test]
+fn snapshot_age_saturates_when_clock_is_behind_mtime() {
+    assert_eq!(snapshot_age_secs(1_700_000_000, 2_000), 0);
+    assert_eq!(snapshot_age_secs(1_000, 4_601), 3_601);
+}
+
+#[test]
+fn default_freshness_denies_stale_dangerous_actions() {
+    let err = evaluate_default_freshness(
+        "remotecap-issue",
+        SafetyTier::Dangerous,
+        301,
+        "tr-default",
+        "ts-default",
+    )
+    .expect_err("stale dangerous must fail closed");
+    assert_eq!(err.code(), "RF_STALE_FRONTIER");
+}
+
+#[test]
+fn unix_mtime_none_for_missing_path() {
+    assert!(
+        unix_mtime_epoch_secs(std::path::Path::new("/no/such/revocation-snapshot.json")).is_none()
+    );
+    assert!(
+        snapshot_age_secs_for_path(std::path::Path::new("/no/such/revocation-snapshot.json"), 9)
+            .is_none()
+    );
 }

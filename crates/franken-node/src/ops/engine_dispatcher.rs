@@ -12,6 +12,9 @@ use crate::{
         configured_child_process_spawn_admission_in_active_containment,
         configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key,
     },
+    security::revocation_freshness::{
+        SafetyTier, evaluate_default_freshness, snapshot_age_secs_for_path,
+    },
     supply_chain::trust_card::{SnapshotSourceContext, TrustCardRegistry},
 };
 use anyhow::{Context, Result};
@@ -4042,6 +4045,23 @@ impl EngineDispatcher {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         let authoritative_registry = project_root.join(".state").join("trust_card_registry.json");
+
+        if let Some(age) = snapshot_age_secs_for_path(&authoritative_registry, now_secs) {
+            let tier = SafetyTier::for_policy_mode(policy_mode);
+            if let Err(err) = evaluate_default_freshness(
+                "dispatch-run",
+                tier,
+                age,
+                "trace-execution-revocation-freshness",
+                now_secs.to_string(),
+            ) {
+                return Err(ActionableError::new(
+                    format!("Revocation freshness gate denied execution: {err}"),
+                    "Refresh revocation data with `franken-node trust sync` before running under this profile",
+                )
+                .into());
+            }
+        }
 
         if authoritative_registry.is_file() && !trusted_extension_ids.is_empty() {
             let mut registry = TrustCardRegistry::load_authoritative_state_from_config(

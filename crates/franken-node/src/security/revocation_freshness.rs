@@ -3,15 +3,85 @@
 //! Enforces revocation freshness before risky/dangerous actions.
 //! Standard-tier actions always pass. Higher tiers require fresher
 //! revocation data. Overrides require a policy-backed receipt.
+//!
+//! Product `run` and `remotecap issue` consult this wall-clock gate.
+//! Control-plane proof windows use
+//! [`crate::security::revocation_freshness_gate::EpochFreshnessTier`],
+//! mapped from this enum via `From`.
+
+use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 /// Canonical product safety tier for wall-clock revocation freshness
-/// (`run` preflight, trust sync). Control-plane epoch windows use
+/// (`run` preflight, trust sync, remotecap issue). Control-plane epoch
+/// windows use
 /// [`crate::security::revocation_freshness_gate::EpochFreshnessTier`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SafetyTier {
     Standard,
     Risky,
     Dangerous,
+}
+
+impl SafetyTier {
+    /// Map a `run --policy` / remotecap posture onto the product tier.
+    ///
+    /// `strict` is Dangerous (5-minute max age), `balanced` is Risky
+    /// (1-hour max age), `legacy-risky` is Standard (no age floor).
+    #[must_use]
+    pub fn for_policy_mode(policy_mode: &str) -> Self {
+        match policy_mode {
+            "strict" => Self::Dangerous,
+            "legacy-risky" => Self::Standard,
+            _ => Self::Risky,
+        }
+    }
+}
+
+/// Age of a revocation snapshot file relative to `now_secs`.
+///
+/// When the caller supplies a test clock earlier than the file mtime,
+/// the age saturates at zero (fresh) rather than wrapping.
+#[must_use]
+pub fn snapshot_age_secs(snapshot_mtime_epoch: u64, now_secs: u64) -> u64 {
+    now_secs.saturating_sub(snapshot_mtime_epoch)
+}
+
+/// Wall-clock mtime of `path` as Unix seconds, if the file exists.
+#[must_use]
+pub fn unix_mtime_epoch_secs(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    modified
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Convenience: age of `path` at `now_secs`, or `None` if the file is missing.
+#[must_use]
+pub fn snapshot_age_secs_for_path(path: &Path, now_secs: u64) -> Option<u64> {
+    unix_mtime_epoch_secs(path).map(|mtime| snapshot_age_secs(mtime, now_secs))
+}
+
+/// Evaluate default product policy against a named action.
+pub fn evaluate_default_freshness(
+    action_id: impl Into<String>,
+    tier: SafetyTier,
+    revocation_age_secs: u64,
+    trace_id: impl Into<String>,
+    timestamp: impl Into<String>,
+) -> Result<FreshnessDecision, FreshnessError> {
+    evaluate_freshness(
+        &FreshnessPolicy::default_policy(),
+        &FreshnessCheck {
+            action_id: action_id.into(),
+            tier,
+            revocation_age_secs,
+            trace_id: trace_id.into(),
+            timestamp: timestamp.into(),
+        },
+        None,
+    )
 }
 
 impl std::fmt::Display for SafetyTier {
@@ -333,6 +403,42 @@ mod tests {
     }
 
     #[test]
+    fn policy_mode_maps_onto_product_tiers() {
+        assert_eq!(SafetyTier::for_policy_mode("strict"), SafetyTier::Dangerous);
+        assert_eq!(SafetyTier::for_policy_mode("balanced"), SafetyTier::Risky);
+        assert_eq!(
+            SafetyTier::for_policy_mode("legacy-risky"),
+            SafetyTier::Standard
+        );
+        assert_eq!(SafetyTier::for_policy_mode("unknown"), SafetyTier::Risky);
+    }
+
+    #[test]
+    fn snapshot_age_saturates_when_test_clock_is_behind_mtime() {
+        assert_eq!(snapshot_age_secs(1_700_000_000, 2_000), 0);
+        assert_eq!(snapshot_age_secs(1_000, 4_601), 3_601);
+    }
+
+    #[test]
+    fn default_freshness_denies_stale_dangerous_actions() {
+        let err = evaluate_default_freshness(
+            "remotecap-issue",
+            SafetyTier::Dangerous,
+            301,
+            "tr-default",
+            "ts-default",
+        )
+        .expect_err("stale dangerous must fail closed");
+        assert!(matches!(
+            err,
+            FreshnessError::StaleFrontier {
+                age_secs: 301,
+                max_age_secs: 300,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn standard_always_passes() {
         let d = evaluate_freshness(&policy(), &check_action(SafetyTier::Standard, 999999), None)
