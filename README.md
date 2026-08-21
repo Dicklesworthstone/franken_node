@@ -1960,7 +1960,7 @@ can pin directly against the names. Current names emitted by the CLI:
 |---|---|---|---|
 | `franken_node_health_pass` | gauge | `surface` | 1 when the named surface is healthy, 0 otherwise |
 | `franken_node_process_uptime_seconds` | gauge | — | Process uptime |
-| `franken_node_active_session_count` | gauge | — | Currently active operator sessions |
+| `franken_node_active_session_count` | gauge | — | Count of files under `<project>/.franken-node/state/sessions` (same source as `ops health-check`; not a live SessionManager) |
 | `franken_node_build_info` | gauge | `version`, `git_sha` | Always 1; labels carry version info |
 | `franken_node_last_successful_evidence_ledger_flush_timestamp_seconds` | gauge | — | Last successful evidence ledger flush (epoch seconds) |
 | `franken_node_evidence_ledger_spill_entries` | counter | — | Entries spilled from the evidence ledger to durable storage |
@@ -2916,7 +2916,8 @@ See [`docs/DUAL_ORACLE_CLOSE_CONDITION.md`](docs/DUAL_ORACLE_CLOSE_CONDITION.md)
 
 Receipts emitted by the close-condition oracle are signed and chained into
 the evidence ledger so a later audit can verify exactly which inputs
-produced the GREEN.
+produced the verdict. Live L1 is currently RED (corpus 86.43%, 484/560);
+do not read a GREEN L1 from backfill artifacts.
 
 ---
 
