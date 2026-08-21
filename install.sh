@@ -465,6 +465,7 @@ main() {
     local tag="$VERSION"
     [ -z "$tag" ] && tag="$(discover_latest_release_tag || true)"
     if [ -n "$tag" ]; then
+      warn "GitHub Latest release is ${tag}; this can lag main. For current HEAD behavior use --method source --node-ref main --engine-ref main"
       if install_from_release "$tag"; then
         install_completions; maybe_add_path; self_test; verify_process_spawn_backend; final_summary; return 0
       fi

@@ -262,13 +262,20 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main
 irm https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.ps1 | iex
 ```
 
-The installer downloads the latest release asset for your platform, verifies
-it against its `SHA256` sidecar (and a cosign signature when one is published),
-and places `franken-node` on `PATH` (`%USERPROFILE%\.local\bin` on Windows).
-Prebuilt binaries ship for **Linux x86_64**, **macOS Apple Silicon (arm64)**,
-and **Windows x86_64**; on other platforms the bash installer falls back to a
-side-by-side source build. Pass `--help` (bash) / `-EasyMode` (PowerShell adds
-the dir to PATH) for options.
+The installer tries the latest GitHub **release tag** first. That tag can lag
+`main` by hundreds of commits (as of 2026-08-20, Latest was `v0.1.0` while
+`main` was `v0.1.0-709`). Prebuilt `v0.1.0` does **not** include `ltv` and
+cannot `run` guest JS without a degraded Node/Bun fallback. For current
+`main` behavior:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/franken_node/main/install.sh | bash -s -- --method source --node-ref main --engine-ref main
+```
+
+A checksum-verified release asset is used when you pass `--method release` or
+`--version vX.Y.Z`. Prebuilt binaries ship for **Linux x86_64**, **macOS Apple
+Silicon (arm64)**, and **Windows x86_64**. Pass `--help` (bash) / `-EasyMode`
+(PowerShell adds the dir to PATH) for options.
 
 Child-process spawning is not enabled by any runtime profile. Profile-governed
 `run` also rejects external Node/Bun runtimes because they cannot enforce the
