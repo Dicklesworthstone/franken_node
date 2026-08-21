@@ -791,7 +791,7 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node ops health-check` | Process health from compile-time git SHA, evidence-ledger flush mtime, and persisted session files under `.franken-node/state/sessions` (not a live SessionManager). Flags: `--json` (`franken-node/ops-health-check-cli/v1`; `session_count_source=persisted_session_files`). |
-| `franken-node ops resource-governor` | Advise whether validation should run / defer / deduplicate based on a process snapshot, proof class, RCH queue depth, and target-dir usage. Flags: `--json`. |
+| `franken-node ops resource-governor` | Advise whether validation should run / defer / deduplicate. Default observation is a live procfs sample; `--process-snapshot` is a fixture. Human output names `source=`. Flags: `--json`. |
 | `franken-node ops validation-readiness` | Report validation broker evidence freshness from receipts. Flags: `--json`. |
 | `franken-node ops validation-closeout` | Render closeout summary from a receipt. `--bead-id` and `--receipt` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node ops config-audit` | Audit active config across profiles. Flags: `--json` (`franken-node/ops-config-audit-cli/v1`). |

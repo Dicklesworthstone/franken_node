@@ -8517,6 +8517,10 @@ fn emit_ops_resource_governor_report(
             "ops resource-governor: decision={}",
             report.decision.kind.as_str()
         );
+        println!(
+            "  source={} (procfs live sample unless --process-snapshot was supplied)",
+            report.observation.source
+        );
         println!("  trace_id={}", report.trace_id);
         println!("  reason_code={}", report.decision.reason_code);
         println!("  reason={}", report.decision.reason);

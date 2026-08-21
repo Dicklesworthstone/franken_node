@@ -300,6 +300,7 @@ fn ops_resource_governor_cli_human_output_names_decision_and_backoff() {
 
     let stdout = stdout_text(command);
     assert!(stdout.contains("ops resource-governor: decision=defer"));
+    assert!(stdout.contains("source=human-fixture"));
     assert!(stdout.contains("reason_code=RG_DEFER_CONTENTION"));
     assert!(stdout.contains("recommended_backoff_ms=180000"));
 }
