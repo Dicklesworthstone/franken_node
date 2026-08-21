@@ -147,7 +147,30 @@ fn run_app(app_src: &str, extra_args: &[&str]) -> (tempfile::TempDir, RunOutcome
     (dir, outcome)
 }
 
-/// bd-wwjxn: the actual product path must place source loading, parse/lower,
+/// bd-reality-20260820-w0fc6.7: default `run` (no degraded-fallback env)
+/// executes fixture JS through the embedded engine and surfaces stdout.
+#[test]
+fn default_run_executes_fixture_js_through_embedded_engine_without_degraded_fallback() {
+    let (dir, outcome) = run_app("console.log(\"hello-from-engine\");\n", &[]);
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "embedded-engine run must exit 0 without FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK; stderr=\n{}",
+        outcome.stderr
+    );
+    assert!(
+        outcome.stdout.contains("hello-from-engine"),
+        "guest stdout must include the logged line; stdout=\n{}\nstderr=\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+    assert!(
+        !outcome.stderr.contains("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK"),
+        "must not demand degraded Node/Bun fallback; stderr=\n{}",
+        outcome.stderr
+    );
+    let _workspace = dir;
+}
 /// HostIo and telemetry behind one killable session boundary. A loopback server
 /// confirms that an HTTP effect reached its real socket, then withholds the
 /// response; the parent deadline must still kill/reap the worker before returning.
