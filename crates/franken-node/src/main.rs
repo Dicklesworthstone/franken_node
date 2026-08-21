@@ -9568,7 +9568,7 @@ fn render_ops_metrics_prometheus(report: &OpsPrometheusMetricsReport) -> String 
     write_prometheus_metric_prelude(
         &mut rendered,
         "franken_node_process_uptime_seconds",
-        "Process uptime in seconds reported by franken-node ops health-check.",
+        "Uptime in seconds of this franken-node CLI process (ops health-check / ops metrics; not a long-running node daemon).",
         "gauge",
     );
     writeln!(
@@ -9621,7 +9621,7 @@ fn render_ops_metrics_prometheus(report: &OpsPrometheusMetricsReport) -> String 
     write_prometheus_metric_prelude(
         &mut rendered,
         "franken_node_health_pass",
-        "Whether franken-node ops health-check passed (1) or failed (0).",
+        "ops health-check pass (1) or fail (0): compiled FRANKEN_NODE_GIT_SHA plus a local ledger/receipt file; not per-surface daemon liveness.",
         "gauge",
     );
     writeln!(rendered, "franken_node_health_pass {health_pass}").expect("write metric");
@@ -15505,7 +15505,9 @@ mod fleet_command_tests {
         let rendered = render_fleet_status_human(&status, true);
         assert!(rendered.contains("fleet status: zone=zone-1"));
         assert!(rendered.contains("activated=false"));
-        assert!(rendered.contains("transport=file live_control_plane=false"));
+        assert!(rendered.contains(
+            "transport=file live_control_plane=false activated_source=file_transport_not_live"
+        ));
         assert!(rendered.contains("quarantines=2 revocations=1"));
         assert!(rendered.contains("healthy_nodes=9/10"));
         assert!(rendered.contains("pending_convergences=0"));
@@ -15548,6 +15550,9 @@ mod fleet_command_tests {
         assert!(rendered.contains("success=true"));
         assert!(rendered.contains("event_code=FLEET-005"));
         assert!(rendered.contains("convergence=4/5 (80%)"));
+        assert!(rendered.contains(
+            "transport=file live_control_plane=false activated_source=file_transport_not_live"
+        ));
     }
 
     #[test]
@@ -23277,6 +23282,9 @@ fn append_trust_quarantine_action(
 fn render_fleet_status_human(status: &FleetStatus, verbose: bool) -> String {
     let mut lines = vec![
         format!("fleet status: zone={}", status.zone_id),
+        format!(
+            "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false activated_source={FLEET_CLI_ACTIVATED_SOURCE}"
+        ),
         format!("  activated={}", status.activated),
         format!(
             "  quarantines={} revocations={}",
@@ -23323,10 +23331,6 @@ fn render_fleet_status_human(status: &FleetStatus, verbose: bool) -> String {
             ));
         }
     }
-    // Keep this after the stable first-five-line shape (`fleet_status_human_output_shape_is_stable`).
-    lines.push(format!(
-        "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false"
-    ));
     lines.join("\n")
 }
 
@@ -23358,7 +23362,7 @@ fn render_fleet_node_human(report: &FleetCliNodeReport) -> String {
         lines.push(format!("  active_incidents={incidents}"));
     }
     lines.push(format!(
-        "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false"
+        "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false activated_source={FLEET_CLI_ACTIVATED_SOURCE}"
     ));
     lines.join("\n")
 }
@@ -23387,6 +23391,9 @@ fn render_fleet_action_human(action: &FleetActionResult) -> String {
             convergence.eta_seconds
         ));
     }
+    lines.push(format!(
+        "  transport={FLEET_CLI_TRANSPORT} live_control_plane=false activated_source={FLEET_CLI_ACTIVATED_SOURCE}"
+    ));
     lines.join("\n")
 }
 
@@ -29733,9 +29740,10 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         ("doctor", Some("workspace-pressure")) => {
             (DOCTOR_ERROR_CLI_SCHEMA_VERSION, "doctor.workspace-pressure")
         }
-        ("doctor", Some("process-spawn-readiness")) => {
-            (DOCTOR_ERROR_CLI_SCHEMA_VERSION, "doctor.process-spawn-readiness")
-        }
+        ("doctor", Some("process-spawn-readiness")) => (
+            DOCTOR_ERROR_CLI_SCHEMA_VERSION,
+            "doctor.process-spawn-readiness",
+        ),
         ("migrate", Some("audit")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.audit"),
         ("migrate", Some("rewrite")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.rewrite"),
         ("migrate", Some("validate")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.validate"),
@@ -31752,12 +31760,24 @@ mod ops_metrics_tests {
 
         let rendered = render_ops_metrics_prometheus(&report);
         assert!(rendered.contains("# HELP franken_node_process_uptime_seconds "));
+        assert!(
+            rendered.contains("not a long-running node daemon"),
+            "uptime HELP must not look like a daemon heartbeat: {rendered}"
+        );
         assert!(rendered.contains("franken_node_evidence_ledger_spill_entries 3"));
         assert!(rendered.contains("franken_node_incident_evidence_files 2"));
         assert!(rendered.contains("franken_node_execution_receipts 1"));
         assert!(rendered.contains("franken_node_fleet_active_quarantines 1"));
         assert!(rendered.contains("franken_node_fleet_node_records 2"));
         assert!(rendered.contains("franken_node_health_pass 1"));
+        assert!(
+            rendered.contains("not per-surface daemon liveness"),
+            "health_pass HELP must not look like per-surface liveness: {rendered}"
+        );
+        assert!(
+            !rendered.contains("franken_node_health_pass{surface="),
+            "ops metrics CLI health_pass is unlabeled: {rendered}"
+        );
         assert!(rendered.contains("franken_node_build_info{version=\""));
     }
 

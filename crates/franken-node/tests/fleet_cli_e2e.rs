@@ -2532,10 +2532,14 @@ fn fleet_status_human_output_shape_is_stable() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
     assert_eq!(lines[0], "fleet status: zone=zone-human");
-    assert_eq!(lines[1], "  activated=false");
-    assert_eq!(lines[2], "  quarantines=0 revocations=0");
-    assert_eq!(lines[3], "  healthy_nodes=0/0");
-    assert_eq!(lines[4], "  pending_convergences=0");
+    assert_eq!(
+        lines[1],
+        "  transport=file live_control_plane=false activated_source=file_transport_not_live"
+    );
+    assert_eq!(lines[2], "  activated=false");
+    assert_eq!(lines[3], "  quarantines=0 revocations=0");
+    assert_eq!(lines[4], "  healthy_nodes=0/0");
+    assert_eq!(lines[5], "  pending_convergences=0");
 }
 
 #[test]
@@ -2905,8 +2909,12 @@ fn fleet_release_human_output_shape_is_stable() {
         lines[4],
         "  convergence=0/0 (100%) phase=Converged eta_seconds=Some(0)"
     );
-    assert!(lines[5].starts_with("  convergence_receipt_elapsed_ms="));
-    assert!(lines[5].ends_with(" timed_out=false"));
+    assert_eq!(
+        lines[5],
+        "  transport=file live_control_plane=false activated_source=file_transport_not_live"
+    );
+    assert!(lines[6].starts_with("  convergence_receipt_elapsed_ms="));
+    assert!(lines[6].ends_with(" timed_out=false"));
 
     assert_snapshot!(
         "fleet_release_human",

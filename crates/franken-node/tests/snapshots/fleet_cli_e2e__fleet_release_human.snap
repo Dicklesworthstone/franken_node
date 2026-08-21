@@ -7,4 +7,5 @@ fleet action: type=release operation_id=[operation-id]
   event_code=FLEET-004
   receipt_id=[receipt-id] issuer=cli-fleet-operator zone=zone-release-human
   convergence=0/0 (100%) phase=Converged eta_seconds=Some(0)
+  transport=file live_control_plane=false activated_source=file_transport_not_live
   convergence_receipt_elapsed_ms=[elapsed-ms] timed_out=false
