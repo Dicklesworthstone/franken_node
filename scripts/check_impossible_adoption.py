@@ -26,6 +26,14 @@ SPEC = ROOT / "docs" / "specs" / "section_13" / "bd-1xao_contract.md"
 POLICY = ROOT / "docs" / "policy" / "impossible_by_default_adoption.md"
 EVIDENCE = ROOT / "artifacts" / "section_13" / "bd-1xao" / "verification_evidence.json"
 SUMMARY = ROOT / "artifacts" / "section_13" / "bd-1xao" / "verification_summary.md"
+PRODUCTION_USE = ROOT / "artifacts" / "adoption" / "ibd_production_use.json"
+README = ROOT / "README.md"
+CLAIMS_REGISTRY = ROOT / "docs" / "CLAIMS_REGISTRY.md"
+FORBIDDEN_ADOPTION_CLAIMS = (
+    "adopted by production users",
+    "broadly adopted by production users",
+    "production users are using",
+)
 
 EVENT_CODES = ["IBD-001", "IBD-002", "IBD-003", "IBD-004"]
 
@@ -438,6 +446,95 @@ def check_verification_evidence() -> dict[str, Any]:
     )
 
 
+def check_ibd_production_use_artifact() -> dict[str, Any]:
+    """Fail closed if the live KPI artifact claims GREEN below 3 operators."""
+    if not PRODUCTION_USE.is_file():
+        return _check(
+            "ibd production-use artifact",
+            False,
+            f"missing: {_safe_rel(PRODUCTION_USE)}",
+        )
+    try:
+        data = json.loads(PRODUCTION_USE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return _check("ibd production-use artifact", False, f"parse error: {exc}")
+
+    count = data.get("production_operator_count")
+    required = data.get("required_operator_count")
+    verdict = str(data.get("verdict", "")).strip().lower()
+    capabilities = data.get("capabilities")
+    errors: list[str] = []
+    if not isinstance(count, int) or count < 0:
+        errors.append(f"production_operator_count invalid: {count!r}")
+    if not isinstance(required, int) or required < 3:
+        errors.append(f"required_operator_count must be >= 3, got {required!r}")
+    if not isinstance(capabilities, list) or len(capabilities) != 10:
+        errors.append(
+            f"capabilities must be a 10-row matrix, got {type(capabilities).__name__} len="
+            f"{len(capabilities) if isinstance(capabilities, list) else 'n/a'}"
+        )
+    achieved = {"pass", "passed", "verified", "green", "working"}
+    if isinstance(count, int) and isinstance(required, int) and count < required:
+        if verdict in achieved:
+            errors.append(
+                f"verdict={verdict} is forbidden while production_operator_count="
+                f"{count} < required_operator_count={required}"
+            )
+        elif verdict not in {"pending", "fail", "failed", "red"}:
+            errors.append(f"count<{required} requires pending/fail verdict, got {verdict!r}")
+    ok = not errors
+    return _check(
+        "ibd production-use artifact",
+        ok,
+        "honest pending" if ok else "; ".join(errors),
+    )
+
+
+def check_docs_do_not_claim_production_adoption() -> dict[str, Any]:
+    """README must not assert live production adoption while the KPI is below 3."""
+    try:
+        data = json.loads(PRODUCTION_USE.read_text(encoding="utf-8"))
+        count = data.get("production_operator_count")
+        required = data.get("required_operator_count", 3)
+    except (json.JSONDecodeError, OSError, FileNotFoundError) as exc:
+        return _check(
+            "docs do not claim production adoption",
+            False,
+            f"cannot load {_safe_rel(PRODUCTION_USE)}: {exc}",
+        )
+    if isinstance(count, int) and isinstance(required, int) and count >= required:
+        return _check(
+            "docs do not claim production adoption",
+            True,
+            f"count={count} meets required={required}",
+        )
+
+    hits: list[str] = []
+    if not README.is_file():
+        hits.append(f"missing {_safe_rel(README)}")
+    else:
+        text = README.read_text(encoding="utf-8").lower()
+        for phrase in FORBIDDEN_ADOPTION_CLAIMS:
+            if phrase in text:
+                hits.append(f"{_safe_rel(README)} claims {phrase!r} while operator count < 3")
+    if not CLAIMS_REGISTRY.is_file():
+        hits.append(f"missing {_safe_rel(CLAIMS_REGISTRY)}")
+    else:
+        claims = CLAIMS_REGISTRY.read_text(encoding="utf-8")
+        if "CLAIM-021" not in claims:
+            hits.append("CLAIMS_REGISTRY missing CLAIM-021 IBD production-adoption KPI")
+        else:
+            claim_body = claims.split("CLAIM-021", 1)[-1][:1200]
+            if "**Status**: pending" not in claim_body:
+                hits.append("CLAIM-021 must stay Status: pending while operator count < 3")
+    ok = not hits
+    return _check(
+        "docs do not claim production adoption",
+        ok,
+        "no live adoption claim" if ok else "; ".join(hits),
+    )
+
+
 def check_verification_summary() -> dict[str, Any]:
     """Verify the summary markdown exists and contains PASS."""
     if not SUMMARY.is_file():
@@ -489,6 +586,8 @@ ALL_CHECKS = [
     check_policy_evidence_requirements,
     check_verification_evidence,
     check_verification_summary,
+    check_ibd_production_use_artifact,
+    check_docs_do_not_claim_production_adoption,
 ]
 
 

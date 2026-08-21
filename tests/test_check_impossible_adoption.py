@@ -8,7 +8,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -228,6 +228,14 @@ class TestIndividualChecks(unittest.TestCase):
         result = mod.check_verification_summary()
         self.assertTrue(result["pass"], result["detail"])
 
+    def test_check_ibd_production_use_artifact(self) -> None:
+        result = mod.check_ibd_production_use_artifact()
+        self.assertTrue(result["pass"], result["detail"])
+
+    def test_check_docs_do_not_claim_production_adoption(self) -> None:
+        result = mod.check_docs_do_not_claim_production_adoption()
+        self.assertTrue(result["pass"], result["detail"])
+
 
 # ---------------------------------------------------------------------------
 # TestMissingFileDetection
@@ -257,6 +265,28 @@ class TestMissingFileDetection(unittest.TestCase):
             result = mod.check_verification_evidence()
         self.assertFalse(result["pass"])
         self.assertIn("missing", result["detail"])
+
+    def test_production_use_missing_detected(self) -> None:
+        fake_path = ROOT / "nonexistent" / "ibd_production_use.json"
+        with patch.object(mod, "PRODUCTION_USE", fake_path):
+            result = mod.check_ibd_production_use_artifact()
+        self.assertFalse(result["pass"])
+        self.assertIn("missing", result["detail"])
+
+    def test_production_use_green_with_zero_operators_fails(self) -> None:
+        payload = {
+            "production_operator_count": 0,
+            "required_operator_count": 3,
+            "verdict": "green",
+            "capabilities": [{"id": f"IBD-{i:02d}"} for i in range(1, 11)],
+        }
+        fake = MagicMock()
+        fake.is_file.return_value = True
+        fake.read_text.return_value = json.dumps(payload)
+        with patch.object(mod, "PRODUCTION_USE", fake):
+            result = mod.check_ibd_production_use_artifact()
+        self.assertFalse(result["pass"], result["detail"])
+        self.assertIn("forbidden", result["detail"])
 
     def test_summary_missing_detected(self) -> None:
         fake_path = ROOT / "nonexistent" / "summary.md"

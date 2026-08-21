@@ -386,6 +386,22 @@ Each claim entry uses this structure:
 - **Notes**: README's "Quick Example" Day-0 workflow now works end-to-end
   through `init → trust scan → trust list → trust card`.
 
+### CLAIM-021: ≥3 IBD capabilities adopted by production users
+
+- **Category**: operability
+- **Source**: docs/PRODUCT_CHARTER.md §5–6; bd-reality-20260820-w0fc6.8
+- **Claim**: At least three independent production operators exercise at least
+  three of the ten impossible-by-default capabilities, evidenced by signed
+  receipts whose audience is not a franken-node test fixture.
+- **Evidence artifact**: `artifacts/adoption/ibd_production_use.json`
+- **Verification command**:
+  `python3 scripts/check_impossible_adoption.py --json`
+- **Last verified**: 2026-08-21T00:00:00Z
+- **Status**: pending
+- **Notes**: Honest default is `production_operator_count=0`, `verdict=pending`.
+  `bd-2hrg` closed the IBD index document, not production adoption. Do not
+  mark this claim verified while count<3.
+
 ## Update Cadence
 
 - Every README "Why use franken-node" or "Comparison" claim added should land
