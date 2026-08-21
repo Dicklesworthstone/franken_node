@@ -231,22 +231,42 @@ fn registry_publish_persists_artifact_and_search_reports_integrity() {
             "1.0.0",
             "--signing-key",
             &signing_key_arg,
+            "--json",
         ],
     );
     assert!(
         publish_output.status.success(),
-        "registry publish failed: {}",
+        "registry publish --json failed: {}",
         String::from_utf8_lossy(&publish_output.stderr)
     );
+    let publish_payload: serde_json::Value = serde_json::from_slice(&publish_output.stdout)
+        .expect("registry publish --json should emit valid JSON");
+    assert_eq!(
+        publish_payload["schema_version"],
+        "franken-node/registry-publish-cli/v1"
+    );
+    assert_eq!(publish_payload["command"], "registry.publish");
+    assert_eq!(publish_payload["integrity"], "verified");
+    let publish_json_stdout = String::from_utf8_lossy(&publish_output.stdout);
+    assert!(
+        !publish_json_stdout.contains("registry publish:"),
+        "json mode must not emit the human one-liner:\n{publish_json_stdout}"
+    );
 
-    let publish_stdout = String::from_utf8_lossy(&publish_output.stdout);
-    let extension_id = publish_field(&publish_stdout, "extension_id");
-    let artifact_path = workspace
-        .path()
-        .join(publish_field(&publish_stdout, "artifact_path"));
-    let manifest_path = workspace
-        .path()
-        .join(publish_field(&publish_stdout, "manifest_path"));
+    let extension_id = publish_payload["extension_id"]
+        .as_str()
+        .expect("publish JSON extension_id")
+        .to_string();
+    let artifact_path = workspace.path().join(
+        publish_payload["artifact_path"]
+            .as_str()
+            .expect("publish JSON artifact_path"),
+    );
+    let manifest_path = workspace.path().join(
+        publish_payload["manifest_path"]
+            .as_str()
+            .expect("publish JSON manifest_path"),
+    );
     assert!(
         artifact_path.starts_with(registry_artifacts_root(workspace.path())),
         "artifact path not stored under registry artifacts root: {}",
@@ -308,38 +328,6 @@ fn registry_publish_persists_artifact_and_search_reports_integrity() {
     assert!(
         !verify_json_stdout.contains("registry verify:"),
         "json mode must not emit the human one-liner:\n{verify_json_stdout}"
-    );
-
-    let publish_json = run_cli_in_workspace(
-        workspace.path(),
-        &[
-            "registry",
-            "publish",
-            "plugin.fnext",
-            "--version",
-            "1.0.0",
-            "--signing-key",
-            &signing_key_arg,
-            "--json",
-        ],
-    );
-    assert!(
-        publish_json.status.success(),
-        "registry publish --json failed: {}",
-        String::from_utf8_lossy(&publish_json.stderr)
-    );
-    let publish_payload: serde_json::Value = serde_json::from_slice(&publish_json.stdout)
-        .expect("registry publish --json should emit valid JSON");
-    assert_eq!(
-        publish_payload["schema_version"],
-        "franken-node/registry-publish-cli/v1"
-    );
-    assert_eq!(publish_payload["command"], "registry.publish");
-    assert_eq!(publish_payload["integrity"], "verified");
-    let publish_json_stdout = String::from_utf8_lossy(&publish_json.stdout);
-    assert!(
-        !publish_json_stdout.contains("registry publish:"),
-        "json mode must not emit the human one-liner:\n{publish_json_stdout}"
     );
 
     let search_output = run_cli_in_workspace(workspace.path(), &["registry", "search", "plugin"]);
