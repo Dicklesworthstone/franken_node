@@ -215,7 +215,8 @@ pub struct InitArgs {
     pub scan: bool,
 
     /// Emit schema-versioned JSON (`franken-node/init-cli/v1`) instead of the
-    /// human init report.
+    /// human init report. Failures emit `franken-node/init-error-cli/v1`
+    /// then exit 1.
     #[arg(long)]
     pub json: bool,
 
@@ -865,7 +866,8 @@ pub struct VerifyReleaseArgs {
     pub key_dir: PathBuf,
 
     /// Emit schema-versioned JSON (`franken-node/verify-release-cli/v1`)
-    /// instead of human-readable text.
+    /// instead of human-readable text. Early failures emit
+    /// `franken-node/verify-release-error-cli/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
 }
@@ -944,6 +946,8 @@ pub struct VerifyTransparencyLogArgs {
     pub public_key: Option<PathBuf>,
 
     /// Emit schema-versioned JSON (`franken-node/verify-transparency-log-cli/v1`).
+    /// Early failures emit `franken-node/verify-transparency-log-error-cli/v1`
+    /// then exit 1.
     #[arg(long)]
     pub json: bool,
 }
@@ -967,6 +971,8 @@ pub struct VerifyRecoveryRunbookArgs {
     pub readiness_input_flag: Option<PathBuf>,
 
     /// Emit structured JSON output instead of human-readable format.
+    /// Early failures emit `franken-node/verify-recovery-runbook-error-cli/v1`
+    /// then exit 1.
     #[arg(long)]
     pub json: bool,
 
@@ -2110,7 +2116,8 @@ pub struct DebugEvidenceArgs {
     #[arg(long, default_value = "verifier://debug-evidence")]
     pub verifier_identity: String,
 
-    /// Emit results as machine-readable JSON.
+    /// Emit results as machine-readable JSON. Early failures emit
+    /// `franken-node/debug-error-cli/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
 }
@@ -2132,7 +2139,8 @@ pub struct DebugExplainArgs {
     pub public_key_hex: Option<String>,
 
     /// Emit schema-versioned JSON (`franken-node/debug-explain-cli/v1`)
-    /// instead of the human-readable line-per-step form.
+    /// instead of the human-readable line-per-step form. Early failures emit
+    /// `franken-node/debug-error-cli/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
 }
@@ -2343,7 +2351,8 @@ pub struct DebugTraceArgs {
     pub input: PathBuf,
 
     /// Emit schema-versioned JSON (`franken-node/debug-trace-cli/v1`)
-    /// instead of a human-readable trace.
+    /// instead of a human-readable trace. Early failures emit
+    /// `franken-node/debug-error-cli/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
 

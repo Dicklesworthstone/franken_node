@@ -4,6 +4,8 @@ source: crates/franken-node/tests/runtime_lane_golden_artifacts.rs
 {
   "schema_version": "ls-v1.0",
   "command": "runtime.lane.assign",
+  "live_node": false,
+  "persisted": false,
   "assignment": {
     "task_id": "[TASK_ID]",
     "task_class": "log_rotation",

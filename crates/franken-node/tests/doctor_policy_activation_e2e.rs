@@ -1086,10 +1086,20 @@ fn debug_trace_unsupported_policy_engine_fails_closed() {
         !output.status.success(),
         "unsupported policy engine must fail closed"
     );
-    assert!(output.stdout.is_empty());
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("debug trace --json failure stdout must be JSON");
+    assert_eq!(payload["schema_version"], "franken-node/debug-error-cli/v1");
+    assert_eq!(payload["command"], "debug.trace");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("unsupported debug trace policy_engine `preview_only`")
+        error.contains("unsupported debug trace policy_engine `preview_only`"),
+        "unsupported engine --json must name the engine: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: unsupported debug trace policy_engine"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
 
@@ -1125,8 +1135,21 @@ fn debug_trace_malformed_input_json_fails_closed() {
         }),
     );
     assert!(!output.status.success(), "malformed input must fail closed");
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Failed to parse input JSON from"));
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("debug trace --json failure stdout must be JSON");
+    assert_eq!(payload["schema_version"], "franken-node/debug-error-cli/v1");
+    assert_eq!(payload["command"], "debug.trace");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Failed to parse input JSON from"),
+        "malformed input --json must name the parse failure: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: Failed to parse input JSON from"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
 }
 
 #[test]
@@ -1160,6 +1183,19 @@ fn debug_trace_missing_input_file_fails_closed() {
         }),
     );
     assert!(!output.status.success(), "missing input must fail closed");
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Failed to read input file"));
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("debug trace --json failure stdout must be JSON");
+    assert_eq!(payload["schema_version"], "franken-node/debug-error-cli/v1");
+    assert_eq!(payload["command"], "debug.trace");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Failed to read input file"),
+        "missing input --json must name the read failure: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: Failed to read input file"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
 }

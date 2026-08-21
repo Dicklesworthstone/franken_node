@@ -313,6 +313,7 @@ fn runtime_lane_status_reports_default_policy() {
 
     assert_eq!(payload["schema_version"], "ls-v1.0");
     assert_eq!(payload["command"], "runtime.lane.status");
+    assert_eq!(payload["live_node"], false);
     assert!(payload["policy"]["lane_configs"]["control_critical"].is_object());
     assert_eq!(
         payload["policy"]["mapping_rules"]["epoch_transition"],
@@ -340,6 +341,8 @@ fn runtime_lane_assign_routes_task_class() {
 
     assert_eq!(payload["schema_version"], "ls-v1.0");
     assert_eq!(payload["command"], "runtime.lane.assign");
+    assert_eq!(payload["live_node"], false);
+    assert_eq!(payload["persisted"], false);
     assert_eq!(payload["assignment"]["task_class"], "epoch_transition");
     assert_eq!(payload["assignment"]["lane"], "ControlCritical");
     assert_eq!(payload["assignment"]["trace_id"], "runtime-cli-e2e");
@@ -404,6 +407,8 @@ fn runtime_epoch_reports_mismatch_delta() {
 
     assert_eq!(payload["schema_version"], "runtime-epoch-v1");
     assert_eq!(payload["command"], "runtime.epoch");
+    assert_eq!(payload["live_node"], false);
+    assert_eq!(payload["compares_live_control_epoch"], false);
     assert_eq!(payload["verdict"], "mismatch");
     assert_eq!(payload["epoch_delta"], 2);
 

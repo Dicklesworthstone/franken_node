@@ -1996,6 +1996,78 @@ fn verify_release_fails_with_invalid_key_directory() {
         "expected verify release failure with invalid key directory"
     );
 
+    let payload = parse_json_stdout(&output);
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/verify-release-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "verify.release");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("no usable Ed25519 public keys found"),
+        "invalid key-dir --json must name the key failure: {payload}"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("no usable Ed25519 public keys found"));
+    assert!(
+        !stderr.contains("Error: no usable Ed25519 public keys found"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn verify_transparency_log_missing_file_json_fails_closed() {
+    let output = run_cli(&[
+        "verify",
+        "transparency-log",
+        "missing-transparency-log.jsonl",
+        "--json",
+    ]);
+    assert!(
+        !output.status.success(),
+        "missing transparency log --json should fail closed"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/verify-transparency-log-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "verify.transparency-log");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Failed to open transparency log"),
+        "missing-file --json must name the open failure: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: Failed to open transparency log"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn verify_recovery_runbook_missing_input_json_fails_closed() {
+    let output = run_cli(&["verify", "recovery-runbook", "--json"]);
+    assert!(
+        !output.status.success(),
+        "recovery-runbook --json without input should fail closed"
+    );
+    let payload = parse_json_stdout(&output);
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/verify-recovery-runbook-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "verify.recovery-runbook");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Must provide either --readiness-input") || error.contains("--scenario"),
+        "missing-input --json must name the required flags: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: Must provide either --readiness-input"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
 }

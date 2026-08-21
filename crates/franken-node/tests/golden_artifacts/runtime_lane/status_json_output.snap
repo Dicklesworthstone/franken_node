@@ -4,6 +4,7 @@ source: crates/franken-node/tests/runtime_lane_golden_artifacts.rs
 {
   "schema_version": "ls-v1.0",
   "command": "runtime.lane.status",
+  "live_node": false,
   "policy": {
     "lane_configs": {
       "background": {

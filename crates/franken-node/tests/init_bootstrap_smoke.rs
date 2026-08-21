@@ -265,3 +265,93 @@ fn config_resolved_from_init_output_is_valid_for_subsequent_commands() {
         String::from_utf8_lossy(&trust_list.stderr),
     );
 }
+
+fn assert_init_json_error(output: &std::process::Output, error_needle: &str) {
+    assert!(
+        !output.status.success(),
+        "init --json should fail closed; stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("init --json failure stdout must be JSON");
+    assert_eq!(payload["schema_version"], "franken-node/init-error-cli/v1");
+    assert_eq!(payload["command"], "init");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains(error_needle),
+        "init --json error must name the failure: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: "),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn init_scan_no_state_json_fails_closed() {
+    let Some(bin) = require_binary() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let output = Command::new(&bin)
+        .args([
+            "init",
+            "--profile",
+            "balanced",
+            "--out-dir",
+            ".",
+            "--scan",
+            "--no-state",
+            "--json",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("invoke init --scan --no-state --json");
+    assert_init_json_error(
+        &output,
+        "`init --scan` requires state bootstrapping; remove `--no-state`",
+    );
+}
+
+#[test]
+fn init_existing_files_json_fails_closed_without_overwrite() {
+    let Some(bin) = require_binary() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let first = Command::new(&bin)
+        .args(["init", "--profile", "balanced", "--out-dir", ".", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("invoke first init");
+    assert!(first.status.success(), "first init must succeed");
+
+    let second = Command::new(&bin)
+        .args(["init", "--profile", "balanced", "--out-dir", ".", "--json"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("invoke second init without overwrite");
+    assert_init_json_error(&second, "init target already contains generated files");
+}
+
+#[test]
+fn init_overwrite_and_backup_json_fails_closed() {
+    let Some(bin) = require_binary() else { return };
+    let tmp = TempDir::new().expect("tempdir");
+    let output = Command::new(&bin)
+        .args([
+            "init",
+            "--profile",
+            "balanced",
+            "--out-dir",
+            ".",
+            "--overwrite",
+            "--backup-existing",
+            "--json",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("invoke init --overwrite --backup-existing --json");
+    assert_init_json_error(
+        &output,
+        "--overwrite and --backup-existing are mutually exclusive",
+    );
+}

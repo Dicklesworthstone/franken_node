@@ -4,6 +4,8 @@ source: crates/franken-node/tests/runtime_cli_e2e.rs
 {
   "schema_version": "runtime-epoch-v1",
   "command": "runtime.epoch",
+  "live_node": false,
+  "compares_live_control_epoch": false,
   "local_epoch": 7,
   "peer_epoch": 9,
   "verdict": "mismatch",

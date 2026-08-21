@@ -695,7 +695,7 @@ every leaf command available in the current build.
 
 | Command | Purpose |
 |---|---|
-| `franken-node init` | Bootstrap config, policy profile, and `.franken-node/state/` workspace metadata. Flags: `--profile`, `--config`, `--out-dir`, `--overwrite`, `--backup-existing`, `--scan`, `--state-dir`, `--no-state`, `--json`. |
+| `franken-node init` | Bootstrap config, policy profile, and `.franken-node/state/` workspace metadata. Flags: `--profile`, `--config`, `--out-dir`, `--overwrite`, `--backup-existing`, `--scan`, `--state-dir`, `--no-state`, `--json` (`franken-node/init-cli/v1`; failures `franken-node/init-error-cli/v1`). |
 | `franken-node run <app_path>` | Run app under policy-governed runtime controls. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json`. External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
 | `franken-node doctor` | Diagnose environment and policy setup. Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json`, `--structured-logs-jsonl`. |
 
@@ -717,9 +717,9 @@ every leaf command available in the current build.
 | `franken-node verify compatibility <target>` | Probe a concrete runtime (`node`, `bun`, `franken-node`). Profile names (`strict`, `balanced`, `legacy-risky`) fail closed and do not auto-PASS. `node`/`bun` smoke is `console.log`; `franken-node` smoke is fixture JS through the embedded engine (`run --console-only`), not `--version` alone. Flags: `--json`. |
 | `franken-node verify corpus <path>` | Verify corpus schema and coverage. Flags: `--json`. |
 | `franken-node verify lockstep <path>` | Compare behavior across runtimes; default `--runtimes bun,franken-node`; use `--runtimes node,bun,franken-node` only when `node` is a real Node.js binary. `--emit-fixtures` writes divergence fixtures. Flags: `--json` (stderr banner off). |
-| `franken-node verify release <path>` | Verify release artifact signatures. **Fails closed without `--key-dir`.** Flags: `--json` (`franken-node/verify-release-cli/v1`). |
-| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`). |
-| `franken-node verify recovery-runbook` | Generate recovery runbook from `--readiness-input`. Flags: `--json`. |
+| `franken-node verify release <path>` | Verify release artifact signatures. **Fails closed without `--key-dir`.** Flags: `--json` (`franken-node/verify-release-cli/v1`; early failures `franken-node/verify-release-error-cli/v1`). |
+| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`; early failures `franken-node/verify-transparency-log-error-cli/v1`). |
+| `franken-node verify recovery-runbook` | Generate recovery runbook from `--readiness-input`. Flags: `--json` (early failures `franken-node/verify-recovery-runbook-error-cli/v1`). |
 
 ### Trust and supply chain
 
@@ -808,9 +808,9 @@ every leaf command available in the current build.
 | `franken-node registry verify <id>` | Verify a locally stored registry artifact. `--json` emits `franken-node/registry-verify-cli/v1`. |
 | `franken-node registry gc` | Archive older registry artifacts. Optional: `--keep`. `--json` emits `franken-node/registry-gc-cli/v1`. |
 | `franken-node bench run` | Run benchmark suite and emit signed report. Flags: `--scenario`, `--fixture-mode`, `--output`, `--json`. The signed report is always JSON on stdout; `--json` suppresses the human summary on stderr. |
-| `franken-node debug explain` | Walk a signed decision-receipt through verification steps. Required: `--receipt`. `--json` emits machine-readable per-step results. |
-| `franken-node debug evidence` | Inspect verifier evidence artifacts. Required: `--artifact`. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. `--json` emits machine-readable diagnostics. |
-| `franken-node debug trace` | Trace policy evaluation steps. Required: `--policy`, `--input`. `--json` emits machine-readable trace. |
+| `franken-node debug explain` | Walk a signed decision-receipt through verification steps. Required: `--receipt`. `--json` emits machine-readable per-step results (`franken-node/debug-explain-cli/v1`; early failures `franken-node/debug-error-cli/v1`). |
+| `franken-node debug evidence` | Inspect verifier evidence artifacts. Required: `--artifact`. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. `--json` emits machine-readable diagnostics (early failures `franken-node/debug-error-cli/v1`). |
+| `franken-node debug trace` | Trace policy evaluation steps. Required: `--policy`, `--input`. `--json` emits machine-readable trace (`franken-node/debug-trace-cli/v1`; early failures `franken-node/debug-error-cli/v1`). |
 
 > [!NOTE]
 > Commands that declare `--json` emit machine-readable output. That flag

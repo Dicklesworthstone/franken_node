@@ -5699,6 +5699,8 @@ fn now_unix_secs() -> u64 {
 struct RuntimeLaneStatusReport {
     schema_version: &'static str,
     command: &'static str,
+    /// Fresh default policy in this process; not a running node's scheduler.
+    live_node: bool,
     policy: runtime::lane_scheduler::LaneMappingPolicy,
     telemetry: runtime::lane_scheduler::LaneTelemetrySnapshot,
 }
@@ -5707,6 +5709,10 @@ struct RuntimeLaneStatusReport {
 struct RuntimeLaneAssignmentReport {
     schema_version: &'static str,
     command: &'static str,
+    /// Fresh default scheduler in this process; not a running node's scheduler.
+    live_node: bool,
+    /// Assignment is not written to live control-plane state.
+    persisted: bool,
     assignment: runtime::lane_scheduler::TaskAssignment,
     telemetry: runtime::lane_scheduler::LaneTelemetrySnapshot,
 }
@@ -5715,6 +5721,9 @@ struct RuntimeLaneAssignmentReport {
 struct RuntimeEpochReport {
     schema_version: &'static str,
     command: &'static str,
+    /// Compares caller-supplied integers; does not inspect a live ControlEpoch.
+    live_node: bool,
+    compares_live_control_epoch: bool,
     local_epoch: u64,
     peer_epoch: Option<u64>,
     verdict: &'static str,
@@ -6082,6 +6091,7 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 let report = RuntimeLaneStatusReport {
                     schema_version: runtime::lane_scheduler::SCHEMA_VERSION,
                     command: "runtime.lane.status",
+                    live_node: false,
                     policy,
                     telemetry,
                 };
@@ -6089,7 +6099,7 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                     let lane_count = report.policy.lane_configs.len();
                     let rule_count = report.policy.mapping_rules.len();
                     format!(
-                        "runtime lane status: lanes={lane_count} mapping_rules={rule_count} schema={}",
+                        "runtime lane status: local default policy (not a running node): lanes={lane_count} mapping_rules={rule_count} schema={}",
                         report.schema_version
                     )
                 })?;
@@ -6107,12 +6117,14 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 let report = RuntimeLaneAssignmentReport {
                     schema_version: runtime::lane_scheduler::SCHEMA_VERSION,
                     command: "runtime.lane.assign",
+                    live_node: false,
+                    persisted: false,
                     assignment,
                     telemetry,
                 };
                 emit_json_or_human(&report, args.json, || {
                     format!(
-                        "runtime lane assignment: task_id={} task_class={} lane={}",
+                        "runtime lane assignment: local default scheduler (not persisted): task_id={} task_class={} lane={}",
                         report.assignment.task_id,
                         report.assignment.task_class,
                         report.assignment.lane
@@ -6129,6 +6141,8 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
             let report = RuntimeEpochReport {
                 schema_version: "runtime-epoch-v1",
                 command: "runtime.epoch",
+                live_node: false,
+                compares_live_control_epoch: false,
                 local_epoch: args.local_epoch,
                 peer_epoch: args.peer_epoch,
                 verdict,
@@ -6136,7 +6150,7 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
             };
             emit_json_or_human(&report, args.json, || {
                 format!(
-                    "runtime epoch: local={} peer={} verdict={}",
+                    "runtime epoch: caller-supplied integers (not a live ControlEpoch): local={} peer={} verdict={}",
                     report.local_epoch,
                     report
                         .peer_epoch
@@ -7417,6 +7431,29 @@ struct InitFileAction {
 }
 
 const INIT_CLI_SCHEMA_VERSION: &str = "franken-node/init-cli/v1";
+const INIT_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/init-error-cli/v1";
+
+fn emit_init_error_json(message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": INIT_ERROR_CLI_SCHEMA_VERSION,
+            "command": "init",
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn init_fail(json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_init_error_json(&message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct InitReport {
@@ -25122,6 +25159,85 @@ fn sanitize_crypto_failure_reason(detailed_reason: &Option<String>) -> Option<St
     }
 }
 
+const VERIFY_RELEASE_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/verify-release-error-cli/v1";
+const DEBUG_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/debug-error-cli/v1";
+
+fn emit_verify_release_error_json(message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": VERIFY_RELEASE_ERROR_CLI_SCHEMA_VERSION,
+            "command": "verify.release",
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn verify_release_fail(json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_verify_release_error_json(&message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
+fn emit_debug_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": DEBUG_ERROR_CLI_SCHEMA_VERSION,
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn debug_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_debug_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
+const VERIFY_TRANSPARENCY_LOG_ERROR_CLI_SCHEMA_VERSION: &str =
+    "franken-node/verify-transparency-log-error-cli/v1";
+const VERIFY_RECOVERY_RUNBOOK_ERROR_CLI_SCHEMA_VERSION: &str =
+    "franken-node/verify-recovery-runbook-error-cli/v1";
+
+fn emit_named_cli_error_json(schema: &str, command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": schema,
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn named_cli_fail(
+    schema: &str,
+    command: &str,
+    json: bool,
+    error: impl std::fmt::Display,
+) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_named_cli_error_json(schema, command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
 fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
     use supply_chain::artifact_signing::{
         ASV_002_VERIFICATION_OK, ASV_003_VERIFICATION_FAILED, ArtifactVerificationResult,
@@ -29272,7 +29388,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Init(args) => {
-            args.validate_paths()?;
+            let json = args.json;
+            if let Err(err) = args.validate_paths() {
+                return init_fail(json, err);
+            }
             let cli::InitArgs {
                 profile,
                 config,
@@ -29287,11 +29406,19 @@ fn main() -> Result<()> {
                 no_state,
             } = args;
 
-            validate_init_flags(overwrite, backup_existing)?;
-            if scan && no_state {
-                anyhow::bail!("`init --scan` requires state bootstrapping; remove `--no-state`");
+            if let Err(err) = validate_init_flags(overwrite, backup_existing) {
+                return init_fail(json, err);
             }
-            let profile_override = parse_profile_override(profile.as_deref())?;
+            if scan && no_state {
+                return init_fail(
+                    json,
+                    "`init --scan` requires state bootstrapping; remove `--no-state`",
+                );
+            }
+            let profile_override = match parse_profile_override(profile.as_deref()) {
+                Ok(profile) => profile,
+                Err(err) => return init_fail(json, err),
+            };
             // `init` is the bootstrap surface: it must succeed even when the
             // operator has no existing config (the very purpose of the command
             // is to CREATE one). The bootstrap-aware resolver synthesizes the
@@ -29300,17 +29427,23 @@ fn main() -> Result<()> {
             // surfaces what was synthesized via the returned
             // `BootstrapSynthesis`. Every subsequent command continues to use
             // the strict `Config::resolve` path with no behavior change.
-            let (resolved, bootstrap_synthesis) = config::Config::resolve_with_bootstrap(
+            let (resolved, bootstrap_synthesis) = match config::Config::resolve_with_bootstrap(
                 config.as_deref(),
                 CliOverrides {
                     profile: profile_override,
                 },
-            )
-            .context("failed resolving configuration for init")?;
-            let config_toml = resolved
-                .config
-                .to_toml()
-                .context("failed serializing resolved config")?;
+            ) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    return init_fail(json, err.context("failed resolving configuration for init"));
+                }
+            };
+            let config_toml = match resolved.config.to_toml() {
+                Ok(toml) => toml,
+                Err(err) => {
+                    return init_fail(json, err.context("failed serializing resolved config"));
+                }
+            };
 
             let mut wrote_to_stdout = false;
             let mut stdout_config_toml: Option<String> = None;
@@ -29321,9 +29454,11 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|| Path::new("."));
 
             if let Some(ref out_dir) = out_dir {
-                std::fs::create_dir_all(out_dir).with_context(|| {
+                if let Err(err) = std::fs::create_dir_all(out_dir).with_context(|| {
                     format!("failed creating init output dir {}", out_dir.display())
-                })?;
+                }) {
+                    return init_fail(json, err);
+                }
                 let (config_path, profile_path) = init_target_paths(out_dir);
 
                 if !overwrite && !backup_existing {
@@ -29333,28 +29468,37 @@ fn main() -> Result<()> {
                         .map(|path| path.display().to_string())
                         .collect::<Vec<_>>();
                     if !existing.is_empty() {
-                        anyhow::bail!(
-                            "init target already contains generated files: {} (use --overwrite or --backup-existing)",
-                            existing.join(", ")
+                        return init_fail(
+                            json,
+                            format!(
+                                "init target already contains generated files: {} (use --overwrite or --backup-existing)",
+                                existing.join(", ")
+                            ),
                         );
                     }
                 }
 
                 let backup_suffix = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-                file_actions.push(apply_init_write_policy(
+                match apply_init_write_policy(
                     &config_path,
                     &config_toml,
                     overwrite,
                     backup_existing,
                     &backup_suffix,
-                )?);
-                file_actions.push(apply_init_write_policy(
+                ) {
+                    Ok(action) => file_actions.push(action),
+                    Err(err) => return init_fail(json, err),
+                }
+                match apply_init_write_policy(
                     &profile_path,
                     PROFILE_EXAMPLES_TEMPLATE,
                     overwrite,
                     backup_existing,
                     &backup_suffix,
-                )?);
+                ) {
+                    Ok(action) => file_actions.push(action),
+                    Err(err) => return init_fail(json, err),
+                }
             } else {
                 wrote_to_stdout = true;
                 stdout_config_toml = Some(config_toml.clone());
@@ -29362,15 +29506,20 @@ fn main() -> Result<()> {
 
             // Bootstrap .franken-node/ state directory structure unless --no-state.
             if !no_state {
-                let state_actions = bootstrap_state_directory(
+                match bootstrap_state_directory(
                     bootstrap_root,
                     &resolved.selected_profile.to_string(),
                     &resolved.config.trust,
-                )?;
-                file_actions.extend(state_actions);
+                ) {
+                    Ok(state_actions) => file_actions.extend(state_actions),
+                    Err(err) => return init_fail(json, err),
+                }
             }
             let trust_scan = if scan {
-                Some(run_trust_scan(bootstrap_root, false, false)?)
+                match run_trust_scan(bootstrap_root, false, false) {
+                    Ok(report) => Some(report),
+                    Err(err) => return init_fail(json, err),
+                }
             } else {
                 None
             };
@@ -29581,6 +29730,9 @@ fn main() -> Result<()> {
             )?;
 
             if dispatch.terminated_by_signal {
+                if json {
+                    fail_closed_after_json();
+                }
                 anyhow::bail!(
                     "run exited abnormally: runtime `{}` terminated by signal",
                     dispatch.runtime
@@ -29825,14 +29977,30 @@ fn main() -> Result<()> {
                 }
             }
             VerifyCommand::Release(args) => {
-                handle_verify_release(&args)?;
+                if let Err(err) = handle_verify_release(&args) {
+                    return verify_release_fail(args.json, err);
+                }
             }
-            VerifyCommand::TransparencyLog(args) => {
-                let code = handle_verify_transparency_log(&args)?;
-                std::process::exit(code);
-            }
+            VerifyCommand::TransparencyLog(args) => match handle_verify_transparency_log(&args) {
+                Ok(code) => std::process::exit(code),
+                Err(err) => {
+                    return named_cli_fail(
+                        VERIFY_TRANSPARENCY_LOG_ERROR_CLI_SCHEMA_VERSION,
+                        "verify.transparency-log",
+                        args.json,
+                        err,
+                    );
+                }
+            },
             VerifyCommand::RecoveryRunbook(args) => {
-                handle_verify_recovery_runbook(&args)?;
+                if let Err(err) = handle_verify_recovery_runbook(&args) {
+                    return named_cli_fail(
+                        VERIFY_RECOVERY_RUNBOOK_ERROR_CLI_SCHEMA_VERSION,
+                        "verify.recovery-runbook",
+                        args.json,
+                        err,
+                    );
+                }
             }
         },
 
@@ -30539,13 +30707,19 @@ fn main() -> Result<()> {
 
         Command::Debug(debug_command) => match debug_command {
             DebugCommand::Trace(args) => {
-                handle_debug_trace(&args)?;
+                if let Err(err) = handle_debug_trace(&args) {
+                    return debug_fail("debug.trace", args.json, err);
+                }
             }
             DebugCommand::Explain(args) => {
-                handle_debug_explain(&args)?;
+                if let Err(err) = handle_debug_explain(&args) {
+                    return debug_fail("debug.explain", args.json, err);
+                }
             }
             DebugCommand::Evidence(args) => {
-                handle_debug_evidence(&args)?;
+                if let Err(err) = handle_debug_evidence(&args) {
+                    return debug_fail("debug.evidence", args.json, err);
+                }
             }
         },
 

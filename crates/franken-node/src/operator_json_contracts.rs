@@ -233,6 +233,8 @@ const BENCH_RUN_VOLATILE: &[&str] = &[
 const RUNTIME_EPOCH_REQUIRED: &[&str] = &[
     "schema_version",
     "command",
+    "live_node",
+    "compares_live_control_epoch",
     "local_epoch",
     "peer_epoch",
     "verdict",
@@ -390,7 +392,7 @@ const CONTRACTS: &[OperatorJsonContract] = &[
         volatile_fields: RUNTIME_EPOCH_VOLATILE,
         owner_tests: &["crates/franken-node/tests/runtime_cli_e2e.rs"],
         owner_gates: &[],
-        notes: "Runtime epoch mismatch JSON is a compact operator diagnostic surface.",
+        notes: "Runtime epoch JSON compares caller-supplied integers; live_node and compares_live_control_epoch stay false (not a live ControlEpoch).",
     },
     OperatorJsonContract {
         surface: OperatorJsonSurface::RemoteCapabilityIssueReport,
