@@ -206,6 +206,12 @@ pub struct ProofWorkerRestartReport {
     pub rejected_workers: Vec<String>,
     pub required_action: String,
     pub audit_event: String,
+    /// False unless `--execute` dispatched a bound executor.
+    #[serde(default)]
+    pub restart_executed: bool,
+    /// Honest disposition: request-only vs executed vs denied.
+    #[serde(default)]
+    pub execution_detail: String,
 }
 
 #[must_use]
@@ -468,13 +474,15 @@ pub fn evaluate_worker_restart_request(
         operator_id: request.operator_id.clone(),
         selected_workers: selected.clone(),
         rejected_workers: Vec::new(),
-        required_action: "dispatch_restart_to_deployment_supervisor".to_string(),
+        required_action: "record_restart_request".to_string(),
         audit_event: format!(
             "operator={} requested proof worker restart for {} worker(s): {}",
             request.operator_id,
             selected.len(),
             selected.join(",")
         ),
+        restart_executed: false,
+        execution_detail: "request recorded only; this command does not restart a process unless --execute is set with FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR".to_string(),
     }
 }
 
@@ -498,6 +506,8 @@ pub fn render_restart_report_human(report: &ProofWorkerRestartReport) -> String 
         format!("  selected_workers={workers}"),
         format!("  rejected_workers={rejected}"),
         format!("  required_action={}", report.required_action),
+        format!("  restart_executed={}", report.restart_executed),
+        format!("  execution_detail={}", report.execution_detail),
     ]
     .join("\n")
 }
@@ -1039,6 +1049,8 @@ fn restart_denied(
         rejected_workers,
         required_action: required_action.to_string(),
         audit_event: decision_reason.to_string(),
+        restart_executed: false,
+        execution_detail: format!("denied: {decision_reason}"),
     }
 }
 

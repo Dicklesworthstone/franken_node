@@ -935,6 +935,7 @@ fn proofs_workers_restart_json_accepts_all_degraded_workers() -> Result<(), Box<
     );
     assert_eq!(restart_json["ok"], json!(true));
     assert_eq!(restart_json["selected_workers"], json!(["vmi-proof-1"]));
+    assert_eq!(restart_json["restart_executed"], json!(false));
     Ok(())
 }
 

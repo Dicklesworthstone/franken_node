@@ -546,7 +546,8 @@ pub struct ProofQueueStatusArgs {
 #[derive(Debug, Subcommand)]
 pub enum ProofWorkersCommand {
     /// Validate operator identity and emit a restart-*request* artifact.
-    /// This does not restart any process.
+    /// Does not restart a process unless `--execute` is set with
+    /// `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR`.
     Restart(ProofWorkersRestartArgs),
 }
 
@@ -591,6 +592,11 @@ pub struct ProofWorkersRestartArgs {
     /// Explicit confirmation that the restart request should be emitted.
     #[arg(long)]
     pub confirm: bool,
+
+    /// Dispatch selected worker IDs to `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR`.
+    /// Without this flag the command only records a request.
+    #[arg(long)]
+    pub execute: bool,
 }
 
 // -- migrate --
@@ -2735,6 +2741,7 @@ mod parser_contract_extra_tests {
         assert!(!args.all_workers);
         assert_eq!(args.reason, "outage drill");
         assert!(args.confirm);
+        assert!(!args.execute);
         assert!(args.json);
         Ok(())
     }
