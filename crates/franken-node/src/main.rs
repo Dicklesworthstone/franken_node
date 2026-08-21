@@ -7988,7 +7988,7 @@ fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> 
 
     Ok(OpsHealthCheckReport {
         uptime_seconds: OPS_HEALTH_CHECK_PROCESS_START.elapsed().as_secs(),
-        active_session_count: ops_active_session_count(),
+        active_session_count: ops_active_session_count(project_root),
         pass: last_successful_evidence_ledger_flush_timestamp.is_some() && git_sha != "unknown",
         last_successful_evidence_ledger_flush_timestamp,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -7996,12 +7996,12 @@ fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> 
     })
 }
 
-fn ops_active_session_count() -> usize {
-    persisted_ops_session_count().unwrap_or(0)
+fn ops_active_session_count(project_root: &Path) -> usize {
+    persisted_ops_session_count(project_root).unwrap_or(0)
 }
 
-fn persisted_ops_session_count() -> Result<usize> {
-    let dir = PathBuf::from(".franken-node/state/sessions");
+fn persisted_ops_session_count(project_root: &Path) -> Result<usize> {
+    let dir = project_root.join(".franken-node/state/sessions");
     if !dir.is_dir() {
         return Ok(0);
     }
@@ -29170,7 +29170,9 @@ fn main() -> Result<()> {
 
         Command::Ops(sub) => match sub {
             OpsCommand::HealthCheck(args) => {
-                let report = ops_health_check_report(Path::new("."))?;
+                let project_root = std::env::current_dir()
+                    .context("failed resolving current directory for ops health-check")?;
+                let report = ops_health_check_report(&project_root)?;
                 emit_ops_health_check_report(&report, args.json)?;
             }
             OpsCommand::ResourceGovernor(args) => {
@@ -29627,6 +29629,18 @@ mod ops_metrics_tests {
         assert!(rendered.contains("franken_node_fleet_node_records 2"));
         assert!(rendered.contains("franken_node_health_pass 1"));
         assert!(rendered.contains("franken_node_build_info{version=\""));
+    }
+
+    #[test]
+    fn ops_health_check_counts_persisted_sessions_under_project_root() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let sessions = root.join(".franken-node/state/sessions");
+        std::fs::create_dir_all(&sessions).expect("create sessions dir");
+        std::fs::write(sessions.join("sess-1"), "ok").expect("write session file");
+        std::fs::write(sessions.join("sess-2"), "ok").expect("write session file");
+        let report = ops_health_check_report(root).expect("health-check report");
+        assert_eq!(report.active_session_count, 2);
     }
 }
 

@@ -2347,6 +2347,26 @@ fn ops_health_check_json_reports_local_state_and_build_metadata() {
 }
 
 #[test]
+fn ops_health_check_json_counts_persisted_sessions_under_workspace_root() {
+    let workspace = tempdir().expect("tempdir");
+    let sessions = workspace.path().join(".franken-node/state/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions dir");
+    std::fs::write(sessions.join("sess-1"), "ok").expect("write session file");
+    std::fs::write(sessions.join("sess-2"), "ok").expect("write session file");
+
+    let output = run_cli_in_dir_with_env(workspace.path(), &["ops", "health-check", "--json"], &[]);
+    assert!(
+        output.status.success(),
+        "ops health-check --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ops health-check json");
+    assert_eq!(payload["active_session_count"], 2);
+}
+
+#[test]
 fn ops_config_audit_json_reports_active_state_and_profile_diffs() {
     let workspace = tempdir().expect("tempdir");
     std::fs::write(
