@@ -1226,6 +1226,8 @@ fn hash_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<()> {
 struct LegCapture {
     comparison: Vec<u8>,
     observation: RuntimeLegObservation,
+    stdout_excerpt: String,
+    stderr_excerpt: String,
 }
 
 #[cfg(feature = "engine")]
@@ -1786,6 +1788,8 @@ fn run_leg_after_spawn(
             timed_out,
             elapsed_ms,
         },
+        stdout_excerpt: sanitize_reason_excerpt(&stdout.retained_bytes),
+        stderr_excerpt: sanitize_reason_excerpt(&stderr.retained_bytes),
     })
 }
 
@@ -2186,12 +2190,34 @@ fn classify_failure(bun: &LegCapture, node: Option<&LegCapture>, franken: &LegCa
         return "lockstep divergence: node and bun reference legs disagree".to_string();
     }
     match (bun.observation.exit_code, franken.observation.exit_code) {
-        (Some(0), Some(0)) => "lockstep divergence: output mismatch vs bun reference".to_string(),
-        (Some(0), other) => {
+        (Some(0), Some(0)) => {
+            let bun_excerpt = if bun.stdout_excerpt.is_empty() {
+                String::new()
+            } else {
+                format!(", bun_excerpt={}", bun.stdout_excerpt)
+            };
+            let franken_excerpt = if franken.stdout_excerpt.is_empty() {
+                String::new()
+            } else {
+                format!(", franken_excerpt={}", franken.stdout_excerpt)
+            };
             format!(
-                "lockstep divergence: franken-engine leg refused or crashed (exit {:?}, stderr_sha256={})",
-                other, franken.observation.stderr_digest
+                "lockstep divergence: output mismatch vs bun reference (bun_stdout_bytes={}, franken_stdout_bytes={}{bun_excerpt}{franken_excerpt})",
+                bun.observation.stdout_bytes, franken.observation.stdout_bytes
             )
+        }
+        (Some(0), other) => {
+            if franken.stderr_excerpt.is_empty() {
+                format!(
+                    "lockstep divergence: franken-engine leg refused or crashed (exit {:?}, stderr_sha256={})",
+                    other, franken.observation.stderr_digest
+                )
+            } else {
+                format!(
+                    "lockstep divergence: franken-engine leg refused or crashed (exit {:?}, stderr_sha256={}, excerpt={})",
+                    other, franken.observation.stderr_digest, franken.stderr_excerpt
+                )
+            }
         }
         (other, Some(0)) => format!(
             "lockstep divergence: bun reference leg exited {:?} while franken leg exited 0",
@@ -3047,6 +3073,118 @@ mod snapshot_staging_tests {
             .expect("drain thread")
             .expect_err("read failure must propagate");
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    }
+
+    fn crashed_leg_observation(exit_code: Option<i32>) -> RuntimeLegObservation {
+        RuntimeLegObservation {
+            stdout_digest:
+                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string(),
+            stderr_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            stdout_bytes: 0,
+            stderr_bytes: 12,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            exit_code,
+            termination_kind: "exited".to_string(),
+            timed_out: false,
+            elapsed_ms: 1,
+        }
+    }
+
+    #[test]
+    fn classify_failure_includes_stderr_excerpt_on_engine_crash() {
+        let bun = LegCapture {
+            comparison: b"ok".to_vec(),
+            observation: crashed_leg_observation(Some(0)),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
+        };
+        let franken = LegCapture {
+            comparison: b"fail".to_vec(),
+            observation: crashed_leg_observation(Some(1)),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: "TypeError: crypto.createHmac is not a function".to_string(),
+        };
+        let reason = classify_failure(&bun, None, &franken);
+        assert!(
+            reason.contains("excerpt=TypeError: crypto.createHmac is not a function"),
+            "crash reasons must surface a stderr excerpt, got {reason}"
+        );
+        assert!(reason.contains("stderr_sha256="));
+        assert!(
+            !reason.contains("output mismatch vs bun"),
+            "crash path must not recategorize as an output mismatch: {reason}"
+        );
+    }
+
+    #[test]
+    fn classify_failure_includes_stdout_excerpts_on_output_mismatch() {
+        let bun = LegCapture {
+            comparison: b"i1>i2>i3\n".to_vec(),
+            observation: RuntimeLegObservation {
+                stdout_digest:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                stderr_digest:
+                    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_string(),
+                stdout_bytes: 9,
+                stderr_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                exit_code: Some(0),
+                termination_kind: "exited".to_string(),
+                timed_out: false,
+                elapsed_ms: 1,
+            },
+            stdout_excerpt: "i1>i2>i3".to_string(),
+            stderr_excerpt: String::new(),
+        };
+        let franken = LegCapture {
+            comparison: b"".to_vec(),
+            observation: RuntimeLegObservation {
+                stdout_digest:
+                    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_string(),
+                stderr_digest:
+                    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_string(),
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                exit_code: Some(0),
+                termination_kind: "exited".to_string(),
+                timed_out: false,
+                elapsed_ms: 1,
+            },
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
+        };
+        let reason = classify_failure(&bun, None, &franken);
+        assert!(
+            reason.contains("bun_stdout_bytes=9"),
+            "mismatch reasons must include bun stdout size, got {reason}"
+        );
+        assert!(
+            reason.contains("franken_stdout_bytes=0"),
+            "mismatch reasons must include empty franken stdout, got {reason}"
+        );
+        assert!(
+            reason.contains("bun_excerpt=i1>i2>i3"),
+            "mismatch reasons must surface the bun stdout excerpt, got {reason}"
+        );
+        assert!(
+            !reason.contains("franken_excerpt="),
+            "empty franken stdout must not invent an excerpt: {reason}"
+        );
+        assert!(
+            !reason.contains("refused or crashed"),
+            "both-exit-0 mismatch must not recategorize as a crash: {reason}"
+        );
     }
 
     #[cfg(target_os = "linux")]
