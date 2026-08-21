@@ -196,6 +196,12 @@ fn remotecap_cli_json_wire_lifecycle_conforms_to_contract() -> Result<(), String
         ]);
     let used = run_json(&mut use_cmd, "remotecap use --json")?;
     assert_bool(&used["allowed"], true, "use.allowed")?;
+    assert_bool(&used["dry_run"], true, "use.dry_run")?;
+    assert_bool(&used["request_executed"], false, "use.request_executed")?;
+    assert_eq!(
+        used["schema_version"].as_str(),
+        Some("franken-node/remotecap-use-cli/v1")
+    );
     assert_eq!(used["token_id"].as_str(), Some(token_id.as_str()));
     assert_eq!(used["operation"].as_str(), Some("network_egress"));
     assert_eq!(

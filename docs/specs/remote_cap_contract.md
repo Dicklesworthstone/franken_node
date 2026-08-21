@@ -109,7 +109,9 @@ franken-node remotecap verify \
   --endpoint https://api.example.com/v1/status \
   --json
 
-# Use the token for a network operation (consumes single-use tokens)
+# Use the token for a network operation (consumes single-use tokens).
+# Current CLI is dry-run: it authorizes and may consume the token, but does
+# not send HTTP. JSON reports dry_run=true, request_executed=false.
 franken-node remotecap use \
   --token-file capability.json \
   --operation network_egress \
@@ -132,4 +134,6 @@ a development default only in test/dev-key builds).
 - The `--issuer` field defaults to "operator-cli" but can be customized for audit trails
 - Verification with `remotecap verify` rechecks the requested `--operation` and
   `--endpoint` scope without consuming single-use tokens
-- Use `remotecap use` only when ready to perform the actual network operation
+- `remotecap use` currently authorizes the scoped operation and may consume a
+  single-use token; it does not send the HTTP request (`dry_run=true`,
+  `request_executed=false` on `--json`)

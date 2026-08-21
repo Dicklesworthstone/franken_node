@@ -111,6 +111,12 @@ fn remotecap_lifecycle_issue_use_revoke_uses_real_subprocesses() {
     let use_output = use_cmd.assert().success().get_output().stdout.clone();
     let use_json: Value = serde_json::from_slice(&use_output).expect("use output should be json");
     assert_eq!(use_json["allowed"].as_bool(), Some(true));
+    assert_eq!(use_json["dry_run"].as_bool(), Some(true));
+    assert_eq!(use_json["request_executed"].as_bool(), Some(false));
+    assert_eq!(
+        use_json["schema_version"].as_str(),
+        Some("franken-node/remotecap-use-cli/v1")
+    );
     assert_eq!(
         use_json["audit_event"]["event_code"].as_str(),
         Some("REMOTECAP_CONSUMED")
