@@ -30,6 +30,7 @@ def _base_spec_text() -> str:
             mod.BENCHMARK_ARTIFACT_RELATIVE_PATH,
             *sorted(mod.REQUIRED_ATTACK_CLASSES),
             *sorted(mod.REQUIRED_EVENT_CODES),
+            "INV-CRG-EQUAL-ATTEMPTS",
         ]
     )
 
@@ -124,10 +125,17 @@ def _make_report(
 
 
 class TestCompromiseReductionGate(TestCase):
-    def test_run_checks_passes_repo_artifacts(self) -> None:
+    def test_run_checks_fails_repo_artifacts_when_attempts_unequal(self) -> None:
         result = mod.run_checks()
         self.assertEqual(result["bead_id"], "bd-3cpa")
-        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(
+            any(
+                check["check"] == "equal attempts (baseline vs franken)" and not check["pass"]
+                for check in result["checks"]
+            ),
+            result["checks"],
+        )
 
     def test_attack_vector_count_below_twenty_fails(self) -> None:
         with TemporaryDirectory(prefix="bd-3cpa-test-") as tmp:

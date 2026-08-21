@@ -81,12 +81,15 @@ Each claim entry uses this structure:
   `tests/security/exfiltration_sentinel_scenarios.rs`
 - **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
 - **Status**: pending
-- **Notes**: Adversarial test suites that back this claim are real and pass
-  today (see `tests/security/`: `adversarial_trust_card_forgery`,
-  `adversarial_supply_chain_poisoning`, `bpet_adversarial_evolution_suite`,
-  `dgis_quarantine_containment`, `dgis_adversarial_suite`, etc.). What is
-  missing is a published baseline/treatment study with a single number
-  ("10×") attached to a signed artifact.
+- **Notes**: Adversarial test suites that back this claim are real.
+  `artifacts/13/compromise_reduction_report.json` and
+  `artifacts/adversarial/compromise_reduction_v2.json` currently record
+  `baseline_attempts=20` vs `franken_attempts=10`. That is not an
+  equal-attempts 10× measurement. `scripts/check_compromise_reduction_gate.py`
+  now fails closed on unequal attempts (`INV-CRG-EQUAL-ATTEMPTS`,
+  bd-3cpa / this session). Do not treat the 20.0× v2 ratio as a verified
+  claim until baseline and franken-node run the same payloads the same
+  number of times.
 
 ### CLAIM-004: 100% deterministic replay for high-severity incidents
 

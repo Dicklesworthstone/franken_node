@@ -24,6 +24,9 @@ reproducible adversarial campaign.
   - `command_injection`
 - `INV-CRG-IDENTICAL-CAMPAIGN`: Baseline and hardened outcomes are recorded for
   every attack vector in the same campaign runbook.
+- `INV-CRG-EQUAL-ATTEMPTS`: `baseline_attempts` MUST equal `franken_attempts`
+  (and the cited measured artifact must match). A 10× ratio computed from
+  fewer franken-node attempts than baseline attempts is fail-closed.
 - `INV-CRG-CONTAINMENT`: At least `3` attack vectors must be marked as
   containment outcomes (`contained`) in hardened mode.
 - `INV-CRG-DOC`: Every vector documents attack description, baseline outcome,
@@ -97,6 +100,8 @@ reproducible adversarial campaign.
 3. **Coverage-fail scenario**: attack vectors <20 or required classes missing.
 4. **Containment-fail scenario**: containment vectors <3.
 5. **Determinism scenario**: shuffled attack list yields identical verdict.
+6. **Unequal-attempts fail**: `baseline_attempts != franken_attempts` (the
+   2026-02 v2 measurement of 20 vs 10 is this failure mode).
 
 ## Structured Event Codes
 

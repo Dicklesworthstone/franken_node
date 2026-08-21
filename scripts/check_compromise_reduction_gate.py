@@ -214,10 +214,17 @@ def _validate_benchmark_proof(report: dict[str, Any]) -> list[str]:
         errors.append("benchmark_proof.baseline_compromised must be 20")
     if proof.get("franken_compromised") != 0:
         errors.append("benchmark_proof.franken_compromised must be 0")
-    if proof.get("baseline_attempts") != 20:
-        errors.append("benchmark_proof.baseline_attempts must be 20")
-    if proof.get("franken_attempts") != 10:
-        errors.append("benchmark_proof.franken_attempts must be 10")
+    baseline_attempts = proof.get("baseline_attempts")
+    franken_attempts = proof.get("franken_attempts")
+    if not isinstance(baseline_attempts, int) or not isinstance(franken_attempts, int):
+        errors.append("benchmark_proof.baseline_attempts and franken_attempts must be integers")
+    elif baseline_attempts != franken_attempts:
+        errors.append(
+            "equal-attempts required for 10x: "
+            f"baseline_attempts={baseline_attempts} franken_attempts={franken_attempts}"
+        )
+    elif baseline_attempts < 20:
+        errors.append("benchmark_proof attempts must be >= 20")
     if proof.get("raw_baseline_runtimes") != EXPECTED_RAW_BASELINE_RUNTIMES:
         errors.append("benchmark_proof.raw_baseline_runtimes must be ['bun', 'node']")
     if proof.get("fail_closed_baseline_unavailable") is not True:
@@ -277,7 +284,22 @@ def _validate_benchmark_proof(report: dict[str, Any]) -> list[str]:
             errors.append("benchmark proof artifact status must be measured")
         if pass_criterion.get("criterion") != ">=10x":
             errors.append("benchmark proof artifact criterion must be >=10x")
-        if pass_criterion.get("passed") is not True:
+        artifact_baseline_attempts = artifact.get("baseline_attempts")
+        artifact_franken_attempts = artifact.get("franken_attempts")
+        attempts_equal = (
+            isinstance(artifact_baseline_attempts, int)
+            and artifact_baseline_attempts == artifact_franken_attempts
+        )
+        if not attempts_equal:
+            errors.append(
+                "measured artifact baseline_attempts must equal franken_attempts "
+                "(equal-attempts 10x; unequal attempts are fail-closed)"
+            )
+        if not attempts_equal and pass_criterion.get("passed") is True:
+            errors.append(
+                "measured artifact cannot declare pass_criterion.passed while attempts are unequal"
+            )
+        elif attempts_equal and pass_criterion.get("passed") is not True:
             errors.append("benchmark proof artifact must have passed criterion")
         if artifact.get("baseline_compromised") != proof.get("baseline_compromised"):
             errors.append("benchmark proof baseline_compromised must match artifact")
@@ -329,6 +351,10 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
                 BENCHMARK_ARTIFACT_RELATIVE_PATH,
             )
         ),
+    )
+    _check(
+        "spec equal-attempts invariant",
+        "INV-CRG-EQUAL-ATTEMPTS" in spec_text,
     )
 
     report: dict[str, Any] = {}
@@ -488,6 +514,20 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
         "compromise reduction threshold >= 10x",
         threshold_ok,
         f"ratio={ratio if ratio != float('inf') else 'infinite'}, threshold={threshold}",
+    )
+
+    proof = report.get("benchmark_proof") if isinstance(report.get("benchmark_proof"), dict) else {}
+    baseline_attempts = proof.get("baseline_attempts")
+    franken_attempts = proof.get("franken_attempts")
+    equal_attempts = (
+        isinstance(baseline_attempts, int)
+        and isinstance(franken_attempts, int)
+        and baseline_attempts == franken_attempts
+    )
+    _check(
+        "equal attempts (baseline vs franken)",
+        equal_attempts,
+        f"baseline_attempts={baseline_attempts}, franken_attempts={franken_attempts}",
     )
 
     benchmark_errors = _validate_benchmark_proof(report)
@@ -665,6 +705,7 @@ def self_test() -> bool:
                     "benchmark_proof",
                     BENCHMARK_TEST_RELATIVE_PATH,
                     BENCHMARK_ARTIFACT_RELATIVE_PATH,
+                    "INV-CRG-EQUAL-ATTEMPTS",
                     *sorted(REQUIRED_ATTACK_CLASSES),
                     *sorted(REQUIRED_EVENT_CODES),
                 ]
@@ -737,10 +778,16 @@ def self_test() -> bool:
         )
 
         pass_result = run_checks(spec_path=spec, report_path=report)
-        if pass_result["verdict"] != "PASS":
+        # 20 vs 10 attempts is the live v2 trap: the gate must FAIL, not PASS.
+        if pass_result["verdict"] != "FAIL":
+            return False
+        if not any(
+            check["check"] == "equal attempts (baseline vs franken)" and not check["pass"]
+            for check in pass_result["checks"]
+        ):
             return False
 
-        # Perturb one additional hardened compromise to force threshold failure.
+        # Perturb one additional hardened compromise; verdict stays FAIL.
         data = json.loads(report.read_text(encoding="utf-8"))
         data["attack_vectors"][3]["franken_node_outcome"] = "compromised"
         data["attack_vectors"][3]["containment_demonstrated"] = False
