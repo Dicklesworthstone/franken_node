@@ -736,13 +736,14 @@ fn fleet_reconcile_executes_and_reports_operation() {
 
 #[test]
 fn fleet_reconcile_rejects_local_state_dir_self_attestation_key() {
-    let fleet_state = tempdir().expect("tempdir");
-    let fleet_state_dir = fleet_state.path().join("fleet-state");
+    let workspace = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(workspace.path());
+    let fleet_state_dir = workspace.path().join("fleet-state");
     seed_transport(&fleet_state_dir);
     write_test_signing_key(&fleet_state_dir, "fleet-signing.ed25519", 12);
 
     let output = run_cli_in_dir_with_fleet_state(
-        &repo_root(),
+        workspace.path(),
         &["fleet", "reconcile", "--json"],
         &fleet_state_dir,
     );
@@ -751,11 +752,24 @@ fn fleet_reconcile_rejects_local_state_dir_self_attestation_key() {
         !output.status.success(),
         "fleet reconcile should reject local self-attestation key"
     );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fleet reconcile --json error");
+    assert_eq!(payload["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(payload["command"], "fleet.reconcile");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["transport"], "file");
+    assert_eq!(payload["live_control_plane"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("configured fleet-level signing key")
+            && error.contains("self-attestation")
+            && error.contains("is not trusted"),
+        "self-attestation --json must name the key failure: {payload}"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("configured fleet-level signing key")
-            && stderr.contains("self-attestation is not trusted"),
-        "unexpected stderr: {stderr}",
+        !stderr.contains("Error: configured fleet-level signing key"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
 
@@ -766,6 +780,72 @@ fn fleet_release_nonexistent_incident_reports_error() {
     assert!(
         stderr.contains("incident `inc-demo-123` not found") || !output.status.success(),
         "fleet release should fail for nonexistent incident, stderr: {stderr}",
+    );
+}
+
+#[test]
+fn fleet_release_json_fails_closed_when_incident_missing() {
+    let workspace = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(workspace.path());
+    let fleet_state_dir = workspace.path().join("fleet-state");
+    let output = run_cli_in_dir_with_fleet_state(
+        workspace.path(),
+        &["fleet", "release", "--incident", "inc-demo-123", "--json"],
+        &fleet_state_dir,
+    );
+    assert!(
+        !output.status.success(),
+        "fleet release --json should fail for a missing incident"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fleet release --json missing incident");
+    assert_eq!(payload["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(payload["command"], "fleet.release");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["transport"], "file");
+    assert_eq!(payload["live_control_plane"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("incident `inc-demo-123` not found"),
+        "missing-incident --json must name the incident: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: incident `inc-demo-123` not found"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn fleet_describe_json_fails_closed_when_node_missing() {
+    let workspace = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(workspace.path());
+    let fleet_state_dir = workspace.path().join("fleet-state");
+    let output = run_cli_in_dir_with_fleet_state(
+        workspace.path(),
+        &["fleet", "describe", "node-missing", "--json"],
+        &fleet_state_dir,
+    );
+    assert!(
+        !output.status.success(),
+        "fleet describe --json should fail for a missing node"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fleet describe --json missing node");
+    assert_eq!(payload["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(payload["command"], "fleet.describe");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["transport"], "file");
+    assert_eq!(payload["live_control_plane"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("node `node-missing` not found"),
+        "missing-node --json must name the node: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: node `node-missing` not found"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
 
@@ -894,6 +974,7 @@ fn fleet_release_publishes_release_action_to_transport() {
 #[test]
 fn fleet_release_fails_on_convergence_timeout() {
     let fleet_state = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(fleet_state.path());
     let fleet_state_dir = fleet_state.path().join("fleet-state");
     let (signing_key_path, _) = write_test_signing_key(fleet_state.path(), "keys/fleet.key", 24);
     let signing_key_path = signing_key_path.display().to_string();
@@ -925,7 +1006,7 @@ fn fleet_release_fails_on_convergence_timeout() {
         .expect("write pre-release node heartbeat");
 
     let output = run_cli_in_dir_with_fleet_state_and_env(
-        &repo_root(),
+        fleet_state.path(),
         &[
             "fleet",
             "release",
@@ -947,14 +1028,26 @@ fn fleet_release_fails_on_convergence_timeout() {
         !output.status.success(),
         "fleet release should fail closed on convergence timeout"
     );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fleet release --json timeout error");
+    assert_eq!(payload["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(payload["command"], "fleet.release");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["transport"], "file");
+    assert_eq!(payload["live_control_plane"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("fleet release convergence timed out"),
+        "timeout --json must name the convergence failure: {payload}"
+    );
+    assert_ne!(
+        payload["schema_version"], "franken-node/fleet-action-cli/v1",
+        "timeout path must not emit a success receipt: {payload}"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("fleet release convergence timed out"),
-        "unexpected stderr: {stderr}"
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "timeout path must not emit a success receipt"
+        !stderr.contains("Error: fleet release convergence timed out"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
 
@@ -2404,6 +2497,11 @@ fn ops_health_check_json_reports_local_state_and_build_metadata() {
 
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("ops health-check json");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/ops-health-check-cli/v1"
+    );
+    assert_eq!(payload["command"], "ops.health-check");
     assert!(payload["uptime_seconds"].as_u64().is_some());
     assert_eq!(payload["active_session_count"], 0);
     assert_eq!(
@@ -2433,6 +2531,11 @@ fn ops_health_check_json_counts_persisted_sessions_under_workspace_root() {
 
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("ops health-check json");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/ops-health-check-cli/v1"
+    );
+    assert_eq!(payload["command"], "ops.health-check");
     assert_eq!(payload["active_session_count"], 2);
 }
 
@@ -2466,6 +2569,12 @@ fn ops_metrics_json_emits_health_snapshot_instead_of_prometheus_text() {
     );
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("ops metrics --json");
+    assert_eq!(payload["schema_version"], "franken-node/ops-metrics-cli/v1");
+    assert_eq!(payload["command"], "ops.metrics");
+    assert_eq!(
+        payload["health"]["schema_version"],
+        "franken-node/ops-health-check-cli/v1"
+    );
     assert_eq!(
         payload["health"]["build_version"],
         env!("CARGO_PKG_VERSION")
@@ -2525,6 +2634,10 @@ convergence_timeout_seconds = 360
 
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("ops config-audit json");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/ops-config-audit-cli/v1"
+    );
     assert_eq!(payload["command"], "ops config-audit");
     assert_eq!(payload["selected_profile"], "balanced");
     assert_eq!(

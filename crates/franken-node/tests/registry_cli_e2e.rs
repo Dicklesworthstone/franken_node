@@ -232,6 +232,39 @@ fn registry_publish_missing_package_json_emits_error_report() {
 }
 
 #[test]
+fn registry_verify_missing_extension_json_emits_error_report() {
+    let workspace = registry_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &["registry", "verify", "npm:@missing/package", "--json"],
+    );
+    assert!(
+        !output.status.success(),
+        "registry verify --json should fail when the extension is missing"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("registry verify --json missing-extension stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/registry-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "registry.verify");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"]
+        .as_str()
+        .expect("error field must be a string");
+    assert!(
+        error.contains("registry artifact not found for extension_id=npm:@missing/package"),
+        "JSON error must name the missing extension: {error}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: registry artifact not found"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn registry_publish_succeeds_with_operator_managed_signing_key() {
     let workspace = registry_workspace();
     let signing_key_path = workspace.path().join("keys/publisher.ed25519");

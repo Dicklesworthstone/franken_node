@@ -1888,6 +1888,11 @@ fn ops_proof_carrying_evidence_cli_merges_l1_verdict_and_gate_passes() {
     let emitted: Value =
         serde_json::from_slice(&output.stdout).expect("producer CLI stdout must be JSON");
     assert_eq!(
+        emitted["schema_version"],
+        "franken-node/ops-proof-carrying-evidence-cli/v1"
+    );
+    assert_eq!(emitted["command"], "ops.proof-carrying-evidence");
+    assert_eq!(
         emitted["proof_carrying_effects"]["schema_version"],
         "franken-node/l1-proof-carrying-effects/v2"
     );

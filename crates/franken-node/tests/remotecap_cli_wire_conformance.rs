@@ -165,6 +165,11 @@ fn remotecap_cli_json_wire_lifecycle_conforms_to_contract() -> Result<(), String
             "--json",
         ]);
     let verify = run_json(&mut verify_cmd, "remotecap verify --json")?;
+    assert_eq!(
+        verify["schema_version"].as_str(),
+        Some("franken-node/remotecap-verify-cli/v1")
+    );
+    assert_eq!(verify["command"].as_str(), Some("remotecap.verify"));
     assert_bool(&verify["valid"], true, "verify.valid")?;
     assert_bool(&verify["authorized"], true, "verify.authorized")?;
     assert_eq!(verify["token_id"].as_str(), Some(token_id.as_str()));
@@ -222,6 +227,11 @@ fn remotecap_cli_json_wire_lifecycle_conforms_to_contract() -> Result<(), String
         .arg(&token_path)
         .args(["--trace-id", "trace-wire-revoke", "--json"]);
     let revoked = run_json(&mut revoke_cmd, "remotecap revoke --json")?;
+    assert_eq!(
+        revoked["schema_version"].as_str(),
+        Some("franken-node/remotecap-revoke-cli/v1")
+    );
+    assert_eq!(revoked["command"].as_str(), Some("remotecap.revoke"));
     assert_bool(&revoked["revoked"], true, "revoke.revoked")?;
     assert_eq!(revoked["token_id"].as_str(), Some(token_id.as_str()));
     assert_audit_event(
@@ -259,6 +269,11 @@ fn write_json(path: &std::path::Path, value: &Value) -> Result<(), String> {
 }
 
 fn assert_issue_wire(value: &Value) -> Result<(), String> {
+    assert_eq!(
+        value["schema_version"].as_str(),
+        Some("franken-node/remotecap-issue-cli/v1")
+    );
+    assert_eq!(value["command"].as_str(), Some("remotecap.issue"));
     assert_eq!(value["ttl_secs"].as_u64(), Some(900));
     assert!(
         value["issued_at_epoch_secs"].is_u64(),

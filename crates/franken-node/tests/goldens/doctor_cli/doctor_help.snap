@@ -20,7 +20,7 @@ Options:
       --policy-activation-input <POLICY_ACTIVATION_INPUT>
           Path to policy activation input JSON for live guardrail diagnostics. Falls back to `FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT` when the flag is omitted; the CLI flag takes precedence (bd-lmbt0) [env: FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT=]
       --json
-          Emit machine-readable JSON report
+          Emit machine-readable JSON (`franken-node/doctor-cli/v1`)
       --structured-logs-jsonl
           Emit structured diagnostic log events as JSONL to stderr
       --trace-id <TRACE_ID>

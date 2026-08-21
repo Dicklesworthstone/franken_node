@@ -49,6 +49,7 @@ For equivalent inputs (resolved config and flags):
 
 Top-level fields:
 
+- `schema_version` (`franken-node/init-cli/v1`)
 - `command`
 - `trace_id`
 - `generated_at_utc`

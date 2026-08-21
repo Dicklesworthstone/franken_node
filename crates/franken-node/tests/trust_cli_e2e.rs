@@ -1158,6 +1158,29 @@ fn trust_list_rejects_unknown_risk_value() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid --risk `severe`"));
+
+    let json_output = run_cli_in_workspace(
+        repo_root().as_path(),
+        &["trust", "list", "--risk", "severe", "--json"],
+    );
+    assert!(
+        !json_output.status.success(),
+        "trust list --json should fail for unknown risk"
+    );
+    let payload = parse_json_stdout(&json_output, "trust list --json unknown risk");
+    assert_eq!(payload["schema_version"], "franken-node/trust-error-cli/v1");
+    assert_eq!(payload["command"], "trust.list");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("invalid --risk `severe`"),
+        "unknown-risk --json must name the invalid risk: {payload}"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(
+        !json_stderr.contains("Error: invalid --risk"),
+        "--json must not append a second human Error line after the JSON report: {json_stderr}"
+    );
 }
 
 #[test]
@@ -1682,6 +1705,37 @@ fn trust_quarantine_receipt_export_fails_before_mutation_when_key_missing() {
     assert!(
         !receipt_out.exists(),
         "receipt export should not be written on failure"
+    );
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "quarantine",
+            "--artifact",
+            "sha256:deadbeef",
+            "--receipt-out",
+            receipt_out.to_str().expect("utf8 receipt path"),
+            "--json",
+        ],
+    );
+    assert!(
+        !json_output.status.success(),
+        "trust quarantine --json should fail when receipt export has no signing key"
+    );
+    let payload = parse_json_stdout(&json_output, "trust quarantine --json missing signing key");
+    assert_eq!(payload["schema_version"], "franken-node/trust-error-cli/v1");
+    assert_eq!(payload["command"], "trust.quarantine");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("receipt export requested but no signing key was configured"),
+        "missing-signing-key --json must name the key failure: {payload}"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(
+        !json_stderr.contains("Error: receipt export requested but no signing key"),
+        "--json must not append a second human Error line after the JSON report: {json_stderr}"
     );
 }
 
@@ -2721,6 +2775,128 @@ fn trust_card_list_rejects_zero_page() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid pagination: page=0, per_page=20"));
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &["trust-card", "list", "--page", "0", "--json"],
+    );
+    assert!(
+        !json_output.status.success(),
+        "trust-card list --json should fail for page 0"
+    );
+    let payload = parse_json_stdout(&json_output, "trust-card list --json page 0");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-card-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust-card.list");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("invalid pagination: page=0, per_page=20"),
+        "page-0 --json must name the pagination failure: {payload}"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(
+        !json_stderr.contains("Error: invalid pagination"),
+        "--json must not append a second human Error line after the JSON report: {json_stderr}"
+    );
+}
+
+#[test]
+fn trust_card_show_json_fails_closed_when_card_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &["trust-card", "show", "npm:@missing/package", "--json"],
+    );
+    assert!(
+        !output.status.success(),
+        "trust-card show --json should fail for a missing card"
+    );
+    let payload = parse_json_stdout(&output, "trust-card show --json missing card");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-card-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust-card.show");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("trust card not found: npm:@missing/package"),
+        "missing-card --json must name the extension: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: trust card not found"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn trust_card_export_json_fails_closed_when_card_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &["trust-card", "export", "npm:@missing/package", "--json"],
+    );
+    assert!(
+        !output.status.success(),
+        "trust-card export --json should fail for a missing card"
+    );
+    let payload = parse_json_stdout(&output, "trust-card export --json missing card");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-card-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust-card.export");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("trust card not found: npm:@missing/package"),
+        "missing-card --json must name the extension: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: trust card not found"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn trust_card_compare_json_fails_closed_when_card_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust-card",
+            "compare",
+            "npm:@acme/auth-guard",
+            "npm:@missing/package",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "trust-card compare --json should fail when the right card is missing"
+    );
+    let payload = parse_json_stdout(&output, "trust-card compare --json missing card");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-card-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust-card.compare");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("trust card not found for extension `npm:@missing/package`"),
+        "missing-card --json must name the extension: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: trust card not found"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
 }
 
 #[test]
@@ -2781,4 +2957,30 @@ fn trust_commands_fail_closed_without_authoritative_registry_state() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("authoritative trust-card registry not initialized"));
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &["trust-card", "show", "npm:@acme/auth-guard", "--json"],
+    );
+    assert!(
+        !json_output.status.success(),
+        "trust-card show --json should fail when authoritative registry state is missing"
+    );
+    let payload = parse_json_stdout(&json_output, "trust-card show --json missing registry");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-card-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust-card.show");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("authoritative trust-card registry not initialized"),
+        "missing-registry --json must name the registry failure: {payload}"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(
+        !json_stderr.contains("Error: authoritative trust-card registry not initialized"),
+        "--json must not append a second human Error line after the JSON report: {json_stderr}"
+    );
 }

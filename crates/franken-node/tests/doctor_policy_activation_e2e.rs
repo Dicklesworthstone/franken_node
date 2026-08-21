@@ -950,6 +950,8 @@ fn debug_trace_policy_activation_json_runs_real_policy_pipeline() {
         }),
     );
 
+    assert_eq!(report["schema_version"], "franken-node/debug-trace-cli/v1");
+    assert_eq!(report["command"], "debug.trace");
     assert_eq!(report["trace_id"], test_name);
     assert_eq!(
         report["policy_schema_version"],

@@ -2,6 +2,8 @@
 source: crates/franken-node/tests/remotecap_cli_e2e.rs
 ---
 {
+  "schema_version": "franken-node/remotecap-issue-cli/v1",
+  "command": "remotecap.issue",
   "token": {
     "token_id": "[token-id]",
     "issuer_identity": "operator-cli",

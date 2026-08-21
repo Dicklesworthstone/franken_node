@@ -453,9 +453,9 @@ deltas fail closed. On hosts with a real Node.js binary, add it explicitly with
 ### Day 5 — Pre-production validation
 
 ```bash
-franken-node verify recovery-runbook --readiness-input broker-snapshot.json
+franken-node verify recovery-runbook --readiness-input broker-snapshot.json --json
 franken-node doctor --verbose --json
-franken-node ops validation-readiness --input broker-snapshot.json
+franken-node ops validation-readiness --input broker-snapshot.json --json
 ```
 
 The validation broker integrates RCH worker health, evidence freshness,
@@ -703,101 +703,101 @@ every leaf command available in the current build.
 
 | Command | Purpose |
 |---|---|
-| `franken-node migrate audit <path>` | Inventory migration risk. Flags: `--format` (json\|text\|sarif), `--out`. |
-| `franken-node migrate rewrite <path>` | Apply migration transforms. Flags: `--apply`, `--emit-rollback`. |
-| `franken-node migrate validate <path>` | Validate transformed project with conformance checks. |
-| `franken-node migrate-report <path>` | Export one-command migration assessment (json\|html). |
+| `franken-node migrate audit <path>` | Inventory migration risk. Flags: `--format` (json\|text\|sarif), `--json` (alias for `--format json`), `--out`. |
+| `franken-node migrate rewrite <path>` | Apply migration transforms. Flags: `--apply`, `--emit-rollback`, `--json`. |
+| `franken-node migrate validate <path>` | Validate transformed project with conformance checks. Flags: `--format` (json\|text), `--json`, `--static-only`. |
+| `franken-node migrate-report <path>` | Export one-command migration assessment. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`. |
 
 ### Verification
 
 | Command | Purpose |
 |---|---|
-| `franken-node verify module <id>` | Verify a franken_node crate-src module contract (`api`, `cli`, …). Not guest JS conformance. |
-| `franken-node verify migration <id>` | Verify migration compatibility. |
-| `franken-node verify compatibility <target>` | Probe a concrete runtime (`node`, `bun`, `franken-node`). Profile names (`strict`, `balanced`, `legacy-risky`) fail closed and do not auto-PASS. |
-| `franken-node verify corpus <path>` | Verify corpus schema and coverage. |
-| `franken-node verify lockstep <path>` | Compare behavior across runtimes; default `--runtimes bun,franken-node`; use `--runtimes node,bun,franken-node` only when `node` is a real Node.js binary. `--emit-fixtures` writes divergence fixtures. |
-| `franken-node verify release <path>` | Verify release artifact signatures. **Fails closed without `--key-dir`.** |
-| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. |
-| `franken-node verify recovery-runbook` | Generate recovery runbook from `--readiness-input`. |
+| `franken-node verify module <id>` | Verify a franken_node crate-src module contract (`api`, `cli`, …). Not guest JS conformance. Flags: `--json`. |
+| `franken-node verify migration <id>` | Verify migration compatibility. Flags: `--json`. |
+| `franken-node verify compatibility <target>` | Probe a concrete runtime (`node`, `bun`, `franken-node`). Profile names (`strict`, `balanced`, `legacy-risky`) fail closed and do not auto-PASS. `node`/`bun` smoke is `console.log`; `franken-node` smoke is fixture JS through the embedded engine (`run --console-only`), not `--version` alone. Flags: `--json`. |
+| `franken-node verify corpus <path>` | Verify corpus schema and coverage. Flags: `--json`. |
+| `franken-node verify lockstep <path>` | Compare behavior across runtimes; default `--runtimes bun,franken-node`; use `--runtimes node,bun,franken-node` only when `node` is a real Node.js binary. `--emit-fixtures` writes divergence fixtures. Flags: `--json` (stderr banner off). |
+| `franken-node verify release <path>` | Verify release artifact signatures. **Fails closed without `--key-dir`.** Flags: `--json` (`franken-node/verify-release-cli/v1`). |
+| `franken-node verify transparency-log <path>` | Verify transparency-log hash chain. Empty logs fail closed. Without `--public-key`, signatures are `unproven` (non-zero exit), not PASS. Flags: `--json` (`franken-node/verify-transparency-log-cli/v1`). |
+| `franken-node verify recovery-runbook` | Generate recovery runbook from `--readiness-input`. Flags: `--json`. |
 
 ### Trust and supply chain
 
 | Command | Purpose |
 |---|---|
-| `franken-node trust card <id>` | Show trust profile for one extension. |
+| `franken-node trust card <id>` | Show trust profile for one extension. Flags: `--json`. |
 | `franken-node trust list` | List extensions; filter by `--risk`, `--revoked`. `--json` emits the card list as JSON. |
 | `franken-node trust scan [path]` | Populate baseline trust cards from package.json. Flags: `--deep`, `--audit`, `--json`. |
 | `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. `--json` emits `franken-node/trust-sync-cli/v1`. |
 | `franken-node trust revoke <id>` | Revoke artifact or publisher trust. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card. |
 | `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide. `--artifact` required. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
-| `franken-node trust-card show <id>` | Show full trust card. |
+| `franken-node trust-card show <id>` | Show full trust card. Flags: `--json`. |
 | `franken-node trust-card export <id> --json` | Export trust card as canonical JSON. |
-| `franken-node trust-card list` | List with filters: `--publisher`, `--query`, `--page`, `--per-page`. |
-| `franken-node trust-card compare <left> <right>` | Compare two trust postures. |
-| `franken-node trust-card diff <id> <left_version> <right_version>` | Diff one card across versions. |
+| `franken-node trust-card list` | List with filters: `--publisher`, `--query`, `--page`, `--per-page`. Flags: `--json`. |
+| `franken-node trust-card compare <left> <right>` | Compare two trust postures. Flags: `--json`. |
+| `franken-node trust-card diff <id> <left_version> <right_version>` | Diff one card across versions. Flags: `--json`. |
 
 ### Remote capabilities
 
 | Command | Purpose |
 |---|---|
-| `franken-node remotecap issue` | Issue signed Ed25519 capability token. Required: `--scope`, `--endpoint`. Optional: `--ttl`, `--issuer`, `--operator-approved`, `--single-use`. |
-| `franken-node remotecap verify` | Verify a capability token without using it. Required: `--token-file`, `--operation`, `--endpoint`. |
-| `franken-node remotecap use` | Authorize a scoped network operation against a token (dry-run). Does not perform the HTTP request. Same required flags as `verify`. |
-| `franken-node remotecap revoke` | Revoke a capability token. Required: `--token-file`. |
+| `franken-node remotecap issue` | Issue signed Ed25519 capability token. Required: `--scope`, `--endpoint`. Optional: `--ttl`, `--issuer`, `--operator-approved`, `--single-use`. Flags: `--json` (`franken-node/remotecap-issue-cli/v1`). |
+| `franken-node remotecap verify` | Verify a capability token without using it. Required: `--token-file`, `--operation`, `--endpoint`. Flags: `--json` (`franken-node/remotecap-verify-cli/v1`). |
+| `franken-node remotecap use` | Authorize a scoped network operation against a token (dry-run). Does not perform the HTTP request. Same required flags as `verify`. Flags: `--json` (`franken-node/remotecap-use-cli/v1`). |
+| `franken-node remotecap revoke` | Revoke a capability token. Required: `--token-file`. Flags: `--json` (`franken-node/remotecap-revoke-cli/v1`). |
 
 ### Fleet control plane
 
 | Command | Purpose |
 |---|---|
 | `franken-node fleet status` | Show **local persisted** fleet/quarantine state from file transport. `activated` is not a live multi-node heartbeat. Flags: `--zone`, `--verbose`, `--json`. |
-| `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. |
-| `franken-node fleet release` | Lift quarantine/revocation controls with signed receipts. `--incident` required. |
-| `franken-node fleet reconcile` | Reconcile local fleet-action log and wait for file-transport convergence. Times out fail-closed (same as `fleet release`). |
-| `franken-node fleet agent` | Poll local file-transport fleet actions (not a live cluster). Flags: `--node-id`, `--zone` (required), `--poll-interval-secs`, `--max-cycles`, `--once`. |
+| `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. Flags: `--zone`, `--json`. |
+| `franken-node fleet release` | Lift quarantine/revocation controls with signed receipts. `--incident` required. Flags: `--json`. |
+| `franken-node fleet reconcile` | Reconcile local fleet-action log and wait for file-transport convergence. Times out fail-closed (same as `fleet release`). Flags: `--json`. |
+| `franken-node fleet agent` | Poll local file-transport fleet actions (not a live cluster). Flags: `--node-id`, `--zone` (required), `--poll-interval-secs`, `--max-cycles`, `--once`, `--json`. |
 
 ### Incident replay and forensics
 
 | Command | Purpose |
 |---|---|
-| `franken-node incident bundle` | Export deterministic incident bundle. `--id` required; reads evidence from `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `--verify` checks the bundle after writing. Optional receipt-signing controls. |
-| `franken-node incident replay` | Replay incident timeline locally. **Fails closed without `--trusted-public-key` or `--key-dir`.** |
-| `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. Required: `--policy`. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. |
-| `franken-node incident list` | List recorded incidents. Filter: `--severity`. |
+| `franken-node incident bundle` | Export deterministic incident bundle. `--id` required; reads evidence from `--evidence-path` or `<project-root>/.franken-node/state/incidents/<slug>/evidence.v1.json`. `--verify` checks the bundle after writing. Optional receipt-signing controls. Flags: `--json`. |
+| `franken-node incident replay` | Replay incident timeline locally. **Fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--json`. |
+| `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. Required: `--policy`. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. Flags: `--json`. |
+| `franken-node incident list` | List recorded incidents. Filter: `--severity`. Flags: `--json`. |
 
 ### Long-term verifiability (LTV)
 
 | Command | Purpose |
 |---|---|
-| `franken-node ltv attest` | Build self-contained long-term verification evidence from a signature-verified incident bundle: the bundle (plus, with `--run-report`, its run's host-effect chain hashes) becomes Merkle leaves, the root is re-attested and threshold-cosigned by operator witness keys. **Required: `--bundle`, `--out`, at least one `--witness-key`, and a trust anchor (`--trusted-public-key` or `--key-dir`).** |
-| `franken-node ltv verify-as-of` | Re-verify LTV evidence offline through the verifier SDK (`verify_as_of_ltv`): inclusion, re-attestation chain, witness threshold, and anteriority against `--as-of`. Fails closed (non-zero exit) on any failed assertion. Required: `--evidence`. |
+| `franken-node ltv attest` | Build self-contained long-term verification evidence from a signature-verified incident bundle: the bundle (plus, with `--run-report`, its run's host-effect chain hashes) becomes Merkle leaves, the root is re-attested and threshold-cosigned by operator witness keys. **Required: `--bundle`, `--out`, at least one `--witness-key`, and a trust anchor (`--trusted-public-key` or `--key-dir`).** Flags: `--json`. |
+| `franken-node ltv verify-as-of` | Re-verify LTV evidence offline through the verifier SDK (`verify_as_of_ltv`): inclusion, re-attestation chain, witness threshold, and anteriority against `--as-of`. Fails closed (non-zero exit) on any failed assertion. Required: `--evidence`. Flags: `--json`. |
 
 ### Runtime, safe-mode, and proofs
 
 | Command | Purpose |
 |---|---|
-| `franken-node runtime lane status` | Emit the *local default* lane policy and an empty telemetry snapshot (not a running node). |
-| `franken-node runtime lane assign <task_class>` | Assign one task class through a fresh default lane scheduler; the assignment is not persisted to a live node. |
-| `franken-node runtime epoch` | Compare two caller-supplied epoch integers. Does not inspect a live `ControlEpoch`. Flags: `--local-epoch`, `--peer-epoch`. |
-| `franken-node safe-mode enter` | Enter safe mode and persist operator state. Required: `--reason`, `--operator-id`, `--trust-state-hash`. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. |
-| `franken-node safe-mode status` | Inspect persisted safe-mode state. |
-| `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. Required: `--operator-id`, `--confirm`. `--trust-state-consistent`, `--no-unresolved-incidents`, and `--evidence-ledger-intact` are **operator attestations**, not independently verified checks. |
-| `franken-node proofs queue status` | Inspect proof queue, proof status, and worker readiness from broker snapshots. |
-| `franken-node proofs workers restart` | Validate and emit a restart-*request* artifact. Does **not** restart a process unless `--execute` is set and `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR` is bound. Required: `--operator-id`, `--operator-role`, `--reason`, `--confirm`. |
+| `franken-node runtime lane status` | Emit the *local default* lane policy and an empty telemetry snapshot (not a running node). Flags: `--json`. |
+| `franken-node runtime lane assign <task_class>` | Assign one task class through a fresh default lane scheduler; the assignment is not persisted to a live node. Flags: `--json`. |
+| `franken-node runtime epoch` | Compare two caller-supplied epoch integers. Does not inspect a live `ControlEpoch`. Flags: `--local-epoch`, `--peer-epoch`, `--json`. |
+| `franken-node safe-mode enter` | Enter safe mode and persist operator state. Required: `--reason`, `--operator-id`, `--trust-state-hash`. Reasons: `explicit-flag`, `environment-variable`, `config-field`, `trust-corruption`, `crash-loop`, `epoch-mismatch`. Flags: `--json`. |
+| `franken-node safe-mode status` | Inspect persisted safe-mode state. Flags: `--json`. |
+| `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. Required: `--operator-id`, `--confirm`. `--trust-state-consistent`, `--no-unresolved-incidents`, and `--evidence-ledger-intact` are **operator attestations**, not independently verified checks. Flags: `--json`. |
+| `franken-node proofs queue status` | Inspect proof queue, proof status, and worker readiness from broker snapshots. Flags: `--json`. |
+| `franken-node proofs workers restart` | Validate and emit a restart-*request* artifact. Does **not** restart a process unless `--execute` is set and `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR` is bound. Required: `--operator-id`, `--operator-role`, `--reason`, `--confirm`. Flags: `--json`. |
 
 ### Ops and diagnostics
 
 | Command | Purpose |
 |---|---|
-| `franken-node ops health-check` | Process health from compile-time git SHA, evidence-ledger flush mtime, and persisted session files under `.franken-node/state/sessions` (not a live SessionManager). |
-| `franken-node ops resource-governor` | Advise whether validation should run / defer / deduplicate based on a process snapshot, proof class, RCH queue depth, and target-dir usage. |
-| `franken-node ops validation-readiness` | Report validation broker evidence freshness from receipts. |
-| `franken-node ops validation-closeout` | Render closeout summary from a receipt. Required: `--bead-id`, `--receipt`. |
-| `franken-node ops config-audit` | Audit active config across profiles. |
-| `franken-node ops metrics` | Emit operator metrics (Prometheus by default). |
-| `franken-node doctor workspace-pressure` | Analyze workspace pressure: disk, memory, builds, RCH; routes through balanced/conservative/permissive policy. |
-| `franken-node doctor close-condition` | Emit dual-oracle close-condition receipt. |
-| `franken-node doctor evidence-readiness` | Report evidence readiness from a broker snapshot. |
+| `franken-node ops health-check` | Process health from compile-time git SHA, evidence-ledger flush mtime, and persisted session files under `.franken-node/state/sessions` (not a live SessionManager). Flags: `--json` (`franken-node/ops-health-check-cli/v1`). |
+| `franken-node ops resource-governor` | Advise whether validation should run / defer / deduplicate based on a process snapshot, proof class, RCH queue depth, and target-dir usage. Flags: `--json`. |
+| `franken-node ops validation-readiness` | Report validation broker evidence freshness from receipts. Flags: `--json`. |
+| `franken-node ops validation-closeout` | Render closeout summary from a receipt. Required: `--bead-id`, `--receipt`. Flags: `--json`. |
+| `franken-node ops config-audit` | Audit active config across profiles. Flags: `--json` (`franken-node/ops-config-audit-cli/v1`). |
+| `franken-node ops metrics` | Emit operator metrics (Prometheus by default). Flags: `--json` (`franken-node/ops-metrics-cli/v1`). |
+| `franken-node doctor workspace-pressure` | Analyze workspace pressure: disk, memory, builds, RCH; routes through balanced/conservative/permissive policy. Flags: `--json`. |
+| `franken-node doctor close-condition` | Emit dual-oracle close-condition receipt. Flags: `--json`. |
+| `franken-node doctor evidence-readiness` | Report evidence readiness from a broker snapshot. Flags: `--json`. |
 
 ### Registry, bench, debug
 
@@ -2298,10 +2298,10 @@ operator ──► validation-planner ──► proof lanes (RCH workers + local
 
 | Command | What it does |
 |---|---|
-| `franken-node ops validation-readiness --input broker-snapshot.json` | Reports per-lane freshness vs. policy. |
-| `franken-node ops validation-closeout --bead-id <id> --receipt <r>` | Renders the closeout summary for a tracked work item. |
-| `franken-node ops resource-governor --process-snapshot <p> --requested-proof-class <c>` | Advises whether the proof lane should run, defer, or dedupe. |
-| `franken-node verify recovery-runbook --readiness-input <input>` | Generates a runbook for the operator to unstick a blocked lane. |
+| `franken-node ops validation-readiness --input broker-snapshot.json --json` | Reports per-lane freshness vs. policy. `--json` emits the schema-versioned readiness report. |
+| `franken-node ops validation-closeout --bead-id <id> --receipt <r> --json` | Renders the closeout summary for a tracked work item. `--json` emits the schema-versioned closeout report. |
+| `franken-node ops resource-governor --process-snapshot <p> --requested-proof-class <c> --json` | Advises whether the proof lane should run, defer, or dedupe. `--json` emits the schema-versioned governor decision. |
+| `franken-node verify recovery-runbook --readiness-input <input> --json` | Generates a runbook for the operator to unstick a blocked lane. `--json` emits the schema-versioned runbook report. |
 
 Receipts emitted by the broker carry the canonical input hash, the
 proof-class lane that produced them, the worker identity, the policy

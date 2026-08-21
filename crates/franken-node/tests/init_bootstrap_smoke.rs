@@ -94,6 +94,8 @@ fn init_succeeds_on_empty_directory_and_synthesizes_security_defaults() {
 
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
         .expect("init --json must produce parseable JSON on stdout");
+    assert_eq!(report["schema_version"], "franken-node/init-cli/v1");
+    assert_eq!(report["command"], "init");
 
     // The synthesized values must be reported back to the operator so they
     // know what just landed in the config file.

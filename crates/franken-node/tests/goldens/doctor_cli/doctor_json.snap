@@ -2,6 +2,7 @@
 source: crates/franken-node/tests/cli_subcommand_goldens.rs
 ---
 {
+  "schema_version": "franken-node/doctor-cli/v1",
   "command": "doctor",
   "trace_id": "golden-doctor-trace",
   "generated_at_utc": "[TIMESTAMP]",

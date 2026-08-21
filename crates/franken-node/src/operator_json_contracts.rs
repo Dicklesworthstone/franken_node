@@ -115,6 +115,7 @@ const DOCTOR_REQUIRED: &[&str] = &[
     "checks",
 ];
 const DOCTOR_OPTIONAL: &[&str] = &[
+    "schema_version",
     "source_path",
     "structured_logs",
     "merge_decision_count",
@@ -129,7 +130,12 @@ const VERIFY_RELEASE_REQUIRED: &[&str] = &[
     "overall_pass",
     "unlisted_artifact_count",
 ];
-const VERIFY_RELEASE_OPTIONAL: &[&str] = &["results.failure_reason", "results.key_id"];
+const VERIFY_RELEASE_OPTIONAL: &[&str] = &[
+    "schema_version",
+    "command",
+    "results.failure_reason",
+    "results.key_id",
+];
 const VERIFY_RELEASE_VOLATILE: &[&str] = &["release_path", "results.key_id"];
 
 const FLEET_RECONCILE_REQUIRED: &[&str] = &[
@@ -309,7 +315,7 @@ const CONTRACTS: &[OperatorJsonContract] = &[
             "crates/franken-node/tests/cli_subcommand_goldens.rs",
         ],
         owner_gates: &["tests/test_doctor_command_diagnostics_gate.py"],
-        notes: "Doctor output has no producer-emitted schema_version yet; this registry pins the automation contract.",
+        notes: "Producer emits franken-node/doctor-cli/v1 schema_version. Historical artifacts may omit it, so the registry still treats schema_version as additive.",
     },
     OperatorJsonContract {
         surface: OperatorJsonSurface::VerifyReleaseReport,
@@ -321,7 +327,7 @@ const CONTRACTS: &[OperatorJsonContract] = &[
         volatile_fields: VERIFY_RELEASE_VOLATILE,
         owner_tests: &["crates/franken-node/tests/verify_release_cli_e2e.rs"],
         owner_gates: &["tests/test_check_verifier_contract.py"],
-        notes: "Release verification JSON is the stable artifact consumed by release automation.",
+        notes: "Producer emits franken-node/verify-release-cli/v1 schema_version. Historical artifacts may omit it, so the registry still treats schema_version as additive.",
     },
     OperatorJsonContract {
         surface: OperatorJsonSurface::FleetReconcileReport,

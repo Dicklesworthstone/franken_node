@@ -1440,3 +1440,46 @@ fn tnr_engine_capability_gate_fails_closed_under_balanced() {
         "fs:write refused pre-effect, non-zero exit, no bytes on disk",
     );
 }
+
+#[test]
+fn ltv_attest_json_fails_closed_when_bundle_missing() {
+    let workspace = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(
+        workspace.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )
+    .expect("write fail-closed config");
+    let output = run_cli(
+        workspace.path(),
+        &[
+            "ltv",
+            "attest",
+            "--bundle",
+            "missing.fnbundle",
+            "--out",
+            "ltv-evidence.json",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "ltv attest --json should fail when the bundle is missing"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("ltv attest --json missing-bundle stdout must be JSON ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["schema_version"], "franken-node/ltv-error-cli/v1");
+    assert_eq!(payload["command"], "ltv.attest");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("failed reading replay bundle") || error.contains("missing.fnbundle"),
+        "missing-bundle --json must name the bundle failure: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: failed reading replay bundle"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}

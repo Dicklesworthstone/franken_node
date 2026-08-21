@@ -214,7 +214,8 @@ pub struct InitArgs {
     #[arg(long)]
     pub scan: bool,
 
-    /// Emit machine-readable init report.
+    /// Emit schema-versioned JSON (`franken-node/init-cli/v1`) instead of the
+    /// human init report.
     #[arg(long)]
     pub json: bool,
 
@@ -650,6 +651,12 @@ impl clap::Args for MigrateAuditArgs {
                 .help("Output file path.")
                 .value_parser(parse_safe_content_pathbuf),
         )
+        .arg(
+            clap::Arg::new("json")
+                .long("json")
+                .help("Emit structured JSON (same as `--format json`). Required for the README all-commands `--json` contract.")
+                .action(clap::ArgAction::SetTrue),
+        )
     }
 
     fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
@@ -663,10 +670,21 @@ impl clap::FromArgMatches for MigrateAuditArgs {
             .get_one::<PathBuf>("project_path")
             .expect("project_path is required by clap")
             .clone();
-        let format = matches
+        let mut format = matches
             .get_one::<String>("format")
             .expect("format has a default value")
             .clone();
+        if matches.get_flag("json") {
+            let format_from_cli =
+                matches.value_source("format") == Some(clap::parser::ValueSource::CommandLine);
+            if format_from_cli && format != "json" {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    format!("--json conflicts with --format={format}"),
+                ));
+            }
+            format = "json".to_string();
+        }
         let out = matches.get_one::<PathBuf>("out").cloned();
 
         validate_migrate_audit_output(&format, out.as_ref())?;
@@ -744,6 +762,11 @@ pub struct MigrateValidateArgs {
     #[arg(long, default_value = "text")]
     pub format: String,
 
+    /// Emit structured JSON (same as `--format json`). Required for the README
+    /// all-commands `--json` contract.
+    #[arg(long)]
+    pub json: bool,
+
     /// Run only the deterministic static checks and skip the transformed-runtime
     /// smoke test. Use this in CI/golden contexts where no JavaScript runtime is
     /// guaranteed (the smoke test executes the project and its result depends on
@@ -760,6 +783,11 @@ pub struct MigrateReportArgs {
     /// Output format: json or html.
     #[arg(long, default_value = "json", value_parser = ["json", "html"])]
     pub format: String,
+
+    /// Emit structured JSON (same as `--format json`). Required for the README
+    /// all-commands `--json` contract.
+    #[arg(long)]
+    pub json: bool,
 
     /// Output file path. When omitted, the report is written to stdout.
     #[arg(long, alias = "out", value_parser = parse_safe_content_pathbuf)]
@@ -779,6 +807,8 @@ pub enum VerifyCommand {
     Migration(VerifyMigrationArgs),
 
     /// Probe node, bun, or franken-node; profile names fail closed.
+    /// `franken-node` smoke executes fixture JS through the embedded engine
+    /// (`run --console-only`); it does not auto-PASS on `--version`.
     #[command(name = "compatibility")]
     Compatibility(VerifyCompatibilityArgs),
 
@@ -834,7 +864,8 @@ pub struct VerifyReleaseArgs {
     #[arg(long)]
     pub key_dir: PathBuf,
 
-    /// Emit structured JSON output instead of human-readable text.
+    /// Emit schema-versioned JSON (`franken-node/verify-release-cli/v1`)
+    /// instead of human-readable text.
     #[arg(long)]
     pub json: bool,
 }
@@ -912,7 +943,7 @@ pub struct VerifyTransparencyLogArgs {
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub public_key: Option<PathBuf>,
 
-    /// Emit structured JSON output.
+    /// Emit schema-versioned JSON (`franken-node/verify-transparency-log-cli/v1`).
     #[arg(long)]
     pub json: bool,
 }
@@ -1242,7 +1273,8 @@ pub struct TrustCardShowArgs {
     /// Extension identifier (e.g., npm:@example/plugin).
     pub extension_id: String,
 
-    /// Emit JSON instead of human-readable output.
+    /// Emit the trust card as JSON, or `franken-node/trust-card-error-cli/v1`
+    /// then exit 1 without a second human `Error:` line.
     #[arg(long)]
     pub json: bool,
 }
@@ -1253,6 +1285,7 @@ pub struct TrustCardExportArgs {
     pub extension_id: String,
 
     /// Required explicit JSON export flag for machine pipelines.
+    /// Failures still emit `franken-node/trust-card-error-cli/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
 }
@@ -1275,7 +1308,8 @@ pub struct TrustCardListArgs {
     #[arg(long, default_value_t = 20)]
     pub per_page: usize,
 
-    /// Emit JSON instead of human-readable output.
+    /// Emit the list as JSON, or `franken-node/trust-card-error-cli/v1`
+    /// then exit 1 without a second human `Error:` line.
     #[arg(long)]
     pub json: bool,
 }
@@ -1288,7 +1322,8 @@ pub struct TrustCardCompareArgs {
     /// Right extension identifier.
     pub right_extension_id: String,
 
-    /// Emit JSON instead of human-readable output.
+    /// Emit the comparison as JSON, or `franken-node/trust-card-error-cli/v1`
+    /// then exit 1 without a second human `Error:` line.
     #[arg(long)]
     pub json: bool,
 }
@@ -1304,7 +1339,8 @@ pub struct TrustCardDiffArgs {
     /// Right trust-card version.
     pub right_version: u64,
 
-    /// Emit JSON instead of human-readable output.
+    /// Emit the version diff as JSON, or `franken-node/trust-card-error-cli/v1`
+    /// then exit 1 without a second human `Error:` line.
     #[arg(long)]
     pub json: bool,
 }
@@ -1430,7 +1466,7 @@ pub enum OpsCommand {
     /// Audit the active config and compare operational impact across profiles.
     #[command(name = "config-audit")]
     ConfigAudit(OpsConfigAuditArgs),
-    /// Emit operator metrics as Prometheus text, or as JSON with `--json`.
+    /// Emit operator metrics as Prometheus text, or as schema-versioned JSON with `--json`.
     Metrics(OpsMetricsArgs),
     /// Produce L1 proof-carrying host-effect evidence (v2) from a real native-engine run.
     #[command(name = "proof-carrying-evidence")]
@@ -1444,7 +1480,9 @@ pub enum OpsCommand {
 
 #[derive(Debug, Parser)]
 pub struct OpsHealthCheckArgs {
-    /// Emit JSON instead of human-readable output.
+    /// Emit schema-versioned JSON (`franken-node/ops-health-check-cli/v1`)
+    /// instead of human-readable output. Session counts come from persisted
+    /// `.franken-node/state/sessions` files, not an empty in-process manager.
     #[arg(long)]
     pub json: bool,
 }
@@ -1581,7 +1619,8 @@ pub struct OpsConfigAuditArgs {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// Emit JSON instead of human-readable output.
+    /// Emit schema-versioned JSON (`franken-node/ops-config-audit-cli/v1`)
+    /// instead of human-readable output.
     #[arg(long)]
     pub json: bool,
 
@@ -1592,7 +1631,11 @@ pub struct OpsConfigAuditArgs {
 
 #[derive(Debug, Parser)]
 pub struct OpsProofCarryingEvidenceArgs {
-    /// Emit the produced evidence block as JSON on stdout.
+    /// Emit JSON on stdout. Without `--merge-l1-verdict` this is the v2
+    /// evidence wire (`franken-node/l1-proof-carrying-effects/v2`). With
+    /// `--merge-l1-verdict` it is a CLI envelope
+    /// (`franken-node/ops-proof-carrying-evidence-cli/v1`) wrapping evidence
+    /// plus the lockstep verdict.
     #[arg(long)]
     pub json: bool,
 
@@ -1615,7 +1658,9 @@ pub struct OpsProofCarryingEvidenceArgs {
 
 #[derive(Debug, Parser)]
 pub struct OpsCompatCorpusRunArgs {
-    /// Emit the run summary as JSON on stdout.
+    /// Emit a schema-versioned run summary
+    /// (`franken-node/ops-compat-corpus-run-cli/v1`) on stdout. The digest-bound
+    /// corpus results live in `--out`, not in this envelope.
     #[arg(long)]
     pub json: bool,
 
@@ -1654,7 +1699,8 @@ pub struct OpsMetricsArgs {
     #[arg(long, value_enum, default_value_t = OpsMetricsFormat::Prometheus)]
     pub format: OpsMetricsFormat,
 
-    /// Emit the same metrics snapshot as JSON instead of Prometheus text.
+    /// Emit the same metrics snapshot as schema-versioned JSON
+    /// (`franken-node/ops-metrics-cli/v1`) instead of Prometheus text.
     #[arg(long)]
     pub json: bool,
 }
@@ -2085,8 +2131,8 @@ pub struct DebugExplainArgs {
     #[arg(long)]
     pub public_key_hex: Option<String>,
 
-    /// Emit results as machine-readable JSON instead of the
-    /// human-readable line-per-step form.
+    /// Emit schema-versioned JSON (`franken-node/debug-explain-cli/v1`)
+    /// instead of the human-readable line-per-step form.
     #[arg(long)]
     pub json: bool,
 }
@@ -2194,7 +2240,7 @@ pub struct DoctorArgs {
     #[arg(long, env = "FRANKEN_NODE_DOCTOR_POLICY_ACTIVATION_INPUT")]
     pub policy_activation_input: Option<PathBuf>,
 
-    /// Emit machine-readable JSON report.
+    /// Emit machine-readable JSON (`franken-node/doctor-cli/v1`).
     #[arg(long)]
     pub json: bool,
 
@@ -2296,7 +2342,8 @@ pub struct DebugTraceArgs {
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub input: PathBuf,
 
-    /// Emit JSON output instead of human-readable trace.
+    /// Emit schema-versioned JSON (`franken-node/debug-trace-cli/v1`)
+    /// instead of a human-readable trace.
     #[arg(long)]
     pub json: bool,
 

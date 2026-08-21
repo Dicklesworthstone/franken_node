@@ -2,6 +2,8 @@
 source: crates/franken-node/tests/cli_subcommand_goldens.rs
 ---
 {
+  "schema_version": "franken-node/verify-release-cli/v1",
+  "command": "verify.release",
   "release_path": "[release]",
   "manifest_signature_ok": true,
   "results": [

@@ -396,8 +396,17 @@ struct VerifyCorpusValidationReport {
     passed: bool,
 }
 
+const OPS_HEALTH_CHECK_CLI_SCHEMA_VERSION: &str = "franken-node/ops-health-check-cli/v1";
+const OPS_METRICS_CLI_SCHEMA_VERSION: &str = "franken-node/ops-metrics-cli/v1";
+const OPS_CONFIG_AUDIT_CLI_SCHEMA_VERSION: &str = "franken-node/ops-config-audit-cli/v1";
+const OPS_PROOF_CARRYING_EVIDENCE_CLI_SCHEMA_VERSION: &str =
+    "franken-node/ops-proof-carrying-evidence-cli/v1";
+const OPS_COMPAT_CORPUS_RUN_CLI_SCHEMA_VERSION: &str = "franken-node/ops-compat-corpus-run-cli/v1";
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct OpsHealthCheckReport {
+    schema_version: &'static str,
+    command: &'static str,
     uptime_seconds: u64,
     active_session_count: usize,
     last_successful_evidence_ledger_flush_timestamp: Option<String>,
@@ -408,6 +417,8 @@ struct OpsHealthCheckReport {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct OpsPrometheusMetricsReport {
+    schema_version: &'static str,
+    command: &'static str,
     health: OpsHealthCheckReport,
     last_successful_evidence_ledger_flush_timestamp_seconds: u64,
     evidence_ledger_spill_entries: u64,
@@ -419,6 +430,7 @@ struct OpsPrometheusMetricsReport {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 struct OpsConfigAuditReport {
+    schema_version: &'static str,
     command: String,
     trace_id: String,
     selected_profile: String,
@@ -5188,6 +5200,9 @@ fn load_registry_publish_signing_material(path: &Path) -> Result<Ed25519SigningM
     load_ed25519_signing_material_from_path(path, "registry publish signing key", "cli")
 }
 
+/// Mints `.franken-node/keys/receipt-signing.key`. Fleet CLI must not call this:
+/// a missing fleet signing key is fail-closed, not a prompt to mint a key.
+#[allow(dead_code)]
 fn bootstrap_receipt_signing_key() -> Result<()> {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
@@ -5216,19 +5231,11 @@ fn bootstrap_receipt_signing_key() -> Result<()> {
 fn load_fleet_signing_material() -> Result<Ed25519SigningMaterial> {
     match load_receipt_signing_material(None)? {
         Some(material) => Ok(material),
-        None => {
-            // Bootstrap a new signing key for first-run scenarios
-            bootstrap_receipt_signing_key()?;
-            // Load the newly created key
-            match load_receipt_signing_material(None)? {
-                Some(material) => Ok(material),
-                None => Err(ActionableError::new(
-                    "fleet convergence receipt signing requires a configured fleet-level signing key; bootstrap failed",
-                    receipt_signing_key_fix_command(),
-                )
-                .into()),
-            }
-        }
+        None => Err(ActionableError::new(
+            "fleet convergence receipt signing requires a configured fleet-level signing key; a key found only in the fleet state directory is self-attestation and is not trusted",
+            receipt_signing_key_fix_command(),
+        )
+        .into()),
     }
 }
 
@@ -6039,6 +6046,30 @@ fn handle_safe_mode_command(command: SafeModeCommand) -> Result<()> {
     }
 }
 
+const RUNTIME_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/runtime-error-cli/v1";
+
+fn emit_runtime_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": RUNTIME_ERROR_CLI_SCHEMA_VERSION,
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn runtime_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_runtime_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
 fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
     match command {
         RuntimeCommand::Lane(lane_command) => match lane_command {
@@ -6456,20 +6487,69 @@ fn emit_migration_audit_report(rendered: &str, out_path: Option<&Path>) -> Resul
     Ok(None)
 }
 
+const MIGRATE_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/migrate-error-cli/v1";
+
+fn emit_migrate_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": MIGRATE_ERROR_CLI_SCHEMA_VERSION,
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn migrate_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_migrate_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
 fn handle_migrate_report(args: &MigrateReportArgs) -> Result<()> {
-    let format = migration::OneCommandMigrationReportFormat::parse(&args.format)
-        .map_err(|err| anyhow::anyhow!(err))?;
-    let report = migration::run_one_command_report(&args.project_path).with_context(|| {
+    if args.json && args.format != "json" {
+        return migrate_fail(
+            "migrate.report",
+            true,
+            format!("--json conflicts with --format={}", args.format),
+        );
+    }
+    let format = if args.json {
+        "json".to_string()
+    } else {
+        args.format.clone()
+    };
+    let format = match migration::OneCommandMigrationReportFormat::parse(&format)
+        .map_err(|err| anyhow::anyhow!(err))
+    {
+        Ok(format) => format,
+        Err(err) => return migrate_fail("migrate.report", args.json, err),
+    };
+    let report = match migration::run_one_command_report(&args.project_path).with_context(|| {
         format!(
             "failed building migration report for {}",
             args.project_path.display()
         )
-    })?;
-    let rendered = migration::render_one_command_report(&report, format)?;
+    }) {
+        Ok(report) => report,
+        Err(err) => return migrate_fail("migrate.report", args.json, err),
+    };
+    let rendered = match migration::render_one_command_report(&report, format) {
+        Ok(rendered) => rendered,
+        Err(err) => return migrate_fail("migrate.report", args.json, err),
+    };
 
     if let Some(output) = args.output.as_deref() {
         let written_path =
-            write_migration_report_file(&rendered, output, "one-command migration report")?;
+            match write_migration_report_file(&rendered, output, "one-command migration report") {
+                Ok(path) => path,
+                Err(err) => return migrate_fail("migrate.report", args.json, err),
+            };
         eprintln!("migration report written: {}", written_path.display());
     } else {
         println!("{rendered}");
@@ -7336,8 +7416,11 @@ struct InitFileAction {
     backup_path: Option<String>,
 }
 
+const INIT_CLI_SCHEMA_VERSION: &str = "franken-node/init-cli/v1";
+
 #[derive(Debug, Clone, Serialize)]
 struct InitReport {
+    schema_version: &'static str,
     command: String,
     trace_id: String,
     generated_at_utc: String,
@@ -7442,6 +7525,7 @@ fn build_init_report(
     bootstrap_synthesis: config::BootstrapSynthesis,
 ) -> InitReport {
     InitReport {
+        schema_version: INIT_CLI_SCHEMA_VERSION,
         command: "init".to_string(),
         trace_id: trace_id.to_string(),
         generated_at_utc: chrono::Utc::now().to_rfc3339(),
@@ -7928,6 +8012,8 @@ fn handle_ops_proof_carrying_evidence(args: &OpsProofCarryingEvidenceArgs) -> Re
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": OPS_PROOF_CARRYING_EVIDENCE_CLI_SCHEMA_VERSION,
+                    "command": "ops.proof-carrying-evidence",
                     "proof_carrying_effects": evidence,
                     "lockstep_verdict": lockstep,
                 }))?
@@ -8049,6 +8135,8 @@ fn handle_ops_compat_corpus_run(args: &OpsCompatCorpusRunArgs) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": OPS_COMPAT_CORPUS_RUN_CLI_SCHEMA_VERSION,
+                "command": "ops.compat-corpus-run",
                 "corpus_version": corpus_version,
                 "reference_runtimes": document.pointer("/corpus/reference_runtimes"),
                 "lockstep_topology": document.pointer("/corpus/lockstep_topology"),
@@ -8092,6 +8180,8 @@ fn ops_health_check_report(project_root: &Path) -> Result<OpsHealthCheckReport> 
         .to_string();
 
     Ok(OpsHealthCheckReport {
+        schema_version: OPS_HEALTH_CHECK_CLI_SCHEMA_VERSION,
+        command: "ops.health-check",
         uptime_seconds: OPS_HEALTH_CHECK_PROCESS_START.elapsed().as_secs(),
         active_session_count: ops_active_session_count(project_root),
         pass: last_successful_evidence_ledger_flush_timestamp.is_some() && git_sha != "unknown",
@@ -8207,6 +8297,53 @@ where
     Ok(newest)
 }
 
+const OPS_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/ops-error-cli/v1";
+const PROOFS_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/proofs-error-cli/v1";
+
+fn emit_ops_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": OPS_ERROR_CLI_SCHEMA_VERSION,
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn ops_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_ops_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
+fn emit_proofs_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": PROOFS_ERROR_CLI_SCHEMA_VERSION,
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn proofs_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_proofs_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
 fn emit_ops_health_check_report(report: &OpsHealthCheckReport, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(report)?);
@@ -8217,7 +8354,10 @@ fn emit_ops_health_check_report(report: &OpsHealthCheckReport, json: bool) -> Re
             .unwrap_or("none");
         println!("ops health-check: pass={}", report.pass);
         println!("  uptime_seconds={}", report.uptime_seconds);
-        println!("  active_session_count={}", report.active_session_count);
+        println!(
+            "  active_session_count={} (persisted .franken-node/state/sessions files; not a live SessionManager)",
+            report.active_session_count
+        );
         println!("  last_successful_evidence_ledger_flush_timestamp={flush_timestamp}");
         println!("  build_version={}", report.build_version);
         println!("  git_sha={}", report.git_sha);
@@ -8558,6 +8698,7 @@ fn ops_config_audit_report(args: &OpsConfigAuditArgs) -> Result<OpsConfigAuditRe
         build_ops_config_dependency_impact(args.config.as_deref(), &resolved, &active_state)?;
 
     Ok(OpsConfigAuditReport {
+        schema_version: OPS_CONFIG_AUDIT_CLI_SCHEMA_VERSION,
         command: "ops config-audit".to_string(),
         trace_id: args.trace_id.clone(),
         selected_profile: resolved.selected_profile.to_string(),
@@ -9125,6 +9266,8 @@ fn ops_metrics_report(project_root: &Path) -> Result<OpsPrometheusMetricsReport>
     let fleet_state_dir = resolve_ops_metrics_fleet_state_dir(project_root)?;
 
     Ok(OpsPrometheusMetricsReport {
+        schema_version: OPS_METRICS_CLI_SCHEMA_VERSION,
+        command: "ops.metrics",
         last_successful_evidence_ledger_flush_timestamp_seconds: health
             .last_successful_evidence_ledger_flush_timestamp
             .as_deref()
@@ -9315,7 +9458,7 @@ fn render_ops_metrics_prometheus(report: &OpsPrometheusMetricsReport) -> String 
     write_prometheus_metric_prelude(
         &mut rendered,
         "franken_node_active_session_count",
-        "Active session count reported by franken-node ops health-check.",
+        "Count of files under <project>/.franken-node/state/sessions (ops health-check; not a live SessionManager).",
         "gauge",
     );
     writeln!(
@@ -9966,6 +10109,28 @@ fn trust_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Resul
     anyhow::bail!("{message}")
 }
 
+fn emit_trust_card_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "franken-node/trust-card-error-cli/v1",
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn trust_card_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_trust_card_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
 fn emit_trust_release_error_json(message: &str) -> Result<()> {
     println!(
         "{}",
@@ -10427,6 +10592,8 @@ fn build_debug_trace_json_report(inputs: &DebugTraceReportInputs<'_>) -> serde_j
         .map(|candidate| candidate.0.as_str());
 
     serde_json::json!({
+        "schema_version": "franken-node/debug-trace-cli/v1",
+        "command": "debug.trace",
         "trace_id": args.trace_id,
         "policy_file": policy_path.display().to_string(),
         "input_file": input_path.display().to_string(),
@@ -10871,8 +11038,11 @@ struct DoctorStatusCounts {
     fail: usize,
 }
 
+const DOCTOR_CLI_SCHEMA_VERSION: &str = "franken-node/doctor-cli/v1";
+
 #[derive(Debug, Clone, Serialize)]
 struct DoctorReport {
+    schema_version: &'static str,
     command: String,
     trace_id: String,
     generated_at_utc: String,
@@ -12225,6 +12395,7 @@ fn build_doctor_report_with_cwd_and_policy_input(
         .collect::<Vec<_>>();
 
     DoctorReport {
+        schema_version: DOCTOR_CLI_SCHEMA_VERSION,
         command: "doctor".to_string(),
         trace_id: trace_id.to_string(),
         generated_at_utc: chrono::Utc::now().to_rfc3339(),
@@ -16227,6 +16398,8 @@ fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "franken-node/remotecap-issue-cli/v1",
+                "command": "remotecap.issue",
                 "token": cap,
                 "audit_event": audit_event,
                 "ttl_secs": ttl_secs,
@@ -16412,6 +16585,8 @@ fn handle_remotecap_verify(args: &RemoteCapVerifyArgs) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "franken-node/remotecap-verify-cli/v1",
+                "command": "remotecap.verify",
                 "valid": true,
                 "authorized": true,
                 "token_id": cap.token_id(),
@@ -16460,6 +16635,8 @@ fn handle_remotecap_revoke(args: &RemoteCapRevokeArgs) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "franken-node/remotecap-revoke-cli/v1",
+                "command": "remotecap.revoke",
                 "revoked": true,
                 "token_id": cap.token_id(),
                 "audit_event": audit_event,
@@ -18247,6 +18424,29 @@ fn resolve_incident_evidence_path(
 // `VerifierSdk::verify_as_of_ltv`. All LTV hashing lives in the SDK crate.
 const LTV_ATTEST_CLI_SCHEMA: &str = "franken-node/ltv-attest-cli/v1";
 const LTV_VERIFY_AS_OF_CLI_SCHEMA: &str = "franken-node/ltv-verify-as-of-cli/v1";
+const LTV_ERROR_CLI_SCHEMA: &str = "franken-node/ltv-error-cli/v1";
+
+fn emit_ltv_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": LTV_ERROR_CLI_SCHEMA,
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn ltv_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_ltv_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
 const LTV_CLI_CRYPTO_SUITE: &str = "ed25519-v1";
 const MAX_LTV_RUN_REPORT_BYTES: u64 = 64 << 20;
 const MAX_LTV_EVIDENCE_BYTES: u64 = 16 << 20;
@@ -21198,6 +21398,28 @@ fn emit_registry_publish_error_json(message: &str) -> Result<()> {
     Ok(())
 }
 
+fn emit_registry_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "franken-node/registry-error-cli/v1",
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn registry_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_registry_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
 fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
     let project_root = std::env::current_dir()
         .context("failed resolving current directory for registry publish")?;
@@ -22053,7 +22275,32 @@ const FLEET_CLI_STATUS_SCHEMA_VERSION: &str = "franken-node/fleet-status-cli/v1"
 const FLEET_CLI_DESCRIBE_SCHEMA_VERSION: &str = "franken-node/fleet-describe-cli/v1";
 const FLEET_CLI_ACTION_SCHEMA_VERSION: &str = "franken-node/fleet-action-cli/v1";
 const FLEET_CLI_AGENT_SCHEMA_VERSION: &str = "franken-node/fleet-agent-cli/v1";
+const FLEET_CLI_ERROR_SCHEMA_VERSION: &str = "franken-node/fleet-error-cli/v1";
 const FLEET_CLI_TRANSPORT: &str = "file";
+
+fn emit_fleet_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": FLEET_CLI_ERROR_SCHEMA_VERSION,
+            "command": command,
+            "ok": false,
+            "error": message,
+            "transport": FLEET_CLI_TRANSPORT,
+            "live_control_plane": false,
+        }))?
+    );
+    Ok(())
+}
+
+fn fleet_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_fleet_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct FleetCliStatusReport {
@@ -24954,6 +25201,8 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
         .collect::<Vec<_>>();
 
     let payload = serde_json::json!({
+        "schema_version": "franken-node/verify-release-cli/v1",
+        "command": "verify.release",
         "release_path": release_dir.display().to_string(),
         "manifest_signature_ok": report.manifest_signature_ok,
         "results": result_rows,
@@ -25046,6 +25295,8 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "franken-node/verify-transparency-log-cli/v1",
+                    "command": "verify.transparency-log",
                     "status": "empty",
                     "message": "No entries in transparency log; verify fails closed",
                     "total_entries": 0,
@@ -25123,6 +25374,8 @@ fn handle_verify_transparency_log(args: &VerifyTransparencyLogArgs) -> Result<i3
 
     if args.json {
         let result = serde_json::json!({
+            "schema_version": "franken-node/verify-transparency-log-cli/v1",
+            "command": "verify.transparency-log",
             "status": status,
             "total_entries": total_entries,
             "hash_chain_errors": hash_chain_errors,
@@ -26516,6 +26769,90 @@ fn resolve_external_runtime_binary(runtime: &str) -> Result<PathBuf> {
     anyhow::bail!("runtime `{runtime}` resolution requires the `external-commands` feature")
 }
 
+const FRANKEN_NODE_COMPAT_SMOKE_MARKER: &str = "compat-smoke-ok";
+
+/// Guest-JS smoke for `verify compatibility franken-node`.
+///
+/// `--version` alone is not a compatibility claim: PATH binaries can print a
+/// version and still fail to execute JS. This probe bootstraps a temp workspace
+/// and runs fixture JS through the embedded engine without degraded fallback.
+fn franken_node_guest_js_smoke_probe(binary: &Path) -> Result<String> {
+    let sandbox = tempfile::Builder::new()
+        .prefix("franken-node-compat-smoke-")
+        .tempdir()
+        .context("create franken-node compatibility JS smoke workspace")?;
+    std::fs::write(
+        sandbox.path().join("compat-smoke.js"),
+        format!("console.log(\"{FRANKEN_NODE_COMPAT_SMOKE_MARKER}\");\n"),
+    )
+    .context("write franken-node compatibility JS smoke fixture")?;
+
+    let init = ProcessCommand::new(binary)
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(sandbox.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| {
+            format!(
+                "failed running init for JS smoke using {}",
+                binary.display()
+            )
+        })?;
+    if !init.status.success() {
+        let stderr = String::from_utf8_lossy(&init.stderr).trim().to_string();
+        anyhow::bail!(
+            "JS smoke workspace init failed for franken-node with exit code {:?}: {}",
+            init.status.code(),
+            if stderr.is_empty() {
+                "no stderr emitted".to_string()
+            } else {
+                stderr
+            }
+        );
+    }
+
+    let output = ProcessCommand::new(binary)
+        .args([
+            "run",
+            "compat-smoke.js",
+            "--console-only",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+        ])
+        .arg("--engine-bin")
+        .arg(binary)
+        .current_dir(sandbox.path())
+        .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("failed running guest JS smoke using {}", binary.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "guest JS smoke failed for franken-node with exit code {:?}: {}",
+            output.status.code(),
+            if stderr.is_empty() {
+                "no stderr emitted".to_string()
+            } else {
+                stderr
+            }
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.contains(FRANKEN_NODE_COMPAT_SMOKE_MARKER) {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "guest JS smoke for franken-node did not print `{FRANKEN_NODE_COMPAT_SMOKE_MARKER}` (stdout={stdout:?}, stderr={stderr:?})"
+        );
+    }
+    Ok(stdout)
+}
+
 fn run_runtime_probe(binary: &Path, runtime: &str, args: &[&str], context: &str) -> Result<String> {
     let output = ProcessCommand::new(binary)
         .args(args)
@@ -27018,9 +27355,7 @@ fn emit_verify_compatibility(args: &VerifyCompatibilityArgs) -> i32 {
                                 &["-e", "console.log(JSON.stringify({\"ok\":true}))"],
                                 "smoke probe",
                             ),
-                            "franken-node" => {
-                                run_runtime_probe(&binary, runtime, &["--version"], "smoke probe")
-                            }
+                            "franken-node" => franken_node_guest_js_smoke_probe(&binary),
                             _ => unreachable!("unsupported runtime normalization"),
                         };
                         match (version_result, smoke_result) {
@@ -28850,12 +29185,16 @@ fn emit_explain_steps<S: serde::Serialize>(
     if json {
         #[derive(serde::Serialize)]
         struct ExplainReport<'a, T> {
+            schema_version: &'static str,
+            command: &'static str,
             ok: bool,
             steps: &'a [T],
         }
         println!(
             "{}",
             serde_json::to_string_pretty(&ExplainReport {
+                schema_version: "franken-node/debug-explain-cli/v1",
+                command: "debug.explain",
                 ok: overall_ok,
                 steps
             })?
@@ -29255,7 +29594,19 @@ fn main() -> Result<()> {
         }
 
         Command::Runtime(sub) => {
-            handle_runtime_command(sub)?;
+            let json = match &sub {
+                RuntimeCommand::Lane(RuntimeLaneCommand::Status(args)) => args.json,
+                RuntimeCommand::Lane(RuntimeLaneCommand::Assign(args)) => args.json,
+                RuntimeCommand::Epoch(args) => args.json,
+            };
+            let command_name = match &sub {
+                RuntimeCommand::Lane(RuntimeLaneCommand::Status(_)) => "runtime.lane.status",
+                RuntimeCommand::Lane(RuntimeLaneCommand::Assign(_)) => "runtime.lane.assign",
+                RuntimeCommand::Epoch(_) => "runtime.epoch",
+            };
+            if let Err(err) = handle_runtime_command(sub) {
+                return runtime_fail(command_name, json, err);
+            }
         }
 
         Command::SafeMode(sub) => {
@@ -29263,41 +29614,71 @@ fn main() -> Result<()> {
         }
 
         Command::Proofs(sub) => {
-            handle_proofs_command(sub)?;
+            let json = match &sub {
+                ProofsCommand::Queue(ProofQueueCommand::Status(args)) => args.json,
+                ProofsCommand::Workers(ProofWorkersCommand::Restart(args)) => args.json,
+            };
+            let command_name = match &sub {
+                ProofsCommand::Queue(_) => "proofs.queue.status",
+                ProofsCommand::Workers(_) => "proofs.workers.restart",
+            };
+            if let Err(err) = handle_proofs_command(sub) {
+                return proofs_fail(command_name, json, err);
+            }
         }
 
         Command::Migrate(sub) => match sub {
             MigrateCommand::Audit(args) => {
-                let format = migration::AuditOutputFormat::parse(&args.format)
-                    .map_err(|err| anyhow::anyhow!(err))?;
-                let report = migration::run_audit(&args.project_path).with_context(|| {
+                let json = args.format == "json";
+                let format = match migration::AuditOutputFormat::parse(&args.format)
+                    .map_err(|err| anyhow::anyhow!(err))
+                {
+                    Ok(format) => format,
+                    Err(err) => return migrate_fail("migrate.audit", json, err),
+                };
+                let report = match migration::run_audit(&args.project_path).with_context(|| {
                     format!(
                         "failed running migration audit for {}",
                         args.project_path.display()
                     )
-                })?;
-                let rendered = migration::render_audit_report(&report, format)?;
+                }) {
+                    Ok(report) => report,
+                    Err(err) => return migrate_fail("migrate.audit", json, err),
+                };
+                let rendered = match migration::render_audit_report(&report, format) {
+                    Ok(rendered) => rendered,
+                    Err(err) => return migrate_fail("migrate.audit", json, err),
+                };
 
-                if let Some(out_path) = emit_migration_audit_report(&rendered, args.out.as_deref())?
-                {
-                    eprintln!("migration audit report written: {}", out_path.display());
+                match emit_migration_audit_report(&rendered, args.out.as_deref()) {
+                    Ok(Some(out_path)) => {
+                        eprintln!("migration audit report written: {}", out_path.display());
+                    }
+                    Ok(None) => {}
+                    Err(err) => return migrate_fail("migrate.audit", json, err),
                 }
             }
             MigrateCommand::Rewrite(args) => {
-                let report =
-                    migration::run_rewrite(&args.project_path, args.apply).with_context(|| {
+                let report = match migration::run_rewrite(&args.project_path, args.apply)
+                    .with_context(|| {
                         format!(
                             "failed running migration rewrite for {}",
                             args.project_path.display()
                         )
-                    })?;
+                    }) {
+                    Ok(report) => report,
+                    Err(err) => return migrate_fail("migrate.rewrite", args.json, err),
+                };
                 if args.json {
-                    let rendered = serde_json::to_string_pretty(&report).with_context(|| {
+                    let rendered = match serde_json::to_string_pretty(&report).with_context(|| {
                         format!(
                             "failed serializing migration rewrite JSON for {}",
                             args.project_path.display()
                         )
-                    })?;
+                    }) {
+                        Ok(rendered) => rendered,
+                        Err(err) => return migrate_fail("migrate.rewrite", args.json, err),
+                    };
                     println!("{rendered}");
                 } else {
                     print!("{}", migration::render_rewrite_report(&report));
@@ -29305,43 +29686,88 @@ fn main() -> Result<()> {
 
                 if let Some(out_path) = args.emit_rollback.as_deref() {
                     let rollback_plan = migration::build_rollback_plan(&report);
-                    let rollback_json =
-                        serde_json::to_string_pretty(&rollback_plan).with_context(|| {
+                    let rollback_json = match serde_json::to_string_pretty(&rollback_plan)
+                        .with_context(|| {
                             format!(
                                 "failed serializing migration rollback plan for {}",
                                 args.project_path.display()
                             )
-                        })?;
-                    let written_path = write_migration_report_file(
+                        }) {
+                        Ok(json) => json,
+                        Err(err) => {
+                            if args.json {
+                                fail_closed_after_json();
+                            }
+                            return migrate_fail("migrate.rewrite", false, err);
+                        }
+                    };
+                    match write_migration_report_file(
                         &rollback_json,
                         out_path,
                         "migration rollback artifact",
-                    )?;
-                    eprintln!(
-                        "migration rollback artifact written: {}",
-                        written_path.display()
-                    );
+                    ) {
+                        Ok(written_path) => {
+                            eprintln!(
+                                "migration rollback artifact written: {}",
+                                written_path.display()
+                            );
+                        }
+                        Err(err) => {
+                            if args.json {
+                                fail_closed_after_json();
+                            }
+                            return Err(err);
+                        }
+                    }
                 }
             }
             MigrateCommand::Validate(args) => {
-                let format = migration::ValidateOutputFormat::parse(&args.format)
-                    .map_err(|err| anyhow::anyhow!(err))?;
-                let report = migration::run_validate(&args.project_path, args.static_only)
+                if args.json && args.format != "text" && args.format != "json" {
+                    return migrate_fail(
+                        "migrate.validate",
+                        true,
+                        format!("--json conflicts with --format={}", args.format),
+                    );
+                }
+                let format = if args.json {
+                    "json".to_string()
+                } else {
+                    args.format.clone()
+                };
+                let format = match migration::ValidateOutputFormat::parse(&format)
+                    .map_err(|err| anyhow::anyhow!(err))
+                {
+                    Ok(format) => format,
+                    Err(err) => return migrate_fail("migrate.validate", args.json, err),
+                };
+                let report = match migration::run_validate(&args.project_path, args.static_only)
                     .with_context(|| {
                         format!(
                             "failed running migration validate for {}",
                             args.project_path.display()
                         )
-                    })?;
+                    }) {
+                    Ok(report) => report,
+                    Err(err) => return migrate_fail("migrate.validate", args.json, err),
+                };
                 match format {
                     migration::ValidateOutputFormat::Json => {
-                        println!("{}", serde_json::to_string_pretty(&report)?);
+                        let rendered = match serde_json::to_string_pretty(&report) {
+                            Ok(rendered) => rendered,
+                            Err(err) => {
+                                return migrate_fail("migrate.validate", true, err);
+                            }
+                        };
+                        println!("{rendered}");
                     }
                     migration::ValidateOutputFormat::Text => {
                         println!("{}", migration::render_validate_report(&report));
                     }
                 }
                 if !report.is_pass() {
+                    if args.json || matches!(format, migration::ValidateOutputFormat::Json) {
+                        fail_closed_after_json();
+                    }
                     anyhow::bail!(
                         "migration validation failed for {}",
                         args.project_path.display()
@@ -29351,7 +29777,9 @@ fn main() -> Result<()> {
         },
 
         Command::MigrateReport(args) => {
-            handle_migrate_report(&args)?;
+            if let Err(err) = handle_migrate_report(&args) {
+                return migrate_fail("migrate.report", args.json, err);
+            }
         }
 
         Command::Verify(sub) => match sub {
@@ -29414,30 +29842,55 @@ fn main() -> Result<()> {
                 let trace_id = "trace-cli-trust-card";
                 let identity = trust_card_cli_identity();
                 let trace = trust_card_cli_trace(trace_id);
-                let mut state = trust_card_cli_registry(now_secs)?;
-                let response = get_trust_card(
+                let mut state = match trust_card_cli_registry(now_secs) {
+                    Ok(state) => state,
+                    Err(err) => return trust_fail("trust.card", args.json, err),
+                };
+                let response = match get_trust_card(
                     &identity,
                     &trace,
                     &mut state.registry,
                     &args.extension_id,
                     now_secs,
-                )?;
-                let card = response
-                    .data
-                    .ok_or_else(|| trust_card_not_found_error(&args.extension_id))?;
+                ) {
+                    Ok(response) => response,
+                    Err(err) => return trust_fail("trust.card", args.json, err),
+                };
+                let card = match response.data {
+                    Some(card) => card,
+                    None => {
+                        return trust_fail(
+                            "trust.card",
+                            args.json,
+                            trust_card_not_found_error(&args.extension_id),
+                        );
+                    }
+                };
                 println!("{}", render_trust_card_for_trust_command(&card, args.json)?);
             }
             TrustCommand::List(args) => {
-                let risk_filter = parse_risk_level_filter(args.risk.as_deref())?;
-                let mut state = trust_card_cli_registry(now_unix_secs())?;
-                let cards = state
-                    .registry
-                    .list(
-                        &TrustCardListFilter::empty(),
-                        "trace-cli-trust-list",
-                        now_unix_secs(),
-                    )
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let risk_filter = match parse_risk_level_filter(args.risk.as_deref()) {
+                    Ok(filter) => filter,
+                    Err(err) => return trust_fail("trust.list", args.json, err),
+                };
+                let mut state = match trust_card_cli_registry(now_unix_secs()) {
+                    Ok(state) => state,
+                    Err(err) => return trust_fail("trust.list", args.json, err),
+                };
+                let cards = match state.registry.list(
+                    &TrustCardListFilter::empty(),
+                    "trace-cli-trust-list",
+                    now_unix_secs(),
+                ) {
+                    Ok(cards) => cards,
+                    Err(err) => {
+                        return trust_fail(
+                            "trust.list",
+                            args.json,
+                            anyhow::anyhow!(err.to_string()),
+                        );
+                    }
+                };
                 let filtered =
                     filter_trust_cards_for_trust_command(cards, risk_filter, args.revoked);
                 println!(
@@ -29450,7 +29903,10 @@ fn main() -> Result<()> {
                     .project_path
                     .as_deref()
                     .unwrap_or_else(|| Path::new("."));
-                let report = run_trust_scan(project_root, args.deep, args.audit)?;
+                let report = match run_trust_scan(project_root, args.deep, args.audit) {
+                    Ok(report) => report,
+                    Err(err) => return trust_fail("trust.scan", args.json, err),
+                };
                 if args.json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
@@ -29496,18 +29952,35 @@ fn main() -> Result<()> {
             TrustCommand::Quarantine(args) => {
                 // Prepare receipt export context upfront - fails immediately if receipt export
                 // is requested but signing material is unavailable (sign-or-fail).
-                let receipt_export_ctx = prepare_receipt_export_context(
+                let receipt_export_ctx = match prepare_receipt_export_context(
                     args.receipt_out.as_deref(),
                     args.receipt_summary_out.as_deref(),
                     args.receipt_signing_key.as_deref(),
-                )?;
+                ) {
+                    Ok(ctx) => ctx,
+                    Err(err) => return trust_fail("trust.quarantine", args.json, err),
+                };
                 let now_secs = now_unix_secs();
-                let mut state = trust_card_cli_registry(now_secs)?;
+                let mut state = match trust_card_cli_registry(now_secs) {
+                    Ok(state) => state,
+                    Err(err) => return trust_fail("trust.quarantine", args.json, err),
+                };
                 let updates =
-                    quarantine_trust_cards(&mut state.registry, &args.artifact, now_secs)?;
-                let fleet_incident_id =
-                    append_trust_quarantine_action(Path::new("."), &args.artifact, updates.len())?;
-                persist_trust_card_cli_registry(&state)?;
+                    match quarantine_trust_cards(&mut state.registry, &args.artifact, now_secs) {
+                        Ok(updates) => updates,
+                        Err(err) => return trust_fail("trust.quarantine", args.json, err),
+                    };
+                let fleet_incident_id = match append_trust_quarantine_action(
+                    Path::new("."),
+                    &args.artifact,
+                    updates.len(),
+                ) {
+                    Ok(id) => id,
+                    Err(err) => return trust_fail("trust.quarantine", args.json, err),
+                };
+                if let Err(err) = persist_trust_card_cli_registry(&state) {
+                    return trust_fail("trust.quarantine", args.json, err);
+                }
                 let report = TrustQuarantineCliReport {
                     schema_version: TRUST_QUARANTINE_CLI_SCHEMA_VERSION,
                     command: "trust.quarantine",
@@ -29525,13 +29998,15 @@ fn main() -> Result<()> {
                         render_trust_card_list(&updates)
                     )
                 })?;
-                if let Some(ref ctx) = receipt_export_ctx {
-                    export_signed_receipts(
+                if let Some(ref ctx) = receipt_export_ctx
+                    && let Err(err) = export_signed_receipts(
                         "quarantine",
                         "trust-control-plane",
                         "Quarantine decision exported for incident forensics",
                         ctx,
-                    )?;
+                    )
+                {
+                    return trust_fail("trust.quarantine", args.json, err);
                 }
             }
             TrustCommand::Release(args) => {
@@ -29539,31 +30014,52 @@ fn main() -> Result<()> {
             }
             TrustCommand::Sync(args) => {
                 let now_secs = now_unix_secs();
-                let mut state = trust_card_cli_registry(now_secs)?;
-                let sync_report = state
-                    .registry
-                    .sync_cache(now_secs, "trace-cli-trust-sync", args.force)
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let mut state = match trust_card_cli_registry(now_secs) {
+                    Ok(state) => state,
+                    Err(err) => return trust_fail("trust.sync", args.json, err),
+                };
+                let sync_report =
+                    match state
+                        .registry
+                        .sync_cache(now_secs, "trace-cli-trust-sync", args.force)
+                    {
+                        Ok(report) => report,
+                        Err(err) => {
+                            return trust_fail(
+                                "trust.sync",
+                                args.json,
+                                anyhow::anyhow!(err.to_string()),
+                            );
+                        }
+                    };
                 let audit_report = refresh_trust_sync_audit_with(
                     &mut state,
                     now_secs,
                     args.force,
                     fetch_trust_scan_audit_metadata,
                 );
-                if audit_report.refreshed_count > 0 {
-                    persist_trust_card_cli_registry(&state)?;
+                if audit_report.refreshed_count > 0
+                    && let Err(err) = persist_trust_card_cli_registry(&state)
+                {
+                    return trust_fail("trust.sync", args.json, err);
                 }
                 for warning in &audit_report.warnings {
                     eprintln!("warning: {warning}");
                 }
-                let cards = state
-                    .registry
-                    .list(
-                        &TrustCardListFilter::empty(),
-                        "trace-cli-trust-sync",
-                        now_secs,
-                    )
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let cards = match state.registry.list(
+                    &TrustCardListFilter::empty(),
+                    "trace-cli-trust-sync",
+                    now_secs,
+                ) {
+                    Ok(cards) => cards,
+                    Err(err) => {
+                        return trust_fail(
+                            "trust.sync",
+                            args.json,
+                            anyhow::anyhow!(err.to_string()),
+                        );
+                    }
+                };
                 let report = trust_sync_cli_report(&cards, &sync_report, &audit_report, args.force);
                 emit_json_or_human(&report, args.json, || {
                     render_trust_sync_summary_from_report(&report)
@@ -29587,66 +30083,119 @@ fn main() -> Result<()> {
         },
 
         Command::TrustCard(sub) => {
-            handle_trust_card_command(sub)?;
+            let json = match &sub {
+                TrustCardCommand::Show(args) => args.json,
+                TrustCardCommand::Export(args) => args.json,
+                TrustCardCommand::List(args) => args.json,
+                TrustCardCommand::Compare(args) => args.json,
+                TrustCardCommand::Diff(args) => args.json,
+            };
+            let command_name = match &sub {
+                TrustCardCommand::Show(_) => "trust-card.show",
+                TrustCardCommand::Export(_) => "trust-card.export",
+                TrustCardCommand::List(_) => "trust-card.list",
+                TrustCardCommand::Compare(_) => "trust-card.compare",
+                TrustCardCommand::Diff(_) => "trust-card.diff",
+            };
+            if let Err(err) = handle_trust_card_command(sub) {
+                return trust_card_fail(command_name, json, err);
+            }
         }
 
         Command::Fleet(sub) => match sub {
             FleetCommand::Status(args) => {
                 let zone_id = args.zone.unwrap_or_else(|| "all".to_string());
-                let report = fleet_status_report(Path::new("."), &zone_id)?;
-                emit_fleet_status_report(&report, args.json, args.verbose)?;
+                let report = match fleet_status_report(Path::new("."), &zone_id) {
+                    Ok(report) => report,
+                    Err(err) => return fleet_fail("fleet.status", args.json, err),
+                };
+                if let Err(err) = emit_fleet_status_report(&report, args.json, args.verbose) {
+                    return fleet_fail("fleet.status", args.json, err);
+                }
             }
             FleetCommand::Describe(args) => {
-                let report =
-                    fleet_describe_report(Path::new("."), &args.node_id, args.zone.as_deref())?;
-                emit_fleet_node_report(&report, args.json)?;
+                let report = match fleet_describe_report(
+                    Path::new("."),
+                    &args.node_id,
+                    args.zone.as_deref(),
+                ) {
+                    Ok(report) => report,
+                    Err(err) => return fleet_fail("fleet.describe", args.json, err),
+                };
+                if let Err(err) = emit_fleet_node_report(&report, args.json) {
+                    return fleet_fail("fleet.describe", args.json, err);
+                }
             }
             FleetCommand::Release(args) => {
                 let identity = fleet_cli_identity();
                 let trace = fleet_cli_trace("trace-cli-fleet-release");
-                let loaded = load_fleet_state(Path::new("."))?;
-                let incident = loaded
+                let loaded = match load_fleet_state(Path::new(".")) {
+                    Ok(loaded) => loaded,
+                    Err(err) => return fleet_fail("fleet.release", args.json, err),
+                };
+                let incident = match loaded
                     .active_incidents
                     .iter()
                     .find(|incident| incident.incident_id == args.incident)
                     .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("incident `{}` not found", args.incident))?;
-                let fleet_signing_material = load_fleet_signing_material()?;
-                let (_, state_dir, mut transport) = open_fleet_transport(Path::new("."))?;
+                {
+                    Some(incident) => incident,
+                    None => {
+                        return fleet_fail(
+                            "fleet.release",
+                            args.json,
+                            format!("incident `{}` not found", args.incident),
+                        );
+                    }
+                };
+                let fleet_signing_material = match load_fleet_signing_material() {
+                    Ok(material) => material,
+                    Err(err) => return fleet_fail("fleet.release", args.json, err),
+                };
+                let (_, state_dir, mut transport) = match open_fleet_transport(Path::new(".")) {
+                    Ok(transport) => transport,
+                    Err(err) => return fleet_fail("fleet.release", args.json, err),
+                };
                 let operation_id = fleet_operation_id("release");
                 let release_emitted_at = Utc::now();
                 let issued_at = release_emitted_at.to_rfc3339();
-                transport
-                    .publish_action(&PersistedFleetActionRecord {
-                        action_id: operation_id.clone(),
-                        emitted_at: release_emitted_at,
-                        action: PersistedFleetAction::Release {
-                            zone_id: incident.zone_id.clone(),
-                            incident_id: incident.incident_id.clone(),
-                            reason: Some("manual release via fleet CLI".to_string()),
-                        },
-                    })
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                if let Err(err) = transport.publish_action(&PersistedFleetActionRecord {
+                    action_id: operation_id.clone(),
+                    emitted_at: release_emitted_at,
+                    action: PersistedFleetAction::Release {
+                        zone_id: incident.zone_id.clone(),
+                        incident_id: incident.incident_id.clone(),
+                        reason: Some("manual release via fleet CLI".to_string()),
+                    },
+                }) {
+                    return fleet_fail("fleet.release", args.json, err.to_string());
+                }
                 let (converged_state, timed_out, elapsed_ms) =
-                    wait_for_fleet_cli_release_convergence(
+                    match wait_for_fleet_cli_release_convergence(
                         Path::new("."),
                         &incident.zone_id,
                         &incident.incident_id,
                         release_emitted_at,
-                    )?;
+                    ) {
+                        Ok(result) => result,
+                        Err(err) => return fleet_fail("fleet.release", args.json, err),
+                    };
                 let convergence = fleet_release_convergence_state(
                     &converged_state,
                     &incident.zone_id,
                     release_emitted_at,
                 );
                 if timed_out {
-                    anyhow::bail!(
-                        "fleet release convergence timed out after {}s for incident `{}`",
-                        converged_state.convergence_timeout_seconds,
-                        incident.incident_id
+                    return fleet_fail(
+                        "fleet.release",
+                        args.json,
+                        format!(
+                            "fleet release convergence timed out after {}s for incident `{}`",
+                            converged_state.convergence_timeout_seconds, incident.incident_id
+                        ),
                     );
                 }
-                let report = fleet_action_report(
+                let report = match fleet_action_report(
                     Path::new("."),
                     &incident.zone_id,
                     FleetActionResult {
@@ -29669,57 +30218,95 @@ fn main() -> Result<()> {
                         trace_id: trace.trace_id.clone(),
                         event_code: FLEET_RELEASED.to_string(),
                     },
-                    Some(build_fleet_convergence_receipt(
-                        &operation_id,
-                        FLEET_RELEASED,
-                        timed_out,
-                        elapsed_ms,
-                        converged_state.convergence_timeout_seconds,
-                        Some(convergence),
-                        &fleet_signing_material,
-                    )?),
-                )?;
+                    Some(
+                        match build_fleet_convergence_receipt(
+                            &operation_id,
+                            FLEET_RELEASED,
+                            timed_out,
+                            elapsed_ms,
+                            converged_state.convergence_timeout_seconds,
+                            Some(convergence),
+                            &fleet_signing_material,
+                        ) {
+                            Ok(receipt) => receipt,
+                            Err(err) => return fleet_fail("fleet.release", args.json, err),
+                        },
+                    ),
+                ) {
+                    Ok(report) => report,
+                    Err(err) => return fleet_fail("fleet.release", args.json, err),
+                };
                 debug_assert_eq!(report.state_dir, state_dir);
-                emit_fleet_action_report(&report, args.json)?;
+                if let Err(err) = emit_fleet_action_report(&report, args.json) {
+                    return fleet_fail("fleet.release", args.json, err);
+                }
             }
             FleetCommand::Reconcile(args) => {
                 let identity = fleet_cli_identity();
                 let trace = fleet_cli_trace("trace-cli-fleet-reconcile");
-                let loaded = load_fleet_state(Path::new("."))?;
+                let loaded = match load_fleet_state(Path::new(".")) {
+                    Ok(loaded) => loaded,
+                    Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
+                };
                 if !loaded.stale_nodes.is_empty() && !loaded.active_incidents.is_empty() {
-                    let (_, _, mut transport) = open_fleet_transport(Path::new("."))?;
+                    let (_, _, mut transport) = match open_fleet_transport(Path::new(".")) {
+                        Ok(transport) => transport,
+                        Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
+                    };
                     let republished_at = Utc::now();
                     for incident in &loaded.active_incidents {
-                        transport
-                            .publish_action(&PersistedFleetActionRecord {
-                                action_id: fleet_operation_id("reconcile-republish"),
-                                emitted_at: republished_at,
-                                action: PersistedFleetAction::Quarantine {
-                                    zone_id: incident.zone_id.clone(),
-                                    incident_id: incident.incident_id.clone(),
-                                    target_id: incident.target_id.clone(),
-                                    target_kind: incident.target_kind,
-                                    reason: incident.reason.clone(),
-                                    quarantine_version: incident.quarantine_version,
-                                },
-                            })
-                            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                        if let Err(err) = transport.publish_action(&PersistedFleetActionRecord {
+                            action_id: fleet_operation_id("reconcile-republish"),
+                            emitted_at: republished_at,
+                            action: PersistedFleetAction::Quarantine {
+                                zone_id: incident.zone_id.clone(),
+                                incident_id: incident.incident_id.clone(),
+                                target_id: incident.target_id.clone(),
+                                target_kind: incident.target_kind,
+                                reason: incident.reason.clone(),
+                                quarantine_version: incident.quarantine_version,
+                            },
+                        }) {
+                            return fleet_fail("fleet.reconcile", args.json, err.to_string());
+                        }
                     }
                 }
 
                 let operation_id = fleet_operation_id("reconcile");
                 let (converged_state, timed_out, elapsed_ms) =
-                    wait_for_fleet_cli_convergence(Path::new("."))?;
+                    match wait_for_fleet_cli_convergence(Path::new(".")) {
+                        Ok(result) => result,
+                        Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
+                    };
                 let convergence = aggregate_convergence(&converged_state.active_incidents);
-                let fleet_signing_material = load_fleet_signing_material()?;
+                let fleet_signing_material = match load_fleet_signing_material() {
+                    Ok(material) => material,
+                    Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
+                };
                 let issued_at = Utc::now().to_rfc3339();
                 if timed_out {
-                    anyhow::bail!(
-                        "fleet reconcile convergence timed out after {}s",
-                        converged_state.convergence_timeout_seconds
+                    return fleet_fail(
+                        "fleet.reconcile",
+                        args.json,
+                        format!(
+                            "fleet reconcile convergence timed out after {}s",
+                            converged_state.convergence_timeout_seconds
+                        ),
                     );
                 }
-                let report = fleet_action_report(
+                let convergence_receipt = match build_fleet_convergence_receipt(
+                    &operation_id,
+                    FLEET_RECONCILE_COMPLETED,
+                    timed_out,
+                    elapsed_ms,
+                    converged_state.convergence_timeout_seconds,
+                    convergence.clone(),
+                    &fleet_signing_material,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
+                };
+                let report = match fleet_action_report(
                     Path::new("."),
                     "all",
                     FleetActionResult {
@@ -29738,50 +30325,84 @@ fn main() -> Result<()> {
                         trace_id: trace.trace_id.clone(),
                         event_code: FLEET_RECONCILE_COMPLETED.to_string(),
                     },
-                    Some(build_fleet_convergence_receipt(
-                        &operation_id,
-                        FLEET_RECONCILE_COMPLETED,
-                        timed_out,
-                        elapsed_ms,
-                        converged_state.convergence_timeout_seconds,
-                        convergence,
-                        &fleet_signing_material,
-                    )?),
-                )?;
-                emit_fleet_action_report(&report, args.json)?;
+                    Some(convergence_receipt),
+                ) {
+                    Ok(report) => report,
+                    Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
+                };
+                if let Err(err) = emit_fleet_action_report(&report, args.json) {
+                    return fleet_fail("fleet.reconcile", args.json, err);
+                }
             }
             FleetCommand::Agent(args) => {
                 run_fleet_agent(&args)?;
             }
         },
 
-        Command::Ltv(sub) => match sub {
-            LtvCommand::Attest(args) => {
-                handle_ltv_attest_command(&args)?;
+        Command::Ltv(sub) => {
+            let json = match &sub {
+                LtvCommand::Attest(args) => args.json,
+                LtvCommand::VerifyAsOf(args) => args.json,
+            };
+            let command_name = match &sub {
+                LtvCommand::Attest(_) => "ltv.attest",
+                LtvCommand::VerifyAsOf(_) => "ltv.verify-as-of",
+            };
+            let result = match sub {
+                LtvCommand::Attest(args) => handle_ltv_attest_command(&args),
+                LtvCommand::VerifyAsOf(args) => handle_ltv_verify_as_of_command(&args),
+            };
+            if let Err(err) = result {
+                return ltv_fail(command_name, json, err);
             }
-            LtvCommand::VerifyAsOf(args) => {
-                handle_ltv_verify_as_of_command(&args)?;
-            }
-        },
+        }
 
         Command::Incident(sub) => match sub {
             IncidentCommand::Bundle(args) => {
-                handle_incident_bundle_command(&args)?;
+                if let Err(err) = handle_incident_bundle_command(&args) {
+                    return incident_fail("incident.bundle", args.json, err);
+                }
             }
             IncidentCommand::Replay(args) => {
-                handle_incident_replay_command(&args)?;
+                if let Err(err) = handle_incident_replay_command(&args) {
+                    return incident_fail("incident.replay", args.json, err);
+                }
             }
             IncidentCommand::Counterfactual(args) => {
-                handle_incident_counterfactual_command(&args)?;
+                if let Err(err) = handle_incident_counterfactual_command(&args) {
+                    return incident_fail("incident.counterfactual", args.json, err);
+                }
             }
             IncidentCommand::List(args) => {
-                let severity_filter = parse_incident_severity_filter(args.severity.as_deref())?;
-                let cwd = std::env::current_dir()
-                    .context("failed resolving current working directory for incident list")?;
-                let entries = collect_incident_list_entries(&cwd, severity_filter.as_deref())?;
+                let severity_filter = match parse_incident_severity_filter(args.severity.as_deref())
+                {
+                    Ok(filter) => filter,
+                    Err(err) => return incident_fail("incident.list", args.json, err),
+                };
+                let cwd = match std::env::current_dir() {
+                    Ok(cwd) => cwd,
+                    Err(err) => {
+                        return incident_fail(
+                            "incident.list",
+                            args.json,
+                            anyhow::anyhow!(
+                                "failed resolving current working directory for incident list: {err}"
+                            ),
+                        );
+                    }
+                };
+                let entries = match collect_incident_list_entries(&cwd, severity_filter.as_deref())
+                {
+                    Ok(entries) => entries,
+                    Err(err) => return incident_fail("incident.list", args.json, err),
+                };
                 if args.json {
                     let payload = incident_list_json_payload(&entries, severity_filter.as_deref());
-                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                    let rendered = match serde_json::to_string_pretty(&payload) {
+                        Ok(rendered) => rendered,
+                        Err(err) => return incident_fail("incident.list", true, err),
+                    };
+                    println!("{rendered}");
                 } else {
                     println!(
                         "{}",
@@ -29793,64 +30414,126 @@ fn main() -> Result<()> {
 
         Command::Ops(sub) => match sub {
             OpsCommand::HealthCheck(args) => {
-                let project_root = std::env::current_dir()
-                    .context("failed resolving current directory for ops health-check")?;
-                let report = ops_health_check_report(&project_root)?;
-                emit_ops_health_check_report(&report, args.json)?;
+                let result = (|| -> Result<()> {
+                    let project_root = std::env::current_dir()
+                        .context("failed resolving current directory for ops health-check")?;
+                    let report = ops_health_check_report(&project_root)?;
+                    emit_ops_health_check_report(&report, args.json)
+                })();
+                if let Err(err) = result {
+                    return ops_fail("ops.health-check", args.json, err);
+                }
             }
             OpsCommand::ResourceGovernor(args) => {
-                let report = ops_resource_governor_report(&args)?;
-                emit_ops_resource_governor_report(&report, args.json)?;
+                let result = (|| -> Result<()> {
+                    let report = ops_resource_governor_report(&args)?;
+                    emit_ops_resource_governor_report(&report, args.json)
+                })();
+                if let Err(err) = result {
+                    return ops_fail("ops.resource-governor", args.json, err);
+                }
             }
             OpsCommand::ValidationReadiness(args) => {
-                let report = ops_validation_readiness_report(&args)?;
-                emit_ops_validation_readiness_report(&report, args.json)?;
+                let result = (|| -> Result<()> {
+                    let report = ops_validation_readiness_report(&args)?;
+                    emit_ops_validation_readiness_report(&report, args.json)
+                })();
+                if let Err(err) = result {
+                    return ops_fail("ops.validation-readiness", args.json, err);
+                }
             }
             OpsCommand::ValidationCloseout(args) => {
-                let report = ops_validation_closeout_report(&args)?;
-                emit_ops_validation_closeout_report(&report, args.json)?;
+                let result = (|| -> Result<()> {
+                    let report = ops_validation_closeout_report(&args)?;
+                    emit_ops_validation_closeout_report(&report, args.json)
+                })();
+                if let Err(err) = result {
+                    return ops_fail("ops.validation-closeout", args.json, err);
+                }
             }
             OpsCommand::ConfigAudit(args) => {
-                let report = ops_config_audit_report(&args)?;
-                if args.json {
-                    println!("{}", serde_json::to_string_pretty(&report)?);
-                } else {
-                    emit_operator_surface_output(
-                        "ops-config-audit",
-                        &render_ops_config_audit_report_human(&report),
-                    )?;
+                let result = (|| -> Result<()> {
+                    let report = ops_config_audit_report(&args)?;
+                    if args.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        emit_operator_surface_output(
+                            "ops-config-audit",
+                            &render_ops_config_audit_report_human(&report),
+                        )?;
+                    }
+                    Ok(())
+                })();
+                if let Err(err) = result {
+                    return ops_fail("ops.config-audit", args.json, err);
                 }
             }
             OpsCommand::Metrics(args) => {
-                let report = ops_metrics_report(Path::new("."))?;
-                emit_ops_metrics_report(&report, args.format, args.json)?;
+                let result = (|| -> Result<()> {
+                    let report = ops_metrics_report(Path::new("."))?;
+                    emit_ops_metrics_report(&report, args.format, args.json)
+                })();
+                if let Err(err) = result {
+                    return ops_fail("ops.metrics", args.json, err);
+                }
             }
             OpsCommand::ProofCarryingEvidence(args) => {
-                handle_ops_proof_carrying_evidence(&args)?;
+                if let Err(err) = handle_ops_proof_carrying_evidence(&args) {
+                    return ops_fail("ops.proof-carrying-evidence", args.json, err);
+                }
             }
             OpsCommand::CompatCorpusRun(args) => {
-                handle_ops_compat_corpus_run(&args)?;
+                if let Err(err) = handle_ops_compat_corpus_run(&args) {
+                    return ops_fail("ops.compat-corpus-run", args.json, err);
+                }
             }
         },
 
         Command::Registry(sub) => match sub {
             RegistryCommand::Publish(args) => {
-                handle_registry_publish(&args)?;
+                if let Err(err) = handle_registry_publish(&args) {
+                    if args.json {
+                        emit_registry_publish_error_json(&err.to_string())?;
+                        fail_closed_after_json();
+                    }
+                    return Err(err);
+                }
             }
             RegistryCommand::Search(args) => {
-                handle_registry_search(&args)?;
+                if let Err(err) = handle_registry_search(&args) {
+                    return registry_fail("registry.search", args.json, err);
+                }
             }
             RegistryCommand::Verify(args) => {
-                handle_registry_verify(&args)?;
+                if let Err(err) = handle_registry_verify(&args) {
+                    return registry_fail("registry.verify", args.json, err);
+                }
             }
             RegistryCommand::Gc(args) => {
-                handle_registry_gc(&args)?;
+                if let Err(err) = handle_registry_gc(&args) {
+                    return registry_fail("registry.gc", args.json, err);
+                }
             }
         },
 
         Command::Bench(sub) => match sub {
             BenchCommand::Run(args) => {
-                handle_bench_run(&args)?;
+                if let Err(err) = handle_bench_run(&args) {
+                    let message = err.to_string();
+                    if args.json {
+                        let error_report = BenchRunErrorCliReport {
+                            schema_version: BENCH_RUN_ERROR_CLI_SCHEMA_VERSION,
+                            command: "bench.run",
+                            ok: false,
+                            error: message.as_str(),
+                            scenario: args.scenario.as_deref(),
+                            fixture_mode: args.fixture_mode,
+                        };
+                        println!("{}", serde_json::to_string_pretty(&error_report)?);
+                        fail_closed_after_json();
+                    }
+                    return Err(err);
+                }
             }
         },
 
@@ -30232,6 +30915,12 @@ mod ops_metrics_tests {
         .expect("write fleet actions log");
 
         let report = ops_metrics_report(root).expect("collect ops metrics report");
+        assert_eq!(report.schema_version, OPS_METRICS_CLI_SCHEMA_VERSION);
+        assert_eq!(report.command, "ops.metrics");
+        assert_eq!(
+            report.health.schema_version,
+            OPS_HEALTH_CHECK_CLI_SCHEMA_VERSION
+        );
         assert_eq!(report.health.active_session_count, 0);
         assert!(report.health.pass, "expected health-check to pass");
         assert!(
@@ -30264,6 +30953,8 @@ mod ops_metrics_tests {
         std::fs::write(sessions.join("sess-1"), "ok").expect("write session file");
         std::fs::write(sessions.join("sess-2"), "ok").expect("write session file");
         let report = ops_health_check_report(root).expect("health-check report");
+        assert_eq!(report.schema_version, OPS_HEALTH_CHECK_CLI_SCHEMA_VERSION);
+        assert_eq!(report.command, "ops.health-check");
         assert_eq!(report.active_session_count, 2);
     }
 }

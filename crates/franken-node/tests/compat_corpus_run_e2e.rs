@@ -1549,6 +1549,18 @@ fn compat_corpus_run_cli_emits_genuine_digest_bound_artifact() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let summary: Value = serde_json::from_slice(&output.stdout)
+        .expect("compat-corpus-run --json stdout must be JSON");
+    assert_eq!(
+        summary["schema_version"],
+        "franken-node/ops-compat-corpus-run-cli/v1"
+    );
+    assert_eq!(summary["command"], "ops.compat-corpus-run");
+    assert_eq!(
+        summary["out"], "artifacts/corpus_results.json",
+        "stdout envelope must point at --out rather than pretending to be the artifact"
+    );
+
     let artifact: Value = serde_json::from_str(
         &std::fs::read_to_string(work.path().join("artifacts/corpus_results.json"))
             .expect("read artifact"),

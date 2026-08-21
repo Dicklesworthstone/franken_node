@@ -71,3 +71,80 @@ fn migrate_audit_accepts_matching_json_output_target() {
     assert_eq!(args.format, "json");
     assert_eq!(args.out, Some(PathBuf::from("audit.json")));
 }
+
+#[test]
+fn migrate_audit_json_flag_selects_json_format() {
+    let cli = parse(&["franken-node", "migrate", "audit", "fixture-app", "--json"])
+        .expect("--json should select json format");
+
+    let Command::Migrate(MigrateCommand::Audit(args)) = cli.command else {
+        panic!("expected migrate audit command");
+    };
+    assert_eq!(args.format, "json");
+}
+
+#[test]
+fn migrate_audit_json_conflicts_with_non_json_format() {
+    let err = parse(&[
+        "franken-node",
+        "migrate",
+        "audit",
+        "fixture-app",
+        "--format",
+        "sarif",
+        "--json",
+        "--out",
+        "audit.sarif",
+    ])
+    .expect_err("--json must not silently override --format sarif");
+
+    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn migrate_validate_json_flag_parses() {
+    let cli = parse(&[
+        "franken-node",
+        "migrate",
+        "validate",
+        "fixture-app",
+        "--json",
+    ])
+    .expect("--json should parse on migrate validate");
+
+    let Command::Migrate(MigrateCommand::Validate(args)) = cli.command else {
+        panic!("expected migrate validate command");
+    };
+    assert!(args.json);
+}
+
+#[test]
+fn migrate_report_json_flag_parses() {
+    let cli = parse(&["franken-node", "migrate-report", "fixture-app", "--json"])
+        .expect("--json should parse on migrate-report");
+
+    let Command::MigrateReport(args) = cli.command else {
+        panic!("expected migrate-report command");
+    };
+    assert!(args.json);
+    assert_eq!(args.format, "json");
+}
+
+#[test]
+fn migrate_report_json_conflicts_with_html_format() {
+    let cli = parse(&[
+        "franken-node",
+        "migrate-report",
+        "fixture-app",
+        "--format",
+        "html",
+        "--json",
+    ])
+    .expect("clap should accept both flags; handler fail-closes the conflict");
+
+    let Command::MigrateReport(args) = cli.command else {
+        panic!("expected migrate-report command");
+    };
+    assert!(args.json);
+    assert_eq!(args.format, "html");
+}

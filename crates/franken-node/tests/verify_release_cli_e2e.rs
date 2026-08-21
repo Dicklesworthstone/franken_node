@@ -1073,6 +1073,13 @@ fn verify_compatibility_accepts_current_binary_runtime() {
     );
     assert_eq!(payload["details"]["compatible"], true);
     assert_eq!(payload["details"]["known_issues"], serde_json::json!([]));
+    let smoke = payload["details"]["smoke_output"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        smoke.contains("compat-smoke-ok"),
+        "franken-node compatibility smoke must execute guest JS, got smoke_output={smoke:?}"
+    );
 }
 
 #[test]

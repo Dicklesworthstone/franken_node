@@ -604,6 +604,80 @@ fn incident_bundle_fails_closed_when_authoritative_evidence_is_missing() {
 }
 
 #[test]
+fn incident_list_json_fails_closed_for_unknown_severity() {
+    let workspace = config_only_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &["incident", "list", "--severity", "apocalyptic", "--json"],
+    );
+    assert!(
+        !output.status.success(),
+        "incident list --json should fail for an unknown severity"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("incident list --json unknown-severity stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.list");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("invalid --severity `apocalyptic`"),
+        "unknown-severity --json must name the invalid severity: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: invalid --severity"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
+fn incident_counterfactual_json_fails_closed_for_production_model() {
+    let workspace = config_only_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident",
+            "counterfactual",
+            "--bundle",
+            "missing.fnbundle",
+            "--policy",
+            "strict",
+            "--model",
+            "production",
+            "--json",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "incident counterfactual --json should fail for --model production"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("incident counterfactual --json production-model stdout must be JSON");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "incident.counterfactual");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains(
+            "counterfactual --model production requires the runtime's real policy decision"
+        ),
+        "production-model --json must name the honest gate: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error: counterfactual --model production"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn incident_bundle_receipt_export_fails_when_signing_key_missing() {
     let workspace = config_only_workspace();
     let evidence_path = workspace

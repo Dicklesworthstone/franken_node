@@ -346,6 +346,47 @@ fn runtime_lane_assign_routes_task_class() {
 }
 
 #[test]
+fn runtime_lane_assign_json_fails_closed_for_unknown_class() {
+    let mut command = franken_node();
+    let output = command
+        .args([
+            "runtime",
+            "lane",
+            "assign",
+            "not-a-real-task-class",
+            "--json",
+        ])
+        .output()
+        .expect("run runtime lane assign --json");
+    assert!(
+        !output.status.success(),
+        "unknown task class --json should fail closed"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!("runtime lane assign --json unknown-class stdout must be JSON ({err}):\n{stdout}")
+    });
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/runtime-error-cli/v1"
+    );
+    assert_eq!(payload["command"], "runtime.lane.assign");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("unknown")
+            || error.contains("task class")
+            || error.contains("not-a-real-task-class"),
+        "unknown-class --json must name the mapping failure: {payload}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Error:"),
+        "--json must not append a second human Error line after the JSON report: {stderr}"
+    );
+}
+
+#[test]
 fn runtime_epoch_reports_mismatch_delta() {
     let mut command = franken_node();
     command.args([
