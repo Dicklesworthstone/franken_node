@@ -9944,6 +9944,28 @@ fn apply_sentinel_subject_quarantine_gate(
     })
 }
 
+fn emit_trust_error_json(command: &str, message: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "franken-node/trust-error-cli/v1",
+            "command": command,
+            "ok": false,
+            "error": message,
+        }))?
+    );
+    Ok(())
+}
+
+fn trust_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Result<()> {
+    let message = error.to_string();
+    if json {
+        emit_trust_error_json(command, &message)?;
+        fail_closed_after_json();
+    }
+    anyhow::bail!("{message}")
+}
+
 fn emit_trust_release_error_json(message: &str) -> Result<()> {
     println!(
         "{}",
@@ -29438,23 +29460,37 @@ fn main() -> Result<()> {
             TrustCommand::Revoke(args) => {
                 // Prepare receipt export context upfront - fails immediately if receipt export
                 // is requested but signing material is unavailable (sign-or-fail).
-                let receipt_export_ctx = prepare_receipt_export_context(
+                let receipt_export_ctx = match prepare_receipt_export_context(
                     args.receipt_out.as_deref(),
                     args.receipt_summary_out.as_deref(),
                     args.receipt_signing_key.as_deref(),
-                )?;
+                ) {
+                    Ok(ctx) => ctx,
+                    Err(err) => return trust_fail("trust.revoke", args.json, err),
+                };
                 let now_secs = now_unix_secs();
-                let mut state = trust_card_cli_registry(now_secs)?;
-                let card = revoke_trust_card(&mut state.registry, &args.extension_id, now_secs)?;
-                persist_trust_card_cli_registry(&state)?;
+                let mut state = match trust_card_cli_registry(now_secs) {
+                    Ok(state) => state,
+                    Err(err) => return trust_fail("trust.revoke", args.json, err),
+                };
+                let card =
+                    match revoke_trust_card(&mut state.registry, &args.extension_id, now_secs) {
+                        Ok(card) => card,
+                        Err(err) => return trust_fail("trust.revoke", args.json, err),
+                    };
+                if let Err(err) = persist_trust_card_cli_registry(&state) {
+                    return trust_fail("trust.revoke", args.json, err);
+                }
                 println!("{}", render_trust_card_for_trust_command(&card, args.json)?);
-                if let Some(ref ctx) = receipt_export_ctx {
-                    export_signed_receipts(
+                if let Some(ref ctx) = receipt_export_ctx
+                    && let Err(err) = export_signed_receipts(
                         "revocation",
                         "trust-control-plane",
                         "Revocation decision exported for audit traceability",
                         ctx,
-                    )?;
+                    )
+                {
+                    return trust_fail("trust.revoke", args.json, err);
                 }
             }
             TrustCommand::Quarantine(args) => {

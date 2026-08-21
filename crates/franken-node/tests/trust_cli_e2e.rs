@@ -1310,6 +1310,29 @@ fn trust_revoke_fails_for_unknown_extension() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("trust card not found"));
     assert!(stderr.contains("fix_command=franken-node trust scan ."));
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &["trust", "revoke", "npm:@does-not/exist", "--json"],
+    );
+    assert!(
+        !json_output.status.success(),
+        "trust revoke --json should fail for unknown extension"
+    );
+    let payload = parse_json_stdout(&json_output, "trust revoke --json unknown extension");
+    assert_eq!(payload["schema_version"], "franken-node/trust-error-cli/v1");
+    assert_eq!(payload["command"], "trust.revoke");
+    assert_eq!(payload["ok"], false);
+    let error = payload["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("trust card not found"),
+        "unknown-extension --json must name the missing card: {payload}"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(
+        !json_stderr.contains("Error: trust card not found"),
+        "--json must not append a second human Error line after the JSON report: {json_stderr}"
+    );
 }
 
 #[test]
