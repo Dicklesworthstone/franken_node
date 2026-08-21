@@ -1233,6 +1233,7 @@ struct LegCapture {
 }
 
 #[cfg(feature = "engine")]
+#[derive(Debug)]
 struct PipeDrainResult {
     retained_bytes: Vec<u8>,
     sha256: String,
@@ -1469,6 +1470,7 @@ fn resolve_corpus_process_executable(alias: &str) -> Result<ChildProcessExecutab
 }
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
+#[derive(Debug)]
 struct ResolvedExecutable {
     path: PathBuf,
     sha256: String,
@@ -2654,23 +2656,30 @@ pub fn build_corpus_results_document_with_references(
                 outcome.test_id
             );
         }
+        let fingerprints = outcome
+            .runtime_observations
+            .iter()
+            .map(|(runtime_id, observation)| {
+                (
+                    runtime_id.clone(),
+                    LockstepObservationKey::from(observation),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         if outcome.status == "pass" {
-            let fingerprints = outcome
-                .runtime_observations
-                .iter()
-                .map(|(runtime_id, observation)| {
-                    (
-                        runtime_id.clone(),
-                        LockstepObservationKey::from(observation),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>();
             if let Err(reason) = passing_lockstep_observations_are_consistent(&fingerprints) {
                 bail!(
                     "corpus outcome `{}` cannot pass with divergent runtime observations: {reason}",
                     outcome.test_id
                 );
             }
+        } else if !has_incomplete_observation
+            && passing_lockstep_observations_are_consistent(&fingerprints).is_ok()
+        {
+            bail!(
+                "corpus outcome `{}` cannot fail when franken matches the node reference",
+                outcome.test_id
+            );
         }
     }
 
@@ -4090,6 +4099,30 @@ mod lockstep_pass_policy_tests {
                 .map(Vec::len)
                 .unwrap_or(usize::MAX),
             0
+        );
+    }
+
+    #[test]
+    fn writer_rejects_triad_fail_when_franken_matches_node() {
+        let mut observations = BTreeMap::new();
+        observations.insert("bun".to_string(), observation('b', 1));
+        observations.insert("node".to_string(), observation('a', 2));
+        observations.insert("franken-engine-native".to_string(), observation('a', 3));
+        let error = build_corpus_results_document_with_references(
+            None,
+            &[outcome("fail", observations)],
+            "compat-corpus-test",
+            "1.3.14-test",
+            Some("v22.14.0"),
+            "2026-08-21T00:00:00Z",
+            "corpus",
+        )
+        .expect_err("Node-canonical observations cannot serialize as fail");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot fail when franken matches the node reference"),
+            "got {error}"
         );
     }
 

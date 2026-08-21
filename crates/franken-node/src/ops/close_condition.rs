@@ -91,6 +91,21 @@ pub struct L1ProductOracle {
     pub pass_rate_pct: f64,
     pub required_pass_rate_pct: f64,
     pub blocking_findings: Vec<String>,
+    /// Rows whose captured observations already satisfy the Node-canonical pass
+    /// rule. May exceed `passed_test_cases` on a stale artifact; does not
+    /// recategorize `child_process` native-eval aborts as pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_canonical_observation_passes: Option<u64>,
+    /// Declared-fail rows whose observations already match Node. Informational;
+    /// does not recategorize `child_process` native-eval aborts as pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_canonical_unscored_fail_ids: Vec<String>,
+    /// Declared `child_process` fails whose franken leg did not match Node.
+    /// Informational only; these remain fail and are never recategorized as pass.
+    /// Counted from `per_test_results` where `api_family=child_process`,
+    /// `status=fail`, and the row is not Node-canonical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_process_native_eval_aborts: Option<u64>,
 }
 
 /// Recompute the canonical content digest over a corpus's per-test results.
@@ -408,6 +423,87 @@ pub fn compute_compatibility_corpus_runtime_observations_digest(
         hash_field(b"elapsed_ms", &observation.elapsed_ms.to_be_bytes())?;
     }
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn lockstep_key_from_observation_json(value: &Value) -> Option<LockstepObservationKey> {
+    Some(LockstepObservationKey {
+        stdout_digest: value.get("stdout_digest")?.as_str()?.to_string(),
+        stderr_digest: value.get("stderr_digest")?.as_str()?.to_string(),
+        stdout_bytes: value.get("stdout_bytes")?.as_u64()?,
+        stderr_bytes: value.get("stderr_bytes")?.as_u64()?,
+        stdout_truncated: value.get("stdout_truncated")?.as_bool()?,
+        stderr_truncated: value.get("stderr_truncated")?.as_bool()?,
+        exit_code: match value.get("exit_code") {
+            Some(Value::Null) | None => None,
+            Some(code) => Some(i32::try_from(code.as_i64()?).ok()?),
+        },
+        termination_kind: value.get("termination_kind")?.as_str()?.to_string(),
+        timed_out: value.get("timed_out")?.as_bool()?,
+    })
+}
+
+/// True when captured triad/dyad observations already satisfy the Node-canonical
+/// pass rule. Does not recategorize `child_process` native-eval aborts (franken
+/// exit != 0 never matches Node's successful exit).
+pub(crate) fn observations_are_node_canonical_pass(row: &Value) -> bool {
+    let Some(observations) = row.get("runtime_observations").and_then(Value::as_object) else {
+        return false;
+    };
+    let mut fingerprints = BTreeMap::new();
+    for (runtime_id, observation) in observations {
+        let Some(key) = lockstep_key_from_observation_json(observation) else {
+            return false;
+        };
+        if key.timed_out || key.stdout_truncated || key.stderr_truncated {
+            return false;
+        }
+        fingerprints.insert(runtime_id.clone(), key);
+    }
+    passing_lockstep_observations_are_consistent(&fingerprints).is_ok()
+}
+
+fn count_node_canonical_observation_passes(data: &Value) -> Option<u64> {
+    let rows = data.get("per_test_results")?.as_array()?;
+    u64::try_from(
+        rows.iter()
+            .filter(|row| observations_are_node_canonical_pass(row))
+            .count(),
+    )
+    .ok()
+}
+
+fn count_child_process_native_eval_aborts(data: &Value) -> Option<u64> {
+    let rows = data.get("per_test_results")?.as_array()?;
+    u64::try_from(
+        rows.iter()
+            .filter(|row| {
+                row.get("api_family").and_then(Value::as_str) == Some("child_process")
+                    && row.get("status").and_then(Value::as_str) == Some("fail")
+                    && !observations_are_node_canonical_pass(row)
+            })
+            .count(),
+    )
+    .ok()
+}
+
+fn node_canonical_unscored_fail_ids(data: &Value) -> Vec<String> {
+    let Some(rows) = data.get("per_test_results").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = rows
+        .iter()
+        .filter_map(|row| {
+            if row.get("status")?.as_str()? != "fail" {
+                return None;
+            }
+            if !observations_are_node_canonical_pass(row) {
+                return None;
+            }
+            Some(row.get("test_id")?.as_str()?.to_string())
+        })
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// Validate and re-derive the complete run-specific observation binding from
@@ -897,6 +993,9 @@ fn evaluate_l1_product_oracle(root: &Path) -> L1ProductOracle {
                 pass_rate_pct: 0.0,
                 required_pass_rate_pct: 0.0,
                 blocking_findings: vec![err],
+                node_canonical_observation_passes: None,
+                node_canonical_unscored_fail_ids: Vec::new(),
+                child_process_native_eval_aborts: None,
             };
         }
     };
@@ -965,6 +1064,9 @@ fn evaluate_l1_product_oracle(root: &Path) -> L1ProductOracle {
         pass_rate_pct,
         required_pass_rate_pct,
         blocking_findings,
+        node_canonical_observation_passes: count_node_canonical_observation_passes(&data),
+        node_canonical_unscored_fail_ids: node_canonical_unscored_fail_ids(&data),
+        child_process_native_eval_aborts: count_child_process_native_eval_aborts(&data),
     }
 }
 
@@ -2393,6 +2495,71 @@ mod tests {
     }
 
     #[test]
+    fn node_canonical_observation_pass_does_not_recategorize_child_process_abort() {
+        let mut matching = triad_pass_rows(&format!("sha256:{}", "b".repeat(64)), true);
+        matching[0]["status"] = serde_json::json!("fail");
+        assert!(
+            super::observations_are_node_canonical_pass(&matching[0]),
+            "franken matching node must be a Node-canonical pass even when status is still fail"
+        );
+        let counted = super::count_node_canonical_observation_passes(&serde_json::json!({
+            "per_test_results": matching,
+        }));
+        assert_eq!(
+            counted,
+            Some(1),
+            "stale fail status still counts as a Node-canonical observation pass"
+        );
+        assert_eq!(
+            super::node_canonical_unscored_fail_ids(&serde_json::json!({
+                "per_test_results": matching,
+            })),
+            vec!["tc::net::0005".to_string()],
+            "stale Node-matching fail ids must be named without changing pass/fail"
+        );
+        assert_eq!(
+            super::count_child_process_native_eval_aborts(&serde_json::json!({
+                "per_test_results": matching,
+            })),
+            Some(0),
+            "Node-matching net fail must not be counted as a child_process abort"
+        );
+
+        let mut abort = matching;
+        abort[0]["api_family"] = serde_json::json!("child_process");
+        abort[0]["runtime_observations"]["franken-engine-native"]["exit_code"] =
+            serde_json::json!(1);
+        abort[0]["runtime_observations"]["franken-engine-native"]["stdout_digest"] =
+            serde_json::json!(format!("sha256:{}", "c".repeat(64)));
+        assert!(
+            !super::observations_are_node_canonical_pass(&abort[0]),
+            "child_process native-eval abort must stay fail"
+        );
+        let abort_counted = super::count_node_canonical_observation_passes(&serde_json::json!({
+            "per_test_results": abort,
+        }));
+        assert_eq!(
+            abort_counted,
+            Some(0),
+            "child_process abort must not inflate node_canonical_observation_passes"
+        );
+        assert!(
+            super::node_canonical_unscored_fail_ids(&serde_json::json!({
+                "per_test_results": abort,
+            }))
+            .is_empty(),
+            "child_process abort must not appear in node_canonical_unscored_fail_ids"
+        );
+        assert_eq!(
+            super::count_child_process_native_eval_aborts(&serde_json::json!({
+                "per_test_results": abort,
+            })),
+            Some(1),
+            "child_process abort must stay counted as a native-eval abort, not a pass"
+        );
+    }
+
+    #[test]
     fn passing_triad_refuses_when_franken_matches_only_bun() {
         let per_test_results = triad_pass_rows(&format!("sha256:{}", "b".repeat(64)), false);
         let error = compute_compatibility_corpus_runtime_observations_digest(
@@ -2415,7 +2582,7 @@ mod tests {
     fn runtime_observations_refuse_forged_over_cap_stream_state() {
         let mut data = corpus_totals_json(1, 0, 100.0);
         data["per_test_results"][0]["runtime_observations"]["bun"]["stdout_bytes"] =
-            serde_json::json!(super::compat_corpus_run::MAX_LEG_OUTPUT_BYTES as u64 + 1);
+            serde_json::json!(crate::ops::compat_corpus_run::MAX_LEG_OUTPUT_BYTES as u64 + 1);
         let error = validate_compatibility_corpus_runtime_observations(&data)
             .expect_err("over-cap stream without truncation must fail closed");
         assert!(error.to_string().contains("inconsistent stream truncation"));
@@ -3143,6 +3310,9 @@ mod tests {
                     pass_rate_pct: 100.0,
                     required_pass_rate_pct: 95.0,
                     blocking_findings: l1_findings,
+                    node_canonical_observation_passes: None,
+                    node_canonical_unscored_fail_ids: Vec::new(),
+                    child_process_native_eval_aborts: None,
                 },
                 l2_engine_boundary_oracle: L2EngineBoundaryOracle {
                     verdict: OracleColor::Green,

@@ -177,6 +177,9 @@ impl From<RawCloseConditionReceipt> for CloseConditionReceipt {
             pass_rate_pct: raw.l1_product_oracle.pass_rate_pct,
             required_pass_rate_pct: raw.l1_product_oracle.required_pass_rate_pct,
             blocking_findings: Vec::new(),
+            node_canonical_observation_passes: None,
+            node_canonical_unscored_fail_ids: Vec::new(),
+            child_process_native_eval_aborts: None,
         };
 
         let l2_checks: Vec<SplitContractCheck> = raw
