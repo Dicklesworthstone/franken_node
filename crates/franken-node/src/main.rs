@@ -642,6 +642,18 @@ struct TrustSyncCliReport {
     warnings: Vec<String>,
 }
 
+const TRUST_QUARANTINE_CLI_SCHEMA_VERSION: &str = "franken-node/trust-quarantine-cli/v1";
+
+#[derive(Debug, Serialize)]
+struct TrustQuarantineCliReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    artifact: &'a str,
+    affected_cards: usize,
+    fleet_incident_id: &'a str,
+    cards: &'a [TrustCard],
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum TrustViolationKind {
@@ -6446,6 +6458,18 @@ fn handle_migrate_report(args: &MigrateReportArgs) -> Result<()> {
     Ok(())
 }
 
+const BENCH_RUN_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/bench-run-error/v1";
+
+#[derive(Debug, Serialize)]
+struct BenchRunErrorCliReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    ok: bool,
+    error: &'a str,
+    scenario: Option<&'a str>,
+    fixture_mode: bool,
+}
+
 fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
     let mut config = BenchmarkSuiteConfig::for_cli();
     if let Some(output) = &args.output {
@@ -6456,12 +6480,28 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
     } else {
         BenchmarkEvidenceMode::Measured
     };
-    let report = benchmark_suite_run_default_suite_with_config_and_mode(
+    let report = match benchmark_suite_run_default_suite_with_config_and_mode(
         config,
         args.scenario.as_deref(),
         evidence_mode,
-    )
-    .map_err(|err| anyhow::anyhow!("benchmark suite run failed: {err}"))?;
+    ) {
+        Ok(report) => report,
+        Err(err) => {
+            let message = format!("benchmark suite run failed: {err}");
+            if args.json {
+                let error_report = BenchRunErrorCliReport {
+                    schema_version: BENCH_RUN_ERROR_CLI_SCHEMA_VERSION,
+                    command: "bench.run",
+                    ok: false,
+                    error: message.as_str(),
+                    scenario: args.scenario.as_deref(),
+                    fixture_mode: args.fixture_mode,
+                };
+                println!("{}", serde_json::to_string_pretty(&error_report)?);
+            }
+            anyhow::bail!("{message}");
+        }
+    };
     let rendered =
         benchmark_suite_to_json(&report).context("failed serializing benchmark suite report")?;
     if let Some(output) = &args.output {
@@ -6473,7 +6513,9 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
         })?;
     }
     println!("{rendered}");
-    eprintln!("{}", benchmark_suite_render_human_summary(&report));
+    if !args.json {
+        eprintln!("{}", benchmark_suite_render_human_summary(&report));
+    }
     Ok(())
 }
 
@@ -16117,7 +16159,11 @@ fn handle_remotecap_use(args: &RemoteCapUseArgs) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "franken-node/remotecap-use-cli/v1",
+                "command": "remotecap.use",
                 "allowed": true,
+                "dry_run": true,
+                "request_executed": false,
                 "token_id": cap.token_id(),
                 "operation": operation,
                 "endpoint": args.endpoint,
@@ -16125,11 +16171,12 @@ fn handle_remotecap_use(args: &RemoteCapUseArgs) -> Result<()> {
             }))?
         );
     } else {
-        println!("RemoteCap use authorized");
+        println!("RemoteCap use authorized (dry-run; no HTTP request sent)");
         println!("  token_id: {}", cap.token_id());
         println!("  operation: {operation}");
         println!("  endpoint: {}", args.endpoint);
         println!("  event_code: {}", audit_event.event_code);
+        println!("  request_executed: false");
     }
 
     Ok(())
@@ -20908,28 +20955,67 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
     let artifact_path = registry_relative_display_path(&stored.artifact_path(), &project_root);
     let manifest_path = registry_relative_display_path(&stored.manifest_path, &project_root);
 
-    println!(
-        "registry publish: extension_id={} name={} status={} content_sha256={} publisher_key_id={} signing_key_source={} signing_key_path={} artifact_path={} manifest_path={} integrity={}",
-        published.extension_id,
-        published.name,
-        published.status.label(),
-        content_hash,
-        publisher_key_id,
+    let report = RegistryPublishCliReport {
+        schema_version: REGISTRY_PUBLISH_CLI_SCHEMA_VERSION,
+        command: "registry.publish",
+        extension_id: published.extension_id.as_str(),
+        name: published.name.as_str(),
+        status: published.status.label(),
+        content_sha256: content_hash.as_str(),
+        publisher_key_id: publisher_key_id.as_str(),
         signing_key_source,
-        signing_key_path,
-        artifact_path,
-        manifest_path,
-        verification.status.label()
-    );
-    println!(
-        "registry state: entries={} revocations={} audit_records={} content_hash={}",
-        registry.list(None).len(),
-        registry.revocations().len(),
-        registry.audit_log().len(),
-        registry.content_hash()
-    );
+        signing_key_path: signing_key_path.as_str(),
+        artifact_path: artifact_path.as_str(),
+        manifest_path: manifest_path.as_str(),
+        integrity: verification.status.label(),
+        entries: registry.list(None).len(),
+        revocations: registry.revocations().len(),
+        audit_records: registry.audit_log().len(),
+        state_content_hash: registry.content_hash().to_string(),
+    };
+    emit_json_or_human(&report, args.json, || {
+        format!(
+            "registry publish: extension_id={} name={} status={} content_sha256={} publisher_key_id={} signing_key_source={} signing_key_path={} artifact_path={} manifest_path={} integrity={}\nregistry state: entries={} revocations={} audit_records={} content_hash={}",
+            report.extension_id,
+            report.name,
+            report.status,
+            report.content_sha256,
+            report.publisher_key_id,
+            report.signing_key_source,
+            report.signing_key_path,
+            report.artifact_path,
+            report.manifest_path,
+            report.integrity,
+            report.entries,
+            report.revocations,
+            report.audit_records,
+            report.state_content_hash
+        )
+    })?;
 
     Ok(())
+}
+
+const REGISTRY_PUBLISH_CLI_SCHEMA_VERSION: &str = "franken-node/registry-publish-cli/v1";
+
+#[derive(Debug, Serialize)]
+struct RegistryPublishCliReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    extension_id: &'a str,
+    name: &'a str,
+    status: &'a str,
+    content_sha256: &'a str,
+    publisher_key_id: &'a str,
+    signing_key_source: &'a str,
+    signing_key_path: &'a str,
+    artifact_path: &'a str,
+    manifest_path: &'a str,
+    integrity: &'a str,
+    entries: usize,
+    revocations: usize,
+    audit_records: usize,
+    state_content_hash: String,
 }
 
 fn handle_registry_search(args: &cli::RegistrySearchArgs) -> Result<()> {
@@ -20968,6 +21054,20 @@ fn handle_registry_search(args: &cli::RegistrySearchArgs) -> Result<()> {
     Ok(())
 }
 
+const REGISTRY_VERIFY_CLI_SCHEMA_VERSION: &str = "franken-node/registry-verify-cli/v1";
+
+#[derive(Debug, Serialize)]
+struct RegistryVerifyCliReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    extension_id: &'a str,
+    integrity: &'static str,
+    archived: bool,
+    artifact_path: &'a str,
+    manifest_path: &'a str,
+    detail: &'a str,
+}
+
 fn handle_registry_verify(args: &cli::RegistryVerifyArgs) -> Result<()> {
     let project_root = std::env::current_dir()
         .context("failed resolving current directory for registry verify")?;
@@ -20975,7 +21075,20 @@ fn handle_registry_verify(args: &cli::RegistryVerifyArgs) -> Result<()> {
     let verification = inspect_local_registry_artifact(&artifact);
     let artifact_path = registry_relative_display_path(&verification.artifact_path, &project_root);
     let manifest_path = registry_relative_display_path(&artifact.manifest_path, &project_root);
+    let report = RegistryVerifyCliReport {
+        schema_version: REGISTRY_VERIFY_CLI_SCHEMA_VERSION,
+        command: "registry.verify",
+        extension_id: artifact.manifest.extension.extension_id.as_str(),
+        integrity: verification.status.label(),
+        archived: artifact.archived,
+        artifact_path: artifact_path.as_str(),
+        manifest_path: manifest_path.as_str(),
+        detail: verification.detail.as_str(),
+    };
     if verification.status != RegistryArtifactIntegrityStatus::Verified {
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         anyhow::bail!(
             "registry verify failed: extension_id={} integrity={} archived={} artifact_path={} manifest_path={} detail={}",
             artifact.manifest.extension.extension_id,
@@ -20986,17 +21099,31 @@ fn handle_registry_verify(args: &cli::RegistryVerifyArgs) -> Result<()> {
             verification.detail
         );
     }
-
-    println!(
-        "registry verify: extension_id={} integrity={} archived={} artifact_path={} manifest_path={} detail={}",
-        artifact.manifest.extension.extension_id,
-        verification.status.label(),
-        artifact.archived,
-        artifact_path,
-        manifest_path,
-        verification.detail
-    );
+    emit_json_or_human(&report, args.json, || {
+        format!(
+            "registry verify: extension_id={} integrity={} archived={} artifact_path={} manifest_path={} detail={}",
+            report.extension_id,
+            report.integrity,
+            report.archived,
+            report.artifact_path,
+            report.manifest_path,
+            report.detail
+        )
+    })?;
     Ok(())
+}
+
+const REGISTRY_GC_CLI_SCHEMA_VERSION: &str = "franken-node/registry-gc-cli/v1";
+
+#[derive(Debug, Serialize)]
+struct RegistryGcCliReport<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    keep: usize,
+    lineages: usize,
+    active: usize,
+    archived: usize,
+    archive_root: &'a str,
 }
 
 fn handle_registry_gc(args: &cli::RegistryGcArgs) -> Result<()> {
@@ -21036,14 +21163,23 @@ fn handle_registry_gc(args: &cli::RegistryGcArgs) -> Result<()> {
         }
     }
 
-    println!(
-        "registry gc: keep={} lineages={} active={} archived={} archive_root={}",
-        args.keep,
-        by_lineage.len(),
+    let archive_root =
+        registry_relative_display_path(&registry_archive_root(&project_root), &project_root);
+    let report = RegistryGcCliReport {
+        schema_version: REGISTRY_GC_CLI_SCHEMA_VERSION,
+        command: "registry.gc",
+        keep: args.keep,
+        lineages: by_lineage.len(),
         active,
         archived,
-        registry_relative_display_path(&registry_archive_root(&project_root), &project_root)
-    );
+        archive_root: archive_root.as_str(),
+    };
+    emit_json_or_human(&report, args.json, || {
+        format!(
+            "registry gc: keep={} lineages={} active={} archived={} archive_root={}",
+            report.keep, report.lineages, report.active, report.archived, report.archive_root
+        )
+    })?;
     Ok(())
 }
 
@@ -21310,20 +21446,6 @@ fn trust_sync_cli_report(
         critical_risk: critical,
         warnings: audit_report.warnings.clone(),
     }
-}
-
-fn render_trust_sync_summary(
-    cards: &[TrustCard],
-    sync_report: &TrustCardSyncReport,
-    audit_report: &TrustSyncAuditRefreshReport,
-    force: bool,
-) -> String {
-    render_trust_sync_summary_from_report(&trust_sync_cli_report(
-        cards,
-        sync_report,
-        audit_report,
-        force,
-    ))
 }
 
 fn render_trust_sync_summary_from_report(report: &TrustSyncCliReport) -> String {
@@ -28940,7 +29062,7 @@ fn main() -> Result<()> {
                 let mut state = trust_card_cli_registry(now_secs)?;
                 let card = revoke_trust_card(&mut state.registry, &args.extension_id, now_secs)?;
                 persist_trust_card_cli_registry(&state)?;
-                println!("{}", render_trust_card_human(&card));
+                println!("{}", render_trust_card_for_trust_command(&card, args.json)?);
                 if let Some(ref ctx) = receipt_export_ctx {
                     export_signed_receipts(
                         "revocation",
@@ -28965,13 +29087,23 @@ fn main() -> Result<()> {
                 let fleet_incident_id =
                     append_trust_quarantine_action(Path::new("."), &args.artifact, updates.len())?;
                 persist_trust_card_cli_registry(&state)?;
-                println!(
-                    "quarantine applied: artifact={} affected_cards={}",
-                    args.artifact,
-                    updates.len()
-                );
-                println!("fleet propagation incident={fleet_incident_id}");
-                println!("{}", render_trust_card_list(&updates));
+                let report = TrustQuarantineCliReport {
+                    schema_version: TRUST_QUARANTINE_CLI_SCHEMA_VERSION,
+                    command: "trust.quarantine",
+                    artifact: args.artifact.as_str(),
+                    affected_cards: updates.len(),
+                    fleet_incident_id: fleet_incident_id.as_str(),
+                    cards: &updates,
+                };
+                emit_json_or_human(&report, args.json, || {
+                    format!(
+                        "quarantine applied: artifact={} affected_cards={}\nfleet propagation incident={}\n{}",
+                        report.artifact,
+                        report.affected_cards,
+                        report.fleet_incident_id,
+                        render_trust_card_list(&updates)
+                    )
+                })?;
                 if let Some(ref ctx) = receipt_export_ctx {
                     export_signed_receipts(
                         "quarantine",
@@ -29011,8 +29143,7 @@ fn main() -> Result<()> {
                         now_secs,
                     )
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-                let report =
-                    trust_sync_cli_report(&cards, &sync_report, &audit_report, args.force);
+                let report = trust_sync_cli_report(&cards, &sync_report, &audit_report, args.force);
                 emit_json_or_human(&report, args.json, || {
                     render_trust_sync_summary_from_report(&report)
                 })?;

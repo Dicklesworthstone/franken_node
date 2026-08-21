@@ -16,6 +16,15 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::error::Error;
 
+fn disable_cli_color(cmd: &mut Command) {
+    // clap color help injects ANSI that can wrap tokens such as
+    // `--scenario <SCENARIO>` and make substring asserts fail.
+    cmd.env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .env("CLICOLOR_FORCE", "0")
+        .env_remove("FORCE_COLOR");
+}
+
 /// Bench command test configuration
 #[derive(Debug, Clone)]
 struct BenchTestConfig {
@@ -356,6 +365,7 @@ fn measured_suite_rejects_oversized_warmup_budget_before_workload() {
 #[test]
 fn bench_help_output_format() -> Result<(), Box<dyn Error>> {
     let mut cmd = Command::cargo_bin("franken-node")?;
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["bench", "--help"]).assert().success();
 
     let stdout = std::str::from_utf8(&assertion.get_output().stdout)?;
@@ -370,6 +380,7 @@ fn bench_help_output_format() -> Result<(), Box<dyn Error>> {
 #[test]
 fn bench_run_help_output_format() -> Result<(), Box<dyn Error>> {
     let mut cmd = Command::cargo_bin("franken-node")?;
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["bench", "run", "--help"]).assert().success();
 
     let stdout = std::str::from_utf8(&assertion.get_output().stdout)?;
@@ -377,6 +388,10 @@ fn bench_run_help_output_format() -> Result<(), Box<dyn Error>> {
     assert!(stdout.contains("franken-node bench run"));
     assert!(stdout.contains("[OPTIONS]"));
     assert!(stdout.contains("--scenario <SCENARIO>"));
+    assert!(
+        stdout.contains("--json"),
+        "bench run --help must advertise --json: {stdout}"
+    );
 
     Ok(())
 }

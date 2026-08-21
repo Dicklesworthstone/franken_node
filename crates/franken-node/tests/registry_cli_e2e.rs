@@ -131,7 +131,10 @@ fn tamper_manifest_signature(manifest_path: &Path) {
 #[test]
 fn registry_publish_requires_explicit_signing_key() {
     let workspace = registry_workspace();
-    let output = run_cli_in_workspace(workspace.path(), &["registry", "publish", "plugin.fnext"]);
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &["registry", "publish", "plugin.fnext", "--version", "1.0.0"],
+    );
     assert!(
         !output.status.success(),
         "registry publish should fail when signing key is omitted"
@@ -160,6 +163,8 @@ fn registry_publish_succeeds_with_operator_managed_signing_key() {
             "registry",
             "publish",
             "plugin.fnext",
+            "--version",
+            "1.0.0",
             "--signing-key",
             &signing_key_arg,
         ],
@@ -194,6 +199,8 @@ fn registry_publish_rejects_invalid_signing_key_material() {
             "registry",
             "publish",
             "plugin.fnext",
+            "--version",
+            "1.0.0",
             "--signing-key",
             &signing_key_arg,
         ],
@@ -220,6 +227,8 @@ fn registry_publish_persists_artifact_and_search_reports_integrity() {
             "registry",
             "publish",
             "plugin.fnext",
+            "--version",
+            "1.0.0",
             "--signing-key",
             &signing_key_arg,
         ],
@@ -277,6 +286,62 @@ fn registry_publish_persists_artifact_and_search_reports_integrity() {
     assert!(verify_stdout.contains("integrity=verified"));
     assert!(verify_stdout.contains("manifest_path=.franken-node/state/registry/artifacts/"));
 
+    let verify_json = run_cli_in_workspace(
+        workspace.path(),
+        &["registry", "verify", &extension_id, "--json"],
+    );
+    assert!(
+        verify_json.status.success(),
+        "registry verify --json failed: {}",
+        String::from_utf8_lossy(&verify_json.stderr)
+    );
+    let verify_payload: serde_json::Value = serde_json::from_slice(&verify_json.stdout)
+        .expect("registry verify --json should emit valid JSON");
+    assert_eq!(
+        verify_payload["schema_version"],
+        "franken-node/registry-verify-cli/v1"
+    );
+    assert_eq!(verify_payload["command"], "registry.verify");
+    assert_eq!(verify_payload["extension_id"], extension_id);
+    assert_eq!(verify_payload["integrity"], "verified");
+    let verify_json_stdout = String::from_utf8_lossy(&verify_json.stdout);
+    assert!(
+        !verify_json_stdout.contains("registry verify:"),
+        "json mode must not emit the human one-liner:\n{verify_json_stdout}"
+    );
+
+    let publish_json = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "registry",
+            "publish",
+            "plugin.fnext",
+            "--version",
+            "1.0.0",
+            "--signing-key",
+            &signing_key_arg,
+            "--json",
+        ],
+    );
+    assert!(
+        publish_json.status.success(),
+        "registry publish --json failed: {}",
+        String::from_utf8_lossy(&publish_json.stderr)
+    );
+    let publish_payload: serde_json::Value = serde_json::from_slice(&publish_json.stdout)
+        .expect("registry publish --json should emit valid JSON");
+    assert_eq!(
+        publish_payload["schema_version"],
+        "franken-node/registry-publish-cli/v1"
+    );
+    assert_eq!(publish_payload["command"], "registry.publish");
+    assert_eq!(publish_payload["integrity"], "verified");
+    let publish_json_stdout = String::from_utf8_lossy(&publish_json.stdout);
+    assert!(
+        !publish_json_stdout.contains("registry publish:"),
+        "json mode must not emit the human one-liner:\n{publish_json_stdout}"
+    );
+
     let search_output = run_cli_in_workspace(workspace.path(), &["registry", "search", "plugin"]);
     assert!(
         search_output.status.success(),
@@ -328,6 +393,8 @@ fn registry_verify_detects_corrupted_local_artifact() {
             "registry",
             "publish",
             "plugin.fnext",
+            "--version",
+            "1.0.0",
             "--signing-key",
             &signing_key_arg,
         ],
@@ -356,6 +423,24 @@ fn registry_verify_detects_corrupted_local_artifact() {
         stderr.contains("hash-mismatch"),
         "expected hash-mismatch in stderr, got: {stderr}"
     );
+
+    let verify_json = run_cli_in_workspace(
+        workspace.path(),
+        &["registry", "verify", &extension_id, "--json"],
+    );
+    assert!(
+        !verify_json.status.success(),
+        "registry verify --json should fail after tampering"
+    );
+    let verify_payload: serde_json::Value = serde_json::from_slice(&verify_json.stdout)
+        .expect("registry verify --json failure should emit JSON");
+    assert_eq!(
+        verify_payload["schema_version"],
+        "franken-node/registry-verify-cli/v1"
+    );
+    assert_eq!(verify_payload["command"], "registry.verify");
+    assert_eq!(verify_payload["extension_id"], extension_id);
+    assert_eq!(verify_payload["integrity"], "hash-mismatch");
 }
 
 #[test]
@@ -371,6 +456,8 @@ fn registry_search_reports_hash_mismatch_for_corrupted_local_artifact() {
             "registry",
             "publish",
             "plugin.fnext",
+            "--version",
+            "1.0.0",
             "--signing-key",
             &signing_key_arg,
         ],
@@ -413,6 +500,8 @@ fn registry_search_reports_invalid_signature_for_tampered_manifest() {
             "registry",
             "publish",
             "plugin.fnext",
+            "--version",
+            "1.0.0",
             "--signing-key",
             &signing_key_arg,
         ],
@@ -455,6 +544,8 @@ fn registry_verify_detects_tampered_manifest_signature() {
             "registry",
             "publish",
             "plugin.fnext",
+            "--version",
+            "1.0.0",
             "--signing-key",
             &signing_key_arg,
         ],
@@ -508,6 +599,8 @@ fn registry_gc_archives_older_lineage_entries() {
                 "registry",
                 "publish",
                 "plugin.fnext",
+                "--version",
+                "1.0.0",
                 "--signing-key",
                 &signing_key_arg,
             ],
@@ -536,6 +629,30 @@ fn registry_gc_archives_older_lineage_entries() {
     );
     let gc_stdout = String::from_utf8_lossy(&gc_output.stdout);
     assert!(gc_stdout.contains("archived=1"));
+
+    let gc_json = run_cli_in_workspace(
+        workspace.path(),
+        &["registry", "gc", "--keep", "1", "--json"],
+    );
+    assert!(
+        gc_json.status.success(),
+        "registry gc --json failed: {}",
+        String::from_utf8_lossy(&gc_json.stderr)
+    );
+    let gc_payload: serde_json::Value =
+        serde_json::from_slice(&gc_json.stdout).expect("registry gc --json should emit valid JSON");
+    assert_eq!(
+        gc_payload["schema_version"],
+        "franken-node/registry-gc-cli/v1"
+    );
+    assert_eq!(gc_payload["command"], "registry.gc");
+    assert_eq!(gc_payload["keep"], 1);
+    assert_eq!(gc_payload["archived"], 0);
+    let gc_json_stdout = String::from_utf8_lossy(&gc_json.stdout);
+    assert!(
+        !gc_json_stdout.contains("registry gc:"),
+        "json mode must not emit the human one-liner:\n{gc_json_stdout}"
+    );
 
     let active_after = collect_manifest_paths(&registry_artifacts_root(workspace.path()));
     let archived_after = collect_manifest_paths(&registry_archive_root(workspace.path()));

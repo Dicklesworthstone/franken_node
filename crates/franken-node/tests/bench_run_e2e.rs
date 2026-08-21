@@ -123,6 +123,41 @@ fn assert_signed_benchmark_report(bytes: &[u8]) -> Value {
 }
 
 #[test]
+fn bench_run_honors_json_flag() {
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(repo_root())
+        .env("FRANKEN_NODE_BENCH_CPU", "deterministic-test-cpu")
+        .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
+        .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
+        .args([
+            "bench",
+            "run",
+            "--scenario",
+            "secure-extension-heavy",
+            "--fixture-mode",
+            "--json",
+        ])
+        .output()
+        .expect("failed to run franken-node bench run --json");
+
+    assert!(
+        output.status.success(),
+        "bench --json failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = assert_signed_benchmark_report(&output.stdout);
+    assert_eq!(report["evidence_mode"], "fixture_only");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("benchmark suite:"),
+        "bench --json must suppress the human summary on stderr: {stderr}"
+    );
+}
+
+#[test]
 fn bench_run_secure_extension_heavy_is_byte_stable() {
     let first = run_secure_extension_heavy_bench();
     let first_report = assert_signed_benchmark_report(&first);
@@ -261,6 +296,47 @@ fn assert_structured_error_response(stderr: &[u8]) -> Value {
         "stderr_content": stderr_str,
         "contains_error": true
     })
+}
+
+#[test]
+fn bench_run_invalid_scenario_json_emits_error_report() {
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(repo_root())
+        .env("FRANKEN_NODE_BENCH_CPU", "deterministic-test-cpu")
+        .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
+        .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
+        .args([
+            "bench",
+            "run",
+            "--scenario",
+            "nonexistent-invalid-scenario",
+            "--json",
+        ])
+        .output()
+        .expect("failed to run franken-node bench run --json with invalid scenario");
+
+    assert!(
+        !output.status.success(),
+        "invalid scenario --json must fail with nonzero exit"
+    );
+    let payload: Value =
+        serde_json::from_slice(&output.stdout).expect("bench --json failure stdout must be JSON");
+    assert_eq!(payload["schema_version"], "franken-node/bench-run-error/v1");
+    assert_eq!(payload["command"], "bench.run");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["scenario"], "nonexistent-invalid-scenario");
+    let error = payload["error"]
+        .as_str()
+        .expect("error field must be a string");
+    assert!(
+        error.contains("benchmark suite run failed"),
+        "error must preserve the CLI failure boundary: {error}"
+    );
+    assert!(
+        error.contains("nonexistent-invalid-scenario") || error.contains("unknown scenario"),
+        "error must identify the invalid scenario: {error}"
+    );
 }
 
 #[test]

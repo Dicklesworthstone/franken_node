@@ -1194,6 +1194,28 @@ fn trust_revoke_marks_target_as_revoked() {
 }
 
 #[test]
+fn trust_revoke_honors_json() {
+    let workspace = seeded_fixture_trust_workspace();
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &["trust", "revoke", "npm:@acme/auth-guard", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "trust revoke --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = parse_json_stdout(&output, "trust revoke --json");
+    assert_eq!(payload["extension"]["extension_id"], "npm:@acme/auth-guard");
+    assert_eq!(payload["revocation_status"]["status"], "revoked");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("revocation: revoked"),
+        "json mode must not emit the human card dump:\n{stdout}"
+    );
+}
+
+#[test]
 fn trust_revoke_fails_for_unknown_extension() {
     let workspace = seeded_fixture_trust_workspace();
     let output = run_cli_in_workspace(
@@ -1227,6 +1249,35 @@ fn trust_quarantine_supports_sha256_artifact_scope() {
     assert!(stdout.contains("affected_cards=2"));
     assert!(stdout.contains("npm:@acme/auth-guard"));
     assert!(stdout.contains("npm:@beta/telemetry-bridge"));
+
+    let json_output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "quarantine",
+            "--artifact",
+            "sha256:deadbeef",
+            "--json",
+        ],
+    );
+    assert!(
+        json_output.status.success(),
+        "trust quarantine --json failed: {}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let payload = parse_json_stdout(&json_output, "trust quarantine --json");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/trust-quarantine-cli/v1"
+    );
+    assert_eq!(payload["command"], "trust.quarantine");
+    assert_eq!(payload["artifact"], "sha256:deadbeef");
+    assert_eq!(payload["affected_cards"], 2);
+    let json_stdout = String::from_utf8_lossy(&json_output.stdout);
+    assert!(
+        !json_stdout.contains("quarantine applied:"),
+        "json mode must not emit the human summary:\n{json_stdout}"
+    );
 }
 
 #[test]

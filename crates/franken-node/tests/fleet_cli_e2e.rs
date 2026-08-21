@@ -165,6 +165,43 @@ convergence_timeout_seconds = 33
     .expect("write profile routing config");
 }
 
+/// Config that satisfies the fail-closed `trust.registry_signing_key` and
+/// `security.authorized_api_keys` boundaries. Matches `Config::default()`
+/// (`balanced`) plus the two required security fields.
+fn write_fail_closed_cli_config(root: &std::path::Path) {
+    std::fs::write(
+        root.join("franken_node.toml"),
+        concat!(
+            "profile = \"balanced\"\n",
+            "\n",
+            "[trust]\n",
+            "registry_signing_key = \"x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c=\"\n",
+            "\n",
+            "[security]\n",
+            "authorized_api_keys = [\"test-api-key\"]\n",
+        ),
+    )
+    .expect("write fail-closed cli config");
+}
+
+/// Same fail-closed fields, but the registry HMAC matches `fixture_registry`
+/// (`DEFAULT_REGISTRY_KEY` = `franken-node-trust-card-registry-key-v1`).
+fn write_fail_closed_cli_config_for_fixture_trust_cards(root: &std::path::Path) {
+    std::fs::write(
+        root.join("franken_node.toml"),
+        concat!(
+            "profile = \"balanced\"\n",
+            "\n",
+            "[trust]\n",
+            "registry_signing_key = \"ZnJhbmtlbi1ub2RlLXRydXN0LWNhcmQtcmVnaXN0cnkta2V5LXYx\"\n",
+            "\n",
+            "[security]\n",
+            "authorized_api_keys = [\"test-api-key\"]\n",
+        ),
+    )
+    .expect("write fixture-matching fail-closed cli config");
+}
+
 fn seed_fleet_quarantine(
     transport: &mut FileFleetTransport,
     zone_id: &str,
@@ -2306,6 +2343,7 @@ fn fleet_describe_json_reports_node_state_and_zone_context() {
 #[test]
 fn ops_health_check_json_reports_local_state_and_build_metadata() {
     let workspace = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(workspace.path());
     let evidence_path = workspace
         .path()
         .join(".franken-node/state/incidents/INC-OPS-001/evidence.v1.json");
@@ -2349,6 +2387,7 @@ fn ops_health_check_json_reports_local_state_and_build_metadata() {
 #[test]
 fn ops_health_check_json_counts_persisted_sessions_under_workspace_root() {
     let workspace = tempdir().expect("tempdir");
+    write_fail_closed_cli_config(workspace.path());
     let sessions = workspace.path().join(".franken-node/state/sessions");
     std::fs::create_dir_all(&sessions).expect("create sessions dir");
     std::fs::write(sessions.join("sess-1"), "ok").expect("write session file");
@@ -2693,6 +2732,7 @@ fn fleet_reconcile_bootstrap_signing_key_on_first_run() {
 #[test]
 fn fleet_cli_json_output_matrix_matches_snapshots() {
     let status_state = tempdir().expect("status tempdir");
+    write_fail_closed_cli_config(status_state.path());
     let status_state_dir = status_state.path().join("fleet-state");
     let mut status_transport = seed_transport(&status_state_dir);
     let now = Utc::now();
@@ -2729,7 +2769,8 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         })
         .expect("write stale status node");
 
-    let status_zone_output = run_cli_with_fleet_state(
+    let status_zone_output = run_cli_in_dir_with_fleet_state(
+        status_state.path(),
         &["fleet", "status", "--zone", "zone-golden-status", "--json"],
         &status_state_dir,
     );
@@ -2738,8 +2779,11 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         "fleet status zone failed: {}",
         String::from_utf8_lossy(&status_zone_output.stderr)
     );
-    let status_all_output =
-        run_cli_with_fleet_state(&["fleet", "status", "--json"], &status_state_dir);
+    let status_all_output = run_cli_in_dir_with_fleet_state(
+        status_state.path(),
+        &["fleet", "status", "--json"],
+        &status_state_dir,
+    );
     assert!(
         status_all_output.status.success(),
         "fleet status all failed: {}",
@@ -2747,12 +2791,13 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     );
 
     let reconcile_state = tempdir().expect("reconcile tempdir");
+    write_fail_closed_cli_config(reconcile_state.path());
     let reconcile_state_dir = reconcile_state.path().join("fleet-state");
     let (reconcile_signing_key_path, reconcile_signing_key) =
         write_test_signing_key(reconcile_state.path(), "keys/fleet.key", 43);
     let reconcile_signing_key_path = reconcile_signing_key_path.display().to_string();
     let reconcile_output = run_cli_in_dir_with_fleet_state_and_env(
-        &repo_root(),
+        reconcile_state.path(),
         &["fleet", "reconcile", "--json"],
         &reconcile_state_dir,
         &[(
@@ -2772,6 +2817,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     );
 
     let release_state = tempdir().expect("release tempdir");
+    write_fail_closed_cli_config(release_state.path());
     let release_state_dir = release_state.path().join("fleet-state");
     let (release_signing_key_path, release_signing_key) =
         write_test_signing_key(release_state.path(), "keys/fleet.key", 41);
@@ -2784,7 +2830,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         5,
     );
     let release_output = run_cli_in_dir_with_fleet_state_and_env(
-        &repo_root(),
+        release_state.path(),
         &[
             "fleet",
             "release",
@@ -2810,6 +2856,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     );
 
     let timeout_state = tempdir().expect("timeout tempdir");
+    write_fail_closed_cli_config(timeout_state.path());
     let timeout_state_dir = timeout_state.path().join("fleet-state");
     let (timeout_signing_key_path, timeout_signing_key) =
         write_test_signing_key(timeout_state.path(), "keys/fleet.key", 42);
@@ -2831,7 +2878,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         })
         .expect("write timeout node");
     let timeout_output = run_cli_in_dir_with_fleet_state_and_env(
-        &repo_root(),
+        timeout_state.path(),
         &["fleet", "reconcile", "--json"],
         &timeout_state_dir,
         &[
@@ -2855,9 +2902,11 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     let _timeout_signing_key = timeout_signing_key;
 
     let agent_state = tempdir().expect("agent tempdir");
+    write_fail_closed_cli_config(agent_state.path());
     let agent_state_dir = agent_state.path().join("fleet-state");
     seed_transport(&agent_state_dir);
-    let agent_output = run_cli_with_fleet_state(
+    let agent_output = run_cli_in_dir_with_fleet_state(
+        agent_state.path(),
         &[
             "fleet",
             "agent",
@@ -2877,11 +2926,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     );
 
     let trust_card_workspace = tempdir().expect("trust-card tempdir");
-    std::fs::write(
-        trust_card_workspace.path().join("franken_node.toml"),
-        "profile = \"balanced\"\n",
-    )
-    .expect("write trust-card fixture config");
+    write_fail_closed_cli_config_for_fixture_trust_cards(trust_card_workspace.path());
     write_fixture_registry_to(trust_card_workspace.path());
     let trust_card_output = run_cli_in_dir_with_env(
         trust_card_workspace.path(),
@@ -2905,6 +2950,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     );
 
     let remotecap_workspace = tempdir().expect("remotecap tempdir");
+    write_fail_closed_cli_config(remotecap_workspace.path());
     let remotecap_issue_output = run_cli_in_dir_with_env(
         remotecap_workspace.path(),
         &[

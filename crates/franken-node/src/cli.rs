@@ -1052,6 +1052,10 @@ pub struct TrustRevokeArgs {
     /// Extension identifier with optional version.
     pub extension_id: String,
 
+    /// Emit the revoked trust card as JSON instead of the human card dump.
+    #[arg(long)]
+    pub json: bool,
+
     /// Optional explicit Ed25519 signing key file for receipt export.
     #[arg(long)]
     pub receipt_signing_key: Option<PathBuf>,
@@ -1070,6 +1074,10 @@ pub struct TrustQuarantineArgs {
     /// Artifact hash to quarantine.
     #[arg(long)]
     pub artifact: String,
+
+    /// Emit a schema-versioned JSON report instead of the human card dump.
+    #[arg(long)]
+    pub json: bool,
 
     /// Optional explicit Ed25519 signing key file for receipt export.
     #[arg(long)]
@@ -1925,6 +1933,10 @@ pub struct RegistryPublishArgs {
     /// Maximum active artifacts retained per publisher/name lineage before publish requires GC.
     #[arg(long, default_value_t = DEFAULT_REGISTRY_MAX_ACTIVE_ARTIFACTS_PER_LINEAGE)]
     pub max_active_artifacts: usize,
+
+    /// Emit a schema-versioned JSON report instead of the human one-liners.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1945,6 +1957,10 @@ pub struct RegistrySearchArgs {
 pub struct RegistryVerifyArgs {
     /// Extension identifier to verify from the local registry artifact store.
     pub extension_id: String,
+
+    /// Emit a schema-versioned JSON report instead of the human one-liner.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1952,6 +1968,10 @@ pub struct RegistryGcArgs {
     /// Number of most recent active artifacts to retain per publisher/name lineage.
     #[arg(long, default_value_t = 5)]
     pub keep: usize,
+
+    /// Emit a schema-versioned JSON report instead of the human one-liner.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // -- bench --
@@ -1980,6 +2000,12 @@ pub struct BenchRunArgs {
     /// bench from there or pass a relative path that resolves to it.
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub output: Option<PathBuf>,
+
+    /// Emit the signed JSON report on stdout. The report is always JSON;
+    /// `--json` is accepted so operator/agent wrappers match other surfaces
+    /// and suppresses the human summary on stderr.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // -- debug --
@@ -2293,6 +2319,29 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn bench_run_parses_json_flag() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "bench",
+            "run",
+            "--json",
+            "--fixture-mode",
+            "--scenario",
+            "secure-extension-heavy",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Bench(BenchCommand::Run(args)) => args,
+            other => return Err(format!("expected bench run command, got {other:?}")),
+        };
+        assert!(args.json);
+        assert!(args.fixture_mode);
+        assert_eq!(args.scenario.as_deref(), Some("secure-extension-heavy"));
+        Ok(())
+    }
+
+    #[test]
     fn migration_output_flags_reject_unsafe_content_paths() {
         let command_prefixes: &[(&[&str], &str)] = &[
             (
@@ -2546,6 +2595,106 @@ mod parser_contract_extra_tests {
         };
         assert_eq!(args.query, "plugin");
         assert_eq!(args.min_assurance, Some(3));
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn registry_verify_parses_json_flag() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "registry",
+            "verify",
+            "npm:@acme/plugin",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Registry(RegistryCommand::Verify(args)) => args,
+            other => return Err(format!("expected registry verify command, got {other:?}")),
+        };
+        assert_eq!(args.extension_id, "npm:@acme/plugin");
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn registry_gc_parses_json_flag() -> Result<(), String> {
+        let cli = parse(&["franken-node", "registry", "gc", "--keep", "1", "--json"])
+            .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Registry(RegistryCommand::Gc(args)) => args,
+            other => return Err(format!("expected registry gc command, got {other:?}")),
+        };
+        assert_eq!(args.keep, 1);
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn trust_revoke_parses_json_flag() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "trust",
+            "revoke",
+            "npm:@acme/plugin",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Trust(TrustCommand::Revoke(args)) => args,
+            other => return Err(format!("expected trust revoke command, got {other:?}")),
+        };
+        assert_eq!(args.extension_id, "npm:@acme/plugin");
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn trust_quarantine_parses_json_flag() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "trust",
+            "quarantine",
+            "--artifact",
+            "sha256:deadbeef",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Trust(TrustCommand::Quarantine(args)) => args,
+            other => return Err(format!("expected trust quarantine command, got {other:?}")),
+        };
+        assert_eq!(args.artifact, "sha256:deadbeef");
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn registry_publish_parses_json_flag() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "registry",
+            "publish",
+            "plugin.fnext",
+            "--version",
+            "1.0.0",
+            "--signing-key",
+            "keys/publisher.ed25519",
+            "--json",
+        ])
+        .map_err(|err| err.to_string())?;
+
+        let args = match cli.command {
+            Command::Registry(RegistryCommand::Publish(args)) => args,
+            other => return Err(format!("expected registry publish command, got {other:?}")),
+        };
+        assert_eq!(args.package_path, std::path::PathBuf::from("plugin.fnext"));
+        assert_eq!(args.version, "1.0.0");
         assert!(args.json);
         Ok(())
     }

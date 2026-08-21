@@ -726,11 +726,11 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node trust card <id>` | Show trust profile for one extension. |
-| `franken-node trust list` | List extensions; filter by `--risk`, `--revoked`. |
+| `franken-node trust list` | List extensions; filter by `--risk`, `--revoked`. `--json` emits the card list as JSON. |
 | `franken-node trust scan [path]` | Populate baseline trust cards from package.json. Flags: `--deep`, `--audit`, `--json`. |
 | `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. `--json` emits `franken-node/trust-sync-cli/v1`. |
-| `franken-node trust revoke <id>` | Revoke artifact or publisher trust. Optional `--receipt-signing-key`, `--receipt-out`. |
-| `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide. `--artifact` required. |
+| `franken-node trust revoke <id>` | Revoke artifact or publisher trust. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card. |
+| `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide. `--artifact` required. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
 | `franken-node trust-card show <id>` | Show full trust card. |
 | `franken-node trust-card export <id> --json` | Export trust card as canonical JSON. |
 | `franken-node trust-card list` | List with filters: `--publisher`, `--query`, `--page`, `--per-page`. |
@@ -803,19 +803,20 @@ every leaf command available in the current build.
 
 | Command | Purpose |
 |---|---|
-| `franken-node registry publish <package>` | Publish signed extension artifact. **Required: `--version` and `--signing-key`** (raw Ed25519 32-byte key; hex, base64, or supported JSON wrapper). Optional: `--max-active-artifacts`. |
+| `franken-node registry publish <package>` | Publish signed extension artifact. **Required: `--version` and `--signing-key`** (raw Ed25519 32-byte key; hex, base64, or supported JSON wrapper). Optional: `--max-active-artifacts`. `--json` emits `franken-node/registry-publish-cli/v1`. |
 | `franken-node registry search <query>` | Query extension registry. Filter: `--min-assurance`. `--json` emits `franken-node/registry-search-cli/v1`. |
-| `franken-node registry verify <id>` | Verify a locally stored registry artifact. |
-| `franken-node registry gc` | Archive older registry artifacts. Optional: `--keep`. |
-| `franken-node bench run` | Run benchmark suite and emit signed report. Flags: `--scenario`, `--fixture-mode`, `--output`. |
-| `franken-node debug explain` | Walk a signed decision-receipt through verification steps. Required: `--receipt`. |
-| `franken-node debug evidence` | Inspect verifier evidence artifacts. Required: `--artifact`. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. |
-| `franken-node debug trace` | Trace policy evaluation steps. Required: `--policy`, `--input`. |
+| `franken-node registry verify <id>` | Verify a locally stored registry artifact. `--json` emits `franken-node/registry-verify-cli/v1`. |
+| `franken-node registry gc` | Archive older registry artifacts. Optional: `--keep`. `--json` emits `franken-node/registry-gc-cli/v1`. |
+| `franken-node bench run` | Run benchmark suite and emit signed report. Flags: `--scenario`, `--fixture-mode`, `--output`, `--json`. The signed report is always JSON on stdout; `--json` suppresses the human summary on stderr. |
+| `franken-node debug explain` | Walk a signed decision-receipt through verification steps. Required: `--receipt`. `--json` emits machine-readable per-step results. |
+| `franken-node debug evidence` | Inspect verifier evidence artifacts. Required: `--artifact`. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. `--json` emits machine-readable diagnostics. |
+| `franken-node debug trace` | Trace policy evaluation steps. Required: `--policy`, `--input`. `--json` emits machine-readable trace. |
 
 > [!NOTE]
 > Commands that declare `--json` emit machine-readable output. That flag
-> is **not** on every subcommand (for example `trust revoke`,
-> `registry publish`, and `bench run` currently have no `--json`).
+> is **not** on every subcommand. `bench run` always writes the signed
+> JSON report to stdout; `--json` is accepted for operator/agent wrappers
+> and suppresses the human summary on stderr.
 > Many JSON-capable commands also accept `--structured-logs-jsonl` for
 > event-coded diagnostics on stderr (see [Structured Logging and
 > Observability](#structured-logging-and-observability)), and
