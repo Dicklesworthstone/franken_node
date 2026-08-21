@@ -26,6 +26,10 @@ const SECTION_10N_GATE_VERDICT_PATH: &str =
 /// consumes it too, so the two gates can no longer enforce the dual-oracle
 /// close condition over disjoint input sets.
 const L1_PRODUCT_VERDICT_PATH: &str = "artifacts/oracle/l1_product_verdict.json";
+/// Public charter metric artifact referenced by README CLAIM-001 / PRODUCT_CHARTER §5.
+/// Must stay bound to `COMPATIBILITY_CORPUS_RESULTS_PATH`; a GREEN label here
+/// while the corpus is below threshold is fail-closed (bd-reality-20260820-w0fc6.1).
+const PUBLIC_CORPUS_PASS_PATH: &str = "artifacts/compat/corpus_pass.json";
 /// bd-ihusm: the only corpus provenance the L1 ship-gate accepts. A corpus
 /// whose `corpus.provenance` is anything else (or absent) is treated as
 /// unmeasured evidence and fails closed — synthesized/authored results can
@@ -923,7 +927,17 @@ fn evaluate_l1_product_oracle(root: &Path) -> L1ProductOracle {
         ));
     }
     blocking_findings.extend(validate_l1_proof_carrying_effects(&data));
-    blocking_findings.extend(validate_l1_verdict_artifact(root, &data));
+    blocking_findings.extend(validate_l1_verdict_artifact(
+        root,
+        &data,
+        pass_rate_pct,
+        required_pass_rate_pct,
+    ));
+    blocking_findings.extend(validate_public_corpus_pass_artifact(
+        root,
+        pass_rate_pct,
+        required_pass_rate_pct,
+    ));
 
     L1ProductOracle {
         verdict: if blocking_findings.is_empty() {
@@ -1188,7 +1202,17 @@ fn validate_l1_proof_carrying_effects_v2(summary: &Value) -> Vec<String> {
 /// absent or does not re-derive (see [`validate_l1_lockstep_verdict`]), or
 /// its `evidence.proof_carrying_effects` copy differs from the
 /// corpus-results copy the pass-rate leg was evaluated against.
-fn validate_l1_verdict_artifact(root: &Path, corpus_data: &Value) -> Vec<String> {
+///
+/// bd-reality-20260820-w0fc6.1: the artifact's self-label must match the
+/// corpus pass-rate leg. Declaring GREEN while the measured rate is below
+/// the required floor is fail-closed. Declaring RED while the corpus is
+/// below the floor is honest and is not itself a finding.
+fn validate_l1_verdict_artifact(
+    root: &Path,
+    corpus_data: &Value,
+    pass_rate_pct: f64,
+    required_pass_rate_pct: f64,
+) -> Vec<String> {
     let path = root.join(L1_PRODUCT_VERDICT_PATH);
     let data = match read_json_value(&path) {
         Ok(data) => data,
@@ -1200,10 +1224,34 @@ fn validate_l1_verdict_artifact(root: &Path, corpus_data: &Value) -> Vec<String>
     let mut findings = Vec::new();
 
     let declared_verdict = get_str(&data, &["verdict"]);
-    if declared_verdict != Some("GREEN") {
-        findings.push(format!(
-            "L1 verdict artifact declares verdict {declared_verdict:?}, expected \"GREEN\""
-        ));
+    let corpus_meets_floor = pass_rate_pct >= required_pass_rate_pct;
+    match declared_verdict {
+        Some("GREEN") if !corpus_meets_floor => {
+            findings.push(format!(
+                "L1 verdict artifact declares GREEN while compatibility corpus pass rate \
+                 {pass_rate_pct:.2}% is below required {required_pass_rate_pct:.2}%"
+            ));
+        }
+        Some("GREEN" | "RED" | "YELLOW") => {}
+        other => {
+            findings.push(format!(
+                "L1 verdict artifact declares verdict {other:?}, expected GREEN, YELLOW, or RED"
+            ));
+        }
+    }
+
+    let notes = data.get("notes").and_then(Value::as_array);
+    if notes.is_some_and(|items| {
+        items.iter().any(|item| {
+            item.as_str()
+                .is_some_and(|note| note.to_ascii_lowercase().contains("backfill"))
+        })
+    }) {
+        findings.push(
+            "L1 verdict artifact notes admit a backfill; L1 refuses backfilled GREEN/RED \
+             labels as close-condition evidence"
+                .to_string(),
+        );
     }
 
     let Some(evidence) = get_value(&data, &["evidence"]).filter(|value| value.is_object()) else {
@@ -1252,6 +1300,74 @@ fn validate_l1_verdict_artifact(root: &Path, corpus_data: &Value) -> Vec<String>
         }
     }
 
+    findings
+}
+
+/// bd-reality-20260820-w0fc6.1: bind the README-facing corpus_pass.json
+/// charter metric to the same measured pass rate the L1 gate consumed.
+fn validate_public_corpus_pass_artifact(
+    root: &Path,
+    pass_rate_pct: f64,
+    required_pass_rate_pct: f64,
+) -> Vec<String> {
+    let path = root.join(PUBLIC_CORPUS_PASS_PATH);
+    let data = match read_json_value(&path) {
+        Ok(data) => data,
+        Err(err) => {
+            return vec![format!(
+                "public corpus_pass artifact unreadable at {PUBLIC_CORPUS_PASS_PATH}: {err}"
+            )];
+        }
+    };
+
+    let mut findings = Vec::new();
+    let declared = get_str(&data, &["verdict"]).unwrap_or("");
+    if declared.eq_ignore_ascii_case("pending") {
+        findings.push(
+            "public corpus_pass artifact verdict is pending; L1 requires a measured \
+             observed_pct (GREEN or RED), not an unmeasured backfill"
+                .to_string(),
+        );
+    }
+    if data.get("notes").and_then(Value::as_array).is_some_and(|items| {
+        items.iter().any(|item| {
+            item.as_str()
+                .is_some_and(|note| note.to_ascii_lowercase().contains("backfill"))
+        })
+    }) {
+        findings.push(
+            "public corpus_pass artifact notes admit a backfill; L1 refuses it as \
+             charter-metric evidence"
+                .to_string(),
+        );
+    }
+
+    let observed = get_f64(&data, &["metric", "observed_pct"]);
+    match observed {
+        None => findings.push(
+            "public corpus_pass artifact is missing metric.observed_pct".to_string(),
+        ),
+        Some(observed_pct) if (observed_pct - pass_rate_pct).abs() > 0.05 => {
+            findings.push(format!(
+                "public corpus_pass observed_pct {observed_pct:.2} does not match L1 corpus \
+                 pass rate {pass_rate_pct:.2}"
+            ));
+        }
+        Some(observed_pct) => {
+            let expected = if observed_pct >= required_pass_rate_pct {
+                "GREEN"
+            } else {
+                "RED"
+            };
+            if !declared.eq_ignore_ascii_case(expected) && !declared.eq_ignore_ascii_case("pending")
+            {
+                findings.push(format!(
+                    "public corpus_pass verdict `{declared}` is inconsistent with observed_pct \
+                     {observed_pct:.2}% vs required {required_pass_rate_pct:.2}% (expected {expected})"
+                ));
+            }
+        }
+    }
     findings
 }
 
@@ -2435,6 +2551,29 @@ mod tests {
         let path = root.join(COMPATIBILITY_CORPUS_RESULTS_PATH);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, serde_json::to_string_pretty(data).unwrap()).unwrap();
+        write_public_corpus_pass_fixture(root, data);
+    }
+
+    fn write_public_corpus_pass_fixture(root: &Path, data: &Value) {
+        let pass_rate = get_f64(data, &["totals", "overall_pass_rate_pct"]).unwrap_or(0.0);
+        let required = get_f64(data, &["thresholds", "overall_pass_rate_min_pct"]).unwrap_or(95.0);
+        let verdict = if pass_rate >= required { "GREEN" } else { "RED" };
+        let artifact = serde_json::json!({
+            "gate": "compat_corpus_pass_gate",
+            "verdict": verdict,
+            "timestamp": "2026-08-20T00:00:00Z",
+            "owner_track": "10.2",
+            "metric": {
+                "name": "targeted_compatibility_corpus_pass_rate",
+                "target_pct": required,
+                "observed_pct": pass_rate,
+                "passed": pass_rate >= required,
+            },
+            "notes": [],
+        });
+        let path = root.join(PUBLIC_CORPUS_PASS_PATH);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string_pretty(&artifact).unwrap()).unwrap();
     }
 
     /// A lockstep verdict block whose embedded report is built through the
@@ -2562,9 +2701,13 @@ mod tests {
             crate::ops::proof_carrying_evidence::LOCKSTEP_VERDICT_KEY.to_string(),
             lockstep,
         );
+        let pass_rate = get_f64(corpus_data, &["totals", "overall_pass_rate_pct"]).unwrap_or(0.0);
+        let required =
+            get_f64(corpus_data, &["thresholds", "overall_pass_rate_min_pct"]).unwrap_or(95.0);
+        let verdict = if pass_rate >= required { "GREEN" } else { "RED" };
         let artifact = serde_json::json!({
             "dimension": "l1_product",
-            "verdict": "GREEN",
+            "verdict": verdict,
             "owner_track": "10.2",
             "timestamp": "2026-07-10T00:00:00+00:00",
             "evidence": Value::Object(evidence),
@@ -2667,15 +2810,15 @@ mod tests {
     }
 
     #[test]
-    fn l1_fails_closed_when_verdict_artifact_declares_non_green() {
+    fn l1_fails_closed_when_verdict_artifact_declares_green_below_corpus_floor() {
         let temp = TempDir::new().unwrap();
-        let corpus = corpus_with_valid_proof(100, 0, 100.0);
+        let corpus = corpus_with_valid_proof(50, 50, 50.0);
         write_corpus_fixture(temp.path(), &corpus);
         write_l1_verdict_fixture(temp.path(), &corpus, valid_lockstep_verdict_json());
         let path = temp.path().join(L1_PRODUCT_VERDICT_PATH);
         let mut artifact: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        artifact["verdict"] = serde_json::json!("RED");
+        artifact["verdict"] = serde_json::json!("GREEN");
         std::fs::write(&path, serde_json::to_string_pretty(&artifact).unwrap()).unwrap();
 
         let oracle = evaluate_l1_product_oracle(temp.path());
@@ -2684,7 +2827,39 @@ mod tests {
             oracle
                 .blocking_findings
                 .iter()
-                .any(|finding| finding.contains("declares verdict Some(\"RED\")")),
+                .any(|finding| finding.contains("declares GREEN while compatibility corpus pass rate")),
+            "{oracle:?}"
+        );
+    }
+
+    #[test]
+    fn l1_fails_closed_when_public_corpus_pass_is_pending_backfill() {
+        let temp = TempDir::new().unwrap();
+        let corpus = corpus_with_valid_proof(50, 50, 50.0);
+        write_bound_l1_fixtures(temp.path(), &corpus);
+        let path = temp.path().join(PUBLIC_CORPUS_PASS_PATH);
+        let pending = serde_json::json!({
+            "gate": "compat_corpus_pass_gate",
+            "verdict": "pending",
+            "metric": { "observed_pct": null, "target_pct": 95.0 },
+            "notes": ["Backfilled 2026-05-21 from the reality-check bridge plan."],
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&pending).unwrap()).unwrap();
+
+        let oracle = evaluate_l1_product_oracle(temp.path());
+        assert_eq!(oracle.verdict, OracleColor::Red, "{oracle:?}");
+        assert!(
+            oracle
+                .blocking_findings
+                .iter()
+                .any(|finding| finding.contains("pending")),
+            "{oracle:?}"
+        );
+        assert!(
+            oracle
+                .blocking_findings
+                .iter()
+                .any(|finding| finding.contains("backfill")),
             "{oracle:?}"
         );
     }

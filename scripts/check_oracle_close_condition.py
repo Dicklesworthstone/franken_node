@@ -1190,6 +1190,7 @@ def check_dimension(
     max_age: timedelta | None = None,
     now: datetime | None = None,
     require_runtime_triad: bool = False,
+    require_green: bool = True,
 ) -> dict:
     """Check a single oracle dimension."""
     artifact_path = artifacts_dir / dim["artifact"]
@@ -1222,7 +1223,7 @@ def check_dimension(
 
     result["verdict"] = verdict
     errors = []
-    if verdict != "GREEN":
+    if require_green and verdict != "GREEN":
         errors.append(f"Verdict is {verdict}, expected GREEN")
     if expected_franken_node is not None and expected_franken_engine is not None:
         errors.extend(
@@ -1283,6 +1284,16 @@ def _git_sha(value: str) -> str:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--consistency-mode",
+        action="store_true",
+        help=(
+            "CI consistency gate (bd-reality-20260820-w0fc6.1): fail on malformed "
+            "artifacts and on L1 GREEN declared while the corpus is below 95%%; "
+            "do not require all dimensions GREEN. Release/ship still uses default "
+            "or --release-mode."
+        ),
+    )
     parser.add_argument("--artifacts-dir", type=Path, default=DEFAULT_ARTIFACTS_DIR)
     parser.add_argument("--corpus-results", type=Path)
     parser.add_argument(
@@ -1358,10 +1369,42 @@ def main(argv: list[str] | None = None):
             expected_franken_engine=expected_engine,
             max_age=max_age,
             require_runtime_triad=args.release_mode,
+            require_green=not args.consistency_mode,
         )
         dimensions[dim["id"]] = result
 
-        if result.get("error") or result["verdict"] != "GREEN":
+        if args.consistency_mode:
+            error = result.get("error") or ""
+            if (
+                dim["id"] == "l1_product"
+                and result.get("verdict") == "RED"
+            ):
+                kept = [
+                    part.strip()
+                    for part in error.split(";")
+                    if part.strip()
+                    and "pass rate" not in part
+                    and "below required" not in part
+                ]
+                error = "; ".join(kept)
+                result["error"] = error or None
+            if result.get("error"):
+                failing.append({
+                    "dimension": dim["id"],
+                    "label": dim["label"],
+                    "reason": result["error"],
+                })
+            elif (
+                dim["id"] == "l1_product"
+                and result.get("verdict") == "GREEN"
+                and "pass rate" in (result.get("error") or "")
+            ):
+                failing.append({
+                    "dimension": dim["id"],
+                    "label": dim["label"],
+                    "reason": result.get("error", "GREEN while corpus below floor"),
+                })
+        elif result.get("error") or result["verdict"] != "GREEN":
             failing.append({
                 "dimension": dim["id"],
                 "label": dim["label"],

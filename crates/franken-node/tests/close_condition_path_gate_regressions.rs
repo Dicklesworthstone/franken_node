@@ -211,6 +211,23 @@ frankenengine-extension-host = {{ path = "{extension_host_path}" }}
         .expect("verdict artifact render"),
     );
     write_fixture(
+        &root.join("artifacts/compat/corpus_pass.json"),
+        &serde_json::to_string_pretty(&serde_json::json!({
+            "gate": "compat_corpus_pass_gate",
+            "verdict": "GREEN",
+            "timestamp": "2026-08-20T00:00:00Z",
+            "owner_track": "10.2",
+            "metric": {
+                "name": "targeted_compatibility_corpus_pass_rate",
+                "target_pct": 95.0,
+                "observed_pct": 98.0,
+                "passed": true,
+            },
+            "notes": [],
+        }))
+        .expect("corpus_pass artifact render"),
+    );
+    write_fixture(
         &root.join("artifacts/section/10.N/gate_verdict/bd-1neb_section_gate.json"),
         r#"{
   "gate": "section_10n_verification",

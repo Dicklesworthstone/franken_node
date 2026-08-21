@@ -61,6 +61,7 @@ CHECKS = [
             "python3",
             str(ROOT / "scripts" / "check_oracle_close_condition.py"),
             "--json",
+            "--consistency-mode",
         ],
     },
     {

@@ -1224,9 +1224,18 @@ fn write_bound_l1_verdict_fixture(root: &Path) {
         evidence.insert("proof_carrying_effects".to_string(), proof.clone());
     }
     evidence.insert("lockstep_verdict".to_string(), l1_lockstep_verdict_block());
+    let pass_rate = corpus
+        .pointer("/totals/overall_pass_rate_pct")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let required = corpus
+        .pointer("/thresholds/overall_pass_rate_min_pct")
+        .and_then(Value::as_f64)
+        .unwrap_or(95.0);
+    let verdict = if pass_rate >= required { "GREEN" } else { "RED" };
     let artifact = serde_json::json!({
         "dimension": "l1_product",
-        "verdict": "GREEN",
+        "verdict": verdict,
         "owner_track": "10.2",
         "timestamp": "2026-07-10T00:00:00+00:00",
         "evidence": Value::Object(evidence),
@@ -1234,6 +1243,23 @@ fn write_bound_l1_verdict_fixture(root: &Path) {
     write_fixture(
         &root.join("artifacts/oracle/l1_product_verdict.json"),
         &serde_json::to_string_pretty(&artifact).expect("render verdict artifact"),
+    );
+    write_fixture(
+        &root.join("artifacts/compat/corpus_pass.json"),
+        &serde_json::to_string_pretty(&serde_json::json!({
+            "gate": "compat_corpus_pass_gate",
+            "verdict": verdict,
+            "timestamp": "2026-08-20T00:00:00Z",
+            "owner_track": "10.2",
+            "metric": {
+                "name": "targeted_compatibility_corpus_pass_rate",
+                "target_pct": required,
+                "observed_pct": pass_rate,
+                "passed": pass_rate >= required,
+            },
+            "notes": [],
+        }))
+        .expect("render corpus_pass artifact"),
     );
 }
 
