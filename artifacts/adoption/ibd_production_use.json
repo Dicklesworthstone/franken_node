@@ -1,0 +1,26 @@
+{
+  "schema_version": "franken-node/ibd-production-use/v1",
+  "gate": "ibd_production_adoption",
+  "verdict": "pending",
+  "timestamp": "2026-08-20T00:00:00Z",
+  "production_operator_count": 0,
+  "required_operator_count": 3,
+  "required_capabilities_per_operator": 3,
+  "notes": [
+    "Honest default: there are no production users (AGENTS.md). bd-2hrg closed the index document, not adoption.",
+    "This artifact must stay pending with count=0 until independent operators present signed receipts whose audience is not a franken-node test fixture.",
+    "Tracked by bd-reality-20260820-w0fc6.8."
+  ],
+  "capabilities": [
+    {"id": "IBD-01", "name": "policy-visible compatibility + divergence receipts", "status": "partial"},
+    {"id": "IBD-02", "name": "one-command migration audit", "status": "partial"},
+    {"id": "IBD-03", "name": "signed policy checkpoints + revocation-aware gates", "status": "partial"},
+    {"id": "IBD-04", "name": "deterministic incident replay + counterfactual", "status": "partial"},
+    {"id": "IBD-05", "name": "fleet quarantine + bounded convergence", "status": "partial"},
+    {"id": "IBD-06", "name": "extension trust cards", "status": "working"},
+    {"id": "IBD-07", "name": "compatibility lockstep oracle", "status": "partial"},
+    {"id": "IBD-08", "name": "control-plane recommended actions", "status": "partial"},
+    {"id": "IBD-09", "name": "ecosystem reputation graph", "status": "partial"},
+    {"id": "IBD-10", "name": "public verifier toolkit", "status": "partial"}
+  ]
+}
