@@ -58,11 +58,12 @@ Each claim entry uses this structure:
 - **Verification command**: TBD — needs a published comparison-corpus runner
 - **Last verified**: 2026-05-20T00:00:00Z (registry backfill)
 - **Status**: pending
-- **Notes**: `migration-velocity-gate.yml` workflow exists; baseline/treatment
-  numbers have not been published. The four-stage migrate pipeline (audit,
-  rewrite, validate, rollout) is implemented and runs end-to-end on real
-  Node/Bun projects, so the throughput claim is plausible but not yet
-  *measured-and-signed*.
+- **Notes**: `artifacts/13/migration_velocity_report.json` is a constructed
+  Feb 2026 10-archetype cohort (`cohort-express-001`, overall 3.15×) and is
+  **not** a live measurement. `scripts/check_migration_velocity_gate.py` now
+  fails that constructed ID set (bd-reality-20260820-w0fc6.2). Tracked by
+  that bead; `bd-3agp` remains historically closed and must not be cited as
+  verified 3×.
 
 ### CLAIM-003: ≥10× reduction in successful host compromise vs. baseline
 

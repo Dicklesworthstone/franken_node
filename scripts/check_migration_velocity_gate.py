@@ -202,6 +202,21 @@ def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, 
 
     _check("report bead id", report.get("bead_id") == "bd-3agp")
     _check("report unit minutes", report.get("measurement_unit") == "minutes")
+    constructed_ids = {
+        "cohort-express-001",
+        "cohort-fastify-001",
+        "cohort-next-001",
+    }
+    constructed_hits = []
+    if isinstance(report.get("projects"), list):
+        for project in report["projects"]:
+            if isinstance(project, dict) and project.get("project_id") in constructed_ids:
+                constructed_hits.append(str(project.get("project_id")))
+    _check(
+        "constructed Feb 2026 archetype cohort rejected (bd-reality-20260820-w0fc6.2)",
+        len(constructed_hits) == 0,
+        "constructed ids: " + ",".join(constructed_hits) if constructed_hits else "ok",
+    )
 
     projects = report.get("projects", [])
     _check("cohort size >= 10", isinstance(projects, list) and len(projects) >= 10)
