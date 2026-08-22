@@ -1,12 +1,13 @@
-"""Unit tests for scripts/check_migration_velocity_gate.py."""
+"""Unit tests for scripts/check_migration_velocity_gate.py (live velocity gate)."""
 
 from __future__ import annotations
 
 import json
 import runpy
+import subprocess
+import sys
+import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_migration_velocity_gate.py"
@@ -23,123 +24,116 @@ class ScriptNamespace:
 mod = ScriptNamespace(runpy.run_path(str(SCRIPT)))
 
 
-def _base_spec_text() -> str:
-    return "\n".join(
-        [
-            "# test spec",
-            ">= 3.0x",
-            *sorted(mod.REQUIRED_ARCHETYPES),
-            *sorted(mod.REQUIRED_EVENT_CODES),
-        ]
-    )
+class MedianTests(unittest.TestCase):
+    def test_odd_length_returns_middle(self) -> None:
+        assert mod._median_int([5, 1, 3]) == 3
+
+    def test_even_length_floors_mean_of_middles(self) -> None:
+        assert mod._median_int([4, 1, 3, 2]) == 2
+        assert mod._median_int([5, 1, 3, 2]) == 2  # (2+3)//2 floor
+
+    def test_empty_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            mod._median_int([])
 
 
-def _make_project(archetype: str, idx: int, *, ci_sample: bool = False) -> dict:
-    return {
-        "project_id": f"p-{idx}",
-        "archetype": archetype,
-        "start_time_utc": "2026-02-20T00:00:00Z",
-        "end_time_utc": "2026-02-20T01:00:00Z",
-        "first_passing_test_time_utc": "2026-02-20T01:05:00Z",
-        "manual_migration_minutes": 300 + idx,
-        "tooled_migration_minutes": 90 + (idx % 2),
-        "manual_intervention_points": ["manual tweak"],
-        "blockers_encountered": [],
-        "ci_release_sample": ci_sample,
-    }
+class RatioTests(unittest.TestCase):
+    def test_exact_three_x(self) -> None:
+        assert mod._ratio_bp(30_000, 10_000) == 30_000
+
+    def test_basis_point_rounding_is_half_up(self) -> None:
+        assert mod._ratio_bp(1, 3) == 3_333
+        assert mod._ratio_bp(2, 3) == 6_667
+
+    def test_zero_denominator_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            mod._ratio_bp(10, 0)
 
 
-def _make_report(*, drop_archetype: str | None = None, ratio_fail: bool = False, ci_samples: int = 3) -> dict:
-    archetypes = [a for a in sorted(mod.REQUIRED_ARCHETYPES) if a != drop_archetype]
-    projects = []
-    for idx, archetype in enumerate(archetypes):
-        projects.append(_make_project(archetype, idx, ci_sample=idx < ci_samples))
-
-    total_manual = sum(p["manual_migration_minutes"] for p in projects)
-    total_tooled = sum(p["tooled_migration_minutes"] for p in projects)
-    ratio = total_manual / total_tooled if total_tooled else 0.0
-
-    if ratio_fail:
-        # Inflate tooled effort to force <3x ratio.
-        for p in projects:
-            p["tooled_migration_minutes"] = int(p["tooled_migration_minutes"] * 2)
-        total_tooled = sum(p["tooled_migration_minutes"] for p in projects)
-        ratio = total_manual / total_tooled if total_tooled else 0.0
-
-    return {
-        "bead_id": "bd-3agp",
-        "generated_at_utc": "2026-02-21T00:00:00Z",
-        "measurement_unit": "minutes",
-        "trace_id": "test-trace",
-        "required_velocity_ratio": 3.0,
-        "overall_velocity_ratio": round(ratio, 4),
-        "total_manual_minutes": total_manual,
-        "total_tooled_minutes": total_tooled,
-        "cohort_size": len(projects),
-        "projects": projects,
-    }
+class Splitmix64Tests(unittest.TestCase):
+    def test_reference_vector_seed_zero(self) -> None:
+        state, out = mod._splitmix64(0)
+        assert state == 0x9E3779B97F4A7C15
+        assert out == 0xE220A8397B1DCDAF
 
 
-class TestMigrationVelocityGate(TestCase):
-    def test_run_checks_passes_repo_artifacts(self) -> None:
-        result = mod.run_checks()
-        self.assertEqual(result["bead_id"], "bd-3agp")
-        self.assertEqual(result["verdict"], "PASS")
+class BootstrapTests(unittest.TestCase):
+    def test_degenerate_population_gives_point_interval(self) -> None:
+        ci = mod._bootstrap_ci_bp([(100, 350)] * 5, 2000, 42)
+        assert ci == {
+            "resamples": 2000,
+            "seed": 42,
+            "ci95_low_bp": 35_000,
+            "ci95_high_bp": 35_000,
+        }
 
-    def test_missing_required_archetype_fails(self) -> None:
-        with TemporaryDirectory(prefix="bd-3agp-test-") as tmp:
-            root = Path(tmp)
-            spec_path = root / "spec.md"
-            report_path = root / "report.json"
+    def test_deterministic_for_fixed_seed(self) -> None:
+        pairs = [(100, 350), (110, 330), (90, 400), (105, 360), (95, 340)]
+        assert mod._bootstrap_ci_bp(pairs, 4000, 7) == mod._bootstrap_ci_bp(pairs, 4000, 7)
 
-            spec_path.write_text(_base_spec_text(), encoding="utf-8")
-            report_path.write_text(
-                json.dumps(_make_report(drop_archetype="monorepo"), indent=2),
-                encoding="utf-8",
-            )
+    def test_empty_pairs_raise(self) -> None:
+        with self.assertRaises(ValueError):
+            mod._bootstrap_ci_bp([], 100, 42)
 
-            result = mod.run_checks(spec_path=spec_path, report_path=report_path)
 
-        self.assertEqual(result["verdict"], "FAIL")
-        self.assertTrue(any("required archetypes covered" == c["check"] and not c["pass"] for c in result["checks"]))
+class CanonicalizationTests(unittest.TestCase):
+    def test_reject_floats_paths(self) -> None:
+        assert mod._reject_floats({"a": {"b": [1, 2]}}) is None
+        assert mod._reject_floats({"a": 3.14}) == "$.a"
 
-    def test_velocity_ratio_below_threshold_fails(self) -> None:
-        with TemporaryDirectory(prefix="bd-3agp-test-") as tmp:
-            root = Path(tmp)
-            spec_path = root / "spec.md"
-            report_path = root / "report.json"
+    def test_canonical_bytes_sorted_compact(self) -> None:
+        assert mod._canonical_bytes({"b": 1, "a": [2, 3]}) == b'{"a":[2,3],"b":1}'
 
-            spec_path.write_text(_base_spec_text(), encoding="utf-8")
-            report_path.write_text(
-                json.dumps(_make_report(ratio_fail=True), indent=2),
-                encoding="utf-8",
-            )
+    def test_corpus_digest_order_invariant(self) -> None:
+        pairs_a = [("f1", "sha256:aa"), ("f2", "sha256:bb")]
+        pairs_b = [("f2", "sha256:bb"), ("f1", "sha256:aa")]
+        assert mod._corpus_digest(pairs_a) == mod._corpus_digest(pairs_b)
 
-            result = mod.run_checks(spec_path=spec_path, report_path=report_path)
 
-        self.assertEqual(result["verdict"], "FAIL")
-        self.assertTrue(any("velocity threshold >= 3x" == c["check"] and not c["pass"] for c in result["checks"]))
+class SignatureTests(unittest.TestCase):
+    def test_roundtrip_verifies(self) -> None:
+        private, public_hex = mod._harness_keys()
+        unsigned = {"schema": mod.MIGTP_SCHEMA, "value_bp": 35_000}
+        message = mod._signature_message(mod._canonical_bytes(unsigned))
+        signature = {
+            "algorithm": mod.MIGTP_SIGNATURE_ALGORITHM,
+            "signer_key_id": mod.MIGTP_HARNESS_KEY_ID,
+            "signer_public_key_hex": public_hex,
+            "signature_hex": private.sign(message).hex(),
+        }
+        ok, detail = mod._verify_signature(
+            unsigned, signature, private, public_hex
+        )
+        assert ok, detail
 
-    def test_ci_sample_count_below_three_fails(self) -> None:
-        with TemporaryDirectory(prefix="bd-3agp-test-") as tmp:
-            root = Path(tmp)
-            spec_path = root / "spec.md"
-            report_path = root / "report.json"
+    def test_flipped_payload_fails(self) -> None:
+        private, public_hex = mod._harness_keys()
+        unsigned = {"schema": mod.MIGTP_SCHEMA, "value_bp": 35_000}
+        message = mod._signature_message(mod._canonical_bytes(unsigned))
+        signature = {
+            "algorithm": mod.MIGTP_SIGNATURE_ALGORITHM,
+            "signer_key_id": mod.MIGTP_HARNESS_KEY_ID,
+            "signer_public_key_hex": public_hex,
+            "signature_hex": private.sign(message).hex(),
+        }
+        tampered = dict(unsigned)
+        tampered["value_bp"] = 34_999
+        ok, _detail = mod._verify_signature(tampered, signature, private, public_hex)
+        assert not ok
 
-            spec_path.write_text(_base_spec_text(), encoding="utf-8")
-            report_path.write_text(
-                json.dumps(_make_report(ci_samples=2), indent=2),
-                encoding="utf-8",
-            )
 
-            result = mod.run_checks(spec_path=spec_path, report_path=report_path)
-
-        self.assertEqual(result["verdict"], "FAIL")
-        self.assertTrue(any("ci sample coverage >= 3" == c["check"] and not c["pass"] for c in result["checks"]))
-
-    def test_self_test_passes(self) -> None:
-        self.assertTrue(mod.self_test())
+class GateCliTests(unittest.TestCase):
+    def test_self_test_exit_zero(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "--self-test"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert completed.returncode == 0, completed.stderr
+        payload = json.loads(completed.stdout)
+        assert payload["ok"] is True
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()

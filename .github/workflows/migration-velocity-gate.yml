@@ -3,27 +3,45 @@ name: Migration Velocity Gate
 on:
   pull_request:
     paths:
-      - "docs/specs/section_13/bd-3agp_contract.md"
-      - "artifacts/13/migration_velocity_report.json"
       - "scripts/check_migration_velocity_gate.py"
+      - "scripts/emit_migration_throughput_delta.py"
+      - "scripts/migration_baseline/**"
       - "tests/test_check_migration_velocity_gate.py"
+      - "tests/test_emit_migration_throughput_delta.py"
+      - "artifacts/migration/throughput_delta.json"
+      - "artifacts/migration/throughput_delta_evidence.json"
+      - "sdk/verifier/src/migration_throughput.rs"
+      - "sdk/verifier/tests/migration_throughput_recompute.rs"
+      - "crates/franken-node/tests/fixtures/migrate/**"
+      - "docs/specs/migration/throughput_delta_contract.md"
   push:
     branches: [main]
     paths:
-      - "docs/specs/section_13/bd-3agp_contract.md"
-      - "artifacts/13/migration_velocity_report.json"
       - "scripts/check_migration_velocity_gate.py"
+      - "scripts/emit_migration_throughput_delta.py"
+      - "scripts/migration_baseline/**"
       - "tests/test_check_migration_velocity_gate.py"
+      - "tests/test_emit_migration_throughput_delta.py"
+      - "artifacts/migration/throughput_delta.json"
+      - "artifacts/migration/throughput_delta_evidence.json"
+      - "sdk/verifier/src/migration_throughput.rs"
+      - "sdk/verifier/tests/migration_throughput_recompute.rs"
+      - "crates/franken-node/tests/fixtures/migrate/**"
+      - "docs/specs/migration/throughput_delta_contract.md"
 
 jobs:
-  migration-velocity:
+  # Fast independent verification of the committed, signed artifact pair.
+  migration-velocity-verifier:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run migration velocity gate
+      - name: Run migration velocity verifier
         run: |
           python3 scripts/check_migration_velocity_gate.py --json > /tmp/migration_velocity_gate.json
+
+      - name: Run gate self-test
+        run: python3 scripts/check_migration_velocity_gate.py --self-test
 
       - name: Upload gate evidence
         if: always()
@@ -31,3 +49,28 @@ jobs:
         with:
           name: migration-velocity-gate
           path: /tmp/migration_velocity_gate.json
+
+  # Heavy live re-measurement: rebuild the real CLI and re-run the frozen
+  # cohort end-to-end so the claim stays measured, not merely attested.
+  migration-velocity-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build franken-node (release)
+        run: cargo build -p frankenengine-node --release --bin franken-node
+
+      - name: Live re-measurement over the frozen cohort
+        run: |
+          python3 scripts/emit_migration_throughput_delta.py --json --runs 3 \
+            > /tmp/migration_velocity_live.json
+
+      - name: Upload live evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-velocity-live
+          path: /tmp/migration_velocity_live.json

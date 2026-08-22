@@ -1,14 +1,42 @@
 #!/usr/bin/env python3
-"""Verify bd-3agp: concrete target gate for >=3x migration velocity."""
+"""Verify the LIVE migration-velocity gate (CLAIM-002, >= 3x throughput).
+
+Subject: the signed, live-measured pair
+  artifacts/migration/throughput_delta.json          (signed summary)
+  artifacts/migration/throughput_delta_evidence.json (measurement census)
+produced by scripts/emit_migration_throughput_delta.py from real
+`franken-node migrate audit/rewrite/validate` invocations against the frozen
+cohort of checked-in fixtures plus the holdout fixture.
+
+This gate is an INDEPENDENT verifier: it reimplements the canonicalization,
+Ed25519 verification, corpus digest, median/basis-point math, and the
+splitmix64 bootstrap rather than importing them from the producer, so a green
+run is two implementations agreeing. It fails closed when:
+
+* the artifacts are missing, malformed, or carry floats;
+* the Ed25519 signature does not verify under the pinned throughput harness
+  key (or an operator anchor);
+* any census entry's declared medians/ratio disagree with its recorded runs;
+* the pooled medians, velocity ratio, or bootstrap CI disagree with the
+  census;
+* the corpus digest does not commit to the census;
+* the frozen fixture inputs no longer match the digests recorded at
+  measurement time;
+* the holdout contract (exactly one holdout fixture) is violated;
+* any constructed Feb 2026 archetype ID (bd-3agp's fictional
+  ``cohort-*-001`` cohort) appears in the cohort;
+* the velocity ratio is below the signed 3.0x threshold.
+
+The constructed Feb 2026 report (artifacts/13/migration_velocity_report.json)
+is NOT evidence and is no longer read by this gate (bd-reality-20260820-w0fc6.2).
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import tempfile
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,42 +44,60 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
-SPEC = ROOT / "docs" / "specs" / "section_13" / "bd-3agp_contract.md"
-REPORT = ROOT / "artifacts" / "13" / "migration_velocity_report.json"
+SUMMARY = ROOT / "artifacts" / "migration" / "throughput_delta.json"
+EVIDENCE = ROOT / "artifacts" / "migration" / "throughput_delta_evidence.json"
 
-REQUIRED_ARCHETYPES = {
-    "express_app",
-    "fastify_app",
-    "nextjs_app",
-    "cli_tool",
-    "library_package",
-    "worker_service",
-    "websocket_server",
-    "monorepo",
-    "native_addons_partial",
-    "custom_build_pipeline",
+# Byte-compatibility constants — MUST match
+# sdk/verifier/src/migration_throughput.rs and the emitter.
+MIGTP_SCHEMA = "franken-node/migration-throughput/v1"
+MIGTP_EVIDENCE_SCHEMA = "franken-node/migration-throughput-evidence/v1"
+MIGTP_SIGNATURE_ALGORITHM = "ed25519"
+MIGTP_HARNESS_KEY_ID = "franken-node-migration-throughput-harness-v1"
+MIGTP_SIGNATURE_DOMAIN = b"frankenengine-verifier-sdk:migration-throughput-signature:v1:"
+MIGTP_EVIDENCE_DOMAIN = b"frankenengine-verifier-sdk:migration-throughput-evidence:v1:"
+MIGTP_CORPUS_DOMAIN = b"frankenengine-verifier-sdk:migration-throughput-corpus:v1:"
+MIGTP_SEED_PREIMAGE = b"frankenengine-verifier-sdk:migration-throughput-harness-key:v1"
+SHA256_PREFIX = "sha256:"
+REQUIRED_VELOCITY_RATIO_BP = 30_000
+MASK64 = (1 << 64) - 1
+
+EVENT_CODES = {
+    "MTP-001",
+    "MTP-002",
+    "MTP-003",
+    "MTP-004",
 }
 
-REQUIRED_EVENT_CODES = {
-    "MVG-001",
-    "MVG-002",
-    "MVG-003",
-    "MVG-004",
-    "MVG-005",
-    "MVG-006",
+CONSTRUCTED_COHORT_IDS = {
+    "cohort-express-001",
+    "cohort-fastify-001",
+    "cohort-next-001",
+    "cohort-nextjs-001",
+    "cohort-cli-tool-001",
+    "cohort-library-001",
+    "cohort-worker-001",
+    "cohort-websocket-001",
+    "cohort-monorepo-001",
+    "cohort-native-addons-001",
+    "cohort-custom-build-001",
 }
 
 CHECKS: list[dict[str, Any]] = []
+EVENTS: list[dict[str, Any]] = []
 
 
-def _check(name: str, passed: bool, detail: str = "") -> dict[str, Any]:
+def _check(name: str, passed: bool, detail: str = "") -> bool:
     entry = {
         "check": name,
         "pass": bool(passed),
         "detail": detail or ("found" if passed else "NOT FOUND"),
     }
     CHECKS.append(entry)
-    return entry
+    return bool(passed)
+
+
+def _event(code: str, trace_id: str, message: str) -> None:
+    EVENTS.append({"event_code": code, "trace_id": trace_id, "message": message})
 
 
 def _trace_id(payload: dict[str, Any]) -> str:
@@ -59,410 +105,485 @@ def _trace_id(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _parse_iso8601(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+# --------------------------------------------------------------------------- #
+# Independent verification primitives
+# --------------------------------------------------------------------------- #
+def _reject_floats(value: Any, path: str = "$") -> str | None:
+    if isinstance(value, float):
+        return path
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            hit = _reject_floats(item, f"{path}[{index}]")
+            if hit:
+                return hit
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            hit = _reject_floats(item, f"{path}.{key}")
+            if hit:
+                return hit
+    return None
 
 
-def _json_decode(text: str) -> Any:
-    return json.JSONDecoder().decode(text)
+def _canonical_bytes(obj: Any) -> bytes:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
 
 
-def _is_json_true(value: Any) -> bool:
-    return isinstance(value, bool) and value
+def _sha256_prefixed(domain: bytes, payload: bytes) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(domain)
+    hasher.update(len(payload).to_bytes(8, "little"))
+    hasher.update(payload)
+    return SHA256_PREFIX + hasher.hexdigest()
 
 
-def _safe_rel(path: Path) -> str:
+def _corpus_digest(pairs: list) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(MIGTP_CORPUS_DOMAIN)
+    for fixture_id, digest in sorted(pairs):
+        fid = fixture_id.encode("utf-8")
+        dig = digest.encode("utf-8")
+        hasher.update(len(fid).to_bytes(8, "little"))
+        hasher.update(fid)
+        hasher.update(len(dig).to_bytes(8, "little"))
+        hasher.update(dig)
+    return SHA256_PREFIX + hasher.hexdigest()
+
+
+def _signature_message(canonical_unsigned: bytes) -> bytes:
+    return (
+        MIGTP_SIGNATURE_DOMAIN
+        + len(canonical_unsigned).to_bytes(8, "little")
+        + canonical_unsigned
+    )
+
+
+def _harness_keys():
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    seed = hashlib.sha256(MIGTP_SEED_PREIMAGE).digest()
+    private = Ed25519PrivateKey.from_private_bytes(seed)
+    public_hex = private.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    ).hex()
+    return private, public_hex
+
+
+def _verify_signature(unsigned: dict, signature: dict, private, public_hex: str) -> tuple[bool, str]:
+    import hmac
+
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    if signature.get("algorithm") != MIGTP_SIGNATURE_ALGORITHM:
+        return False, "algorithm"
+    if signature.get("signer_key_id") != MIGTP_HARNESS_KEY_ID:
+        return False, "key id"
+    embedded = str(signature.get("signer_public_key_hex", ""))
+    if not hmac.compare_digest(embedded, public_hex):
+        return False, "signer key mismatch"
+    message = _signature_message(_canonical_bytes(unsigned))
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(embedded)).verify(
+            bytes.fromhex(str(signature.get("signature_hex", ""))), message
+        )
+    except (InvalidSignature, ValueError):
+        return False, "signature invalid"
+    return True, "ok"
+
+
+def _median_int(values: list) -> int:
+    ordered = sorted(values)
+    if not ordered:
+        raise ValueError("median of empty list")
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) // 2
+
+
+def _ratio_bp(numerator_ms: int, denominator_ms: int) -> int:
+    if numerator_ms < 0 or denominator_ms <= 0:
+        raise ValueError("ratio requires positive denominator")
+    return (numerator_ms * 10_000 + denominator_ms // 2) // denominator_ms
+
+
+def _splitmix64(state: int) -> tuple:
+    state = (state + 0x9E3779B97F4A7C15) & MASK64
+    z = state
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & MASK64
+    return state, z ^ (z >> 31)
+
+
+def _bootstrap_ci_bp(pairs: list, resamples: int, seed: int) -> dict:
+    n = len(pairs)
+    if n == 0 or resamples <= 0:
+        raise ValueError("bootstrap requires samples")
+    state = seed & MASK64
+    ratios: list[int] = []
+    for _ in range(resamples):
+        tool_sample: list[int] = []
+        baseline_sample: list[int] = []
+        for _ in range(n):
+            state, out = _splitmix64(state)
+            index = out % n
+            tool_sample.append(pairs[index][0])
+            baseline_sample.append(pairs[index][1])
+        tool_med = _median_int(tool_sample)
+        if tool_med == 0:
+            continue
+        ratios.append(_ratio_bp(_median_int(baseline_sample), tool_med))
+    if not ratios:
+        raise ValueError("bootstrap produced no usable resamples")
+    ratios.sort()
+    lo = (2 * resamples) // 40
+    hi = min(len(ratios) - 1, len(ratios) - 1 - (2 * resamples) // 40)
+    return {
+        "resamples": resamples,
+        "seed": seed,
+        "ci95_low_bp": ratios[lo],
+        "ci95_high_bp": ratios[hi],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Checks
+# --------------------------------------------------------------------------- #
+def _strict_ints(text: str) -> Any:
+    def no_float(raw: str) -> Any:
+        raise ValueError(f"float value in signed payload: {raw}")
+
+    return json.loads(text, parse_float=no_float, parse_constant=no_float)
+
+
+def run_checks(summary_path: Path = SUMMARY, evidence_path: Path = EVIDENCE) -> dict:
+    CHECKS.clear()
+    EVENTS.clear()
+
+    _check("file: signed summary", summary_path.is_file(), _rel(summary_path))
+    _check("file: evidence census", evidence_path.is_file(), _rel(evidence_path))
+    if not (summary_path.is_file() and evidence_path.is_file()):
+        return _verdict(
+            "FAIL",
+            "MTP-004",
+            "throughput_delta artifacts missing; run "
+            "scripts/emit_migration_throughput_delta.py to measure live",
+        )
+
+    try:
+        summary = _strict_ints(summary_path.read_text(encoding="utf-8"))
+        evidence = _strict_ints(evidence_path.read_text(encoding="utf-8"))
+    except (ValueError, json.JSONDecodeError) as exc:
+        return _verdict("FAIL", "MTP-004", f"artifact parse/float rejection: {exc}")
+
+    _check("summary schema", summary.get("schema_version") == MIGTP_SCHEMA)
+    _check("evidence schema", evidence.get("schema_version") == MIGTP_EVIDENCE_SCHEMA)
+    if not (
+        _check("summary is object", isinstance(summary, dict))
+        and _check("evidence is object", isinstance(evidence, dict))
+    ):
+        return _verdict("FAIL", "MTP-004", "artifact roots must be objects")
+
+    # Signature over the canonical unsigned payload.
+    unsigned = {key: value for key, value in summary.items() if key != "signature"}
+    private, public_hex = _harness_keys()
+    signature_ok, signature_detail = _verify_signature(
+        unsigned, summary.get("signature", {}), private, public_hex
+    )
+    _check("ed25519 signature under harness anchor", signature_ok, signature_detail)
+
+    # Census structure + per-fixture recompute.
+    fixtures = evidence.get("fixtures")
+    if not _check("census fixtures list", isinstance(fixtures, list) and len(fixtures) > 0):
+        return _verdict("FAIL", "MTP-004", "census fixtures missing or empty")
+
+    corpus_pairs: list = []
+    pooled: list = []
+    per_fixture_ok = True
+    fixture_ids: list = []
+    holdout_ids: list = []
+    for entry in fixtures:
+        fixture_id = str(entry.get("fixture_id", ""))
+        fixture_ids.append(fixture_id)
+        if entry.get("role") == "holdout":
+            holdout_ids.append(fixture_id)
+        runs = entry.get("runs", [])
+        tool_values = [int(run.get("tool_ms", 0)) for run in runs]
+        baseline_values = [int(run.get("baseline_ms", 0)) for run in runs]
+        entry_ok = len(runs) > 0
+        if entry_ok:
+            tool_median = _median_int(tool_values)
+            baseline_median = _median_int(baseline_values)
+            ratio = _ratio_bp(baseline_median, tool_median)
+            entry_ok = (
+                tool_median == int(entry.get("tool_median_ms", -1))
+                and baseline_median == int(entry.get("baseline_median_ms", -1))
+                and ratio == int(entry.get("ratio_bp", -1))
+            )
+            pooled.extend((tool, base) for tool, base in zip(tool_values, baseline_values))
+        corpus_pairs.append((fixture_id, _sha256_prefixed(MIGTP_EVIDENCE_DOMAIN, _canonical_bytes(entry))))
+        per_fixture_ok = per_fixture_ok and entry_ok
+    _check(
+        "per-fixture medians/ratios recompute from runs",
+        per_fixture_ok,
+        "" if per_fixture_ok else "declared aggregates disagree with recorded runs",
+    )
+
+    # Frozen-input binding: recorded digests must still match the tree.
+    frozen_ok, frozen_detail = _check_frozen_inputs(fixtures)
+    _check("frozen fixture inputs match recorded digests", frozen_ok, frozen_detail)
+
+    # Corpus digest.
+    declared_corpus = str(summary.get("corpus_digest", ""))
+    recomputed_corpus = _corpus_digest(corpus_pairs)
+    _check("corpus digest commits to census", declared_corpus == recomputed_corpus)
+
+    # Fixture-set + holdout + constructed-ID contracts.
+    declared_ids = sorted(
+        [str(item) for item in summary.get("fixture_ids_cohort", [])]
+        + [str(item) for item in summary.get("fixture_ids_holdout", [])]
+    )
+    _check("delta fixture ids match census", declared_ids == sorted(fixture_ids))
+    _check("exactly one holdout fixture", len(holdout_ids) == 1, f"holdouts={holdout_ids}")
+    constructed_hits = sorted(set(fixture_ids) & CONSTRUCTED_COHORT_IDS)
+    _check(
+        "constructed Feb 2026 archetype cohort rejected (bd-reality-20260820-w0fc6.2)",
+        not constructed_hits,
+        "constructed ids: " + ",".join(constructed_hits) if constructed_hits else "ok",
+    )
+
+    # Pooled aggregates + bootstrap.
+    pooled_tool = _median_int([pair[0] for pair in pooled])
+    pooled_baseline = _median_int([pair[1] for pair in pooled])
+    recomputed_ratio = _ratio_bp(pooled_baseline, pooled_tool)
+    _check("pooled medians recompute", pooled_tool == int(summary.get("median_tool_ms", -1)) and pooled_baseline == int(summary.get("median_baseline_ms", -1)))
+    _check(
+        "velocity ratio recomputes from census",
+        recomputed_ratio == int(summary.get("velocity_ratio_bp", -1)),
+        f"declared={summary.get('velocity_ratio_bp')}, recomputed={recomputed_ratio}",
+    )
+    try:
+        ci = summary.get("bootstrap_ci95", {})
+        recomputed_ci = _bootstrap_ci_bp(
+            pooled, int(ci.get("resamples", 0)), int(ci.get("seed", 0))
+        )
+        ci_ok = (
+            recomputed_ci["ci95_low_bp"] == int(ci.get("ci95_low_bp", -1))
+            and recomputed_ci["ci95_high_bp"] == int(ci.get("ci95_high_bp", -1))
+        )
+        _check("bootstrap CI95 recomputes deterministically", ci_ok)
+    except ValueError as exc:
+        _check("bootstrap CI95 recomputes deterministically", False, str(exc))
+
+    # Threshold + holdout ratio.
+    required = int(summary.get("required_velocity_ratio_bp", 0))
+    threshold_ok = _check(
+        "required ratio pinned at 3x",
+        required == REQUIRED_VELOCITY_RATIO_BP,
+        f"required={required}",
+    )
+    ratio_ok = _check(
+        "velocity threshold >= 3x",
+        recomputed_ratio >= required,
+        f"ratio_bp={recomputed_ratio}, required_bp={required}",
+    )
+    holdout_entry = next((entry for entry in fixtures if entry.get("role") == "holdout"), None)
+    holdout_ok = _check(
+        "holdout ratio matches census",
+        bool(holdout_entry)
+        and int(summary.get("holdout_ratio_bp", -1)) == int(holdout_entry.get("ratio_bp", -2)),
+    )
+    _check(
+        "measured runs recorded",
+        all(len(entry.get("runs", [])) == int(summary.get("measured_runs", -1)) for entry in fixtures),
+    )
+    _check("protocol documented", bool(str(summary.get("protocol", "")).strip()))
+
+    trace = str(summary.get("corpus_digest", ""))[:16] or _trace_id(summary)
+    _event("MTP-001", trace, f"Live velocity metrics recomputed (ratio_bp={recomputed_ratio}).")
+    if ratio_ok and threshold_ok:
+        _event("MTP-002", trace, "Velocity threshold met (>= 3x).")
+    else:
+        _event("MTP-003", trace, "Velocity threshold breached or mispinned (< 3x).")
+    if signature_ok and frozen_ok and holdout_ok:
+        _event("MTP-004", trace, "Signature, frozen-input, and holdout contracts verified.")
+    else:
+        _event("MTP-004", trace, "Signature/frozen-input/holdout contract violation detected.")
+
+    return _verdict("PASS" if all(c["pass"] for c in CHECKS) else "FAIL", "", "")
+
+
+def _check_frozen_inputs(fixtures: list) -> tuple[bool, str]:
+    mismatches: list[str] = []
+    for entry in fixtures:
+        for item in entry.get("input_files", []):
+            path = ROOT / str(item.get("path", ""))
+            expected = str(item.get("sha256", ""))
+            if not path.is_file():
+                mismatches.append(f"missing:{item.get('path')}")
+                continue
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual != expected:
+                mismatches.append(f"drift:{item.get('path')}")
+    return (not mismatches, "ok" if not mismatches else "; ".join(mismatches[:5]))
+
+
+def _verdict(verdict: str, event_code: str, message: str) -> dict:
+    if event_code:
+        _event(event_code, "gate", message)
+    total = len(CHECKS)
+    passed = sum(1 for check in CHECKS if check["pass"])
+    return {
+        "bead_id": "bd-reality-20260820-w0fc6.2",
+        "title": "Live migration velocity gate (>= 3x, signed, census-recomputed)",
+        "verdict": verdict,
+        "total": total,
+        "passed": passed,
+        "failed": total - passed,
+        "checks": CHECKS,
+        "events": EVENTS,
+    }
+
+
+def _rel(path: Path) -> str:
     try:
         return str(path.relative_to(ROOT))
     except ValueError:
         return str(path)
 
 
-def _project_required_fields() -> tuple[str, ...]:
-    return (
-        "project_id",
-        "archetype",
-        "start_time_utc",
-        "end_time_utc",
-        "first_passing_test_time_utc",
-        "manual_migration_minutes",
-        "tooled_migration_minutes",
-        "manual_intervention_points",
-        "blockers_encountered",
-        "ci_release_sample",
-    )
-
-
-def _validate_project_entry(project: dict[str, Any], idx: int, errors: list[str]) -> None:
-    for field in _project_required_fields():
-        if field not in project:
-            errors.append(f"projects[{idx}] missing field: {field}")
-
-    for field in ("project_id", "archetype", "start_time_utc", "end_time_utc", "first_passing_test_time_utc"):
-        if field in project and (not isinstance(project[field], str) or not project[field].strip()):
-            errors.append(f"projects[{idx}].{field} must be non-empty string")
-
-    for field in ("manual_migration_minutes", "tooled_migration_minutes"):
-        if field in project:
-            value = project[field]
-            if not isinstance(value, (int, float)) or value <= 0:
-                errors.append(f"projects[{idx}].{field} must be > 0")
-
-    for field in ("manual_intervention_points", "blockers_encountered"):
-        if field in project:
-            value = project[field]
-            if not isinstance(value, list):
-                errors.append(f"projects[{idx}].{field} must be list")
-            else:
-                for list_idx, item in enumerate(value):
-                    if not isinstance(item, str):
-                        errors.append(
-                            f"projects[{idx}].{field}[{list_idx}] must be string"
-                        )
-
-    if "ci_release_sample" in project and not isinstance(project["ci_release_sample"], bool):
-        errors.append(f"projects[{idx}].ci_release_sample must be boolean")
-
-    try:
-        start = _parse_iso8601(str(project.get("start_time_utc", "")))
-        end = _parse_iso8601(str(project.get("end_time_utc", "")))
-        first_pass = _parse_iso8601(str(project.get("first_passing_test_time_utc", "")))
-        if end < start:
-            errors.append(f"projects[{idx}] end_time_utc must be >= start_time_utc")
-        if first_pass < end:
-            errors.append(
-                f"projects[{idx}] first_passing_test_time_utc must be >= end_time_utc"
-            )
-    except Exception:
-        errors.append(
-            f"projects[{idx}] timestamps must be valid RFC-3339 UTC values"
-        )
-
-
-def run_checks(spec_path: Path = SPEC, report_path: Path = REPORT) -> dict[str, Any]:
-    CHECKS.clear()
-    events: list[dict[str, Any]] = []
-
-    _check("file: spec contract", spec_path.is_file(), _safe_rel(spec_path))
-    _check("file: migration velocity report", report_path.is_file(), _safe_rel(report_path))
-
-    spec_text = ""
-    if spec_path.is_file():
-        spec_text = spec_path.read_text(encoding="utf-8")
-    _check("spec threshold >= 3x", ">=3x" in spec_text or ">= 3.0x" in spec_text)
-    _check("spec archetype coverage", all(a in spec_text for a in REQUIRED_ARCHETYPES))
-    _check("spec event codes", all(code in spec_text for code in REQUIRED_EVENT_CODES))
-
-    report: dict[str, Any] = {}
-    report_errors: list[str] = []
-    if report_path.is_file():
-        try:
-            report = _json_decode(report_path.read_text(encoding="utf-8"))
-            if not isinstance(report, dict):
-                report_errors.append("report root must be an object")
-        except json.JSONDecodeError as exc:
-            report_errors.append(f"invalid report JSON: {exc}")
-
-    _check("report parse", len(report_errors) == 0, "; ".join(report_errors) if report_errors else "ok")
-    if report_errors:
-        verdict = "FAIL"
-        total = len(CHECKS)
-        passed = sum(1 for check in CHECKS if check["pass"])
-        failed = total - passed
-        return {
-            "bead_id": "bd-3agp",
-            "title": "Migration velocity gate (>= 3x)",
-            "section": "13",
-            "verdict": verdict,
-            "total": total,
-            "passed": passed,
-            "failed": failed,
-            "checks": CHECKS,
-            "events": [],
-        }
-
-    required_top = (
-        "bead_id",
-        "generated_at_utc",
-        "measurement_unit",
-        "trace_id",
-        "required_velocity_ratio",
-        "overall_velocity_ratio",
-        "total_manual_minutes",
-        "total_tooled_minutes",
-        "cohort_size",
-        "projects",
-    )
-    missing_top = [field for field in required_top if field not in report]
-    _check(
-        "report required top-level fields",
-        len(missing_top) == 0,
-        "missing: " + ", ".join(missing_top) if missing_top else "ok",
-    )
-
-    _check("report bead id", report.get("bead_id") == "bd-3agp")
-    _check("report unit minutes", report.get("measurement_unit") == "minutes")
-    constructed_ids = {
-        "cohort-express-001",
-        "cohort-fastify-001",
-        "cohort-next-001",
-    }
-    constructed_hits = []
-    if isinstance(report.get("projects"), list):
-        for project in report["projects"]:
-            if isinstance(project, dict) and project.get("project_id") in constructed_ids:
-                constructed_hits.append(str(project.get("project_id")))
-    _check(
-        "constructed Feb 2026 archetype cohort rejected (bd-reality-20260820-w0fc6.2)",
-        len(constructed_hits) == 0,
-        "constructed ids: " + ",".join(constructed_hits) if constructed_hits else "ok",
-    )
-
-    projects = report.get("projects", [])
-    _check("cohort size >= 10", isinstance(projects, list) and len(projects) >= 10)
-    _check(
-        "cohort_size matches project count",
-        isinstance(projects, list) and report.get("cohort_size") == len(projects),
-    )
-
-    project_errors: list[str] = []
-    archetypes_seen: set[str] = set()
-    total_manual = 0.0
-    total_tooled = 0.0
-    ci_sample_count = 0
-
-    if isinstance(projects, list):
-        for idx, project in enumerate(projects):
-            if not isinstance(project, dict):
-                project_errors.append(f"projects[{idx}] must be object")
-                continue
-            _validate_project_entry(project, idx, project_errors)
-            archetype = project.get("archetype")
-            if isinstance(archetype, str):
-                archetypes_seen.add(archetype)
-
-            manual = project.get("manual_migration_minutes")
-            tooled = project.get("tooled_migration_minutes")
-            if isinstance(manual, (int, float)) and manual > 0:
-                total_manual += float(manual)
-            if isinstance(tooled, (int, float)) and tooled > 0:
-                total_tooled += float(tooled)
-            if _is_json_true(project.get("ci_release_sample")):
-                ci_sample_count += 1
-
-    _check(
-        "project entry schema",
-        len(project_errors) == 0,
-        "; ".join(project_errors[:5]) if project_errors else "ok",
-    )
-
-    missing_archetypes = sorted(REQUIRED_ARCHETYPES - archetypes_seen)
-    _check(
-        "required archetypes covered",
-        len(missing_archetypes) == 0,
-        "missing: " + ", ".join(missing_archetypes) if missing_archetypes else "ok",
-    )
-
-    computed_ratio = 0.0
-    if total_tooled > 0:
-        computed_ratio = total_manual / total_tooled
-
-    declared_ratio = report.get("overall_velocity_ratio")
-    ratio_matches = isinstance(declared_ratio, (int, float)) and abs(declared_ratio - computed_ratio) <= 0.01
-    _check(
-        "overall velocity ratio matches computed",
-        ratio_matches,
-        f"declared={declared_ratio}, computed={computed_ratio:.2f}",
-    )
-
-    threshold = report.get("required_velocity_ratio", 3.0)
-    threshold_ok = isinstance(threshold, (int, float)) and computed_ratio >= float(threshold)
-    _check(
-        "velocity threshold >= 3x",
-        threshold_ok,
-        f"ratio={computed_ratio:.2f}, threshold={threshold}",
-    )
-
-    _check(
-        "ci sample coverage >= 3",
-        ci_sample_count >= 3,
-        f"ci_release_sample projects={ci_sample_count}",
-    )
-
-    # Determinism check: order-invariant aggregate ratio.
-    determinism_ok = False
-    if isinstance(projects, list):
-        reversed_manual = sum(float(p.get("manual_migration_minutes", 0.0)) for p in reversed(projects) if isinstance(p, dict))
-        reversed_tooled = sum(float(p.get("tooled_migration_minutes", 0.0)) for p in reversed(projects) if isinstance(p, dict))
-        reversed_ratio = (reversed_manual / reversed_tooled) if reversed_tooled > 0 else 0.0
-        determinism_ok = abs(reversed_ratio - computed_ratio) <= 1e-9
-        _check(
-            "determinism under reordering",
-            determinism_ok,
-            f"ratio={computed_ratio:.5f}, reversed_ratio={reversed_ratio:.5f}",
-        )
-    else:
-        _check("determinism under reordering", False, "projects is not a list")
-
-    # Adversarial perturbation check: degrading tooled times should fail threshold.
-    perturbed_ratio = computed_ratio / 1.5 if computed_ratio > 0 else 0.0
-    adversarial_expected_fail = perturbed_ratio < 3.0
-    _check(
-        "adversarial perturbation flips threshold",
-        adversarial_expected_fail,
-        f"perturbed_ratio={perturbed_ratio:.2f}",
-    )
-
-    trace = report.get("trace_id")
-    if not isinstance(trace, str) or not trace:
-        trace = _trace_id(report)
-
-    events.append(
-        {
-            "event_code": "MVG-001",
-            "trace_id": trace,
-            "message": f"Velocity metrics computed (ratio={computed_ratio:.2f}).",
-        }
-    )
-    if threshold_ok:
-        events.append(
-            {
-                "event_code": "MVG-002",
-                "trace_id": trace,
-                "message": "Velocity threshold met (>= 3x).",
-            }
-        )
-    else:
-        events.append(
-            {
-                "event_code": "MVG-003",
-                "trace_id": trace,
-                "message": "Velocity threshold breached (< 3x).",
-            }
-        )
-
-    if missing_archetypes or len(project_errors) > 0:
-        events.append(
-            {
-                "event_code": "MVG-004",
-                "trace_id": trace,
-                "message": "Cohort coverage/documentation violation detected.",
-            }
-        )
-
-    if ci_sample_count < 3:
-        events.append(
-            {
-                "event_code": "MVG-005",
-                "trace_id": trace,
-                "message": "Insufficient CI release sample coverage.",
-            }
-        )
-
-    events.append(
-        {
-            "event_code": "MVG-006",
-            "trace_id": trace,
-            "message": "Determinism validation executed.",
-        }
-    )
-
-    verdict = "PASS" if all(check["pass"] for check in CHECKS) else "FAIL"
-    total = len(CHECKS)
-    passed = sum(1 for check in CHECKS if check["pass"])
-    failed = total - passed
-
-    return {
-        "bead_id": "bd-3agp",
-        "title": "Migration velocity gate (>= 3x)",
-        "section": "13",
-        "trace_id": trace,
-        "verdict": verdict,
-        "total": total,
-        "passed": passed,
-        "failed": failed,
-        "computed": {
-            "overall_velocity_ratio": round(computed_ratio, 4),
-            "required_velocity_ratio": threshold,
-            "cohort_size": len(projects) if isinstance(projects, list) else 0,
-            "ci_release_sample_count": ci_sample_count,
-            "missing_archetypes": missing_archetypes,
-        },
-        "checks": CHECKS,
-        "events": events,
-    }
-
-
 def self_test() -> bool:
-    with tempfile.TemporaryDirectory(prefix="bd-3agp-self-test-") as tmp:
-        root = Path(tmp)
-        spec = root / "spec.md"
-        report = root / "report.json"
+    """Build a synthetic signed delta+census in memory and verify both the
+    PASS path and two tamper paths using this gate's own primitives."""
+    import tempfile
 
-        spec.write_text(
-            "\n".join(
+    private, public_hex = _harness_keys()
+
+    def make_pair(ratio_tool: int, ratio_baseline: int) -> tuple[dict, dict]:
+        runs = [
+            {
+                "run_index": index,
+                "tool_ms": ratio_tool + index,
+                "tool_commands_ms": [ratio_tool, ratio_tool, ratio_tool],
+                "tool_exit_codes": [0, 0, 0],
+                "baseline_ms": ratio_baseline + index,
+                "baseline_commands_ms": [ratio_baseline, ratio_baseline, ratio_baseline],
+                "baseline_exit_codes": [0, 0, 0],
+            }
+            for index in range(5)
+        ]
+        tool_median = _median_int([run["tool_ms"] for run in runs])
+        baseline_median = _median_int([run["baseline_ms"] for run in runs])
+        entry = {
+            "fixture_id": "self-test-fixture",
+            "role": "cohort",
+            "source_path_rel": "unused",
+            "input_files": [],
+            "expected_validate": "pass",
+            "runs": runs,
+            "tool_median_ms": tool_median,
+            "baseline_median_ms": baseline_median,
+            "ratio_bp": _ratio_bp(baseline_median, tool_median),
+        }
+        holdout = dict(entry)
+        holdout["fixture_id"] = "self-test-holdout"
+        holdout["role"] = "holdout"
+        fixtures = [entry, holdout]
+        pairs = [(run["tool_ms"], run["baseline_ms"]) for fixture in fixtures for run in fixture["runs"]]
+        pooled_tool = _median_int([pair[0] for pair in pairs])
+        pooled_baseline = _median_int([pair[1] for pair in pairs])
+        unsigned = {
+            "schema_version": MIGTP_SCHEMA,
+            "generated_at": "1970-01-01T00:00:00Z",
+            "protocol": "self-test",
+            "required_velocity_ratio_bp": REQUIRED_VELOCITY_RATIO_BP,
+            "velocity_ratio_bp": _ratio_bp(pooled_baseline, pooled_tool),
+            "median_baseline_ms": pooled_baseline,
+            "median_tool_ms": pooled_tool,
+            "bootstrap_ci95": _bootstrap_ci_bp(pairs, 2000, 42),
+            "holdout_ratio_bp": holdout["ratio_bp"],
+            "fixture_ids_cohort": ["self-test-fixture"],
+            "fixture_ids_holdout": ["self-test-holdout"],
+            "warmup_runs": 1,
+            "measured_runs": 5,
+            "corpus_digest": _corpus_digest(
                 [
-                    "# test spec",
-                    ">= 3.0x",
-                    *sorted(REQUIRED_ARCHETYPES),
-                    *sorted(REQUIRED_EVENT_CODES),
+                    (fixture["fixture_id"], _sha256_prefixed(MIGTP_EVIDENCE_DOMAIN, _canonical_bytes(fixture)))
+                    for fixture in fixtures
                 ]
             ),
-            encoding="utf-8",
-        )
+        }
+        message = _signature_message(_canonical_bytes(unsigned))
+        unsigned["signature"] = {
+            "algorithm": MIGTP_SIGNATURE_ALGORITHM,
+            "signer_key_id": MIGTP_HARNESS_KEY_ID,
+            "signer_public_key_hex": public_hex,
+            "signature_hex": private.sign(message).hex(),
+        }
+        evidence = {
+            "schema_version": MIGTP_EVIDENCE_SCHEMA,
+            "generated_at": "1970-01-01T00:00:00Z",
+            "protocol": "self-test",
+            "fixtures": fixtures,
+        }
+        return unsigned, evidence
 
-        projects = []
-        archetypes = sorted(REQUIRED_ARCHETYPES)
-        for idx, archetype in enumerate(archetypes):
-            projects.append(
-                {
-                    "project_id": f"p-{idx}",
-                    "archetype": archetype,
-                    "start_time_utc": "2026-02-20T00:00:00Z",
-                    "end_time_utc": "2026-02-20T01:00:00Z",
-                    "first_passing_test_time_utc": "2026-02-20T01:05:00Z",
-                    "manual_migration_minutes": 300 + idx,
-                    "tooled_migration_minutes": 90 + (idx % 2),
-                    "manual_intervention_points": ["x"],
-                    "blockers_encountered": [],
-                    "ci_release_sample": idx < 3,
-                }
-            )
+    with tempfile.TemporaryDirectory(prefix="migtp-gate-self-test-") as tmp:
+        root = Path(tmp)
+        summary_path = root / "delta.json"
+        evidence_path = root / "evidence.json"
 
-        total_manual = sum(p["manual_migration_minutes"] for p in projects)
-        total_tooled = sum(p["tooled_migration_minutes"] for p in projects)
-        ratio = total_manual / total_tooled
-
-        report.write_text(
-            json.dumps(
-                {
-                    "bead_id": "bd-3agp",
-                    "generated_at_utc": "2026-02-21T00:00:00Z",
-                    "measurement_unit": "minutes",
-                    "trace_id": "self-test-trace",
-                    "required_velocity_ratio": 3.0,
-                    "overall_velocity_ratio": round(ratio, 4),
-                    "total_manual_minutes": total_manual,
-                    "total_tooled_minutes": total_tooled,
-                    "cohort_size": len(projects),
-                    "projects": projects,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-
-        pass_result = run_checks(spec_path=spec, report_path=report)
-        if pass_result["verdict"] != "PASS":
+        # PASS path: 3.5x synthetic measurement.
+        summary, evidence = make_pair(ratio_tool=100, ratio_baseline=350)
+        summary_path.write_text(json.dumps(summary))
+        evidence_path.write_text(json.dumps(evidence))
+        if run_checks(summary_path, evidence_path)["verdict"] != "PASS":
             return False
 
-        # Perturb to force threshold failure.
-        data = _json_decode(report.read_text(encoding="utf-8"))
-        data["overall_velocity_ratio"] = 2.9
-        data["total_tooled_minutes"] = int(data["total_tooled_minutes"] * 1.3)
-        report.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        fail_result = run_checks(spec_path=spec, report_path=report)
-        return fail_result["verdict"] == "FAIL"
+        # Tamper 1: below-threshold measurement must FAIL.
+        summary, evidence = make_pair(ratio_tool=100, ratio_baseline=250)
+        summary_path.write_text(json.dumps(summary))
+        evidence_path.write_text(json.dumps(evidence))
+        if run_checks(summary_path, evidence_path)["verdict"] != "FAIL":
+            return False
+
+        # Tamper 2: flipped signed value must FAIL the signature check.
+        summary, evidence = make_pair(ratio_tool=100, ratio_baseline=350)
+        summary["velocity_ratio_bp"] = summary["velocity_ratio_bp"] + 1
+        summary_path.write_text(json.dumps(summary))
+        evidence_path.write_text(json.dumps(evidence))
+        result = run_checks(summary_path, evidence_path)
+        if result["verdict"] != "FAIL":
+            return False
+        signature_check = next(
+            (check for check in result["checks"] if "signature" in check["check"]), None
+        )
+        if signature_check is None or signature_check["pass"]:
+            return False
+
+        # Tamper 3: float in the signed payload must FAIL.
+        summary, evidence = make_pair(ratio_tool=100, ratio_baseline=350)
+        summary["velocity_ratio_bp"] = 3.5
+        summary_path.write_text(json.dumps(summary))
+        evidence_path.write_text(json.dumps(evidence))
+        if run_checks(summary_path, evidence_path)["verdict"] != "FAIL":
+            return False
+
+        # Tamper 4: constructed cohort ID must FAIL.
+        summary, evidence = make_pair(ratio_tool=100, ratio_baseline=350)
+        summary["fixture_ids_cohort"] = ["cohort-express-001"]
+        summary["fixture_ids_holdout"] = ["self-test-holdout"]
+        summary["corpus_digest"] = summary["corpus_digest"]
+        evidence["fixtures"][0]["fixture_id"] = "cohort-express-001"
+        summary_path.write_text(json.dumps(summary))
+        evidence_path.write_text(json.dumps(evidence))
+        if run_checks(summary_path, evidence_path)["verdict"] != "FAIL":
+            return False
+
+    return True
 
 
 def main() -> int:
