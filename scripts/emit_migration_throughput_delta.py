@@ -316,7 +316,7 @@ def resolve_js_runtime() -> tuple[str, str]:
 
 
 def copy_fixture(source: Path, destination: Path) -> None:
-    shutil.copytree(source, destination)
+    shutil.copytree(source, destination, dirs_exist_ok=True)
 
 
 def fixture_input_files(rel: str) -> list:
