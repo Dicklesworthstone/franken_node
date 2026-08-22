@@ -1,6 +1,10 @@
 {
   "binary_profile": "target-debug",
   "equivalences": {
+    "corpus-commander": {
+      "audit_summary_matches": true,
+      "validate_status_parity": true
+    },
     "hardened": {
       "audit_summary_matches": true,
       "validate_status_parity": true
@@ -20,7 +24,7 @@
   },
   "fixtures": [
     {
-      "baseline_median_ms": 76,
+      "baseline_median_ms": 74,
       "expected_validate": "fail_static_lockfile_missing",
       "fixture_id": "rewrite-shell-commonjs",
       "input_files": [
@@ -37,50 +41,25 @@
           "sha256": "af1bbbee3899cefe1b13cb8d1079e8e277ec269408f5f023138a0aa5f22dbe03"
         }
       ],
-      "ratio_bp": 17674,
+      "ratio_bp": 14231,
       "role": "cohort",
       "runs": [
         {
           "baseline_commands_ms": [
+            24,
             25,
-            26,
-            25
+            24
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 76,
+          "baseline_ms": 73,
           "run_index": 0,
           "tool_commands_ms": [
-            7,
-            32,
-            7
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "tool_ms": 46
-        },
-        {
-          "baseline_commands_ms": [
-            25,
-            25,
-            29
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "baseline_ms": 79,
-          "run_index": 1,
-          "tool_commands_ms": [
-            7,
-            26,
+            8,
+            36,
             8
           ],
           "tool_exit_codes": [
@@ -88,13 +67,13 @@
             0,
             1
           ],
-          "tool_ms": 41
+          "tool_ms": 52
         },
         {
           "baseline_commands_ms": [
             25,
-            26,
-            25
+            25,
+            26
           ],
           "baseline_exit_codes": [
             0,
@@ -102,49 +81,24 @@
             1
           ],
           "baseline_ms": 76,
-          "run_index": 2,
+          "run_index": 1,
           "tool_commands_ms": [
-            7,
-            29,
-            7
+            8,
+            36,
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 43
-        },
-        {
-          "baseline_commands_ms": [
-            26,
-            25,
-            25
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "baseline_ms": 76,
-          "run_index": 3,
-          "tool_commands_ms": [
-            7,
-            29,
-            7
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "tool_ms": 43
+          "tool_ms": 52
         },
         {
           "baseline_commands_ms": [
             24,
-            25,
-            25
+            26,
+            24
           ],
           "baseline_exit_codes": [
             0,
@@ -152,22 +106,22 @@
             1
           ],
           "baseline_ms": 74,
-          "run_index": 4,
+          "run_index": 2,
           "tool_commands_ms": [
             7,
-            30,
-            7
+            36,
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 44
+          "tool_ms": 51
         }
       ],
       "source_path_rel": "crates/franken-node/tests/fixtures/migrate/rewrite_shell_commonjs",
-      "tool_median_ms": 43
+      "tool_median_ms": 52
     },
     {
       "baseline_median_ms": 74,
@@ -183,25 +137,25 @@
           "sha256": "bf353ecadf71aa5d4a388d4bc89302c18b979c3f383dca4becb86d0753de31a1"
         }
       ],
-      "ratio_bp": 26429,
+      "ratio_bp": 20556,
       "role": "cohort",
       "runs": [
         {
           "baseline_commands_ms": [
-            24,
-            23,
-            26
+            25,
+            25,
+            27
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 73,
+          "baseline_ms": 77,
           "run_index": 0,
           "tool_commands_ms": [
-            7,
-            14,
+            8,
+            23,
             7
           ],
           "tool_exit_codes": [
@@ -209,7 +163,7 @@
             0,
             0
           ],
-          "tool_ms": 28
+          "tool_ms": 38
         },
         {
           "baseline_commands_ms": [
@@ -225,8 +179,8 @@
           "baseline_ms": 74,
           "run_index": 1,
           "tool_commands_ms": [
-            7,
-            13,
+            8,
+            19,
             8
           ],
           "tool_exit_codes": [
@@ -234,13 +188,13 @@
             0,
             0
           ],
-          "tool_ms": 28
+          "tool_ms": 35
         },
         {
           "baseline_commands_ms": [
+            24,
             25,
-            25,
-            24
+            25
           ],
           "baseline_exit_codes": [
             0,
@@ -250,70 +204,20 @@
           "baseline_ms": 74,
           "run_index": 2,
           "tool_commands_ms": [
-            7,
-            17,
-            7
+            8,
+            20,
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 31
-        },
-        {
-          "baseline_commands_ms": [
-            25,
-            25,
-            24
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "baseline_ms": 74,
-          "run_index": 3,
-          "tool_commands_ms": [
-            6,
-            15,
-            7
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "tool_ms": 28
-        },
-        {
-          "baseline_commands_ms": [
-            31,
-            25,
-            26
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "baseline_ms": 82,
-          "run_index": 4,
-          "tool_commands_ms": [
-            7,
-            15,
-            7
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "tool_ms": 29
+          "tool_ms": 36
         }
       ],
       "source_path_rel": "crates/franken-node/tests/fixtures/migrate/hardened",
-      "tool_median_ms": 28
+      "tool_median_ms": 36
     },
     {
       "baseline_median_ms": 73,
@@ -325,14 +229,14 @@
           "sha256": "c832f29049499123b429cb56039c998a64aa35c31c2e059351a272a20324c63a"
         }
       ],
-      "ratio_bp": 22813,
+      "ratio_bp": 21471,
       "role": "cohort",
       "runs": [
         {
           "baseline_commands_ms": [
             25,
-            25,
-            23
+            23,
+            25
           ],
           "baseline_exit_codes": [
             0,
@@ -343,32 +247,7 @@
           "run_index": 0,
           "tool_commands_ms": [
             7,
-            15,
-            7
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "tool_ms": 29
-        },
-        {
-          "baseline_commands_ms": [
-            25,
-            24,
-            25
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "baseline_ms": 74,
-          "run_index": 1,
-          "tool_commands_ms": [
-            7,
-            14,
+            18,
             8
           ],
           "tool_exit_codes": [
@@ -376,89 +255,168 @@
             0,
             1
           ],
-          "tool_ms": 29
-        },
-        {
-          "baseline_commands_ms": [
-            24,
-            24,
-            24
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "baseline_ms": 72,
-          "run_index": 2,
-          "tool_commands_ms": [
-            7,
-            18,
-            7
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "tool_ms": 32
+          "tool_ms": 33
         },
         {
           "baseline_commands_ms": [
             25,
-            24,
-            24
+            25,
+            25
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 73,
-          "run_index": 3,
+          "baseline_ms": 75,
+          "run_index": 1,
           "tool_commands_ms": [
-            6,
+            8,
             19,
-            7
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 32
+          "tool_ms": 35
         },
         {
           "baseline_commands_ms": [
             24,
             24,
-            24
+            23
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 72,
-          "run_index": 4,
+          "baseline_ms": 71,
+          "run_index": 2,
           "tool_commands_ms": [
-            6,
-            126,
-            7
+            7,
+            19,
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 139
+          "tool_ms": 34
         }
       ],
       "source_path_rel": "crates/franken-node/tests/fixtures/migrate/risky",
-      "tool_median_ms": 32
+      "tool_median_ms": 34
     },
     {
       "baseline_median_ms": 75,
+      "expected_validate": "pass",
+      "fixture_id": "corpus-commander",
+      "input_files": [
+        {
+          "path": "crates/franken-node/tests/fixtures/migrate/corpus_commander/README.md",
+          "sha256": "b6eee5925362574e3237d24cc53f974a5ebe3a9e7cbeee4f2f50c5c4084e302a"
+        },
+        {
+          "path": "crates/franken-node/tests/fixtures/migrate/corpus_commander/index.js",
+          "sha256": "f92b14348d67ebab914c56d538da80afaf30e0343acee6eadcc01ca197753e6f"
+        },
+        {
+          "path": "crates/franken-node/tests/fixtures/migrate/corpus_commander/package-lock.json",
+          "sha256": "0c2397946733f44ec62f1c41d722b03a2e9024e205bedb02d676610dff057908"
+        },
+        {
+          "path": "crates/franken-node/tests/fixtures/migrate/corpus_commander/package.json",
+          "sha256": "34d3d7f57504ea34e12600ea34220038931bf9da32b0525cbd85931a40561c40"
+        }
+      ],
+      "ratio_bp": 9036,
+      "role": "cohort",
+      "runs": [
+        {
+          "baseline_commands_ms": [
+            24,
+            25,
+            24
+          ],
+          "baseline_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "baseline_ms": 73,
+          "run_index": 0,
+          "tool_commands_ms": [
+            8,
+            69,
+            8
+          ],
+          "tool_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "tool_ms": 85
+        },
+        {
+          "baseline_commands_ms": [
+            25,
+            25,
+            25
+          ],
+          "baseline_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "baseline_ms": 75,
+          "run_index": 1,
+          "tool_commands_ms": [
+            7,
+            68,
+            7
+          ],
+          "tool_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "tool_ms": 82
+        },
+        {
+          "baseline_commands_ms": [
+            26,
+            24,
+            27
+          ],
+          "baseline_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "baseline_ms": 77,
+          "run_index": 2,
+          "tool_commands_ms": [
+            7,
+            68,
+            8
+          ],
+          "tool_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "tool_ms": 83
+        }
+      ],
+      "source_path_rel": "crates/franken-node/tests/fixtures/migrate/corpus_commander",
+      "tool_median_ms": 83
+    },
+    {
+      "baseline_median_ms": 74,
       "expected_validate": "pass",
       "fixture_id": "holdout-worker-service",
       "input_files": [
@@ -479,113 +437,63 @@
           "sha256": "d67ec3f02def9625ab1a25a8a14b175bd27757cc6423500960423dbc53cbab93"
         }
       ],
-      "ratio_bp": 17442,
+      "ratio_bp": 13704,
       "role": "holdout",
       "runs": [
         {
           "baseline_commands_ms": [
-            25,
-            25,
-            25
+            24,
+            24,
+            23
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 75,
+          "baseline_ms": 71,
           "run_index": 0,
           "tool_commands_ms": [
-            7,
-            29,
-            7
+            8,
+            132,
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 43
+          "tool_ms": 148
         },
         {
           "baseline_commands_ms": [
-            24,
-            24,
-            25
+            25,
+            25,
+            28
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 73,
+          "baseline_ms": 78,
           "run_index": 1,
           "tool_commands_ms": [
-            7,
-            27,
-            7
+            8,
+            38,
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 41
-        },
-        {
-          "baseline_commands_ms": [
-            25,
-            25,
-            25
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "baseline_ms": 75,
-          "run_index": 2,
-          "tool_commands_ms": [
-            7,
-            31,
-            7
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "tool_ms": 45
+          "tool_ms": 54
         },
         {
           "baseline_commands_ms": [
             24,
             26,
-            25
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "baseline_ms": 75,
-          "run_index": 3,
-          "tool_commands_ms": [
-            7,
-            29,
-            7
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "tool_ms": 43
-        },
-        {
-          "baseline_commands_ms": [
-            26,
-            25,
             24
           ],
           "baseline_exit_codes": [
@@ -593,27 +501,27 @@
             0,
             0
           ],
-          "baseline_ms": 75,
-          "run_index": 4,
+          "baseline_ms": 74,
+          "run_index": 2,
           "tool_commands_ms": [
-            7,
-            31,
-            7
+            8,
+            36,
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 45
+          "tool_ms": 52
         }
       ],
       "source_path_rel": "crates/franken-node/tests/fixtures/migrate/holdout_worker_service",
-      "tool_median_ms": 43
+      "tool_median_ms": 54
     }
   ],
   "generated_at": "1970-01-01T00:00:00Z",
-  "measured_runs": 5,
+  "measured_runs": 3,
   "protocol": "manual-baseline: checked-in reference codemods (scripts/migration_baseline/baseline_{audit,rewrite,validate}.cjs) executed by node/bun perform the same three duties as franken-node migrate audit/rewrite/validate \u2014 tree+manifest audit, engines/script/module-syntax rewrite, static validation \u2014 on identical fresh copies of each frozen fixture. Both sides get 1 warmup then N measured runs; wall-clock ns around each spawned command; pipeline ms is the sum of its three commands. velocity_ratio_bp = round(median(baseline_ms)*10000/median(tooled_ms)) over all cohort+holdout runs. Minutes are never invented: every row is a measured wall-clock sample committed in the evidence census.",
   "runtime_name": "node",
   "runtime_version": "unknown",

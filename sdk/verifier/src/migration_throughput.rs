@@ -606,7 +606,9 @@ pub fn verify_throughput_delta(
         evidence_value
             .get("fixtures")
             .cloned()
-            .ok_or_else(|| MigrationThroughputError::Json("census.fixtures missing".to_string()))?,
+            .ok_or_else(|| {
+                MigrationThroughputError::Json("census.fixtures missing".to_string())
+            })?,
     )
     .map_err(|source| MigrationThroughputError::Json(source.to_string()))?;
     if census_entries.is_empty() {
@@ -635,7 +637,7 @@ pub fn verify_throughput_delta(
         census_entries.iter().map(|e| e.fixture_id.clone()).collect();
     census_ids.sort();
     let mut declared_ids = delta.fixture_ids_cohort.clone();
-    declared_ids.extend(delta.fixture_ids_holdout.iter().clone());
+    declared_ids.extend(delta.fixture_ids_holdout.iter().cloned());
     declared_ids.sort();
     if census_ids != declared_ids {
         return Err(MigrationThroughputError::FixtureSetMismatch);
@@ -669,13 +671,11 @@ pub fn verify_throughput_delta(
             return Err(MigrationThroughputError::CensusRecomputeMismatch {
                 fixture_id: entry.fixture_id.clone(),
                 detail: format!(
-                    "declared (tool={},{},baseline={},{},ratio={}) vs recomputed (tool={tool_median},baseline={baseline_median},ratio={entry_ratio})",
+                    "declared (tool={},baseline={},ratio={}) vs recomputed \
+                     (tool={tool_median},baseline={baseline_median},ratio={entry_ratio})",
                     entry.tool_median_ms,
                     entry.baseline_median_ms,
-                    entry.ratio_bp,
-                    tool_median = tool_median,
-                    baseline_median = baseline_median,
-                    entry_ratio = entry_ratio,
+                    entry.ratio_bp
                 ),
             });
         }
@@ -727,7 +727,7 @@ pub fn verify_throughput_delta(
     let holdout_entry = census_entries
         .iter()
         .find(|entry| entry.role == "holdout")
-        .ok_or_else(|| MigrationThroughputError::HoldoutContractViolated { actual: 0 })?;
+        .ok_or(MigrationThroughputError::HoldoutContractViolated { actual: 0 })?;
     if holdout_entry.ratio_bp != delta.holdout_ratio_bp {
         return Err(MigrationThroughputError::DeltaRecomputeMismatch {
             detail: "holdout ratio disagrees with census".to_string(),

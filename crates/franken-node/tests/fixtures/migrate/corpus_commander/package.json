@@ -1,0 +1,7 @@
+{
+  "name": "migrate-corpus-commander-fixture",
+  "version": "12.1.0",
+  "scripts": {
+    "start": "NODE_OPTIONS=--trace-warnings node index.js"
+  }
+}

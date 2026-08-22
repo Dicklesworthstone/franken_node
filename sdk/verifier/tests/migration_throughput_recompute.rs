@@ -52,6 +52,7 @@ fn evidence_bytes() -> Vec<u8> {
 /// The frozen-cohort contract: exactly these fixtures, with these roles. A
 /// deliberate cohort change must update this test.
 const EXPECTED_FIXTURES: &[(&str, &str)] = &[
+    ("corpus-commander", "cohort"),
     ("hardened", "cohort"),
     ("holdout-worker-service", "holdout"),
     ("rewrite-shell-commonjs", "cohort"),

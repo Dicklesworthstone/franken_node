@@ -58,9 +58,11 @@ wall-clock against a documented manual-baseline reference procedure.
 
 Frozen checked-in apps under `crates/franken-node/tests/fixtures/migrate/`:
 `rewrite-shell-commonjs`, `hardened`, `risky` (adversarial: the validator is
-expected to reject it), and `holdout-worker-service` (holdout). Adding or
-changing fixtures requires re-measurement and updating the SDK conformance
-test's pinned fixture contract.
+expected to reject it), `corpus_commander` (verbatim pinned Commander.js
+v12.1.0 source spanning the size axis with real upstream code), and
+`holdout-worker-service` (holdout). Adding or changing fixtures requires
+re-measurement and updating the SDK conformance test's pinned fixture
+contract.
 
 ## Known Limits (disclosed, not hidden)
 

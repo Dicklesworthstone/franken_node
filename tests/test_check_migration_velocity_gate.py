@@ -125,7 +125,7 @@ class SignatureTests(unittest.TestCase):
 class GateCliTests(unittest.TestCase):
     def test_self_test_exit_zero(self) -> None:
         completed = subprocess.run(
-            [sys.executable, str(SCRIPT), "--self-test"],
+            [sys.executable, str(SCRIPT), "--self-test", "--json"],
             capture_output=True,
             text=True,
             timeout=120,

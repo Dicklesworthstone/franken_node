@@ -78,8 +78,26 @@ EVIDENCE_PATH = ROOT / "artifacts" / "migration" / "throughput_delta_evidence.js
 BASELINE_DIR = ROOT / "scripts" / "migration_baseline"
 SCRATCH_DIR = ROOT / "target" / "migration-throughput"
 
-# The frozen cohort: real checked-in app fixtures. The holdout fixture has
-# never been referenced by golden tests or rewrite-rule tuning.
+# Constructed Feb 2026 archetype IDs — their appearance anywhere in a live
+# cohort fails the run (bd-reality-20260820-w0fc6.2).
+
+CONSTRUCTED_COHORT_IDS = {
+    "cohort-express-001",
+    "cohort-fastify-001",
+    "cohort-next-001",
+    "cohort-nextjs-001",
+    "cohort-cli-tool-001",
+    "cohort-library-001",
+    "cohort-worker-001",
+    "cohort-websocket-001",
+    "cohort-monorepo-001",
+    "cohort-native-addons-001",
+    "cohort-custom-build-001",
+}
+
+# The frozen cohort: real checked-in app fixtures plus real pinned upstream
+# code (corpus_commander spans the size axis), and one holdout fixture that
+# has never been referenced by golden tests or rewrite-rule tuning.
 FIXTURES = [
     {
         "fixture_id": "rewrite-shell-commonjs",
@@ -100,28 +118,18 @@ FIXTURES = [
         "expected_validate": "fail_risky_script",
     },
     {
+        "fixture_id": "corpus-commander",
+        "rel": "crates/franken-node/tests/fixtures/migrate/corpus_commander",
+        "role": "cohort",
+        "expected_validate": "pass",
+    },
+    {
         "fixture_id": "holdout-worker-service",
         "rel": "crates/franken-node/tests/fixtures/migrate/holdout_worker_service",
         "role": "holdout",
         "expected_validate": "pass",
     },
 ]
-
-# Constructed Feb 2026 archetype IDs — their appearance anywhere in a live
-# cohort fails the run (bd-reality-20260820-w0fc6.2).
-CONSTRUCTED_COHORT_IDS = {
-    "cohort-express-001",
-    "cohort-fastify-001",
-    "cohort-next-001",
-    "cohort-nextjs-001",
-    "cohort-cli-tool-001",
-    "cohort-library-001",
-    "cohort-worker-001",
-    "cohort-websocket-001",
-    "cohort-monorepo-001",
-    "cohort-native-addons-001",
-    "cohort-custom-build-001",
-}
 
 PROTOCOL_TEXT = (
     "manual-baseline: checked-in reference codemods (scripts/migration_baseline/"
