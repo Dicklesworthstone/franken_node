@@ -1,8 +1,7 @@
 use crate::config::timeouts;
 use crate::push_bounded;
-use crate::storage::frankensqlite_adapter::{
-    CallerContext, FrankensqliteAdapter, PersistenceClass,
-};
+use crate::storage::durable_adapter::AdapterWriteBackend;
+use crate::storage::frankensqlite_adapter::{CallerContext, PersistenceClass};
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -712,7 +711,7 @@ impl TelemetryRuntimeHandle {
 
 pub struct TelemetryBridge {
     socket_path: String,
-    adapter_slot: Mutex<Option<Arc<Mutex<FrankensqliteAdapter>>>>,
+    adapter_slot: Mutex<Option<Arc<Mutex<dyn AdapterWriteBackend + Send>>>>,
     state: Arc<Mutex<TelemetryBridgeState>>,
     lifecycle: Arc<AtomicU8>,
     stop_flag: Arc<AtomicBool>,
@@ -720,7 +719,10 @@ pub struct TelemetryBridge {
 }
 
 impl TelemetryBridge {
-    pub fn new(socket_path: &str, adapter: Arc<Mutex<FrankensqliteAdapter>>) -> Self {
+    pub fn new(
+        socket_path: &str,
+        adapter: Arc<Mutex<dyn AdapterWriteBackend + Send>>,
+    ) -> Self {
         Self {
             socket_path: socket_path.to_string(),
             adapter_slot: Mutex::new(Some(adapter)),
