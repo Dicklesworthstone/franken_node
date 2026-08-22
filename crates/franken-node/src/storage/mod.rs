@@ -1,5 +1,6 @@
 pub mod cas;
 pub mod cleanup_receipts;
+pub mod durable_adapter;
 pub mod frankensqlite_adapter;
 pub mod models;
 pub mod retrievability_gate;

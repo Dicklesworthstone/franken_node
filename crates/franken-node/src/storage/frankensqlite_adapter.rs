@@ -65,7 +65,7 @@ pub const MAX_STORE_VALUE_BYTES: usize = crate::capacity_defaults::base::XL * 8;
 /// SECURITY: Sanitizes keys for safe inclusion in log messages by escaping
 /// control characters, newlines, and other characters that could be used
 /// for log injection attacks.
-fn sanitize_log_key(key: &str) -> String {
+pub(crate) fn sanitize_log_key(key: &str) -> String {
     let mut sanitized = String::with_capacity(key.len());
     for c in key.chars() {
         match c {
@@ -219,7 +219,7 @@ pub enum AuthorizationError {
 }
 
 /// Check if caller is authorized for the requested operation
-fn check_authorization(
+pub(crate) fn check_authorization(
     caller: &CallerContext,
     operation: &str,
     class: PersistenceClass,
