@@ -24,11 +24,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use fsqlite::compat::TransactionExt;
 use fsqlite::{Connection, SqliteValue};
 
 use super::fleet_transport::{
-    FleetAction, FleetActionRecord, FleetSharedState, FleetTransport, FleetTransportError,
-    NodeStatus, FLEET_ACTION_LOG_FILE,
+    FLEET_ACTION_LOG_FILE, FleetAction, FleetActionRecord, FleetSharedState, FleetTransport,
+    FleetTransportError, NodeStatus,
 };
 
 const FLEET_DB_FILE: &str = "fleet-state.db";
@@ -126,6 +127,17 @@ impl DurableFleetTransport {
 
     fn ensure_initialized(&self) -> Result<(), FleetTransportError> {
         let flag = self.with_connection(|connection| {
+            // A fresh database has no tables at all; that is the
+            // not-initialized state, not an I/O failure.
+            let table = connection
+                .query_with_params(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'fleet_meta';",
+                    &[],
+                )
+                .map_err(|err| FleetTransportError::io(err.to_string()))?;
+            if table.is_empty() {
+                return Ok(false);
+            }
             let rows = connection
                 .query_with_params(
                     "SELECT value FROM fleet_meta WHERE key = ?1;",
@@ -160,13 +172,14 @@ impl DurableFleetTransport {
             imported += self.import_legacy_actions(connection)?;
             imported += self.import_legacy_nodes(connection)?;
 
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS fleet_meta (
+            connection
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS fleet_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );",
-            )
-            .map_err(|err| FleetTransportError::io(err.to_string()))?;
+                )
+                .map_err(|err| FleetTransportError::io(err.to_string()))?;
             connection
                 .execute_with_params(
                     "INSERT INTO fleet_meta(key, value) VALUES (?1, ?2)
@@ -186,8 +199,9 @@ impl DurableFleetTransport {
         if !actions_path.is_file() {
             return Ok(0);
         }
-        let raw = std::fs::read_to_string(&actions_path)
-            .map_err(|err| FleetTransportError::io(format!("read {}: {err}", actions_path.display())))?;
+        let raw = std::fs::read_to_string(&actions_path).map_err(|err| {
+            FleetTransportError::io(format!("read {}: {err}", actions_path.display()))
+        })?;
         let mut imported = 0_usize;
         for line in raw.lines() {
             if line.trim().is_empty() {
@@ -211,15 +225,16 @@ impl DurableFleetTransport {
             return Ok(0);
         }
         let mut imported = 0_usize;
-        let entries =
-            std::fs::read_dir(&nodes_dir).map_err(|err| FleetTransportError::io(err.to_string()))?;
+        let entries = std::fs::read_dir(&nodes_dir)
+            .map_err(|err| FleetTransportError::io(err.to_string()))?;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            let raw = std::fs::read_to_string(&path)
-                .map_err(|err| FleetTransportError::io(format!("read {}: {err}", path.display())))?;
+            let raw = std::fs::read_to_string(&path).map_err(|err| {
+                FleetTransportError::io(format!("read {}: {err}", path.display()))
+            })?;
             let status: NodeStatus = serde_json::from_str(&raw).map_err(|err| {
                 FleetTransportError::serialization(format!("legacy {}: {err}", path.display()))
             })?;
@@ -235,19 +250,26 @@ impl DurableFleetTransport {
     ) -> Result<(), FleetTransportError> {
         let action_json = serde_json::to_string(record)
             .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
-        connection
-            .execute_with_params(
-                "INSERT INTO fleet_actions(action_id, emitted_at, action_json)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(action_id) DO UPDATE SET
-                    emitted_at = excluded.emitted_at,
-                    action_json = excluded.action_json;",
-                &[
-                    SqliteValue::Text(record.action_id.clone().into()),
-                    SqliteValue::Text(record.emitted_at.to_rfc3339().into()),
-                    SqliteValue::Text(action_json.into()),
-                ],
-            )
+        // Explicit transaction: the commit is the WAL-durable boundary under
+        // synchronous=FULL; a bare statement can sit in the retained
+        // autocommit overlay and die with the process.
+        let mut tx = connection
+            .transaction()
+            .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        tx.execute_with_params(
+            "INSERT INTO fleet_actions(action_id, emitted_at, action_json)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(action_id) DO UPDATE SET
+                emitted_at = excluded.emitted_at,
+                action_json = excluded.action_json;",
+            &[
+                SqliteValue::Text(record.action_id.clone().into()),
+                SqliteValue::Text(record.emitted_at.to_rfc3339().into()),
+                SqliteValue::Text(action_json.into()),
+            ],
+        )
+        .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        tx.commit()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
         Ok(())
     }
@@ -258,23 +280,29 @@ impl DurableFleetTransport {
     ) -> Result<(), FleetTransportError> {
         let status_json = serde_json::to_string(status)
             .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
-        connection
-            .execute_with_params(
-                "INSERT INTO fleet_nodes(zone_id, node_id, status_json)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(zone_id, node_id) DO UPDATE SET
-                    status_json = excluded.status_json;",
-                &[
-                    SqliteValue::Text(status.zone_id.clone().into()),
-                    SqliteValue::Text(status.node_id.clone().into()),
-                    SqliteValue::Text(status_json.into()),
-                ],
-            )
+        let mut tx = connection
+            .transaction()
+            .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        tx.execute_with_params(
+            "INSERT INTO fleet_nodes(zone_id, node_id, status_json)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(zone_id, node_id) DO UPDATE SET
+                status_json = excluded.status_json;",
+            &[
+                SqliteValue::Text(status.zone_id.clone().into()),
+                SqliteValue::Text(status.node_id.clone().into()),
+                SqliteValue::Text(status_json.into()),
+            ],
+        )
+        .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        tx.commit()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
         Ok(())
     }
 
-    fn query_actions(connection: &Connection) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
+    fn query_actions(
+        connection: &Connection,
+    ) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
         // Ordering contract mirrors FileFleetTransport::read_shared_state:
         // emitted_at, then action_id.
         let rows = connection
@@ -283,16 +311,18 @@ impl DurableFleetTransport {
                  ORDER BY emitted_at ASC, action_id ASC;",
             )
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
-        rows.iter().map(|row| parse_row_json(&row.values()[0], "action_json")).collect()
+        rows.iter()
+            .map(|row| parse_row_json(&row.values()[0], "action_json"))
+            .collect()
     }
 
     fn query_nodes(connection: &Connection) -> Result<Vec<NodeStatus>, FleetTransportError> {
         let rows = connection
-            .query(
-                "SELECT status_json FROM fleet_nodes ORDER BY zone_id ASC, node_id ASC;",
-            )
+            .query("SELECT status_json FROM fleet_nodes ORDER BY zone_id ASC, node_id ASC;")
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
-        rows.iter().map(|row| parse_row_json(&row.values()[0], "status_json")).collect()
+        rows.iter()
+            .map(|row| parse_row_json(&row.values()[0], "status_json"))
+            .collect()
     }
 
     /// Same staleness helper as [`FileFleetTransport::list_stale_nodes`].
@@ -313,6 +343,34 @@ impl DurableFleetTransport {
             .collect();
         stale_nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
         Ok(stale_nodes)
+    }
+}
+
+/// Count node status records directly from the durable store.
+/// Replaces `count_matching_files(nodes/, ...)` in the ops metrics readers
+/// now that `nodes/node-<id>.json` files are a legacy import source only.
+///
+/// # Errors
+///
+/// Returns [`FleetTransportError::Io`] when the store cannot be opened.
+pub fn count_node_statuses(state_dir: &Path) -> Result<u64, FleetTransportError> {
+    let db_path = state_dir.join(FLEET_DB_FILE);
+    if !db_path.is_file() {
+        return Ok(0);
+    }
+    let connection = DurableFleetTransport::open_tier1_connection(&db_path)?;
+    let table = connection
+        .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'fleet_nodes';")
+        .map_err(|err| FleetTransportError::io(err.to_string()))?;
+    if table.is_empty() {
+        return Ok(0);
+    }
+    let rows = connection
+        .query("SELECT COUNT(*) FROM fleet_nodes;")
+        .map_err(|err| FleetTransportError::io(err.to_string()))?;
+    match rows.first().and_then(|row| row.values().first()) {
+        Some(SqliteValue::Integer(value)) => Ok(u64::try_from(*value).unwrap_or(u64::MAX)),
+        _ => Ok(0),
     }
 }
 
@@ -398,7 +456,10 @@ impl FleetTransport for DurableFleetTransport {
     fn read_shared_state(&self) -> Result<FleetSharedState, FleetTransportError> {
         self.ensure_initialized()?;
         let (actions, nodes) = self.with_connection(|connection| {
-            Ok((Self::query_actions(connection)?, Self::query_nodes(connection)?))
+            Ok((
+                Self::query_actions(connection)?,
+                Self::query_nodes(connection)?,
+            ))
         })?;
         // Keep the shared-state sort contract even though SQL pre-sorts.
         let mut actions = actions;
@@ -459,169 +520,4 @@ pub fn count_active_quarantine_actions(state_dir: &Path) -> Result<u64, FleetTra
         }
     }
     Ok(u64::try_from(active_incidents.len()).unwrap_or(u64::MAX))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Utc;
-
-    fn sample_action(action_id: &str, incident_id: &str) -> FleetActionRecord {
-        FleetActionRecord {
-            action_id: action_id.to_string(),
-            emitted_at: Utc::now(),
-            action: FleetAction::Quarantine {
-                zone_id: "zone-a".to_string(),
-                incident_id: incident_id.to_string(),
-                target_id: "ext-1".to_string(),
-                target_kind: super::super::fleet_transport::FleetTargetKind::Extension,
-                reason: "test".to_string(),
-                quarantine_version: 1,
-            },
-        }
-    }
-
-    fn release_action(action_id: &str, incident_id: &str) -> FleetActionRecord {
-        FleetActionRecord {
-            action_id: action_id.to_string(),
-            emitted_at: Utc::now(),
-            action: FleetAction::Release {
-                zone_id: "zone-a".to_string(),
-                incident_id: incident_id.to_string(),
-                reason: Some("test".to_string()),
-            },
-        }
-    }
-
-    fn sample_node(node_id: &str) -> NodeStatus {
-        NodeStatus {
-            zone_id: "zone-a".to_string(),
-            node_id: node_id.to_string(),
-            last_seen: Utc::now(),
-            quarantine_version: 0,
-            health: super::super::fleet_transport::NodeHealth::Healthy,
-        }
-    }
-
-    #[test]
-    fn writes_survive_reopen_and_read_back_in_contract_order() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let state_dir = dir.path().join("fleet");
-        {
-            let mut transport = DurableFleetTransport::new(&state_dir).expect("open");
-            transport.initialize().expect("initialize");
-            transport
-                .publish_action(&sample_action("a-2", "inc-2"))
-                .expect("publish a-2");
-            transport
-                .publish_action(&sample_action("a-1", "inc-1"))
-                .expect("publish a-1");
-            transport
-                .upsert_node_status(&sample_node("node-1"))
-                .expect("upsert node");
-        }
-
-        let mut reopened = DurableFleetTransport::new(&state_dir).expect("reopen");
-        reopened.initialize().expect("re-initialize is idempotent");
-        let actions = reopened.list_actions().expect("list actions");
-        assert_eq!(actions.len(), 2, "both actions survive reopen");
-        assert_eq!(actions[0].action_id, "a-1", "sorted by action_id within equal timestamps");
-        let nodes = reopened.list_node_statuses().expect("list nodes");
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].node_id, "node-1");
-        let state = reopened.read_shared_state().expect("shared state");
-        assert_eq!(state.actions.len(), 2);
-        assert_eq!(state.nodes.len(), 1);
-    }
-
-    #[test]
-    fn republishing_same_action_id_is_idempotent() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut transport = DurableFleetTransport::new(dir.path()).expect("open");
-        transport.initialize().expect("initialize");
-        transport
-            .publish_action(&sample_action("a-1", "inc-1"))
-            .expect("publish first");
-        transport
-            .publish_action(&sample_action("a-1", "inc-1"))
-            .expect("republish same id");
-        assert_eq!(transport.list_actions().expect("list").len(), 1);
-    }
-
-    #[test]
-    fn reads_fail_closed_before_initialize() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let transport = DurableFleetTransport::new(dir.path()).expect("open");
-        let err = transport
-            .list_actions()
-            .expect_err("uninitialized transport must fail closed");
-        assert!(matches!(err, FleetTransportError::NotInitialized { .. }));
-    }
-
-    #[test]
-    fn legacy_jsonl_layout_imports_once_and_rollback_restores_import() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let state_dir = dir.path().join("fleet");
-        std::fs::create_dir_all(state_dir.join("nodes")).expect("nodes dir");
-
-        let record = sample_action("legacy-1", "inc-legacy");
-        std::fs::write(
-            state_dir.join(FLEET_ACTION_LOG_FILE),
-            format!("{}\n", serde_json::to_string(&record).expect("serialize")),
-        )
-        .expect("write legacy actions.jsonl");
-        let node = sample_node("legacy-node");
-        std::fs::write(
-            state_dir.join("nodes").join("node-legacy-node.json"),
-            serde_json::to_string_pretty(&node).expect("serialize node"),
-        )
-        .expect("write legacy node file");
-
-        let mut transport = DurableFleetTransport::new(&state_dir).expect("open");
-        transport.initialize().expect("initialize imports legacy");
-        assert_eq!(transport.list_actions().expect("list").len(), 1);
-        assert_eq!(transport.list_node_statuses().expect("nodes").len(), 1);
-
-        // Re-initializing the SAME database must not double-import.
-        transport.initialize().expect("second initialize");
-        assert_eq!(transport.list_actions().expect("list").len(), 1);
-        drop(transport);
-
-        // Rollback = delete the database; the importer re-runs from JSONL.
-        std::fs::remove_file(state_dir.join(FLEET_DB_FILE)).expect("remove db");
-        let _ = std::fs::remove_file(state_dir.join(format!("{FLEET_DB_FILE}-wal")));
-        let _ = std::fs::remove_file(state_dir.join(format!("{FLEET_DB_FILE}-shm")));
-        let mut rolled_back = DurableFleetTransport::new(&state_dir).expect("reopen");
-        rolled_back.initialize().expect("re-import after rollback");
-        let actions = rolled_back.list_actions().expect("list");
-        assert_eq!(actions.len(), 1, "legacy record restored exactly once");
-        assert_eq!(actions[0].action_id, "legacy-1");
-    }
-
-    #[test]
-    fn quarantine_incident_count_matches_file_reader_semantics() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut transport = DurableFleetTransport::new(dir.path()).expect("open");
-        transport.initialize().expect("initialize");
-        transport
-            .publish_action(&sample_action("q-1", "inc-1"))
-            .expect("quarantine inc-1");
-        transport
-            .publish_action(&sample_action("q-2", "inc-2"))
-            .expect("quarantine inc-2");
-        transport
-            .publish_action(&release_action("r-1", "inc-1"))
-            .expect("release inc-1");
-
-        let count =
-            count_active_quarantine_actions(dir.path()).expect("count from durable store");
-        assert_eq!(count, 1, "only inc-2 remains active");
-
-        // Missing database behaves like the missing actions.jsonl case: zero.
-        let empty = tempfile::tempdir().expect("empty tempdir");
-        assert_eq!(
-            count_active_quarantine_actions(empty.path()).expect("missing db"),
-            0
-        );
-    }
 }

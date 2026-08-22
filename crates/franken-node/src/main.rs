@@ -140,7 +140,7 @@ use frankenengine_node::api::fleet_quarantine::{
     RevocationScope as PersistedRevocationScope, RevocationSeverity as PersistedRevocationSeverity,
 };
 use frankenengine_node::control_plane::fleet_transport::{
-    FLEET_ACTION_LOG_FILE, FLEET_NODE_DIR, FileFleetTransport, FleetAction as PersistedFleetAction,
+    FLEET_ACTION_LOG_FILE, FLEET_NODE_DIR, FleetAction as PersistedFleetAction,
     FleetActionRecord as PersistedFleetActionRecord, FleetConvergenceReceiptSignature,
     FleetSharedState, FleetTargetKind as PersistedFleetTargetKind,
     FleetTransport as PersistedFleetTransport, FleetTransportError,
@@ -148,6 +148,7 @@ use frankenengine_node::control_plane::fleet_transport::{
     fleet_convergence_receipt_verdict, sign_fleet_convergence_receipt_payload,
     wait_until_fleet_converged_or_timeout,
 };
+use frankenengine_node::control_plane::fleet_transport_durable;
 #[cfg(test)]
 use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
 pub use frankenengine_node::{capacity_defaults, connector, control_plane, supply_chain};
@@ -9452,7 +9453,12 @@ fn ops_metrics_report(project_root: &Path) -> Result<OpsPrometheusMetricsReport>
         )
         .unwrap_or(u64::MAX),
         fleet_active_quarantines: count_active_fleet_quarantines(&fleet_state_dir)?,
-        fleet_node_records: count_matching_files(&fleet_state_dir.join(FLEET_NODE_DIR), |_| true)?,
+        fleet_node_records: if fleet_state_dir.join("fleet-state.db").is_file() {
+            fleet_transport_durable::count_node_statuses(&fleet_state_dir)
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?
+        } else {
+            count_matching_files(&fleet_state_dir.join(FLEET_NODE_DIR), |_| true)?
+        },
         health,
     })
 }
@@ -9514,6 +9520,14 @@ fn count_newline_delimited_records(path: &Path) -> Result<u64> {
 }
 
 fn count_active_fleet_quarantines(fleet_state_dir: &Path) -> Result<u64> {
+    // bd-reality-20260820-w0fc6.3: actions are authoritative in the durable
+    // fleet database now; fall back to the legacy JSONL reader only when the
+    // database has not been created yet.
+    if fleet_state_dir.join("fleet-state.db").is_file() {
+        return fleet_transport_durable::count_active_quarantine_actions(fleet_state_dir)
+            .map_err(|err| anyhow::anyhow!(err.to_string()));
+    }
+
     let actions_path = fleet_state_dir.join(FLEET_ACTION_LOG_FILE);
     if !actions_path.is_file() {
         return Ok(0);
@@ -22642,11 +22656,17 @@ fn resolve_fleet_state_dir(
     Ok(ensure_state_dir(project_root)?.join("fleet"))
 }
 
-fn open_fleet_transport(project_root: &Path) -> Result<(u64, PathBuf, FileFleetTransport)> {
+fn open_fleet_transport(
+    project_root: &Path,
+) -> Result<(u64, PathBuf, fleet_transport_durable::DurableFleetTransport)> {
     let resolved = config::Config::resolve(None, config::CliOverrides::default())
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let state_dir = resolve_fleet_state_dir(project_root, &resolved)?;
-    let mut transport = FileFleetTransport::new(state_dir.clone());
+    // bd-reality-20260820-w0fc6.3: the authoritative store is now the
+    // WAL-durable frankensqlite database; the legacy JSONL layout is imported
+    // once at initialize and deleting the db files rolls back to it.
+    let mut transport = fleet_transport_durable::DurableFleetTransport::new(state_dir.clone())
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     transport
         .initialize()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -23295,7 +23315,8 @@ fn append_trust_quarantine_action(
     affected_cards: usize,
 ) -> Result<String> {
     let loaded = load_fleet_state(project_root)?;
-    let mut transport = FileFleetTransport::new(loaded.state_dir.clone());
+    let mut transport = fleet_transport_durable::DurableFleetTransport::new(loaded.state_dir.clone())
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     transport
         .initialize()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
