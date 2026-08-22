@@ -1711,7 +1711,9 @@ fn compat_corpus_run_json_fails_closed_when_corpus_root_flag_missing() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
-        panic!("missing --corpus-root --json must be JSON, not a clap usage dump ({err}):\n{stdout}")
+        panic!(
+            "missing --corpus-root --json must be JSON, not a clap usage dump ({err}):\n{stdout}"
+        )
     });
     assert_eq!(payload["schema_version"], "franken-node/ops-error-cli/v1");
     assert_eq!(payload["command"], "ops.compat-corpus-run");

@@ -734,10 +734,7 @@ fn incident_counterfactual_json_fails_closed_when_policy_missing() {
 #[test]
 fn incident_counterfactual_json_fails_closed_when_bundle_flag_missing() {
     let workspace = config_only_workspace();
-    let output = run_cli_in_workspace(
-        workspace.path(),
-        &["incident", "counterfactual", "--json"],
-    );
+    let output = run_cli_in_workspace(workspace.path(), &["incident", "counterfactual", "--json"]);
     assert!(
         !output.status.success(),
         "incident counterfactual --json should fail when --bundle is omitted"

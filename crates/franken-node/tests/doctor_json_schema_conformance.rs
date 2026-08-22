@@ -938,7 +938,10 @@ fn doctor_evidence_readiness_json_fails_closed_when_input_flag_missing() {
     let payload: Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
         panic!("missing --input --json must be JSON, not a clap usage dump ({err}):\n{stdout}")
     });
-    assert_eq!(payload["schema_version"], "franken-node/doctor-error-cli/v1");
+    assert_eq!(
+        payload["schema_version"],
+        "franken-node/doctor-error-cli/v1"
+    );
     assert_eq!(payload["command"], "doctor.evidence-readiness");
     assert_eq!(payload["ok"], false);
     let error = payload["error"].as_str().unwrap_or_default();

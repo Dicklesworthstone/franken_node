@@ -936,6 +936,11 @@ path = "tests/frankensqlite_adapter_conformance.rs"
 name = "frankensqlite_persistence_integration"
 path = "tests/frankensqlite_persistence_integration.rs"
 
+# bd-reality-20260820-w0fc6.3: durable fleet transport coverage lives in a
+# wired target because [lib] test=false keeps inline suites out of cargo test.
+[[test]]
+name = "fleet_transport_durable_e2e"
+path = "tests/fleet_transport_durable_e2e.rs"
 # bd-rjc2m.37: restore the SQLModel typed-schema migration contract
 [[test]]
 name = "sqlmodel_rust_schema_integration"
